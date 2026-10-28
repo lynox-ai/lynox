@@ -6,7 +6,10 @@ import { tmpdir } from 'node:os';
 import { join, relative, dirname, resolve, basename } from 'node:path';
 import { isPathWithin, getWorkspaceCwd, writeRootsBesidesWorkspace } from './workspace.js';
 import { processUmask, toWorkspaceRel, workspaceBase } from './workspace-rel.js';
-import { openRead, openWrite, rmdirAt, statEntry, unlinkAt, WorkspaceAccessError, type WorkspaceAnchor } from './workspace-fd.js';
+import {
+  FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, openWrite, readFdCapped, rmdirAt, statEntry, unlinkAt,
+  WorkspaceAccessError, type WorkspaceAnchor,
+} from './workspace-fd.js';
 
 const realOr = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
 
@@ -40,6 +43,9 @@ export class ChangesetManager {
    *  no directory behind. `cleanup()` sets it back to null, so a backup after it makes a new
    *  private (0700) directory instead of re-creating the removed path with default modes. */
   private backupDir: string | null = null;
+  /** Whether the last {@link backupBeforeWrite} refused because the file is too large to save,
+   *  so the caller's refusal can say so and name the way out. */
+  refusedTooLarge = false;
 
   /** `runId` names the session run this manager belongs to (one per user run, not the HTTP
    *  run registry's id). The review shows it and its answer carries it back, so an answer to
@@ -221,10 +227,12 @@ export class ChangesetManager {
    *
    * False when isolation is on and its directory cannot be reached: nothing could be saved,
    * and the caller does not write. A write that went ahead would be in neither the review
-   * nor the rollback, and nothing would say it is missing. True otherwise, also for a path
-   * this review does not track.
+   * nor the rollback, and nothing would say it is missing. False also for a file over
+   * {@link FILE_TOOL_READ_CAP_BYTES}, which is not read whole and so cannot be saved; then
+   * {@link refusedTooLarge} is true. True otherwise, also for a path this review does not track.
    */
   backupBeforeWrite(filePath: string): boolean {
+    this.refusedTooLarge = false;
     // Outside the workspace: not tracked. The write tool refuses such a path; if it is
     // allowed elsewhere (`/tmp`), it is not this review's to show or roll back.
     const loc = this._locate(filePath);
@@ -248,8 +256,18 @@ export class ChangesetManager {
       // The file exists, so it is `modified` whatever fails below. Treating it as `added`
       // would make "Rollback all" delete a file the user had before the run.
       status = 'modified';
+      const read = { tooLarge: false };
       try {
-        const bytes = this._readTracked(abs);
+        // Read only up to the file tools' cap: a file of any size must not be read whole
+        // because a write names it.
+        const bytes = this._withTracked(abs, (fd) => {
+          try {
+            return readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
+          } catch (err) {
+            read.tooLarge = isReadLimit(err);
+            throw err;
+          }
+        });
         if (bytes === null) throw new Error('unreadable');
         originalContent = bytes.toString('utf-8');
         // Held before the copy: a failed copy still leaves the bytes rollback restores.
@@ -260,6 +278,13 @@ export class ChangesetManager {
       } catch {
         // Unreadable: rollback cannot restore it and leaves it alone (no original content).
         // Copy failed: rollback restores the held bytes; the diff is unavailable.
+      }
+      if (read.tooLarge) {
+        // Too large to save: the write is refused, as for an unreachable workspace. Going ahead
+        // would change a file the rollback cannot restore. Nothing of it is kept.
+        this.anchored.delete(abs);
+        this.refusedTooLarge = true;
+        return false;
       }
     }
 
