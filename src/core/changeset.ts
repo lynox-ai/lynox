@@ -33,12 +33,15 @@ const shownSize = (bytes: number, up = false): string => {
   return `${(up ? Math.ceil(tenths) : Math.round(tenths)) / 10} MB`;
 };
 
-/** The review's line for a file over the cap, in place of a diff. `before` is null for a file
- *  the run added, undefined when the size before the run is not known. */
+/** The review's line for a file over the cap, in place of a diff: what is known, and what the
+ *  person deciding without the content can do. `before` is null for a file the run added,
+ *  undefined when the original could not be read (then nothing was saved to restore). */
 function notComparedNote(before: number | null | undefined, now: number): string {
-  const was = before === null ? 'It did not exist before the run.'
-    : before === undefined ? 'Its size before the run is not known.'
-    : `Before the run it was ${shownSize(before)}.`;
+  const was = before === null
+    ? 'It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it has not changed since the run.'
+    : before === undefined
+      ? 'Its size before the run is not known. Look at the file yourself before you keep the change; Rollback cannot restore it, because the original could not be read.'
+      : `Before the run it was ${shownSize(before)}. Look at the file yourself before you keep the change; Rollback restores the original.`;
   return `(Content not compared: the file is ${shownSize(now, true)} now, larger than the ${shownSize(FILE_TOOL_READ_CAP_BYTES)} the review reads. ${was})`;
 }
 import { execFileSync } from 'node:child_process';
@@ -390,6 +393,8 @@ export class ChangesetManager {
       const rel = relative(this.realCwd, abs);
 
       let diffText: string;
+      // False when the review shows a note instead of a diff: no line count says anything then.
+      let compared = Buffer.isBuffer(current);
       if (!Buffer.isBuffer(current)) {
         // Over the cap: shown as changed, with both sizes, and its content not compared.
         const before = entry.status === 'added' ? null : this.originalBytes.get(abs)?.length;
@@ -421,6 +426,7 @@ export class ChangesetManager {
           } else {
             // Fallback: basic header
             diffText = `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
+            compared = false;
           }
         } finally {
           if (currentPath !== null) rmSync(currentPath, { force: true });
@@ -432,6 +438,7 @@ export class ChangesetManager {
         absolutePath: abs,
         status: entry.status,
         diff: diffText,
+        compared,
         originalContent: entry.originalContent,
       });
     }

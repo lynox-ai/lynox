@@ -5461,7 +5461,8 @@ export class LynoxHTTPApi {
           if (line.startsWith('+') && !line.startsWith('+++')) added++;
           else if (line.startsWith('-') && !line.startsWith('---')) removed++;
         }
-        return { file: c.file, status: c.status, diff: c.diff, added, removed };
+        // `compared: false`: the diff is a note, and its zero counts must not read as "nothing changed".
+        return { file: c.file, status: c.status, diff: c.diff, added, removed, compared: c.compared };
       });
       jsonResponse(res, 200, { hasChanges: true, runId: csm.runId, files });
     }, READS));

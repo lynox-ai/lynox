@@ -121,9 +121,10 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(bytesReadBy(() => { changes = mgr.getChanges(); }), 'getChanges does not read a file over the cap').toBe(0);
     expect(changes).toHaveLength(1);
     expect(changes[0]!.status).toBe('modified');
+    expect(changes[0]!.compared, 'a note, not a diff').toBe(false);
     expect(changes[0]!.diff).toBe(
       '--- a/notes.txt\n+++ b/notes.txt\n'
-      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes.)',
+      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes. Look at the file yourself before you keep the change; Rollback restores the original.)',
     );
     expect(bytesReadBy(() => { expect(mgr.hasChanges()).toBe(true); }), 'hasChanges does not read it').toBe(0);
     expect(bytesReadBy(() => { expect(mgr.size).toBe(1); }), 'size does not read it').toBe(0);
@@ -154,7 +155,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(changes[0]!.status).toBe('added');
     expect(changes[0]!.diff).toBe(
       '--- /dev/null\n+++ b/new.txt\n'
-      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. It did not exist before the run.)',
+      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it has not changed since the run.)',
     );
 
     expect(bytesReadBy(() => mgr.settle())).toBe(0);
@@ -176,7 +177,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(read, 'and did read up to it').toBeGreaterThan(CAP);
     expect(changes.map((c) => c.diff)).toEqual([
       '--- a/notes.txt\n+++ b/notes.txt\n'
-      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes.)',
+      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes. Look at the file yourself before you keep the change; Rollback restores the original.)',
     ]);
   });
 
@@ -204,7 +205,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(bytesReadBy(() => { changes = mgr.getChanges(); })).toBe(0);
     expect(changes[0]!.diff).toBe(
       '--- /dev/null\n+++ b/big.txt\n'
-      + '(Content not compared: the file is 5.1 MB now, larger than the 5 MB the review reads. It did not exist before the run.)',
+      + '(Content not compared: the file is 5.1 MB now, larger than the 5 MB the review reads. It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it has not changed since the run.)',
     );
     expect(bytesReadBy(() => mgr.rollbackAll())).toBe(0);
     expect(existsSync(path), 'the run\'s own file is deleted').toBe(false);
@@ -238,7 +239,18 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
 
     expect(mgr.getChanges().map((c) => c.diff)).toEqual([
       '--- a/locked.txt\n+++ b/locked.txt\n'
-      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Its size before the run is not known.)',
+      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Its size before the run is not known. Look at the file yourself before you keep the change; Rollback cannot restore it, because the original could not be read.)',
+    ]);
+  });
+
+  it(`[${branch}] a modified file whose backup copy is gone is shown with "(diff unavailable)", not compared`, () => {
+    const path = join(ws, 'notes.txt');
+    writeFileSync(path, 'original');
+    writeAsTheRun(path, 'the run wrote this');
+    rmSync((mgr as unknown as { backupDir: string }).backupDir, { recursive: true, force: true });
+
+    expect(mgr.getChanges().map((c) => [c.diff, c.compared])).toEqual([
+      ['--- a/notes.txt\n+++ b/notes.txt\n(diff unavailable)', false],
     ]);
   });
 
@@ -251,7 +263,10 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
 
     const changes = mgr.getChanges();
     expect(changes.map((c) => c.file).sort()).toEqual(['new.txt', 'notes.txt']);
-    for (const c of changes) expect(c.diff).not.toContain('Content not compared');
+    for (const c of changes) {
+      expect(c.diff).not.toContain('Content not compared');
+      expect(c.compared).toBe(true);
+    }
     expect(changes.find((c) => c.file === 'notes.txt')!.diff).toContain('-original');
 
     mgr.rollbackAll();
