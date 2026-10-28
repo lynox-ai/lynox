@@ -354,6 +354,8 @@ describe('the steps of each write site against the source', () => {
     .map(u => `${u.file}:${String(u.line)} ${String(u.site)} step=${String(u.step)}`);
 
   it('every step that removes a set names what it hit, unless it runs only in a legacy memory tool', () => {
+    // The exemption is for the legacy memory tools only: a mandate cannot reach them (memory-tool-set.ts).
+    for (const site of LEGACY_MEMORY_SITES) expect(site, 'an exempt site of a legacy memory tool').toMatch(/^memory_(?:delete|update|promote)#/);
     expect(uses.filter(u => u.affected === true).length, 'positive control').toBeGreaterThan(0);
     expect(unnamedSets(uses)).toEqual([]);
   });

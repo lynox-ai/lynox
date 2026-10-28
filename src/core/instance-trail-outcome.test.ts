@@ -251,6 +251,12 @@ describe('what a set-hitting step names (660a-2)', () => {
     expect(rows()).toEqual([{ phase: 'attempt', target: 'data_store' }, { phase: 'returned', target: 'data_store wrote=all records=2 id=7 id=9' }]);
   });
 
+  it('keeps the attempt\'s own pairs first, so a fit holds back ids, never the store\'s scope', () => {
+    const by = writer();
+    runInCallSlot({ instanceTrail: instanceTrailFor(by, 'test') }, () => withInstanceWrite(by, { ...spec, target: () => [['table', 'abcd1234']] }, (w) => w.run('delete', () => removed([7]), ifRemovedIds, records)));
+    expect(rows()[1]!.target).toBe('data_store wrote=all table=abcd1234 records=1 id=7');
+  });
+
   it('names nothing when the call removed nothing: the row is the 1a row, byte for byte', () => {
     run(writer(), (w) => w.run('delete', () => removed([]), ifRemovedIds, records));
     expect(rows()).toEqual([{ phase: 'attempt', target: 'data_store' }, { phase: 'returned', target: 'data_store' }]);
