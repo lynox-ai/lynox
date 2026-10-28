@@ -218,7 +218,7 @@ const isGuarded = (v: unknown): v is { obj: object; reads: readonly string[] } =
 /**
  * The pattern writers (`MANDATE_PATTERN_WRITE_TOOLS`) are held back from a mandate by the lock,
  * so a mandate's call never reaches their blocks (checked on its own below). Their blocks stay
- * as a second wall, and (a)/(b) still prove them, with the lock set aside as if it were relaxed.
+ * as a second wall, and (a)/(b) still prove them, with the lock set aside (which also lifts the lock's `secret:` refusal; these fixtures name no secret).
  */
 const lockAside = (f: Fixture): boolean => Object.hasOwn(MANDATE_PATTERN_WRITE_TOOLS, f.tool.definition.name);
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
-import { INSTANCE_WRITE_SITES, MANDATE_INSIDE_NON_WRITERS, MANDATE_INSIDE_WRITERS, MANDATE_OUTWARD_READERS, MANDATE_PATTERN_WRITE_TOOLS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, mandateWithheldReason, toolLockFor } from './mandate-tool-lock.js';
+import { INSTANCE_WRITE_SITES, MANDATE_INSIDE_NON_WRITERS, MANDATE_INSIDE_WRITERS, MANDATE_OUTWARD_READERS, MANDATE_PATTERN_WRITE_TOOLS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
 import type { MailRegistry } from '../integrations/mail/tools/registry.js';
 import type { SearchProvider } from '../integrations/search/search-provider.js';
 import type { ToolEntry } from '../types/index.js';
@@ -35,18 +35,15 @@ describe('toolLockFor', () => {
 
   // 660a-2: the sign-in refuses a mandate on an engine with the legacy memory, but its plan
   // runs later under the mandate — the lock is the one place every turn of it passes.
-  it('holds back the three pattern writers from a mandate, each with its reason, though they stay on the surface', () => {
+  it('holds back the three pattern writers from a mandate, though they stay on the surface', () => {
     const lock = toolLockFor({ kind: 'mandate', email: 'setup@example.org' })!;
     expect(Object.keys(MANDATE_PATTERN_WRITE_TOOLS).sort()).toEqual(['memory_delete', 'memory_promote', 'memory_update']);
     for (const name of ['memory_delete', 'memory_update', 'memory_promote']) {
       expect(lock.has(name), name).toBe(false);
       expect(MANDATE_TOOL_SURFACE.has(name), name).toBe(true);
-      expect(mandateWithheldReason(name), name).toBe(MANDATE_PATTERN_WRITE_TOOLS[name]);
     }
-    // control: the other memory tools stay, and a withheld tool keeps its own reason
+    // control: the other memory tools stay
     for (const name of ['memory_store', 'memory_recall', 'memory_list']) expect(lock.has(name), name).toBe(true);
-    expect(mandateWithheldReason('bash')).toBe(MANDATE_WITHHELD_TOOLS['bash']);
-    expect(mandateWithheldReason('memory_store')).toBeUndefined();
   });
 
   it('withholds what D1 names: the shell and every tool that reads or writes the process filesystem', () => {

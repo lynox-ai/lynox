@@ -179,13 +179,6 @@ const MANDATE_TURN_TOOLS: ReadonlySet<string> = new Set(
   [...MANDATE_TOOL_SURFACE].filter(n => !Object.hasOwn(MANDATE_PATTERN_WRITE_TOOLS, n)),
 );
 
-/** Why a mandate's turn does not get `name`, or undefined when it does (or the tool is unknown). */
-export function mandateWithheldReason(name: string): string | undefined {
-  if (Object.hasOwn(MANDATE_WITHHELD_TOOLS, name)) return MANDATE_WITHHELD_TOOLS[name];
-  if (Object.hasOwn(MANDATE_PATTERN_WRITE_TOOLS, name)) return MANDATE_PATTERN_WRITE_TOOLS[name];
-  return undefined;
-}
-
 /**
  * The lock for a principal: the set of tool names its turn may use, or `null` when nothing
  * is locked (the owner). Every agent turn applies it on top of the user's disabled tools.

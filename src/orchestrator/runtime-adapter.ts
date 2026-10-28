@@ -1,5 +1,5 @@
 import type { RequestPrincipal } from '../core/request-principal.js';
-import { mandateWithheldReason, toolLockFor } from '../core/mandate-tool-lock.js';
+import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
 import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
@@ -1234,14 +1234,17 @@ export async function spawnInline(
   // parent lacks for any other reason (the owner turned it off, a role of an enclosing step
   // bounds it, a flag leaves it unregistered) is dropped as before. A role's grant is a ceiling,
   // not a request, so a withheld tool in it narrows the step as it narrows the mandate's own
-  // agents (`collector` lists `read_file` among nine).
+  // agents (`collector` lists `read_file` among nine). The pattern writers the lock also holds
+  // back (`MANDATE_PATTERN_WRITE_TOOLS`) are dropped, not refused: they are registered only beside
+  // the legacy memory, so on the engines a mandate signs in to the step names a tool that is not
+  // there, and the planners still offer `memory_update` for steps.
   const lock = principal !== undefined ? toolLockFor(principal) : null;
   if (lock !== null) {
     const named = [...(step.tools ?? []), ...(step.tool !== undefined ? [step.tool] : [])];
-    const withheld = [...new Set(named.filter(n => !lock.has(n) && mandateWithheldReason(n) !== undefined))];
+    const withheld = [...new Set(named.filter(n => !lock.has(n) && Object.hasOwn(MANDATE_WITHHELD_TOOLS, n)))];
     if (withheld.length > 0) {
       throw new Error(
-        `Step "${step.id}" needs ${withheld.map(n => `${n} (${mandateWithheldReason(n) ?? ''})`).join(', ')}, which this `
+        `Step "${step.id}" needs ${withheld.map(n => `${n} (${MANDATE_WITHHELD_TOOLS[n]})`).join(', ')}, which this `
         + `run does not get: it runs for a person with delegated access, with that person's tools.`,
       );
     }
