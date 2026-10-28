@@ -9,12 +9,12 @@ import { reloadConfig } from '../core/config.js';
 import { INTERFACE_POLLS } from '../core/audit-trail-view.js';
 
 /**
- * Row 1034: the reads a helper's web UI makes by itself are marked in the owner's view, so the view
+ * Row 1034: reads on the routes a helper's web UI polls by itself are marked in the owner's view, so the view
  * can group them. Measured through the real dispatcher: the mark follows the action the engine
  * itself wrote for the route it dispatched, so each listed route is read here as the web UI reads
  * it, and the mark must come out on exactly those.
  */
-describe('reads the web UI makes by itself, in the owner\'s view (real engine)', () => {
+describe('reads on the routes the web UI polls by itself, in the owner\'s view (real engine)', () => {
   // Built at RUNTIME: a key-shaped literal in a fixture is what the commit-time secret
   // scan looks for, and this repo is public.
   const SECRET = `t-${randomBytes(12).toString('hex')}`;

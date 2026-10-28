@@ -4,7 +4,7 @@ import { join, relative } from 'node:path';
 import { buildTrail, INTERFACE_POLLS, type TrailRow, type TrailSources } from './audit-trail-view.js';
 
 /**
- * Row 1034: `INTERFACE_POLLS` names the reads the web UI makes by itself. It is a list, so it
+ * Row 1034: `INTERFACE_POLLS` names the routes the web UI polls by itself. It is a list, so it
  * goes stale when a poller is added and nobody enters it. This test holds it against the web UI:
  * every file under `packages/web-ui/src` that starts a timer with `setInterval` is classified here,
  * by what it reads, and every route a poller reads is either in the list or excepted with a reason.
@@ -37,7 +37,7 @@ const POLLERS: Record<string, Poller> = {
   },
   'lib/stores/approvals.svelte.ts': {
     reads: [],
-    excepted: [{ path: '/approvals/count', action: 'GET /api/approvals/count', why: 'polled for the owner only (`viewer !== \'owner\'` stops it); a helper reads it once' }],
+    excepted: [{ path: '/approvals/count', action: 'GET /api/approvals/count', why: 'polled for the owner only (`viewer !== \'owner\'` stops it); a helper reads it once per mount, with a few retries on failure' }],
   },
   'lib/components/TriggersView.svelte': {
     reads: [],
@@ -75,7 +75,7 @@ function sources(dir: string): string[] {
 
 const read = (file: string): string => readFileSync(join(WEB_UI_SRC, file), 'utf-8');
 
-describe('the list of reads the web UI makes by itself', () => {
+describe('the list of routes the web UI polls by itself', () => {
   it('classifies every web UI file that starts a timer with setInterval', () => {
     const withTimer = sources(WEB_UI_SRC).filter((p) => readFileSync(p, 'utf-8').includes('setInterval(')).map((p) => relative(WEB_UI_SRC, p)).sort();
     // Not empty: the scan reads the tree it is meant to read.
@@ -126,17 +126,20 @@ describe('the mark in the owner\'s view', () => {
     const entries = buildTrail([
       row('GET /api/runs/active', 'read'),
       row('GET /api/threads', 'read'),
-      row('GET /api/tasks', 'denied', '/api/tasks?status=in_progress'),
-      // By route, whatever the target: the person opening the Tasks view or the history is grouped
-      // too. Decided so (sec-infra 2026-10-28: „faltet auch das selbst geöffnete Fenster;
-      // aufklappbar sichtbar; kein Session-Inhalt“); this case keeps the decision visible.
-      row('GET /api/tasks', 'read', '/api/tasks?status=done'),
+      row('GET /api/tasks', 'denied'),
+      // By route: the person opening the Tasks view or the history is grouped too. Their rows are
+      // the poll's rows (`/api/tasks`, `/api/history/cost/daily`; the query is not recorded, D15).
+      // Decided so (sec-infra 2026-10-28: „faltet auch das selbst geöffnete Fenster; aufklappbar
+      // sichtbar; kein Session-Inhalt“).
       row('GET /api/tasks', 'read', '/api/tasks'),
-      row('GET /api/history/cost/daily', 'read', '/api/history/cost/daily?days=30'),
+      row('GET /api/history/cost/daily', 'read', '/api/history/cost/daily'),
+      // Should a row ever carry the query, the mark still goes by route; this keeps the decision
+      // visible against a return to matching the poll's exact query.
+      row('GET /api/tasks', 'read', '/api/tasks?status=done'),
     ], quiet);
     expect(entries.map((e) => [e.kind, 'action' in e ? e.action : '', 'auto' in e ? e.auto : undefined])).toEqual([
-      ['event', 'GET /api/history/cost/daily', true],
       ['event', 'GET /api/tasks', true],
+      ['event', 'GET /api/history/cost/daily', true],
       ['event', 'GET /api/tasks', true],
       ['event', 'GET /api/tasks', undefined],
       ['event', 'GET /api/threads', undefined],

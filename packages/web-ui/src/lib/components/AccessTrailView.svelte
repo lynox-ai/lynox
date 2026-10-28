@@ -16,7 +16,7 @@
 	interface Person { email: string | null; display: string | null; mandateId: string | null }
 	interface Targets { written: number; failed: number; atLeast: boolean }
 	interface Step { kind: 'step'; id: string; action: string; target: string | null; at: string; person: Person; status: Status | null; note?: Note; decidedBy?: string | null }
-	/** `auto`: a read the person's web UI made by itself, marked by the engine (row 1034). */
+	/** `auto`: a read on a route the person's web UI polls by itself, marked by the engine (row 1034). */
 	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true }
 	interface PlanRun { kind: 'plan'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; writeSteps: number | null; entries: Array<Step | Event> }
 	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }

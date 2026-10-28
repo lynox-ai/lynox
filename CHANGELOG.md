@@ -56,8 +56,8 @@
   status routes, such as `GET /api/runs/active`). The owner's view groups
   consecutive marked reads of one person into one line that opens to each
   read, after the filters. The mark goes by route, so the helper opening the
-  Tasks view or the cost history is grouped too, and shows when the line is
-  opened. The trail still records every read.
+  Tasks view or the cost history, or chat checking for a running run, is
+  grouped too, and shows when the line is opened. The trail still records every read.
 - An engine started with `LYNOX_SHELL_EXEC_SOCKET` now also needs the
   workspace handed over on fd 3, and stops at start, naming the check, when it
   is missing. It also stops when the socket is set but blank (it used to fail

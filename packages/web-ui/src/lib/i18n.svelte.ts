@@ -1526,7 +1526,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.kind_bulk': { de: 'Massenlauf', en: 'Bulk run' },
 	'access_trail.kind_step': { de: 'Schritt', en: 'Step' },
 	'access_trail.kind_read': { de: 'Lesezugriff', en: 'Read access' },
-	// Reads the person's web UI made by itself, grouped (access-trail-fold.ts; ux U-047).
+	// Reads on routes the person's web UI polls by itself, grouped (access-trail-fold.ts; ux U-047).
 	'access_trail.polls_legend': { de: 'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln.', en: 'Status requests (running work, tasks, costs, providers) are grouped. The interface makes most of them by itself. Expand to see each one.' },
 	'access_trail.polls_many': { de: '{n} Statusabfragen ({span})', en: '{n} status requests ({span})' },
 	'access_trail.polls_one': { de: 'Eine Statusabfrage ({time})', en: 'One status request ({time})' },

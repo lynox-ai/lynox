@@ -14,7 +14,7 @@ type SvelteClient = {
 };
 const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
 
-// Row 1034, ux U-047: the reads a helper's web UI makes by itself (marked `auto` by the engine)
+// Row 1034, ux U-047: reads on the routes a helper's web UI polls by itself (marked `auto` by the engine)
 // stand grouped in the owner's view, after the filters, so the helper's own steps stay findable.
 // Nothing is dropped: a group opens to every read it stands for.
 
@@ -66,7 +66,7 @@ const rows = (): string[] => [...target.querySelectorAll<HTMLElement>('ul > li[d
 	li.dataset['entryKind'] === 'polls' ? `polls:${String(li.querySelectorAll('details [data-entry-kind="event"]').length)}` : li.dataset['entryKind']!);
 const summaries = (): string[] => [...target.querySelectorAll('[data-polls-summary]')].map((s) => s.textContent?.trim() ?? '');
 
-describe('reads the interface made by itself', () => {
+describe('reads on the routes the interface polls by itself', () => {
 	it('groups consecutive marked reads of one person, and leaves steps and other reads single', async () => {
 		await render([poll(1), poll(2), step(3), poll(4), read(5), poll(6), poll(7), poll(8)]);
 		expect(rows()).toEqual(['polls:2', 'step', 'polls:1', 'event', 'polls:3']);

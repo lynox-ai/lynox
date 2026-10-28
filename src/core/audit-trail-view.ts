@@ -90,21 +90,22 @@ export interface TrailEvent {
   readonly phase: string;
   readonly at: string;
   readonly person: TrailPerson;
-  /** A read the web UI makes by itself (`INTERFACE_POLLS`); the view groups these. */
+  /** A read on a route the web UI polls by itself (`INTERFACE_POLLS`); the view groups these. */
   readonly auto?: true | undefined;
 }
 
 /**
- * The reads the web UI makes by itself, without the person doing anything, by the action
+ * The routes the web UI polls by itself, without the person doing anything, by the action
  * `_recordedMandateRead` writes for them (`GET <route template>`). A helper's open tab leaves about
- * 23 of these a minute (row 1034), and the owner's view groups them so the person's own steps stay
+ * 23 reads a minute on them (row 1034), and the owner's view groups them so the person's own steps stay
  * findable. The trail itself keeps every row (D15).
  *
  * Decided here, from the route the engine dispatched, never from a mark the client sends. Listed
  * are only routes without a path parameter, whose answer is the instance's status or counts and no
  * session's content: a route that takes an id (`pending-prompt`) is not listed. Grouping is by
  * route, not by query (the row does not record these queries, and D15 stays as it is), so where the
- * person opens the same route on purpose, that read is grouped too; the entry says so. A poll
+ * person opens the same route on purpose, that read is grouped too (the Tasks view, the cost history, chat's own check for a running
+ * run); opening the group shows it. A poll
  * missing here is shown ungrouped, as before. `audit-trail-interface-polls.test.ts` holds this list
  * against the pollers in the web UI.
  */
@@ -123,7 +124,7 @@ export const INTERFACE_POLLS: ReadonlySet<string> = new Set([
   'GET /api/tasks',
 ]);
 
-/** Whether a row is a read the web UI made by itself. Writes and steps never are. */
+/** Whether a row is a read on a route the web UI polls by itself. Writes and steps never are. */
 export function isInterfacePoll(row: Pick<TrailRow, 'phase' | 'action'>): boolean {
   return row.phase === 'read' && INTERFACE_POLLS.has(row.action);
 }
