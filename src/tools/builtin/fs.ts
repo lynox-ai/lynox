@@ -1,4 +1,4 @@
-import { openSync, closeSync, fstatSync, ftruncateSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
+import { openSync, closeSync, constants, fstatSync, ftruncateSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getWorkspaceDir, isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
@@ -8,7 +8,9 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { processUmask, toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
-import { openRead, openWrite, WorkspaceAccessError, type WorkspaceAnchor } from '../../core/workspace-fd.js';
+import {
+  FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, openWrite, readFdCapped, WorkspaceAccessError, type WorkspaceAnchor,
+} from '../../core/workspace-fd.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -24,7 +26,7 @@ const MAX_WRITE_BYTES_PER_SESSION = 100 * 1024 * 1024; // 100MB
 // Soft-cap: truncate + nudge toward spawn_agent collector. Hard-cap: refuse.
 // Without these one multi-MB read could consume the main agent's context.
 const READ_FILE_SOFT_CAP_BYTES = 256 * 1024;
-const READ_FILE_HARD_CAP_BYTES = 5 * 1024 * 1024;
+const READ_FILE_HARD_CAP_BYTES = FILE_TOOL_READ_CAP_BYTES;
 
 interface ReadFileInput {
   path: string;
@@ -475,9 +477,8 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       }
       const realPath = target.kind === 'anchored' ? target.shown : target.path;
       // In the workspace the read and the write both go through its open directory.
-      let original: string;
+      let fd: number;
       if (target.kind === 'anchored') {
-        let fd: number;
         try {
           fd = openRead(target.anchor, target.rel);
         } catch (err) {
@@ -486,21 +487,38 @@ export const editFileTool: ToolEntry<EditFileInput> = {
           }
           throw anchoredError(target.shown, err);
         }
-        try {
-          // Before anything is compared: whether old_string matches would tell the content of a
-          // file read_file refuses.
-          if (fstatSync(fd).nlink > 1) {
-            throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not edit such a file.`);
-          }
-          original = readFileSync(fd, 'utf-8');
-        } finally {
-          closeSync(fd);
-        }
       } else {
-        if (!existsSync(realPath)) {
-          throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+        try {
+          // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
+          fd = openSync(realPath, constants.O_RDONLY | constants.O_NONBLOCK);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+          }
+          throw err;
         }
-        original = readFileSync(realPath, 'utf-8');
+      }
+      let original: string;
+      try {
+        const st = fstatSync(fd);
+        // Before anything is compared: whether old_string matches would tell the content of a
+        // file read_file refuses.
+        if (target.kind === 'anchored' && st.nlink > 1) {
+          throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not edit such a file.`);
+        }
+        if (!st.isFile()) throw new Error(`${realPath} is not a regular file; edit_file edits only regular files.`);
+        original = readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, realPath).toString('utf-8');
+      } catch (err) {
+        if (isReadLimit(err)) {
+          const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
+          throw new Error(
+            `${realPath} is larger than ${capMb} MB, too large for edit_file; nothing was changed. ` +
+            `Change it with shell tools instead (sed for a line, or split it into parts under ${capMb} MB with \`split -l\`).`,
+          );
+        }
+        throw err;
+      } finally {
+        closeSync(fd);
       }
       const segments = original.split(input.old_string);
       const matches = segments.length - 1;

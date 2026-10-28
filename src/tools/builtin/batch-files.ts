@@ -3,7 +3,7 @@ import { join, dirname, basename, resolve, posix } from 'node:path';
 import type { ToolEntry, IAgent, ChangesetWriter } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
-import { listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
+import { FILE_TOOL_READ_CAP_BYTES, listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 import { anchoredError, artifactsRoot, isInArtifactsRoot, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
 import { getWorkspaceRoot } from '../../core/workspace-root.js';
 import { readEnvAlias } from '../../core/env.js';
@@ -163,6 +163,10 @@ function landingPath(path: string): string {
  */
 function saveBefore(changeset: ChangesetWriter | undefined, path: string): void {
   if (changeset !== undefined && !changeset.backupBeforeWrite(path)) {
+    if (changeset.refusedTooLarge) {
+      const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
+      throw new Error(`it is larger than ${capMb} MB, too large to save for the review, so it was left as it was; tell the user, and if they agree, split it into parts under ${capMb} MB with bash (for example \`split -l\`) and transform those`);
+    }
     throw new Error('it could not be saved for the review before the change, so the change could not be undone; it was left as it was');
   }
 }

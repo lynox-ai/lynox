@@ -82,9 +82,9 @@ import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
-import { readFileSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
+import { openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
-import { openRead } from './workspace-fd.js';
+import { FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, readFdCapped } from './workspace-fd.js';
 import { resolveWritablePath } from '../tools/builtin/fs.js';
 import { resolve } from 'node:path';
 import type {
@@ -282,6 +282,9 @@ function stableStringify(value: unknown): string {
  * the link's target. With isolation, a file in the context workspace is read through its open
  * directory, one component at a time without following a link, and a file with a second name
  * shows nothing, as read_file reads neither.
+ *
+ * A file over {@link FILE_TOOL_READ_CAP_BYTES} is not read whole: that throws the `LIMIT`
+ * error, so the caller can say why there is no preview instead of showing the file as new.
  */
 export function readForDiffPreview(path: string): string {
   let fd: number | undefined;
@@ -291,13 +294,14 @@ export function readForDiffPreview(path: string): string {
     if (base !== null && mapped !== null && mapped.kind === 'inside') {
       fd = openRead(base.anchor, mapped.rel);
       if (fstatSync(fd).nlink > 1) return '';
-      return readFileSync(fd, 'utf-8');
+    } else {
+      // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      if (!fstatSync(fd).isFile()) return '';
     }
-    // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    if (!fstatSync(fd).isFile()) return '';
-    return readFileSync(fd, 'utf-8');
-  } catch {
+    return readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, path).toString('utf-8');
+  } catch (err) {
+    if (isReadLimit(err)) throw err;
     return ''; // absent, unreadable, or a symlink — the preview shows a new file
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -742,6 +746,7 @@ export class Agent implements IAgent {
     return (this._changesetView ??= Object.freeze({
       active: true,
       backupBeforeWrite: (filePath: string): boolean => manager.backupBeforeWrite(filePath) !== false,
+      get refusedTooLarge(): boolean { return manager.refusedTooLarge === true; },
       recordWritten: (filePath: string): void => manager.recordWritten?.(filePath),
       // A manager that cannot say counts as holding something: a move is refused rather than
       // made where the review might restore over it.
@@ -4638,8 +4643,13 @@ export class Agent implements IAgent {
             process.stderr.write(`\n${renderDiffHunks(existing, updated)}`);
           }
         }
-      } catch {
-        // Diff preview is best-effort — never block the tool
+      } catch (err) {
+        // Diff preview is best-effort — never block the tool. A file too large to read whole
+        // gets a line instead, so the prompt below is not read as a write to a new file.
+        if (isReadLimit(err)) {
+          const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
+          process.stderr.write(`\nNo diff preview: ${String((tc.input as { path?: unknown }).path)} is larger than ${capMb} MB.\n`);
+        }
       }
     }
 
@@ -4898,10 +4908,13 @@ export class Agent implements IAgent {
       if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolve(reviewed)) === false) {
         // Nothing could be saved for the review: the write would be in neither the review nor
         // the rollback, and nothing would say so.
+        const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
         return {
           type: 'tool_result',
           tool_use_id: tc.id,
-          content: `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
+          content: this.changesetManager.refusedTooLarge === true
+            ? `Blocked: ${tc.name} did not run. The file is larger than ${capMb} MB, too large to save for the review, so the change could not be undone. Nothing was written. Do not retry with ${tc.name}: tell the user, and if they agree, split the file into parts under ${capMb} MB with bash (for example \`split -l\`) and change the part that needs it.`
+            : `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
           is_error: true,
         };
       }
