@@ -521,6 +521,16 @@ describe('the webhook drain', () => {
     expect(eventOf(t, id).state).toBe('dropped');
   });
 
+  it('drops an event of a plan whose mandate has ended, the pause off, and runs nothing', async () => {
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ endRow: () => null, isLive: () => false });
+    const t = tm.createWebhookTrigger({ title: 'Theirs', pipelineId: 'wf-orders', verifier: 'shared-token', createdBy: `${MANDATE_TAG_PREFIX}eva@kanzlei.example`, confirmedAt: '2026-10-01T00:00:00.000Z' }).trigger.id;
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'dropped');
+    expect(runner.run).not.toHaveBeenCalled();
+    expect(eventOf(t, id).reason).toMatch(/access has ended/);
+  });
+
   it('drops an event of a paused plan and runs nothing', async () => {
     const restore = setPlanPauseForTests(true);
     try {
