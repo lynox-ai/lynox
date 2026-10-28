@@ -373,6 +373,14 @@ describe('what a tool call reads outside the instance (ToolEntry.outwardRead)', 
     expect(target('google_sheets', { action: 'write' })).toBeNull();
   });
 
+  it('writes a Google id or range that holds an address as the placeholder: the row is written before Google answers', () => {
+    expect(target('google_docs', { action: 'read', document_id: 'max@kunde.example' })).toBe('read document=<address>');
+    expect(target('google_drive', { action: 'read', file_id: 'max@kunde.example' })).toBe('read file=<address>');
+    expect(target('google_drive', { action: 'list', folder_id: 'max@kunde.example' })).toBe('list folder=<address>');
+    expect(target('google_sheets', { action: 'read', spreadsheet_id: 'max@kunde.example', range: 'A1:B2' })).toBe('read spreadsheet=<address> range=A1:B2');
+    expect(target('google_sheets', { action: 'read', spreadsheet_id: 's1', range: "'max@kunde.example'!A1:B2" })).toBe('read spreadsheet=s1 range=<address>');
+  });
+
   it('names a subscribed calendar by its label, never its address', () => {
     expect(target('calendar_read', { calendar: 'work' })).toBe('calendar=work');
     expect(target('calendar_read', {})).toBe('calendar=all');
