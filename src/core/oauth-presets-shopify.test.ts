@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { OAUTH_PRESETS, derivePresetEndpoints, presetNotFollowed, presetRegisterOf, presetScopeRequest, presetStoreHost } from './oauth-presets.js';
+import { OAUTH_PRESETS, consentFrameProblems, derivePresetEndpoints, presetNotFollowed, presetRegisterOf, presetScopeRequest, presetStoreHost } from './oauth-presets.js';
+import { decideConnect, isRefusal } from '../server/oauth-connect-decision.js';
+import { SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS } from './shopify-graphql.js';
 
 const shopify = OAUTH_PRESETS.get('shopify')!;
 
@@ -83,5 +85,54 @@ describe('presetNotFollowed on a store host', () => {
 
   it('still names bexio for its own host', () => {
     expect(presetNotFollowed({ base_url: 'https://api.bexio.com', auth: { type: 'bearer' } })?.id).toBe('bexio');
+  });
+});
+
+// The page before a connect appears for the scopes in `writeScopes`, a second list next to
+// `allowedScopes`: a write scope added to one and not the other would skip the page.
+describe('the Shopify customer text', () => {
+  const connect = (scope: string): ReturnType<typeof decideConnect> => decideConnect({
+    authenticated: true, fetchSite: 'same-origin', fetchDest: 'document', httpSecretSet: true,
+    profile: {
+      id: 'shop', name: 'Shop', base_url: 'https://my-store.myshopify.com', description: 'Shop',
+      auth: { type: 'oauth2', vault_keys: [], oauth: { preset_id: 'shopify', preset_params: { shop: 'my-store' }, scope } },
+      custom_endpoint_ack: { accepted: true, hosts: ['my-store.myshopify.com'], redirect_hosts: ['my-store.myshopify.com'], accepted_at: '2026-10-28T00:00:00.000Z' },
+    },
+  }, OAUTH_PRESETS);
+
+  it('covers every write scope the preset allows, no more and no fewer, and has no frame problem', () => {
+    expect(shopify.consentNotice?.writeScopes).toEqual(shopify.allowedScopes.filter((s) => s.startsWith('write_')));
+    expect(consentFrameProblems(shopify.consentNotice!)).toEqual([]);
+  });
+
+  it('comes before a link that asks for write_products, a reconnect included, and not before a read-only one', () => {
+    const writing = connect('read_products write_products');
+    expect(isRefusal(writing)).toBe(false);
+    if (isRefusal(writing)) return;
+    expect(writing.consent?.writeScopes).toEqual(['write_products']);
+    expect(writing.consent?.frame?.title).toBe('Schreibrechte für Shopify bestätigen');
+    const reading = connect('read_products');
+    expect(isRefusal(reading)).toBe(false);
+    if (isRefusal(reading)) return;
+    expect(reading).not.toHaveProperty('consent');
+  });
+
+  // The text says lynox asks for no write access to orders, customers or stock. Such a scope may
+  // not come into the list without a new text.
+  it('allows no write scope for orders, customers or stock', () => {
+    expect(shopify.consentNotice?.paragraphs.join(' ')).toContain('Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.');
+    expect(shopify.allowedScopes.filter((s) => /^write_(orders|all_orders|customers|inventory|fulfillments)/.test(s))).toEqual([]);
+  });
+
+  // The text names the fields a bulk run writes. They are the fields of the engine's write forms
+  // for products and for their images, not of the scope: a field added to a form fails here, and
+  // the text needs a new approval.
+  it('names exactly the fields the engine\'s Shopify write forms set', () => {
+    const named: Record<string, string> = { title: 'Titel', descriptionHtml: 'Beschreibung', seo_title: 'SEO-Titel', seo_description: 'SEO-Beschreibung' };
+    const order = ['title', 'descriptionHtml', 'seo_title', 'seo_description'];
+    for (const f of SHOPIFY_WRITABLE_FIELDS) expect(named[f], `a name for ${f}`).toBeDefined();
+    expect(SHOPIFY_MEDIA_WRITABLE_FIELDS).toEqual(['alt']);
+    const fields = order.filter((f) => SHOPIFY_WRITABLE_FIELDS.includes(f)).map((f) => named[f]);
+    expect(shopify.consentNotice?.paragraphs[1]).toContain(`Ein Massenlauf ändert nur Texte bestehender Produkte: ${fields.join(', ')} und die Alt-Texte der Produktbilder.`);
   });
 });

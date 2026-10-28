@@ -383,6 +383,29 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // (`shopify-graphql.ts`), and Shopify grants a write only to the token, so the scope sits on
     // the connection. It is asked for only when the profile names it. No other write scope.
     allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products'],
+    // Customer text. A change to a word needs a new approval; the test that holds this text
+    // byte for byte is the reminder. Shown before every link that asks for write_products, a
+    // new connection's or a reconnect's. The fields in the second paragraph are those of the
+    // engine's Shopify write forms, a test holds the two together.
+    consentNotice: {
+      lang: 'de',
+      writeScopes: ['write_products'],
+      paragraphs: [
+        'lynox kann in deinem Shopify-Store Produkte ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an Shopify schickt, und er geschieht erst nach deinem Ja.',
+        'Die eine Ausnahme ist ein Massenlauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel, SEO-Beschreibung und die Alt-Texte der Produktbilder. Anlegen, löschen oder Preise ändern kann er nicht.',
+        'Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.',
+      ],
+      frame: {
+        title: 'Schreibrechte für Shopify bestätigen',
+        scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in Shopify:',
+        scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Das Recht ist damit breiter als das, was lynox damit tut.',
+        button: 'Zustimmen und weiter zu Shopify',
+        afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in Shopify.',
+      },
+      scopeNames: {
+        write_products: 'Produkte: Schreibzugriff',
+      },
+    },
     scopeSeparator: ',',
     tokenHeaderName: 'X-Shopify-Access-Token',
     tokenBodyFormat: 'form',
