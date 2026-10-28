@@ -26,7 +26,7 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
+import { askedScopes, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, scopesBeyondAsked, scopesOfAnswer, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
@@ -11015,6 +11015,8 @@ export class LynoxHTTPApi {
       let storeCallback: VerifiedStoreCallback | undefined;
       // Set when a store preset's token could not be bound (no vault key, or the grant was not saved).
       let storeBindingFailed = false;
+      // The scopes the provider granted beyond what this connection asks for, said on the page.
+      let grantedBeyond: string[] = [];
       // Set when the save of a profile its provider had revoked was refused: no new grant was
       // recorded, so an erasure that revocation started is still held and will run.
       let revokedNotRecorded = false;
@@ -11264,7 +11266,13 @@ export class LynoxHTTPApi {
           };
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
           // What the token can do, as the provider says: a narrower grant is recorded as granted.
-          if (typeof parsed.scope === 'string') grantNext.granted_scope = parsed.scope.split(/[\s,]+/).filter((s) => s !== '');
+          // A broader one is recorded too, and the page below names what it holds beyond the ask.
+          const grantedNow = scopesOfAnswer(parsed.scope);
+          if (grantedNow !== undefined) {
+            grantNext.granted_scope = grantedNow;
+            const asked = askedScopes(fresh.auth?.oauth ?? {});
+            if (asked !== undefined) grantedBeyond = scopesBeyondAsked(grantedNow, asked);
+          }
           // The account this consent signed in with, for the person to read: the store the
           // provider signed for, or the account an OpenID Connect preset's id_token names.
           // Nothing else is trusted for it, so any other provider records none.
@@ -11337,6 +11345,11 @@ export class LynoxHTTPApi {
       }
       if (revokedNotRecorded) {
         sendOAuthHtml(res, 500, 'The authorization arrived, but this engine could not record the new connection, so the profile still counts as revoked and a deletion announced for it still stands. Reconnect again from the profile.');
+        return;
+      }
+      if (grantedBeyond.length > 0) {
+        const named = grantedBeyond.slice(0, 10).join(', ') + (grantedBeyond.length > 10 ? `, and ${String(grantedBeyond.length - 10)} more` : '');
+        sendOAuthHtml(res, 200, `Connected. The provider granted more access than this connection asks for: ${named}. The token can use all of it. If that is not what you want, narrow the app's permissions at the provider and connect again. You can close this tab and go back to the conversation.`);
         return;
       }
       sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');

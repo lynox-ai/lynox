@@ -23,7 +23,7 @@ import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
@@ -172,6 +172,10 @@ const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
 const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 
 /** The built-in preset an oauth2 profile names, when the engine knows it. */
+function isPlainRecord<T>(value: T): value is T & Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function builtInPresetOf(profile: ApiProfile): ReturnType<typeof OAUTH_PRESETS.get> {
   const presetId: unknown = profile.auth?.type === 'oauth2' ? profile.auth.oauth?.preset_id : undefined;
   return typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
@@ -2024,6 +2028,10 @@ ${draftJson}
             ...profile.auth.oauth,
             client_id_key: profile.auth.oauth.client_id_key ?? derived.id,
             client_secret_key: profile.auth.oauth.client_secret_key ?? derived.secret,
+            // A value the provider reads without regard to case is stored in lower case:
+            // "My-Store" is the store my-store, not a refusal.
+            // Only an object is normalized: any other shape reaches the check below as written.
+            ...(isPlainRecord(profile.auth.oauth.preset_params) ? { preset_params: normalizedPresetParams(namedPreset, profile.auth.oauth.preset_params) } : {}),
           },
         };
       }
@@ -3278,6 +3286,10 @@ ${draftJson}
         // A token this exchange wrote is not the one a store callback bound: the binding goes
         // with it, or the new credential would be held to a store it never came from.
         delete next.store_binding;
+        // What this token can do, as the renewal's answer says. One that names no scope leaves the
+        // record as it was: the provider said nothing new.
+        const grantedNow = scopesOfAnswer(parsed.scope);
+        if (grantedNow !== undefined) next.granted_scope = grantedNow;
         next.written = mergeWrites(current, writes);
         if (next.connected_by === undefined) Object.assign(next, consentOf(agent, profile));
         return next;

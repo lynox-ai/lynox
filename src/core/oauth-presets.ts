@@ -100,6 +100,25 @@ export interface OAuthPresetParam {
   readonly pattern: RegExp;
   /** Said to the user when the value is missing or refused. */
   readonly describe: string;
+  /**
+   * The provider reads the value without regard to case. Saving a profile then writes it in
+   * lower case, so a name typed as the person sees it is kept rather than refused. The
+   * derivation still refuses anything `pattern` does not match.
+   */
+  readonly caseInsensitive?: true;
+}
+
+/**
+ * `params` with each value its preset reads without regard to case in lower case. Other names and
+ * values are returned as they are; the derivation decides whether they are acceptable.
+ */
+export function normalizedPresetParams<T extends Readonly<Record<string, unknown>>>(preset: OAuthPreset, params: T): T {
+  const out: Record<string, unknown> = { ...params };
+  for (const spec of preset.params) {
+    const value = out[spec.name];
+    if (spec.caseInsensitive === true && typeof value === 'string') out[spec.name] = value.toLowerCase();
+  }
+  return out as T;
 }
 
 /**
@@ -348,7 +367,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     tokenPath: '/admin/oauth/access_token',
     // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not
     // starting with a hyphen. Shopify itself admits upper case; the boundary does not.
-    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]*$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case' }],
+    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]*$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
     requiredScopes: [],
     // Read only. `read_all_orders` stays out: Shopify grants it only on request. Write scopes
     // come with the bulk form, not with the connection.
@@ -660,4 +679,36 @@ export function presetRegisterOf(entries: readonly OAuthPreset[]): PresetRegiste
     get: (id: string): OAuthPreset | undefined => map.get(id),
     ids: (): string[] => [...map.keys()].sort(),
   });
+}
+
+/**
+ * The scopes a token answer's `scope` names (comma- or space-separated there), in its order, or
+ * `undefined` when the answer names none. The connect callback and a renewal both record this as
+ * the grant's `granted_scope`.
+ */
+export function scopesOfAnswer(scope: unknown): string[] | undefined {
+  return typeof scope === 'string' ? scope.split(/[\s,]+/).filter((s) => s !== '') : undefined;
+}
+
+/**
+ * The scopes a connection asks for: for a built-in provider what its link requests (the
+ * provider's required scopes plus the profile's own, possibly none), otherwise the profile's
+ * `scope` as written. `undefined` when there is nothing to compare a grant with: a profile of no
+ * built-in provider that names no scope leaves the choice to the provider, and a scope the
+ * provider refuses never made a link.
+ */
+export function askedScopes(oauth: { readonly preset_id?: string | undefined; readonly scope?: string | undefined }): string[] | undefined {
+  const preset = OAUTH_PRESETS.get(oauth.preset_id ?? '');
+  if (preset === undefined) {
+    const written = (oauth.scope ?? '').split(/\s+/).filter((s) => s !== '');
+    return written.length > 0 ? written : undefined;
+  }
+  const requested = presetScopeRequest(preset, oauth.scope);
+  return 'scopes' in requested ? [...requested.scopes] : undefined;
+}
+
+/** What `granted` holds that `asked` does not, in the order granted, each once. */
+export function scopesBeyondAsked(granted: readonly string[], asked: readonly string[]): string[] {
+  const known = new Set(asked);
+  return [...new Set(granted.filter((s) => !known.has(s)))];
 }
