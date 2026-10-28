@@ -115,7 +115,7 @@ describe('each kind of entry', () => {
 			planned: true, windows: 3, targets: { written: 40, failed: 0, atLeast: true },
 		}]);
 		const [li] = items();
-		expect(text(li)).toContain('Sammellauf');
+		expect(text(li)).toContain('Massenlauf');
 		expect(text(li)).toContain('3 Fenster');
 		expect(text(li?.querySelector('[data-targets]'))).toBe('mindestens 40 geschrieben, mindestens 0 fehlgeschlagen');
 		expect(text(li?.querySelector('[data-note]'))).toBe('Angehalten wie geplant, wartet auf dich');
@@ -130,16 +130,17 @@ describe('each kind of entry', () => {
 		expect(text(items()[0]?.querySelector('[data-targets]'))).toBe('1 geschrieben, 0 fehlgeschlagen');
 	});
 
-	it('a read is named a read; another event by its own word', async () => {
+	it('a read is named a read access, not a read that happened; another event by its own word', async () => {
 		await render([
 			{ kind: 'event', action: 'GET /api/threads/:id', target: '/api/threads/t-1', phase: 'read', at: NOW, person: IDA },
 			{ kind: 'event', action: 'oauth:consent', target: null, phase: 'success', at: NOW, person: IDA },
 		]);
 		const [read, other] = items();
-		expect(text(read)).toContain('Gelesen');
+		expect(text(read)).toContain('Lesezugriff');
+		expect(text(read)).not.toContain('Gelesen');
 		expect(text(read)).toContain('/api/threads/t-1');
 		expect(text(other)).toContain('Ereignis');
-		expect(text(other)).not.toContain('Gelesen');
+		expect(text(other)).not.toContain('Lesezugriff');
 	});
 });
 
@@ -160,7 +161,7 @@ describe('statuses and notes come from the engine and are named', () => {
 		expect(text(items()[0]?.querySelector('[data-note]'))).toBe('Ein Ergebnis ist nicht festgehalten.');
 	});
 
-	it('a rejected approval says who rejected it: the owner, a helper, or nobody named', async () => {
+	it('an approval not given says who did not give it — next to "not approved", not after "not sent" — or names nobody', async () => {
 		const step = { kind: 'step', action: 'mail_send', target: null, at: NOW, person: IDA, status: 'ended', note: 'approval-rejected' };
 		await render([
 			{ ...step, decidedBy: 'owner' },
@@ -169,9 +170,9 @@ describe('statuses and notes come from the engine and are named', () => {
 		]);
 		const notes = items().map((li) => text(li.querySelector('[data-note]')));
 		expect(notes).toEqual([
-			'Freigabe abgelehnt, nicht gesendet (von dir)',
-			'Freigabe abgelehnt, nicht gesendet (von ben@example.invalid)',
-			'Freigabe abgelehnt, nicht gesendet',
+			'Nicht freigegeben (von dir), nicht gesendet',
+			'Nicht freigegeben (von ben@example.invalid), nicht gesendet',
+			'Nicht freigegeben, nicht gesendet',
 		]);
 	});
 
@@ -251,8 +252,10 @@ describe('filters and older pages', () => {
 		await render([{ kind: 'event', action: 'a', target: 'newer-row', phase: 'read', at: NOW, person: IDA }], 41);
 		const more = [...target.querySelectorAll('button')].find((b) => text(b) === 'Ältere laden');
 		expect(more).toBeDefined();
+		expect(text(target.querySelector('[data-state="filter-partial"]'))).toBe('Ältere Einträge sind noch nicht geladen, die Auswahl zeigt nur die geladenen. Mit „Ältere laden“ holst du sie dazu.');
 		more?.click();
 		await settle();
+		expect(target.querySelector('[data-state="filter-partial"]'), 'every page is loaded: the selection covers them all').toBeNull();
 		expect(urls.at(-1)).toMatch(/\/access-trail\?before=41$/);
 		expect(items().map((li) => text(li))).toEqual([expect.stringContaining('newer-row'), expect.stringContaining('older-row')]);
 		expect([...target.querySelectorAll('button')].find((b) => text(b) === 'Ältere laden')).toBeUndefined();
