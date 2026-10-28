@@ -6,7 +6,9 @@
  * `memory_*` tools when durable memory is on AND its store opened. Otherwise the legacy tools
  * are registered, and three of them (`memory_delete`, `memory_update`, `memory_promote`) change
  * memory by a pattern the model writes. Their rows in a mandate's trail cannot name what was
- * hit, so a mandate is refused on an engine that registers them.
+ * hit, so a mandate is refused on an engine that registers them. The sign-in is not every way
+ * a mandate acts — its plans run later under it — so the tool lock also holds these three back
+ * from every mandate turn (`MANDATE_PATTERN_WRITE_TOOLS` in mandate-tool-lock.ts).
  */
 
 /** Why an engine registers the legacy memory tools: durable memory is off, or on without its store. */

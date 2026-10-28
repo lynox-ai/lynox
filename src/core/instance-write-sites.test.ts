@@ -15,7 +15,7 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import ts from 'typescript';
-import { INSTANCE_WRITE_SITES } from './mandate-tool-lock.js';
+import { INSTANCE_WRITE_SITES, MANDATE_PATTERN_WRITE_TOOLS } from './mandate-tool-lock.js';
 
 const SRC = resolve(__dirname, '..');
 
@@ -339,8 +339,9 @@ describe('the steps of each write site against the source', () => {
   });
 
   // 660a-2: a step that removes or retires a set the model described (a filter, a pattern) names
-  // what it hit, or runs only in a legacy memory tool, which a mandate cannot reach: the engine
-  // refuses a mandate while it registers them (memory-tool-set.ts). The set is drawn by the
+  // what it hit, or runs only in a pattern writer, which a mandate cannot reach: the lock holds
+  // them back from every mandate turn (`MANDATE_PATTERN_WRITE_TOOLS`), and the sign-in refuses a
+  // mandate while the engine registers them (memory-tool-set.ts). The set is drawn by the
   // methods that take such a filter, not by the decoder, so a new one without ids fails here.
   const SET_METHOD = /\b(?:deleteRecords\w*|deactivateByPattern\w*|deleteScoped|retireForMove|delete)\s*\(/;
   const LEGACY_MEMORY_SITES = new Set(['memory_delete#delete', 'memory_update#fallback', 'memory_update#exact', 'memory_promote#move']);
@@ -354,8 +355,8 @@ describe('the steps of each write site against the source', () => {
     .map(u => `${u.file}:${String(u.line)} ${String(u.site)} step=${String(u.step)}`);
 
   it('every step that removes a set names what it hit, unless it runs only in a legacy memory tool', () => {
-    // The exemption is for the legacy memory tools only: a mandate cannot reach them (memory-tool-set.ts).
-    for (const site of LEGACY_MEMORY_SITES) expect(site, 'an exempt site of a legacy memory tool').toMatch(/^memory_(?:delete|update|promote)#/);
+    // The exemption is for the tools the lock holds back only: a mandate cannot reach them.
+    for (const site of LEGACY_MEMORY_SITES) expect(Object.hasOwn(MANDATE_PATTERN_WRITE_TOOLS, site.slice(0, site.indexOf('#'))), `${site} is a site of a held-back pattern writer`).toBe(true);
     expect(uses.filter(u => u.affected === true).length, 'positive control').toBeGreaterThan(0);
     expect(unnamedSets(uses)).toEqual([]);
   });

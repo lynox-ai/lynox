@@ -1,5 +1,5 @@
 import type { RequestPrincipal } from '../core/request-principal.js';
-import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
+import { mandateWithheldReason, toolLockFor } from '../core/mandate-tool-lock.js';
 import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
@@ -1238,10 +1238,10 @@ export async function spawnInline(
   const lock = principal !== undefined ? toolLockFor(principal) : null;
   if (lock !== null) {
     const named = [...(step.tools ?? []), ...(step.tool !== undefined ? [step.tool] : [])];
-    const withheld = [...new Set(named.filter(n => !lock.has(n) && Object.hasOwn(MANDATE_WITHHELD_TOOLS, n)))];
+    const withheld = [...new Set(named.filter(n => !lock.has(n) && mandateWithheldReason(n) !== undefined))];
     if (withheld.length > 0) {
       throw new Error(
-        `Step "${step.id}" needs ${withheld.map(n => `${n} (${MANDATE_WITHHELD_TOOLS[n]})`).join(', ')}, which this `
+        `Step "${step.id}" needs ${withheld.map(n => `${n} (${mandateWithheldReason(n) ?? ''})`).join(', ')}, which this `
         + `run does not get: it runs for a person with delegated access, with that person's tools.`,
       );
     }

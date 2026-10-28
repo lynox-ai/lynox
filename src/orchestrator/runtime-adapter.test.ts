@@ -2570,6 +2570,8 @@ describe('step agents are built for the run\'s principal (PRD customer-granted-o
     [['read_file', 'task_list'], /needs read_file \(opens any absolute path outside a workspace\), which this run does not get/],
     // Withheld from a mandate: the focus is the instance's, not one session's.
     [['memory_focus'], /needs memory_focus \(sets the knowledge focus for every session of the instance\), which this run does not get/],
+    // A pattern writer: on the surface, but held back by the lock (660a-2).
+    [['memory_delete'], /needs memory_delete \(deletes memory by a pattern, and what it hits cannot be recorded\), which this run does not get/],
   ])('refuses a step naming %j in a run for a mandate, before any agent is built', async (tools, message) => {
     await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', tools }, MANDATE)).rejects.toThrow(message);
     expect(vi.mocked(Agent)).not.toHaveBeenCalled();
