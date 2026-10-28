@@ -473,6 +473,17 @@ describe('bulk_plan with a Shopify source', () => {
     expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 1 });
   });
 
+  it('refuses a judge on the image form: a judge is decided for products only', async () => {
+    vi.stubEnv(FLAG, '1');
+    try {
+      expect(await plan({ source_list: { form: 'shopify_media' }, judge: { rule: 'r', schema: { alt: { type: 'string', maxLength: 512 } } } }))
+        .toMatch(/source_list\.form shopify_media does not take judge yet/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+  });
+
   it('refuses a write method', async () => {
     vi.stubEnv(FLAG, '1');
     try {
