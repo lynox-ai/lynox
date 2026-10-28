@@ -103,6 +103,9 @@ describe('BackupsView: what a backup covers', () => {
 	it('control: an omitted or unclear notice is not in warning colour', async () => {
 		listed = [backup('b-1', { provenance: 'verified', coverage: { workspace: 'omitted-sidecar' } }), backup('b-2', { provenance: 'none' })];
 		await render();
-		for (const el of target.querySelectorAll('[data-testid^="backup-coverage-"]')) expect(el.className).not.toContain('warning');
+		const notices = [...target.querySelectorAll('[data-testid^="backup-coverage-"]')];
+		// Two badges and two lines, so the loop below cannot pass by finding nothing.
+		expect(notices).toHaveLength(4);
+		for (const el of notices) expect(el.className).not.toContain('warning');
 	});
 });
