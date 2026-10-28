@@ -41,12 +41,13 @@ let ws: string;
 const writers: ChildProcess[] = [];
 
 /**
- * A FIFO at `path`, with a writer that opens it after 3 s and gives up after 6 s. A read that
- * waits for a writer returns then, so it fails the time asserted below instead of hanging the run.
+ * A FIFO at `path`, with a writer that opens it every 3 s, three times, and gives up after 12 s.
+ * A read that waits for a writer returns then (a call may open the file twice: backup and tool),
+ * so it fails the time asserted below instead of hanging the run.
  */
 function fifoWithLateWriter(path: string): void {
   execFileSync('mkfifo', [path]);
-  const writer = spawn('timeout', ['6', 'sh', '-c', 'sleep 3; echo x > "$1"', 'sh', path], { stdio: 'ignore' });
+  const writer = spawn('timeout', ['12', 'sh', '-c', 'for i in 1 2 3; do sleep 3; echo x > "$1"; done', 'sh', path], { stdio: 'ignore' });
   writer.unref();
   writers.push(writer);
 }
@@ -214,7 +215,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
     } finally {
       manager.cleanup();
     }
-  }, 10_000);
+  }, 15_000);
 
   it.runIf(process.platform === 'linux')(`[${branch}] the preview before a prompted edit of a FIFO returns at once`, async () => {
     const path = join(ws, 'pipe.csv');
@@ -230,7 +231,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
       stderr.mockRestore();
     }
     expect(statSync(path).isFIFO()).toBe(true);
-  }, 10_000);
+  }, 15_000);
 });
 
 describe('write_file on a FIFO in the context workspace', () => {
@@ -251,5 +252,5 @@ describe('write_file on a FIFO in the context workspace', () => {
     } finally {
       manager.cleanup();
     }
-  }, 10_000);
+  }, 15_000);
 });
