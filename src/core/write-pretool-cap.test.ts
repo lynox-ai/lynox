@@ -72,7 +72,9 @@ const bashStub = {
 } as unknown as ToolEntry;
 
 const WAY_OUT_NO_BASH =
-  'There is no bash here to split it: tell the user the file is too large for the file tools, and has to be split into parts under 5 MB or changed outside lynox.';
+  'There is no bash here: tell the user the file is too large for the file tools, that they can download it under Artifacts › Files and change it outside lynox.';
+const WAY_OUT_REVIEWED =
+  'Write the changed content to a new file with bash instead (for example `sed \'…\' file > file.new`), tell the user its name, and that the original stays as it was.';
 
 function agentWith(manager?: ChangesetManager, extra: ToolEntry[] = []): Agent {
   return new Agent({
@@ -182,8 +184,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
       });
       const result = await call(agent, 'batch_files', { pattern: '*.csv', directory: ws, operation: 'transform', find: MARK, replace: 'EDITED' });
       expect(String(result.content)).toContain(
-        'over.csv: it is larger than 5 MB, too large to save for the review, so it was left as it was. Tell the user, and if they agree, ' +
-        'split the file into parts under 5 MB with bash (for example `split -l`) and change the part that needs it.',
+        `over.csv: it is larger than 5 MB, too large to save for the review, so it was left as it was. ${WAY_OUT_REVIEWED}`,
       );
       expect(readFileSync(join(ws, 'over.csv'), 'utf-8').startsWith(MARK)).toBe(true);
       expect(readFileSync(join(ws, 'at.csv'), 'utf-8').startsWith('EDITED'), 'a file of exactly the cap is changed').toBe(true);
@@ -210,9 +211,9 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
     }
   });
 
-  it(`[${branch}] with the review on, edit_file's own refusal of a file grown past the cap asks the user first`, async () => {
+  it(`[${branch}] with the review on, edit_file's own refusal of a file grown past the cap points to a new file`, async () => {
     // Saved while small (the first save wins), then grown: the backup lets the call through, and
-    // edit_file refuses it itself. A change by bash would not be in the review, so ask first.
+    // edit_file refuses it itself. A change by bash in place would not be in the review.
     const path = join(ws, 'data.csv');
     writeFileSync(path, MARK);
     const manager = new ChangesetManager(ws, 'run');
@@ -222,8 +223,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
       const result = await call(agentWith(manager, [bashStub]), 'edit_file', { path, old_string: MARK, new_string: 'EDITED' });
       expect(result.is_error).toBe(true);
       expect(String(result.content)).toContain(
-        `${path} is larger than 5 MB, too large for edit_file; nothing was changed. ` +
-        'Tell the user, and if they agree, split the file into parts under 5 MB with bash (for example `split -l`) and change the part that needs it.',
+        `${path} is larger than 5 MB, too large for edit_file; nothing was changed. ${WAY_OUT_REVIEWED}`,
       );
     } finally {
       manager.cleanup();
@@ -238,7 +238,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
     expect(over.is_error).toBe(true);
     expect(String(over.content)).toContain(
       `${path} is larger than 5 MB, too large for edit_file; nothing was changed. ` +
-      'Change it with bash instead (sed for a line, or split it into parts under 5 MB with `split -l`).',
+      'Change it with bash instead (for example sed for a line).',
     );
     // An agent without bash (the creator role) is not sent to it.
     const noBash = await call(agentWith(), 'edit_file', { path, old_string: MARK, new_string: 'EDITED' });

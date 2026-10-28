@@ -32,18 +32,19 @@ const READ_FILE_HARD_CAP_BYTES = FILE_TOOL_READ_CAP_BYTES;
  * The way out of a refusal for a file over {@link FILE_TOOL_READ_CAP_BYTES}, by what was refused
  * and whether this agent has bash (the `creator` role has not):
  * - `replace` (write_file under the review): a new file, which needs nothing saved.
- * - `change` (edit_file, a batch_files transform): split the file with bash, first asking the user
- *   when the run is reviewed (a change by bash is not in the review); without bash, tell the user.
+ * - `change` (edit_file, a batch_files transform): under the review, the changed content goes to a
+ *   new file by bash and the original stays (a change by bash in place would not be in the review);
+ *   without the review, bash changes it in place. Without bash, the user downloads and changes it.
+ * Never a split: a CSV or log the user changes should stay one file (ux U-036).
  */
 export function oversizeWayOut(agent: Pick<IAgent, 'getAvailableTools'>, kind: 'replace' | 'change', reviewed: boolean): string {
-  const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
   if (kind === 'replace') return 'Write the new content to a new file instead and tell the user its name; the old file stays as it was.';
   if (!agent.getAvailableTools().some((t) => t.definition.name === 'bash')) {
-    return `There is no bash here to split it: tell the user the file is too large for the file tools, and has to be split into parts under ${capMb} MB or changed outside lynox.`;
+    return 'There is no bash here: tell the user the file is too large for the file tools, that they can download it under Artifacts › Files and change it outside lynox.';
   }
   return reviewed
-    ? `Tell the user, and if they agree, split the file into parts under ${capMb} MB with bash (for example \`split -l\`) and change the part that needs it.`
-    : `Change it with bash instead (sed for a line, or split it into parts under ${capMb} MB with \`split -l\`).`;
+    ? 'Write the changed content to a new file with bash instead (for example `sed \'…\' file > file.new`), tell the user its name, and that the original stays as it was.'
+    : 'Change it with bash instead (for example sed for a line).';
 }
 
 interface ReadFileInput {
