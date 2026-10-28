@@ -843,7 +843,7 @@ describe('the ledger\'s moves', () => {
 
   it('gets the index on a database that ran the drain columns before it existed', () => {
     const db = engineDb.getDb();
-    db.exec('DROP INDEX idx_inbound_events_state_received; DELETE FROM schema_version WHERE version = 60;');
+    db.exec('DROP INDEX idx_inbound_events_state_received; DELETE FROM schema_version WHERE version = 61;');
     engineDb.close();
     engineDb = new EngineDb(join(dir, 'engine.db'));
     expect(engineDb.getDb().prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inbound_events_state_received'`).get()).toBeDefined();

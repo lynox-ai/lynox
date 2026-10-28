@@ -28,7 +28,7 @@ import type {
   CacheProfile,
 } from '../types/index.js';
 import { headlessRefusalNote } from './write-notes.js';
-import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
+import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile, DEFAULT_MAX_TOOL_RESULT_CHARS } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -768,7 +768,7 @@ export class Agent implements IAgent {
   private static RETRY_BASE_MS = 2000;
 
   /** Default max chars for a single tool result before truncation. Configurable via `max_tool_result_chars`. */
-  private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = 80_000;
+  private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = DEFAULT_MAX_TOOL_RESULT_CHARS;
   private messages: BetaMessageParam[] = [];
   /** Persisted high-water-mark BY IDENTITY: how many leading entries of the
    *  CURRENT `this.messages` buffer are already durable on disk. The persist

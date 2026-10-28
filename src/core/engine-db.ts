@@ -1527,18 +1527,23 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
    ALTER TABLE bulk_runs ADD COLUMN start_domains TEXT;`,
 
-  // v59: the webhook drain's columns. `attempt_id` names the
+  // v59 (PRD shopify-preset §20.2 item 4): a target the owner takes out of a previewed run before
+  // approving it. It keeps its after-state and is not written; the ledger's one definition of a
+  // writing target excludes it. NULL for every existing target: nothing is deselected.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
+   ALTER TABLE bulk_targets ADD COLUMN deselected_at TEXT;`,
+  // v60: the webhook drain's columns. `attempt_id` names the
   // run a `running` event belongs to, so the outcome of a run whose attempt was superseded
   // writes nothing. `reported_at` is set once a dropped or failed event was reported to the owner,
   // `unknown_reported_at` once a `running` event left behind by a lost process was reported as
   // of unknown outcome — each is reported once.
-  `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (60);
    ALTER TABLE inbound_events ADD COLUMN attempt_id TEXT;
    ALTER TABLE inbound_events ADD COLUMN reported_at TEXT;
    ALTER TABLE inbound_events ADD COLUMN unknown_reported_at TEXT;`,
-  // v60: the index the drain's sweeps read by, state and age across all triggers each tick. Its
+  // v61: the index the drain's sweeps read by, state and age across all triggers each tick. Its
   // own migration, so that a database that already ran the one before it gets it too.
-  `INSERT OR IGNORE INTO schema_version (version) VALUES (60);
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (61);
    CREATE INDEX IF NOT EXISTS idx_inbound_events_state_received ON inbound_events(state, received_at);`,
 ];
 

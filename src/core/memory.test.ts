@@ -361,6 +361,17 @@ describe('Memory', () => {
   });
 
   describe('scoped methods', () => {
+    it('appendScoped says whether it wrote: true for new text in the file, false for text it holds, false without the file', async () => {
+      const mem = new Memory(dir, undefined, undefined, 'proj1');
+      const g = { type: 'global' as const, id: 'global' };
+      expect(await mem.appendScoped('knowledge', 'a fact', g)).toBe(true);
+      expect(await mem.appendScoped('knowledge', 'a fact', g)).toBe(false);
+      expect(await mem.append('knowledge', 'another fact')).toBe(true);
+      const cacheOnly = new Memory(dir, undefined, undefined, 'proj1', undefined, false);
+      expect(await cacheOnly.appendScoped('knowledge', 'only cached', g)).toBe(false);
+      expect(await cacheOnly.loadScoped('knowledge', g)).toBe('only cached');
+    });
+
     it('appendScoped stores in global scope', async () => {
       const mem = new Memory(dir, undefined, undefined, 'proj1');
       await mem.appendScoped('knowledge', 'global fact', { type: 'global', id: 'global' });

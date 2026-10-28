@@ -5,7 +5,7 @@ import { channels } from '../../core/observability.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { rowStampOf } from '../../core/data-store.js';
-import { withInstanceWrite } from '../../core/instance-trail.js';
+import { ifCounts, ifPositive, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 // DataStore accessed via agent.toolContext.dataStore
 
@@ -93,13 +93,13 @@ export const dataStoreCreateTool: ToolEntry<CreateInput> = {
         ...(c.role === 'occurred_at' ? { role: 'occurred_at' as const } : {}),
       }));
 
-      return withInstanceWrite(agent, { site: 'data_store_create#create', kind: 'create', store: 'data_store' }, () => {
-        const info = storeRef.createCollection({
+      return withInstanceWrite(agent, { site: 'data_store_create#create', kind: 'create', store: 'data_store', main: ['create'] }, (w) => {
+        const info = w.run('create', () => storeRef.createCollection({
           name: input.name,
           scope,
           columns,
           uniqueKey: input.unique_key,
-        });
+        }), ifReturned);
 
         // Publish for Knowledge Graph bridge (collection registration)
         channels.dataStoreInsert.publish({
@@ -151,12 +151,12 @@ export const dataStoreInsertTool: ToolEntry<InsertInput> = {
     if (!storeRef) return 'DataStore not available.';
 
     try {
-      return withInstanceWrite(agent, { site: 'data_store_insert#save', kind: 'save', store: 'data_store' }, () => {
-        const result = storeRef.insertRecords({
+      return withInstanceWrite(agent, { site: 'data_store_insert#save', kind: 'save', store: 'data_store', main: ['insert'] }, (w) => {
+        const result = w.run('insert', () => storeRef.insertRecords({
           collection: input.collection,
           records: input.records,
           stamp: rowStampOf(agent),
-        });
+        }), ifCounts);
 
         // Publish for Knowledge Graph bridge (entity extraction from records)
         if (result.inserted > 0 || result.updated > 0) {
@@ -408,11 +408,11 @@ export const dataStoreDeleteTool: ToolEntry<DeleteInput> = {
     if (!storeRef) return 'DataStore not available.';
 
     try {
-      return withInstanceWrite(agent, { site: 'data_store_delete#delete', kind: 'delete', store: 'data_store' }, () => {
-        const deleted = storeRef.deleteRecords({
+      return withInstanceWrite(agent, { site: 'data_store_delete#delete', kind: 'delete', store: 'data_store', main: ['delete'] }, (w) => {
+        const deleted = w.run('delete', () => storeRef.deleteRecords({
           collection: input.collection,
           filter: input.filter,
-        });
+        }), ifPositive);
 
         if (deleted > 0) {
           channels.dataStoreInsert.publish({
@@ -458,8 +458,8 @@ export const dataStoreDropTool: ToolEntry<DropInput> = {
     if (!storeRef) return 'DataStore not available.';
 
     try {
-      return withInstanceWrite(agent, { site: 'data_store_drop#delete', kind: 'delete', store: 'data_store' }, () => {
-        const dropped = storeRef.dropCollection(input.collection);
+      return withInstanceWrite(agent, { site: 'data_store_drop#delete', kind: 'delete', store: 'data_store', main: ['drop'] }, (w) => {
+        const dropped = w.run('drop', () => storeRef.dropCollection(input.collection), ifTrue);
         if (dropped) {
           channels.dataStoreInsert.publish({
             event: 'collection_dropped',
