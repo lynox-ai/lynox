@@ -4,7 +4,7 @@ import type { ToolEntry, IAgent, ChangesetWriter } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
 import { FILE_TOOL_READ_CAP_BYTES, listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
-import { anchoredError, artifactsRoot, isInArtifactsRoot, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
+import { anchoredError, artifactsRoot, isInArtifactsRoot, oversizeWayOut, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
 import { getWorkspaceRoot } from '../../core/workspace-root.js';
 import { readEnvAlias } from '../../core/env.js';
 import { getErrorMessage } from '../../core/utils.js';
@@ -161,11 +161,11 @@ function landingPath(path: string): string {
  * write_file's are, so the review shows the change and a rollback undoes it. Throws, and the
  * file is left alone, when it cannot be saved.
  */
-function saveBefore(changeset: ChangesetWriter | undefined, path: string): void {
+function saveBefore(changeset: ChangesetWriter | undefined, path: string, wayOut: () => string): void {
   if (changeset !== undefined && !changeset.backupBeforeWrite(path)) {
     if (changeset.refusedTooLarge) {
       const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
-      throw new Error(`it is larger than ${capMb} MB, too large to save for the review, so it was left as it was; tell the user, and if they agree, split it into parts under ${capMb} MB with bash (for example \`split -l\`) and transform those`);
+      throw new Error(`it is larger than ${capMb} MB, too large to save for the review, so it was left as it was. ${wayOut()}`);
     }
     throw new Error('it could not be saved for the review before the change, so the change could not be undone; it was left as it was');
   }
@@ -183,7 +183,7 @@ function insideRel(rel: string): string | null {
  * open directory. A link on the way is refused, never followed; a move or rename never leaves
  * the workspace (a destination outside it is refused).
  */
-function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: string, dirRel: string, changeset: ChangesetWriter | undefined): string {
+function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: string, dirRel: string, changeset: ChangesetWriter | undefined, wayOut: () => string): string {
   const shown = (rel: string): string => (rel === '' ? ws : `${ws}/${rel}`);
   let files: string[];
   try {
@@ -256,7 +256,7 @@ function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: stri
           }
           const updated = content.replaceAll(input.find, input.replace);
           if (content !== updated) {
-            saveBefore(changeset, target.shown);
+            saveBefore(changeset, target.shown, wayOut);
             writeInPlace(target, updated, false);
             changeset?.recordWritten(target.shown);
             results.push(`Transformed: ${target.shown}`);
@@ -294,6 +294,8 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
   },
   handler: async (input: BatchFilesInput, agent?: IAgent): Promise<string> => {
     const changeset = agent?.changeset;
+    // What to do with a file too large to save for the review (`saveBefore`).
+    const wayOut = (): string => oversizeWayOut(agent ?? { getAvailableTools: () => [] }, 'change', true);
     // The review restores and deletes files by path; it cannot follow a file to where it was
     // moved, and a rollback after a move could then delete the only copy. Without a review, or
     // before its first write, a move is what it is on its own.
@@ -307,7 +309,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
     const base = reachWorkspace(input.directory);
     if (base !== null) {
       const mapped = toWorkspaceRel(resolve(input.directory), base.ws);
-      if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel, changeset);
+      if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel, changeset, wayOut);
     }
     // Resolve symlinks on the directory itself to prevent traversal via symlinked root
     const dir = realpathSync(resolve(input.directory));
@@ -405,7 +407,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             if (content !== updated) {
               if (insertsPlaceholder) refuseEvictionPlaceholder(input.replace, file);
               else if (containsEvictionMarker(updated) && !containsEvictionMarker(content)) refuseEvictionPlaceholder(updated, file);
-              saveBefore(changeset, file);
+              saveBefore(changeset, file, wayOut);
               writeFileSync(file, updated, 'utf-8');
               changeset?.recordWritten(file);
               results.push(`Transformed: ${file}`);

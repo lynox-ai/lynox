@@ -1,4 +1,4 @@
-import { openSync, closeSync, constants, fstatSync, ftruncateSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
+import { openSync, closeSync, constants, fstatSync, ftruncateSync, readSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getWorkspaceDir, isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
@@ -27,6 +27,24 @@ const MAX_WRITE_BYTES_PER_SESSION = 100 * 1024 * 1024; // 100MB
 // Without these one multi-MB read could consume the main agent's context.
 const READ_FILE_SOFT_CAP_BYTES = 256 * 1024;
 const READ_FILE_HARD_CAP_BYTES = FILE_TOOL_READ_CAP_BYTES;
+
+/**
+ * The way out of a refusal for a file over {@link FILE_TOOL_READ_CAP_BYTES}, by what was refused
+ * and whether this agent has bash (the `creator` role has not):
+ * - `replace` (write_file under the review): a new file, which needs nothing saved.
+ * - `change` (edit_file, a batch_files transform): split the file with bash, first asking the user
+ *   when the run is reviewed (a change by bash is not in the review); without bash, tell the user.
+ */
+export function oversizeWayOut(agent: Pick<IAgent, 'getAvailableTools'>, kind: 'replace' | 'change', reviewed: boolean): string {
+  const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
+  if (kind === 'replace') return 'Write the new content to a new file instead and tell the user its name; the old file stays as it was.';
+  if (!agent.getAvailableTools().some((t) => t.definition.name === 'bash')) {
+    return `There is no bash here to split it: tell the user the file is too large for the file tools, and has to be split into parts under ${capMb} MB or changed outside lynox.`;
+  }
+  return reviewed
+    ? `Tell the user, and if they agree, split the file into parts under ${capMb} MB with bash (for example \`split -l\`) and change the part that needs it.`
+    : `Change it with bash instead (sed for a line, or split it into parts under ${capMb} MB with \`split -l\`).`;
+}
 
 interface ReadFileInput {
   path: string;
@@ -512,8 +530,7 @@ export const editFileTool: ToolEntry<EditFileInput> = {
         if (isReadLimit(err)) {
           const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
           throw new Error(
-            `${realPath} is larger than ${capMb} MB, too large for edit_file; nothing was changed. ` +
-            `Change it with shell tools instead (sed for a line, or split it into parts under ${capMb} MB with \`split -l\`).`,
+            `${realPath} is larger than ${capMb} MB, too large for edit_file; nothing was changed. ${oversizeWayOut(agent, 'change', false)}`,
           );
         }
         throw err;

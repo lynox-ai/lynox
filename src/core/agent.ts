@@ -85,7 +85,7 @@ import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIE
 import { openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
 import { FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, readFdCapped } from './workspace-fd.js';
-import { resolveWritablePath } from '../tools/builtin/fs.js';
+import { oversizeWayOut, resolveWritablePath } from '../tools/builtin/fs.js';
 import { resolve } from 'node:path';
 import type {
   BetaMessageParam,
@@ -4913,7 +4913,7 @@ export class Agent implements IAgent {
           type: 'tool_result',
           tool_use_id: tc.id,
           content: this.changesetManager.refusedTooLarge === true
-            ? `Blocked: ${tc.name} did not run. The file is larger than ${capMb} MB, too large to save for the review, so the change could not be undone. Nothing was written. Do not retry with ${tc.name}: tell the user, and if they agree, split the file into parts under ${capMb} MB with bash (for example \`split -l\`) and change the part that needs it.`
+            ? `Blocked: ${tc.name} did not run. The file is larger than ${capMb} MB, too large to save for the review, so the change could not be undone. Nothing was written. Do not retry with ${tc.name}. ${oversizeWayOut(this, tc.name === 'write_file' ? 'replace' : 'change', true)}`
             : `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
           is_error: true,
         };

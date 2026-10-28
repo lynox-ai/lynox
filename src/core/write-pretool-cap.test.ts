@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ToolEntry } from '../types/index.js';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
@@ -64,10 +65,19 @@ function setup(branch: Branch): void {
   if (branch === 'anchor') setTenantWorkspace(ws);
 }
 
-function agentWith(manager?: ChangesetManager): Agent {
+/** Present only so the refusals see an agent that has bash; never called here. */
+const bashStub = {
+  definition: { name: 'bash', description: 'bash', input_schema: { type: 'object', properties: {} } },
+  handler: async () => 'not run',
+} as unknown as ToolEntry;
+
+const WAY_OUT_NO_BASH =
+  'There is no bash here to split it: tell the user the file is too large for the file tools, and has to be split into parts under 5 MB or changed outside lynox.';
+
+function agentWith(manager?: ChangesetManager, extra: ToolEntry[] = []): Agent {
   return new Agent({
     name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
-    tools: [writeFileTool, editFileTool],
+    tools: [writeFileTool, editFileTool, ...extra],
     ...(manager !== undefined ? { changesetManager: manager } : {}),
   });
 }
@@ -130,8 +140,8 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
       expect(result.is_error).toBe(true);
       expect(String(result.content)).toBe(
         'Blocked: write_file did not run. The file is larger than 5 MB, too large to save for the review, so the change could not be undone. ' +
-        'Nothing was written. Do not retry with write_file: tell the user, and if they agree, split the file into parts under 5 MB with bash ' +
-        '(for example `split -l`) and change the part that needs it.',
+        'Nothing was written. Do not retry with write_file. ' +
+        'Write the new content to a new file instead and tell the user its name; the old file stays as it was.',
       );
       expect(statSync(path).size, 'the file is left as it was').toBe(CAP + 1);
       expect(manager.getChanges()).toEqual([]);
@@ -168,12 +178,12 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
     const manager = new ChangesetManager(ws, 'run');
     try {
       const agent = new Agent({
-        name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [batchFilesTool], changesetManager: manager,
+        name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [batchFilesTool, bashStub], changesetManager: manager,
       });
       const result = await call(agent, 'batch_files', { pattern: '*.csv', directory: ws, operation: 'transform', find: MARK, replace: 'EDITED' });
       expect(String(result.content)).toContain(
-        'over.csv: it is larger than 5 MB, too large to save for the review, so it was left as it was; tell the user, and if they agree, ' +
-        'split it into parts under 5 MB with bash (for example `split -l`) and transform those',
+        'over.csv: it is larger than 5 MB, too large to save for the review, so it was left as it was. Tell the user, and if they agree, ' +
+        'split the file into parts under 5 MB with bash (for example `split -l`) and change the part that needs it.',
       );
       expect(readFileSync(join(ws, 'over.csv'), 'utf-8').startsWith(MARK)).toBe(true);
       expect(readFileSync(join(ws, 'at.csv'), 'utf-8').startsWith('EDITED'), 'a file of exactly the cap is changed').toBe(true);
@@ -183,16 +193,36 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
     }
   });
 
+  it(`[${branch}] with the review on, edit_file over a file one byte over the cap is refused before it runs`, async () => {
+    const path = join(ws, 'data.csv');
+    writeFileSync(path, fileOf(CAP + 1));
+    const manager = new ChangesetManager(ws, 'run');
+    try {
+      const result = await call(agentWith(manager), 'edit_file', { path, old_string: MARK, new_string: 'EDITED' });
+      expect(result.is_error).toBe(true);
+      expect(String(result.content)).toBe(
+        'Blocked: edit_file did not run. The file is larger than 5 MB, too large to save for the review, so the change could not be undone. ' +
+        `Nothing was written. Do not retry with edit_file. ${WAY_OUT_NO_BASH}`,
+      );
+      expect(readFileSync(path, 'utf-8').startsWith(MARK), 'the file is left as it was').toBe(true);
+    } finally {
+      manager.cleanup();
+    }
+  });
+
   it(`[${branch}] edit_file refuses a file one byte over the cap with the way out, and edits one of exactly the cap`, async () => {
     // Without the review, so the refusal is edit_file's own and not the backup's.
     const path = join(ws, 'data.csv');
     writeFileSync(path, fileOf(CAP + 1));
-    const over = await call(agentWith(), 'edit_file', { path, old_string: MARK, new_string: 'EDITED' });
+    const over = await call(agentWith(undefined, [bashStub]), 'edit_file', { path, old_string: MARK, new_string: 'EDITED' });
     expect(over.is_error).toBe(true);
     expect(String(over.content)).toContain(
       `${path} is larger than 5 MB, too large for edit_file; nothing was changed. ` +
-      'Change it with shell tools instead (sed for a line, or split it into parts under 5 MB with `split -l`).',
+      'Change it with bash instead (sed for a line, or split it into parts under 5 MB with `split -l`).',
     );
+    // An agent without bash (the creator role) is not sent to it.
+    const noBash = await call(agentWith(), 'edit_file', { path, old_string: MARK, new_string: 'EDITED' });
+    expect(String(noBash.content)).toContain(`too large for edit_file; nothing was changed. ${WAY_OUT_NO_BASH}`);
     expect(readFileSync(path, 'utf-8').startsWith(MARK), 'the file is left as it was').toBe(true);
 
     writeFileSync(path, fileOf(CAP));
