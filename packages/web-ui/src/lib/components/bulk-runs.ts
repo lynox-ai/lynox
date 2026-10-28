@@ -3,7 +3,7 @@
 // The translator comes in as an argument: i18n is a Svelte module, and these stay testable
 // without the Svelte plugin.
 
-import { hiddenCharIndexes } from '../hidden-chars.js';
+import { visibleText } from '../visible-text.js';
 
 /** The two i18n lookups the helpers need, `t` and `tf` from `i18n.svelte.ts`. */
 export interface BulkI18n {
@@ -24,6 +24,9 @@ export interface BulkRun {
 	applied: number;
 	failed: number;
 	conflicts: number;
+	/** Targets not written because an earlier send reached them without a clear answer; the
+	 *  engine does not send to them again. */
+	sentUnknown: number;
 	undone: number;
 	kind: 'apply' | 'undo';
 	atomic: boolean;
@@ -47,6 +50,8 @@ export interface BulkRun {
 	resumeOpen: number;
 	/** Of those, the most the next pass may write to under the approved maximum. */
 	resumeTries: number;
+	/** Writing targets the owner took out before approving; not counted in `changes`. */
+	deselected: number;
 }
 
 export interface BulkRunDetailData extends BulkRun {
@@ -160,7 +165,7 @@ export function bulkHaltText(
 /** A write run's halts that writing on moves on from, each with its own sentence on the page. */
 const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
-	'expired', 'failureRate', 'consecutiveFailures',
+	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
@@ -208,7 +213,7 @@ export function bulkResumeText(
 		: i18n.tf(`bulk.halt.${key}`, vars);
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
-		: key === 'blocked' ? `bulk.halt.blocked_before_${tier}`
+		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, kept: null, soFar: null, allows: null };
@@ -250,6 +255,14 @@ export function bulkResumeMax(input: unknown, current: number | null, all: numbe
 	const n = typeof input === 'number' ? input : typeof input === 'string' && /^\d+$/.test(input.trim()) ? Number(input.trim()) : Number.NaN;
 	if (!Number.isInteger(n) || n < 1 || n > all || (current !== null && n <= current)) return null;
 	return n;
+}
+
+/** What the page says about the targets an earlier send reached without a clear answer, or
+ *  null when there are none. It hangs on their number alone: the same on every halt, on a
+ *  finished run, and for every run size. */
+export function bulkSentUnknownText(run: Pick<BulkRun, 'sentUnknown'>, i18n: BulkI18n): string | null {
+	if (run.sentUnknown <= 0) return null;
+	return run.sentUnknown === 1 ? i18n.t('bulk.sent_unknown.one') : i18n.tf('bulk.sent_unknown.many', { count: String(run.sentUnknown) });
 }
 
 /** Whether `/api/config` says this is a managed instance: its config carries `managed` (the
@@ -351,15 +364,9 @@ export function bulkMergeAnswer(
 	return refused(key ?? 'unclear');
 }
 
-/** Text the owner reads before a run acts on it, with every hidden character (`hidden-chars.ts`,
- *  the same file the engine refuses a judge rule by) shown as its code point. Not removed: the
- *  run reads the text as it is, so what the owner reads must be that text too: a removed
- *  character would be one the owner never saw and the model still reads. */
-export function bulkVisibleText(text: string): string {
-	const hidden = new Set(hiddenCharIndexes(text));
-	if (hidden.size === 0) return text;
-	return Array.from(text, (c, i) => (hidden.has(i) ? `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩` : c)).join('');
-}
+/** Text the owner reads before a run acts on it, every hidden character shown as its code point
+ *  (see `visible-text.ts`, which the approval queue shares). */
+export const bulkVisibleText: (text: string) => string = visibleText;
 
 /** The provider that serves a judge call, by name. */
 export function bulkJudgeProviderName(provider: string): string {
@@ -389,11 +396,40 @@ export interface BulkTarget {
 	change: BulkChange;
 	diff: TargetDiff;
 	error: string | null;
+	/** The owner took it out of the write before approving. */
+	deselected: boolean;
 }
 
 /** The external host of a run's target system, or null for a local run. */
 export function bulkHostOf(targetSystem: string): string | null {
 	return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
+}
+
+/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`). */
+const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+
+/** Whether an external run writes to a Shopify store. */
+export function bulkIsShopifyHost(host: string | null): boolean {
+	return host !== null && SHOPIFY_STORE_HOST.test(host);
+}
+
+/** The fields a Shopify run writes, each with the i18n key of its readable name. */
+const SHOPIFY_FIELD_KEYS: Readonly<Record<string, string>> = {
+	title: 'bulk.field.shopify.title',
+	descriptionHtml: 'bulk.field.shopify.descriptionHtml',
+	seo_title: 'bulk.field.shopify.seo_title',
+	seo_description: 'bulk.field.shopify.seo_description',
+};
+
+/** The i18n key of a field's readable name on this host, or null: the field is then shown by its own name. */
+export function bulkFieldLabelKey(host: string | null, field: string): string | null {
+	return bulkIsShopifyHost(host) && Object.hasOwn(SHOPIFY_FIELD_KEYS, field) ? SHOPIFY_FIELD_KEYS[field]! : null;
+}
+
+/** Field names as the owner reads them, joined: a readable name where the host has one, else the
+ *  field's own name, shown through {@link bulkVisibleText} — a field name is the planner's text. */
+export function bulkFieldNamesText(host: string | null, fields: readonly string[], label: (key: string) => string): string {
+	return fields.map((f) => { const key = bulkFieldLabelKey(host, f); return key === null ? bulkVisibleText(f) : label(key); }).join(', ');
 }
 
 /** The target system as the owner reads it: the host of an external run, a name otherwise. */
@@ -443,6 +479,61 @@ export function bulkStep(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | '
 	if (bulkAtProbe(run)) return 3;
 	if (run.phase === 'approved' || run.phase === 'writing') return 4;
 	return 5;
+}
+
+/** The sentence of each reason a Shopify run leaves a target out for (core `BulkInvalidReason`),
+ *  as the i18n key under `bulk.invalid.`. Reasons that read the same share a key. */
+const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
+	not_found: 'not_found', redirect: 'redirect', not_json: 'not_json', read_failed: 'read_failed', bad_url: 'bad_url',
+	secret_in_target: 'secret_in_target', secret_in_after: 'secret_in_after', secret_in_before: 'secret_in_before',
+	mail_api: 'mail_api', field_missing: 'field_missing',
+	before_not_object: 'shape', after_not_object: 'shape', field_not_scalar: 'shape',
+	list_item_no_id: 'list_item', list_item_bad_id: 'list_item', list_item_not_object: 'list_item', list_item_outside_list: 'list_item',
+	list_item_mismatch: 'list_item_mismatch',
+	list_item_truncated: 'list_item_truncated',
+	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
+	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char',
+};
+/** The refusals of taking a target out or putting it back that the owner's page words by
+ *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
+export const BULK_DESELECT_REFUSALS: readonly string[] = ['atomic_undo', 'not_writing', 'not_taken_out'];
+/** Sentences a managed instance follows with a way to support; a self-hosted one has none to name. */
+const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
+	not_json: 'bulk.invalid.persists_support', read_failed: 'bulk.invalid.persists_support', shape: 'bulk.invalid.many_support',
+};
+
+/** What the owner reads under a target lynox leaves out: on a Shopify run what is wrong, that
+ *  lynox does not change it, and the next step; elsewhere the reason by its code and the step
+ *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
+export function bulkInvalidText(reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n): string {
+	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
+	if (key === undefined) return i18n.tf('bulk.invalid.other', { code: bulkVisibleText(reason) });
+	const support = BULK_INVALID_SUPPORT[key];
+	const text = i18n.t(`bulk.invalid.${key}`);
+	return support !== undefined && managed !== false ? `${text} ${i18n.t(support)}` : text;
+}
+
+/** The line above a preview's targets: how many lynox leaves out and the owner took out, and
+ *  whether anything is left to approve. `nothing` disables the approval: the engine would
+ *  refuse it (`nothing_to_apply`), and a button that only fails after the click says less. */
+export function bulkSkippedHead(
+	run: Pick<BulkRun, 'changes' | 'deselected' | 'judge'>,
+	shopify: boolean,
+	i18n: BulkI18n,
+): { text: string | null; nothing: boolean } {
+	const n = run.changes.invalid;
+	const m = run.deselected;
+	const noun = shopify ? 'products' : 'targets';
+	const judged = n > 0 && run.judge !== null ? ` ${i18n.t(shopify ? 'bulk.skipped.judged' : 'bulk.skipped.judged_targets')}` : '';
+	if (bulkWriting(run) === 0) {
+		// "All" holds only where every target is one lynox leaves out.
+		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(`bulk.nothing.all_skipped_${noun}`, { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
+		return { text: text + judged, nothing: true };
+	}
+	if (n > 0 && m > 0) return { text: i18n.tf(`bulk.skipped.both_${noun}`, { n: String(n), m: String(m) }) + judged, nothing: false };
+	if (n > 0) return { text: i18n.tf(`bulk.skipped.${noun}`, { n: String(n) }) + judged, nothing: false };
+	if (m > 0) return { text: i18n.tf('bulk.skipped.taken_out', { m: String(m) }), nothing: false };
+	return { text: null, nothing: false };
 }
 
 /** A value of a target as the preview shows it: text as it is, anything else as JSON. */

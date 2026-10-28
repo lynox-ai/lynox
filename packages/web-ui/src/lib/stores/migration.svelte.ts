@@ -3,10 +3,11 @@
  *
  * Flow:
  *   1. Preview — shows what data will be migrated
- *   2. Plan — choose plan + checkout OR enter existing instance details
- *   3. Provisioning — wait for new instance to become healthy (after checkout return)
- *   4. Transferring — ECDH + encrypt + transfer (engine-to-engine via SSE)
- *   5. Done — show verification summary
+ *   2. Plan — enter the target instance's URL and migration token
+ *   3. Transferring — ECDH + encrypt + transfer (engine-to-engine via SSE)
+ *   4. Done — show verification summary
+ *
+ * A target only enters the store through setTarget, behind the user's click.
  *
  * The actual crypto happens engine-to-engine (POST /api/migration/export).
  * The browser only orchestrates and shows progress.
@@ -15,10 +16,11 @@
 import { getApiBase } from '../config.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { t } from '../i18n.svelte.js';
+import { migrationWorkspaceNotice } from '../backup-coverage.js';
 
 // ── Types ──
 
-export type MigrationStep = 'preview' | 'plan' | 'provisioning' | 'transferring' | 'done' | 'error';
+export type MigrationStep = 'preview' | 'plan' | 'transferring' | 'done' | 'error';
 
 export interface MigrationPreview {
 	secrets: number;
@@ -50,11 +52,11 @@ let loading = $state(false);
 let error = $state('');
 let progress = $state<TransferProgress | null>(null);
 let verification = $state<MigrationVerification | null>(null);
+/** The `done` event's `workspace` record: `'omitted-sidecar'` when the export left the workspace out. */
+let doneWorkspace = $state<unknown>(undefined);
 let targetUrl = $state('');
 let migrationToken = $state('');
-let provisioningElapsed = $state(0);
 let abortController: AbortController | null = null;
-let provisioningTimer: ReturnType<typeof setInterval> | null = null;
 
 // ── Getters ──
 
@@ -64,9 +66,9 @@ export function getLoading(): boolean { return loading; }
 export function getError(): string { return error; }
 export function getProgress(): TransferProgress | null { return progress; }
 export function getVerification(): MigrationVerification | null { return verification; }
+export function getDoneWorkspace(): unknown { return doneWorkspace; }
 export function getTargetUrl(): string { return targetUrl; }
 export function getMigrationToken(): string { return migrationToken; }
-export function getProvisioningElapsed(): number { return provisioningElapsed; }
 
 // ── Actions ──
 
@@ -87,27 +89,6 @@ export async function loadPreview(): Promise<void> {
 	}
 }
 
-/**
- * Initialize from URL parameters (checkout return flow).
- * Validates and sanitizes all inputs before accepting.
- */
-export function initFromParams(params: URLSearchParams): boolean {
-	const url = params.get('instanceUrl')?.trim() ?? '';
-	const token = params.get('migrationToken')?.trim() ?? '';
-
-	if (!url || !token) return false;
-
-	// Validate URL format
-	if (!isValidTargetUrl(url)) return false;
-
-	// Validate token format (64 hex chars = 32 bytes)
-	if (!/^[a-f0-9]{64}$/.test(token)) return false;
-
-	targetUrl = url;
-	migrationToken = token;
-	return true;
-}
-
 export function goToPlan(): void {
 	step = 'plan';
 	error = '';
@@ -115,72 +96,12 @@ export function goToPlan(): void {
 
 export function goBack(): void {
 	if (step === 'plan') step = 'preview';
-	if (step === 'provisioning') step = 'plan';
-	stopProvisioningPoll();
 	error = '';
 }
 
 export function setTarget(url: string, token: string): void {
 	targetUrl = url.trim();
 	migrationToken = token.trim();
-}
-
-/**
- * Build the checkout URL with return parameters.
- * The checkout page will redirect back here after payment + provisioning.
- */
-export function getCheckoutUrl(plan: 'hosted' | 'managed'): string {
-	// The returnUrl tells checkout where to redirect after provisioning
-	const currentUrl = typeof window !== 'undefined' ? window.location.origin + window.location.pathname : '';
-	const returnUrl = encodeURIComponent(currentUrl);
-	return `https://lynox.ai/checkout?plan=${plan}&migration=true&returnUrl=${returnUrl}`;
-}
-
-/**
- * Start polling the target instance's health endpoint.
- * Used after checkout return when the instance may still be provisioning.
- */
-export function startProvisioningPoll(): void {
-	if (!targetUrl) return;
-	step = 'provisioning';
-	error = '';
-	provisioningElapsed = 0;
-
-	stopProvisioningPoll(); // cleanup any existing timer
-
-	const startTime = Date.now();
-	const MAX_WAIT_MS = 5 * 60 * 1000; // 5 minutes max
-
-	provisioningTimer = setInterval(async () => {
-		provisioningElapsed = Math.floor((Date.now() - startTime) / 1000);
-
-		if (Date.now() - startTime > MAX_WAIT_MS) {
-			stopProvisioningPoll();
-			error = t('migration.error_provision_timeout');
-			step = 'error';
-			return;
-		}
-
-		try {
-			const res = await fetch(`${targetUrl}/health`, {
-				signal: AbortSignal.timeout(5000),
-			});
-			if (res.ok) {
-				stopProvisioningPoll();
-				// Instance is ready — start migration automatically
-				void startMigration();
-			}
-		} catch {
-			// Instance not ready yet — keep polling
-		}
-	}, 3000);
-}
-
-function stopProvisioningPoll(): void {
-	if (provisioningTimer) {
-		clearInterval(provisioningTimer);
-		provisioningTimer = null;
-	}
 }
 
 /**
@@ -205,6 +126,7 @@ export async function startMigration(): Promise<void> {
 	error = '';
 	progress = { phase: 'starting', message: t('migration.starting') };
 	verification = null;
+	doneWorkspace = undefined;
 
 	abortController = new AbortController();
 
@@ -268,7 +190,6 @@ export async function startMigration(): Promise<void> {
 
 export function cancelMigration(): void {
 	abortController?.abort();
-	stopProvisioningPoll();
 	step = 'error';
 	error = t('migration.cancelled');
 	progress = null;
@@ -281,10 +202,9 @@ export function reset(): void {
 	error = '';
 	progress = null;
 	verification = null;
+	doneWorkspace = undefined;
 	targetUrl = '';
 	migrationToken = '';
-	provisioningElapsed = 0;
-	stopProvisioningPoll();
 	abortController?.abort();
 	abortController = null;
 }
@@ -324,11 +244,16 @@ function handleSSEEvent(event: string, data: Record<string, unknown>): void {
 			break;
 
 		case 'done': {
-			const result = data as { success: boolean; verification: MigrationVerification };
+			const result = data as { success: boolean; verification: MigrationVerification; workspace?: unknown };
 			if (result.success) {
 				verification = result.verification;
+				doneWorkspace = result.workspace;
 				step = 'done';
-				addToast(t('migration.success'), 'success', 5000);
+				// A green "completed successfully" alone would be read and dismissed while the workspace
+				// files stayed behind (ux U-046).
+				const omitted = migrationWorkspaceNotice(result, false);
+				if (omitted) addToast(t(omitted.toast), 'info', 8000);
+				else addToast(t('migration.success'), 'success', 5000);
 			} else {
 				error = t('migration.error_restore');
 				step = 'error';

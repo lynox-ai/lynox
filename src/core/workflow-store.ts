@@ -70,6 +70,13 @@ export interface WorkflowAuthorship {
   mandateEditorId: string | null;
   mandateEditedAt: string | null;
   createdAt: string;
+  /** The marks the owner took over (`plan-takeover.ts`), as they stood; null when none. */
+  coveredCreatedBy: string | null;
+  coveredCreatedId: string | null;
+  coveredCreatedAt: string | null;
+  coveredEditedBy: string | null;
+  coveredEditedId: string | null;
+  coveredEditedAt: string | null;
 }
 
 /**
@@ -163,7 +170,10 @@ export class WorkflowStore {
         updated_at = excluded.updated_at,
         mandate_editor = COALESCE(?, workflows.mandate_editor),
         mandate_editor_id = CASE WHEN ? IS NULL THEN workflows.mandate_editor_id ELSE ? END,
-        mandate_edited_at = CASE WHEN ? IS NULL THEN workflows.mandate_edited_at ELSE datetime('now') END
+        mandate_edited_at = CASE WHEN ? IS NULL THEN workflows.mandate_edited_at ELSE datetime('now') END,
+        covered_edited_by = CASE WHEN ? IS NULL THEN workflows.covered_edited_by ELSE NULL END,
+        covered_edited_id = CASE WHEN ? IS NULL THEN workflows.covered_edited_id ELSE NULL END,
+        covered_edited_at = CASE WHEN ? IS NULL THEN workflows.covered_edited_at ELSE NULL END
     `).run(
       row.id,
       row.name,
@@ -178,6 +188,7 @@ export class WorkflowStore {
       by.mandate,
       by.mandate, by.mandateId,
       by.mandate,
+      by.mandate, by.mandate, by.mandate,
     );
   }
 
@@ -188,6 +199,11 @@ export class WorkflowStore {
    * grant id and `created_at`. The copy holds that mandate's steps, so it answers for them as
    * the source does; its creator is still `author`. A source without a mandate mark (or one
    * that is gone) leaves the copy's editor empty.
+   *
+   * The owner's takeover of that mark travels with it into the copy's editor columns: from the
+   * source's editor cover, or its creator cover when the mark copied was the creator. Without it
+   * the copy of a workflow the owner took over would carry the ended mandate as a member again.
+   * Not a new edit, so the mark is not uncovered here.
    */
   upsertCopy(row: WorkflowRow, author: RequestPrincipal | null, sourceId: string): void {
     this.db.transaction(() => {
@@ -195,13 +211,13 @@ export class WorkflowStore {
       const src = this.authorship(sourceId);
       if (src === undefined) return;
       const mark = src.mandateEditor !== null
-        ? { editor: src.mandateEditor, id: src.mandateEditorId, at: src.mandateEditedAt }
+        ? { editor: src.mandateEditor, id: src.mandateEditorId, at: src.mandateEditedAt, cby: src.coveredEditedBy, cid: src.coveredEditedId, cat: src.coveredEditedAt }
         : isMandateTag(src.createdBy)
-          ? { editor: src.createdBy, id: src.createdMandateId, at: src.createdAt }
+          ? { editor: src.createdBy, id: src.createdMandateId, at: src.createdAt, cby: src.coveredCreatedBy, cid: src.coveredCreatedId, cat: src.coveredCreatedAt }
           : null;
       if (mark === null) return;
-      this.db.prepare('UPDATE workflows SET mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = ? WHERE id = ?')
-        .run(mark.editor, mark.id, mark.at, row.id);
+      this.db.prepare('UPDATE workflows SET mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = ?, covered_edited_by = ?, covered_edited_id = ?, covered_edited_at = ? WHERE id = ?')
+        .run(mark.editor, mark.id, mark.at, mark.cby, mark.cid, mark.cat, row.id);
     })();
   }
 
@@ -228,7 +244,7 @@ export class WorkflowStore {
         "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?) WHERE id = ? OR id LIKE ? ESCAPE '\\'",
       ).run(name, name, id, likePrefix(id))
       : this.db.prepare(
-        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?), mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now') WHERE id = ? OR id LIKE ? ESCAPE '\\'",
+        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?), mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now'), covered_edited_by = NULL, covered_edited_id = NULL, covered_edited_at = NULL WHERE id = ? OR id LIKE ? ESCAPE '\\'",
       ).run(name, name, by.mandate, by.mandateId, id, likePrefix(id));
     return res.changes > 0;
   }
@@ -237,15 +253,21 @@ export class WorkflowStore {
    *  `undefined` when there is none. */
   authorship(id: string): WorkflowAuthorship | undefined {
     const r = this.db.prepare(
-      'SELECT created_by, created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, created_at FROM workflows WHERE id = ?',
+      `SELECT created_by, created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, created_at,
+              covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at
+       FROM workflows WHERE id = ?`,
     ).get(id) as {
       created_by: string | null; created_mandate_id: string | null; mandate_editor: string | null;
       mandate_editor_id: string | null; mandate_edited_at: string | null; created_at: string;
+      covered_created_by: string | null; covered_created_id: string | null; covered_created_at: string | null;
+      covered_edited_by: string | null; covered_edited_id: string | null; covered_edited_at: string | null;
     } | undefined;
     if (r === undefined) return undefined;
     return {
       createdBy: r.created_by, createdMandateId: r.created_mandate_id, mandateEditor: r.mandate_editor,
       mandateEditorId: r.mandate_editor_id, mandateEditedAt: r.mandate_edited_at, createdAt: r.created_at,
+      coveredCreatedBy: r.covered_created_by, coveredCreatedId: r.covered_created_id, coveredCreatedAt: r.covered_created_at,
+      coveredEditedBy: r.covered_edited_by, coveredEditedId: r.covered_edited_id, coveredEditedAt: r.covered_edited_at,
     };
   }
 

@@ -46,13 +46,16 @@ export interface TargetWriter {
   readonly readsBack?: boolean | undefined;
   /** The writer calls `write`'s `onSend` right before its request leaves, so a write stopped
    *  before that (a refused credential, a blocked host) does not count as sent. A writer
-   *  without it is taken to have sent whenever `write` is called. */
+   *  without it is taken to have sent whenever `write` is called. Such a writer also calls
+   *  `onRefused` once for a send the host refused (or that never left), right after its
+   *  answer; every other send that is not a success counts as one without a clear answer,
+   *  and the target is not sent to again. */
   readonly reportsSend?: boolean | undefined;
   /** A writer whose requests carry a stored credential (an external host): start noting the
    *  connections of what it sends from now on (`ExternalClient.track`). A local writer has none. */
   readonly track?: (() => () => AttachedConnection | null) | undefined;
   read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
-  write(key: string, after: BeforeImage, onSend?: () => void): Promise<string | { result: string; actual: ActualImage }>;
+  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage }>;
 }
 
 /**
@@ -128,7 +131,8 @@ function summarize(ledger: BulkLedger, runId: string, lead: string): string {
   const s = ledger.getStatus(runId);
   if (!s) return lead;
   return `${lead} Applied ${String(s.applied)}${bulkFoundAsPlannedNote(s.foundAsPlanned)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, ` +
-    `undone ${String(s.undone)} of ${String(s.total)} targets.`;
+    `undone ${String(s.undone)} of ${String(s.total)} targets.` +
+    (s.sentUnknown > 0 ? ` Unclear ${String(s.sentUnknown)}: sent without a clear answer, not sent again.` : '');
 }
 
 export interface BulkEffectDeps {
@@ -166,7 +170,7 @@ export interface BulkRunTrail {
    * Writes the row after the call. Never throws: a row before stands alone if this one fails.
    * The counts are `null` when the ledger could not be read for them, which is not "none".
    */
-  end(outcome: BulkEffectOutcome['status'] | 'error', written: number | null, failed: number | null): void;
+  end(outcome: BulkEffectOutcome['status'] | 'error', written: number | null, failed: number | null, planned: boolean): void;
 }
 
 /**
@@ -191,7 +195,7 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
       // the counts are unknown rather than zero.
       let after: { applied: number; failed: number } | null;
       try { after = deps.ledger.getRunForApply(runId) ?? null; } catch { after = null; }
-      o.trail.end(outcome?.status ?? 'error', after === null ? null : after.applied - o.applied, after === null ? null : after.failed - o.failed);
+      o.trail.end(outcome?.status ?? 'error', after === null ? null : after.applied - o.applied, after === null ? null : after.failed - o.failed, outcome?.planned === true);
     }
   }
 }
@@ -219,6 +223,11 @@ async function applyRunEffect(
   if (run.approvalChecksum === null || ledger.computeChecksum(runId) !== run.approvalChecksum) {
     ledger.halt(runId, BULK_HALT_REASONS.checksum);
     return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.checksum}.`) };
+  }
+  // Approved before the store's bulk runs were switched off: it writes no further.
+  if (ledger.isWriteSwitchedOff(runId)) {
+    ledger.halt(runId, BULK_HALT_REASONS.shopifyWriteOff);
+    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.shopifyWriteOff}.`) };
   }
   const writer = deps.writerFor(run);
   if (!writer) {
@@ -303,6 +312,11 @@ async function applyRunEffect(
       continue;
     }
     ledger.recordFailed(runId, seq, outcome.kind, via);
+    // No new attempt, so no failure: the send that left it unclear was counted, halted the
+    // run, or belonged to a loop that died. Counting it on every pass would halt a small run
+    // at the same target on every resume. It neither extends nor breaks a run of failures.
+    // Only an external writer gives it, and an external run is never atomic.
+    if (outcome.kind === 'sent_unknown') continue;
     if (run.atomic) return rollBack(ledger, writer, run, now);
     if (outcome.kind === 'conflict') {
       // A conflict is not a failure, and it breaks a run of failures.
@@ -355,9 +369,13 @@ async function applyRunEffect(
     return deps.signal?.aborted === true && deps.ownerStopped?.() === true;
   }
 
-  /** End the run on the owner's stop: an atomic run rolls back, any other is halted. */
+  /** End the run on the owner's stop: an atomic run with a recorded write rolls back, any other
+   *  is halted. An atomic run with no recorded write gives the rollback nothing to take back
+   *  (it reads the same record): rolling it back would only end it for good, so it is halted and
+   *  can be resumed like any other. A write a dead loop sent but did not record is found again
+   *  on that resume, as planned, and counted then. */
   async function endStopped(): Promise<BulkEffectOutcome> {
-    if (run!.atomic) {
+    if (run!.atomic && ledger.listAppliedDesc(runId).length > 0) {
       const rolled = await rollBack(ledger, writer!, run!, now, 'stopped');
       return { ...rolled, status: 'stopped' };
     }
@@ -379,11 +397,16 @@ async function applyRunEffect(
         return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
       }
       if (cur === 'foreign' || !sameImage(cur, t.expected)) return { kind: 'conflict' };
+      // Still as expected, but an earlier send reached it without a clear answer: that write
+      // may land later or not be visible yet, and sending it again could carry the change out
+      // twice. A local writer's outcome is always known.
+      if (w.reportsSend === true && ledger.hasUnknownSend(runId, t.seq)) return { kind: 'sent_unknown' };
       // Marked as it leaves, with the connection it leaves under: a loop that dies before the
       // target is recorded still left a row saying whose credential reached the host.
       const sent = (): void => { ledger.markSent(runId, t.seq, carried?.() ?? null); };
+      const refused = (): void => { ledger.markRefused(runId, t.seq); };
       if (w.reportsSend !== true) sent();
-      const out = await w.write(t.key, t.after, sent);
+      const out = await w.write(t.key, t.after, sent, refused);
       return typeof out === 'string' ? { kind: 'applied', result: out, actual: null } : { kind: 'applied', result: out.result, actual: out.actual };
     } catch (err: unknown) {
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };

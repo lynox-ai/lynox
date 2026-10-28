@@ -17,13 +17,13 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, writtenNames } from './api-store.js';
-import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
+import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
 import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
-import { MANDATE_TAG_PREFIX, principalTag, type RequestPrincipal } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
 import type { SecretReleases } from './secret-releases.js';
 import type { VaultNameBindings } from './vault-name-bindings.js';
@@ -403,6 +403,45 @@ function sameEndpoints(a: ApiProfile, b: ApiProfile): boolean {
   return x.size === y.size && [...x].every((e) => y.has(e));
 }
 
+/**
+ * Why the owner of a held access slot has nothing to bind its token to, so that the token goes
+ * nowhere (901 D); null when it has a client, or never had one.
+ * - `not_oauth2`: the owner holds the slot only through the names its exchanges wrote, and no
+ *   longer signs in with OAuth; the client the token was minted with is gone from the profile. A
+ *   save that switches the type empties these slots and drops only the derived pair from
+ *   `written`; a name written under `output_secret_name`, and any slot after a hand edit, stays.
+ * - `no_client_secret`: the oauth block names no client secret; a hand edit that removed only the
+ *   secret would otherwise free the token.
+ * An oauth2 label without an oauth block (a legacy or human-driven profile, a pasted token) never
+ * had a client to bind to, and is left as it was.
+ */
+function clientlessWhy(owner: ApiProfile): 'not_oauth2' | 'no_client_secret' | null {
+  if (owner.auth?.type !== 'oauth2') return 'not_oauth2';
+  const secret: unknown = owner.auth.oauth?.client_secret_key;
+  if (owner.auth.oauth !== undefined && (typeof secret !== 'string' || secret === '')) return 'no_client_secret';
+  return null;
+}
+
+/**
+ * For the refusal that names the way out: the owner of the held access slot `name` and why it
+ * has nothing to bind the token to ({@link clientlessWhy}), or null for any other slot or reason.
+ * Anything that throws answers null, and the refusal falls back to the general text.
+ */
+export function clientlessSlot(
+  apiStore: Pick<ApiStore, 'knownProfiles' | 'unreadableHolds'>,
+  name: string,
+): { owner: string; why: 'not_oauth2' | 'no_client_secret' } | null {
+  try {
+    if (apiStore.unreadableHolds(name)) return null;
+    const grant = slotGrant(apiStore.knownProfiles(), name);
+    if (grant.kind !== 'owned' || grant.members.some((m) => isRefreshSlotOf(m, name))) return null;
+    const why = clientlessWhy(grant.owner);
+    return why === null ? null : { owner: grant.owner.id, why };
+  } catch {
+    return null;
+  }
+}
+
 /** Whether `name` is a refresh slot of `p`: the one its id derives, or the one it configures. */
 function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
   return p.auth?.type === 'oauth2' && (refreshTokenKey(p.id) === name || p.auth.oauth?.refresh_token_key === name);
@@ -454,6 +493,7 @@ export function slotMayReach(
       // moved without the owner's answer (a file edited by hand, a save the binding question
       // refused) takes no token along, the ones minted before the move included. Without a
       // binding context, none.
+      if (clientlessWhy(owner) !== null) return false;
       const clientSecret: unknown = owner.auth?.type === 'oauth2' ? owner.auth.oauth?.client_secret_key : undefined;
       if (typeof clientSecret === 'string' && clientSecret !== '') {
         if (bind === undefined) return false;
@@ -970,6 +1010,36 @@ export function memberConnectionReader(
   // Writing: the one who connected it renews it, also on a profile whose author an owner's save
   // removed before such saves were refused; the author connects it again under a later grant.
   return (consented || profile.created_by === tag) && ends !== null && ends.isLive(reader.mandateId);
+}
+
+/** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` exists only there, never in the store. */
+export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
+  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined }) | undefined;
+};
+
+/**
+ * A profile as `reader` sees it over the profile routes (`GET /api/api-profiles` and `…/:id`):
+ * without the grant's fingerprints, and without the provider account the consent signed in with
+ * (`oauth_grant.account`) unless the reader gave that consent. The account is a personal detail
+ * of whoever connected, the verified address of an OpenID Connect sign-in among them; a helper
+ * does not need the owner's for its work. Who connected (`connected_by`) stays for everyone.
+ * The owner sees every account; a mandate only the one of a connection it made with its own
+ * login ({@link memberConnectionReader}, `read`: same tag and same grant, both known); the
+ * control plane's bearer none. A grant whose account was left out says so (`account_withheld`),
+ * so the page does not read it as an account the engine never recorded.
+ */
+export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ProfileForReader {
+  const shown = withoutFingerprints(profile);
+  const grant = shown.oauth_grant;
+  if (grant?.account === undefined) return shown;
+  switch (reader.kind) {
+    case 'owner': return shown;
+    case 'mandate': if (memberConnectionReader(profile, reader, 'read', null)) return shown; break;
+    case 'cp-admin': break;
+    default: return unhandledPrincipal(reader);
+  }
+  const { account: _account, ...rest } = grant;
+  return { ...shown, oauth_grant: { ...rest, account_withheld: true } };
 }
 
 /**

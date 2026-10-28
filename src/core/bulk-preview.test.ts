@@ -118,7 +118,7 @@ const previewDeps = (c: ExternalClient, extra: Partial<BulkPreviewDeps> = {}): B
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-preview-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
 });
 
 afterEach(() => {
@@ -340,6 +340,34 @@ describe('the preview effect', () => {
     }
   });
 
+  it('leaves out a target whose planned text adds markup, on a run without a list form', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planRun([
+        { target: url(0), after: { title: 'New <script>x()</script>' } },
+        { target: url(1), after: { title: 'New <a href="https://evil.example/">deal</a>' } },
+        { target: url(2), after: { title: 'New title' } }, // the twin: plain text passes
+      ]);
+      await runBulkPreview(runId, previewDeps(client()));
+      expect(ledger.getPreview(runId).map((t) => [t.change, t.error])).toEqual([['invalid', 'markup_in_text'], ['invalid', 'markup_in_text'], ['update', null]]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('leaves out a target whose planned text adds a hidden character, on a run without a list form', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planRun([{ target: url(0), after: { title: 'New\u200btitle' } }]);
+      await runBulkPreview(runId, previewDeps(client()));
+      expect(ledger.getPreview(runId).map((t) => [t.change, t.error])).toEqual([['invalid', 'hidden_char']]);
+    } finally {
+      restore();
+    }
+  });
+
   it('refuses a run that is not planned or is halted, and reads nothing', async () => {
     const s = shop();
     const restore = serve(s);
@@ -391,7 +419,7 @@ describe('the preview effect', () => {
     for (const i of [0, 1, 3, 4, 5]) s2.special.set(`/products/${String(i)}`, { status: 503 });
     const restore2 = serve(s2);
     try {
-      ledger = new BulkLedger(engineDb);
+      ledger = new BulkLedger(engineDb, null);
       engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
       const runId = planRun([0, 1, 2, 3, 4, 5].map((i) => ({ target: url(i), after: { price: '1' } })));
       expect((await runBulkPreview(runId, previewDeps(client()))).status).toBe('halted');

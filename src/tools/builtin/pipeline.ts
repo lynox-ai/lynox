@@ -757,6 +757,13 @@ export async function runSavedWorkflow(
      * only a caller that knows how the run was started can answer.
      */
     decideGrant?: ((planned: PlannedPipeline) => GrantDecision) | undefined;
+    /**
+     * A check of the workflow exactly as this function read it, asked before anything binds or
+     * runs: a reason refuses the run (`ok: false`). The webhook run's mapping check.
+     */
+    checkWorkflow?: ((planned: PlannedPipeline) => string | null) | undefined;
+    /** Keep the params out of what the step agents read; see `RunManifestOptions.paramsKeptFromSteps`. */
+    paramsKeptFromSteps?: boolean | undefined;
     /** How the run was started (`startedVia` of its origin), recorded beside the grant id when it runs under one. */
     startedVia?: string | undefined;
     /** The run's id, when the caller already holds a claim keyed by it (the HTTP route).
@@ -806,6 +813,10 @@ export async function runSavedWorkflow(
       error: `Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and must be run from a chat session.`,
     };
   }
+
+  // Asked of the workflow as read here, so no edit can fall between the check and the run.
+  const refused = runtime?.checkWorkflow?.(planned) ?? null;
+  if (refused !== null) return { ok: false, error: refused };
 
   // Whether this run passes the workflow's contract on — decided before binding, because a
   // granted run runs with the values the person accepted, not with the caller's.
@@ -899,6 +910,7 @@ export async function runSavedWorkflow(
       // defaults) stop a runaway from inside the run.
       capabilityContract: grant.contract,
       isAcceptedParam,
+      paramsKeptFromSteps: runtime?.paramsKeptFromSteps,
       // How it was started, written beside the contract's grant id on the run row.
       startedVia: grant.contract !== undefined ? runtime?.startedVia : undefined,
       observeToolCall: collectWriteNotes(writeNotes),
@@ -1084,6 +1096,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         runTaint: retryTaint,
         chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
         parentChangeset: deps.parentAgent?.changeset,
+        // The retried steps resolve their `secret:` references through the caller's store, as
+        // the first run's steps do: run_workflow lets references travel as written.
+        secretStore: deps.secretStore,
       }));
 
       // The retried state now holds what this chat's steps read as well as the cached outputs, so
@@ -1222,6 +1237,7 @@ interface RunPipelineInput {
 
 export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
   undo: 'none',
+  secretRefs: 'verbatim',
   definition: {
     name: 'run_workflow',
     description:

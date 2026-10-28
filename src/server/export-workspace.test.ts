@@ -8,6 +8,7 @@ import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { EXPORT_STAGING_DIR } from '../core/workspace-export.js';
+import { resetShellIsolationForTest, setShellIsolationForTest, type ShellIsolation } from '../core/shell-isolation.js';
 
 /**
  * The workspace files of the Art. 15 / Art. 20 export, on a real engine: the JSON export names
@@ -177,5 +178,38 @@ describe('workspace files in the export (real engine)', () => {
     expect(await stagingEmptied()).toEqual([]);
     // The flag is released too: the next export is served.
     expect(await fullExport()).toBe(200);
+  });
+
+  // PRD shell-sidecar-activation D7, walkers 5 and 6, through the routes. The tier stays unset
+  // (beforeAll), so nothing here is left out because of a tier.
+  it('in sidecar mode leaves the workspace out of both routes, names the control plane, and names no archive route', async () => {
+    mkdirSync(join(dir, 'workspace'), { recursive: true });
+    writeFileSync(join(dir, 'workspace', 'sidecar-probe.md'), 'NOT-FOR-THE-ENGINE');
+    setShellIsolationForTest({ kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as unknown as ShellIsolation);
+    try {
+      const json = await (await get('/api/export')).json() as Record<string, unknown> & { workspace: { files: unknown[]; omitted?: unknown } };
+      expect(json.workspace.omitted).toEqual({ reason: 'sidecar', source: 'control-plane' });
+      expect(json.workspace.files).toEqual([]);
+      expect('workspace_archive' in json).toBe(false);
+
+      const res = await get('/api/export/workspace');
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-lynox-workspace-omitted')).toBe('control-plane');
+      expect(res.headers.get('x-lynox-workspace-files')).toBe('0');
+      const tar = Buffer.from(await res.arrayBuffer());
+      expect(tar.includes('NOT-FOR-THE-ENGINE')).toBe(false);
+      await stagingEmptied();
+    } finally {
+      resetShellIsolationForTest();
+    }
+    // Control: back in local mode the same file is listed, the archive route is named, no omission header.
+    const json = await (await get('/api/export')).json() as { workspace: { files: Array<{ path: string }> }; workspace_archive?: string };
+    expect(json.workspace.files.map(f => f.path)).toContain('sidecar-probe.md');
+    expect(json.workspace_archive).toBe('/api/export/workspace');
+    const res = await get('/api/export/workspace');
+    expect(res.headers.get('x-lynox-workspace-omitted')).toBeNull();
+    await res.arrayBuffer();
+    await stagingEmptied();
+    rmSync(join(dir, 'workspace', 'sidecar-probe.md'), { force: true });
   });
 });

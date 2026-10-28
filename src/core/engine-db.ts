@@ -1481,6 +1481,94 @@ const MIGRATIONS: string[] = [
   // it. 0 before the first page, and on every other run.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
    ALTER TABLE bulk_runs ADD COLUMN list_last_id INTEGER NOT NULL DEFAULT 0;`,
+
+  // v54: how many sends to a bulk target ended without a clear answer (`unknown_sends`). Each
+  // send adds one before it leaves, and only that send's own refusal takes it back, so one
+  // unclear send keeps the target from being sent to again. A target sent to before this
+  // version and not written has an answer nobody recorded: it counts as one unclear send. That
+  // includes a target v18 marked sent for a `write_failed` from before v18, which may have failed
+  // before anything left; counting it unclear errs towards not sending twice.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
+   ALTER TABLE bulk_targets ADD COLUMN unknown_sends INTEGER NOT NULL DEFAULT 0;
+   UPDATE bulk_targets SET unknown_sends = 1 WHERE write_sent = 1 AND applied_at IS NULL;`,
+  // v55: the name a grant was last shown under is read from the actor trail by grant id
+  // (`AuditLog.displayNameOf`). Only rows that carry a name are indexed, so a grant none of whose
+  // rows carries one is answered from the index instead of a walk over the whole trail.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (55);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_mandate_display ON audit_log(mandate_id, id) WHERE actor_display IS NOT NULL;`,
+
+  // v56 (owner's view of the actor trail): `plan_run` is the key a plan's run shares with every row
+  // written within it (the correlation id of its `plan:run` rows), so the view shows a run as one
+  // entry. `trail_form` is set on every row written from now on; the view shows only those, since
+  // a row from before could name a person for a read made after that person's access had ended.
+  // Existing rows keep both NULL: nothing is backfilled, and the update trigger stays.
+  // The view reads a run, a bulk run and a step whole by these keys, and the table is never pruned,
+  // so each gets an index; without one every page of the view scans the whole table.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (56);
+   ALTER TABLE audit_log ADD COLUMN plan_run TEXT;
+   ALTER TABLE audit_log ADD COLUMN trail_form INTEGER;
+   CREATE INDEX IF NOT EXISTS idx_audit_log_plan_run ON audit_log(plan_run);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_correlation ON audit_log(correlation_id);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_action_run ON audit_log(action, run_id);`,
+
+  // v57: a plan's pause after a mandate it depends on has provably ended (`plan-pause.ts`).
+  // `paused_at` carries the state (NULL: not paused), `paused_due_at` the run it was due for,
+  // `paused_for` who ended (JSON, one entry per mandate), `pause_noticed_at` whether the owner
+  // was told (NULL: not yet). Added whether or not the pause is switched on; unused they stay NULL.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (57);
+   ALTER TABLE triggers ADD COLUMN paused_at INTEGER;
+   ALTER TABLE triggers ADD COLUMN paused_due_at TEXT;
+   ALTER TABLE triggers ADD COLUMN paused_for TEXT;
+   ALTER TABLE triggers ADD COLUMN pause_noticed_at INTEGER;`,
+
+  // v58: the link domains the owner allows a judged run's verdicts to add (`start_domains`,
+  // encrypted JSON), given at the start that begins the judge. NULL on every run before this
+  // version and on every run started without one; the approval checksum names it only where set.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
+   ALTER TABLE bulk_runs ADD COLUMN start_domains TEXT;`,
+
+  // v59 (PRD shopify-preset §20.2 item 4): a target the owner takes out of a previewed run before
+  // approving it. It keeps its after-state and is not written; the ledger's one definition of a
+  // writing target excludes it. NULL for every existing target: nothing is deselected.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
+   ALTER TABLE bulk_targets ADD COLUMN deselected_at TEXT;`,
+
+  // v60: the owner's takeover of a paused plan (`plan-takeover.ts`). Each side of a plan — a
+  // trigger, a workflow — keeps the mandate marks the owner took over, as the mark stood:
+  // (tag, grant id, time) for the creator and for the last mandate editor. A mark equal to its
+  // covered copy is no member (`planMandate`); a new mandate edit clears the editor's copy in
+  // the same statement, so it is a member again. `covered_at` is when (unix seconds), for display.
+  // `paused_db_at` is the pause in the database's own clock (`unixepoch('now')`), the clock the
+  // marks are written in, so the takeover can tell a mark made after the pause (`plan-takeover.ts`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (60);
+   ALTER TABLE triggers ADD COLUMN paused_db_at INTEGER;
+   ALTER TABLE triggers ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_at INTEGER;
+   ALTER TABLE workflows ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_at INTEGER;`,
+  // v61: the webhook drain's columns. `attempt_id` names the
+  // run a `running` event belongs to, so the outcome of a run whose attempt was superseded
+  // writes nothing. `reported_at` is set once a dropped or failed event was reported to the owner,
+  // `unknown_reported_at` once a `running` event left behind by a lost process was reported as
+  // of unknown outcome — each is reported once.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (61);
+   ALTER TABLE inbound_events ADD COLUMN attempt_id TEXT;
+   ALTER TABLE inbound_events ADD COLUMN reported_at TEXT;
+   ALTER TABLE inbound_events ADD COLUMN unknown_reported_at TEXT;`,
+  // v62: the index the drain's sweeps read by, state and age across all triggers each tick. Its
+  // own migration, so that a database that already ran the one before it gets it too.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (62);
+   CREATE INDEX IF NOT EXISTS idx_inbound_events_state_received ON inbound_events(state, received_at);`,
 ];
 
 export interface EngineDbOptions {

@@ -36,7 +36,7 @@ describe('the store pass is minted in one place', () => {
     const calls = http.match(/mintStorePass\(/g) ?? [];
     expect(calls).toHaveLength(1);
     const body = functionBody(http, 'mintStorePassFor');
-    const clearance = body.indexOf('exactClearance!.ensure()');
+    const clearance = body.indexOf('exactClearance.ensure()');
     const contain = body.indexOf('containment.contain(');
     const mint = body.indexOf('mintStorePass(');
     expect(clearance).toBeGreaterThan(-1);

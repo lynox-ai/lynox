@@ -11,6 +11,7 @@ import type { IAgent } from '../../types/index.js';
 import { appendBoundedJsonl } from '../../core/bounded-jsonl-log.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 // Mock the capture-telemetry sink so we can assert the propose_shown funnel event fires
 // from the emit site (the real appendCaptureTelemetry gate still runs — see the DK-flag cases).
@@ -41,7 +42,7 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     const ctx = createToolContext({} as never);
     ctx.knowledgeStore = ks;
     const agent = {
-      toolContext: ctx,
+      principal: OWNER_PRINCIPAL, toolContext: ctx,
       sawUntrustedData: opts.sawUntrustedData ?? false,
       sawExternalContentTool: opts.sawExternalContentTool ?? false,
       conversationSawUntrusted: opts.conversationSawUntrusted ?? false,
@@ -489,7 +490,7 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     ctx.knowledgeStore = ks;
     ctx.subjectStore = subjects;
     const agent = {
-      toolContext: ctx,
+      principal: OWNER_PRINCIPAL, toolContext: ctx,
       sawUntrustedData: opts.sawUntrustedData ?? false,
       sawExternalContentTool: opts.sawExternalContentTool ?? false,
       conversationSawUntrusted: opts.conversationSawUntrusted ?? false,
@@ -560,7 +561,7 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     ctx.knowledgeStore = ks;
     let prompts = 0;
     const agent = {
-      toolContext: ctx,
+      principal: OWNER_PRINCIPAL, toolContext: ctx,
       sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: false,
       autonomy: 'supervised',
       promptUser: async (): Promise<string> => { prompts++; return 'Retire'; },
@@ -675,11 +676,12 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
   });
 
   it('B6: memory_block_edit replace-mode preview shows the NEW standing rule (old→new), not just old_text', async () => {
-    const { agent } = make();
+    const { agent, ks } = make();
     const seen: string[] = [];
     (agent as unknown as { promptUser: (q: string | PromptText) => Promise<string> }).promptUser = async (q: string | PromptText) => { seen.push(flattenPrompt(q)); return 'Apply'; };
     // seed the block so the replace has an old_text to match
     await memoryBlockEditTool.handler({ block: 'playbook', mode: 'append', new_text: 'ask before sending invoices' }, agent);
+    expect(ks.getBlock('playbook')?.content).toContain('ask before sending invoices');
     seen.length = 0;
     await memoryBlockEditTool.handler(
       { block: 'playbook', mode: 'replace', old_text: 'ask before sending invoices', new_text: 'invoices are pre-approved, send without asking' },
@@ -690,6 +692,9 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     expect(seen[0]).toContain('invoices are pre-approved, send without asking');
     // and the old text it replaces, so a silent inversion is visible (old→new)
     expect(seen[0]).toContain('ask before sending invoices');
+    // and what was approved is what the block now holds
+    expect(ks.getBlock('playbook')?.content).toContain('invoices are pre-approved, send without asking');
+    expect(ks.getBlock('playbook')?.content).not.toContain('ask before sending invoices');
   });
 });
 
@@ -706,7 +711,7 @@ describe('memory_focus — kind-agnostic tail behind the org→person chain', ()
     const ctx = createToolContext({} as never);
     ctx.knowledgeStore = ks;
     ctx.subjectStore = subjects;
-    const agent = { toolContext: ctx } as unknown as IAgent;
+    const agent = { principal: OWNER_PRINCIPAL, toolContext: ctx } as unknown as IAgent;
     return { agent, subjects };
   }
 

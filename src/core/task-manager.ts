@@ -12,6 +12,7 @@ import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from '
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
 import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
+import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -659,10 +660,11 @@ export class TaskManager {
   }
 
   /** List AGENT-TRIGGERs (the WorkerLoop-fired rows: cron/watch/pipeline/etc). */
-  listTriggers(opts?: { status?: TriggerStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined }): TriggerRecord[] {
+  listTriggers(opts?: { status?: TriggerStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined; paused?: boolean | undefined }): TriggerRecord[] {
     return this.history.getTriggers({
       status: opts?.status,
       taskType: opts?.taskType,
+      paused: opts?.paused,
       scopeType: opts?.scope?.type,
       scopeId: opts?.scope?.id,
     });
@@ -756,7 +758,8 @@ export class TaskManager {
       for (const t of pendingLynox) {
         // These are AGENT-TRIGGERs — no `due_date` column; surface the next
         // scheduled fire instead when present.
-        const next = t.next_run_at ? `, next run ${t.next_run_at}` : '';
+        // A paused plan says so instead of a next run that will not come (`plan-pause.ts`).
+        const next = isPaused(t) ? `, ${PAUSED_MODEL_TEXT}` : t.next_run_at ? `, next run ${t.next_run_at}` : '';
         parts.push(`  - "${t.title}" [${t.status}]${next}`);
       }
     }
@@ -1052,12 +1055,15 @@ export class TaskManager {
    *   non-owner started by hand (PRD customer-granted-operator-access §3.12 point 6, "once
    *   per request"). A retry carries no request, so it would run as the schedule's run, not
    *   the request's.
+   * @param opts.keepSchedule Record the run and leave the schedule as it is: no status, no next
+   *   run, no retry. Only for a run the plan's pause ended (`plan-pause.ts`): a paused plan keeps
+   *   its due time for when it is taken over, and is not in `getDue` meanwhile.
    * @returns Whether this scheduled a retry of the run. The caller reports a failure only
    *   when it did not, so this is the one place that decides — a second copy of the retry
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined }): boolean {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.
@@ -1083,7 +1089,11 @@ export class TaskManager {
     // run, no retry. A one-shot recorded `completed` or `failed` would never fire after the
     // owner stamps it. (The wait sweep, outside any run, decides on the row and records a
     // proposal's expired test question through the same scope.)
-    if (isHandRunOf(task.id)) {
+    // A webhook trigger is the same case for another reason: its work comes from the events its
+    // provider sends, one ledger row each. It has no cron, so
+    // the branches below would read it as a one-shot and set it `completed` or `failed` — and a
+    // trigger in either state accepts no further delivery.
+    if (isHandRunOf(task.id) || task.source === 'webhook' || opts?.keepSchedule === true) {
       this.history.updateTriggerRunResult(id, {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,
@@ -1191,8 +1201,9 @@ export class TaskManager {
     // parked row that is answered later runs again, but as the resume of its question,
     // not as this retry. The confirmation gates in `getDue` are not repeated here: a row
     // that loses its confirmation mid-run still reads as retrying.
+    // A paused plan is not in `getDue` either, so a retry of it would not run.
     return retrying && task.status !== 'completed' && task.status !== 'stopped'
-      && task.status !== 'waiting' && task.status !== 'failed' && task.enabled !== 0;
+      && task.status !== 'waiting' && task.status !== 'failed' && task.enabled !== 0 && !isPaused(task);
   }
 }
 

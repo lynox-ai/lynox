@@ -22,6 +22,8 @@ describe('exec protocol: request', () => {
     expect(capTimeout(Number.POSITIVE_INFINITY)).toBe(DEFAULT_BASH_TIMEOUT_MS);
     expect(capTimeout(MAX_EXEC_TIMEOUT_MS + 1)).toBe(MAX_EXEC_TIMEOUT_MS);
     expect(capTimeout(1234.9)).toBe(1234);
+    // A fraction below 1 ms would floor to 0 and end the call at once.
+    expect(capTimeout(0.5)).toBe(DEFAULT_BASH_TIMEOUT_MS);
   });
 
   it('refuses unknown fields, a cwd among them', () => {

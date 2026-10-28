@@ -2047,6 +2047,9 @@ async function executeThinker(
 }
 
 export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
+  // A spawn order names sources, it does not consume them, and `secret_scope` derives the
+  // child's default reach from the `secret:NAME` refs the order writes.
+  secretRefs: 'verbatim',
   definition: {
     name: 'spawn_agent',
     description: 'Delegate tasks to specialist roles working in parallel. Choose a role via "role" (researcher, creator, operator, collector) to auto-configure model, effort, and allowed tools. If no role fits your task, omit "role" and configure model/effort/tools directly instead of picking a close-but-wrong role name — unrecognised roles error out.',

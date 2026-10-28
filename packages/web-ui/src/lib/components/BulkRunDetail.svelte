@@ -10,7 +10,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkSentUnknownText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -29,6 +29,8 @@
 	let actionError = $state('');
 	let busy = $state(false);
 	let unmeasuredOk = $state(false);
+	// Unchanged targets fold away: the owner checks what is written and what lynox leaves out.
+	let showUnchanged = $state(false);
 	let probeOk = $state(false);
 	let maxTargets = $state(1);
 	// The spend limit of a judged start, as the owner types it; no default (there is no estimate).
@@ -90,7 +92,12 @@
 			if (!r.ok) { error = t('common.load_failed'); loading = false; return; }
 			// The run is shown only with its targets: a page that could not load them all shows
 			// the error, never a run whose approval covers more than it lists.
-			const shown = await loadTargets(0, FIRST_PAGE);
+			// A preview the owner approves is loaded whole: the approval covers every target, and
+			// each one the owner may take out has to be on the page to be taken out.
+			const approving = r.body.phase === 'previewed' && r.body.kind === 'apply';
+			const shown = approving ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
+			// A short page ends the loading early: fewer targets than the run's count are not the whole.
+			if (approving && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
 			const deleted = r.body.kind === 'undo' ? await loadCreates(r.body) : [];
 			run = r.body;
 			targets = shown;
@@ -138,6 +145,20 @@
 				maxTargets: oneFirst ? 1 : maxTargets,
 				...(run.writeForm === 'unmeasured' ? { unmeasuredConfirmed: unmeasuredOk } : {}),
 			}));
+		});
+	}
+
+	/** Take one target out of the write, or put it back, against the checksum this page showed:
+	 *  each moves the checksum, so the page reloads and approves only the run as it now is. */
+	function toggleSelected(target: BulkTarget): Promise<void> {
+		return act(async () => {
+			if (!run?.checksum) return t('common.load_failed');
+			const verb = target.deselected ? 'reselect' : 'deselect';
+			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/targets/${target.seq}/${verb}`, { checksum: run.checksum });
+			// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
+			const code = r.body.code;
+			if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) return t(`bulk.deselect.refused.${code}`);
+			return refusalOf(r);
 		});
 	}
 
@@ -294,6 +315,13 @@
 	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
+	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
+	const shopify = $derived(bulkIsShopifyHost(host));
+	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');
+	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, i18n) : { text: null, nothing: false });
+	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
+	const foldedUnchanged = $derived(targets.length - shownTargets.length);
+	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
@@ -355,10 +383,16 @@
 			{#if run.conflicts > 0}
 				<p class="text-sm text-text-muted">{tf('bulk.conflicts', { n: String(run.conflicts) })}</p>
 			{/if}
+			{#if sentUnknownText}
+				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{sentUnknownText}</p>
+			{/if}
 
 			{#if run.kind === 'apply' && targets.length > 0}
 				<div>
 					<h2 class="text-sm font-medium mb-2">{tf('bulk.preview.title', { k: String(targets.length), n: String(run.total) })}</h2>
+					{#if skipped.text && !skipped.nothing}
+						<p class="text-sm mb-2">{skipped.text}</p>
+					{/if}
 					<div class="overflow-x-auto">
 						<table class="w-full text-sm">
 							<thead>
@@ -368,8 +402,8 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each targets as target (target.seq)}
-									<tr class="border-b border-border align-top">
+								{#each shownTargets as target (target.seq)}
+									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}">
 										<td class="py-1.5 pr-3"><code class="text-xs break-all">{bulkVisibleText(target.key)}</code></td>
 										<td class="py-1.5">
 											{#if target.diff.kind === 'fields'}
@@ -384,11 +418,20 @@
 												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
 {/each}{#each target.diff.added as line, i (i)}<ins class="text-success no-underline">+ {bulkVisibleText(line)}</ins>
 {/each}</pre>
-											{:else if target.error}
+											{:else if target.error && target.change !== 'invalid'}
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
+											{#if target.change === 'invalid' && target.error}
+												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n)}</p>
+											{/if}
+											{#if approving && (target.deselected || writes(target))}
+												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
+													{#if target.deselected}<span class="text-text-subtle">{t('bulk.deselect.taken_out')}</span>{/if}
+													<button type="button" class="{btnPlain} text-xs" disabled={busy} onclick={() => toggleSelected(target)}>{t(target.deselected ? 'bulk.deselect.on' : 'bulk.deselect.off')}</button>
+												</div>
+											{/if}
 											{#if target.sentUnchanged && target.sentUnchanged.length > 0}
-												<div class="text-xs text-text-subtle">{tf('bulk.preview.sent_unchanged', { fields: bulkVisibleText(target.sentUnchanged.join(', ')) })}</div>
+												<div class="text-xs text-text-subtle">{tf('bulk.preview.sent_unchanged', { fields: bulkFieldNamesText(host, target.sentUnchanged, t) })}</div>
 											{/if}
 										</td>
 									</tr>
@@ -396,6 +439,9 @@
 							</tbody>
 						</table>
 					</div>
+					{#if foldedUnchanged > 0}
+						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? 'bulk.preview.show_unchanged' : 'bulk.preview.show_unchanged_targets', { n: String(foldedUnchanged) })}</button>
+					{/if}
 					{#if targets.length < run.total}
 						<button type="button" class="{btnPlain} mt-2" onclick={showMore}>{tf('bulk.preview.show_all', { n: String(run.total) })}</button>
 					{/if}
@@ -554,6 +600,9 @@
 							<span>{unmeasuredConfirmation}</span>
 						</label>
 					{/if}
+					{#if bulkIsShopifyHost(host)}
+						<p class="text-sm">{t('bulk.approve.shopify_visible')}</p>
+					{/if}
 					{#if host !== null && !run.probeConfirmed}
 						<p class="text-sm">{t('bulk.approve.one_first')}</p>
 					{:else}
@@ -565,18 +614,24 @@
 					{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary}
-							disabled={busy || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
+							disabled={busy || skipped.nothing || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
+							aria-describedby={skipped.nothing ? 'bulk-approve-nothing' : run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
 							onclick={() => approve(host !== null && !run!.probeConfirmed)}>
 							{host !== null && !run.probeConfirmed ? t('bulk.approve.write_one') : t('bulk.approve.approve')}
 						</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
+					{#if skipped.nothing}
+						<p id="bulk-approve-nothing" class="text-sm">{skipped.text}</p>
+					{:else if run.writeForm === 'unmeasured' && !unmeasuredOk}
+						<p id="bulk-approve-confirm-first" class="text-xs text-text-subtle">{t('bulk.approve.confirm_first')}</p>
+					{/if}
 				</div>
 			{:else if atProbe && run.probe}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
 					<p class="text-sm">{run.probe.fields.length > 0
-						? tf('bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkVisibleText(run.probe.fields.join(', ')) })
+						? tf('bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
 						: tf('bulk.probe.explain_whole', { target: bulkVisibleText(run.probe.key), provider })}</p>
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />

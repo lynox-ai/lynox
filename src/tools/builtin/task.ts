@@ -4,7 +4,9 @@ import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-principal.js';
+import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
+import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -104,8 +106,12 @@ export function triggerDetailLine(t: {
   effect?: string | undefined;
   next_run_at?: string | undefined;
   status?: string | undefined;
+  paused_at?: number | undefined;
 }): string {
   const parts: string[] = [];
+  // A paused plan says so first; it has no next run until it is taken over (`plan-pause.ts`).
+  const paused = isPaused(t);
+  if (paused) parts.push(`PAUSED — ${PAUSED_MODEL_TEXT}`);
   // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
   // 1, so `=== 0` is the test, not falsiness. A todo has no such field at all.
   if (t.enabled === 0) parts.push('SCHEDULE OFF — it will not fire');
@@ -171,7 +177,7 @@ export function triggerDetailLine(t: {
     // The `effect` test is defensive typing, not what keeps a TODO out: `TaskRecord`
     // carries no `last_run_status`, so the branch above already does. It guards a
     // hand-built object, not a store row.
-    if (t.effect !== undefined && !t.next_run_at
+    if (t.effect !== undefined && !t.next_run_at && !paused
       && t.status !== 'completed' && t.status !== 'waiting' && t.status !== 'stopped') {
       parts.push('NO NEXT RUN — it will not try again on its own');
     }
@@ -214,7 +220,7 @@ export function triggerDetailLine(t: {
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
 function formatTaskLine(
-  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined },
+  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined; paused_at?: number | undefined },
   // Callers used to append their own suffix to the RESULT of this function.
   // That was harmless while the result was one line; with a detail line it put
   // "— next run: …" underneath "workflow <id>", where it reads as a property of
@@ -443,53 +449,72 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           if (unschedulable !== null) return `Error: workflow ${planned.id} ${unschedulable}`;
         }
         const createdUntrusted = describeTurnUntrusted(agent);
-        const task = managerRef.createPipelineTask({
-          ...baseParams,
-          pipelineId: input.workflow_id,
-          scheduleCron: input.schedule,
-          ...(pipelineParams !== undefined ? { pipelineParams } : {}),
-          // The run this task starts has no session of its own; it inherits what this one
-          // had taken in, so a step's durable write carries the trust it would carry here.
-          ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
+        const plannedId = planned?.id;
+        const workflowId = input.workflow_id;
+        return withInstanceWrite(agent, { site: 'task_create#workflow', kind: 'create', store: 'tasks', target: () => [['type', 'workflow'], ['workflow', plannedId]], main: ['create'] }, (w) => {
+          const task = w.run('create', () => managerRef.createPipelineTask({
+            ...baseParams,
+            pipelineId: workflowId,
+            scheduleCron: input.schedule,
+            ...(pipelineParams !== undefined ? { pipelineParams } : {}),
+            // The run this task starts has no session of its own; it inherits what this one
+            // had taken in, so a step's durable write carries the trust it would carry here.
+            ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
+          }), ifReturned);
+          w.created('create', task.id);
+          const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
+          const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
+          return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${pendingConsent(task)}`)}`;
         });
-        const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
-        const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
-        return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${pendingConsent(task)}`)}`;
       }
 
       if (input.schedule) {
-        const task = managerRef.createScheduled({
-          ...baseParams,
-          scheduleCron: input.schedule,
+        const scheduleCron = input.schedule;
+        return withInstanceWrite(agent, { site: 'task_create#scheduled', kind: 'create', store: 'tasks', target: () => [['type', 'scheduled']], main: ['create'] }, (w) => {
+          const task = w.run('create', () => managerRef.createScheduled({
+            ...baseParams,
+            scheduleCron,
+          }), ifReturned);
+          w.created('create', task.id);
+          const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
+          return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${pendingConsent(task)}`)}`;
         });
-        const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
-        return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${pendingConsent(task)}`)}`;
       }
 
       if (input.watch_url) {
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);
-        const task = managerRef.createWatch({
-          ...baseParams,
-          watchUrl: input.watch_url,
-          watchIntervalMinutes: intervalMinutes,
+        const watchUrl = input.watch_url;
+        return withInstanceWrite(agent, { site: 'task_create#watch', kind: 'create', store: 'tasks', target: () => [['type', 'watch']], main: ['create'] }, (w) => {
+          const task = w.run('create', () => managerRef.createWatch({
+            ...baseParams,
+            watchUrl,
+            watchIntervalMinutes: intervalMinutes,
+          }), ifReturned);
+          w.created('create', task.id);
+          return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`)}`;
         });
-        return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`)}`;
       }
 
       if (input.run_at) {
         if (Number.isNaN(Date.parse(input.run_at))) {
           return `Error: invalid run_at "${input.run_at}". Use ISO 8601 datetime (e.g. "2026-04-25T09:00:00").`;
         }
-        const task = managerRef.create({ ...baseParams, nextRunAt: input.run_at });
-        return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, pendingConsent(task))}`;
+        return withInstanceWrite(agent, { site: 'task_create#one-shot', kind: 'create', store: 'tasks', target: () => [['type', 'one-shot']], main: ['create'] }, (w) => {
+          const task = w.run('create', () => managerRef.create({ ...baseParams, nextRunAt: input.run_at }), ifReturned);
+          w.created('create', task.id);
+          return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, pendingConsent(task))}`;
+        });
       }
 
       // A mandate's act is marked on the schedule it creates; a to-do it creates records it as
       // its creator, and a subtask goes only under a to-do of its own (`TaskManager.create`).
-      const task = managerRef.create(baseParams);
-      return `Task created: ${formatTaskLine(task, pendingConsent(task))}`;
+      return withInstanceWrite(agent, { site: 'task_create#todo', kind: 'create', store: 'tasks', target: () => [['type', 'todo']], main: ['create'] }, (w) => {
+        const task = w.run('create', () => managerRef.create(baseParams), ifReturned);
+        w.created('create', task.id);
+        return `Task created: ${formatTaskLine(task, pendingConsent(task))}`;
+      });
     } catch (e: unknown) {
       logErrorChain('task_create', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
@@ -560,42 +585,56 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       // the write changes. A TODO is not a trigger and carries no mark: a mandate changes only a
       // to-do of its own, which `complete` and `update` check on the row they resolve, as the
       // HTTP routes do.
-      if (!isOwnerPrincipal(agent.principal)) {
-        const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
-        if (trigger) managerRef.markEditedBy(trigger.id, agent.principal, true);
+      // A paused plan (`plan-pause.ts`) changes only by its takeover: a mandate changes nothing on
+      // it, and the owner may complete it but not edit it. Before the mark, so a refusal marks nothing.
+      const pausedTarget = managerRef.getTrigger(input.task_id, scopeFilter);
+      if (pausedTarget !== undefined && isPaused(pausedTarget)
+        && !(isOwnerPrincipal(agent.principal) && input.status === 'completed')) {
+        return `Error: this plan is ${PAUSED_MODEL_TEXT}. It cannot be changed until then.`;
       }
-      if (input.status === 'completed') {
-        const task = managerRef.complete(input.task_id, scopeFilter, agent.principal);
-        if (!task) return `Task not found: ${input.task_id}`;
-        return `Task completed: ${formatTaskLine(task)}`;
-      }
+      return withInstanceWrite(agent, {
+        site: 'task_update#change', kind: 'change', store: 'tasks',
+        // A trigger's id as stored; a to-do is named by nothing here.
+        target: () => [['task', managerRef.getTrigger(input.task_id, scopeFilter)?.id]],
+        main: ['apply'],
+      }, (w) => {
+        if (!isOwnerPrincipal(agent.principal)) {
+          const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
+          if (trigger) w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue);
+        }
+        if (input.status === 'completed') {
+          const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal), ifNonNull);
+          if (!task) return `Task not found: ${input.task_id}`;
+          return `Task completed: ${formatTaskLine(task)}`;
+        }
 
-      const task = managerRef.update(input.task_id, {
-        title: input.title,
-        description: input.description,
-        status: input.status as TaskStatus | undefined,
-        priority: input.priority as 'low' | 'medium' | 'high' | 'urgent' | undefined,
-        assignee: input.assignee,
-        dueDate: input.due_date,
-        tags: input.tags,
-        nextRunAt: input.run_at,
-        scheduleCron: input.schedule,
-      }, scopeFilter, agent.principal);
-      if (!task) return `Task not found: ${input.task_id}`;
-      // Surface the new schedule when it changed so the agent can confirm
-      // the reschedule landed (mirrors the create path's "scheduled for …"
-      // string, which the LLM is already trained to read back).
-      // Only a trigger (TriggerRecord) carries a schedule — narrow via `in`
-      // since the v42 split removed these columns from the TODO (TaskRecord).
-      const scheduleNote = 'next_run_at' in task && task.next_run_at
-        ? ` — next run: ${task.next_run_at}`
-        : 'schedule_cron' in task && task.schedule_cron
-          ? ` — schedule: ${task.schedule_cron}`
-          : '';
-      // An edit can re-open consent: changing what a trigger RUNS clears the stamp
-      // (`trigger-store.ts`), so the row just edited may be held back again — and
-      // this report is the only place that says so.
-      return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task)}`)}`;
+        const task = w.run('apply', () => managerRef.update(input.task_id, {
+          title: input.title,
+          description: input.description,
+          status: input.status as TaskStatus | undefined,
+          priority: input.priority as 'low' | 'medium' | 'high' | 'urgent' | undefined,
+          assignee: input.assignee,
+          dueDate: input.due_date,
+          tags: input.tags,
+          nextRunAt: input.run_at,
+          scheduleCron: input.schedule,
+        }, scopeFilter, agent.principal), ifNonNull);
+        if (!task) return `Task not found: ${input.task_id}`;
+        // Surface the new schedule when it changed so the agent can confirm
+        // the reschedule landed (mirrors the create path's "scheduled for …"
+        // string, which the LLM is already trained to read back).
+        // Only a trigger (TriggerRecord) carries a schedule — narrow via `in`
+        // since the v42 split removed these columns from the TODO (TaskRecord).
+        const scheduleNote = 'next_run_at' in task && task.next_run_at
+          ? ` — next run: ${task.next_run_at}`
+          : 'schedule_cron' in task && task.schedule_cron
+            ? ` — schedule: ${task.schedule_cron}`
+            : '';
+        // An edit can re-open consent: changing what a trigger RUNS clears the stamp
+        // (`trigger-store.ts`), so the row just edited may be held back again — and
+        // this report is the only place that says so.
+        return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task)}`)}`;
+      });
     } catch (e: unknown) {
       logErrorChain('task_update', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
@@ -618,7 +657,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
         // the one shape a filter enum must never have. `task_update`'s enum (above)
         // does NOT get them: both are the engine's to write, and `TaskManager.update`
         // rejects the values outright.
-        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed', 'waiting', 'stopped'], description: 'Filter by status. `waiting` = a trigger paused on an unanswered question.' },
+        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed', 'waiting', 'stopped', 'paused'], description: 'Filter by status. `waiting` = a trigger paused on an unanswered question.' },
         assignee: { type: 'string', description: 'Filter by assignee: "user", "lynox", or custom name' },
         due: { type: 'string', enum: ['today', 'week', 'overdue'], description: 'Filter by due date range' },
         limit: { type: 'number', description: 'Max results. Default: 20' },
@@ -668,7 +707,9 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     // todos, which is not the same as passing the value down: `list` types its filter
     // `TaskStatus`, and casting a non-member through it would be a lie that happens to
     // work.
-    const todos = input.status === 'waiting' || input.status === 'stopped'
+    // `paused` is no status value either: it reads `paused_at` (`plan-pause.ts`), on triggers only.
+    const pausedFilter = input.status === 'paused';
+    const todos = input.status === 'waiting' || input.status === 'stopped' || pausedFilter
       ? []
       : managerRef.list({
         status: input.status as TaskStatus | undefined,
@@ -676,7 +717,9 @@ export const taskListTool: ToolEntry<TaskListInput> = {
         scope,
       });
     const triggers = input.assignee === undefined || input.assignee === 'lynox'
-      ? managerRef.listTriggers({ status: input.status as TriggerStatus | undefined, scope })
+      ? (pausedFilter
+        ? managerRef.listTriggers({ scope, paused: true })
+        : managerRef.listTriggers({ status: input.status as TriggerStatus | undefined, scope }))
       : [];
     // Triggers FIRST: the agent's active scheduled work is fewer rows and more
     // relevant to surface. Appending them after the todos would let an install

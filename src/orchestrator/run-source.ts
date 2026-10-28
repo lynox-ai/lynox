@@ -8,7 +8,7 @@
  * does not compile until it decides.
  */
 import type { MandateEnds } from '../core/mandate-ends.js';
-import { planMandate, planMembers, principalHasEnded, type RequestPrincipal } from '../core/request-principal.js';
+import { planAuthorshipOfWorkflow, planMandate, planMembers, principalHasEnded, type RequestPrincipal } from '../core/request-principal.js';
 import type { WorkflowAuthorship } from '../core/workflow-store.js';
 
 export type RunSource =
@@ -51,10 +51,7 @@ export function savedWorkflowSource(
     a = undefined;
   }
   if (a === undefined) return { kind: 'saved', workflowId, authors: 'unreadable', ends: ends ?? null };
-  const mark = planMandate({
-    created_by: a.createdBy, created_mandate_id: a.createdMandateId, created_at: a.createdAt,
-    mandate_editor: a.mandateEditor, mandate_editor_id: a.mandateEditorId, mandate_edited_at: a.mandateEditedAt,
-  });
+  const mark = planMandate(planAuthorshipOfWorkflow(a));
   return { kind: 'saved', workflowId, authors: planMembers(undefined, mark).members, ends: ends ?? null };
 }
 
