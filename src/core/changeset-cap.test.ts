@@ -17,6 +17,18 @@ const reads = vi.hoisted(() => ({ bytes: 0 }));
 /** While on, `fstatSync` reports a size of 1 byte, until the first `readSync`: as a file that
  *  grows past the cap between the size check and the read would. */
 const grows = vi.hoisted(() => ({ on: false }));
+/** When set, `execFileSync` throws this instead of running: as a `diff` stopped by its timeout would. */
+const diffThrows = vi.hoisted(() => ({ err: null as Record<string, unknown> | null }));
+vi.mock('node:child_process', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...real,
+    execFileSync: ((...args: unknown[]) => {
+      if (diffThrows.err !== null) throw Object.assign(new Error('diff stopped'), diffThrows.err);
+      return (real.execFileSync as (...a: unknown[]) => unknown)(...args);
+    }) as typeof real.execFileSync,
+  };
+});
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>();
   return {
@@ -100,6 +112,7 @@ function bytesReadBy(op: () => void): number {
 
 afterEach(() => {
   grows.on = false;
+  diffThrows.err = null;
   mgr.cleanup();
   closeWorkspaceBase();
   clearTenantWorkspace();
@@ -266,9 +279,12 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
   });
 
   it(`[${branch}] a file of exactly the cap is still read and diffed, and the run's added file still rolled back (control)`, () => {
+    // Short lines, so the diff of one changed line stays far under the diff's own limit.
+    const line = 'x'.repeat(63) + '\n';
+    const original = 'o'.repeat(63) + '\n' + line.repeat(CAP / 64 - 1);
     const modified = join(ws, 'notes.txt');
-    writeFileSync(modified, 'original\n');
-    writeAsTheRun(modified, 'x'.repeat(CAP - 1) + '\n');
+    writeFileSync(modified, original);
+    writeAsTheRun(modified, line.repeat(CAP / 64));
     const added = join(ws, 'new.txt');
     writeAsTheRun(added, 'y'.repeat(CAP));
 
@@ -278,10 +294,50 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
       expect(c.diff).not.toContain('Content not compared');
       expect(c.compared).toBe(true);
     }
-    expect(changes.find((c) => c.file === 'notes.txt')!.diff).toContain('-original');
+    expect(changes.find((c) => c.file === 'notes.txt')!.diff).toContain('-' + 'o'.repeat(63));
 
     mgr.rollbackAll();
-    expect(readFileSync(modified, 'utf-8')).toBe('original\n');
+    expect(readFileSync(modified, 'utf-8')).toBe(original);
     expect(existsSync(added), 'the run\'s own file of exactly the cap is deleted').toBe(false);
+  });
+
+  it(`[${branch}] a diff longer than 1 MB is shown cut, with a note, and not compared`, () => {
+    const path = join(ws, 'notes.txt');
+    const original = ('a'.repeat(63) + '\n').repeat(40_000);
+    writeFileSync(path, original);
+    writeAsTheRun(path, ('b'.repeat(63) + '\n').repeat(40_000));
+
+    const [change] = mgr.getChanges();
+    expect(change!.diff.startsWith('--- a/notes.txt\n+++ b/notes.txt\n@@ ')).toBe(true);
+    expect(change!.diff.endsWith(
+      '\n(Diff cut: only its start is shown, as it is longer than 1 MB or took longer than 5 seconds. Look at the file yourself before you keep the change; Rollback restores the original.)',
+    )).toBe(true);
+    // Node stops the read after the chunk that crosses the limit; the whole diff is about 5 MB.
+    expect(change!.diff.length, 'only the start').toBeLessThan(2 * 1024 * 1024);
+    expect(change!.compared, 'its counts are those of the start only').toBe(false);
+
+    mgr.rollbackAll();
+    expect(readFileSync(path, 'utf-8')).toBe(original);
+  });
+
+  it(`[${branch}] a diff stopped by its timeout is shown cut, and not compared`, () => {
+    const path = join(ws, 'notes.txt');
+    writeFileSync(path, 'original\n');
+    writeAsTheRun(path, 'changed\n');
+    diffThrows.err = { code: 'ETIMEDOUT', signal: 'SIGTERM', status: null, stdout: '--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-orig' };
+
+    const [change] = mgr.getChanges();
+    expect(change!.diff).toMatch(/^--- a\/notes\.txt\n\+\+\+ b\/notes\.txt\n@@ -1 \+1 @@\n-orig\n\(Diff cut: /);
+    expect(change!.compared).toBe(false);
+  });
+
+  it(`[${branch}] a diff that ends normally, with exit code 1, is whole and compared (control)`, () => {
+    const path = join(ws, 'notes.txt');
+    writeFileSync(path, 'original\n');
+    writeAsTheRun(path, 'changed\n');
+
+    const [change] = mgr.getChanges();
+    expect(change!.diff).toBe('--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-original\n+changed\n');
+    expect(change!.compared).toBe(true);
   });
 });
