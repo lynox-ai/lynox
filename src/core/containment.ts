@@ -3,6 +3,7 @@ import type { IAgent } from '../types/index.js';
 import { chatThreadOf } from '../tools/builtin/private-thread.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import type { ThreadStore } from './thread-store.js';
+import type { ContainmentMirror } from './history-markers.js';
 import { isShopifyAdminHost, normalizeHostForMatch } from './shopify-host.js';
 import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
 import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, type BodyReadings } from './outbound-write.js';
@@ -54,8 +55,21 @@ export function containerOf(agent: Pick<IAgent, 'currentThreadId' | 'originThrea
   return { threadId: containerThreadOf(agent) };
 }
 
+/**
+ * The record lives twice for threads: engine.db's `contained` and history.db's copy
+ * (`ContainmentMirror`, cut S3-E), so that a thread stays contained when engine.db is set aside
+ * on corruption or comes back older than history.db. Every read is the union of the two; every
+ * write of a thread row writes both. Bulk runs live in engine.db and are recorded only there.
+ *
+ * Without engine.db (`db` null) nothing can be contained: `contain` and `containFromThread`
+ * throw. Reads then answer from the copy, and on a provisioned instance "contained" for any
+ * thread or run, as {@link threadIsContained} did before the copy existed.
+ */
 export class Containment {
-  constructor(private readonly db: Database.Database) {}
+  constructor(
+    private readonly db: Database.Database | null,
+    private readonly mirror: ContainmentMirror | null,
+  ) {}
 
   /**
    * Whether the thread or the bulk run (either is enough) is contained for any connection.
@@ -66,6 +80,8 @@ export class Containment {
     const bulkRunId = key.bulkRunId !== undefined && key.bulkRunId !== '' ? key.bulkRunId : undefined;
     if (threadId === undefined && bulkRunId === undefined) return true;
     try {
+      if (threadId !== undefined && this.mirror !== null && this.mirror.has(threadId)) return true;
+      if (this.db === null) return isProvisionedInstance();
       const has = this.db.prepare('SELECT 1 FROM contained WHERE container_kind = ? AND container_id = ? LIMIT 1');
       if (threadId !== undefined && has.get('thread', threadId) !== undefined) return true;
       if (bulkRunId !== undefined && has.get('bulk_run', bulkRunId) !== undefined) return true;
@@ -84,6 +100,8 @@ export class Containment {
     const contained = new Set<string>(threadIds.filter((id) => id === ''));
     if (named.length === 0) return contained;
     try {
+      if (this.mirror !== null) for (const id of this.mirror.threadIds(named)) contained.add(id);
+      if (this.db === null) return isProvisionedInstance() ? new Set(threadIds) : contained;
       const rows = this.db
         .prepare(`SELECT DISTINCT container_id AS id FROM contained WHERE container_kind = 'thread' AND container_id IN (${named.map(() => '?').join(',')})`)
         .all(...named) as Array<{ id: string }>;
@@ -96,12 +114,25 @@ export class Containment {
 
   /**
    * Record the container as contained for the connection. A second call for the same pair
-   * keeps the first row and its `first_at`. Throws when the row cannot be written: the caller
+   * keeps the first row and its `first_at`. Throws when a row cannot be written: the caller
    * then refuses the request it was about to send.
    */
   contain(container: { kind: 'thread' | 'bulk_run'; id: string }, connection: ContainedConnection): void {
     if (container.id === '') throw new Error('a container needs an id');
-    insertContained(this.db, container.kind, container.id, connection);
+    insertContained(this.engine(), container.kind, container.id, connection);
+    if (container.kind === 'thread') this.mirror?.write(container.id, connection);
+  }
+
+  /**
+   * Whether the pair is recorded in every place {@link contain} writes it: the funnel reads this
+   * back before it mints a pass, since `INSERT OR IGNORE` swallows a refused row as well.
+   */
+  holds(container: { kind: 'thread' | 'bulk_run'; id: string }, connection: ContainedConnection): boolean {
+    const inEngine = this.engine().prepare(
+      'SELECT 1 FROM contained WHERE container_kind = ? AND container_id = ? AND kind = ? AND connection_id = ?',
+    ).get(container.kind, container.id, connection.kind, connection.connectionId) !== undefined;
+    if (!inEngine || container.kind !== 'thread' || this.mirror === null) return inEngine;
+    return this.mirror.connections(container.id).some((c) => c.kind === connection.kind && c.connectionId === connection.connectionId);
   }
 
   /**
@@ -112,12 +143,38 @@ export class Containment {
    */
   containFromThread(sourceThreadId: string, threadId: string): number {
     if (sourceThreadId === '' || threadId === '') throw new Error('a container needs an id');
-    const rows = this.db.prepare(
-      "SELECT kind, connection_id FROM contained WHERE container_kind = 'thread' AND container_id = ?",
-    ).all(sourceThreadId) as { kind: string; connection_id: string }[];
-    for (const r of rows) insertContained(this.db, 'thread', threadId, { kind: r.kind, connectionId: r.connection_id });
-    return rows.length;
+    const db = this.engine();
+    const connections = threadConnections(db, this.mirror, sourceThreadId);
+    for (const c of connections) {
+      insertContained(db, 'thread', threadId, c);
+      this.mirror?.write(threadId, c);
+    }
+    return connections.length;
   }
+
+  /**
+   * Whether this store can contain anything: engine.db is open. Without it the reads answer from
+   * history.db's copy, and a reader that stood in for "no record at all" asks this.
+   */
+  get canContain(): boolean {
+    return this.db !== null;
+  }
+
+  private engine(): Database.Database {
+    if (this.db === null) throw new Error('no containment store');
+    return this.db;
+  }
+}
+
+/** The connections a thread is contained for, from both records, each once. Throws when either cannot be read. */
+function threadConnections(db: Database.Database, mirror: ContainmentMirror | null, threadId: string): ContainedConnection[] {
+  const rows = db.prepare(
+    "SELECT kind, connection_id FROM contained WHERE container_kind = 'thread' AND container_id = ?",
+  ).all(threadId) as { kind: string; connection_id: string }[];
+  const byKey = new Map<string, ContainedConnection>();
+  for (const r of rows) byKey.set(`${r.kind}\0${r.connection_id}`, { kind: r.kind, connectionId: r.connection_id });
+  for (const c of mirror?.connections(threadId) ?? []) byKey.set(`${c.kind}\0${c.connectionId}`, c);
+  return [...byKey.values()];
 }
 
 function insertContained(db: Database.Database, kind: 'thread' | 'bulk_run', id: string, c: ContainedConnection): void {
@@ -133,23 +190,20 @@ function insertContained(db: Database.Database, kind: 'thread' | 'bulk_run', id:
  * not at all. A read that throws aborts that transaction: no run is planned whose containment
  * could not be established.
  */
-export function containRunFromThread(db: Database.Database, threadId: string | undefined, runId: string): void {
+export function containRunFromThread(db: Database.Database, mirror: ContainmentMirror | null, threadId: string | undefined, runId: string): void {
   if (threadId === undefined || threadId === '') return;
-  copyContainment(db, 'thread', threadId, runId);
+  // Both records: a thread whose engine.db row was lost is contained by history.db's copy alone.
+  for (const c of threadConnections(db, mirror, threadId)) insertContained(db, 'bulk_run', runId, c);
 }
 
 /**
  * Contain an undo run for every connection its source run is contained for. Same transaction
- * rule as {@link containRunFromThread}.
+ * rule as {@link containRunFromThread}. Runs are recorded in engine.db only.
  */
 export function containRunFromRun(db: Database.Database, sourceRunId: string, runId: string): void {
-  copyContainment(db, 'bulk_run', sourceRunId, runId);
-}
-
-function copyContainment(db: Database.Database, fromKind: 'thread' | 'bulk_run', fromId: string, runId: string): void {
   const rows = db.prepare(
-    'SELECT kind, connection_id FROM contained WHERE container_kind = ? AND container_id = ?',
-  ).all(fromKind, fromId) as { kind: string; connection_id: string }[];
+    "SELECT kind, connection_id FROM contained WHERE container_kind = 'bulk_run' AND container_id = ?",
+  ).all(sourceRunId) as { kind: string; connection_id: string }[];
   for (const r of rows) insertContained(db, 'bulk_run', runId, { kind: r.kind, connectionId: r.connection_id });
 }
 

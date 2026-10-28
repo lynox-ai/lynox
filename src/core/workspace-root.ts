@@ -1,8 +1,9 @@
-import { accessSync, closeSync, constants, openSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { accessSync, constants, readdirSync, realpathSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { ensureDirSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
+import { mountIdOfDir } from './workspace-fd.js';
 
 /**
  * The workspace root: the directory that holds one directory per context (`<root>/<ctx.id>`,
@@ -227,24 +228,6 @@ function assertUsableDir(path: string, what: string, mode: number): void {
     accessSync(path, mode);
   } catch (err) {
     throw new WorkspaceRootError(`${what} ${path} cannot be used (${errnoOf(err)}).`);
-  }
-}
-
-/** The Linux mount id of a directory, from `/proc/self/fdinfo`; null where that cannot be read. */
-function mountIdOfDir(path: string): number | null {
-  let fd: number;
-  try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY);
-  } catch {
-    return null;
-  }
-  try {
-    const m = /^mnt_id:\s*(\d+)$/m.exec(readFileSync(`/proc/self/fdinfo/${String(fd)}`, 'utf8'));
-    return m ? Number(m[1]) : null;
-  } catch {
-    return null;
-  } finally {
-    closeSync(fd);
   }
 }
 

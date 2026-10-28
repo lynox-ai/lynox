@@ -43,6 +43,11 @@
 		// the last load: the stop route still answers a run that ended since.
 		running?: boolean;
 		stoppable?: boolean;
+		// Paused because the access of someone who set up or changed it ended: it does not run
+		// until it is taken over (`GET /api/triggers`, engine `plan-pause.ts`).
+		paused?: boolean;
+		// Whose ended access paused it, for the owner only (a helper is not told about another's).
+		paused_who?: string[];
 	}
 
 	// How often the list is reloaded while the tab is visible, so a run that started on its
@@ -174,7 +179,10 @@
 				// to answer it — a sentence they never saw while this branch showed one
 				// fixed string and never read the body.
 				const code = await res.json().then((b: { code?: string }) => b.code).catch(() => undefined);
-				addToast(t(code === 'awaiting_answer' ? 'triggers.run_awaiting_answer' : 'triggers.run_already'), 'info');
+				const who = trigger.paused_who?.join(', ') ?? '';
+				addToast(code === 'awaiting_answer' ? t('triggers.run_awaiting_answer')
+					: code === 'paused' ? (who !== '' ? tf('triggers.run_paused', { who }) : t('triggers.run_paused_anon'))
+					: t('triggers.run_already'), 'info');
 				// "Already running" — so show it running, and offer its stop.
 				await loadTriggers(true);
 			} else {
@@ -357,6 +365,9 @@
 								{#if trigger.running === true}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-accent/10 px-1.5 py-0.5 text-accent-text" data-trigger-running>{t('triggers.running')}</span>
 								{/if}
+								{#if trigger.paused === true}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
+								{/if}
 							</div>
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
@@ -369,7 +380,7 @@
 								     past — it is not a next run, so it is not labelled as one. It is said
 								     in the consent block below instead, where it is the thing a person
 								     needs: what confirming starts, and when. -->
-								{#if trigger.next_run_at && trigger.enabled !== 0 && !awaitsConfirmation(trigger)}
+								{#if trigger.next_run_at && trigger.enabled !== 0 && !awaitsConfirmation(trigger) && trigger.paused !== true}
 									<span>{t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
 								{#if trigger.last_run_at}

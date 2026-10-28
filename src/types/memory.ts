@@ -41,7 +41,8 @@ export interface ScopeClassification {
 export interface IMemory {
   load(ns: MemoryNamespace):                                    Promise<string | null>;
   save(ns: MemoryNamespace, content: string):                   Promise<void>;
-  append(ns: MemoryNamespace, text: string):                    Promise<void>;
+  /** `true` when the text was written; `false` when the namespace already held it. `void` from an older implementation proves nothing. */
+  append(ns: MemoryNamespace, text: string):                    Promise<boolean | void>;
   delete(ns: MemoryNamespace, pattern: string):                 Promise<number>;
   update(ns: MemoryNamespace, oldText: string, newText: string): Promise<boolean>;
   render():                                                     string;
@@ -49,7 +50,7 @@ export interface IMemory {
   loadAll():                                                    Promise<void>;
   maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined): Promise<void>;
   // Scope-aware methods (Phase 1)
-  appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef):            Promise<void>;
+  appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef):            Promise<boolean | void>;
   loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef):                            Promise<string | null>;
   deleteScoped(ns: MemoryNamespace, pattern: string, scope: MemoryScopeRef, options?: { exact?: boolean | undefined } | undefined): Promise<number>;
   updateScoped(ns: MemoryNamespace, oldText: string, newText: string, scope: MemoryScopeRef): Promise<boolean>;
@@ -329,6 +330,8 @@ export interface IKnowledgeLayer {
   ): Promise<ContradictionInfo[]>;
 
   deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
+  /** Retire the original of a move at its scope; the ids go with the copy's store, which names the copy their successor. */
+  retireForMove(pattern: string, namespace: MemoryNamespace, scope: MemoryScopeRef): Promise<string[]>;
   eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
   updateMemoryText(
     oldText: string,

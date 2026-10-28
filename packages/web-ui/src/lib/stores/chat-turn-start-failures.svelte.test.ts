@@ -1,5 +1,6 @@
 // Runs in the browser-compile project (vitest.config.ts): Svelte state behaves as in the browser.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { t } from '../i18n.svelte.js';
 
 // A turn whose start fails before the server answers (no connection, a request cut off) is
 // marked failed and reported, the chat is free again, and the queue moves on. Nothing sends such
@@ -313,6 +314,74 @@ describe('sending a failed turn again', () => {
 		expect(runPosts()).toBe(0);
 		expect(calls.some((u) => u.includes('/runs/r1/stream'))).toBe(true);
 		expect(toasts).toEqual([expect.objectContaining({ type: 'info' })]);
+		running.close();
+		await settle();
+	});
+
+	// ux U-032: a run that waits for the user's answer is not "still running"; the way on is to answer.
+	it('names a waiting question, not a running turn, when the run awaits the user', async () => {
+		await failOnce();
+		serve((url) => (url.endsWith('/runs/active')
+			? json({ runs: [{ runId: 'q1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0 }] })
+			: undefined));
+		await expect(store.retryFailedTurn(lastUser()!, 'go')).resolves.toBeUndefined();
+		expect(toasts).toEqual([{ message: t('chat.question_waiting'), type: 'info' }]);
+		await settle();
+		expect(runPosts()).toBe(0);
+	});
+
+	// A scheduled run's question has no stream: the toast says to answer it, and its card is there.
+	it('brings back the card of a scheduled run\'s question and attaches to nothing', async () => {
+		await failOnce();
+		serve((url) => {
+			if (url.endsWith('/runs/active')) {
+				return json({ runs: [{ runId: 'q1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0, attachable: false }] });
+			}
+			if (url.endsWith('/pending-prompt')) {
+				return json({ pending: true, promptType: 'ask_user', promptId: 'q1', question: 'Which file?', options: ['a', 'b'] });
+			}
+			return undefined;
+		});
+		await expect(store.retryFailedTurn(lastUser()!, 'go')).resolves.toBeUndefined();
+		expect(toasts).toEqual([{ message: t('chat.question_waiting'), type: 'info' }]);
+		await settle();
+		expect(runPosts()).toBe(0);
+		expect(calls.some((u) => u.includes('/runs/q1'))).toBe(false);
+		expect(store.getPendingPermission()).toEqual(expect.objectContaining({ promptId: 'q1', question: 'Which file?' }));
+		expect(lastUser()!.failed).toBe(true);
+	});
+
+	// A turn that failed to start asks before it is sent again on reconnect too: attaching to the
+	// question's id would find no stream, and the reconcile after that could replace the failed
+	// message with the server's transcript.
+	it('on reconnect asks first as well: a scheduled run\'s question is not attached to, the failed turn keeps its mark', async () => {
+		await failOnce();
+		serve((url) => {
+			if (url.endsWith('/runs/active')) {
+				return json({ runs: [{ runId: 'q1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0, attachable: false }] });
+			}
+			if (url.endsWith('/run')) return offline();
+			return undefined;
+		});
+		listeners['online']!();
+		await settle();
+		await wait(600);
+		expect(calls.some((u) => u.endsWith('/runs/active'))).toBe(true);
+		expect(calls.some((u) => u.includes('/runs/q1'))).toBe(false);
+		expect(lastUser()!.content).toBe('go');
+		expect(lastUser()!.failed).toBe(true);
+	});
+
+	it('names a running turn when the run is working', async () => {
+		await failOnce();
+		const running = sseStream();
+		serve((url) => {
+			if (url.endsWith('/runs/active')) return json({ runs: [{ runId: 'r1', threadId: 't1', status: 'running', lastPersistedSeq: 0 }] });
+			if (url.includes('/runs/r1/stream')) return sse(running);
+			return undefined;
+		});
+		await expect(store.retryFailedTurn(lastUser()!, 'go')).resolves.toBeUndefined();
+		expect(toasts).toEqual([{ message: t('chat.still_running'), type: 'info' }]);
 		running.close();
 		await settle();
 	});

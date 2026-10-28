@@ -28,6 +28,7 @@ import { setPinnedTransportForTests } from './network-guard.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
 import { flattenPrompt } from './prompt-value.js';
 import type { RequestPrincipal } from './request-principal.js';
+import { testAuditLog } from '../../tests/helpers/audit-log.js';
 
 // Values assembled at runtime: no literal here has the shape of a credential.
 const value = (...parts: string[]): string => parts.join('-');
@@ -116,7 +117,7 @@ function agentFor(store: ApiStore, vault: Vault, opts: { principal?: RequestPrin
     promptUser: opts.promptUser,
     runSignal: opts.runSignal,
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
-    toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+    toolContext: { auditLog: testAuditLog().log, apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   } as never;
 }
 const del = (store: ApiStore, vault: Vault, id: string, opts: Parameters<typeof agentFor>[2] = {}): Promise<string> =>

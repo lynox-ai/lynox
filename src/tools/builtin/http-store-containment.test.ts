@@ -33,6 +33,7 @@ import { ExactClearance } from '../../core/exact-clearance.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
 import { Containment, CONTAINED_WRITE_REFUSAL_AT_SEND as CONTAINED_WRITE_REFUSAL } from '../../core/containment.js';
+import type { ContainmentMirror } from '../../core/history-markers.js';
 import { createToolContext, type ToolContext } from '../../core/tool-context.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
@@ -49,7 +50,6 @@ const ENV = {
   LYNOX_MANAGED_CONTROL_PLANE_URL: 'https://cp.example.invalid',
   LYNOX_MANAGED_INSTANCE_ID: 'inst-1',
   LYNOX_HTTP_SECRET: 's',
-  LYNOX_SHELL_EXEC_SOCKET: '/run/lynox/shell.sock',
 };
 
 function shopProfile(): ApiProfile {
@@ -79,7 +79,7 @@ beforeEach(() => {
   vi.mocked(dns.lookup).mockResolvedValue([{ address: '1.2.3.4', family: 4 }] as never);
   dir = mkdtempSync(join(tmpdir(), 'lynox-funnel-contained-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
-  containment = new Containment(engineDb.getDb());
+  containment = new Containment(engineDb.getDb(), null);
   cpAnswer = () => new Response('{"ok":true}', { status: 200 });
   cpAsked = 0;
   skipSet = [];
@@ -90,6 +90,8 @@ beforeEach(() => {
   const store = new ApiStore();
   store.register(shopProfile());
   ctx = createToolContext({});
+  // The process's shell mode (`shell-isolation.ts`): a store pass needs the sidecar.
+  ctx.shellIsolation = { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as never;
   ctx.apiStore = store;
   ctx.exactClearance = new ExactClearance(
     { url: 'https://cp.example.invalid', instanceId: 'inst-1', secret: 's' },
@@ -218,6 +220,17 @@ describe('no container, or no record, means no request', () => {
     expect(skipSet).toEqual([]);
   });
 
+  it('a copy in history.db that does not hold refuses: the funnel reads both records back', async () => {
+    // A write the copy swallows, as `INSERT OR IGNORE` does with a refused row (cut S3-E).
+    const swallowing = { write: () => undefined, connections: () => [], has: () => false, threadIds: () => new Set() } as unknown as ContainmentMirror;
+    ctx.containment = new Containment(engineDb.getDb(), swallowing);
+    minted.probe = () => false;
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(out).toMatch(/could not record that this chat or run reads the store/);
+    expect(minted.sawContained).toEqual([]);
+    expect(atReceipt).toEqual([]);
+  });
+
   it('a private flag that cannot be written refuses, and the containment row stays', async () => {
     ctx.threadStore = { getThread: () => ({ skip_extraction: 0 }), updateThread: () => { throw new Error('history.db is locked'); } } as never;
     const out = await request(agent({ current: 'thread-1' }));
@@ -261,6 +274,7 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
       exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest,
       containment: over.containment === undefined ? containment : over.containment,
       vaultNameBindings: ctx.vaultNameBindings,
+      shellIsolation: ctx.shellIsolation,
     }, { bulkRunId: runId }, out as never);
     return { attached, pass: out.pass };
   };
@@ -278,7 +292,7 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
     // The rule is read at the run's insert: a contained planning chat passes its containment
     // on, but what the run reads later does not flow back into the chat (its summary and its
     // notifications carry counts and fixed text only), so the chat is not contained by it.
-    const run = new BulkLedger(engineDb).recordDryRun({
+    const run = new BulkLedger(engineDb, null).recordDryRun({
       createdBy: 'chat-clean', planningThread: 'chat-clean', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem',
       targets: [{ key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' }],
     });

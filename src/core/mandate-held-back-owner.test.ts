@@ -27,6 +27,7 @@ import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { setPinnedTransportForTests } from './network-guard.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
 import type { RequestPrincipal } from './request-principal.js';
+import { testAuditLog } from '../../tests/helpers/audit-log.js';
 
 // Values assembled at runtime: no literal here has the shape of a credential.
 const value = (...parts: string[]): string => parts.join('-');
@@ -134,7 +135,7 @@ function call(store: ApiStore, vault: ReturnType<typeof vaultOf>, input: Record<
     secretStore: vault,
     promptUser: asked,
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
-    toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+    toolContext: { auditLog: testAuditLog().log, apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   } as never;
   return apiSetupTool.handler(input as never, agent) as Promise<string>;
 }

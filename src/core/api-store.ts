@@ -415,7 +415,8 @@ export interface OAuthGrantRecord {
   account?: OAuthAccount | undefined;
   /**
    * The scopes the provider says it granted, from the `scope` of the code exchange's answer
-   * (comma- or space-separated there), in its order. A person may narrow a grant on the
+   * (comma- or space-separated there), in its order; a renewal whose answer names scopes replaces
+   * it, one that names none leaves it. A person may narrow a grant on the
    * provider's page, so this is what the token can do, not what the link asked for. Absent when
    * the answer named none: then nothing is known beyond what was asked.
    */

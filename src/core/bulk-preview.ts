@@ -24,19 +24,44 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   BULK_HOST_BUDGET, beforeOverFields, mintBulkContract,
-  type BulkHostBudget, type ExternalClient, type ExternalRead,
+  type BulkHostBudget, type ExternalClient, type ExternalImage, type ExternalRead,
 } from './bulk-external.js';
 import {
-  BULK_LIST_FORMS, SHOPIFY_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl,
+  BULK_LIST_FORMS, SHOPIFY_MEDIA_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
-import { shopifyBeforeImage, shopifyBulkReadEnabled, shopifyListPage } from './bulk-shopify.js';
-import { SHOPIFY_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
+import { checkMarkup, htmlFieldsOfListForm } from './bulk-html.js';
+import { shopifyBulkReadEnabled, shopifyListPage, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
+import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, externalHostOf,
   type BulkHaltReason, type BulkInvalidReason, type BulkLedger, type BulkListRun, type BulkRunForPreview,
 } from './bulk-ledger.js';
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * Whether a planner's after-state for an HTML field of the run's list form adds markup the
+ * owner does not read (PRD shopify-preset §20.2 item 5, M4): the check a verdict's value goes
+ * through, for the after-state that did not come from a verdict. A judged target's after-state
+ * is its template here, every field null, so nothing of it is checked before its verdict.
+ */
+function planMarkupRefusal(
+  after: unknown, before: unknown, list: BulkListRun | null, host: string, startDomains: readonly string[],
+): BulkInvalidReason | null {
+  if (list === null || !isRecord(after)) return null;
+  const was = isRecord(before) ? before : {};
+  for (const field of htmlFieldsOfListForm(list.source.form)) {
+    const value = after[field];
+    if (typeof value !== 'string') continue;
+    const prior = typeof was[field] === 'string' ? was[field] as string : null;
+    if (value === prior) continue;
+    const checked = checkMarkup({ before: prior, after: value, storeHost: host, startDomains });
+    if (!checked.ok) return checked.reason;
+  }
+  return null;
+}
 
 export interface BulkPreviewOutcome {
   /** `pending`: the preview waits (budget, rate limit, a 429, a stopped tick) and is
@@ -154,6 +179,8 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     return { status: 'halted', summary: summarize(ledger, runId, `Bulk preview halted: ${BULK_HALT_REASONS.listFormWithdrawn}.`) };
   }
   const shopify = list !== null && isShopifyListSource(list.source);
+  // The form the run's targets are read and written with: a product's, or an image's.
+  const shopifyForm = list !== null && isShopifyListForm(list.source.form) ? shopifyWriteFormOfList(list.source.form) : null;
   // Asked on every tick, not only when the run was planned: a run planned while the switch
   // was on sends nothing once it is off.
   if (shopify && !(deps.shopifyEnabled ?? shopifyBulkReadEnabled)()) return halt(BULK_HALT_REASONS.shopifyReadOff);
@@ -194,7 +221,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         continue;
       }
       const got = endpoint !== null
-        ? await targetClient.graphqlRead(endpoint, { form: 'shopify_product_read', gid: target.key }, deps.signal)
+        ? await targetClient.graphqlRead(endpoint, shopifyForm === 'shopify_media_alt'
+          ? { form: 'shopify_media_read', gid: target.key }
+          : { form: 'shopify_product_read', gid: target.key }, deps.signal)
         : await targetClient.get(target.key, deps.signal);
       if (got.kind === 'rate_limited') return pending(now() + DEFAULT_RETRY_MS, 'Bulk preview waiting for the API rate limit.');
       if (got.kind === 'retry_after') {
@@ -212,9 +241,17 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     const stop = haltFor(read);
     if (stop !== null) return halt(stop);
     if (read.kind === 'ok' && endpoint !== null) {
-      // A product is read under its GID, and must answer as that product; its fields made flat.
-      const image = shopifyBeforeImage(read.value, target.key);
-      ledger.recordRead(runId, seq, 'invalid' in image ? image : beforeOverFields(image.value, target.after), 'invalid' in image ? undefined : carried());
+      // A product or an image is read under its GID, and must answer as that target; its fields made flat.
+      const image = shopifyTargetBeforeImage(shopifyForm ?? 'shopify_product', read.value, target.key);
+      if ('invalid' in image) {
+        ledger.recordRead(runId, seq, image);
+      } else {
+        // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
+        const after = shopifyPairedAfter(target.after, image.value);
+        const markup = planMarkupRefusal(after, image.value, list, host, ledger.startDomainsOf(runId));
+        if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
+        else ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after);
+      }
       consecutive = 0;
       continue;
     }
@@ -227,7 +264,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         consecutive = 0;
         continue;
       }
-      ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried());
+      const markup = planMarkupRefusal(target.after, read.value, list, host, ledger.startDomainsOf(runId));
+      if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
+      else ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried());
       consecutive = 0;
       continue;
     }
@@ -263,7 +302,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
    */
   async function readList(listRun: BulkListRun, listClient: ExternalClient): Promise<BulkPreviewOutcome> {
     const { source } = listRun;
-    if (source.form === SHOPIFY_LIST_FORM) throw new Error('a Shopify list is read by readShopifyList');
+    if (isShopifyListForm(source.form)) throw new Error('a Shopify list is read by readShopifyList');
     const perPage = BULK_LIST_FORMS[source.form].perPage;
     const maxPages = maxListPages(source.form);
     // Each page may be tried a few times (a 5xx, a 429), never without bound.
@@ -351,8 +390,8 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   }
 
   /**
-   * Read a Shopify store's product list, page by page after the last id recorded, until a short
-   * page ends it. Each page's client is minted for that page's one body; what bounds the read is
+   * Read a Shopify store's product list, or its products' images, page by page after the last
+   * product id recorded, until a short page ends it. Each page's client is minted for that page's one body; what bounds the read is
    * what bounds any list's (pages, requests, bytes, the tick's time). A page out of id order
    * stops the run (`listOrder`), and a full page that moves the cursor nowhere (its ids all
    * unusable) is a list that does not progress. The write contract it closes with grants no
@@ -360,7 +399,8 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
    */
   async function readShopifyList(listRun: BulkListRun): Promise<BulkPreviewOutcome> {
     const { source } = listRun;
-    const maxPages = maxListPages(SHOPIFY_LIST_FORM);
+    const media = source.form === SHOPIFY_MEDIA_LIST_FORM;
+    const maxPages = maxListPages(source.form);
     const maxCalls = maxPages * 3;
     const listDeadline = now() + Math.max(MIN_PREVIEW_BUDGET_MS, (maxPages - listRun.page) * BULK_TARGET_BUDGET_MS);
     let failures = 0;
@@ -378,7 +418,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       const cap = listPageCap(current.bytes);
       if (cap === 0) return halt(BULK_HALT_REASONS.listTooLarge);
       sentBefore += pageClient?.sent ?? 0;
-      pageClient = deps.clientFor(run!, undefined, { phase: 'list', afterId: current.lastId });
+      pageClient = deps.clientFor(run!, undefined, { phase: 'list', afterId: current.lastId, form: media ? 'shopify_media_list' : 'shopify_products_list' });
       if (!pageClient) return halt(BULK_HALT_REASONS.unavailable);
       const thisPage = pageClient;
 
@@ -397,7 +437,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
             ? halt(BULK_HALT_REASONS.listTooLarge)
             : { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
         }
-        const answer = await thisPage.graphqlRead(endpoint!, { form: 'shopify_products_list', afterId: current.lastId }, deps.signal, cap);
+        const answer = await thisPage.graphqlRead(endpoint!, { form: media ? 'shopify_media_list' : 'shopify_products_list', afterId: current.lastId }, deps.signal, cap);
         if (answer.kind === 'rate_limited') {
           ledger.returnListCall(runId);
           return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read waiting for the API rate limit.');
@@ -422,7 +462,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       if (got.kind === 'graphql_error') return halt(BULK_HALT_REASONS.listReadFailed);
       if (got.kind !== 'ok') return halt(BULK_HALT_REASONS.listUnreadable);
       failures = 0;
-      const page = shopifyListPage(got.value, current.lastId);
+      const page = media ? shopifyMediaListPage(got.value, current.lastId) : shopifyListPage(got.value, current.lastId);
       if (page.kind === 'not_a_list') return halt(BULK_HALT_REASONS.listNotAList);
       if (page.kind === 'order') return halt(BULK_HALT_REASONS.listOrder);
       const recorded = ledger.recordListPage(runId, { page: next, items: page.items, bytes: got.bytes ?? 0, lastId: page.lastId });
@@ -430,7 +470,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         if (recorded.reason === 'too_large') return halt(BULK_HALT_REASONS.listTooLarge);
         return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
       }
-      if (page.count < SHOPIFY_LIST_PAGE_SIZE) break;
+      if (page.count < (media ? SHOPIFY_MEDIA_LIST_PAGE_SIZE : SHOPIFY_LIST_PAGE_SIZE)) break;
       // A full page whose ids were all unusable leaves the cursor where it was: the next page
       // would be the same one.
       if (page.lastId === current.lastId) return halt(BULK_HALT_REASONS.listNoProgress);

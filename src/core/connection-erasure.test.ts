@@ -21,6 +21,7 @@ import {
 import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
+import { testAuditLog } from '../../tests/helpers/audit-log.js';
 
 /**
  * The acceptance tests T1–T3 of PRD-SOURCE-CONNECTION revision 8 (R8-8), written before the
@@ -347,7 +348,7 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
       principal,
       sessionCounters: { httpRequests: 0 },
       promptUser: async () => 'Allow',
-      toolContext: { apiStore: store, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, connectionErasureSweep: null, secretReleases: null },
+      toolContext: { auditLog: testAuditLog().log, apiStore: store, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, connectionErasureSweep: null, secretReleases: null },
     }) as never;
     const save = (createdBy?: string): void => {
       expect(store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] }, ...(createdBy ? { created_by: createdBy } : {}) }).ok).toBe(true);
@@ -545,8 +546,10 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     active_runs: 'ids, status and times of runs in flight',
     bulk_cost_days: 'costs per day',
     compaction_events: 'counts and the trigger kind',
+    contained_threads: 'thread ids and the kind and id of the connection they were contained for',
     conversation_grants: 'thread and grant ids',
     deleted_threads: 'ids of deleted chats',
+    exact_marker_mirror: 'a marker and the instance id it was set for',
     metrics: 'computed numbers',
     model_provenance_backfill_marker: 'a marker',
     // Measured at 90d8a5ca: the snapshot (session.ts:1061, batch.ts:95) is the fixed prompt, the
@@ -771,7 +774,7 @@ describe('the migration that adds where an epoch starts', () => {
       const backfill = ledger.mint('shop', 'api', 'backfill');
       db.getDb().prepare("UPDATE connection_grants SET minted_at = '2026-03-01 00:00:05' WHERE grant_id = ?").run(backfill);
       db.getDb().prepare("UPDATE connections SET config_json = json_set(config_json, '$.oauth_grant.grant_id', ?) WHERE id = 'shop'").run(backfill);
-      db.getDb().exec('ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
+      db.getDb().exec('ALTER TABLE bulk_targets DROP COLUMN deselected_at; ALTER TABLE bulk_runs DROP COLUMN start_domains; ALTER TABLE triggers DROP COLUMN paused_at; ALTER TABLE triggers DROP COLUMN paused_due_at; ALTER TABLE triggers DROP COLUMN paused_for; ALTER TABLE triggers DROP COLUMN pause_noticed_at; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
       db.close();
 
       const migrated = new EngineDb(path);

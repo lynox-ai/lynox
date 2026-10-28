@@ -118,7 +118,7 @@ const previewDeps = (c: ExternalClient, extra: Partial<BulkPreviewDeps> = {}): B
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-preview-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
 });
 
 afterEach(() => {
@@ -391,7 +391,7 @@ describe('the preview effect', () => {
     for (const i of [0, 1, 3, 4, 5]) s2.special.set(`/products/${String(i)}`, { status: 503 });
     const restore2 = serve(s2);
     try {
-      ledger = new BulkLedger(engineDb);
+      ledger = new BulkLedger(engineDb, null);
       engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
       const runId = planRun([0, 1, 2, 3, 4, 5].map((i) => ({ target: url(i), after: { price: '1' } })));
       expect((await runBulkPreview(runId, previewDeps(client()))).status).toBe('halted');

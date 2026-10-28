@@ -68,7 +68,9 @@ export function errorTextReduced(
   store: Containment | null | undefined,
   key: { threadId?: string | undefined; bulkRunId?: string | undefined },
 ): boolean {
-  if (store && (key.threadId || key.bulkRunId)) return store.isContained(key);
+  // Without engine.db the store answers from history.db's copy alone, which misses a run and a
+  // thread it never recorded; the process state still holds there, as with no store at all.
+  if (store && (key.threadId || key.bulkRunId)) return store.isContained(key) || (store.canContain === false && exactHeld);
   return exactHeld;
 }
 

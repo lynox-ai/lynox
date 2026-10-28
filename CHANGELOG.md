@@ -4,11 +4,67 @@
 
 ### Upgrade notes
 
+- A control plane may now emit `LYNOX_FEATURE_SHOPIFY_BULK_READ`, per instance
+  and never fleet-wide. It reads or writes a store only where bulk runs are open
+  on that instance.
+  Self-hosted instances are unchanged: the variable is still off by default
+  and turned on in the instance's own configuration.
 - `PUT /api/config` can turn `bulk_runs_enabled` on again where the owner
   holds the config (self-host and the tiers that bring their own model key).
-  This takes back the 2.17.0 note that it answers 403 for that. On the managed
-  pool tiers the field stays locked, as before 2.17.0. Bulk runs still ship
-  off.
+  This takes back the 2.17.0 note that it answers 403 for that. Bulk runs still
+  ship off.
+- On the managed pool tiers (`managed`, `managed_pro`, `managed_max`) bulk runs
+  are opened per instance by the control plane, through the new
+  `LYNOX_FEATURE_BULK_RUNS`. There the owner may write `bulk_runs_enabled`, but
+  it can only turn bulk runs off: `true` opens nothing without the flag. The
+  flag has no effect on any other tier. `GET /api/config` reports the state as
+  `bulk_runs: { on, source, allowed }`.
+- Turning bulk runs on or off now takes effect without a restart. When they
+  go off, a run is stopped as by its owner: one that applies completely or not
+  at all is rolled back if it has a recorded write, any other run halts where it
+  stood and can be resumed once bulk runs are on again. A run writing at that
+  moment is stopped between two targets; one waiting for its next turn is
+  stopped when that turn comes, and so is every waiting run after a restart
+  with bulk runs off.
+- An owner's stop no longer ends an all-or-nothing run that has no recorded
+  write yet: it halts, and can be resumed.
+- In shell sidecar mode the data export leaves the workspace files out and
+  says so: `GET /api/export` carries `workspace.omitted` (`reason: "sidecar"`,
+  `source: "control-plane"`) and then names no `workspace_archive`, and
+  `GET /api/export/workspace` returns an archive holding only the manifest,
+  with the header `X-Lynox-Workspace-Omitted: control-plane`. Without the
+  sidecar nothing changes.
+- In shell sidecar mode lynox no longer walks the shared workspace tree as a
+  whole. `DELETE /api/data` answers 409 `erasure_sidecar_mode` and names the
+  way out. A backup leaves the workspace files out and says so in its result
+  (`workspace: "omitted-sidecar"`), its manifest (`coverage`, covered by the
+  manifest's signature) and the log; restoring a backup that holds workspace
+  files is refused with `workspace_sidecar_mode`, and one made in sidecar mode
+  restores as before. A migration import that carries a workspace is refused
+  at the manifest and, on the decrypted bundles, before the engine shuts down;
+  a migration export leaves the workspace out and names that in its `done`
+  event. Without the sidecar nothing changes.
+- An engine started with `LYNOX_SHELL_EXEC_SOCKET` now also needs the
+  workspace handed over on fd 3, and stops at start, naming the check, when it
+  is missing. It also stops when the socket is set but blank (it used to fail
+  only at the first `bash` call), and when fd 3 is a directory while the socket
+  is unset. The socket is read once at start; nothing reads it later. An engine
+  without the socket, as on self-host, starts as before. In sidecar mode the
+  context's workspace is `/workspace/<context id>`, the path the shell sees;
+  a context that sets another one stops the start. The image has the anchor's
+  mount point, `/run/lynox-anchor/ws`.
+- With `LYNOX_FEATURE_SHOPIFY_BULK_READ` on, an approved bulk run on a Shopify
+  store now writes each product's title and SEO title and description, not
+  its description. The owner confirms the form by name, and the run writes
+  one product as its probe first. Turning the switch off also halts an
+  approved run before its next write; an undo still runs. The switch stays
+  off by default. No schema change.
+- The fast slot of the Fireworks presets `efficient` and `balanced` moves to
+  DeepSeek v4.1 Flash 1017 (`accounts/fireworks/models/deepseek-v4p1-flash-1017`),
+  the provider's update of DeepSeek v4.1 Flash, at the same price ($0.30 input,
+  $0.006 cached, $1.20 output per 1M tokens). It is now the first model of the
+  Fireworks tile in the tier pickers. The older id stays registered and
+  selectable, so a slot that names it keeps it.
 
 ## 2.17.0 — 2026-10-23
 

@@ -70,7 +70,7 @@ let containment: Containment;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'lynox-contained-dispatch-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
-  containment = new Containment(engineDb.getDb());
+  containment = new Containment(engineDb.getDb(), null);
   containment.contain({ kind: 'thread', id: 'chat-shop' }, { kind: 'api', connectionId: 'shop-a' });
 });
 afterEach(() => {

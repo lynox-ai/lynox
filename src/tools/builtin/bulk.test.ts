@@ -68,7 +68,7 @@ beforeEach(() => {
   mkdirSync(ws);
   setTenantWorkspace(ws);
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
   store = new DataStore(join(dir, 'datastore.db'));
 });
 
@@ -455,7 +455,7 @@ describe('bulk_status on an instance without a vault key', () => {
 
     const bareDb = new EngineDb(join(dir, 'unkeyed.db'), '');
     try {
-      const bare = new BulkLedger(bareDb);
+      const bare = new BulkLedger(bareDb, null);
       const a = { toolContext: { bulkLedger: bare, dataStore: store } } as unknown as IAgent;
       expect(await bulkStatusTool.handler({ run_id: plan(bare) }, a)).toMatch(line);
       expect(await bulkStatusTool.handler({}, a)).toMatch(line);

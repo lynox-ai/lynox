@@ -16,6 +16,10 @@ import { deriveBackupKey, deriveManifestKey, encryptFile, decryptBuffer, decrypt
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
 import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
+import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
+import { OMITTED_SIDECAR, restoreRefusal } from './sidecar-refusals.js';
+
+export { OMITTED_SIDECAR };
 import { copyOut, removeStaleStages, stageIn, type StageEntry, type StagedWrite } from './workspace-fd.js';
 
 /**
@@ -81,6 +85,13 @@ export interface BackupManifest {
   files: BackupFileEntry[];
   checksum: string;
   /**
+   * What the backup left out by design. `workspace: 'omitted-sidecar'`: made in shell sidecar
+   * mode, where the engine does not walk the shared workspace tree (`copyWorkspaceOut`). Absent
+   * means everything was covered, as in every backup made before this field existed. Covered by
+   * the MAC like every field but `auth`, so it is authenticated only when `auth` is present.
+   */
+  coverage?: { workspace: typeof OMITTED_SIDECAR } | undefined;
+  /**
    * Proof of origin: an HMAC over the rest of the manifest, keyed from the vault key. Written by
    * every engine that has a vault key, encrypted backup or not. The manifest carries every file's
    * checksum, so the MAC covers the files' bytes as well as their list and the `encrypted` flag.
@@ -123,6 +134,8 @@ export interface BackupResult {
    * `workspace/...`. Empty when everything was copied.
    */
   skipped?: string[] | undefined;
+  /** Set when the workspace was left out because the engine runs in shell sidecar mode; the manifest's `coverage` says the same. */
+  workspace?: typeof OMITTED_SIDECAR | undefined;
 }
 
 export interface RestoreResult {
@@ -131,9 +144,18 @@ export interface RestoreResult {
   files_restored: number;
   duration_ms: number;
   error?: string | undefined;
-  /** Set when the restore was refused because the backup's origin is not shown; confirm with `allowUnverified`. */
-  code?: 'unverified_backup' | undefined;
+  /**
+   * `unverified_backup`: refused because the backup's origin is not shown; confirm with `allowUnverified`.
+   * `workspace_sidecar_mode`: refused because the backup holds workspace files and the engine runs in shell sidecar mode.
+   */
+  code?: 'unverified_backup' | 'workspace_sidecar_mode' | undefined;
   provenance?: BackupProvenance | undefined;
+  /**
+   * Entries the restore did not write: a name outside the inventory, one renamed since the backup
+   * was made, or a name ending in `.restore-staging` (which `createBackup` does copy when a file
+   * in a backed-up directory carries it). Archive paths. Empty when every entry was restored.
+   */
+  skipped?: string[] | undefined;
 }
 
 export interface BackupConfig {
@@ -160,6 +182,38 @@ export interface BackupConfig {
 const SQLITE_DBS = BACKUP_SQLITE_DBS;
 const COPY_DIRS = BACKUP_COPY_DIRS;
 const COPY_FILES = BACKUP_COPY_FILES;
+
+const STAGING_SUFFIX = '.restore-staging';
+
+/**
+ * Whether a restore writes this entry: only where `createBackup` writes, a database or file of the
+ * inventory under its own name, or a path inside one of its directories. A path that is plain but
+ * lands anywhere else (`http-secret`, `vault.key`, `plugins/…`) is what the inventory keeps OUT of
+ * a backup, and a manifest anyone with write access to the backup can extend would otherwise bring
+ * it back. Exact case on purpose: on a filesystem that folds case, `Workspace/x` would reach the
+ * workspace by name, past its root's anchor. A name ending in the staging suffix would collide with
+ * the temp of its neighbour.
+ */
+function isBackedUpEntryPath(path: string): boolean {
+  if (path.endsWith(STAGING_SUFFIX)) return false;
+  const slash = path.indexOf('/');
+  if (slash === -1) return SQLITE_DBS.includes(path) || COPY_FILES.includes(path);
+  return COPY_DIRS.includes(path.slice(0, slash));
+}
+
+/**
+ * The first path the manifest names twice. Both copies pass the check of the archive, and the second
+ * staging deletes the first one's temp, so the swap failed halfway, after earlier files were already
+ * replaced. Compared as strings.
+ */
+function duplicateEntry(paths: readonly string[]): string | null {
+  const seen = new Set<string>();
+  for (const path of paths) {
+    if (seen.has(path)) return path;
+    seen.add(path);
+  }
+  return null;
+}
 
 export class BackupManager {
   private readonly lynoxDir: string;
@@ -253,6 +307,7 @@ export class BackupManager {
     const tmpDir = join(this.backupDir, `${timestamp}.tmp`);
     const files: BackupFileEntry[] = [];
     const skipped: string[] = [];
+    let workspace: typeof OMITTED_SIDECAR | undefined;
 
     try {
       mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
@@ -270,7 +325,9 @@ export class BackupManager {
       // 2. Memory + Sessions — recursive copy
       for (const dirName of COPY_DIRS) {
         if (dirName === WORKSPACE) {
-          skipped.push(...this.copyWorkspaceOut(tmpDir, files));
+          const copied = this.copyWorkspaceOut(tmpDir, files);
+          if (copied === OMITTED_SIDECAR) workspace = OMITTED_SIDECAR;
+          else skipped.push(...copied);
           continue;
         }
         const srcDir = join(this.lynoxDir, dirName);
@@ -337,6 +394,7 @@ export class BackupManager {
         encrypted: this.encrypt,
         files,
         checksum,
+        ...(workspace !== undefined ? { coverage: { workspace } } : {}),
       };
       // Truthy, not `!== null`, as in the constructor: an empty string is not key material.
       if (this.vaultKey) {
@@ -452,7 +510,14 @@ export class BackupManager {
       if (skipped.length > 0) {
         process.stderr.write(`[lynox:backup] ${String(skipped.length)} workspace entries are not in this backup (links, special files or names that are not UTF-8): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}\n`);
       }
-      return { success: true, path: finalDir, manifest, duration_ms: Date.now() - start, ...(skipped.length > 0 ? { skipped } : {}) };
+      if (workspace !== undefined) {
+        process.stderr.write('[lynox:backup] The workspace files are not in this backup: in shell sidecar mode lynox does not read the shared workspace tree. Back them up where the workspace is managed.\n');
+      }
+      return {
+        success: true, path: finalDir, manifest, duration_ms: Date.now() - start,
+        ...(skipped.length > 0 ? { skipped } : {}),
+        ...(workspace !== undefined ? { workspace } : {}),
+      };
     } catch (err: unknown) {
       // Cleanup temp dir on failure
       try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
@@ -505,6 +570,16 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path outside the backup — refusing to restore: ${unrestorable}` };
     }
 
+    // Written only where `isBackedUpEntryPath` allows. The rest is named in the result, not refused: a
+    // backup holding a name the inventory has since renamed must stay restorable.
+    const isWritten = (entry: BackupFileEntry): boolean => entry.type !== 'directory' && isBackedUpEntryPath(entry.path);
+    const written = manifest.files.filter(isWritten);
+    const skipped = manifest.files.filter(entry => entry.type !== 'directory' && !isWritten(entry)).map(entry => entry.path);
+    const duplicate = duplicateEntry(written.map(entry => entry.path));
+    if (duplicate !== null) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path twice — refusing to restore: ${JSON.stringify(duplicate)}` };
+    }
+
     // The manifest decides what is written and whether it is decrypted, and anyone who can write
     // into the backup (or the Drive folder it came from) can write the manifest. Without a MAC
     // under this vault key, the restore needs the caller's explicit word.
@@ -514,6 +589,17 @@ export class BackupManager {
         success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start,
         code: 'unverified_backup', provenance,
         error: `${UNVERIFIED_REASON[provenance]} Restore it only if you know where it came from, and confirm the restore without proof of origin.`,
+      };
+    }
+
+    // In shell sidecar mode nothing is staged into the shared tree (PRD D7, walker 4). Decided by
+    // CONTENT, on the manifest whose origin was just checked: a backup made in this mode holds no
+    // workspace entries (walker 1) and stays restorable. Entries outside the manifest are never
+    // staged, so a backup cannot hide workspace files from this check.
+    if (shellIsolation().kind === 'sidecar' && written.some(entry => entry.path.startsWith(WORKSPACE_PREFIX))) {
+      return {
+        success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start,
+        code: 'workspace_sidecar_mode', error: restoreRefusal(),
       };
     }
 
@@ -587,8 +673,7 @@ export class BackupManager {
       let workspaceStaged: { staged: StagedWrite; release: () => void } | null = null;
       try {
         const workspaceEntries: BackupFileEntry[] = [];
-        for (const entry of manifest.files) {
-          if (entry.type === 'directory') continue;
+        for (const entry of written) {
           // The workspace set is staged through the root's anchor below, never by name: the
           // root may live outside the data dir.
           if (entry.path.startsWith(WORKSPACE_PREFIX)) { workspaceEntries.push(entry); continue; }
@@ -647,6 +732,7 @@ export class BackupManager {
         pre_restore_backup_path: safetyPath,
         files_restored: filesRestored,
         duration_ms: Date.now() - start,
+        skipped,
       };
     } catch (err: unknown) {
       return {
@@ -838,8 +924,14 @@ export class BackupManager {
    * Copy the workspace root into `<tmpDir>/workspace` through its anchor, appending the manifest
    * entries. Returns what was not copied (archive paths). A mount below the root or a file that
    * cannot be read fails the backup: it must not be silently incomplete.
+   *
+   * In shell sidecar mode it walks nothing and returns `OMITTED_SIDECAR` (PRD D7, walker 1): the
+   * tree is shared with the pool uids, and the walk throws on the first directory one of them
+   * closed, which would fail the data dir's backup with it. It never throws for the mode, so the
+   * pre-update backup and the worker-loop tasks go on with the rest; the caller records it.
    */
-  private copyWorkspaceOut(tmpDir: string, files: BackupFileEntry[]): string[] {
+  private copyWorkspaceOut(tmpDir: string, files: BackupFileEntry[], isolation: ShellIsolation = shellIsolation()): string[] | typeof OMITTED_SIDECAR {
+    if (isolation.kind === 'sidecar') return OMITTED_SIDECAR;
     const lease = leaseWorkspaceFor(this.lynoxDir);
     if (lease === null) return [];
     try {
@@ -864,7 +956,10 @@ export class BackupManager {
    * Phase 1 of restoring the workspace set: every file is written as a temp beside its target
    * inside the root, nothing replaced yet. Stale temps of a crashed restore are removed first.
    */
-  private stageWorkspaceIn(backupPath: string, entries: readonly BackupFileEntry[], key: Buffer | null): { staged: StagedWrite; release: () => void } {
+  private stageWorkspaceIn(backupPath: string, entries: readonly BackupFileEntry[], key: Buffer | null, isolation: ShellIsolation = shellIsolation()): { staged: StagedWrite; release: () => void } {
+    // Defence in depth behind the check in `_restoreBackup`: in sidecar mode nothing is staged
+    // into the shared tree. Thrown in the staging phase, so no live file is touched.
+    if (isolation.kind === 'sidecar') throw new Error(restoreRefusal());
     const lease = leaseWorkspaceFor(this.lynoxDir, { create: true });
     if (lease === null) throw new Error('the workspace root could not be made');
     const anchor = lease.access.anchor;

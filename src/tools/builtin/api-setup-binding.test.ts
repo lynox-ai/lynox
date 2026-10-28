@@ -19,6 +19,7 @@ import { flattenPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 import { apiSetupTool } from './api-setup.js';
 import { httpRequestTool } from './http.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 /**
  * Where a vault secret may go (`vault-name-bindings.ts`), end to end through the tools that send
@@ -128,6 +129,8 @@ function agentOf(store: ApiStore, opts: { promptUser?: Ask; principal?: unknown;
     },
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       apiStore: store, vaultNameBindings: bindings(), secretReleases: opts.releases ?? null, mandateEnds: opts.ends ?? null,
       userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity,
     },
@@ -583,5 +586,98 @@ describe('W-Normal: what was allowed keeps working', () => {
     await get(store, 'https://owner.example/v1/items');
     expect(sent.map((s) => new URL(s.url).pathname)).toEqual(['/oauth/token', '/v1/items']);
     expect(sent[1]!.auth).toMatch(/^Bearer at-/);
+  });
+});
+
+describe('W-901D-switch: a profile switched from oauth2 by a save signs in with its own key under the old token name', () => {
+  const allowAll: Ask = async () => 'Allow';
+  const slot = accessTokenKey('owner');
+  const asBearer = (): ApiProfile => ({ ...owner(), ...extra, auth: { type: 'bearer', vault_keys: [slot] } } as ApiProfile);
+
+  it('the save empties the minted token and drops it from written; the user\'s own key then reaches the base', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name)).toContain(slot);
+    const minted = vault[slot]!;
+
+    const upd = String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: asBearer() } as never, agentOf(store, { promptUser: allowAll })));
+    expect(upd).not.toMatch(/^Error/);
+    expect(vault[slot]).toBeUndefined();
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name) ?? []).not.toContain(slot);
+
+    const mine = value('mine');
+    vault[slot] = mine;
+    sent = [];
+    await get(store, 'https://owner.example/v1/items');
+    expect(sent.map((s) => s.auth)).toEqual([`Bearer ${mine}`]);
+    expect(carried(minted)).toBe(false);
+  });
+
+  it('a name the exchange wrote under output_secret_name is emptied but stays on the record: only the derived names leave it', async () => {
+    const store = boot(owner());
+    expect(String(await apiSetupTool.handler({ action: 'fetch_token', id: 'owner', output_secret_name: 'OWNER_OUT' } as never, agentOf(store)))).not.toMatch(/^Error/);
+    expect(vault['OWNER_OUT']).toBeDefined();
+    const bearer = { ...owner(), ...extra, auth: { type: 'bearer', vault_keys: ['MY_OWN_KEY'] } } as ApiProfile;
+    vault['MY_OWN_KEY'] = value('mine');
+    const upd = String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: bearer } as never, agentOf(store, { promptUser: allowAll })));
+    expect(upd).not.toMatch(/^Error/);
+    expect(vault['OWNER_OUT']).toBeUndefined();
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name)).toEqual(['OWNER_OUT']);
+  });
+
+  it('a save that stays oauth2 and moves the base empties the token but keeps the record as it was', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    const moved = { ...owner(), ...extra, base_url: 'https://api2.owner.example/v1', custom_endpoint_ack: ack('owner.example', 'api2.owner.example') } as ApiProfile;
+    const upd = String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: moved } as never, agentOf(store, { promptUser: allowAll })));
+    expect(upd).not.toMatch(/^Error/);
+    expect(vault[slot]).toBeUndefined();
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name)).toContain(slot);
+  });
+
+  it('a hand edit that then moves the base takes the key nowhere: it is bound to the base the owner allowed', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    expect(String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: asBearer() } as never, agentOf(store, { promptUser: allowAll })))).not.toMatch(/^Error/);
+    const mine = value('mine');
+    vault[slot] = mine;
+    // The profile file edited by hand and read at the next boot: the binding stays where the owner put it.
+    const edited = { ...store.storedProfile('owner')!, base_url: 'https://evil.example/v1', custom_endpoint_ack: ack('evil.example') } as ApiProfile;
+    const reread = new ApiStore();
+    expect(reread.register(edited)).toBe(true);
+    sent = [];
+    await get(reread, 'https://evil.example/v1/items');
+    expect(carried(mine)).toBe(false);
+  });
+
+  it('a hand edit that switches the type without a save keeps the minted token held, and it goes nowhere', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    const minted = vault[slot]!;
+    const edited = { ...store.storedProfile('owner')!, ...extra, auth: { type: 'bearer', vault_keys: [slot] } } as ApiProfile;
+    const reread = new ApiStore();
+    expect(reread.register(edited)).toBe(true);
+    sent = [];
+    const out = await get(reread, 'https://owner.example/v1/items');
+    expect(carried(minted)).toBe(false);
+    // The refusal names the cause and a way out, not "the profile that holds the connection".
+    // The whole sentence: a run with no user in it is told to stop, not to try the way out.
+    expect(out).toContain('but that vault name holds an OAuth access token that an earlier sign-in of profile "owner" wrote, and that profile no longer signs in with OAuth. Such a token goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, store your own key under another vault name and name that one in auth.vault_keys with api_setup action="update", or switch the profile back to oauth2 and connect again. If no user is in this conversation, stop here; the owner fixes this in a chat.');
+  });
+
+  it('an oauth block whose client secret was removed by hand keeps the minted token, and it goes nowhere, said so', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    const minted = vault[slot]!;
+    const stored = store.storedProfile('owner')!;
+    const { client_secret_key: _gone, ...oauth } = stored.auth!.oauth!;
+    const edited = { ...stored, auth: { ...stored.auth!, oauth } } as ApiProfile;
+    const reread = new ApiStore();
+    expect(reread.register(edited)).toBe(true);
+    sent = [];
+    const out = await get(reread, 'https://owner.example/v1/items');
+    expect(carried(minted)).toBe(false);
+    // The whole sentence: the model is told to ask for a secret it no longer has, never to make one up.
+    expect(out).toContain('but that vault name holds an OAuth access token of profile "owner", and its OAuth settings name no client secret. A token goes only where the client secret it was minted with may go, so with none named it goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, name the client secret again (auth.oauth.client_secret_key) with api_setup action="update"; if the client secret is no longer stored, ask the user to provide it, then get a new token with action="fetch_token" or by connecting again. If no user is in this conversation, stop here; the owner fixes this in a chat.');
   });
 });

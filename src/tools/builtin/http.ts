@@ -1,5 +1,7 @@
 import type { ToolEntry } from '../../types/index.js';
+import { DEFAULT_MAX_TOOL_RESULT_CHARS } from '../../types/index.js';
 import { urlScanForms } from '../../core/url-scan-forms.js';
+import { shellIsolation } from '../../core/shell-isolation.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
 import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
@@ -13,7 +15,7 @@ import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, pr
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
-import { requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
+import { clientlessSlot, requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
 import { outsideMemberNotes, refuseMemberConnection } from '../../core/member-connection-notes.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -85,7 +87,6 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('too many redirects')) return 'The server redirected too many times. The URL may be incorrect.';
   if (technical.includes('hourly')) return 'Hourly request limit reached. Try again later.';
   if (technical.includes('daily')) return 'Daily request limit reached. Try again tomorrow.';
-  if (technical.includes('session')) return 'Request limit reached for this session.';
   return technical;
 }
 
@@ -382,8 +383,11 @@ const DEFAULT_LARGE_RESPONSE_SHAPE: ResponseShape = {
 // a few KB, so byte-truncating a large JSON to invalid mid-cut text BEFORE it
 // can be parsed + shaped would defeat the cap on exactly the heavy API pulls
 // (e.g. DataForSEO bulk keyword data, routinely >100KB) that motivate it. Only
-// applied when the user hasn't pinned an explicit `http_response_limit`.
-const JSON_SHAPE_READ_CEILING = 2_000_000;
+// applied when the user hasn't pinned an explicit `http_response_limit`. A
+// keywords_for_keywords answer on broad seed terms came to 2.2MB, past the
+// earlier 2MB, and then nothing was shaped at all; a JSON past this ceiling
+// still comes back raw, with a note in front.
+const JSON_SHAPE_READ_CEILING = 8_000_000;
 
 function shouldRewriteToGet(status: number, method: string): boolean {
   if (status === 303) return method !== 'GET' && method !== 'HEAD';
@@ -788,6 +792,31 @@ export function httpStoppedMessage(method: string, answeredStatus?: string, carr
  * shares with sub-agents.
  */
 export const MAX_REQUESTS_PER_SESSION = 100;
+
+/**
+ * What the model reads once this conversation or run has used its `http_request` budget (ux
+ * U-010). It names the two ways on for the person, both of which a person takes, never the
+ * model: a bulk run, which the owner approves before it writes, and a new chat, which starts
+ * without this one's context. Task, workflow and pipeline are not named, not even as a ban: a
+ * runner step gets fresh counters, so naming them would teach the model a way around the cap.
+ * Without a person in the conversation (a run, a read before a write) the sentence for the
+ * user has no reader, so it is conditional.
+ */
+export function requestLimitMessage(): string {
+  return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence: for many changes of the same kind they can plan a bulk run, which they approve before it writes; for the rest of the work they can start a new chat.`;
+}
+
+/**
+ * The refusal for a spent `http_request` budget: the model reads {@link requestLimitMessage},
+ * the ledger keeps the short technical `reason`. Not through `friendlyBlockMessage`: no rule
+ * there matches this reason, so the model would read the technical text, which names no way on.
+ */
+function blockedRequestLimit(reason: string): never {
+  throw new ToolSoftFailure(requestLimitMessage(), reason);
+}
+
+/** A read before a write that the spent budget stopped; refused as the budget, not as the read. */
+class RequestLimitReached extends WriteContextRefused {}
 
 // Cross-session rate limits live on ToolContext (rateLimitProvider,
 // hourlyRateLimit, dailyRateLimit). Engine-init configures them via
@@ -1881,7 +1910,7 @@ const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|sessio
  * B, B3 steps 1–5 and 6a), in that order; `null` when all hold. Reads no vault and asks nobody.
  *
  *  1. a provisioned managed instance (the control-plane env is there);
- *  2. the shell-exec sidecar (`LYNOX_SHELL_EXEC_SOCKET`), which contains what a store returns;
+ *  2. the shell-exec sidecar (`ToolContext.shellIsolation`), which contains what a store returns;
  *  3. exactly one profile on the host, of the store preset, whose own parameter derives exactly
  *     this host (`presetStoreHost`);
  *  4. no credential in the query;
@@ -1890,7 +1919,7 @@ const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|sessio
  */
 function storePassPrecheck(url: string, headers: Record<string, string>, toolContext: ToolContext | undefined): string | null {
   if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return SHOPIFY_UNAVAILABLE;
-  if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return SHOPIFY_UNAVAILABLE;
+  if (toolContext.shellIsolation.kind !== 'sidecar') return SHOPIFY_UNAVAILABLE;
   const apiStore = toolContext.apiStore;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return SHOPIFY_UNAVAILABLE; }
@@ -1947,13 +1976,17 @@ async function mintStorePassFor(
     return { refusal: 'a request to a Shopify store is sent only for a chat or a bulk run, and this one runs for neither, so nothing was sent. Make the request from a chat.' };
   }
   const containment = toolContext.containment;
-  if (!containment) return { refusal: CONTAINMENT_UNWRITABLE };
+  // Without engine.db there is a containment reader (history.db's copy) but no clearance, and
+  // `contain` would throw: refused here, before anything is asked.
+  if (!containment || !toolContext.exactClearance) return { refusal: CONTAINMENT_UNWRITABLE };
   const threads = target.kind === 'thread' ? toolContext.threadStore : null;
   if (target.kind === 'thread' && !threads) return { refusal: CONTAINMENT_UNWRITABLE };
-  const clearance = await toolContext.exactClearance!.ensure();
+  const clearance = await toolContext.exactClearance.ensure();
   if (!clearance.ok) return { refusal: SHOPIFY_UNAVAILABLE };
   try {
     containment.contain(target, connection);
+    // Read back in both records: `INSERT OR IGNORE` swallows a refused row as well.
+    if (!containment.holds(target, connection)) throw new Error('the containment row did not hold');
     if (threads) {
       // Read back, not trusted: an UPDATE of a thread row that does not exist (the session's
       // insert is best-effort) changes nothing and throws nothing.
@@ -2003,7 +2036,7 @@ export async function storeExchangePassFor(
 ): Promise<StorePass | undefined> {
   if (!shopifyExchangeSwitchOn()) return undefined;
   if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return undefined;
-  if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return undefined;
+  if (toolContext.shellIsolation.kind !== 'sidecar') return undefined;
   let parsed: URL;
   try { parsed = new URL(tokenUrl); } catch { return undefined; }
   const origin = storeOriginOf(parsed);
@@ -2170,7 +2203,7 @@ async function attachEngineManagedAuth(
     if (memberRefusal !== null) return { refusal: memberRefusal };
     // Before the revoked-grant check and the renewal: a request this refuses reads nothing.
     const offGrant = slotOffGrant([accessTokenKey(profile.id)]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
     // token and send the model to fetch_token, which cannot help. Only while the
@@ -2359,7 +2392,7 @@ async function attachEngineManagedAuth(
       return { refusal: protectedKeyRefusal(profile.id, protectedKeys.map((k) => shapedForLog(k, VAULT_NAME_SHAPE, 80)).join(' + ')) };
     }
     const offGrant = slotOffGrant([userKey, passKey]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     const unbound = unboundOf([userKey, passKey]);
     if (unbound !== undefined) return { refusal: `Error: ${unboundNameText(unbound, profile.id)}` };
     const user = secretStore.resolve(userKey);
@@ -2407,7 +2440,7 @@ async function attachEngineManagedAuth(
       return { refusal: protectedKeyRefusal(profile.id, shapedForLog(tokenKey, VAULT_NAME_SHAPE, 80)) };
     }
     const offGrant = slotOffGrant([tokenKey]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     // Refused, not hinted: a name the profile may not send here must not go by a `secret:`
     // reference either, and the hint below would invite one.
     // Over plain http nothing is attached anyway, and the hint below says so.
@@ -2724,13 +2757,69 @@ function modelOwnedAuthHint(a: {
  * token of an OAuth connection whose grant does not point at this URL, a refresh token, or a
  * name more than one profile claims.
  */
-function slotReachRefusal(profileId: string, name: string, hostname: string): string {
+function slotReachRefusal(profileId: string, name: string, hostname: string, clientless: ReturnType<typeof clientlessSlot> = null): string {
+  const shown = shapedForLog(name, DERIVED_NAME_SHAPE, 80);
+  // A token whose owner has no client to bind it to goes nowhere at all (901 D): the general text
+  // below would send the model looking for "the profile that holds the connection", which is this one.
+  if (clientless?.why === 'no_client_secret') {
+    return `Error: api_profile "${profileId}" would send ${shown} to ${hostname}, but that vault name holds an OAuth access token of profile "${clientless.owner}", and its OAuth settings name no client secret. A token goes only where the client secret it was minted with may go, so with none named it goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, name the client secret again (auth.oauth.client_secret_key) with api_setup action="update"; if the client secret is no longer stored, ask the user to provide it, then get a new token with action="fetch_token" or by connecting again. If no user is in this conversation, stop here; the owner fixes this in a chat.`;
+  }
+  if (clientless?.why === 'not_oauth2') {
+    return `Error: api_profile "${profileId}" would send ${shown} to ${hostname}, but that vault name holds an OAuth access token that an earlier sign-in of profile "${clientless.owner}" wrote, and that profile no longer signs in with OAuth. Such a token goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, store your own key under another vault name and name that one in auth.vault_keys with api_setup action="update", or switch the profile back to oauth2 and connect again. If no user is in this conversation, stop here; the owner fixes this in a chat.`;
+  }
   return `Error: api_profile "${profileId}" would send ${shapedForLog(name, DERIVED_NAME_SHAPE, 80)} to ${hostname}, but that vault name holds an OAuth token that goes only to where its own connection points (an access token to its base_url, a refresh token only to its token endpoint), or more than one profile claims it. Nothing was sent. Give this profile a credential of its own with api_setup action="update", or send the request through the profile that holds the connection.`;
 }
 
 /** Shared wording — the same refusal for basic and bearer/header. */
 function protectedKeyRefusal(profileId: string, keys: string): string {
   return `Error: api_profile "${profileId}" names protected secret(s) ${keys} as its credentials. Those belong to the platform or hold the tenant's own provider key, and are never attached to an outbound request. Use a credential the user supplied for this API.`;
+}
+
+/**
+ * The note in front of a response read only up to its limit. A JSON cut there is not parsed, so
+ * neither the profile's `response_shape` nor the size cap applies, and a shape written now would
+ * not either: the way on is a request that returns less, not the same request again.
+ */
+function readLimitNote(limitKB: number, isJson: boolean, pinnedLimit: boolean): string {
+  if (!isJson) {
+    return `[truncated — response exceeded ${limitKB}KB limit; below is only its start. ` +
+      `For large responses prefer \`spawn_agent\` with role='collector' ` +
+      `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
+      `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
+  }
+  const limit = pinnedLimit
+    ? `the ${limitKB}KB read limit that "http_response_limit" sets (without that setting a JSON response is read up to ${Math.round(JSON_SHAPE_READ_CEILING / 1024)}KB and shaped)`
+    : `the ${limitKB}KB read limit`;
+  return `[truncated — this JSON response exceeded ${limit}, so it was not parsed: no response_shape and no size cap applied, and below is its raw start, cut mid-JSON. ` +
+    `A response_shape does not help while the response is cut. Do not send the same request again: make it return less (fewer seed terms, a limit or page parameter), ` +
+    `or use \`spawn_agent\` with role='collector' to work it in an isolated context.]`;
+}
+
+/**
+ * The note in front of a result the agent cuts to its start (`max_tool_result_chars`). A
+ * `response_shape` is offered only for a body that was parsed: it applies to nothing else.
+ */
+function resultCutNote(cut: number, parsedJson: boolean): string {
+  return `[note: this result is over ${cut} characters, the most that reaches you; anything past that, notes after the data included, is cut. ` +
+    'To get less, make the request return less (fewer items, a limit or page parameter), ' +
+    (parsedJson
+      ? 'or give this API\'s profile a response_shape that keeps fewer items or fields.]'
+      : 'or use `spawn_agent` with role=\'collector\' to work it in an isolated context.]');
+}
+
+/**
+ * The result with its engine notes in front: the write note first, where the run report reads
+ * it, then the size notes. Whether the agent cuts it is measured on the whole of it, the notes
+ * after the data included, and only a result already over the cut gets the note: a note added
+ * to one just under it would itself push the end off. The result scan may still put a warning
+ * in front before the agent measures; a result within that warning's length of the cut is then
+ * cut without this note, under the agent's own.
+ */
+function withFrontNotes(result: string, writeNote: string | undefined, sizeNotes: readonly string[], cut: number, parsedJson: boolean): string {
+  const compose = (notes: readonly string[]): string =>
+    `${writeNote === undefined ? '' : `${writeNote}\n\n`}${notes.length > 0 ? `${notes.join('\n')}\n\n` : ''}${result}`;
+  const whole = compose(sizeNotes);
+  return whole.length > cut ? compose([...sizeNotes, resultCutNote(cut, parsedJson)]) : whole;
 }
 
 /**
@@ -2884,7 +2973,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
     // Check session rate limit before any validation — only increment on actual request attempt
     if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-      blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+      blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
     // Per-API rate limiting + profile enforcement (from API Store)
@@ -3523,7 +3612,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // The readings count against the session's request budget, as the write itself will:
         // checked again here, before the person is asked about a write that could not be sent.
         if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-          blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+          blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
         }
         // The headers' names leave the box with the question; their values stay on it, like the body's.
         const headersBlock = 'lines' in askedHeaders && askedHeaders.lines.length > 0
@@ -3798,9 +3887,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const htmlExtractEnabled = agent.toolContext?.userConfig?.http_html_extract ?? true;
       let htmlExtracted: HtmlExtractResult | undefined;
 
+      let parsedJson = false;
       if (isJson && !truncated) {
         try {
           const json = JSON.parse(text) as unknown;
+          parsedJson = true;
           // Apply per-API response shaping if the profile defines one.
           const shapedBody = await maybeShapeJson(json, input.url, toolContext);
           body = shapedBody;
@@ -3831,20 +3922,18 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           `Set "http_html_extract": false in config if you need the raw markup.]`;
       }
 
+      // Notes about size go in FRONT of the data, outside the wrap: a result longer than
+      // `max_tool_result_chars` is cut to its start by the agent, and a note at its end goes with it.
+      const sizeNotes: string[] = [];
       if (truncated) {
         const limitKB = Math.round(readLimit / 1024);
-        // Active delegation hint: a half-cut response in the main context is
-        // expensive (eats the cap, may still miss the field the agent needs).
-        // A collector sub-agent can fetch + summarize in an isolated context
-        // and return only the relevant slice — that's the cheaper path. After a
-        // successful extraction that bloat is already gone, so the hint would be
-        // wrong advice — say only that the page was longer than what we read.
-        body += htmlExtracted
-          ? `\n[note: the page exceeded the ${limitKB}KB read limit — the extraction above covers its first ${limitKB}KB.]`
-          : `\n... [truncated — response exceeded ${limitKB}KB limit. ` +
-            `For large responses prefer \`spawn_agent\` with role='collector' ` +
-            `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
-            `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
+        // After a successful extraction the bloat is already gone and the text is capped far
+        // below the cut, so the note stays after it and says only that the page was longer.
+        if (htmlExtracted) {
+          body += `\n[note: the page exceeded the ${limitKB}KB read limit — the extraction above covers its first ${limitKB}KB.]`;
+        } else {
+          sizeNotes.push(readLimitNote(limitKB, isJson, explicitLimit !== undefined));
+        }
       }
 
       const rawResult = `HTTP ${status}\n${respHeaders.join('\n')}\n\n${body}`;
@@ -3852,12 +3941,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
       let wrapped = wrapUntrustedData(rawResult, 'http_response');
       // In front, where the run report collects it (`collectWriteNotes`): engine text, not data.
+      // It is put in front of the size notes at the return, so the report still finds it first.
+      let writeNote: string | undefined;
       if (writeFollowedAsRead !== undefined) {
         const own = sent ?? { method: method.trim().toUpperCase(), url: input.url };
         // A write carried on from the other origin is told after the change of origin, where it went.
         const carried = own.again?.carried === true ? own.again : undefined;
         const sentPhrase = sentWritePhrase(carried === undefined ? own : { ...own, again: undefined });
-        wrapped = `${writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, carried)}\n\n${wrapped}`;
+        writeNote = writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, carried);
       }
 
       // ⚠ A repair that nobody can see is a defect that stops being reported. This call's result
@@ -3996,7 +4087,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
       // Append profile warning if this was an unregistered API
       const profileWarning = (input as unknown as Record<string, unknown>)['_profileWarning'];
-      return profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
+      const result = profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
+      const resultCut = agent.toolContext?.userConfig?.max_tool_result_chars ?? DEFAULT_MAX_TOOL_RESULT_CHARS;
+      return withFrontNotes(result, writeNote, sizeNotes, resultCut, parsedJson);
     } catch (err: unknown) {
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
       // the REASON as its message, and `blockedFriendly`'s reason starts with
@@ -4070,7 +4163,7 @@ async function describeConnectedWrite(
   const read: PresetRead = async (path) => {
     // Each reading is a request of this session, charged against the same budget.
     const counters = deps.agent.sessionCounters;
-    if (counters.httpRequests >= MAX_REQUESTS_PER_SESSION) throw new WriteContextRefused(`the session's HTTP request limit (${MAX_REQUESTS_PER_SESSION}) is reached`);
+    if (counters.httpRequests >= MAX_REQUESTS_PER_SESSION) throw new RequestLimitReached(`the session's HTTP request limit (${MAX_REQUESTS_PER_SESSION}) is reached`);
     counters.httpRequests++;
     const readUrl = `${origin}${path}`;
     const limited = deps.toolContext?.apiStore?.checkRateLimit(new URL(readUrl).hostname);
@@ -4114,6 +4207,7 @@ async function describeConnectedWrite(
   try {
     return await context.describe(method, new URL(url), body, read);
   } catch (err) {
+    if (err instanceof RequestLimitReached) blockedRequestLimit(err.message);
     const why = err instanceof WriteContextRefused ? err.message : 'its reading failed';
     blockedVerbatim(`Blocked: ${shownAs} to ${host} was not asked: lynox could not show what it changes in the ${presetId} account (${why}). Nothing was sent.`);
   }
@@ -4156,6 +4250,9 @@ export async function attachStoredCredential(
     containment?: ToolContext['containment'] | undefined;
     /** Where each vault secret may go; without it no secret of a profile's own is attached. */
     vaultNameBindings: ToolContext['vaultNameBindings'];
+    /** The process's shell mode; a store gets a pass only in sidecar mode. Defaults to the
+     *  process's own object (`shell-isolation.ts`), never to "local". */
+    shellIsolation?: ToolContext['shellIsolation'] | undefined;
   },
   /** The bulk run this request is for. The agent below is built by hand and has no thread, so
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
@@ -4171,9 +4268,10 @@ export async function attachStoredCredential(
       exactClearance: stores.exactClearance ?? null, storeBindingDigest: stores.storeBindingDigest ?? null,
       containment: stores.containment ?? null,
       vaultNameBindings: stores.vaultNameBindings,
+      shellIsolation: stores.shellIsolation ?? shellIsolation(),
       // A bulk run is not a chat: nothing of a thread is written for it.
       threadStore: null,
-    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings'> as ToolContext,
+    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings' | 'shellIsolation'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
     write,
     { bulkRunId: container.bulkRunId },

@@ -16,6 +16,7 @@ import { channels } from './observability.js';
 import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 import { canSupersede, provenanceRank } from './provenance.js';
+import { sourceDeletedSql, sourceKeptSql } from './relation-source.js';
 
 /** Row cap for an `exhaustive` similarity scan (dedup). 50× the old dedup floor
  *  of 100 so an older duplicate past the newest window is caught, but still a
@@ -935,6 +936,31 @@ export class AgentMemoryDb {
   }
 
   /**
+   * {@link deactivateMemoriesByPattern} limited to one scope — the original of a move,
+   * whose flat line and KG twin share that scope. Returns the deactivated ids.
+   */
+  deactivateMemoriesByPatternInScope(pattern: string, namespace: string, scopeType: string, scopeId: string): string[] {
+    const like = `%${escapeLike(pattern)}%`;
+    const rows = this.db.prepare(
+      "UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ? AND scope_type = ? AND scope_id = ? RETURNING id",
+    ).all(new Date().toISOString(), like, namespace, scopeType, scopeId) as { id: string }[];
+    return rows.map(r => r.id);
+  }
+
+  /**
+   * Name `successorId` as the successor of memories retired without one — they were
+   * moved, and the fact lives on in the successor. Only rows still retired without a
+   * successor are touched, never the successor itself. Returns the rows changed.
+   */
+  markReplaced(ids: string[], successorId: string): number {
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => '?').join(',');
+    return this.db.prepare(
+      `UPDATE memories SET superseded_by = ?, updated_at = ? WHERE id IN (${placeholders}) AND is_active = 0 AND superseded_by IS NULL AND id <> ?`,
+    ).run(successorId, new Date().toISOString(), ...ids, successorId).changes;
+  }
+
+  /**
    * GDPR Art. 17, tenant-wide: empty every table of this file except the migration
    * ledger (`MEMORY_KEPT_ON_ERASURE`). The one caller is `DELETE /api/data`.
    *
@@ -1298,17 +1324,31 @@ export class AgentMemoryDb {
 
   // ── Graph Queries ─────────────────────────────────────────────
 
+  /** Relations touching an entity, newest first. A relation whose source memory was deleted is left out (`relation-source.ts`). */
   getEntityRelations(entityId: string, limit = 50): RelationRow[] {
     const safeLimit = Math.max(1, Math.min(limit, 200));
     return this.db.prepare(`
-      SELECT * FROM relations
-      WHERE from_entity_id = ? OR to_entity_id = ?
-      ORDER BY created_at DESC LIMIT ?
+      SELECT r.* FROM relations r
+      WHERE (r.from_entity_id = ? OR r.to_entity_id = ?) AND ${sourceKeptSql('r')}
+      ORDER BY r.created_at DESC LIMIT ?
     `).all(entityId, entityId, safeLimit) as RelationRow[];
   }
 
+  /**
+   * The same relations for the data export, those of a deleted source included and
+   * marked: what is still stored belongs in the export until the reap removes it.
+   */
+  getEntityRelationsForExport(entityId: string, limit = 50): Array<RelationRow & { source_deleted: 0 | 1 }> {
+    const safeLimit = Math.max(1, Math.min(limit, 200));
+    return this.db.prepare(`
+      SELECT r.*, CASE WHEN ${sourceDeletedSql('r')} THEN 1 ELSE 0 END AS source_deleted FROM relations r
+      WHERE r.from_entity_id = ? OR r.to_entity_id = ?
+      ORDER BY r.created_at DESC LIMIT ?
+    `).all(entityId, entityId, safeLimit) as Array<RelationRow & { source_deleted: 0 | 1 }>;
+  }
+
   getRelationCount(): number {
-    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM relations').get() as { cnt: number };
+    const row = this.db.prepare(`SELECT COUNT(*) as cnt FROM relations r WHERE ${sourceKeptSql('r')}`).get() as { cnt: number };
     return row.cnt;
   }
 
@@ -1322,7 +1362,10 @@ export class AgentMemoryDb {
   listAllRelations(opts?: { limit?: number | undefined; offset?: number | undefined }): RelationRow[] {
     const limit = Math.max(1, opts?.limit ?? 500);
     const offset = Math.max(0, opts?.offset ?? 0);
-    return this.db.prepare('SELECT * FROM relations ORDER BY id LIMIT ? OFFSET ?').all(limit, offset) as RelationRow[];
+    // A relation of a deleted source is not carried: the new store keeps no source
+    // for a backfilled edge, so it could not be hidden there afterwards.
+    return this.db.prepare(`SELECT r.* FROM relations r WHERE ${sourceKeptSql('r')} ORDER BY r.id LIMIT ? OFFSET ?`)
+      .all(limit, offset) as RelationRow[];
   }
 
   /**
@@ -1395,6 +1438,7 @@ export class AgentMemoryDb {
       JOIN relations r ON (mn.entity_id = r.from_entity_id OR mn.entity_id = r.to_entity_id)
       WHERE (r.from_entity_id = ? OR r.to_entity_id = ?)
         AND mn.entity_id != ?
+        AND ${sourceKeptSql('r')}
         ${activeClause}
       ORDER BY m.created_at DESC LIMIT ?
     `).all(entityId, entityId, entityId, safeLimit) as MemoryRow[];
@@ -1408,7 +1452,7 @@ export class AgentMemoryDb {
         SELECT to_entity_id, 1,
                from_entity_id || ',' || to_entity_id,
                id
-        FROM relations WHERE from_entity_id = ?
+        FROM relations r0 WHERE r0.from_entity_id = ? AND ${sourceKeptSql('r0')}
         UNION ALL
         SELECT r.to_entity_id, p.depth + 1,
                p.path_ids || ',' || r.to_entity_id,
@@ -1416,6 +1460,7 @@ export class AgentMemoryDb {
         FROM relations r JOIN path p ON r.from_entity_id = p.entity_id
         WHERE p.depth < ?
           AND instr(p.path_ids, r.to_entity_id) = 0
+          AND ${sourceKeptSql('r')}
       )
       SELECT relation_ids FROM path
       WHERE entity_id = ?
@@ -1435,12 +1480,12 @@ export class AgentMemoryDb {
     const entityRows = this.db.prepare(`
       WITH RECURSIVE neighbors(entity_id, depth) AS (
         SELECT CASE WHEN from_entity_id = ? THEN to_entity_id ELSE from_entity_id END, 1
-        FROM relations WHERE from_entity_id = ? OR to_entity_id = ?
+        FROM relations r0 WHERE (r0.from_entity_id = ? OR r0.to_entity_id = ?) AND ${sourceKeptSql('r0')}
         UNION
         SELECT CASE WHEN r.from_entity_id = n.entity_id THEN r.to_entity_id ELSE r.from_entity_id END,
                n.depth + 1
         FROM relations r JOIN neighbors n ON (r.from_entity_id = n.entity_id OR r.to_entity_id = n.entity_id)
-        WHERE n.depth < ?
+        WHERE n.depth < ? AND ${sourceKeptSql('r')}
       )
       SELECT DISTINCT e.* FROM entities e
       JOIN neighbors n ON e.id = n.entity_id

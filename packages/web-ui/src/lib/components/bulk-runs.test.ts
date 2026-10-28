@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
+	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkInvalidText, bulkSkippedHead,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -142,6 +143,28 @@ describe('bulk run helpers', () => {
 // The note on an unchecked kind of change and its confirmation are approved customer texts:
 // German word for word, English the engine's own constants. Compared as whole
 // lines of the table — i18n is a Svelte module and cannot be imported here.
+describe('a Shopify run\'s field names and note', () => {
+	it('names the four fields of a store readably, and any other field or host by its own name', () => {
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'seo_title')).toBe('bulk.field.shopify.seo_title');
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'descriptionHtml')).toBe('bulk.field.shopify.descriptionHtml');
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'vendor')).toBeNull();
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'constructor')).toBeNull();
+		expect(bulkFieldLabelKey('shop.example.com', 'title')).toBeNull();
+		expect(bulkFieldLabelKey(null, 'title')).toBeNull();
+	});
+
+	it('joins readable names, and shows a field of its own name with its hidden characters', () => {
+		const label = (key: string): string => `<${key}>`;
+		expect(bulkFieldNamesText('acme.myshopify.com', ['title', 'seo_title'], label)).toBe('<bulk.field.shopify.title>, <bulk.field.shopify.seo_title>');
+		expect(bulkFieldNamesText('shop.example.com', ['ti\u200btle'], label)).toBe('ti⟨U+200B⟩tle');
+	});
+
+	it('knows a store host exactly, not by a suffix', () => {
+		expect(bulkIsShopifyHost('acme.myshopify.com')).toBe(true);
+		for (const host of ['myshopify.com', 'a.b.myshopify.com', 'acme.myshopify.com.evil.io', 'admin.shopify.com', null]) expect(bulkIsShopifyHost(host), String(host)).toBe(false);
+	});
+});
+
 describe('the approved unchecked-change texts', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const line = (key: string): string => {
@@ -161,6 +184,23 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.start.list_note')).toBe(entry('bulk.start.list_note',
 			'Die Liste wurde Seite für Seite gelesen, nicht auf einen Schlag. Kam beim Anbieter während des Lesens etwas dazu, fiel etwas weg oder wurde umsortiert, kann es bei den Zielen fehlen oder nur einmal stehen, obwohl es sich verschoben hat.',
 			BULK_LIST_NOTE));
+	});
+
+	it('holds the Shopify note and the readable field names (ux 2026-10-26)', () => {
+		expect(line('bulk.approve.shopify_visible')).toBe(entry('bulk.approve.shopify_visible',
+			'Bei veröffentlichten Produkten sind Titel und SEO-Texte sofort in deinem Shop sichtbar, sobald lynox sie schreibt.',
+			'For published products, titles and SEO texts are visible in your shop as soon as lynox writes them.'));
+		for (const [key, de, en] of [['title', 'Titel', 'Title'], ['descriptionHtml', 'Beschreibung', 'Description'], ['seo_title', 'SEO-Titel', 'SEO title'], ['seo_description', 'SEO-Beschreibung', 'SEO description']] as const) {
+			expect(line(`bulk.field.shopify.${key}`)).toBe(entry(`bulk.field.shopify.${key}`, de, en));
+		}
+	});
+
+	it('holds the reason beside a disabled approve, tied to the button for a screen reader (ux 2026-10-26)', () => {
+		expect(line('bulk.approve.confirm_first')).toBe(entry('bulk.approve.confirm_first',
+			'Setz zuerst das Häkchen oben, dann kannst du freigeben.', 'Tick the box above first, then you can approve.'));
+		const page = readFileSync(fileURLToPath(new URL('./BulkRunDetail.svelte', import.meta.url)), 'utf8');
+		expect(page).toContain(`aria-describedby={skipped.nothing ? 'bulk-approve-nothing' : run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}`);
+		expect(page).toContain(`<p id="bulk-approve-confirm-first" `);
 	});
 
 	it('holds the confirmation', () => {
@@ -194,6 +234,10 @@ describe('the bulk pages show supplied text only through bulkVisibleText', () =>
 				const before = expr.slice(0, hit.index);
 				const after = expr.slice(hit.index! + hit[0].length);
 				if (/(bulkVisibleText|bulkValueText)\($/.test(before)) continue;
+				// Its second argument goes through bulkVisibleText inside (tested below).
+				if (/bulkFieldNamesText\(host, $/.test(before)) continue;
+				// A reason is a lookup key; one without a sentence is shown through bulkVisibleText (tested).
+				if (/bulkInvalidText\($/.test(before)) continue;
 				// A key of an object literal names a placeholder; it shows nothing.
 				if (/^\s*:(?!:)/.test(after) && /[{,]\s*$/.test(before)) continue;
 				// A test of the value, not a display of it: a length or a comparison.
@@ -286,7 +330,7 @@ describe('going on from a run that halted', () => {
 	it('places every halt the engine names', () => {
 		const STARTS = ['awaitingStart', 'listed'];
 		const ENDS_THE_RUN = ['superseded', 'mandateEnded'];
-		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'runUnrecorded'];
+		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff'];
 		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkRestartKind({ ...base, haltKey });
@@ -385,7 +429,7 @@ describe('going on from a run that halted', () => {
 		probeConfirmed: true, changes: { update: 1000, create: 0, delete: 0, unchanged: 0, invalid: 0 },
 		maxTargets: 1000, applied: 550, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, ...o,
 	});
-	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures'];
+	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff'];
 
 	it('sorts the halts of a write run into writing on, writing on under a higher maximum, and no way on', () => {
 		for (const k of WRITE_ON) expect(bulkResumeKind(w(k)), k).toBe('write');
@@ -452,6 +496,12 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('blocked'), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
 		expect(bulkResumeText(w('blocked'), null, DE)?.before).toBe(bulkHaltText(at('blocked'), true, DE)?.before);
 		expect(bulkResumeText(w('timeBudget'), true, DE)).toMatchObject({ before: null, soFar: null, allows: null });
+		// Shopify's own switch: who turns it back on depends on who runs the instance.
+		expect(bulkResumeText(w('shopifyWriteOff'), true, DE)).toMatchObject({
+			cause: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kannst du ihn hier fortsetzen.',
+			before: 'Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
+		});
+		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
 		// No way on past a changed run: no promise of what writing on keeps.
 		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, kept: null, soFar: null, allows: null });
 	});
@@ -639,5 +689,77 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 		const i18n = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
 		expect(i18n).toContain("'bulk.head.stopped': { de: 'Gestoppt', en: 'Stopped' }");
 		expect(i18n).toContain("'bulk.stopped_suffix': { de: '· gestoppt', en: '· stopped' }");
+	});
+});
+
+describe('what the preview says about a target lynox leaves out', () => {
+	const HERE = fileURLToPath(new URL('.', import.meta.url));
+	// Every reason core can record, read from its union: a reason added there without a decision
+	// here turns this red, instead of reaching a Shopify owner as a bare code.
+	const ledger = readFileSync(`${HERE}../../../../../src/core/bulk-ledger.ts`, 'utf8');
+	const code = ledger.slice(ledger.indexOf('export type BulkInvalidReason =')).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+	const union = /^export type BulkInvalidReason =([^;]*);/.exec(code)![1]!;
+	const reasons = [...union.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!);
+	// Reasons no Shopify run can record: a workspace file, a data store row, an effect field
+	// (WooCommerce and bexio only).
+	const NOT_SHOPIFY = new Set(['path_outside_workspace', 'unreadable', 'target_too_large', 'after_not_text', 'not_text',
+		'unknown_column', 'subject_column', 'bad_value', 'bad_key', 'effect_field',
+		// The HTML check's reasons: a Shopify run writes no HTML field until descriptions are
+		// written (descriptionHtml is refused at planning), so these reach WooCommerce only, by code.
+		'element_not_allowed', 'attribute_not_allowed', 'content_changed', 'comment_added', 'new_img', 'new_link_domain',
+		'url_scheme', 'url_control_char', 'not_canonical']);
+	const i18nSource = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
+
+	it('has a sentence of its own for every reason a Shopify run can record, in both languages', () => {
+		expect(reasons.length).toBeGreaterThan(25);
+		for (const reason of reasons.filter((r) => !NOT_SHOPIFY.has(r))) {
+			const key = bulkInvalidText(reason, true, false, i18n);
+			expect(key, reason).toMatch(/^bulk\.invalid\.[a-z_]+$/);
+			expect(key, reason).not.toBe('bulk.invalid.other');
+			expect(i18nSource, reason).toMatch(new RegExp(`'${key.replace(/\./g, '\\.')}': \\{ de: .+, en: .+ \\}`));
+		}
+	});
+	it('names the reason by its code with the next step on a run that is not Shopify', () => {
+		expect(bulkInvalidText('not_found', false, true, i18n)).toBe('bulk.invalid.other');
+		const table = { 'bulk.invalid.other': 'skip ({code})' };
+		const own: BulkI18n = { t: (k) => table[k as keyof typeof table] ?? k, tf: (k, v) => (table[k as keyof typeof table] ?? k).replace('{code}', v['code']!) };
+		expect(bulkInvalidText('read_failed', false, true, own)).toBe('skip (read_failed)');
+		// A code is the engine's, but it is shown as text: through bulkVisibleText, as every supplied value.
+		const odd = 'read\u202efailed';
+		expect(bulkVisibleText(odd)).not.toBe(odd);
+		expect(bulkInvalidText(odd, true, true, own)).toBe(`skip (${bulkVisibleText(odd)})`);
+	});
+	it('adds the way to support on a managed instance only, and an unknown one reads as managed', () => {
+		expect(bulkInvalidText('read_failed', true, true, i18n)).toBe('bulk.invalid.read_failed bulk.invalid.persists_support');
+		expect(bulkInvalidText('read_failed', true, null, i18n)).toBe('bulk.invalid.read_failed bulk.invalid.persists_support');
+		expect(bulkInvalidText('read_failed', true, false, i18n)).toBe('bulk.invalid.read_failed');
+		expect(bulkInvalidText('field_not_scalar', true, true, i18n)).toBe('bulk.invalid.shape bulk.invalid.many_support');
+		expect(bulkInvalidText('not_found', true, true, i18n)).toBe('bulk.invalid.not_found');
+	});
+
+	const counts = (o: Partial<Record<'update' | 'create' | 'delete' | 'unchanged' | 'invalid', number>>, deselected = 0, judge: { tier: string; unjudged: number } | null = null) =>
+		({ changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0, ...o }, deselected, judge });
+	const vars = (k: string, v: Record<string, string>): string => `${k}${Object.entries(v).map(([a, b]) => ` ${a}=${b}`).join('')}`;
+	const echo: BulkI18n = { t: (k) => k, tf: vars };
+
+	it('counts what lynox leaves out and the owner took out in one line, and leaves the approval open', () => {
+		expect(bulkSkippedHead(counts({ update: 3, invalid: 2 }), true, echo)).toEqual({ text: 'bulk.skipped.products n=2', nothing: false });
+		expect(bulkSkippedHead(counts({ update: 3, invalid: 2 }, 1), true, echo)).toEqual({ text: 'bulk.skipped.both_products n=2 m=1', nothing: false });
+		expect(bulkSkippedHead(counts({ update: 3 }, 1), false, echo)).toEqual({ text: 'bulk.skipped.taken_out m=1', nothing: false });
+		expect(bulkSkippedHead(counts({ update: 3, unchanged: 4 }), true, echo)).toEqual({ text: null, nothing: false });
+		expect(bulkSkippedHead(counts({ create: 1, invalid: 1 }), false, echo).text).toBe('bulk.skipped.targets n=1');
+	});
+	it('says on a judged run that planning again judges all of it again, only where something was left out', () => {
+		const judge = { tier: 'standard', unjudged: 0 };
+		expect(bulkSkippedHead(counts({ update: 1, invalid: 1 }, 0, judge), true, echo).text).toBe('bulk.skipped.products n=1 bulk.skipped.judged');
+		expect(bulkSkippedHead(counts({ update: 1 }, 2, judge), true, echo).text).toBe('bulk.skipped.taken_out m=2');
+		// Nothing left out, nothing to write: no planning again is suggested, so no cost of it is named.
+		expect(bulkSkippedHead(counts({ unchanged: 2 }, 0, judge), true, echo).text).toBe('bulk.nothing.products');
+	});
+	it('shuts the approval when nothing is left to write, and says "all" only where every target is left out', () => {
+		expect(bulkSkippedHead(counts({ invalid: 5 }), true, echo)).toEqual({ text: 'bulk.nothing.all_skipped_products n=5', nothing: true });
+		expect(bulkSkippedHead(counts({ invalid: 5, unchanged: 1 }), true, echo)).toEqual({ text: 'bulk.nothing.products', nothing: true });
+		expect(bulkSkippedHead(counts({ unchanged: 2 }, 3), false, echo)).toEqual({ text: 'bulk.nothing.targets', nothing: true });
+		expect(bulkSkippedHead(counts({ delete: 1 }), false, echo).nothing).toBe(false);
 	});
 });

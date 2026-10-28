@@ -127,8 +127,8 @@ describe('withShopifyRead — what it mints from', () => {
     }
     expect(() => withShopifyRead(base, HOST, { phase: 'list', afterId: Number.MAX_SAFE_INTEGER + 2 })).toThrow(/safe cursor/);
     expect(() => withShopifyRead(base, HOST, { phase: 'list', afterId: -1 })).toThrow(/safe cursor/);
-    expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: [P1, 'gid://shopify/Collection/1'] })).toThrow(/product GIDs/);
-    expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: ['gid://shopify/Product/99999999999999999'] })).toThrow(/product GIDs/);
+    expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: [P1, 'gid://shopify/Collection/1'] })).toThrow(/product or image GIDs/);
+    expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: ['gid://shopify/Product/99999999999999999'] })).toThrow(/product or image GIDs/);
   });
 
   it('only on the contract\'s one host', () => {
@@ -139,13 +139,33 @@ describe('withShopifyRead — what it mints from', () => {
   });
 });
 
+/**
+ * Whether every spread in `doc` is an inline type condition on its one root field: the whole
+ * document is `query(…) { root(…) { ... on Type { fields } } }`. A fragment definition and a
+ * named spread (`...Name`) are refused: they bring a second, separately written selection into a
+ * document that is compared byte for byte (PRD shopify-preset §16.3 item 3).
+ */
+function spreadsAllowed(doc: string): boolean {
+  if (!doc.includes('...')) return true;
+  if (/\bfragment\b/.test(doc)) return false;
+  return /^query\([^(){}]*\) \{ \w+\([^(){}]*\) \{ \.\.\. on [A-Z]\w* \{ [\w ]+ \} \} \}$/.test(doc);
+}
+
 describe('the read documents', () => {
   it('each holds one query operation, no fragment, and no word that writes', () => {
     for (const doc of Object.values(SHOPIFY_READ_DOCUMENTS)) {
       expect(doc.startsWith('query(')).toBe(true);
       expect(doc.match(/\bquery\s*\(/g)).toHaveLength(1);
       expect(doc).not.toMatch(/\b(?:mutation|subscription|fragment)\b/i);
-      expect(doc).not.toContain('...');
+      expect(spreadsAllowed(doc), doc).toBe(true);
     }
+  });
+
+  it('allows a spread only as an inline type condition on the one root field', () => {
+    expect(spreadsAllowed('query($id: ID!) { node(id: $id) { ... on MediaImage { id alt } } }')).toBe(true);
+    expect(spreadsAllowed('query($id: ID!) { node(id: $id) { ...Img } } fragment Img on MediaImage { id alt }')).toBe(false);
+    expect(spreadsAllowed('query($id: ID!) { node(id: $id) { ...Img } }')).toBe(false);
+    expect(spreadsAllowed('query($id: ID!) { node(id: $id) { id ... on MediaImage { alt } } }')).toBe(false);
+    expect(spreadsAllowed('query($id: ID!) { product(id: $id) { media(first: 1) { nodes { ... on MediaImage { id } } } } }')).toBe(false);
   });
 });
