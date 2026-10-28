@@ -190,9 +190,10 @@ export const ADDRESS_PLACEHOLDER = '<address>';
  * Whether a segment's text, escapes undone once, holds an address: an `@`, or a `%40` that a
  * server undoing escapes twice would read as one. The whole segment is replaced then, never only
  * the part before or after the sign, so neither the person nor the domain is left in the row.
+ * The full-width and the small at sign count too: a reader of the row takes them for one.
  */
 function holdsAddress(text: string): boolean {
-  return text.includes('@') || /%40/i.test(text);
+  return /[@\uFF20\uFE6B]/.test(text) || /%40/i.test(text);
 }
 
 /** What stands in a row where a path segment was a search text. */
@@ -227,10 +228,11 @@ function decodePieces(s: string): Piece[] {
 
 /**
  * A value with each `/`-separated part that holds an address replaced whole. For a name a writer
- * puts into a row that may be an address (a mail folder, a calendar's label).
+ * puts into a row that may be an address (a mail folder, a calendar's label). A part is read as
+ * sent and with its escapes undone once, as a path segment is, so `%2540` is an address too.
  */
 export const withoutAddresses = (value: string): string =>
-  value.split('/').map((part) => (holdsAddress(part) ? ADDRESS_PLACEHOLDER : part)).join('/');
+  value.split('/').map((part) => (holdsAddress(part) || holdsAddress(textOf(decodePieces(part))) ? ADDRESS_PLACEHOLDER : part)).join('/');
 
 /**
  * What a read row names as its target: the request's own path on this instance, plus the query

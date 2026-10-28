@@ -381,6 +381,13 @@ describe('what a tool call reads outside the instance (ToolEntry.outwardRead)', 
     expect(target('google_sheets', { action: 'read', spreadsheet_id: 's1', range: "'max@kunde.example'!A1:B2" })).toBe('read spreadsheet=s1 range=<address>');
   });
 
+  it('takes an at sign written another way for one: escaped twice, full-width, small', () => {
+    expect(target('google_docs', { action: 'read', document_id: 'max%2540kunde.example' })).toBe('read document=<address>');
+    expect(target('google_docs', { action: 'read', document_id: 'max\uFF20kunde.example' })).toBe('read document=<address>');
+    expect(target('google_docs', { action: 'read', document_id: 'max\uFE6Bkunde.example' })).toBe('read document=<address>');
+    expect(target('google_docs', { action: 'read', document_id: '1a%2Fb' }), 'an escape without an at sign is not an address').toBe('read document=1a%252Fb');
+  });
+
   it('names a subscribed calendar by its label, never its address', () => {
     expect(target('calendar_read', { calendar: 'work' })).toBe('calendar=work');
     expect(target('calendar_read', {})).toBe('calendar=all');
