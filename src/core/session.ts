@@ -1428,7 +1428,9 @@ export class Session {
               total_cost_usd: rollupCost,
             });
           }
-          if (startMessageCount === 0) {
+          // An internal run (a summary in a session of its own) has no user words to title, and
+          // its prompt is another thread's history: it would go to a second model call.
+          if (startMessageCount === 0 && !agent.isInternalRun) {
             // Derive the title from the user's OWN words, not the engine framing:
             // a context-opened chat (💬 mail-reply / fix / workflow-edit) carries a
             // `[Loaded …]\n[/loaded-context]\n\n` preamble on its first message that
