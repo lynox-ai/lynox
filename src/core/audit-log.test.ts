@@ -260,6 +260,8 @@ describe('requestPathTarget: no secret shape survives into a read row', () => {
     const t = (p: string, ids: Array<[string, string]> = []): string => requestPathTarget(asParsed(p), ids);
     expect(t('/api/inbox/contacts/max%40firma.example')).toBe('/api/inbox/contacts/<address>');
     expect(t('/api/inbox/contacts/max@firma.example')).toBe('/api/inbox/contacts/<address>');
+    expect(t('/api/inbox/contacts/max%EF%BC%A0firma.example'), 'a full-width at sign, escaped').toBe('/api/inbox/contacts/<address>');
+    expect(t('/api/inbox/contacts/max%25252540firma.example'), 'escaped four times').toBe('/api/inbox/contacts/<address>');
     expect(t('/api/inbox/contacts/max%2540firma.example')).toBe('/api/inbox/contacts/<address>');
     // Behind an encoded slash it is still the same segment, and the whole of it goes.
     expect(t('/api/files/kunden%2Fmax%40firma.example')).toBe('/api/files/<address>');
@@ -371,6 +373,24 @@ describe('what a tool call reads outside the instance (ToolEntry.outwardRead)', 
     expect(target('google_sheets', { action: 'read', spreadsheet_id: 's1', range: 'A1:B2' })).toBe('read spreadsheet=s1 range=A1:B2');
     expect(target('google_sheets', { action: 'list' })).toBe('list');
     expect(target('google_sheets', { action: 'write' })).toBeNull();
+  });
+
+  it('writes a Google id or range that holds an address as the placeholder: the row is written before Google answers', () => {
+    expect(target('google_docs', { action: 'read', document_id: 'max@kunde.example' })).toBe('read document=<address>');
+    expect(target('google_drive', { action: 'read', file_id: 'max@kunde.example' })).toBe('read file=<address>');
+    expect(target('google_drive', { action: 'list', folder_id: 'max@kunde.example' })).toBe('list folder=<address>');
+    expect(target('google_sheets', { action: 'read', spreadsheet_id: 'max@kunde.example', range: 'A1:B2' })).toBe('read spreadsheet=<address> range=A1:B2');
+    expect(target('google_sheets', { action: 'read', spreadsheet_id: 's1', range: "'max@kunde.example'!A1:B2" })).toBe('read spreadsheet=s1 range=<address>');
+  });
+
+  it('takes an at sign written another way for one: escaped twice, full-width, small', () => {
+    expect(target('google_docs', { action: 'read', document_id: 'max%2540kunde.example' })).toBe('read document=<address>');
+    expect(target('google_docs', { action: 'read', document_id: 'max\uFF20kunde.example' })).toBe('read document=<address>');
+    expect(target('google_docs', { action: 'read', document_id: 'max\uFE6Bkunde.example' })).toBe('read document=<address>');
+    expect(target('google_docs', { action: 'read', document_id: '1a%2Fb' }), 'an escape without an at sign is not an address').toBe('read document=1a%252Fb');
+    expect(target('google_docs', { action: 'read', document_id: 'max%252540kunde.example' }), 'escaped three times').toBe('read document=<address>');
+    expect(target('google_docs', { action: 'read', document_id: 'max%25252540kunde.example' }), 'escaped four times, the most it undoes').toBe('read document=<address>');
+    expect(target('google_docs', { action: 'read', document_id: 'max%25EF%25BC%25A0kunde.example' }), 'full-width, escaped twice').toBe('read document=<address>');
   });
 
   it('names a subscribed calendar by its label, never its address', () => {

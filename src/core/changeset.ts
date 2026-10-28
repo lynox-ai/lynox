@@ -1,5 +1,5 @@
 import {
-  mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, realpathSync,
+  mkdtempSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, realpathSync,
   openSync, closeSync, writeSync, constants, fstatSync, ftruncateSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,6 +20,29 @@ function heldBase(): ReturnType<typeof workspaceBase> {
   } catch {
     return null;
   }
+}
+
+/** A tracked file over {@link FILE_TOOL_READ_CAP_BYTES}, with its size: its bytes are not read. */
+type OverCap = { overCap: number };
+
+/** A size as the review shows it: bytes below 1 MB, MB to one decimal above. `up` rounds up,
+ *  so a file one byte over the cap does not read as the cap itself. */
+const shownSize = (bytes: number, up = false): string => {
+  if (bytes < 1024 * 1024) return `${bytes} bytes`;
+  const tenths = (bytes / (1024 * 1024)) * 10;
+  return `${(up ? Math.ceil(tenths) : Math.round(tenths)) / 10} MB`;
+};
+
+/** The review's line for a file over the cap, in place of a diff: what is known, and what the
+ *  person deciding without the content can do. `before` is null for a file the run added,
+ *  undefined when the original could not be read (then nothing was saved to restore). */
+function notComparedNote(before: number | null | undefined, now: number): string {
+  const was = before === null
+    ? 'It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it unless it was changed or replaced after the run wrote it.'
+    : before === undefined
+      ? 'Its size before the run is not known. Look at the file yourself before you keep the change; Rollback cannot restore it, because the original could not be read.'
+      : `Before the run it was ${shownSize(before)}. Look at the file yourself before you keep the change; Rollback restores the original.`;
+  return `(Content not compared: the file is ${shownSize(now, true)} now, larger than the ${shownSize(FILE_TOOL_READ_CAP_BYTES)} the review reads. ${was})`;
 }
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -161,16 +184,38 @@ export class ChangesetManager {
   }
 
   /** The bytes of a tracked file, read only while it is still inside a root and
-   *  not through a symlink at the file itself. Null when it is neither, or unreadable. */
-  private _readTracked(abs: string): Buffer | null {
-    return this._withTracked(abs, (fd) => readFileSync(fd));
+   *  not through a symlink at the file itself. Null when it is neither, or unreadable.
+   *  A file over {@link FILE_TOOL_READ_CAP_BYTES} is not read whole: only its size is
+   *  returned. Another writer can put a file of any size under a tracked path. */
+  private _readTracked(abs: string): Buffer | OverCap | null {
+    return this._withTracked(abs, (fd) => {
+      // The size first, so a file known to be over the cap is not read at all.
+      const size = fstatSync(fd).size;
+      if (size > FILE_TOOL_READ_CAP_BYTES) return { overCap: size };
+      try {
+        return readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
+      } catch (err) {
+        // Grown past the cap since the fstat.
+        if (isReadLimit(err)) return { overCap: fstatSync(fd).size };
+        throw err;
+      }
+    });
   }
 
-  /** Which file a tracked path names now, read as {@link _readTracked} reads it. */
+  /** Which file a tracked path names now: its inode and a hash of its bytes, read as
+   *  {@link _readTracked} reads them. A file over the cap is not read: it is known by its size
+   *  and its ctime instead, which every write changes and no caller can set back. So the run's
+   *  own large file is still rolled back, and one changed or put there since is not. A kernel
+   *  with coarse timestamps can leave ctime as it was for a write in the same tick; multigrain
+   *  timestamps (Linux 6.13 on, for the filesystems that use them) do not, after the fstat here.
+   *  Null when a file grows past the cap while it is read: never taken for the run's own. */
   private _identityOf(abs: string): { dev: number; ino: number; hash: string } | null {
     return this._withTracked(abs, (fd) => {
-      const st = fstatSync(fd);
-      return { dev: st.dev, ino: st.ino, hash: createHash('sha256').update(readFileSync(fd)).digest('hex') };
+      const st = fstatSync(fd, { bigint: true });
+      const id = { dev: Number(st.dev), ino: Number(st.ino) };
+      if (st.size > BigInt(FILE_TOOL_READ_CAP_BYTES)) return { ...id, hash: `over-cap:${st.size}:${st.ctimeNs}` };
+      const bytes = readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
+      return { ...id, hash: createHash('sha256').update(bytes).digest('hex') };
     });
   }
 
@@ -323,17 +368,17 @@ export class ChangesetManager {
    *
    * "Same" is decided on the bytes read before the run, never on decoded text: a file with
    * bytes that are not valid UTF-8 decodes to the same string after a write that changed
-   * them, and that write must still be reviewed.
+   * them, and that write must still be reviewed. A file over the cap is never "same": its
+   * bytes were not read, so it is reported, with its size instead of its content.
    */
-  private _changed(): Array<[string, ChangesetEntry, string, Buffer]> {
-    const changed: Array<[string, ChangesetEntry, string, Buffer]> = [];
+  private _changed(): Array<[string, ChangesetEntry, Buffer | OverCap]> {
+    const changed: Array<[string, ChangesetEntry, Buffer | OverCap]> = [];
     for (const [abs, entry] of this.entries) {
       // Deleted during the run, unreadable, or no longer inside the workspace — not reported
-      const currentBytes = this._readTracked(abs);
-      if (currentBytes === null) continue;
-      if (entry.status === 'modified' && this.originalBytes.get(abs)?.equals(currentBytes)) continue;
-      const currentContent = currentBytes.toString('utf-8');
-      changed.push([abs, entry, currentContent, currentBytes]);
+      const current = this._readTracked(abs);
+      if (current === null) continue;
+      if (entry.status === 'modified' && Buffer.isBuffer(current) && this.originalBytes.get(abs)?.equals(current)) continue;
+      changed.push([abs, entry, current]);
     }
     return changed;
   }
@@ -344,11 +389,18 @@ export class ChangesetManager {
   getChanges(): ChangesetDiff[] {
     const diffs: ChangesetDiff[] = [];
 
-    for (const [abs, entry, currentContent, currentBytes] of this._changed()) {
+    for (const [abs, entry, current] of this._changed()) {
       const rel = relative(this.realCwd, abs);
 
       let diffText: string;
-      if (entry.status === 'added') {
+      // False when the review shows a note instead of a diff: no line count says anything then.
+      let compared = Buffer.isBuffer(current);
+      if (!Buffer.isBuffer(current)) {
+        // Over the cap: shown as changed, with both sizes, and its content not compared.
+        const before = entry.status === 'added' ? null : this.originalBytes.get(abs)?.length;
+        diffText = `--- ${entry.status === 'added' ? '/dev/null' : `a/${rel}`}\n+++ b/${rel}\n${notComparedNote(before, current.overCap)}`;
+      } else if (entry.status === 'added') {
+        const currentContent = current.toString('utf-8');
         // New file: show all lines as additions
         const lines = currentContent.split('\n');
         const header = `--- /dev/null\n+++ b/${rel}\n@@ -0,0 +1,${lines.length} @@\n`;
@@ -362,22 +414,22 @@ export class ChangesetManager {
           if (backupPath === null || currentPath === null || !existsSync(backupPath)) throw new Error('no backup copy');
           // The bytes, as the backup holds bytes: decoded text would turn every line that is
           // not UTF-8 into a change.
-          writeFileSync(currentPath, currentBytes, { mode: 0o600 });
+          writeFileSync(currentPath, current, { mode: 0o600 });
           diffText = execFileSync('diff', ['-u', '--label', `a/${rel}`, '--label', `b/${rel}`, backupPath, currentPath], {
             encoding: 'utf-8',
             timeout: 5000,
           });
         } catch (err: unknown) {
           // diff returns exit code 1 when files differ — that's normal
-          if (err && typeof err === 'object' && 'stdout' in err) {
-            diffText = String((err as { stdout: unknown }).stdout);
-          } else {
-            // Fallback: basic header
-            diffText = `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
-          }
+          const out = err && typeof err === 'object' && 'stdout' in err ? (err as { stdout: unknown }).stdout : null;
+          // Fallback: basic header, also for a diff that printed nothing or failed to start
+          diffText = typeof out === 'string' && out !== '' ? out : `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
         } finally {
           if (currentPath !== null) rmSync(currentPath, { force: true });
         }
+        // A diff without a hunk shows no changed line: binary files ("Binary files … differ"), or a
+        // diff that failed or printed nothing. Its +0 -0 would read as unchanged.
+        compared = /^@@ /m.test(diffText);
       }
 
       diffs.push({
@@ -385,6 +437,7 @@ export class ChangesetManager {
         absolutePath: abs,
         status: entry.status,
         diff: diffText,
+        compared,
         originalContent: entry.originalContent,
       });
     }
@@ -472,7 +525,8 @@ export class ChangesetManager {
   private _isUnchanged(abs: string): boolean {
     const before = this.originalBytes.get(abs);
     if (before === undefined) return false;
-    return this._readTracked(abs)?.equals(before) ?? false;
+    const now = this._readTracked(abs);
+    return Buffer.isBuffer(now) && now.equals(before);
   }
 
   /**

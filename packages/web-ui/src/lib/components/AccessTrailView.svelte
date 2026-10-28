@@ -129,9 +129,10 @@
 	}
 	function noteText(s: Step): string | null {
 		if (s.note === undefined) return null;
-		const by = s.note === 'approval-rejected' ? decidedByText(s.decidedBy) : null;
-		const note = t(`access_trail.note.${s.note}`);
-		return by === null ? note : `${note} (${by})`;
+		if (s.note !== 'approval-rejected') return t(`access_trail.note.${s.note}`);
+		// Who did not approve stands next to "not approved", not after "not sent": the person sent nothing.
+		const by = decidedByText(s.decidedBy);
+		return by === null ? t('access_trail.note.approval-rejected_unnamed') : tf('access_trail.note.approval-rejected', { by });
 	}
 </script>
 
@@ -181,6 +182,11 @@
 				</select>
 			</label>
 		</div>
+		{#if before !== null}
+			<!-- Both filters choose among the loaded pages only: while an older one exists, a period
+			     or a person may have entries the selection does not show. -->
+			<p class="text-xs text-text-muted" data-state="filter-partial">{t('access_trail.filter_partial')}</p>
+		{/if}
 
 		{#if shown.length === 0}
 			<p class="text-sm text-text-muted" data-state="empty-filtered">{t('access_trail.empty_filtered')}</p>
