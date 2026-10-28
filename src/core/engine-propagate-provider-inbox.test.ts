@@ -25,8 +25,10 @@ vi.mock('./config.js', () => ({
 }));
 
 const mockResolveProviderApiKey = vi.fn();
+const pool = vi.hoisted(() => ({ on: false }));
 vi.mock('./llm/provider-keys.js', () => ({
   resolveProviderApiKey: (opts: unknown) => mockResolveProviderApiKey(opts),
+  poolSuppliesLLMKeys: () => pool.on,
 }));
 
 const mockCreateLLMClient = vi.fn();
@@ -150,6 +152,72 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     delete process.env['LYNOX_INBOX_LLM_REGION'];
     delete process.env['MISTRAL_API_KEY'];
     delete process.env['LYNOX_INBOX_MISTRAL_API_KEY'];
+    pool.on = false;
+  });
+
+  /** Switches the engine from Anthropic to Mistral, so the inbox is bootstrapped again for the EU
+   *  region, with `vault` as the secret store; returns the options that bootstrap got. */
+  async function rebootstrapToEu(vault: Record<string, string>): Promise<{ mistralApiKey?: string; meteredHost?: unknown; engine: Engine }> {
+    const engine = new Engine({ model: 'balanced' });
+    const handle = engine as unknown as {
+      _inboxRuntime: MockRuntime | null; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
+      _inboxRebootstrapInflight: Promise<void> | null; secretStore: { resolve(n: string): string | null } | null;
+    };
+    handle._inboxRuntime = makeRuntime('us-runtime');
+    handle._mailStateDb = { __sentinel: 'mail-db' };
+    handle._inboxLlmRegion = 'us';
+    handle.secretStore = { resolve: (n) => vault[n] ?? null };
+    mockBootstrapInbox.mockReturnValueOnce(makeRuntime('eu-runtime'));
+    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
+    await engine.reloadCredentials();
+    if (handle._inboxRebootstrapInflight) await handle._inboxRebootstrapInflight;
+    expect(mockBootstrapInbox).toHaveBeenCalledTimes(1);
+    return { ...(mockBootstrapInbox.mock.calls[0]![0] as { mistralApiKey?: string; meteredHost?: unknown }), engine };
+  }
+
+  describe('the EU classifier on a pool tier: which Mistral key, and whether the instance is debited', () => {
+    it('uses the pool\'s key, not the user\'s own vault key, and debits the instance', async () => {
+      pool.on = true;
+      process.env['MISTRAL_API_KEY'] = 'sk-pool';
+      const opts = await rebootstrapToEu({ MISTRAL_API_KEY: 'sk-own' });
+      expect(opts.mistralApiKey).toBe('sk-pool');
+      expect(opts.meteredHost).toBe(opts.engine);
+    });
+
+    it('uses a key set for the inbox on purpose, and does not debit the instance for it', async () => {
+      pool.on = true;
+      process.env['MISTRAL_API_KEY'] = 'sk-pool';
+      const opts = await rebootstrapToEu({ LYNOX_INBOX_MISTRAL_API_KEY: 'sk-inbox' });
+      expect(opts.mistralApiKey).toBe('sk-inbox');
+      expect(opts.meteredHost, 'the user already pays Mistral').toBeUndefined();
+    });
+
+    it('the US classifier, on the pool\'s Anthropic client, is debited as before', async () => {
+      pool.on = true;
+      const engine = new Engine({ model: 'balanced' });
+      const handle = engine as unknown as {
+        _inboxRuntime: MockRuntime | null; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
+        _inboxRebootstrapInflight: Promise<void> | null;
+      };
+      handle._inboxRuntime = makeRuntime('eu-runtime');
+      handle._mailStateDb = { __sentinel: 'mail-db' };
+      handle._inboxLlmRegion = 'eu';
+      mockBootstrapInbox.mockReturnValueOnce(makeRuntime('us-runtime'));
+      mockLoadConfig.mockReturnValueOnce({ provider: 'anthropic' });
+      await engine.reloadCredentials();
+      if (handle._inboxRebootstrapInflight) await handle._inboxRebootstrapInflight;
+      const opts = mockBootstrapInbox.mock.calls[0]![0] as { llmRegion: string; meteredHost?: unknown };
+      expect(opts.llmRegion).toBe('us');
+      expect(opts.meteredHost).toBe(engine);
+    });
+
+    it('off a pool tier keeps the vault key first and debits nothing (control)', async () => {
+      process.env['MISTRAL_API_KEY'] = 'sk-env';
+      const opts = await rebootstrapToEu({ MISTRAL_API_KEY: 'sk-own' });
+      expect(opts.mistralApiKey).toBe('sk-own');
+      expect(opts.meteredHost).toBeUndefined();
+    });
   });
 
   /**

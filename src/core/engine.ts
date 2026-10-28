@@ -3,7 +3,8 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider, getActiveProvider } from './llm-client.js';
 import type { RunFailure } from './provider-failure.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
-import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds } from './llm/provider-keys.js';
+import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds, poolSuppliesLLMKeys } from './llm/provider-keys.js';
+import { resolveInboxMistralKey } from '../integrations/inbox/mistral-key.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
   LynoxConfig,
@@ -845,6 +846,18 @@ export class Engine {
   }
 
   /**
+   * The inbox classifier's Mistral key, and whether its spend is debited to the instance, for
+   * the cold boot and the rebootstrap alike. The managed credit gate and debit apply to pool-key
+   * spend only (a no-op off managed): the EU classifier on the user's own Mistral key is not
+   * debited, as the user already pays Mistral for it and would pay twice.
+   */
+  private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
+    const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
+    if (key !== undefined) bootOpts.mistralApiKey = key;
+    if (bootOpts.llmRegion !== 'eu' || poolPays) bootOpts.meteredHost = this;
+  }
+
+  /**
    * Rebuild the inbox classifier runtime when a UI provider-switch crosses
    * the us/eu region boundary. Idempotent + region-gated: a same-region
    * rotation (BYOK refresh, Anthropic→Anthropic) short-circuits to avoid
@@ -892,11 +905,6 @@ export class Engine {
       const { bootstrapInbox } = await import('../integrations/inbox/bootstrap.js');
       const rawMode = process.env['LYNOX_INBOX_SENSITIVE_MODE'];
       const sensitiveMode = rawMode === 'mask' || rawMode === 'allow' ? rawMode : 'skip';
-      const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
-        ?? this.secretStore?.resolve('MISTRAL_API_KEY')
-        ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
-        ?? process.env['MISTRAL_API_KEY']
-        ?? undefined;
       const folderBlacklistRaw = process.env['LYNOX_INBOX_FOLDER_BLACKLIST'] ?? '';
       const folderBlacklist = new Set(
         folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
@@ -914,14 +922,12 @@ export class Engine {
         requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
         privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
       };
-      if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
       if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
       if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
       bootOpts.notificationRouter = this._notificationRouter;
       const runHistoryForInbox = this.getRunHistory();
       if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
-      // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
-      bootOpts.meteredHost = this;
+      this._applyInboxKeyAndMeter(bootOpts);
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
         // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
@@ -2212,11 +2218,6 @@ export class Engine {
         // the runtime — without this, switching the main provider to Mistral
         // would leave the classifier on Anthropic-US (the H-012 leak).
         this._inboxLlmRegion = llmRegion;
-        const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
-          ?? this.secretStore?.resolve('MISTRAL_API_KEY')
-          ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
-          ?? process.env['MISTRAL_API_KEY']
-          ?? undefined;
         // Folder blacklist: comma-separated env, case-insensitive match.
         // Use case: "Banking, Privat, Healthcare" — those folders' mails
         // never reach the inbox classifier path at all.
@@ -2238,7 +2239,6 @@ export class Engine {
           requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
           privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
         };
-        if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
         if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
         if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
         // Wire the notification router so the reminder poller can fire
@@ -2249,8 +2249,7 @@ export class Engine {
         // in the dashboard.
         const runHistoryForInbox = this.getRunHistory();
         if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
-        // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
-        bootOpts.meteredHost = this;
+        this._applyInboxKeyAndMeter(bootOpts);
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured
