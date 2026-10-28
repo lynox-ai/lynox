@@ -1635,14 +1635,18 @@
 	const containedOrigin = $derived(getContainedOrigin());
 	/** What the line above the input of such a chat may promise, read from the config each time
 	 *  such a chat opens: a bulk run only where this instance runs one that reads a Shopify store.
-	 *  Null until read. */
+	 *  Null until read. A read that answers after the chat was left is dropped, so the next such
+	 *  chat reads again. */
 	let originKeys = $state<string[] | null>(null);
+	let originRead = 0;
 	$effect(() => {
-		if (!containedOrigin) { if (originKeys !== null) originKeys = null; return; }
+		if (!containedOrigin) { originRead++; if (originKeys !== null) originKeys = null; return; }
 		if (originKeys !== null) return;
+		const read = ++originRead;
+		const keep = (keys: string[]): void => { if (read === originRead) originKeys = keys; };
 		fetch(`${getApiBase()}/config`)
-			.then(async (r) => { originKeys = originLineKeys(r.ok, r.ok ? await r.json() : null); })
-			.catch(() => { originKeys = originLineKeys(false, null); });
+			.then(async (r) => { keep(originLineKeys(r.ok, r.ok ? await r.json() : null)); })
+			.catch(() => { keep(originLineKeys(false, null)); });
 	});
 
 	/** "Plan in a new chat": the store opens the chat; the composer takes the user's words,
@@ -3728,7 +3732,7 @@
 		{:else if containedOrigin}
 			<!-- A chat opened with "Plan in a new chat", before its first run. -->
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 space-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-origin>
-				{#if originKeys}<p data-contained-origin-line>{originKeys.map((k) => t(k)).join(' ')}</p>{/if}
+				{#if originKeys && originKeys.length > 0}<p data-contained-origin-line>{originKeys.map((k) => t(k)).join(' ')}</p>{/if}
 				{#if containedOrigin.removedHidden}<p data-contained-removed-hidden>{t('contained.removed_hidden')}</p>{/if}
 			</div>
 		{/if}

@@ -124,9 +124,10 @@ describe('the line of a chat opened from one that only reads', () => {
 		expect(originLineKeys(true, cfg({ on: false, source: 'config', shopify: false }, 'hosted'))).toEqual([OFF, 'contained.way_support', 'contained.way_bulk_off', DRAFT]);
 	});
 
-	it('promises nothing and names no way when the config could not be read', () => {
-		expect(originLineKeys(false, null)).toEqual([OFF, DRAFT]);
-		expect(originLineKeys(true, {})).toEqual([OFF, DRAFT]);
+	it('gives no line when the config could not be read', () => {
+		expect(originLineKeys(false, null)).toEqual([]);
+		expect(originLineKeys(false, cfg({ on: true, source: 'config', shopify: true }))).toEqual([]);
+		expect(originLineKeys(true, {})).toEqual([]);
 		// The flag alone is not enough: a field that is not exactly true reads as off.
 		expect(originLineKeys(true, cfg({ on: 'true', source: 'config', shopify: true }))).toEqual([OFF, 'contained.way_bulk_off', DRAFT]);
 	});

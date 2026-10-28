@@ -89,14 +89,15 @@ export function containedPrefill(messages: readonly PrefillSource[]): ContainedP
  * `GET /api/config`. A bulk run is promised only where bulk runs are on and may read a Shopify
  * store (`bulk_runs.on` and `bulk_runs.shopify`), as the engine's text for that chat does
  * (`chat-context.ts › containedOriginContext`), and in the same order: what is missing for the
- * Shopify read, then for bulk runs, support once. A config that could not be read promises
- * nothing and names no way.
+ * Shopify read, then for bulk runs, support once. A config that could not be read gives no line:
+ * the engine reads the state when the message is sent, and a line saying either way could
+ * contradict its answer.
  */
 export function originLineKeys(ok: boolean, data: unknown): string[] {
 	const cfg = ok && typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : null;
 	const bulk = cfg !== null && typeof cfg['bulk_runs'] === 'object' && cfg['bulk_runs'] !== null
 		? (cfg['bulk_runs'] as Record<string, unknown>) : null;
-	if (bulk === null) return ['contained.origin_line_off', 'contained.origin_line_draft'];
+	if (bulk === null) return [];
 	const bulkRuns = bulk['on'] === true;
 	const shopify = bulk['shopify'] === true;
 	if (bulkRuns && shopify) return ['contained.origin_line'];

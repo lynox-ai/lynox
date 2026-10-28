@@ -40,6 +40,7 @@ let contained: boolean;
 let runBodies: Array<Record<string, unknown>>;
 /** What `GET /api/config` answers: the line of a chat opened from a read-only one reads it. */
 let config: Record<string, unknown>;
+let configStatus: number;
 
 function serve(events: Array<[string, Record<string, unknown>]>): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -61,7 +62,7 @@ function serve(events: Array<[string, Record<string, unknown>]>): void {
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/threads/t1/messages')) return json({ messages: [] });
 		if (url.endsWith('/artifacts')) return json({ artifacts: [] });
-		if (url.endsWith('/config')) return json(config);
+		if (url.endsWith('/config')) return json(config, configStatus);
 		return json({});
 	}));
 }
@@ -95,6 +96,7 @@ beforeEach(async () => {
 	contained = false;
 	runBodies = [];
 	config = {};
+	configStatus = 200;
 });
 
 afterEach(() => {
@@ -193,6 +195,77 @@ describe('ChatView in a chat that only reads', () => {
 		svelte.unmount(component!); component = undefined; store.newChat();
 		const closed = await openWith({ managed: 'managed', bulk_runs: { on: true, source: 'control-plane', shopify: false } });
 		expect(closed).toBe([t('contained.origin_line_off'), t('contained.way_support'), t('contained.origin_line_draft')].join(' '));
+	});
+
+	const OPEN_CONFIG = { managed: 'managed', bulk_runs: { on: true, source: 'control-plane', shopify: true } };
+	const CLOSED_CONFIG = { managed: 'managed', bulk_runs: { on: true, source: 'control-plane', shopify: false } };
+	const originLine = (): string | null => target.querySelector('[data-contained-origin-line]')?.textContent ?? null;
+	/** In the view already mounted: a contained chat again, then "Plan in a new chat". */
+	async function openAgain(): Promise<void> {
+		serve(refused('contained_write'));
+		await store.sendMessage('Verbessere die Beschreibungen', undefined, undefined, { typed: true });
+		await settle();
+		svelte.flushSync();
+		store.planInNewChat();
+		svelte.flushSync();
+		await settle();
+	}
+
+	it('shows no line when the config cannot be read', async () => {
+		contained = true;
+		config = OPEN_CONFIG;
+		configStatus = 500;
+		await turnThenRender('Verbessere die Beschreibungen', refused('contained_write'));
+		store.planInNewChat();
+		svelte.flushSync();
+		await settle();
+		expect(target.querySelector('[data-contained-origin]'), 'positive control: the chat came from a read-only one').not.toBeNull();
+		expect(originLine()).toBeNull();
+	});
+
+	it('reads the config again when such a chat opens again in the same view', async () => {
+		const { t } = await import('../i18n.svelte.js');
+		contained = true;
+		config = OPEN_CONFIG;
+		await turnThenRender('Verbessere die Beschreibungen', refused('contained_write'));
+		store.planInNewChat();
+		svelte.flushSync();
+		await settle();
+		expect(originLine()).toBe(t('contained.origin_line'));
+		store.newChat();
+		svelte.flushSync();
+		await settle();
+		expect(originLine()).toBeNull();
+		config = CLOSED_CONFIG;
+		await openAgain();
+		expect(originLine()).toBe([t('contained.origin_line_off'), t('contained.way_support'), t('contained.origin_line_draft')].join(' '));
+	});
+
+	it('drops a config read that answers after the chat was left', async () => {
+		const { t } = await import('../i18n.svelte.js');
+		contained = true;
+		config = OPEN_CONFIG;
+		await turnThenRender('Verbessere die Beschreibungen', refused('contained_write'));
+		let release!: () => void;
+		const held = new Promise<void>((r) => { release = r; });
+		const served = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+			if (!String(input).endsWith('/config')) return served(input, init);
+			const answer = config;
+			await held;
+			return json(answer);
+		}));
+		store.planInNewChat();
+		svelte.flushSync();
+		await settle();
+		expect(originLine(), 'the read is still out').toBeNull();
+		store.newChat();
+		svelte.flushSync();
+		release();
+		await settle();
+		config = CLOSED_CONFIG;
+		await openAgain();
+		expect(originLine()).toBe([t('contained.origin_line_off'), t('contained.way_support'), t('contained.origin_line_draft')].join(' '));
 	});
 
 	it('shows an example as the placeholder when the old chat holds nothing typed here', async () => {

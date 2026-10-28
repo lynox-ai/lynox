@@ -155,7 +155,7 @@ export interface ChatInboxReader {
 export interface ContainedWayOutState {
   /** Bulk runs run on this instance (`core/bulk-switch.ts › bulkRunsOn`). */
   readonly bulkRuns: boolean;
-  /** Who turns bulk runs on: the owner in the settings, or the control plane (`bulkRunsSource`). */
+  /** Who turns bulk runs on: the owner through the config, or the control plane (`bulkRunsSource`). */
   readonly bulkRunsBy: 'config' | 'control-plane';
   /** A bulk run may read a Shopify store (`core/bulk-shopify.ts › shopifyBulkReadEnabled`). */
   readonly shopifyBulk: boolean;
