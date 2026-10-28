@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { foldInterfacePolls } from './access-trail-fold.js';
 
-type E = { id: string; kind: string; at: string; auto?: true; who: string };
+type E =
+	| { id: string; kind: 'event'; at: string; auto?: true; who: string }
+	| { id: string; kind: 'step'; at: string; who: string };
 const poll = (id: string, at: string, who = 'ida'): E => ({ id, kind: 'event', at, auto: true, who });
 
 describe('foldInterfacePolls', () => {

@@ -22,15 +22,16 @@ let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let page: unknown[] = [];
 
-const IDA = { email: 'ida@example.invalid', display: 'IDA', mandateId: 'M-1' };
-const BEN = { email: 'ben@example.invalid', display: null, mandateId: 'M-2' };
+type Person = { email: string; display: string | null; mandateId: string };
+const IDA: Person = { email: 'ida@example.invalid', display: 'IDA', mandateId: 'M-1' };
+const BEN: Person = { email: 'ben@example.invalid', display: null, mandateId: 'M-2' };
 /** Minutes ago, newest first in the fixtures as the engine sends them. */
 const ago = (min: number): string => new Date(Date.now() - min * 60_000).toISOString();
 
 let nextId = 0;
-const poll = (min: number, person = IDA): unknown => ({ id: `p${String(nextId++)}`, kind: 'event', action: 'GET /api/runs/active', target: '/api/runs/active', phase: 'read', at: ago(min), person, auto: true });
-const read = (min: number, person = IDA): unknown => ({ id: `r${String(nextId++)}`, kind: 'event', action: 'GET /api/threads/:id', target: '/api/threads/t-1', phase: 'read', at: ago(min), person });
-const step = (min: number, person = IDA): unknown => ({ id: `s${String(nextId++)}`, kind: 'step', action: 'instance:remember#create', target: null, at: ago(min), person, status: 'done' });
+const poll = (min: number, person: Person = IDA): unknown => ({ id: `p${String(nextId++)}`, kind: 'event', action: 'GET /api/runs/active', target: '/api/runs/active', phase: 'read', at: ago(min), person, auto: true });
+const read = (min: number, person: Person = IDA): unknown => ({ id: `r${String(nextId++)}`, kind: 'event', action: 'GET /api/threads/:id', target: '/api/threads/t-1', phase: 'read', at: ago(min), person });
+const step = (min: number, person: Person = IDA): unknown => ({ id: `s${String(nextId++)}`, kind: 'step', action: 'instance:remember#create', target: null, at: ago(min), person, status: 'done' });
 
 beforeEach(() => {
 	vi.stubGlobal('fetch', vi.fn(async () =>
