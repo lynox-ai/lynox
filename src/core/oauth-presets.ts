@@ -395,10 +395,13 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
         'Die eine Ausnahme ist ein Massenlauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel, SEO-Beschreibung und die Alt-Texte der Produktbilder. Anlegen, löschen oder Preise ändern kann er nicht.',
         'Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.',
       ],
+      // The breadth under the list from shopify.dev, read 2026-10-28: write_products covers
+      // Product, ProductVariant and Collection (access-scopes); productCreate, productDelete,
+      // collectionCreate and productVariantsBulkUpdate, whose input carries the price, require it.
       frame: {
         title: 'Schreibrechte für Shopify bestätigen',
         scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in Shopify:',
-        scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Das Recht ist damit breiter als das, was lynox damit tut.',
+        scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Das Recht ist damit breiter als das, was lynox damit tut.',
         button: 'Zustimmen und weiter zu Shopify',
         afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in Shopify.',
       },
