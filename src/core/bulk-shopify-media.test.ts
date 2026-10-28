@@ -187,9 +187,9 @@ describe('the grants for a media run', () => {
 
   it('mints the media list page, an image\'s read and its write, each under its own body only', async () => {
     const list = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, form: 'shopify_media_list' });
-    const products = withShopifyRead(base, HOST, { phase: 'list', afterId: 0 });
+    const products = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: {} });
     expect(await client(list).graphqlRead(ENDPOINT, { form: 'shopify_media_list', afterId: 0 })).not.toEqual({ kind: 'not_granted' });
-    expect(await client(list).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 0 })).toEqual({ kind: 'not_granted' });
+    expect(await client(list).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 0, filters: {} })).toEqual({ kind: 'not_granted' });
     expect(await client(products).graphqlRead(ENDPOINT, { form: 'shopify_media_list', afterId: 0 })).toEqual({ kind: 'not_granted' });
     const read = withShopifyRead(base, HOST, { phase: 'read', targets: [image(1)] });
     expect(await client(read).graphqlRead(ENDPOINT, { form: 'shopify_media_read', gid: image(2) })).toEqual({ kind: 'not_granted' });

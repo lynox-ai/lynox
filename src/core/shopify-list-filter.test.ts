@@ -233,12 +233,12 @@ describe('where the stored Shopify list form is read', () => {
   // form, so it must hold for `shopify_filtered` too; INPUT is what the planner may name, so it
   // takes `shopify` alone. A new place fails here until it is sorted into one of them.
   const READ = [
-    'core/bulk-list.ts | const perPage = isShopifyListForm(form) ? SHOPIFY_LIST_PAGE_',
+    'core/bulk-list.ts | : isShopifyListForm(form) ? SHOPIFY_LIST_PAGE_SIZE',
     'core/bulk-list.ts | export const SHOPIFY_FILTERED_LIST_FORM = \'shopify_filtered\'',
     'core/bulk-list.ts | export const SHOPIFY_LIST_FORM = \'shopify\';',
-    'core/bulk-list.ts | export function isShopifyListForm(form: BulkListSourceForm):',
+    'core/bulk-list.ts | export function isShopifyListForm(form: unknown): form is Sh',
     'core/bulk-list.ts | export function isShopifyListSource(source: BulkListSource):',
-    'core/bulk-list.ts | export type BulkListSourceForm = BulkListForm | typeof SHOPI',
+    'core/bulk-list.ts | export type ShopifyListSourceForm = typeof SHOPIFY_LIST_FORM',
     'core/bulk-list.ts | function isListForm(v: unknown): v is BulkListForm {',
     'core/bulk-list.ts | hostPatterns: [host], pathPatterns: isShopifyListForm(source',
     'core/bulk-list.ts | if (isShopifyListForm(source.form)) return undefined;',
@@ -250,9 +250,9 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-list.ts | return isShopifyListForm(source.form);',
     'core/bulk-list.ts | return list !== null && list.source.form === SHOPIFY_FILTERE',
     'core/bulk-preview.ts | BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_LIST_FO',
-    // The same page size for both forms.
-    'core/bulk-preview.ts | const maxPages = maxListPages(SHOPIFY_LIST_FORM);',
     'core/bulk-preview.ts | const shopify = list !== null && isShopifyListSource(list.so',
+    // A filtered list is written with the product form.
+    'core/bulk-preview.ts | const shopifyForm = list !== null && isShopifyListForm(list.',
     'core/bulk-preview.ts | const withdrawn = list.source.form === SHOPIFY_FILTERED_LIST',
     'core/bulk-preview.ts | if (isShopifyListForm(source.form)) throw new Error(\'a Shopi',
     'server/http-api.ts | import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl, s',
@@ -263,9 +263,10 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-list.ts | const form = Object.keys(filters).length > 0 ? SHOPIFY_FILTE',
     'core/bulk-list.ts | if (!isListForm(form)) throw new BulkSourceError(`source_lis',
     'core/bulk-list.ts | if (form === SHOPIFY_LIST_FORM) return parseShopifyListSourc',
-    'tools/builtin/bulk.ts | form: { type: \'string\', enum: [\'woocommerce\', \'shopify\'], de',
-    'tools/builtin/bulk.ts | if (typeof listInput === \'object\' && listInput !== null && (',
-    'tools/builtin/bulk.ts | import { SHOPIFY_LIST_FORM, listReadContract, parseListSourc',
+    'tools/builtin/bulk.ts | form: { type: \'string\', enum: [\'woocommerce\', \'shopify\', \'sh',
+    // The checks before parsing also match the stored form; parseListSource then refuses it.
+    'tools/builtin/bulk.ts | if (typeof listInput === \'object\' && listInput !== null && i',
+    'tools/builtin/bulk.ts | import { isShopifyListForm, listReadContract, parseListSourc',
   ];
   // Lines that name the provider `shopify` (its OAuth preset), not a list form.
   const NOT_A_LIST_FORM = [

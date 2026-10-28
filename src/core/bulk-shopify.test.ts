@@ -590,7 +590,7 @@ describe('bulk_plan with a Shopify source', () => {
       expect(ledger.getListRun(id)!.source).toMatchObject({ form: SHOPIFY_FILTERED_LIST_FORM, filters: { product_type: 'Tee' } });
       engineDb.getDb().prepare('DELETE FROM bulk_runs').run();
       // The stored form is no input: it would skip the filter checks of the shopify form.
-      expect(await plan({ source_list: { form: SHOPIFY_FILTERED_LIST_FORM, filters: { product_type: 'Tee' }, after: { title: 'x' } } })).toMatch(/source_list\.form must be one of: woocommerce, shopify\./);
+      expect(await plan({ source_list: { form: SHOPIFY_FILTERED_LIST_FORM, filters: { product_type: 'Tee' }, after: { title: 'x' } } })).toMatch(/source_list\.form must be one of: woocommerce, shopify, shopify_media\./);
       expect(await plan({ source_list: { form: 'shopify', filters: { product_type: 'Tee OR Mug' }, after: { title: 'x' } } })).toMatch(/OR, AND, NOT are not allowed as words/);
     } finally {
       vi.unstubAllEnvs();
@@ -679,9 +679,10 @@ describe('who mints a Shopify read grant', () => {
     expect(callers.sort()).toEqual(['core/bulk-external-writer.ts', 'core/worker-loop.ts']);
   });
 
-  it('is handed a phase written out only by the preview, at its two places', () => {
-    // permission-guard: the two members of the phase type. bulk-preview: the list page and the read.
-    expect(count('phase')).toEqual({ 'tools/permission-guard.ts': 2, 'core/bulk-preview.ts': 2 });
+  it('is handed a phase written out only by the preview, for its list pages and its read', () => {
+    // permission-guard: the three members of the phase type. bulk-preview: the list page (of
+    // products or of images) and the read.
+    expect(count('phase')).toEqual({ 'tools/permission-guard.ts': 3, 'core/bulk-preview.ts': 3 });
   });
 });
 
