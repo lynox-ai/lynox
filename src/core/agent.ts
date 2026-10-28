@@ -127,6 +127,7 @@ import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, httpTarget, newCorrelationId
 import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
+import { instanceTrailFor, InstanceWriteUnrecorded } from './instance-trail.js';
 import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 /** What the `secret:` destination check decides for a call (`Agent._secretVerdict`). */
@@ -4941,7 +4942,9 @@ export class Agent implements IAgent {
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
     let trailWatched = false;
     // This call's own slot for the connection the engine resolves (call-connection.ts).
-    const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1, ...(filingCall ? { filing: true } : {}) };
+    // Who makes this call's writes inside the instance is fixed here, with the slot, from the
+    // same sources as the outward trail above (`instance-trail.ts`).
+    const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1, ...(filingCall ? { filing: true } : {}), instanceTrail: instanceTrailFor(this, tc.name) };
     // A stop of the run reaches the call: a handler that passes `currentCallSignal()` to its
     // I/O ends it now instead of at its own limit. The call is still awaited — a handler that
     // does not listen runs to its end, and its result is what it did.
@@ -5001,6 +5004,9 @@ export class Agent implements IAgent {
         result = err.agentVisibleResult;
         softFailureReason = err.reason;
       }
+      // A write inside the instance was refused for want of its row: the handler may have turned
+      // the throw into a result of its own, which must not read as if the entry were made.
+      if (callSlot.instanceRefused === true) throw new InstanceWriteUnrecorded();
       // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
       if (mutatesFile && this.changesetManager?.active) {
         const written = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
@@ -5140,7 +5146,12 @@ export class Agent implements IAgent {
       // A handler that passed the call's signal on and was stopped throws the platform's bare
       // "This operation was aborted", which reads as "did not happen". It gets the stop's own
       // sentence; a handler that wrote its own (http_request, bash) keeps that.
-      const cause = callSlot.stoppedByRun === true && thrown.name === 'AbortError' ? new Error(toolStoppedMessage(tc.name)) : thrown;
+      const stopped = callSlot.stoppedByRun === true && thrown.name === 'AbortError';
+      // A call whose write inside the instance was refused says so, whatever the handler threw
+      // after it (`instance-trail.ts`). After the stop's sentence (the ternary below takes it
+      // first) and a question nobody can answer, which keep theirs.
+      const entryRefused = askedNobody === undefined && callSlot.instanceRefused === true;
+      const cause = stopped ? new Error(toolStoppedMessage(tc.name)) : entryRefused ? new InstanceWriteUnrecorded() : thrown;
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : maskEngineEnvSecrets(cause.message);
       const message = annotateNonRetryable(rawMessage);
       // The LEDGER copy is a different string from the MODEL copy, deliberately.

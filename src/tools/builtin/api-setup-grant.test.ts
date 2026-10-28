@@ -29,6 +29,7 @@ import { tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { httpRequestTool, oauthRenewalBackoffSizeForTests, resetOAuthRenewalBackoffForTests, OAUTH_RENEWAL_BACKOFF_MS, HTTP_HARD_CAP_MS, HTTP_WALL_GRACE_MS } from './http.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({
@@ -182,6 +183,8 @@ function makeAgent(
     getAvailableTools: () => granted.map((name) => ({ definition: { name } })),
     promptUser,
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       apiStore,
       dataStore: null,
       taskManager: null,

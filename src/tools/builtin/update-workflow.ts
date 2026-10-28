@@ -5,6 +5,7 @@ import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/hum
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
 import { validateContractAgainstSteps } from '../../orchestrator/contract-validation.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { withInstanceWrite } from '../../core/instance-trail.js';
 
 interface UpdateWorkflowInput {
   workflow_id?: string | undefined;
@@ -173,7 +174,10 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     // fail-closed contract validation at the chokepoint as a backstop — then
     // evict the in-memory cache so the next getPipeline re-reads the edited row.
     try {
-      runHistory.insertPlannedPipeline(updated, agent.principal);
+      const workflowId = planned.id;
+      withInstanceWrite(agent, { site: 'update_workflow_steps#change', kind: 'change', store: 'workflows', target: () => [['workflow', workflowId]] }, () => {
+        runHistory.insertPlannedPipeline(updated, agent.principal);
+      });
     } catch (err: unknown) {
       return `Error: Could not save the edited workflow: ${getErrorMessage(err)}`;
     }

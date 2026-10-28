@@ -21,6 +21,7 @@ import {
 import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
+import { testAuditLog } from '../../tests/helpers/audit-log.js';
 
 /**
  * The acceptance tests T1–T3 of PRD-SOURCE-CONNECTION revision 8 (R8-8), written before the
@@ -347,7 +348,7 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
       principal,
       sessionCounters: { httpRequests: 0 },
       promptUser: async () => 'Allow',
-      toolContext: { apiStore: store, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, connectionErasureSweep: null, secretReleases: null },
+      toolContext: { auditLog: testAuditLog().log, apiStore: store, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, connectionErasureSweep: null, secretReleases: null },
     }) as never;
     const save = (createdBy?: string): void => {
       expect(store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] }, ...(createdBy ? { created_by: createdBy } : {}) }).ok).toBe(true);

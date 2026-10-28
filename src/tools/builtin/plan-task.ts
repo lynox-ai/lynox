@@ -7,11 +7,10 @@ import { recordSessionCost } from '../../core/session-budget.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
-import type { RunHistory } from '../../core/run-history.js';
-import type { RequestPrincipal } from '../../core/request-principal.js';
 import type { PromptText } from '../../types/index.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { DISMISSED, PLAN_NOT_ANSWERED } from './ask-user.js';
+import { withInstanceWrite } from '../../core/instance-trail.js';
 import { currentCallSignal } from '../../core/call-connection.js';
 
 // Config accessed via agent.toolContext.userConfig
@@ -203,7 +202,7 @@ function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | un
  * Every workflow runs through the orchestrator (`runManifest`) — there is one
  * execution path (D9).
  */
-function convertToPipeline(summary: string, phases: PlanPhase[], runHistory: RunHistory | null | undefined, author: RequestPrincipal, historicalAvg?: Record<string, number>): string {
+function convertToPipeline(summary: string, phases: PlanPhase[], by: IAgent, historicalAvg?: Record<string, number>): string {
   const pipelineSteps = phasesToPipelineSteps(phases);
   if (pipelineSteps.length === 0) return '';
 
@@ -237,9 +236,13 @@ function convertToPipeline(summary: string, phases: PlanPhase[], runHistory: Run
   // restart). The durable insert runs the fail-closed contract validator and
   // throws on a bad contract, so the volatile store is only populated once the
   // durable write succeeded (no cache holding a workflow the DB rejected).
-  runHistory?.insertPlannedPipeline(planned, author);
-  storePipeline(pipelineId, planned);
-  return pipelineId;
+  const runHistory = by.toolContext.runHistory;
+  const author = by.principal;
+  return withInstanceWrite(by, { site: 'plan_task#create', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]] }, () => {
+    runHistory?.insertPlannedPipeline(planned, author);
+    storePipeline(pipelineId, planned);
+    return pipelineId;
+  });
 }
 
 // --- Tool definition ---
@@ -428,7 +431,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     // Auto-approve in non-interactive context
     if (!agent.promptUser) {
       if (hasPhases) {
-        const workflowId = convertToPipeline(input.summary, phases, agent.toolContext.runHistory, agent.principal, historicalAvg);
+        const workflowId = convertToPipeline(input.summary, phases, agent, historicalAvg);
         return finalizeApprovedPlan(workflowId, true);
       }
       return JSON.stringify({ approved: true });
@@ -440,7 +443,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
 
     if (['proceed', 'y', 'yes'].includes(normalized)) {
       if (hasPhases) {
-        const workflowId = convertToPipeline(input.summary, phases, agent.toolContext.runHistory, agent.principal, historicalAvg);
+        const workflowId = convertToPipeline(input.summary, phases, agent, historicalAvg);
         return finalizeApprovedPlan(workflowId, false);
       }
       return JSON.stringify({ approved: true });

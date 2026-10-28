@@ -21,6 +21,7 @@ import type { ContactData, ContactRecord } from '../../core/crm.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 import { rowStampOf } from '../../core/data-store.js';
+import { withInstanceWrite } from '../../core/instance-trail.js';
 
 // CRM accessed via agent.toolContext.crm
 
@@ -90,10 +91,12 @@ export const contactsSaveTool: ToolEntry<ContactsSaveInput> = {
       if (input.notes !== undefined) data.notes = input.notes;
       if (input.tags !== undefined) data.tags = input.tags;
 
-      crm.upsertContact(data, rowStampOf(agent));
+      return withInstanceWrite(agent, { site: 'contacts_save#save', kind: 'save', store: 'contacts' }, () => {
+        crm.upsertContact(data, rowStampOf(agent));
 
-      const emailNote = data.email ? ` <${data.email.trim().toLowerCase()}>` : ' (no email — not deduplicated)';
-      return `Saved contact: ${name}${emailNote}.`;
+        const emailNote = data.email ? ` <${data.email.trim().toLowerCase()}>` : ' (no email — not deduplicated)';
+        return `Saved contact: ${name}${emailNote}.`;
+      });
     } catch (err) {
       return `contacts_save error: ${getErrorMessage(err)}`;
     }

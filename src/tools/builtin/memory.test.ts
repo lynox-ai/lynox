@@ -3,6 +3,7 @@ import { memoryStoreTool, memoryRecallTool, memoryDeleteTool, memoryUpdateTool, 
 import type { IAgent, IKnowledgeLayer } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { currentRunGroup, openRunGroup } from '../../core/run-group.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 /** A KG stub exposing only the two delete-path methods the memory tools call. */
 function makeKg(overrides: Partial<Pick<IKnowledgeLayer, 'eraseByPattern' | 'deactivateByPattern'>> = {}): IKnowledgeLayer {
@@ -31,6 +32,7 @@ function makeAgent(memory: IAgent['memory'] = null): IAgent {
     memory,
     tools: [],
     onStream: null,
+    principal: OWNER_PRINCIPAL,
     toolContext: createToolContext({}),
   };
 }
@@ -137,6 +139,7 @@ describe('memoryStoreTool', () => {
       isExpired: () => false,
     };
     const agent: IAgent = {
+      principal: OWNER_PRINCIPAL,
       name: 'test',
       model: 'test-model',
       memory: makeMockMemory(),
@@ -166,6 +169,7 @@ describe('memoryStoreTool', () => {
     };
     const append = vi.fn().mockResolvedValue(undefined);
     const agent: IAgent = {
+      principal: OWNER_PRINCIPAL,
       name: 'test',
       model: 'test-model',
       memory: makeMockMemory({ append }),
@@ -282,7 +286,7 @@ describe('memory write-trust union (legacy tools quarantine external-content wri
     const { kg, updateMemoryText } = kgWithUpdate();
     const agent: IAgent = {
       ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), { sawExternalContentTool: true }),
-      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+      principal: OWNER_PRINCIPAL, toolContext: { ...createToolContext({}), knowledgeLayer: kg },
     };
     await memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent);
     expect(updateMemoryText).not.toHaveBeenCalled();
@@ -292,7 +296,7 @@ describe('memory write-trust union (legacy tools quarantine external-content wri
     const { kg, updateMemoryText } = kgWithUpdate();
     const agent: IAgent = {
       ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), {}),
-      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+      principal: OWNER_PRINCIPAL, toolContext: { ...createToolContext({}), knowledgeLayer: kg },
     };
     await memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent);
     expect(updateMemoryText).toHaveBeenCalled();
@@ -309,7 +313,7 @@ describe('memory write-trust union (legacy tools quarantine external-content wri
     const kg = { ...makeKg(), updateMemoryText } as unknown as IKnowledgeLayer;
     const agent: IAgent = {
       ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), {}),
-      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+      principal: OWNER_PRINCIPAL, toolContext: { ...createToolContext({}), knowledgeLayer: kg },
     };
     await openRunGroup('run-a', () =>
       memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent));

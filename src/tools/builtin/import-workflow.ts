@@ -5,6 +5,7 @@ import { validateManifest } from '../../orchestrator/validate.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { parseAndValidatePortable, PortableImportError } from '../../core/workflow-portable.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { withInstanceWrite } from '../../core/instance-trail.js';
 
 interface ImportWorkflowInput {
   block?: string | undefined;
@@ -194,7 +195,10 @@ export const importWorkflowTool: ToolEntry<ImportWorkflowInput> = {
     // Persist via the fail-closed chokepoint (stamps schema_version; the contract
     // validation is a no-op since we carry no contract) + cache in memory.
     try {
-      runHistory.insertPlannedPipeline(planned, agent.principal);
+      const workflowId = planned.id;
+      withInstanceWrite(agent, { site: 'import_workflow#create', kind: 'create', store: 'workflows', target: () => [['workflow', workflowId]] }, () => {
+        runHistory.insertPlannedPipeline(planned, agent.principal);
+      });
     } catch (err: unknown) {
       return `Error: Could not save the imported workflow: ${getErrorMessage(err)}`;
     }
