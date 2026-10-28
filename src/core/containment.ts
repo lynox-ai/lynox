@@ -369,12 +369,13 @@ export const CONTAINED_CALL_REFUSAL =
 /**
  * The answer a contained chat gets for a request to another service, such as a keyword lookup
  * after the store was read. It names the way on (a new chat, through the button the chat's view
- * shows in its bar) for a request that does not need the store's data: a new chat that reads the
- * store is held the same way. No place: over the API there is no button.
+ * shows in its bar), and the user as the one who opens it. No place: over the API there is no
+ * button. A wording that said the request "runs in a new chat" made a model promise to open
+ * that chat itself (tests/online/contained-way-out-eval.test.ts, case d).
  */
 export const CONTAINED_OTHER_SERVICE_REFUSAL =
   'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, so it reaches no other service. '
-  + 'Tell the user in one sentence that this chat only reads now, and that a request that does not need the store\'s data runs in a new chat, which they open themselves with "Plan in a new chat" (you cannot open it for them).';
+  + 'Tell the user in one sentence that this chat only reads now, and that they can open a chat where this works with "Plan in a new chat" (you cannot open it for them).';
 
 /**
  * The answer a contained chat gets at dispatch for a write to a store host: such a chat only

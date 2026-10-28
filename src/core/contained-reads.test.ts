@@ -123,7 +123,7 @@ describe('the calls a contained chat may make', () => {
 
   it('a request to another service names the same button, and no place', () => {
     expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('so it reaches no other service');
-    expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('a request that does not need the store\'s data runs in a new chat, which they open themselves with "Plan in a new chat"');
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('they can open a chat where this works with "Plan in a new chat"');
     expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('you cannot open it for them');
     // It holds for an engine that cannot read the state too, so it does not claim a read.
     expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('or this engine cannot read whether it has');

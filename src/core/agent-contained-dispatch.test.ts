@@ -55,7 +55,7 @@ import { createToolContext } from './tool-context.js';
 const REFUSAL = 'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds stays in this chat. '
   + 'Work that does not need the store\'s data belongs in a new chat.';
 const OTHER_SERVICE = 'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, so it reaches no other service. '
-  + 'Tell the user in one sentence that this chat only reads now, and that a request that does not need the store\'s data runs in a new chat, which they open themselves with "Plan in a new chat" (you cannot open it for them).';
+  + 'Tell the user in one sentence that this chat only reads now, and that they can open a chat where this works with "Plan in a new chat" (you cannot open it for them).';
 
 function tool(name: string): ToolEntry {
   return {
