@@ -10,6 +10,7 @@ import {
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
 import { judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { SHOPIFY_WRITABLE_FIELDS } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 
 /**
@@ -167,10 +168,11 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
     const idField = typeof raw['id_field'] === 'string' ? raw['id_field'] : 'id';
     judge = normalizeJudgeRule(judgeInput, { idField });
     // A store takes its product fields as text: a verdict of another type would be judged and paid
-    // for, then refused by the write document for the whole run.
+    // for, then refused by the write document for the whole run. A field the store cannot be
+    // written is left to the Shopify parse below, which names the fields that can.
     if (isShopifyListForm(raw['form'])) {
       const rule = judge;
-      const notText = judgeFields(rule).find((f) => rule.schema.properties[f]!.type !== 'string');
+      const notText = judgeFields(rule).find((f) => SHOPIFY_WRITABLE_FIELDS.includes(f) && rule.schema.properties[f]!.type !== 'string');
       if (notText !== undefined) throw new BulkSourceError(`judge.schema.${notText} must be type "string" for form shopify: the store takes its product fields as text.`);
     }
     // Every listed element is planned with the rule's template — its fields F, null — until its verdict.

@@ -490,6 +490,16 @@ describe('bulk_plan with a Shopify source', () => {
     }
   });
 
+  it('names the writable fields first when a judge names a field the store cannot be written, whatever its type', async () => {
+    vi.stubEnv(FLAG, '1');
+    try {
+      expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { descriptionHtml: { type: 'boolean' } } } })).toMatch(/cannot set descriptionHtml yet/);
+      expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { vendor: { type: 'number' } } } })).toMatch(/may only set: title, seo_title, seo_description/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('refuses an after-state that is not text or null, and takes text and null', async () => {
     vi.stubEnv(FLAG, '1');
     try {
