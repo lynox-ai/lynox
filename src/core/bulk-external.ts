@@ -562,9 +562,9 @@ export function graphqlWriteAnswer(answer: ExternalRead): ExternalRead {
   if (!Array.isArray(userErrors)) return { kind: 'graphql_error' };
   // A refusal names its errors, and the object it returns is then null: refused, not unclear.
   if (userErrors.length > 0) return { kind: 'refused' };
-  // The object the write returns (`product`, `files`) is null when nothing was written, even
-  // with no userErrors: not a success.
-  if (Object.entries(roots[0]).some(([key, value]) => key !== 'userErrors' && (value === null || value === undefined))) return { kind: 'graphql_error' };
+  // The object the write returns (`product`, `files`) is null — or, for a list, empty — when
+  // nothing was written, even with no userErrors: not a success.
+  if (Object.entries(roots[0]).some(([key, value]) => key !== 'userErrors' && (value === null || value === undefined || (Array.isArray(value) && value.length === 0)))) return { kind: 'graphql_error' };
   return answer;
 }
 
