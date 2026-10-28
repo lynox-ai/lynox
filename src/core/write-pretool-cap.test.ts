@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -38,6 +38,18 @@ const fileOf = (size: number): string => MARK + 'a'.repeat(size - MARK.length);
 
 let data: string;
 let ws: string;
+const writers: ChildProcess[] = [];
+
+/**
+ * A FIFO at `path`, with a writer that opens it after 3 s and gives up after 6 s. A read that
+ * waits for a writer returns then, so it fails the time asserted below instead of hanging the run.
+ */
+function fifoWithLateWriter(path: string): void {
+  execFileSync('mkfifo', [path]);
+  const writer = spawn('timeout', ['6', 'sh', '-c', 'sleep 3; echo x > "$1"', 'sh', path], { stdio: 'ignore' });
+  writer.unref();
+  writers.push(writer);
+}
 
 function setup(branch: Branch): void {
   data = realpathSync(mkdtempSync(join(tmpdir(), 'write-cap-')));
@@ -63,6 +75,7 @@ const call = (agent: Agent, name: string, input: Record<string, unknown>) =>
   (agent as unknown as Exec)._executeOneInner({ type: 'tool_use', id: `t-${name}`, name, input });
 
 afterEach(() => {
+  for (const writer of writers.splice(0)) writer.kill();
   closeWorkspaceBase();
   clearTenantWorkspace();
   vi.unstubAllEnvs();
@@ -121,6 +134,11 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
       );
       expect(statSync(path).size, 'the file is left as it was').toBe(CAP + 1);
       expect(manager.getChanges()).toEqual([]);
+      expect(manager.refusedTooLarge).toBe(true);
+      // The next save answers for itself: a file the review can save clears it.
+      writeFileSync(join(ws, 'small.txt'), 'small');
+      expect(manager.backupBeforeWrite(join(ws, 'small.txt'))).toBe(true);
+      expect(manager.refusedTooLarge).toBe(false);
     } finally {
       manager.cleanup();
     }
@@ -184,7 +202,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
 
   it.runIf(process.platform === 'linux')(`[${branch}] edit_file on a FIFO, with the review on, returns at once and leaves the FIFO`, async () => {
     const path = join(ws, 'pipe.csv');
-    execFileSync('mkfifo', [path]);
+    fifoWithLateWriter(path);
     const manager = new ChangesetManager(ws, 'run');
     try {
       const started = Date.now();
@@ -200,7 +218,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
 
   it.runIf(process.platform === 'linux')(`[${branch}] the preview before a prompted edit of a FIFO returns at once`, async () => {
     const path = join(ws, 'pipe.csv');
-    execFileSync('mkfifo', [path]);
+    fifoWithLateWriter(path);
     const agent = agentWith();
     agent.promptUser = vi.fn().mockResolvedValue('Allow');
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
@@ -222,7 +240,7 @@ describe('write_file on a FIFO in the context workspace', () => {
   // there is no second writer of the workspace there, and this file does not cover that case.
   it.runIf(process.platform === 'linux')('with the review on, returns at once and leaves the FIFO', async () => {
     const path = join(ws, 'pipe.csv');
-    execFileSync('mkfifo', [path]);
+    fifoWithLateWriter(path);
     const manager = new ChangesetManager(ws, 'run');
     try {
       const started = Date.now();
