@@ -11009,14 +11009,14 @@ export class LynoxHTTPApi {
         sendOAuthHtml(res, 409, 'This connection\'s address is not the store it authorizes. Nothing was changed.');
         return;
       }
+      // The scopes the provider granted beyond what this connection asks for, said on the page.
+      let grantedBeyond: string[] = [];
       let exchangeCode = code;
       // The store the provider signed for: made here, after both checks, only, and asked again
       // before the token is stored.
       let storeCallback: VerifiedStoreCallback | undefined;
       // Set when a store preset's token could not be bound (no vault key, or the grant was not saved).
       let storeBindingFailed = false;
-      // The scopes the provider granted beyond what this connection asks for, said on the page.
-      let grantedBeyond: string[] = [];
       // Set when the save of a profile its provider had revoked was refused: no new grant was
       // recorded, so an erasure that revocation started is still held and will run.
       let revokedNotRecorded = false;
