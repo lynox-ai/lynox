@@ -5731,7 +5731,7 @@ describe('LynoxHTTPApi', () => {
           const res = await jsonFetch('/api/config');
           expect(res.status).toBe(200);
           const body = await res.json() as Record<string, unknown>;
-          expect(body['bulk_runs']).toEqual({ on, ...expected });
+          expect(body['bulk_runs']).toEqual({ on, ...expected, shopify: false });
         }
       } finally {
         host.engine['getEngineDb'] = origDb;
@@ -5747,7 +5747,7 @@ describe('LynoxHTTPApi', () => {
       try {
         const res = await jsonFetch('/api/config');
         const body = await res.json() as Record<string, unknown>;
-        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false });
+        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false, shopify: false });
       } finally {
         vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
       }
