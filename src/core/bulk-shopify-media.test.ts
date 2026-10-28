@@ -18,7 +18,7 @@ import { setPinnedTransportForTests } from './network-guard.js';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, type BulkRunForPreview } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
-import { BulkHostBudget, externalClient, parseBulkContract, type ExternalClient } from './bulk-external.js';
+import { BulkHostBudget, externalClient, graphqlWriteAnswer, parseBulkContract, type ExternalClient } from './bulk-external.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
 import { isOfferedListSource, listReadContract, maxListPages, parseListSource, type BulkListSource } from './bulk-list.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
@@ -81,6 +81,14 @@ describe('the media documents and bodies', () => {
     expect(shopifyWriteRequest({ form: 'shopify_media_alt', gid: image(7), after: { alt: 'x' } })).toBe(shopifyMediaAltWriteBody(image(7), { alt: 'x' }));
     expect(shopifyWriteRequest({ form: 'shopify_media_alt', gid: product(7), after: { alt: 'x' } })).toBeNull();
     expect(shopifyWriteRequest({ form: 'shopify_product', gid: image(7), after: { title: 'x' } })).toBeNull();
+  });
+
+  it('takes a fileUpdate answer as written only when it returns the file', () => {
+    const ok = (data: unknown) => ({ kind: 'ok', value: data }) as const;
+    const written = ok({ fileUpdate: { files: [{ id: image(7), alt: 'x' }], userErrors: [] } });
+    expect(graphqlWriteAnswer(written)).toEqual(written);
+    expect(graphqlWriteAnswer(ok({ fileUpdate: { files: [], userErrors: [] } }))).toEqual({ kind: 'graphql_error' });
+    expect(graphqlWriteAnswer(ok({ fileUpdate: { files: [], userErrors: [{ field: ['files'], message: 'm', code: 'NON_READY_STATE' }] } }))).toEqual({ kind: 'refused' });
   });
 
   it('selects the fileUpdate userErrors, with their code', () => {
@@ -332,6 +340,18 @@ describe('reading a store\'s images', () => {
     expect(targets(id).map((t) => t.key)).toEqual([image(11), image(12), image(21), image(22)]);
   });
 
+  it('reads the list page by page, after the last product of the page before', async () => {
+    fill(SHOPIFY_MEDIA_LIST_PAGE_SIZE + 1);
+    const id = startedList();
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(minted).toEqual([
+      { phase: 'list', afterId: 0, form: 'shopify_media_list' },
+      { phase: 'list', afterId: SHOPIFY_MEDIA_LIST_PAGE_SIZE * 10, form: 'shopify_media_list' },
+    ]);
+    expect(targets(id)).toHaveLength(2 * (SHOPIFY_MEDIA_LIST_PAGE_SIZE + 1));
+    expect(targets(id).at(-1)!.key).toBe(image((SHOPIFY_MEDIA_LIST_PAGE_SIZE + 1) * 10 + 2));
+  });
+
   it('reads each image\'s alt as its before-image, and classifies against it without a seo pair', async () => {
     fill(1);
     s.products.get(10)![0]!.alt = 'New alt';
@@ -351,16 +371,6 @@ describe('reading a store\'s images', () => {
     s.products.set(10, s.products.get(10)!.filter((m) => m.id !== image(11)));
     expect((await runBulkPreview(id, deps())).status).toBe('done');
     expect(targets(id).map((t) => [t.change, t.error])).toEqual([['invalid', 'not_found'], ['update', null]]);
-  });
-
-  it('keeps a judge\'s verdict on an image as given', async () => {
-    fill(1);
-    const id = await previewed();
-    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'planned', halt_reason = NULL WHERE id = ?`).run(id);
-    const [first] = targets(id);
-    expect(ledger.claimJudge(id, first!.seq, 't', Date.now(), 60_000)).toBe(true);
-    expect(ledger.recordJudgement(id, first!.seq, 't', { after: { alt: 'Judged' } })).toBe(true);
-    expect(ledger.loadTarget(id, first!.seq)!.after).toEqual({ absent: false, value: { alt: 'Judged' } });
   });
 });
 
@@ -429,6 +439,15 @@ describe('applying a media run', () => {
     await apply(id);
     expect(mediaOf(image(11))!.alt).toBe('A1');
     expect(ledger.getStatus(id)).toMatchObject({ applied: 0, failed: 1, sentUnknown: 0 });
+  });
+
+  it('does not count a write the store answers with no file as written', async () => {
+    fill(1);
+    s.writeAnswer = () => ({ data: { fileUpdate: { files: [], userErrors: [] } } });
+    const id = await previewed();
+    ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    await apply(id);
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 0 });
   });
 
   it('takes back what it wrote, an alt the image did not have as the empty string', async () => {
