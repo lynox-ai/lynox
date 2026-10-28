@@ -149,6 +149,18 @@ describe('the webhook drain', () => {
   });
 
   // A push per order is noise; the run history holds the success.
+  it('files a write its run hands to the owner under the webhook and the event that caused it', async () => {
+    vi.stubEnv('LYNOX_FEATURE_APPROVAL_QUEUE', '1');
+    const store = {};
+    (engine as unknown as { getApprovalStore: () => unknown }).getApprovalStore = () => store;
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'done');
+    const [, , , opts] = runner.run.mock.calls[0]! as [unknown, string, unknown, { approvalFiling: unknown }];
+    expect(opts.approvalFiling).toMatchObject({ source: 'webhook', triggerId: t, eventId: id, store });
+  });
+
   it('tells the owner nothing of an event that ran to done', async () => {
     const t = sharedTrigger();
     const id = deliver(t);

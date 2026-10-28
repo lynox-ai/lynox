@@ -3345,8 +3345,10 @@ export class WorkerLoop {
         : { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
       // Its steps hand a mail to the owner instead of being refused one, by hand too: a
       // workflow has no thread to ask in.
+      // A webhook run's filing names the event that caused it, so the entry says which one.
       approvalFiling: filingContextFor(() => this.engine.getApprovalStore(), {
-        source: 'workflow', triggerId: task.id, principal: runAs,
+        source: event !== undefined ? 'webhook' : 'workflow', triggerId: task.id, principal: runAs,
+        ...(event !== undefined ? { eventId: event.eventId } : {}),
         createdUntrusted: seed !== 'none',
       }),
       // Whom the run is for — the mandate its plan acts for, or who started it by hand: the
