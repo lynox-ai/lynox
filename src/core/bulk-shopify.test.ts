@@ -684,9 +684,10 @@ describe('the seo pair of a Shopify run', () => {
 describe('a planned text of a Shopify run (PRD shopify-preset §20.2 item 5)', () => {
   afterEach(() => { vi.unstubAllEnvs(); });
   /** Listed and read with the plan's `after`: one product, its title and seo as the store holds them. */
-  async function planned(after: Record<string, unknown>): Promise<[string, string | null]> {
+  async function planned(after: Record<string, unknown>, prepare?: () => void): Promise<[string, string | null]> {
     vi.stubEnv(FLAG, '1');
     fill(1);
+    prepare?.();
     const id = startedList(after);
     expect((await runBulkPreview(id, deps())).status).toBe('done');
     expect(ledger.resumePreview(id).ok).toBe(true);
@@ -700,6 +701,11 @@ describe('a planned text of a Shopify run (PRD shopify-preset §20.2 item 5)', (
     expect(await planned({ title: 'New <a href="https://evil.example/">deal</a>' })).toEqual(['invalid', 'markup_in_text']);
     expect(await planned({ seo_title: 'New <script>x()</script>' })).toEqual(['invalid', 'markup_in_text']);
     expect(await planned({ title: 'New title' })).toEqual(['update', null]);
+  });
+
+  it('does not hold the seo partner the store already holds against the plan', async () => {
+    const held = (): void => { s.products.set(10, { ...s.products.get(10)!, seo: { title: 'Old', description: 'Size < 40, A -> B' } }); };
+    expect(await planned({ seo_title: 'New title' }, held)).toEqual(['update', null]);
   });
 });
 
