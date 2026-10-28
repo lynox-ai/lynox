@@ -265,26 +265,34 @@ describe('the D2 start checks, each one firing with its name (PRD shell-sidecar-
   });
 
   describe('(hardlinks) the host refuses foreign hard links', () => {
+    // Asserted in the test bodies, not through `check`/`build`: a mutation run proves a kill by the
+    // failing frame, and a helper's frame is not a test's.
+    const caught = (f: () => unknown): unknown => { try { f(); return undefined; } catch (err) { return err; } };
     it.each([['0\n'], [''], ['2\n'], ['1 1\n']])('fires on fs.protected_hardlinks %j', (value) => {
-      const err = check({ protectedHardlinks: () => value });
-      expect(err.check).toBe('hardlinks');
-      expect(err.message).toBe(
+      const err = caught(() => buildShellIsolation(inputs(SOCKET, true, { protectedHardlinks: () => value })));
+      expect(err).toBeInstanceOf(ShellIsolationError);
+      expect((err as ShellIsolationError).check).toBe('hardlinks');
+      expect((err as ShellIsolationError).message).toBe(
         `Shell sidecar start check (hardlinks) failed: fs.protected_hardlinks is ${JSON.stringify(value.trim())} on this host; it must be 1, ` +
         'or the sidecar could hard-link a file outside the workspace into it for the engine to read or write.',
       );
     });
     it('fires when the setting cannot be read, never passes', () => {
-      expect(check({ protectedHardlinks: () => { throw new Error('ENOENT'); } }).check).toBe('hardlinks');
+      const err = caught(() => buildShellIsolation(inputs(SOCKET, true, { protectedHardlinks: () => { throw new Error('ENOENT'); } })));
+      expect(err).toBeInstanceOf(ShellIsolationError);
+      expect((err as ShellIsolationError).check).toBe('hardlinks');
     });
     it('runs before (i): a host without it probes nothing by name', () => {
       const i = inputs(SOCKET, true, { protectedHardlinks: () => '0\n' });
-      expect(failure(() => buildShellIsolation(i)).check).toBe('hardlinks');
+      const err = caught(() => buildShellIsolation(i));
+      expect(err).toBeInstanceOf(ShellIsolationError);
+      expect((err as ShellIsolationError).check).toBe('hardlinks');
       expect(i.probed).toEqual([]);
       expect(i.logged).toEqual([]);
     });
     it('passes 1, with or without the trailing newline', () => {
-      expect(build({ protectedHardlinks: () => '1\n' }).kind).toBe('sidecar');
-      expect(build({ protectedHardlinks: () => '1' }).kind).toBe('sidecar');
+      expect(caught(() => buildShellIsolation(inputs(SOCKET, true, { protectedHardlinks: () => '1\n' })))).toBeUndefined();
+      expect(caught(() => buildShellIsolation(inputs(SOCKET, true, { protectedHardlinks: () => '1' })))).toBeUndefined();
     });
     it('is not read in local mode: self-host does not need it', () => {
       let read = 0;
