@@ -259,13 +259,14 @@ export function mayStopRun(principal: RequestPrincipal, starterTag: string, plan
 /** How the takeover's refusals are answered. "The plan stays paused" only where the plan is paused. */
 export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' | 'unrecorded', { readonly status: number; readonly message: string }> = {
   not_available: { status: 409, message: 'Taking over a plan is not available yet.' },
-  bulk: { status: 409, message: 'A bulk run is not taken over: nobody set it up for you to take over from.' },
-  nothing_to_take_over: { status: 409, message: 'This plan is not paused, so there is nothing to take over.' },
-  unreadable: { status: 409, message: 'Who set up the workflow this plan runs cannot be read, so it cannot be taken over. You can complete or delete the plan. The plan stays paused.' },
-  running: { status: 409, message: 'A run of this plan has not ended yet. Try again in a few minutes. The plan stays paused.' },
-  changed: { status: 409, message: 'The plan changed since you looked. Look at it again, then take it over. The plan stays paused.' },
-  prompts: { status: 503, message: "The plan's open questions cannot be closed right now, so the plan was not taken over. It stays paused." },
-  unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so the plan was not taken over. It stays paused.' },
+  bulk: { status: 409, message: "You don't need to take over a bulk run: no helper set it up." },
+  nothing_to_take_over: { status: 409, message: 'This plan does not need to be taken over any more.' },
+  unreadable: { status: 409, message: 'lynox cannot read who set up the workflow of this plan, so it cannot take the plan over. You can complete or delete it. The plan stays paused.' },
+  // Also a run of another plan on the same workflow that the takeover would release (one text for both, ux).
+  running: { status: 409, message: 'A run of this plan, or of another plan that uses the same workflow, has not finished yet. Try again in a few minutes. The plan stays paused.' },
+  changed: { status: 409, message: 'The plan changed while you were looking at it. Look at it again, then take it over. The plan stays paused.' },
+  prompts: { status: 503, message: "lynox cannot close the plan's open questions right now, so it did not take the plan over. It stays paused. Try again in a few minutes." },
+  unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so lynox did not take the plan over; it stays paused. Try again in a few minutes.' },
 };
 
 /**

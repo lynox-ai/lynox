@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
-import { LynoxHTTPApi } from './http-api.js';
+import { LynoxHTTPApi, TAKEOVER_REFUSALS } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { PLAN_PAUSE_DEFAULT, setPlanPauseForTests } from '../core/plan-pause.js';
 import type { Engine } from '../core/engine.js';
@@ -114,6 +114,19 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect(PLAN_PAUSE_DEFAULT && !registered).toBe(false);
     // Turned on with the button at the plan in the view, in the change that brings it.
     expect(PLAN_PAUSE_DEFAULT).toBe(false);
+  });
+
+  it('the takeover\'s refusals, exactly as ux wrote them (U-037, the API\'s fallback)', () => {
+    expect(TAKEOVER_REFUSALS).toEqual({
+      not_available: { status: 409, message: 'Taking over a plan is not available yet.' },
+      bulk: { status: 409, message: "You don't need to take over a bulk run: no helper set it up." },
+      nothing_to_take_over: { status: 409, message: 'This plan does not need to be taken over any more.' },
+      unreadable: { status: 409, message: 'lynox cannot read who set up the workflow of this plan, so it cannot take the plan over. You can complete or delete it. The plan stays paused.' },
+      running: { status: 409, message: 'A run of this plan, or of another plan that uses the same workflow, has not finished yet. Try again in a few minutes. The plan stays paused.' },
+      changed: { status: 409, message: 'The plan changed while you were looking at it. Look at it again, then take it over. The plan stays paused.' },
+      prompts: { status: 503, message: "lynox cannot close the plan's open questions right now, so it did not take the plan over. It stays paused. Try again in a few minutes." },
+      unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so lynox did not take the plan over; it stays paused. Try again in a few minutes.' },
+    });
   });
 
   it('with the pause off, both takeover routes answer not_available before anything is read or written', async () => {
