@@ -241,7 +241,8 @@ export function pausedForEntries(
 
 /**
  * Pauses the plan and records who ended, in one inner transaction: `paused_at` only if it is not
- * set yet (the first pause keeps its time and its due run), `pause_noticed_at` cleared with it so
+ * set yet (the first pause keeps its time and its due run), with `paused_db_at` beside it in the
+ * database's clock, the one the mandate marks are written in (`plan-takeover.ts` compares the two), `pause_noticed_at` cleared with it so
  * a second pause of the same plan is told again, and `paused_for` merged by mandate id, so a second
  * ended member is added rather than skipped. A `paused_for` that cannot be read is replaced and
  * said on stderr: the pause holds either way. Writes nothing that pushes; the worker tick tells the
@@ -252,7 +253,7 @@ export function pausedForEntries(
 export function writePause(db: Database.Database, id: string, entries: readonly PausedFor[], nowS: number = nowSeconds()): boolean {
   return db.transaction((): boolean => {
     const fresh = db.prepare(
-      'UPDATE triggers SET paused_at = ?, paused_due_at = next_run_at, pause_noticed_at = NULL WHERE id = ? AND paused_at IS NULL',
+      "UPDATE triggers SET paused_at = ?, paused_db_at = unixepoch('now'), paused_due_at = next_run_at, pause_noticed_at = NULL WHERE id = ? AND paused_at IS NULL",
     ).run(nowS, id).changes > 0;
     const stored = db.prepare('SELECT paused_for FROM triggers WHERE id = ?').get(id) as { paused_for: string | null } | undefined;
     if (stored === undefined) return false;
@@ -319,7 +320,7 @@ export interface PauseSweepDeps {
  * In the login (`onlyMandate`) there is no next sweep: once the extension commits the end is no
  * longer proven, and the plan would run as the helper again. So there a plan that cannot be
  * written throws, and the login fails with it, as when its transaction fails; the next login tries
- * again. A plan whose workflow cannot be read is skipped there too, as in a sweep.
+ * again. A plan whose workflow cannot be read is decided there on the schedule's own marks.
  */
 export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
   const paused: string[] = [];
@@ -340,13 +341,19 @@ export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
     try {
       membership = rowPlanMembers(row, (id) => workflowAuthorOf(db, id));
     } catch (err: unknown) {
-      // Skipped in the login as in a sweep: a plan whose workflow cannot be read does not run
-      // (the gate refuses it before dispatch), and refusing the login for it would lock every
-      // helper out over one row. It does not stick, so once readable it runs as the mandate again
-      // after an extension; the owner sees it unreadable at the takeover.
-      skipped.push(row.id);
-      process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, not paused: ${processErrorText(err)}\n`);
-      continue;
+      if (deps.onlyMandate === undefined) {
+        // A sweep tries again on its next run.
+        skipped.push(row.id);
+        process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, not paused: ${processErrorText(err)}\n`);
+        continue;
+      }
+      // The login has no next sweep, and refusing it for one row would lock every helper out. The
+      // schedule's own marks are read without the workflow, so a plan this mandate set up or
+      // changed still pauses before the extension commits; only a member it has through the
+      // workflow alone is not seen. Such a plan does not run while its workflow cannot be read
+      // (the gate refuses it before dispatch), and the owner sees it unreadable at the takeover.
+      membership = rowPlanMembers(row, () => undefined);
+      process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, paused on the schedule's own marks only: ${processErrorText(err)}\n`);
     }
     const members = deps.onlyMandate === undefined
       ? membership.members

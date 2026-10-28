@@ -15,6 +15,9 @@ import { TAKEOVER_DIGEST_PREFIX, takeOver, takeoverPreview, type TakeoverDeps, t
 import { stampExpect } from './plan-stamp.js';
 import { creatorCovered, editorCovered, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate } from './request-principal.js';
 import { savedWorkflowSource } from '../orchestrator/run-source.js';
+import { planOfTrigger } from './plan-stamp.js';
+import { _resetPipelineStore } from '../tools/builtin/pipeline.js';
+import { TaskManager } from './task-manager.js';
 
 /**
  * The owner's takeover of a paused plan (`plan-takeover.ts`) on a real engine.db: which marks it
@@ -30,7 +33,7 @@ const dirs: string[] = [];
 const closers: Array<() => void> = [];
 let restore: () => void = () => undefined;
 
-beforeEach(() => { restore = setPlanPauseForTests(true); });
+beforeEach(() => { restore = setPlanPauseForTests(true); _resetPipelineStore(); });
 afterEach(() => {
   restore();
   vi.restoreAllMocks();
@@ -112,8 +115,9 @@ function editor(b: Box, table: 'triggers' | 'workflows', id: string, email: stri
 }
 
 function workflow(b: Box, id: string, by?: { email: string; grant?: string | null }): string {
-  b.db.prepare("INSERT INTO workflows (id, name, definition_json, created_by, created_mandate_id) VALUES (?, 'W', '{\"steps\":[]}', ?, ?)")
-    .run(id, by ? tag(by.email) : null, by === undefined ? null : (by.grant === undefined ? `g-${by.email}` : by.grant));
+  // Created well before any pause in these cases: a mark in the pause's second counts as after it.
+  b.db.prepare("INSERT INTO workflows (id, name, definition_json, created_by, created_mandate_id, created_at) VALUES (?, 'W', ?, ?, ?, '2026-01-01 00:00:00')")
+    .run(id, JSON.stringify({ id, name: 'W', steps: [] }), by ? tag(by.email) : null, by === undefined ? null : (by.grant === undefined ? `g-${by.email}` : by.grant));
   return id;
 }
 
@@ -247,6 +251,77 @@ describe('the workflow’s side', () => {
     expect(planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))?.principal.email).toBe('m2@x.ch');
   });
 
+  it('a renewed member that changed the workflow after the pause is not covered: the plan runs as that member', () => {
+    const b = box();
+    setup(b);
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    renewed(b, 'h@x.ch');
+    b.db.prepare("UPDATE workflows SET mandate_editor = ?, mandate_editor_id = 'g-h@x.ch', mandate_edited_at = datetime('now', '+1 minute') WHERE id = 'w'").run(tag('h@x.ch'));
+    const p = takeoverPreview(deps(b), 'p');
+    if (p.kind !== 'preview') throw new Error('no preview');
+    expect([p.preview.runsAs, p.preview.workflow?.takenOver]).toEqual([tag('h@x.ch'), false]);
+    // Its grant is live again: the preview says so.
+    expect(p.preview.members).toEqual([{ name: 'h@x.ch', roles: ['created'], ended: false, reason: null }]);
+    takeOver(deps(b), 'p', p.preview.expect);
+    expect(planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))?.principal.email).toBe('h@x.ch');
+  });
+
+  it('the pause is compared in the database’s clock: a process clock far off does not change the decision', () => {
+    for (const shift of [-10 * 365 * 86_400, 10 * 365 * 86_400]) {
+      const b = box();
+      setup(b);
+      ended(b, 'h@x.ch');
+      writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['created'], closedPrompt: false }], nowS() + shift);
+      renewed(b, 'h@x.ch');
+      const before = takeoverPreview(deps(b), 'p');
+      b.db.prepare("UPDATE workflows SET mandate_editor = ?, mandate_editor_id = 'g-h@x.ch', mandate_edited_at = datetime('now', '+1 minute') WHERE id = 'w'").run(tag('h@x.ch'));
+      const after = takeoverPreview(deps(b), 'p');
+      expect([shift, before.kind === 'preview' && before.preview.runsAs, after.kind === 'preview' && after.preview.runsAs])
+        .toEqual([shift, 'owner', tag('h@x.ch')]);
+    }
+  });
+
+  it('a member whose end is proven is covered whatever its mark’s age: a change in the pause’s second, and a renewal that changed and ended again', () => {
+    for (const shape of ['same second', 'ended again'] as const) {
+      const b = box();
+      setup(b);
+      ended(b, 'h@x.ch');
+      pause(b, 'p', 'h@x.ch');
+      if (shape === 'ended again') renewed(b, 'h@x.ch');
+      const at = (b.db.prepare('SELECT paused_db_at AS s FROM triggers WHERE id = ?').get('p') as { s: number }).s;
+      b.db.prepare("UPDATE workflows SET mandate_editor = ?, mandate_editor_id = 'g-h@x.ch', mandate_edited_at = datetime(?, 'unixepoch', ?) WHERE id = 'w'")
+        .run(tag('h@x.ch'), at, shape === 'same second' ? '+0 seconds' : '+1 minute');
+      if (shape === 'ended again') b.ends.record({ kind: 'mandate', email: 'h@x.ch', mandateId: 'g-h@x.ch', mandateExp: nowS() - 1 }, nowS());
+      expect(b.ends.isLive('g-h@x.ch')).toBe(false);
+      const out = take(b, 'p');
+      expect([shape, out.kind === 'taken_over' && out.runsAs]).toEqual([shape, 'owner']);
+    }
+  });
+
+  it('every mandate whose mark it covers is named, also one that cannot be told live', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'z@x.ch', grant: null });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.members).toEqual([
+      { name: 'h@x.ch', roles: ['created'], ended: true, reason: 'expired' },
+      { name: 'z@x.ch', roles: ['workflow-created'], ended: true, reason: null },
+    ]);
+  });
+
+  it('the stamp list’s reader sees the cover too (`planOfTrigger`)', async () => {
+    const b = box();
+    setup(b);
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    take(b, 'p');
+    const plan0 = await planOfTrigger(b.triggers.getById('p')!, b.history);
+    expect([plan0.members, plan0.unreadable]).toEqual([[], false]);
+  });
+
   it('a member that cannot be told live — no grant id, or no recorded end — is covered', () => {
     for (const shape of ['no grant', 'no end'] as const) {
       const b = box();
@@ -318,16 +393,33 @@ describe('the other plans on the workflow', () => {
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' });
     plan(b, 'p1', { effect: 'run_workflow', workflow: 'w' });
-    plan(b, 'p2', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    // p2's own schedule is m3's, set up before the pause; m3 ended with h, and both were renewed.
+    plan(b, 'p2', { by: 'm3@x.ch', effect: 'run_workflow', workflow: 'w' });
+    b.db.prepare("UPDATE triggers SET created_at = '2026-01-01 00:00:00' WHERE id = 'p2'").run();
     ended(b, 'h@x.ch');
+    ended(b, 'm3@x.ch');
     pause(b, 'p1', 'h@x.ch');
-    pause(b, 'p2', 'h@x.ch');
+    pause(b, 'p2', 'h@x.ch', 'm3@x.ch');
     renewed(b, 'h@x.ch');
+    renewed(b, 'm3@x.ch');
     const p = takeoverPreview(deps(b), 'p1');
     expect(p.kind === 'preview' && p.preview.alsoReleased).toEqual([]);
     take(b, 'p1');
     // The member is live, but it is one p2 was paused for: p2 waits for its own takeover.
     expect(row(b, 'p2')['paused_at']).not.toBeNull();
+  });
+
+  it('a plan it would release whose run still holds its lease refuses the takeover as running', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    plan(b, 'o', { effect: 'run_workflow', workflow: 'w', once: true });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    pause(b, 'o', 'h@x.ch');
+    b.db.prepare("UPDATE triggers SET lease_holder = 'other', lease_until = ? WHERE id = 'o'").run(new Date(Date.now() + 60_000).toISOString());
+    expect(takeoverPreview(deps(b), 'p')).toEqual({ kind: 'refused', refusal: 'running' });
+    expect(row(b, 'o')['paused_at']).not.toBeNull();
   });
 
   it('a plan whose workflow member stays changes nothing for the others', () => {
@@ -583,7 +675,26 @@ describe('no other write touches the cover', () => {
     b.triggers.markEditedBy('p', { kind: 'owner' }, false);
     b.workflows.upsert({ id: 'w', name: 'W2', definitionJson: '{"steps":[]}' }, { kind: 'owner' });
     b.workflows.rename('w', 'W3', { kind: 'owner' });
+    const tasks = new TaskManager(b.history);
+    tasks.complete('p');
+    tasks.reopen('p');
+    b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}' }, { kind: 'owner' }, 'w');
     expect(cover()).toEqual(before);
     expect(memberOf(b, 'p')).toBeUndefined();
+  });
+
+  it('the same writes leave a paused plan paused, with who it was paused for', () => {
+    const b = box();
+    plan(b, 'p', { by: 'h@x.ch' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const pauseOf = (): unknown => b.db.prepare('SELECT paused_at, paused_db_at, paused_due_at, paused_for FROM triggers WHERE id = ?').get('p');
+    const before = pauseOf();
+    b.triggers.updateFields('p', { title: 'Renamed' });
+    b.triggers.updateRunResult('p', { lastRunAt: PAST, lastRunResult: 'ok', lastRunStatus: 'success', nextRunAt: PAST, retryCount: 0 });
+    b.triggers.setEnabled('p', false);
+    b.triggers.setConfirmedAt('p', '2026-03-01T00:00:00.000Z', 'owner');
+    b.triggers.markEditedBy('p', { kind: 'owner' }, false);
+    expect(pauseOf()).toEqual(before);
   });
 });

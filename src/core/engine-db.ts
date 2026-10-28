@@ -1532,7 +1532,10 @@ const MIGRATIONS: string[] = [
   // (tag, grant id, time) for the creator and for the last mandate editor. A mark equal to its
   // covered copy is no member (`planMandate`); a new mandate edit clears the editor's copy in
   // the same statement, so it is a member again. `covered_at` is when (unix seconds), for display.
+  // `paused_db_at` is the pause in the database's own clock (`unixepoch('now')`), the clock the
+  // marks are written in, so the takeover can tell a mark made after the pause (`plan-takeover.ts`).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
+   ALTER TABLE triggers ADD COLUMN paused_db_at INTEGER;
    ALTER TABLE triggers ADD COLUMN covered_created_by TEXT;
    ALTER TABLE triggers ADD COLUMN covered_created_id TEXT;
    ALTER TABLE triggers ADD COLUMN covered_created_at TEXT;

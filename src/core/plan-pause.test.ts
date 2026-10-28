@@ -408,13 +408,14 @@ describe('the login that extends an ended grant', () => {
     vi.useRealTimers();
   });
 
-  it('a plan whose workflow cannot be read is skipped by the login as by a sweep: the login goes through, the other plan pauses, stderr names the skipped one', () => {
+  it('a plan whose workflow cannot be read does not refuse the login: the login goes through, a plan of the mandate’s own schedule pauses, one it has only through the workflow does not, and stderr names both', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(NOW * 1000);
     const b = box();
     listen(b);
     workflow(b, 'wf', { email: 'h@x.ch', grant: 'g-h@x.ch' });
     plan(b, 'via-wf', { effect: 'run_workflow', workflow: 'wf' });
+    plan(b, 'own-on-wf', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'wf' });
     plan(b, 'own', { by: 'h@x.ch' });
     login(b, 'h@x.ch', NOW - H, NOW - 2 * H);
     b.db.exec('ALTER TABLE workflows RENAME COLUMN mandate_edited_at TO gone');
@@ -425,8 +426,10 @@ describe('the login that extends an ended grant', () => {
     b.db.exec('ALTER TABLE workflows RENAME COLUMN gone TO mandate_edited_at');
     expect(b.ends.endOf('g-h@x.ch')).toBe(NOW + H);
     expect(col(b, 'own').paused_at).toBe(NOW);
+    expect(col(b, 'own-on-wf').paused_at).toBe(NOW);
     expect(col(b, 'via-wf').paused_at).toBeNull();
-    expect(lines.some((l) => l.includes('plan via-wf: who set up its workflow could not be read, not paused'))).toBe(true);
+    expect(lines.filter((l) => l.includes("who set up its workflow could not be read, paused on the schedule's own marks only")).map((l) => l.slice(0, 22)))
+      .toEqual(['[lynox] plan via-wf: w', '[lynox] plan own-on-wf']);
     vi.useRealTimers();
   });
 
@@ -550,8 +553,9 @@ describe('the migration', () => {
     expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(59);
     const cols = (b.db.prepare('PRAGMA table_info(triggers)').all() as Array<{ name: string; dflt_value: unknown }>)
       .filter((c) => c.name.startsWith('pause'));
+    // `paused_db_at` is v59's (the takeover's clock), not v57's.
     expect(cols.map((c) => [c.name, c.dflt_value])).toEqual([
-      ['paused_at', null], ['paused_due_at', null], ['paused_for', null], ['pause_noticed_at', null],
+      ['paused_at', null], ['paused_due_at', null], ['paused_for', null], ['pause_noticed_at', null], ['paused_db_at', null],
     ]);
   });
 });

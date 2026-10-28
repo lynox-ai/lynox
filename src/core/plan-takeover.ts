@@ -33,7 +33,7 @@ import {
 import type { StampEntry } from './plan-run-context.js';
 import { stampExpect, stampFromRow } from './plan-stamp.js';
 import {
-  OWNER_PRINCIPAL, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag,
+  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag,
   type PlanMandate, type RequestPrincipal,
 } from './request-principal.js';
 import type { TriggerStore } from './trigger-store.js';
@@ -159,12 +159,30 @@ function memberKey(p: RequestPrincipal): string {
 
 /**
  * Whether a member still holds a plan in the sense of the pause: its end is proven or it cannot
- * be told live (`principalHasEnded`), or it is one of the grants the plan was paused for. The rule
- * that decides the workflow's cover and the one that decides a release are this one function.
+ * be told live (`principalHasEnded`), or it is one of the grants the plan was paused for and its
+ * mark is older than the pause. The rule that decides the workflow's cover and the one that
+ * decides a release are this one function.
+ *
+ * The mark's age matters only for a member that is live: a grant renewed after the pause. Its
+ * mark from before the pause is what the pause was about; a mark it made after the pause is a
+ * change the owner was not shown, so it is not covered, and the plan runs as that member (and
+ * pauses again when it ends). Both times are the database's clock: the mark's `datetime('now')`
+ * and the pause's `paused_db_at`. A mark in the same second as the pause counts as after it, the
+ * side where the plan stays with the mandate. A member whose end is proven is covered whatever
+ * its mark's age: left uncovered, the plan would run as an ended mandate and pause again, and the
+ * owner could never take it over.
  */
-function holds(member: RequestPrincipal, pausedFor: ReadonlySet<string>, isLive: (id: string) => boolean): boolean {
+function holds(mark: PlanMandate, pausedFor: ReadonlySet<string>, pausedDbAt: number | null, isLive: (id: string) => boolean): boolean {
+  const member = mark.principal;
   if (principalHasEnded(member, isLive)) return true;
-  return member.kind === 'mandate' && member.mandateId !== undefined && pausedFor.has(member.mandateId);
+  if (member.mandateId === undefined || !pausedFor.has(member.mandateId)) return false;
+  return pausedDbAt !== null && Math.floor(mark.at / 1000) < pausedDbAt;
+}
+
+/** `paused_db_at`, the pause in the database's clock; null when the row has none. */
+function pausedDbAtOf(db: Database.Database, id: string): number | null {
+  const r = db.prepare('SELECT paused_db_at FROM triggers WHERE id = ?').get(id) as { paused_db_at: number | null } | undefined;
+  return r?.paused_db_at ?? null;
 }
 
 function pausedForIds(raw: string | undefined): Set<string> {
@@ -213,22 +231,34 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
   const isLive = deps.isLive;
   const own = pausedForIds(trigger.paused_for);
   const wfMark: PlanMandate | undefined = wf === undefined ? undefined : planMandate(planAuthorshipOf(wf));
-  const coverWorkflow = wfMark !== undefined && holds(wfMark.principal, own, isLive);
+  const coverWorkflow = wfMark !== undefined && holds(wfMark, own, pausedDbAtOf(db, id), isLive);
   const runsAs: RequestPrincipal = wfMark === undefined || coverWorkflow ? OWNER_PRINCIPAL : wfMark.principal;
 
-  const members: TakeoverMember[] = pausedForOf(trigger.paused_for).entries.map((e) => ({
-    name: e.email, roles: e.roles, ended: true, reason: e.reason,
-  }));
-  if (runsAs.kind === 'mandate' && !members.some((m) => m.name === runsAs.email)) {
-    members.push({ name: runsAs.email, roles: roles(runsAs), ended: false, reason: null });
+  // Everyone the owner is shown: who the plan was paused for, as they are now (a renewed grant is
+  // live again), every other mandate whose mark the takeover covers, and the member that stays.
+  const members: TakeoverMember[] = pausedForOf(trigger.paused_for).entries.map((e) => {
+    const ended = principalHasEnded({ kind: 'mandate', email: e.email, mandateId: e.mandateId }, isLive);
+    return { name: e.email, roles: e.roles, ended, reason: ended ? e.reason : null };
+  });
+  const coveredMarks: Array<{ tag: string | undefined; id: string | undefined }> = [
+    { tag: trigger.created_by, id: trigger.created_mandate_id }, { tag: trigger.mandate_editor, id: trigger.mandate_editor_id },
+    ...(coverWorkflow && wf !== undefined
+      ? [{ tag: wf.created_by ?? undefined, id: wf.created_mandate_id ?? undefined }, { tag: wf.mandate_editor ?? undefined, id: wf.mandate_editor_id ?? undefined }]
+      : []),
+  ];
+  const named = (p: Extract<RequestPrincipal, { kind: 'mandate' }>): void => {
+    if (members.some((m) => m.name === p.email)) return;
+    members.push({ name: p.email, roles: roles(p), ended: principalHasEnded(p, isLive), reason: null });
+  };
+  for (const m of coveredMarks) {
+    if (!isMandateTag(m.tag)) continue;
+    named({ kind: 'mandate', email: m.tag!.slice(MANDATE_TAG_PREFIX.length), ...(m.id ? { mandateId: m.id } : {}) });
   }
+  if (runsAs.kind === 'mandate') named(runsAs);
 
   // The grant ids the audit row names: every mark the takeover covers, no address.
   const coveredMandates = new Set<string>();
-  for (const m of [trigger.created_mandate_id, trigger.mandate_editor_id]) if (m) coveredMandates.add(m);
-  if (coverWorkflow && wf !== undefined) {
-    for (const m of [wf.created_mandate_id, wf.mandate_editor_id]) if (m) coveredMandates.add(m);
-  }
+  for (const m of coveredMarks) if (isMandateTag(m.tag) && m.id) coveredMandates.add(m.id);
 
   const memberChanges: TakeoverMemberChange[] = [];
   const released: TriggerRecord[] = [];
@@ -253,8 +283,15 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
         after: after.of === undefined ? null : principalTag(after.of),
         runsNoMore: !paused && other.next_run_at === undefined && (other.status === 'stopped' || other.status === 'failed'),
       });
-      const otherPausedFor = pausedForIds(other.paused_for);
-      if (paused && !after.members.some((m) => holds(m, otherPausedFor, isLive))) released.push(other);
+      // Released when no member is left that holds it: after the cover its only member is the
+      // mandate of its own schedule, if any.
+      if (paused && !(mark !== undefined && holds(mark, pausedForIds(other.paused_for), pausedDbAtOf(db, other.id), isLive))) {
+        // Released with the same steps as the plan taken over, its lease among them: a run of it
+        // still under way would end as stopped over the release.
+        const lease = db.prepare('SELECT lease_until FROM triggers WHERE id = ?').get(other.id) as { lease_until: string | null } | undefined;
+        if (lease?.lease_until != null && lease.lease_until > now.toISOString()) return 'running';
+        released.push(other);
+      }
     }
   }
 
@@ -319,7 +356,7 @@ function release(deps: TakeoverDeps, t: TriggerRecord, now: Date): void {
   // `interrupted`; it is cleared, and with it that run's interruption, which nobody will record.
   db.prepare('UPDATE triggers SET lease_holder = NULL, lease_until = NULL, lease_since = NULL WHERE id = ? AND (lease_until IS NULL OR lease_until <= ?)')
     .run(t.id, now.toISOString());
-  db.prepare('UPDATE triggers SET paused_at = NULL, paused_for = NULL WHERE id = ?').run(t.id);
+  db.prepare('UPDATE triggers SET paused_at = NULL, paused_db_at = NULL, paused_for = NULL WHERE id = ?').run(t.id);
   if (t.status === 'waiting') deps.triggers.endWait(t.id, 'open');
   else if (t.status === 'stopped' && stopResults(t.last_run_result)) {
     db.prepare("UPDATE triggers SET status = 'open', updated_at = datetime('now') WHERE id = ? AND status = 'stopped'").run(t.id);
