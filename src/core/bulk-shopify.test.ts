@@ -703,6 +703,12 @@ describe('a planned text of a Shopify run (PRD shopify-preset §20.2 item 5)', (
     expect(await planned({ title: 'New title' })).toEqual(['update', null]);
   });
 
+  it('lets the plan keep a hidden character the title already holds', async () => {
+    const held = (): void => { s.products.set(10, { ...s.products.get(10)!, title: 'Old\u200btitle' }); };
+    expect(await planned({ title: 'New\u200btitle' }, held)).toEqual(['update', null]);
+    expect(await planned({ title: 'New\u200b\u200btitle' }, held)).toEqual(['invalid', 'hidden_char']);
+  });
+
   it('does not hold the seo partner the store already holds against the plan', async () => {
     const held = (): void => { s.products.set(10, { ...s.products.get(10)!, seo: { title: 'Old', description: 'Size < 40, A -> B' } }); };
     expect(await planned({ seo_title: 'New title' }, held)).toEqual(['update', null]);
