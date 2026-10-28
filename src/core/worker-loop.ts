@@ -1594,8 +1594,8 @@ export class WorkerLoop {
    *   1. Its dropped events are reported to the owner, each once.
    *   2. A run of it in this process → nothing more now.
    *   3. Checked live before anything is reserved: a trigger `findAcceptingWebhook` no longer
-   *      returns, or that is gone, has all its waiting events dropped; a Shopify event whose
-   *      shop is no longer the connection's has that event dropped.
+   *      returns, or that is gone, has all its waiting events dropped; otherwise its oldest
+   *      waiting event is dropped if it is a Shopify event whose shop is no longer the connection's.
    *   4. Budget reserved, then the lease taken; a lease another process holds, or one a lost
    *      run left behind (`interrupted`, which a trigger without a next run never yields),
    *      gives both back and runs nothing.
