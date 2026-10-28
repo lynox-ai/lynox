@@ -877,7 +877,7 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
 
-    // The dogfooded run (rafael, prod 2026-08-24) sat parked on a prompt for 15 h
+    // The dogfooded run (own production instance, 2026-08-24) sat parked on a prompt for 15 h
     // and reached the ledger with cost_usd = 0 / tokens 0-0 while the UI chip
     // showed $0.10 / 32k tokens for the same turn. The cause was NOT "the failure
     // path forgets to book" — it books thoroughly, and has since 2026-06-05. It
@@ -3263,7 +3263,7 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
     it('is provider-agnostic — under Mistral/openai the fast tier resolves to the Mistral small model, never a hardcoded Haiku', async () => {
-      // Model-agnosticity proof (rafael follow-up): the summarizer must ride the
+      // Model-agnosticity proof (owner follow-up): the summarizer must ride the
       // `fast` TIER through `resolveTierModel(getActiveProvider())`, not a
       // hardcoded Anthropic id. Force the active provider to openai + the Mistral
       // tier-map (exactly what a managed-EU / BYOK-Mistral tenant bootstraps) and

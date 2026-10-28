@@ -1,4 +1,4 @@
-import { openSync, closeSync, fstatSync, ftruncateSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
+import { openSync, closeSync, constants, fstatSync, ftruncateSync, readSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getWorkspaceDir, isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
@@ -8,7 +8,9 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { processUmask, toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
-import { openRead, openWrite, WorkspaceAccessError, type WorkspaceAnchor } from '../../core/workspace-fd.js';
+import {
+  FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, openWrite, readFdCapped, WorkspaceAccessError, type WorkspaceAnchor,
+} from '../../core/workspace-fd.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -24,7 +26,26 @@ const MAX_WRITE_BYTES_PER_SESSION = 100 * 1024 * 1024; // 100MB
 // Soft-cap: truncate + nudge toward spawn_agent collector. Hard-cap: refuse.
 // Without these one multi-MB read could consume the main agent's context.
 const READ_FILE_SOFT_CAP_BYTES = 256 * 1024;
-const READ_FILE_HARD_CAP_BYTES = 5 * 1024 * 1024;
+const READ_FILE_HARD_CAP_BYTES = FILE_TOOL_READ_CAP_BYTES;
+
+/**
+ * The way out of a refusal for a file over {@link FILE_TOOL_READ_CAP_BYTES}, by what was refused
+ * and whether this agent has bash (the `creator` role has not):
+ * - `replace` (write_file under the review): a new file, which needs nothing saved.
+ * - `change` (edit_file, a batch_files transform): under the review, the changed content goes to a
+ *   new file by bash and the original stays (a change by bash in place would not be in the review);
+ *   without the review, bash changes it in place. Without bash, the user downloads and changes it.
+ * Never a split: a CSV or log the user changes should stay one file (ux U-036).
+ */
+export function oversizeWayOut(agent: Pick<IAgent, 'getAvailableTools'>, kind: 'replace' | 'change', reviewed: boolean): string {
+  if (kind === 'replace') return 'Write the new content to a new file instead and tell the user its name; the old file stays as it was.';
+  if (!agent.getAvailableTools().some((t) => t.definition.name === 'bash')) {
+    return 'There is no bash here: tell the user the file is too large for the file tools, that they can download it under Artifacts › Files and change it outside lynox.';
+  }
+  return reviewed
+    ? 'Write the changed content to a new file with bash instead (for example `sed \'…\' file > file.new`), tell the user its name, and that the original stays as it was.'
+    : 'Change it with bash instead (for example sed for a line).';
+}
 
 interface ReadFileInput {
   path: string;
@@ -88,7 +109,7 @@ function confineToWorkspace(rawPath: string): string {
 }
 
 /** The artifact store's directory (`ArtifactStore`'s default), symlinks resolved. */
-function artifactsRoot(): string {
+export function artifactsRoot(): string {
   const raw = resolve(join(getLynoxDir(), 'artifacts'));
   return existsSync(raw) ? realpathSync(raw) : raw;
 }
@@ -475,9 +496,8 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       }
       const realPath = target.kind === 'anchored' ? target.shown : target.path;
       // In the workspace the read and the write both go through its open directory.
-      let original: string;
+      let fd: number;
       if (target.kind === 'anchored') {
-        let fd: number;
         try {
           fd = openRead(target.anchor, target.rel);
         } catch (err) {
@@ -486,21 +506,37 @@ export const editFileTool: ToolEntry<EditFileInput> = {
           }
           throw anchoredError(target.shown, err);
         }
-        try {
-          // Before anything is compared: whether old_string matches would tell the content of a
-          // file read_file refuses.
-          if (fstatSync(fd).nlink > 1) {
-            throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not edit such a file.`);
-          }
-          original = readFileSync(fd, 'utf-8');
-        } finally {
-          closeSync(fd);
-        }
       } else {
-        if (!existsSync(realPath)) {
-          throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+        try {
+          // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
+          fd = openSync(realPath, constants.O_RDONLY | constants.O_NONBLOCK);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+          }
+          throw err;
         }
-        original = readFileSync(realPath, 'utf-8');
+      }
+      let original: string;
+      try {
+        const st = fstatSync(fd);
+        // Before anything is compared: whether old_string matches would tell the content of a
+        // file read_file refuses.
+        if (target.kind === 'anchored' && st.nlink > 1) {
+          throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not edit such a file.`);
+        }
+        if (!st.isFile()) throw new Error(`${realPath} is not a regular file; edit_file edits only regular files.`);
+        original = readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, realPath).toString('utf-8');
+      } catch (err) {
+        if (isReadLimit(err)) {
+          const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
+          throw new Error(
+            `${realPath} is larger than ${capMb} MB, too large for edit_file; nothing was changed. ${oversizeWayOut(agent, 'change', agent.changeset !== undefined)}`,
+          );
+        }
+        throw err;
+      } finally {
+        closeSync(fd);
       }
       const segments = original.split(input.old_string);
       const matches = segments.length - 1;

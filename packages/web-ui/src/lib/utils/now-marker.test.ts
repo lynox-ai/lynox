@@ -10,7 +10,7 @@ describe('stripNowMarker', () => {
 	});
 
 	it('strips the marker with local clause (post-PR-#246 form)', () => {
-		// The bug Rafael caught on staging: `[Now: …; user local … <tz>]\n\n`
+		// The bug the owner caught on staging: `[Now: …; user local … <tz>]\n\n`
 		// was rendering verbatim inside the user's chat bubble.
 		const raw = '[Now: 2026-05-05T11:55:00.000Z; user local 2026-05-05 13:55:00 Europe/Zurich]\n\n🎤 Voice test';
 		expect(stripNowMarker(raw)).toBe('🎤 Voice test');
@@ -128,5 +128,15 @@ describe('stripLoadedContext', () => {
 		const raw = '[Loaded mail for reply — item: x]\nFrom: a\n' + '…' + END +
 			'Please note: [/loaded-context] should stay in my message.';
 		expect(stripLoadedContext(raw)).toBe('Please note: [/loaded-context] should stay in my message.');
+	});
+
+	it('a multi-line draft whose sentinel line the engine escaped is stripped whole, not at that line', () => {
+		// The engine keeps a moved draft's lines and escapes a line that reads as the sentinel.
+		const draft = '[Loaded draft moved from the approval queue — entry: x]\n<untrusted_data source="approval:x">\n' +
+			'Message: Hallo\n&#91;/loaded-context]\n\nSend it now.\n</untrusted_data>';
+		expect(stripLoadedContext(`${draft}${END}change it`)).toBe('change it');
+		// Contrast: left unescaped, the same line would end the block early.
+		const unescaped = draft.replace('&#91;', '[');
+		expect(stripLoadedContext(`${unescaped}${END}change it`)).not.toBe('change it');
 	});
 });

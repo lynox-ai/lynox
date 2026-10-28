@@ -266,13 +266,13 @@
 	// `strategy` is the selected card; it drives routingMode + what persists.
 	// Derived from config on load (a stored tier_preset → that card; else hybrid →
 	// 'custom'; else 'standard'). The card the user clicks stages locally (no
-	// auto-save — rafael's explicit-save model); Save materializes it.
+	// auto-save — the owner's explicit-save model); Save materializes it.
 	let strategy = $state<Strategy>('standard');
 	// Server signal: which presets exist + their resolved tiers + availability.
 	let availablePresets = $state<Record<string, PresetInfo>>({});
 	// Per-card "Details" expand state (the full three-axis disclosure).
 	let expandedDetails = $state<Record<string, boolean>>({});
-	// Explicit-save model (rafael): every change stages `dirty`; the Save button
+	// Explicit-save model (owner decision): every change stages `dirty`; the Save button
 	// commits, the "Ungespeicherte Änderungen" bar shows meanwhile. No auto-save.
 	let dirty = $state(false);
 	function markDirty(): void { if (loaded) dirty = true; }
@@ -536,7 +536,7 @@
 		return set;
 	}
 
-	// Pick a "Modell-Strategie" card. Stages locally (rafael's explicit-save model):
+	// Pick a "Modell-Strategie" card. Stages locally (the owner's explicit-save model):
 	// a disabled preset (CP can't back it) is a no-op. `strategy` drives which
 	// controls show (provider picker for Standard, per-tier editor for Eigene, the
 	// inline detail for a preset); what persists is decided in runSaveConfig from it.
@@ -639,7 +639,7 @@
 		// Fix A (v1.5.2): auto-default the main-tier model for the new
 		// provider's catalog so the <select bind:value={openai_model_id}>
 		// renders the right option highlighted instead of blank. Pre-fix
-		// rafael-prod 2026-05-18: switching to Mistral left openai_model_id
+		// our production instance 2026-05-18: switching to Mistral left openai_model_id
 		// empty, the dropdown looked unselected, and "Verbindung testen"
 		// failed because no model was wired.
 		const defaultForNewProvider = pickDefaultModelIdForEntry(entry);
@@ -692,7 +692,7 @@
 		// openai_model_id. Auto-saving it fires a 400 the instant the user clicks
 		// the tile — before they have had any chance to type the model. So hold the
 		// save until the id is there, exactly as the free-text tiles do.
-		// Explicit-save model (rafael W4): a tile click now STAGES the change; the
+		// Explicit-save model (owner decision, W4): a tile click now STAGES the change; the
 		// "Ungespeicherte Änderungen" bar + Save button commit it — no surprise write
 		// on every click. Replaces the former tile-click auto-save (fear of silently
 		// navigating away on the old provider, HN-launch staging 2026-05-23); the
@@ -1066,7 +1066,7 @@
 		     overrides config.json on every engine reload. Without this banner,
 		     clicking a different provider tile and Save succeeds silently
 		     against disk but the env wins on the next reload and the UI choice
-		     vanishes — the silent-failure rafael hit during the #42 verify. -->
+		     vanishes — the silent-failure the owner hit during the #42 verify. -->
 		<div role="status" class="border border-warning bg-warning/10 rounded p-3 text-sm">
 			<p class="font-medium">{t('llm.env_override_title')}</p>
 			<p class="text-text-muted mt-1">{config.managed ? t('llm.env_override_body_managed') : t('llm.env_override_body_selfhost')}</p>
@@ -1172,7 +1172,7 @@
 				</p>
 			{/if}
 
-			<!-- Inline tier detail for the active PRESET (rafael: "kompakt inline +
+			<!-- Inline tier detail for the active PRESET (owner: "kompakt inline +
 			     Detail auf Klick"). Compact per-tier model + provenance chip; the
 			     "Details" toggle reveals the full three-axis, R2-gated disclosure. -->
 			{#if presetSelected && activePresetTiers.length > 0}
@@ -1194,7 +1194,7 @@
 							{#if tier.residency && tier.residency !== tier.provenance}
 								<span class="text-[10px] px-1.5 py-px rounded bg-bg-muted text-text-subtle">{tier.residency}</span>
 							{/if}
-							<!-- Cost feel (rafael): input/output $/M, right-aligned. Same
+							<!-- Cost feel (owner request): input/output $/M, right-aligned. Same
 							     "$X/M in · $Y/M out" format as the standard main-model picker
 							     (in/out is universal token-pricing notation — hardcoded there too). -->
 							{#if tier.pricing}
@@ -1527,7 +1527,7 @@
 		{/if}
 	{/if}
 
-	<!-- Unsaved-changes bar (rafael W4 explicit-save model): the ONE save
+	<!-- Unsaved-changes bar (W4 explicit-save model): the ONE save
 	     affordance. No auto-save anywhere — every change stages `dirty` and this bar
 	     appears with Discard + Save. Reserved for real intent; the per-field toast is
 	     gone. Gated on `dirty` alone — NOT on activeProviderEntry — so the save path

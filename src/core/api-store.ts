@@ -17,7 +17,9 @@ import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import type { OAuthAccount } from './oauth-account.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import type { GrantLedger, GrantMintReason } from './grant-ledger.js';
-import { cancelHeldProviderRecords, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
+import { auditProviderCancels, cancelHeldProviderRecords, mayCancelProviderErasure, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
+import type { AuditLog } from './audit-log.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
@@ -413,7 +415,8 @@ export interface OAuthGrantRecord {
   account?: OAuthAccount | undefined;
   /**
    * The scopes the provider says it granted, from the `scope` of the code exchange's answer
-   * (comma- or space-separated there), in its order. A person may narrow a grant on the
+   * (comma- or space-separated there), in its order; a renewal whose answer names scopes replaces
+   * it, one that names none leaves it. A person may narrow a grant on the
    * provider's page, so this is what the token can do, not what the link asked for. Absent when
    * the answer named none: then nothing is known beyond what was asked.
    */
@@ -1205,6 +1208,12 @@ export interface SaveOptions {
   consentRefresh?: string | null | undefined;
   /** The save that follows a successful token exchange (`fetch_token`), and what it ran on. */
   exchange?: ExchangeFacts | undefined;
+  /**
+   * Who saves: the principal of the request or the run. It decides whether a new consent or a
+   * working exchange cancels a provider's erasure still held (`mayCancelProviderErasure`), and
+   * it is the actor of the audit row of every cancel. A save without one cancels nothing.
+   */
+  actor?: RequestPrincipal | undefined;
 }
 
 /** A save the store refused, with the reason it gives the caller. */
@@ -1547,6 +1556,16 @@ export class ApiStore {
 
   setGrantLedger(ledger: GrantLedger): void {
     this.grantLedger = ledger;
+  }
+
+  /**
+   * The audit log over engine.db, for the row of each cancelled provider erasure, written in the
+   * cancel's transaction. Null: the cancel writes no row (no engine.db, or a store in a test).
+   */
+  private auditLog: AuditLog | null = null;
+
+  setAuditLog(audit: AuditLog | null): void {
+    this.auditLog = audit;
   }
 
   /**
@@ -2629,16 +2648,22 @@ export class ApiStore {
       }
       const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew);
       // A save that clears a revocation from the grant it keeps (an exchange that worked again with
-      // the same token) lifts it: a provider's erasure of that grant still held is cancelled with it.
+      // the same token) lifts it: a provider's erasure of that grant still held is cancelled with it,
+      // whoever saves, since the same grant works again. A save that names no actor cancels nothing.
       const liftedGrant = prev?.oauth_grant?.state === 'revoked' && profile.oauth_grant?.state !== 'revoked' ? prev.oauth_grant.grant_id : undefined;
       const conn = this.connStore;
+      const actor = options?.actor;
       let saved: ReturnType<ApiStore['save']>;
+      // Without an actor the lift would clear the revocation and leave its erasure held, and the
+      // profile would no longer show it: refused instead.
       if (liftedGrant !== undefined && conn !== null && ledger !== null) {
+        if (actor === undefined) return { ok: false, reason: 'A save that clears a provider\'s revocation must name who saves it. Nothing was saved.' };
         try {
           saved = ledger.transaction(() => {
             const result = persist();
             if (!result.ok) throw new SaveRefused(result.reason);
-            cancelHeldProviderRecords(conn.recordDb(), profile.id, new Date(), liftedGrant);
+            const cancelled = cancelHeldProviderRecords(conn.recordDb(), profile.id, new Date(), liftedGrant);
+            auditProviderCancels(this.auditLog, actor, profile.id, cancelled, 'lift');
             return result;
           });
         } catch (err: unknown) {
@@ -2667,9 +2692,18 @@ export class ApiStore {
         if (!result.ok) throw new SaveRefused(result.reason);
         // A new consent, or an exchange that worked on a credential this epoch did not record, on a
         // connection a provider refused: it lives, so a provider's erasure still held is cancelled
-        // with the mint. A `credentials` mint (a configuration change) does not count.
-        if ((mintReason === 'consent' || mintReason === 'exchange') && this.connStore !== null) {
-          cancelHeldProviderRecords(this.connStore.recordDb(), profile.id, new Date());
+        // with the mint, when the actor may (`mayCancelProviderErasure`). The owner's ends every
+        // one held on the connection; a mandate's only the one of the grant it replaces, so it
+        // never reaches an erasure of a grant someone else connected. A `credentials` mint (a
+        // configuration change) does not count.
+        const actor = options?.actor;
+        const refused = prev?.oauth_grant;
+        if ((mintReason === 'consent' || mintReason === 'exchange') && this.connStore !== null && mayCancelProviderErasure(actor, refused)) {
+          const onlyGrant = actor.kind === 'owner' ? undefined : refused?.grant_id;
+          if (actor.kind === 'owner' || onlyGrant !== undefined) {
+            const cancelled = cancelHeldProviderRecords(this.connStore.recordDb(), profile.id, new Date(), onlyGrant);
+            auditProviderCancels(this.auditLog, actor, profile.id, cancelled, mintReason);
+          }
         }
         return result;
       });
@@ -2762,7 +2796,9 @@ export class ApiStore {
       const inMemory = this.unregister(id); // no apisDir → in-memory only, no file unlink
       // Kind-scoped so a cross-kind id collision (once mail/google/push land)
       // can never delete a neighbour's connection.
-      const inStore = record === undefined ? this.connStore.remove(id, 'api') : this.connStore.removeApiWithRecord(id, record, new Date());
+      // Only the owner starts an erasure (api_setup), so the owner is the actor of a supersede.
+      const inStore = record === undefined ? this.connStore.remove(id, 'api')
+        : this.connStore.removeApiWithRecord(id, record, new Date(), (ids) => { auditProviderCancels(this.auditLog, OWNER_PRINCIPAL, id, ids, 'owner_delete'); });
       if (inMemory || inStore) return true;
       // A file the import could not read is deleted as a file: it holds the import open until it
       // is read or gone, and there is no row of it to remove.

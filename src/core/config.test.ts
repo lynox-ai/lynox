@@ -195,7 +195,7 @@ describe('Config', () => {
       // the multi-variable difference this ladder was reshaped to remove (2026-08-10).
       expect(config.tier_set?.fast).toEqual({
         provider: 'openai',
-        model_id: 'accounts/fireworks/models/deepseek-v4p1-flash',
+        model_id: 'accounts/fireworks/models/deepseek-v4p1-flash-1017',
         api_base_url: 'https://api.fireworks.ai/inference/v1',
       });
       expect(config.tier_set?.balanced).toEqual({
@@ -277,7 +277,7 @@ describe('Config', () => {
       // only the settings picker — and there it failed silently, accepting the
       // write, persisting it, reporting it back, and then discarding it at load.
       //
-      // Seeding is the intended semantic (rafael 2026-08-17). The counter-direction
+      // Seeding is the intended semantic (2026-08-17). The counter-direction
       // — pin still applies when the tenant has NOT chosen — is the test below.
       writeUserConfig({ tier_preset: 'max-quality' });
       process.env['LYNOX_TIER_PRESET'] = 'efficient';
@@ -489,7 +489,7 @@ describe('Config', () => {
     });
 
     it('NEITHER name resolvable → boots on default routing instead of crash-looping', async () => {
-      // REVERSED 2026-08-17 after review (rafael's call). This used to assert the
+      // REVERSED 2026-08-17 after review (the owner's call). This used to assert the
       // throw, on the reasoning that with no valid pin to rescue WITH the tenant's
       // own state is corrupt and belongs in the fail-closed path.
       //
@@ -674,7 +674,7 @@ describe('Config', () => {
         api_base_url: 'https://api.fireworks.ai/inference/v1',
       });
       expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/minimax-m3');
-      expect(config.tier_set?.fast?.model_id).toBe('accounts/fireworks/models/deepseek-v4p1-flash');
+      expect(config.tier_set?.fast?.model_id).toBe('accounts/fireworks/models/deepseek-v4p1-flash-1017');
       for (const tier of ['fast', 'balanced', 'deep'] as const) {
         expect(config.tier_set?.[tier]?.api_base_url).toBe('https://api.fireworks.ai/inference/v1');
       }

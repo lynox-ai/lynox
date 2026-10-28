@@ -107,6 +107,17 @@ import type { PromptText } from '../../types/index.js';
  */
 export const MASS_SEND_THRESHOLD = 5;
 
+/**
+ * How many distinct recipients a mail has (addresses compared lower-cased, To, Cc and Bcc
+ * together), and whether that makes it a mass send. The one rule for the send's confirmation
+ * and for a mail shown in the approval queue.
+ */
+export function recipientSpread(recipients: ReadonlyArray<{ readonly address: string }>): { uniqueRecipientCount: number; isMassSend: boolean } {
+  const unique = new Set<string>();
+  for (const a of recipients) unique.add(a.address.toLowerCase());
+  return { uniqueRecipientCount: unique.size, isMassSend: unique.size > MASS_SEND_THRESHOLD };
+}
+
 export interface SendCoreInput {
   /** Account id; omit to use the registry default. */
   account?: string | undefined;
@@ -286,11 +297,9 @@ export async function prepareSend(
   const dedupBlock = checkRecipientDedup(allRecipients, input.subject);
   if (dedupBlock) return { ok: false, status: 'dedup_window', message: dedupBlock };
 
-  const uniqueRecipients = new Set<string>();
-  for (const a of allRecipients) uniqueRecipients.add(a.address.toLowerCase());
-  const isMassSend = uniqueRecipients.size > MASS_SEND_THRESHOLD;
+  const { isMassSend, uniqueRecipientCount } = recipientSpread(allRecipients);
 
-  return { ok: true, prepared: { provider, accountConfig, input, cc, bcc, isMassSend, uniqueRecipientCount: uniqueRecipients.size } };
+  return { ok: true, prepared: { provider, accountConfig, input, cc, bcc, isMassSend, uniqueRecipientCount } };
 }
 
 /** The send after its consent step: exactly what {@link prepareSend} fixed, then the dedup
@@ -387,7 +396,7 @@ export async function commitSend(
 
 /** Chars of the whitespace-flattened body rendered inline in the preview.
  *  4000 since 2026-08-14: at 200 the approver saw almost none of what they
- *  were approving (rafael: „damit der user auch sehen kann was er freigibt"),
+ *  were approving (owner feedback: „damit der user auch sehen kann was er freigibt"),
  *  and the web preview's scroll container (max-h-64 + overflow-y-auto, which
  *  already exists for this prompt) never engaged. The flattening stays: a
  *  line break in a value is a block-level markdown opener (`\n\n<!--` would

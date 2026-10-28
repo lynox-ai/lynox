@@ -1529,6 +1529,31 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }));
   }
 
+  /**
+   * {@link getEntityRelations} for the data export: the relations of a deleted
+   * source memory are included and marked `sourceDeleted`, since what is still
+   * stored belongs in the export until the reap removes it. Same store choice and cap.
+   */
+  async getEntityRelationsForExport(entityId: string): Promise<Array<RelationRecord & { sourceDeleted: boolean }>> {
+    const limit = 50;
+    if (this.subjectGraphEnabled && this.relationshipStore) {
+      try {
+        return this.relationshipStore.getRelationshipsForSubjectForExport(entityId, limit)
+          .map(r => ({ ...this._relRowToRelationRecord(r), sourceDeleted: r.source_deleted === 1 }));
+      } catch (err: unknown) { this._logReadFallback('getEntityRelationsForExport', err); }
+    }
+    return this.db.getEntityRelationsForExport(entityId, limit).map(r => ({
+      fromEntityId: r.from_entity_id,
+      toEntityId: r.to_entity_id,
+      relationType: r.relation_type,
+      description: r.description,
+      confidence: r.confidence,
+      sourceMemoryId: r.source_memory_id ?? '',
+      createdAt: r.created_at,
+      sourceDeleted: r.source_deleted === 1,
+    }));
+  }
+
   // === Subject-graph read mappers (S1d — flag-gated, additive) ===
 
   /**
@@ -1555,7 +1580,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * posture — store PRESERVES the legacy row and continues; deactivate and erase
    * RE-THROW so a half-completed erasure is never reported as done.
    */
-  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'erase' | 'purge', ref: string, err: unknown): void {
+  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'supersede' | 'erase' | 'purge', ref: string, err: unknown): void {
     process.stderr.write(
       `[lynox:mirror-parity] CRITICAL ${op} ${ref}: engine.db diverged from legacy under memory_graph_reads — ${err instanceof Error ? err.message : String(err)}\n`,
     );
@@ -1680,6 +1705,43 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     );
   }
 
+  /**
+   * Retire the original of a move (`memory_promote`): the memories matching `pattern`
+   * in `scope` are deactivated now, like {@link deactivateByPattern}, and their ids
+   * returned so {@link markMoved} can name the copy as their successor once it is
+   * stored. Until then — or for good, if no copy is stored — they read as removed.
+   */
+  async retireForMove(pattern: string, namespace: MemoryNamespace, scope: MemoryScopeRef): Promise<string[]> {
+    const ids = this.db.deactivateMemoriesByPatternInScope(pattern, namespace, scope.type, scope.id);
+    if (this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.deactivateByIds(ids);
+      } catch (err: unknown) {
+        this._reportMirrorParityLoss('deactivate', `${ids.length} id(s) for a move`, err);
+        throw err;
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Name the stored copy as the successor of a move's retired original, in both
+   * stores, so the original reads as replaced rather than removed. The lineage is
+   * recorded whatever the copy's tier: the retirement itself was decided by the move,
+   * this only says where the fact went.
+   */
+  markMoved(ids: string[], successorId: string): void {
+    this.db.markReplaced(ids, successorId);
+    if (this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.markReplaced(ids, successorId);
+      } catch (err: unknown) {
+        this._reportMirrorParityLoss('supersede', `${ids.length} id(s) for a move`, err);
+        throw err;
+      }
+    }
+  }
+
   async deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number> {
     const ids = this.db.deactivateMemoriesByPattern(pattern, namespace);
     // S5b'-c: mirror the deactivation onto the engine.db stubs (the authoritative
@@ -1694,7 +1756,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // eraseByPattern).
     //
     // §0.1 (mirror P0): the reap is NOT swallowed. The whole fleet runs
-    // memory_graph_reads=true (rafael/cat and one customer instance since 2026-07-08), so a swallowed reap
+    // memory_graph_reads=true (the canary instances and one customer instance since 2026-07-08), so a swallowed reap
     // leaves the "deleted" content still recallable from engine.db — a silent erasure
     // FAILURE, and not self-healing (a re-run finds the legacy rows already inactive
     // → ids=[] → the stub is never revisited). So a failed reap: (1) emits a hard,
@@ -1704,10 +1766,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // NOTE — this is loud only for a caller that AWAITS + propagates. As of the erasure
     // PR: `memory_delete` (the agent's SOFT curation path) awaits this and surfaces a
     // partial failure; the hard GDPR erase (MemoryFacade.delete) uses eraseByPattern, not
-    // this method. The one remaining swallower is `memory_promote` (`void …catch(()=>{})`)
-    // — deliberate: promotion is a MOVE (the fact survives at the target scope), so a
-    // lingering old-scope stub is a duplicate, never a privacy leak, and no half-erasure
-    // is falsely reported as done.
+    // this method. A promotion retires its original through `retireForMove`, which keeps
+    // the same posture: promotion is a MOVE (the fact survives at the target scope), so
+    // its caller swallows a failure — a lingering old-scope stub is a duplicate, never a
+    // privacy leak, and no half-erasure is falsely reported as done.
     if (this.memoryGraphStore) {
       try {
         this.memoryGraphStore.deactivateByIds(ids);

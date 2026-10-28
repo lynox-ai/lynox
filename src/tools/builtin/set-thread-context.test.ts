@@ -10,6 +10,7 @@ import { ThreadStore } from '../../core/thread-store.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { setThreadContextTool } from './set-thread-context.js';
 import type { IAgent } from '../../types/index.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 // Live-threads schema mirror (history.db) incl. the A1 `primary_subject_id` column
 // — the same minimal shape ThreadStore's A1 tests build. subjects live in engine.db
@@ -63,7 +64,7 @@ describe('set_thread_context tool (Context-Hierarchy Scoping — Slice A2)', () 
     const ctx = createToolContext({});
     ctx.subjectStore = subjects;
     ctx.threadStore = threads;
-    agent = { toolContext: ctx, currentThreadId: THREAD } as unknown as IAgent;
+    agent = { principal: OWNER_PRINCIPAL, toolContext: ctx, currentThreadId: THREAD } as unknown as IAgent;
   });
 
   afterEach(() => {

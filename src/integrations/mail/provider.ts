@@ -294,7 +294,7 @@ export interface MailServerConfig {
  *   - `oauth_microsoft` → OAuthMicrosoftProvider (future), requires `oauthProviderKey`
  */
 export interface MailAccountConfig {
-  /** Stable id, e.g. 'rafael-gmail'. Used as the SecretStore key prefix. */
+  /** Stable id, e.g. 'work-gmail'. Used as the SecretStore key prefix. */
   id: string;
   /** Human label for UI. */
   displayName: string;

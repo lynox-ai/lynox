@@ -15,6 +15,8 @@ import type Database from 'better-sqlite3';
 import { isShopifyAdminHost } from './shopify-host.js';
 import { scrubFreedPages } from './sqlite-constants.js';
 import { EPOCH_START_REASONS } from './grant-ledger.js';
+import type { AuditLog } from './audit-log.js';
+import { MANDATE_TAG_PREFIX, type RequestPrincipal } from './request-principal.js';
 
 /** The state of one store of a record. Nothing but `done` is ever shown as erased. */
 export type ErasureStoreState = 'done' | 'pending' | 'not reached' | 'failed' | 'late' | 'cancelled';
@@ -267,11 +269,11 @@ function writeProviderRecord(engineDb: Database.Database, connectionId: string, 
  * reconnected, the revocation was lifted on the same grant (`onlyGrant`), or the owner removed the
  * connection, whose own record then covers the epoch. It writes no record; it only ends a held one.
  */
-export function cancelHeldProviderRecords(engineDb: Database.Database, connectionId: string, now: Date, onlyGrant?: string): number {
-  return engineDb.prepare(`UPDATE connection_records SET history_state = 'cancelled', cancelled_at = ?
+export function cancelHeldProviderRecords(engineDb: Database.Database, connectionId: string, now: Date, onlyGrant?: string): number[] {
+  return (engineDb.prepare(`UPDATE connection_records SET history_state = 'cancelled', cancelled_at = ?
     WHERE connection_id = ? AND cause = 'provider_revoked' AND kind = 'erasure' AND history_state = 'pending' AND hold_until > ?
-    ${onlyGrant === undefined ? '' : 'AND revoked_grant IN (?)'}`)
-    .run(now.toISOString(), connectionId, now.toISOString(), ...(onlyGrant === undefined ? [] : [onlyGrant])).changes;
+    ${onlyGrant === undefined ? '' : 'AND revoked_grant IN (?)'} RETURNING id`)
+    .all(now.toISOString(), connectionId, now.toISOString(), ...(onlyGrant === undefined ? [] : [onlyGrant])) as Array<{ id: number }>).map((r) => r.id);
 }
 
 /** The owner's "the connection did not end" on one held provider erasure. */
@@ -282,6 +284,117 @@ export function cancelProviderRecord(engineDb: Database.Database, recordId: numb
     WHERE id = ? AND cause = 'provider_revoked' AND kind = 'erasure' AND history_state = 'pending' AND hold_until > ?`)
     .run(now.toISOString(), recordId, now.toISOString()).changes;
   return changed > 0 ? 'cancelled' : 'not_held';
+}
+
+/** Why a held provider erasure was cancelled, as its audit row says. */
+export type ProviderCancelReason = 'consent' | 'exchange' | 'lift' | 'owner_delete' | 'owner';
+
+/**
+ * Whether `actor` may cancel the held provider erasure of the refused grant `refused` by a new
+ * consent or a working exchange: the owner always; a mandate only on a grant it connected itself,
+ * the same address and the same mandate (a later mandate for the same address is another one).
+ * A grant that names no connecter is the owner's. Anyone else, or no actor: no.
+ */
+export function mayCancelProviderErasure(
+  actor: RequestPrincipal | undefined,
+  refused: { readonly connected_by?: string | undefined; readonly connected_mandate_id?: string | undefined } | undefined,
+): actor is RequestPrincipal {
+  if (actor === undefined) return false;
+  if (actor.kind === 'owner') return true;
+  if (actor.kind !== 'mandate' || actor.mandateId === undefined) return false;
+  return refused?.connected_by === `${MANDATE_TAG_PREFIX}${actor.email}` && refused.connected_mandate_id === actor.mandateId;
+}
+
+/**
+ * The audit row of each cancelled provider erasure: who cancelled it and why. Written in the
+ * cancel's transaction by its caller, so a cancel whose row cannot be written does not happen,
+ * and neither does one without an audit log to write it to: that throws too. Ids and the reason
+ * only.
+ */
+export function auditProviderCancels(audit: AuditLog | null, actor: RequestPrincipal, connectionId: string, recordIds: readonly number[], reason: ProviderCancelReason): void {
+  if (recordIds.length === 0) return;
+  if (audit === null) throw new Error('A provider erasure is not cancelled without an audit log to record it.');
+  for (const id of recordIds) {
+    audit.record({
+      principal: actor, action: 'connection.erasure.cancel', target: `${connectionId} ${id} ${reason}`,
+      phase: 'done', correlationId: `connection-erasure-${id}`,
+    });
+  }
+}
+
+/** A provider's erasure the owner is told about on the profile it concerns. */
+export interface ProviderNotice {
+  readonly recordId: number;
+  readonly connectionId: string;
+  /** When the provider refused the grant: the record is written in the refusal's transaction. */
+  readonly revokedAt: string;
+  /**
+   * Whether the connection was connected again by a new consent since the refusal: the ledger
+   * holds a `consent` grant after the refused one. A profile that works again without one (a
+   * later grant's refusal lifted, an exchange on a new credential) is not; the other fields of its
+   * grant, `connected_by` among them, are carried over from the grant that was refused.
+   */
+  readonly reconnected: boolean;
+  readonly holdUntil: string;
+  readonly deadline: string;
+}
+
+/**
+ * The provider erasures to tell the owner about, at `now`: every erasure that is still to run (not
+ * cancelled, not done) and whose deadline has not passed, of a grant of the connection stored now
+ * under its id. Every such record, whether the profile is revoked or connected again: a mandate's
+ * consent cancels only the erasure of the grant it replaced, a credentials change mints a grant
+ * that stays revoked, and a reconnect past the hold cancels nothing, so in each case an erasure can
+ * still be to run.
+ *
+ * Only records of a grant in the epoch of the connection stored now: from the grant its row was
+ * created with up to, not including, the next grant minted as a beginning. A profile deleted and
+ * stored again under the same id begins a later epoch, so the earlier one's records are not told on
+ * it; an import that brings back an earlier epoch's first grant brings back that epoch alone, and
+ * its records still to run are told (they run either way), not those of a connection stored under
+ * the id after it. `reconnected` counts a consent inside the same bounds.
+ */
+export function providerNotices(engineDb: Database.Database, now: Date): readonly ProviderNotice[] {
+  const rows = engineDb.prepare(`SELECT id, connection_id, revoked_grant, created_at, hold_until, deadline FROM connection_records
+    WHERE cause = 'provider_revoked' AND kind = 'erasure' AND history_state NOT IN ('cancelled', 'done') AND deadline > ?
+    ORDER BY id`).all(now.toISOString()) as Array<{ id: number; connection_id: string; revoked_grant: string; created_at: string; hold_until: string; deadline: string }>;
+  const epochs = new Map<string, ReadonlyArray<{ g: string; reason: string }>>();
+  const epochOf = (id: string): ReadonlyArray<{ g: string; reason: string }> => {
+    let epoch = epochs.get(id);
+    if (epoch === undefined) { epoch = boundedEpoch(engineDb, id); epochs.set(id, epoch); }
+    return epoch;
+  };
+  return rows.flatMap((r) => {
+    const epoch = epochOf(r.connection_id);
+    const at = epoch.findIndex((e) => e.g === r.revoked_grant);
+    if (at < 0) return [];
+    return [{
+      recordId: r.id, connectionId: r.connection_id, revokedAt: r.created_at, holdUntil: r.hold_until, deadline: r.deadline,
+      reconnected: epoch.slice(at + 1).some((e) => e.reason === 'consent'),
+    }];
+  });
+}
+
+/**
+ * The grants of the epoch the row stored under `connectionId` began, in ledger order, ending before
+ * the first grant minted as a beginning after the row's current grant (after its start when the
+ * current grant is not in the ledger after it). A start the row keeps while the boot mints it a
+ * `backfill` or `split` grant does not cut that grant off; a later connection stored under the id
+ * does. Empty when the row is missing or does not say where its epoch starts, or starts at a grant
+ * this ledger did not mint as a beginning (as {@link connectionEpoch}).
+ */
+function boundedEpoch(engineDb: Database.Database, connectionId: string): ReadonlyArray<{ g: string; reason: string }> {
+  const row = engineDb.prepare("SELECT config_json, first_grant_id FROM connections WHERE id = ? AND kind = 'api'")
+    .get(connectionId) as { config_json: string; first_grant_id: string | null } | undefined;
+  if (!row || row.first_grant_id === null) return [];
+  const ledger = engineDb.prepare("SELECT grant_id AS g, reason FROM connection_grants WHERE connection_id = ? AND kind = 'api' ORDER BY rowid")
+    .all(connectionId) as Array<{ g: string; reason: string }>;
+  const start = ledger.findIndex((e) => e.g === row.first_grant_id);
+  if (start < 0 || !EPOCH_START.has(ledger[start]!.reason)) return [];
+  const current = currentGrantOf(row.config_json);
+  const from = Math.max(start, ledger.findIndex((e) => e.g === current));
+  const next = ledger.findIndex((e, i) => i > from && EPOCH_START.has(e.reason));
+  return ledger.slice(start, next < 0 ? undefined : next);
 }
 
 interface RecordRow {

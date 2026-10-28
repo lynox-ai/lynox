@@ -3,8 +3,10 @@ import { join, dirname, basename, resolve, posix } from 'node:path';
 import type { ToolEntry, IAgent, ChangesetWriter } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
-import { listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
-import { anchoredError, isInArtifactsRoot, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
+import { FILE_TOOL_READ_CAP_BYTES, listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
+import { anchoredError, artifactsRoot, isInArtifactsRoot, oversizeWayOut, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
+import { getWorkspaceRoot } from '../../core/workspace-root.js';
+import { readEnvAlias } from '../../core/env.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { MAX_BUFFER_BYTES } from '../../core/constants.js';
@@ -113,6 +115,41 @@ function refusePlaceholderLanding(landing: string, file: string): void {
   refuseEvictionPlaceholder(readFileSync(file, 'utf-8'), landing);
 }
 
+/**
+ * Without isolation, batch_files changes files where `edit_file` does: under the workspace root, or
+ * in the artifacts directory (`write_file` writes under the workspace root only). rename, move and
+ * transform all write. Reading stays free there, as it is for the shell; writing anywhere the process
+ * can is not. Checked on the closest existing ancestor with its symbolic links followed, so a link on
+ * the way does not carry the write out.
+ */
+function refuseOutsideWriteRoots(path: string, shown: string): void {
+  let probe = path;
+  let tail = '';
+  while (!existsSync(probe) && dirname(probe) !== probe) {
+    tail = tail === '' ? basename(probe) : join(basename(probe), tail);
+    probe = dirname(probe);
+  }
+  const real = existsSync(probe) ? join(realpathSync(probe), tail) : path;
+  const wsRaw = resolve(getWorkspaceRoot());
+  const ws = existsSync(wsRaw) ? realpathSync(wsRaw) : wsRaw;
+  if (isPathWithin(real, ws) || isPathWithin(real, artifactsRoot())) return;
+  throw new Error(outsideWriteRootsMessage(shown, ws));
+}
+
+/**
+ * The refusal, with the way out the reader of this instance actually has (ux U-021). A managed
+ * instance sets no workspace either, so it reaches this refusal too, but its user cannot restart
+ * lynox with an env var: there the way out is the workspace itself, or an attachment in the chat,
+ * which lands in the workspace (`persistChatUpload`, `uploads/`).
+ */
+function outsideWriteRootsMessage(shown: string, ws: string): string {
+  const head = `Not changed: ${shown} is outside the workspace (${ws}) and the artifacts directory; batch_files changes files only there. Do not retry with this path. `;
+  if (readEnvAlias('LYNOX_BILLING_TIER')) {
+    return head + 'Work only with files inside the workspace; if the user means a file from their computer, ask them to attach it in the chat.';
+  }
+  return head + 'Tell the user in one sentence: to work on files in another directory, they can restart lynox with LYNOX_WORKSPACE set to that directory.';
+}
+
 /** Where a path that may not exist yet lands, its directory's links resolved. */
 function landingPath(path: string): string {
   const dir = dirname(path);
@@ -124,8 +161,12 @@ function landingPath(path: string): string {
  * write_file's are, so the review shows the change and a rollback undoes it. Throws, and the
  * file is left alone, when it cannot be saved.
  */
-function saveBefore(changeset: ChangesetWriter | undefined, path: string): void {
+function saveBefore(changeset: ChangesetWriter | undefined, path: string, wayOut: () => string): void {
   if (changeset !== undefined && !changeset.backupBeforeWrite(path)) {
+    if (changeset.refusedTooLarge) {
+      const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
+      throw new Error(`it is larger than ${capMb} MB, too large to save for the review, so it was left as it was. ${wayOut()}`);
+    }
     throw new Error('it could not be saved for the review before the change, so the change could not be undone; it was left as it was');
   }
 }
@@ -142,7 +183,7 @@ function insideRel(rel: string): string | null {
  * open directory. A link on the way is refused, never followed; a move or rename never leaves
  * the workspace (a destination outside it is refused).
  */
-function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: string, dirRel: string, changeset: ChangesetWriter | undefined): string {
+function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: string, dirRel: string, changeset: ChangesetWriter | undefined, wayOut: () => string): string {
   const shown = (rel: string): string => (rel === '' ? ws : `${ws}/${rel}`);
   let files: string[];
   try {
@@ -215,7 +256,7 @@ function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: stri
           }
           const updated = content.replaceAll(input.find, input.replace);
           if (content !== updated) {
-            saveBefore(changeset, target.shown);
+            saveBefore(changeset, target.shown, wayOut);
             writeInPlace(target, updated, false);
             changeset?.recordWritten(target.shown);
             results.push(`Transformed: ${target.shown}`);
@@ -253,6 +294,8 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
   },
   handler: async (input: BatchFilesInput, agent?: IAgent): Promise<string> => {
     const changeset = agent?.changeset;
+    // What to do with a file too large to save for the review (`saveBefore`).
+    const wayOut = (): string => oversizeWayOut(agent ?? { getAvailableTools: () => [] }, 'change', true);
     // The review restores and deletes files by path; it cannot follow a file to where it was
     // moved, and a rollback after a move could then delete the only copy. Without a review, or
     // before its first write, a move is what it is on its own.
@@ -266,7 +309,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
     const base = reachWorkspace(input.directory);
     if (base !== null) {
       const mapped = toWorkspaceRel(resolve(input.directory), base.ws);
-      if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel, changeset);
+      if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel, changeset, wayOut);
     }
     // Resolve symlinks on the directory itself to prevent traversal via symlinked root
     const dir = realpathSync(resolve(input.directory));
@@ -288,6 +331,11 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       validatePath(dir, 'write');
       if (input.operation === 'move' && input.destination) {
         validatePath(resolve(input.destination), 'write');
+      }
+    } else {
+      refuseOutsideWriteRoots(dir, input.directory);
+      if (input.operation === 'move' && input.destination) {
+        refuseOutsideWriteRoots(resolve(input.destination), input.destination);
       }
     }
     const files = findFiles(dir, input.pattern);
@@ -311,6 +359,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             // workspace (`../../etc/…`) — a write-anywhere primitive. `move`
             // already validates its destination; rename must too.
             if (isWorkspaceActive()) validatePath(newPath, 'write');
+            else refuseOutsideWriteRoots(newPath, newName);
             if (base !== null && landsInWorkspace(newPath, base.ws)) throw new Error(`the new name ${newName} lands in the workspace`);
             refusePlaceholderLanding(landingPath(newPath), file);
             renameSync(file, newPath);
@@ -358,7 +407,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             if (content !== updated) {
               if (insertsPlaceholder) refuseEvictionPlaceholder(input.replace, file);
               else if (containsEvictionMarker(updated) && !containsEvictionMarker(content)) refuseEvictionPlaceholder(updated, file);
-              saveBefore(changeset, file);
+              saveBefore(changeset, file, wayOut);
               writeFileSync(file, updated, 'utf-8');
               changeset?.recordWritten(file);
               results.push(`Transformed: ${file}`);

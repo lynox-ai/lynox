@@ -157,7 +157,7 @@ describe('currentDateContext', () => {
     // Day-precision is what keeps the Anthropic prompt cache key stable across
     // the whole day. This string is the head of the cached prefix, so any
     // change re-bills the entire conversation — hour precision busted the cache
-    // at every hour boundary (rafael 2026-06-05). The precise wallclock lives
+    // at every hour boundary (2026-06-05). The precise wallclock lives
     // in the per-turn `[Now: …Z]` marker, outside the cache, so coarsening here
     // costs no accuracy. Pinning the contract explicitly.
     vi.useFakeTimers();
@@ -294,7 +294,7 @@ describe('withCurrentTimePrefix', () => {
 });
 
 // F-Halu regression-pin (2026-05-18): the SYSTEM_PROMPT must include the
-// "Honesty over completeness" guardrail — rafael prod fabricated a list
+// "Honesty over completeness" guardrail — our own production instance fabricated a list
 // when memory_recall returned only a partial answer.
 //
 // Assertions are deliberately a mix of literal + intent — the heading and
@@ -393,7 +393,7 @@ describe('SYSTEM_PROMPT operator channels', () => {
 // Fix C regression-pin (v1.5.2): SYSTEM_PROMPT alone does not anchor model
 // identity, so a Mistral/Custom model can hallucinate "I am Claude Haiku"
 // from training-data bias. modelIdentityContext is the injection point —
-// without it, the rafael-prod 2026-05-18 incident regresses.
+// without it, the 2026-05-18 production incident regresses.
 describe('modelIdentityContext', () => {
   it('returns an empty string when the PROVIDER is missing (no anchor possible)', () => {
     expect(modelIdentityContext(undefined, 'claude-sonnet-4-6')).toBe('');
@@ -511,7 +511,7 @@ describe('modelIdentityContext sanitization (prompt-injection guard)', () => {
   // slashes produced `accountsfireworksmodelsglm-5p2` in a prompt that then
   // orders the agent to "state THIS exact model id" — so the agent was told to
   // report an id that does not exist, with authority. Found in a real prod
-  // prompt snapshot (rafael, 2026-07-30).
+  // prompt snapshot (2026-07-30).
   it('keeps slashes in a path-shaped model id (hosted-inference namespacing)', () => {
     const out = modelIdentityContext('openai', 'accounts/fireworks/models/glm-5p2');
     expect(out).toContain('`accounts/fireworks/models/glm-5p2`');

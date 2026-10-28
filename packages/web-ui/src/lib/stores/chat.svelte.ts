@@ -27,7 +27,7 @@ import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
-import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
+import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
@@ -270,7 +270,7 @@ interface PersistedChat {
 	queues?: Record<string, { id: string; task: string }[]>;
 	/** Per-thread "deferred follow-ups" tray: the un-taken siblings of a pill the
 	 *  user clicked, kept visible + clickable so a second matching suggestion
-	 *  isn't lost when taking the first (rafael 2026-07-17). Plain {label,task}
+	 *  isn't lost when taking the first (2026-07-17). Plain {label,task}
 	 *  JSON — persisted exactly like `queues`, no payload concern. */
 	/**
 	 * Retired 2026-08-08 with the deferred-follow-ups tray. Kept on the READ
@@ -404,7 +404,7 @@ function persistChatNow(): void {
 	if (sessionId) {
 		root.threads[sessionId] = messages;
 		// Persist the pending send-queue alongside the messages so a reload
-		// mid-stream doesn't strand a queued turn (rafael 2026-06-04). File-
+		// mid-stream doesn't strand a queued turn (2026-06-04). File-
 		// bearing entries are dropped here — see PersistedChat.queues.
 		const fileless = messageQueue
 			.filter((q) => !q.files || q.files.length === 0)
@@ -737,7 +737,7 @@ if (typeof window !== 'undefined') {
  * evicted the in-memory session OR was restarted, the next /run call returns
  * 404; without the threadId, recovery would create a brand-new sessionId →
  * agent with zero history → user sees old thread in UI but agent can't see it
- * (2026-05-18 staging QA from rafael prod).
+ * (2026-05-18 staging QA from our own production instance).
  */
 export async function ensureSession(resumeThreadId?: string | null): Promise<string> {
 	if (sessionId) return sessionId;
@@ -814,10 +814,11 @@ export interface RunOptions {
 	 * or "💬 N im Chat" (kind 'mail-batch', carrying N selected item ids) — opens
 	 * a fresh chat referencing the object(s) being worked on. The server resolves
 	 * the ref into a context preamble it prepends to this first message, so the
-	 * agent has the object(s) loaded without the user pasting them.
+	 * agent has the object(s) loaded without the user pasting them. Kind
+	 * 'approval' is a queued mail the owner moved to chat to change it.
 	 */
 	context?:
-		| { kind: 'workflow' | 'run' | 'mail'; id: string }
+		| { kind: 'workflow' | 'run' | 'mail' | 'approval'; id: string }
 		| { kind: 'mail-batch'; ids: string[] };
 }
 
@@ -1199,7 +1200,8 @@ let _resendProbeInFlight = false;
 /**
  * Before a failed turn is sent again, ask the server whether a turn is still running in this
  * thread. If one is, it is not sent again: the user is told and the running turn's stream is
- * attached. Resolves whether to send; never rejects.
+ * attached. A scheduled run's question waiting there holds it back too: the user is told and
+ * the question's card is brought back. Resolves whether to send; never rejects.
  */
 async function askBeforeResend(): Promise<boolean> {
 	if (_resendProbeInFlight || isStreaming) return false;
@@ -1207,11 +1209,14 @@ async function askBeforeResend(): Promise<boolean> {
 	// No session yet: the failed turn never reached one, so nothing can be running.
 	if (!sid) return true;
 	_resendProbeInFlight = true;
-	let running: boolean;
+	let live: ReattachTarget | null;
+	let scheduledQuestion: boolean;
 	try {
 		const res = await fetch(`${getApiBase()}/runs/active`);
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		running = selectReattachTarget(await res.json(), sid) !== null;
+		const body: unknown = await res.json();
+		live = selectReattachTarget(body, sid);
+		scheduledQuestion = scheduledQuestionWaits(body, sid);
 	} catch {
 		// Not "nothing is running": the question could not be asked, so nothing is sent.
 		if (sessionId === sid) addToast(t('chat.error_connection'), 'error', 6000);
@@ -1221,8 +1226,16 @@ async function askBeforeResend(): Promise<boolean> {
 	}
 	// The thread changed, or a turn started meanwhile: that is now the turn in charge.
 	if (sessionId !== sid || isStreaming) return false;
-	if (!running) return true;
-	addToast(t('chat.still_running'), 'info', 6000);
+	if (live === null && scheduledQuestion) {
+		// A scheduled run's question has no stream to attach: the way on is to answer it, so
+		// its card is brought back rather than a turn sent past it.
+		addToast(t('chat.question_waiting'), 'info', 6000);
+		void checkPendingPrompt();
+		return false;
+	}
+	if (live === null) return true;
+	// A run that waits for the user's answer is not working: the way on is to answer it.
+	addToast(t(live.status === 'awaiting_input' ? 'chat.question_waiting' : 'chat.still_running'), 'info', 6000);
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its
@@ -1328,7 +1341,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	// recreate via the resume path and retry. Without `resumeThreadId`, the
 	// backend would mint a fresh empty session and the agent would see zero
 	// history despite the UI showing all prior messages (2026-05-18 staging
-	// QA: F-404-Recovery from rafael prod). Distinct from 401 which is a
+	// QA: F-404-Recovery from our own prod instance). Distinct from 401 which is a
 	// cookie-level auth failure handled below.
 	if (res.status === 404) {
 		const previousThreadId = sid;
@@ -1839,7 +1852,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		// brand-new chat's user message is persisted by now (message_count ≥ 1),
 		// but the nav list otherwise only refreshes at run END, so a new chat
 		// stayed invisible (and its live run-status dot couldn't show) for the
-		// whole first turn (rafael 2026-06-05). One-shot, so it's one extra
+		// whole first turn (2026-06-05). One-shot, so it's one extra
 		// thread-list fetch per run.
 		void loadThreads();
 	}
@@ -2114,7 +2127,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// result server-side (otherwise the model couldn't have produced
 			// its final reply). Anything still flagged `running` here is a
 			// UI-side ghost — leaving it spinning forever after the answer is
-			// already on screen is the bug rafael reported on 2026-05-15
+			// already on screen is the bug the owner reported on 2026-05-15
 			// (api_setup ✓ visible but inner http_request still spinning).
 			//
 			// Index-drift invariant: `msg` was resolved at the top of
@@ -2319,7 +2332,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// covers LLM cost only.
 			const merged = mergeDoneUsage(msg.usage, data['usage']);
 			if (merged) msg.usage = merged;
-			// Silent-turn guard (rafael 2026-05-29): a run that the engine
+			// Silent-turn guard (2026-05-29): a run that the engine
 			// fail-closes BEFORE the LLM (stale managed-credit status, budget
 			// reached, content-policy block) never streams a text/tool block —
 			// it returns a short reason string that the HTTP API forwards as

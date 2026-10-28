@@ -2,6 +2,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { runMerge, LEDGER_RETENTION_DAYS } from '../../core/subject-merge-runner.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { withInstanceWrite } from '../../core/instance-trail.js';
 import { pv } from '../../core/prompt-value.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
 import type { SubjectKind } from '../../core/subject-store.js';
@@ -143,17 +144,20 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
     if (answer !== 'Merge') return `Cancelled — "${dup.name}" and "${canon.name}" were left as separate entries.`;
 
     try {
-      const r = runMerge(subjects, agent.toolContext.dataStore, agent.toolContext.threadStore, getLynoxDir(), dup.id, canon.id);
-      if (!r.ok) return `Merge refused: ${r.reason}`;
-      const cells = r.dataStoreRows > 0 ? `, ${r.dataStoreRows} record cell${r.dataStoreRows === 1 ? '' : 's'} repointed` : '';
-      // `runMerge` has always returned `ledgerPath` and this line always threw it
-      // away, then claimed reversibility in the abstract. Handing over the actual
-      // file is what turns "reversible" from a promise into an address: it is the
-      // only input `rollbackMergeRun` takes. It IS covered by backup and migration
-      // (`data-dir-inventory.ts`), so the honest limit is the access it needs, not
-      // the file's survival — the previous wording had that exactly backwards.
-      return `Merged "${r.dupName}" into "${r.canonicalName}" — one entry now${cells}. `
-        + `An operator can reverse this from ${r.ledgerPath} — that needs shell access to this machine, not chat. The file is kept in backups and carried across migrations, and is removed after ${String(LEDGER_RETENTION_DAYS)} days.`;
+      const dupId = dup.id, canonId = canon.id;
+      return withInstanceWrite(agent, { site: 'subjects_merge#change', kind: 'change', store: 'subjects', target: () => [['duplicate', dupId], ['canonical', canonId]] }, () => {
+        const r = runMerge(subjects, agent.toolContext.dataStore, agent.toolContext.threadStore, getLynoxDir(), dup.id, canon.id);
+        if (!r.ok) return `Merge refused: ${r.reason}`;
+        const cells = r.dataStoreRows > 0 ? `, ${r.dataStoreRows} record cell${r.dataStoreRows === 1 ? '' : 's'} repointed` : '';
+        // `runMerge` has always returned `ledgerPath` and this line always threw it
+        // away, then claimed reversibility in the abstract. Handing over the actual
+        // file is what turns "reversible" from a promise into an address: it is the
+        // only input `rollbackMergeRun` takes. It IS covered by backup and migration
+        // (`data-dir-inventory.ts`), so the honest limit is the access it needs, not
+        // the file's survival — the previous wording had that exactly backwards.
+        return `Merged "${r.dupName}" into "${r.canonicalName}" — one entry now${cells}. `
+          + `An operator can reverse this from ${r.ledgerPath} — that needs shell access to this machine, not chat. The file is kept in backups and carried across migrations, and is removed after ${String(LEDGER_RETENTION_DAYS)} days.`;
+      });
     } catch (err) {
       return `subjects_merge error: ${getErrorMessage(err)}`;
     }

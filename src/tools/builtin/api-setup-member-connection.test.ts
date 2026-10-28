@@ -10,6 +10,7 @@ import { runCollectingMemberNotes } from '../../core/member-connection-notes.js'
 import { sharedRefreshRefusal } from '../../core/profile-secret-view.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 // What the owner's session may do with a connection a member made with their own login:
 // not save over it while the member's access lasts (P3), refine it (F6), and not renew its
@@ -94,6 +95,8 @@ function agentWith(store: ApiStore, principal: RequestPrincipal, live: readonly 
     sessionCounters: { httpRequests: 0 },
     promptUser: async () => 'Allow',
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       vaultNameBindings: bindingsAsMigrated(store),
       apiStore: store,
       mandateEnds: { isLive: (id: string) => live.includes(id) },
@@ -190,6 +193,60 @@ describe('fetch_token on a member\'s connection', () => {
     await done;
 
     expect([...notes]).toEqual([expect.stringMatching(/^Connection not used: setup@example\.org set up this connection/)]);
+  });
+});
+
+// A working exchange in the member's run, on the member's connection a provider had refused: the
+// provider's erasure still held is cancelled, and its audit row names the member, not the owner.
+describe('fetch_token in the member\'s run after a provider\'s refusal', () => {
+  it('cancels the held erasure of the member\'s own grant, naming the member', async () => {
+    const { EngineDb } = await import('../../core/engine-db.js');
+    const { ConnectionStore } = await import('../../core/connection-store.js');
+    const { GrantLedger } = await import('../../core/grant-ledger.js');
+    const { AuditLog } = await import('../../core/audit-log.js');
+    const erasure = await import('../../core/connection-erasure.js');
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    const restore = erasure.setProviderErasureForTests(true);
+    try {
+      const conn = new ConnectionStore(db);
+      const store = new ApiStore();
+      store.loadFromConnections(conn);
+      store.setConnectionStore(conn);
+      store.setGrantLedger(new GrantLedger(db.getDb()));
+      store.setAuditLog(new AuditLog(db.getDb()));
+      expect(store.save(crmProfile()).ok).toBe(true);
+      expect(store.markRevokedWithRecord('crm-api', 'fp-refused', new Date(), true)).toBe('erasure');
+      const values: Record<string, string> = { CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_API_REFRESH_TOKEN: 'rt-1' };
+      const vault = {
+        resolve: (n: string) => values[n] ?? null,
+        resolveSecretRefs: (input: unknown) => JSON.parse(JSON.stringify(input).replace(/secret:([A-Z_][A-Z0-9_]*)/g, (m, n: string) => values[n] ?? m)) as unknown,
+        extractSecretNames: (input: unknown) => [...JSON.stringify(input).matchAll(/secret:([A-Z_][A-Z0-9_]*)/g)].map((m) => m[1]!),
+        isEnvironmentSecret: () => false,
+        set: (n: string, v: string) => { values[n] = v; },
+        listNames: () => Object.keys(values),
+        maskSecrets: (t: string) => t,
+      };
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ access_token: 'at-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } }));
+      // The owner released the client pair to the member's profile, for the member's grant.
+      const { releaseBinding } = await import('../../core/profile-secret-view.js');
+      const agent = agentWith(store, MANDATE, ['M-1'], vault) as unknown as { toolContext: Record<string, unknown> };
+      agent.toolContext['secretReleases'] = {
+        releaseOf: (id: string, _author: string, name: string) => {
+          const p = store.get(id);
+          const binding = p ? releaseBinding(p, name) : null;
+          return binding === null ? undefined : { binding, mandateId: 'M-1' };
+        },
+        requestOf: () => undefined, replaceRequests: () => 0, pendingReleases: () => [], activeReleases: () => [], forgetProfile: () => undefined,
+      };
+      const reply = await run(agent as never, { action: 'fetch_token', id: 'crm-api' });
+      const record = erasure.erasureRecords(db.getDb(), 'crm-api').find((r) => r.cause === 'provider_revoked')!;
+      expect(record.historyState, reply).toBe('cancelled');
+      expect(db.getDb().prepare("SELECT actor_kind AS a, actor_email AS e, mandate_id AS m FROM audit_log WHERE action = 'connection.erasure.cancel'").all())
+        .toEqual([{ a: 'mandate', e: 'setup@example.org', m: 'M-1' }]);
+    } finally {
+      restore();
+      db.close();
+    }
   });
 });
 

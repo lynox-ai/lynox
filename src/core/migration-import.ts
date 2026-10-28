@@ -32,6 +32,11 @@ import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import { isCorruptionError } from './sqlite-constants.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
+import { controlPlaneFromEnv } from './exact-clearance.js';
+import { isProvisionedInstance } from './wire-capture.js';
+import { exactHeldInFiles, writeExactMarkerInFile } from './history-markers.js';
+import { shellIsolation } from './shell-isolation.js';
+import { importRefusal } from './sidecar-refusals.js';
 import { removeStaleStages, stageIn, statEntry, type StageEntry } from './workspace-fd.js';
 import type { ExportedSecret } from './migration-export.js';
 import type { SecretScope } from '../types/index.js';
@@ -178,6 +183,16 @@ interface PreparedRest {
   secrets: Array<{ meta: MigrationChunkMeta; secrets: ExportedSecret[]; data: Buffer }>;
 }
 
+/**
+ * Whether a manifest names a workspace bundle (PRD D7, walker 3): a `portable_dir` chunk whose
+ * name's base is `workspace`. The early, cheap refusal at the manifest route, before a chunk is
+ * transferred. Not the deciding one: the name is not bound to the content
+ * (`MigrationImporter.bundlesCarryWorkspace`).
+ */
+export function manifestCarriesWorkspace(manifest: MigrationManifest): boolean {
+  return Array.isArray(manifest?.chunks) && manifest.chunks.some(c => c.type === 'portable_dir' && c.name.split(':')[0] === 'workspace');
+}
+
 /** A JSON object (an array counts, as `Object.entries` takes it), or null for anything else. */
 function asObject(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : null;
@@ -309,13 +324,21 @@ export class MigrationImporter {
   private readonly lynoxDir: string;
   private readonly vaultKey: string;
   private session: MigrationSession | null = null;
+  /**
+   * The ceiling on one reassembled portable-directory bundle (base64). Production never sets it;
+   * it exists so a test can REACH the bound, as `MigrationExporter`'s `portableDirLimits` does:
+   * the real one is 128 MiB.
+   */
+  private readonly portableBundleMaxBytes: number;
 
   constructor(options: {
     lynoxDir?: string | undefined;
     vaultKey: string;
+    portableBundleMaxBytes?: number | undefined;
   }) {
     this.lynoxDir = options.lynoxDir ?? getLynoxDir();
     this.vaultKey = options.vaultKey;
+    this.portableBundleMaxBytes = options.portableBundleMaxBytes ?? MAX_PORTABLE_DIR_BYTES * 2;
   }
 
   /** Whether a migration session is currently active. */
@@ -508,6 +531,42 @@ export class MigrationImporter {
     return { seq: chunk.seq, name: expectedMeta.name, verified: true };
   }
 
+  /** `manifestCarriesWorkspace`, for the route, which loads this module lazily. */
+  manifestCarriesWorkspace(manifest: MigrationManifest): boolean {
+    return manifestCarriesWorkspace(manifest);
+  }
+
+  /**
+   * Whether the assembled, decrypted bundles carry a workspace (PRD D7, walker 3): a
+   * `portable_dir` bundle whose `dir` is `workspace`, or whose `dir` is not its chunk name's base.
+   * The importer groups chunks by the manifest name but restores by `bundle.dir`, so a chunk named
+   * `apis` can carry the workspace past the manifest route. Read in memory; writes nothing. A
+   * bundle that does not parse is left to `prepareRest`, which refuses it.
+   */
+  bundlesCarryWorkspace(): boolean {
+    if (!this.session?.manifest) return false;
+    const { manifest, receivedChunks } = this.session;
+    const byBase = new Map<string, Array<{ meta: MigrationChunkMeta; data: Buffer }>>();
+    for (const c of this.groupChunksByType(manifest.chunks, receivedChunks).portable_dir) {
+      const base = c.meta.name.split(':')[0]!;
+      byBase.set(base, [...(byBase.get(base) ?? []), c]);
+    }
+    for (const [base, parts] of byBase) {
+      if (base === 'workspace') return true;
+      // The same bound `prepareRest` applies, before anything is parsed: a bundle over it is
+      // refused there, before any write, and is not worth holding in memory twice here.
+      if (parts.reduce((n, c) => n + c.data.length, 0) > this.portableBundleMaxBytes) continue;
+      let bundle: Record<string, unknown> | null;
+      try {
+        bundle = asObject(JSON.parse(reassemble(parts).toString('utf-8')));
+      } catch {
+        continue;
+      }
+      if (bundle !== null && bundle['dir'] !== base) return true;
+    }
+    return false;
+  }
+
   /**
    * Check if all chunks have been received.
    */
@@ -565,6 +624,21 @@ export class MigrationImporter {
     const staged = this.stageDatabases(chunksByType.sqlite_db, (meta) => {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: meta.name });
     });
+    // An instance that holds the exact marker keeps it (cut S3-E): the bundle's engine.db and
+    // history.db replace the files that carry it and its copy. Read before the swap, written into
+    // the staged copies, so the marker lands with them or the import stops here with nothing
+    // replaced. A copy the bundle brings for another instance is left as it is (`history-markers.ts`).
+    const instanceId = controlPlaneFromEnv()?.instanceId ?? null;
+    try {
+      if (exactHeldInFiles(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'history.db'), instanceId, isProvisionedInstance())) {
+        for (const { baseName, tmpPath } of staged) {
+          if (baseName === 'engine.db' || baseName === 'history.db') writeExactMarkerInFile(tmpPath, baseName, instanceId);
+        }
+      }
+    } catch (err) {
+      for (const { tmpPath } of staged) dropStagedCopy(tmpPath);
+      throw err;
+    }
     for (const { baseName, tmpPath, destPath, unreadable } of staged) {
       // The unreadable database goes first, its `-wal` with it: the copy must not land next to it.
       if (unreadable) moveAsideUnreadable(destPath);
@@ -804,8 +878,8 @@ export class MigrationImporter {
       // chunk at MAX_CHUNK_BYTES, so a per-chunk sum could never reach this limit. The bundle is
       // base64, so the ceiling is expressed on the encoded size the importer holds in memory.
       const totalBytes = parts.reduce((n, c) => n + c.data.length, 0);
-      if (totalBytes > MAX_PORTABLE_DIR_BYTES * 2) {
-        throw new Error(`Portable directory bundle too large: ${String(totalBytes)} > ${String(MAX_PORTABLE_DIR_BYTES * 2)}`);
+      if (totalBytes > this.portableBundleMaxBytes) {
+        throw new Error(`Portable directory bundle too large: ${String(totalBytes)} > ${String(this.portableBundleMaxBytes)}`);
       }
       const bundle = asObject(decode(reassemble(parts)));
       if (!bundle) throw malformed('portable directory');
@@ -857,6 +931,9 @@ export class MigrationImporter {
     }
     for (const { dir } of rest.portable) {
       if (dir === 'workspace') {
+        // Defence in depth behind the routes (PRD D7, walker 3), here in phase 1: refused before
+        // any database is swapped in, so "nothing was changed" holds. Not by opening the root.
+        if (shellIsolation().kind === 'sidecar') throw new Error(importRefusal());
         // Opening the root is what the write step does first; absent, it is made there.
         leaseWorkspaceFor(this.lynoxDir)?.release();
         continue;
@@ -1234,6 +1311,9 @@ export class MigrationImporter {
    * also uses as a directory — is skipped and named, as the by-name import did per entry.
    */
   private restoreWorkspace(entries: Array<[string, unknown]>, skipped: string[]): number {
+    // Defence in depth behind the manifest route and the check on the assembled bundles: in shell
+    // sidecar mode nothing is staged into the shared tree (PRD D7, walker 3).
+    if (shellIsolation().kind === 'sidecar') throw new Error(importRefusal());
     const lease = leaseWorkspaceFor(this.lynoxDir, { create: true });
     if (lease === null) throw new Error('Refusing to restore workspace: the workspace root could not be made.');
     try {

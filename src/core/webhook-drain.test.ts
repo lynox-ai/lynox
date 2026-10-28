@@ -12,6 +12,7 @@ import { TriggerStore } from './trigger-store.js';
 import { EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED, EVENT_SHOP_MOVED, EVENT_STOPPED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE, WEBHOOK_ASKS_RESULT, WorkerLoop, outcomeOfRun } from './worker-loop.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
+import { setPlanPauseForTests } from './plan-pause.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 
@@ -508,6 +509,45 @@ describe('the webhook drain', () => {
     expect(eventOf(t, id).state).toBe('dropped');
   });
 
+  it('drops an event of a paused plan and runs nothing', async () => {
+    const restore = setPlanPauseForTests(true);
+    try {
+      (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ endRow: () => null });
+      const t = sharedTrigger();
+      engineDb.getDb().prepare('UPDATE triggers SET paused_at = ? WHERE id = ?').run(Date.now(), t);
+      const id = deliver(t);
+      await loop.tick();
+      expect(runner.run).not.toHaveBeenCalled();
+      // A paused trigger accepts no event: dropped before any run is claimed.
+      expect(eventOf(t, id)).toMatchObject({ state: 'dropped', reason: EVENT_TRIGGER_NOT_LIVE });
+    } finally {
+      restore();
+    }
+  });
+
+  it('ends an event whose plan was paused after the drain took it failed, keeps its values, and runs nothing', async () => {
+    const restore = setPlanPauseForTests(true);
+    try {
+      const t = sharedTrigger();
+      const id = deliver(t);
+      // The pause lands between the drain's claim and the gate: it is committed as the gate
+      // reads the mandates' ends, the last read before it looks for a pause.
+      const ends = vi.fn(() => {
+        engineDb.getDb().prepare('UPDATE triggers SET paused_at = ? WHERE id = ?').run(Date.now(), t);
+        return { endRow: () => null };
+      });
+      (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = ends;
+      await loop.tick();
+      await settled(t, id, 'failed');
+      expect(ends).toHaveBeenCalled();
+      expect(runner.run).not.toHaveBeenCalled();
+      expect(eventOf(t, id).reason).toMatch(/access has ended/);
+      expect(eventOf(t, id).valuesJson).not.toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
   // The connection can serve another shop by the time the event runs.
   it('drops a Shopify event whose shop the trigger\'s connection no longer serves', async () => {
     const t = shopifyTrigger();
@@ -719,7 +759,7 @@ describe('the ledger\'s moves', () => {
 
   it('gets the index on a database that ran the drain columns before it existed', () => {
     const db = engineDb.getDb();
-    db.exec('DROP INDEX idx_inbound_events_state_received; DELETE FROM schema_version WHERE version = 54;');
+    db.exec('DROP INDEX idx_inbound_events_state_received; DELETE FROM schema_version WHERE version = 60;');
     engineDb.close();
     engineDb = new EngineDb(join(dir, 'engine.db'));
     expect(engineDb.getDb().prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inbound_events_state_received'`).get()).toBeDefined();

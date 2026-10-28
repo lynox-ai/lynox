@@ -42,6 +42,9 @@ import type { PromptText } from '../../types/index.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { holdsValueAsHost } from '../../core/secret-store.js';
 
+/** ux U-010, written out here so the test does not take the text from the code it checks. */
+const U010_REQUEST_LIMIT = 'Blocked: this conversation or run has reached its limit of 100 HTTP requests (http_request); no further one goes out from it. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence: for many changes of the same kind they can plan a bulk run, which they approve before it writes; for the rest of the work they can start a new chat.';
+
 // fetchPinned replaces the legacy `fetch(currentUrl, init)` call in
 // fetchWithValidatedRedirects. The pinned transport is the seam: tests stub
 // globalThis.fetch as before; this transport adapts the pinned-input back
@@ -1213,6 +1216,39 @@ describe('httpRequestTool', () => {
           expect(promptUser).toHaveBeenCalledTimes(1);
         });
 
+        // PRD shopify-preset §16.4 item 7, decision (A): on a connected account's GraphQL endpoint
+        // neither a read nor a mutation is remembered. Twin calls of ONE batch, the only place a
+        // remembered answer shows: a later batch always asks, and would let both mutants live.
+        describe('a GraphQL endpoint on a connected account remembers nothing', () => {
+          const GQL = 'https://example.com/v1/graphql';
+          const JSON_CT = { 'Content-Type': 'application/json' };
+          const twinsOf = async (body: string, preset: string | undefined): Promise<number> => {
+            await withProfile(preset);
+            mockDnsPublic();
+            vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: '{}' })));
+            const promptUser = vi.fn().mockResolvedValue('Allow');
+            const agent = makeAgent({ promptUser, batch: {} });
+            const twin = (): CallSlot => ({ abort: new AbortController(), twins: 2 });
+            await runInCallSlot(twin(), () => handler({ url: GQL, method: 'POST', headers: JSON_CT, body }, agent));
+            await runInCallSlot(twin(), () => handler({ url: GQL, method: 'POST', headers: JSON_CT, body }, agent));
+            return promptUser.mock.calls.length;
+          };
+          const READ = JSON.stringify({ query: 'query($id: ID!) { product(id: $id) { id title } }', variables: { id: 'gid://shopify/Product/1' } });
+          const MUTATION = JSON.stringify({ query: 'mutation($id: ID!, $title: String) { productUpdate(product: {id: $id, title: $title}) { product { id } userErrors { field message } } }', variables: { id: 'gid://shopify/Product/1', title: 'x' } });
+
+          it('asks for each of two identical reads in one batch', async () => {
+            expect(await twinsOf(READ, 'example-shop')).toBe(2);
+          });
+
+          it('asks for each of two identical mutations in one batch', async () => {
+            expect(await twinsOf(MUTATION, 'example-shop')).toBe(2);
+          });
+
+          it('control: without a preset, one Allow covers the read twin', async () => {
+            expect(await twinsOf(READ, undefined)).toBe(1);
+          });
+        });
+
         // The owner writing to a connected account: a stored secret written plainly is asked masked,
         // one only another server reading reveals is refused, with the way out.
         it('refuses a body with a stored secret written with escapes; written plainly it is asked masked', async () => {
@@ -1872,7 +1908,11 @@ describe('httpRequestTool', () => {
           });
           testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 1;
           const promptUser = vi.fn().mockResolvedValue('Allow');
-          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/HTTP request limit \(100\) is reached/);
+          const err = await handler(cancel, makeAgent({ promptUser })).then(() => null, (e: unknown) => e);
+          expect(err).toBeInstanceOf(ToolSoftFailure);
+          // The ledger keeps the technical reason; the model reads U-010, not the read-before-write sentence.
+          expect((err as ToolSoftFailure).reason).toMatch(/HTTP request limit \(100\) is reached/);
+          expect((err as ToolSoftFailure).agentVisibleResult).toBe(U010_REQUEST_LIMIT);
           expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7']);
           expect(promptUser).not.toHaveBeenCalled();
         });
@@ -1886,7 +1926,10 @@ describe('httpRequestTool', () => {
           });
           testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 2;
           const promptUser = vi.fn().mockResolvedValue('Allow');
-          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/session HTTP request limit \(100\) exceeded/);
+          const err = await handler(cancel, makeAgent({ promptUser })).then(() => null, (e: unknown) => e);
+          expect(err).toBeInstanceOf(ToolSoftFailure);
+          expect((err as ToolSoftFailure).reason).toMatch(/session HTTP request limit \(100\) exceeded/);
+          expect((err as ToolSoftFailure).agentVisibleResult).toBe(U010_REQUEST_LIMIT);
           expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7', 'GET /3.0/currencies/1']);
           expect(promptUser).not.toHaveBeenCalled();
         });
@@ -2364,7 +2407,7 @@ describe('httpRequestTool', () => {
       }
       // Next should be blocked (counter is at 100, >= MAX)
       const result = await visible({ url: 'http://example.com' }, makeAgent());
-      expect(result).toContain('Request limit reached');
+      expect(result).toBe(U010_REQUEST_LIMIT);
     });
 
     it('fresh Session counter object → counter starts at 0', async () => {
@@ -4639,7 +4682,7 @@ describe('httpRequestTool', () => {
     });
   });
 
-  // rafael's own instance, 2026-09-02, engine 2.14.2 (build 7e905219), thread
+  // Our own instance, 2026-09-02, engine 2.14.2 (build 7e905219), thread
   // "DataForSEO Functionality Check". The profile is `basic` + `pre_encoded_b64`,
   // which the engine does not attach ON PURPOSE — the three tests above pin that,
   // including a SECURITY one. So this is NOT a missing branch, and neither an
@@ -5513,7 +5556,9 @@ describe('httpRequestTool', () => {
     it('an oauth2 profile with an ordinary own header still attaches on a GET', async () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
-      const store = await storeWith({ type: 'oauth2', header_name: 'X-Shopify-Access-Token', oauth: { token_url: 'https://idp.bexio.com/token' } });
+      // An oauth2 label without an oauth block: an oauth block that names no client secret binds
+      // its token nowhere (901 D), and this test is about the header, not the grant.
+      const store = await storeWith({ type: 'oauth2', header_name: 'X-Shopify-Access-Token' });
       await handler({ url: 'https://api.crm.example/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_ACCESS_TOKEN: 'v2' }));
       expect(sentHeader('x-shopify-access-token')).toBe('v2');
     });
@@ -6775,8 +6820,21 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     testCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
     expectRecorded(
       await refusal({ url: 'http://example.com' }, makeAgent()),
-      'Request limit reached for this session',
+      U010_REQUEST_LIMIT,
     );
+  });
+
+  it('a refusal that merely contains "session" reaches the model as written, not as the request limit', async () => {
+    // The request limit no longer goes through friendlyBlockMessage (ux U-010), so a rule that
+    // matched the word "session" could only mislabel other refusals: a host or an endpoint
+    // named "session…" read as "Request limit reached for this session.".
+    testCtx.apiStore = {
+      size: 1,
+      checkRateLimit: () => 'Blocked: the session endpoint of api.rated.example.com is paused',
+      getByHostname: () => undefined,
+    } as never;
+    const f = await refusal({ url: 'https://api.rated.example.com/v1/x' }, makeAgent());
+    expect(f.agentVisibleResult).toBe('Blocked: the session endpoint of api.rated.example.com is paused');
   });
 
   it('4/14 — per-API rate limit from the ApiStore', async () => {
@@ -8937,6 +8995,25 @@ describe('write approvals for the write the question showed (270)', () => {
       const both = doc('query A { a } mutation B { b }', { operationName: 'B' });
       await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: both }, agent);
       await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: both }, agent);
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('a mutation whose JSON writes the word with an escape is not remembered', async () => {
+      const { agent, prompt } = agent270();
+      const escaped = '{"query":"\\u006dutation { a }"}';
+      expect(JSON.parse(escaped)).toEqual({ query: 'mutation { a }' });
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: escaped }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: escaped }, agent);
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('a denied mutation does not deny a different read in the same batch; the read is asked', async () => {
+      const answers = ['Deny', 'Allow'];
+      const { agent, prompt } = agent270({ answer: async () => answers.shift()! });
+      const denied = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('mutation { a }') }, agent);
+      const read = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ b }') }, agent);
+      expect(denied).toContain('denied by user');
+      expect(read).not.toContain('was not asked');
       expect(prompt).toHaveBeenCalledTimes(2);
     });
 

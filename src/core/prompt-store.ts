@@ -304,6 +304,7 @@ export class PromptStore {
   private _stmtAnswer: Database.Statement | undefined;
   private _stmtAnswerSecret: Database.Statement | undefined;
   private _stmtGetPending: Database.Statement | undefined;
+  private _stmtListPending: Database.Statement | undefined;
   private _stmtGetById: Database.Statement | undefined;
   private _stmtExpireOld: Database.Statement | undefined;
   private _stmtExpireUnparked: Database.Statement | undefined;
@@ -633,6 +634,19 @@ export class PromptStore {
 
   getById(promptId: string): PendingPromptRow | undefined {
     return this._getGetByIdStmt().get(promptId) as PendingPromptRow | undefined;
+  }
+
+  /**
+   * Every pending (non-expired) question, as `getPending` reads it — at most one per session,
+   * which the unique index `idx_pending_prompts_session_unique` holds. The engine-posed
+   * onboarding card is left out, as `/pending-prompt` hides it. Read by `GET /api/runs/active`,
+   * which marks the threads a scheduled run's question waits in.
+   */
+  listPendingSessions(): Array<{ id: string; session_id: string; created_at: string }> {
+    const rows = this._getListPendingStmt().all() as Array<{ id: string; session_id: string; created_at: string; payload_json: string | null }>;
+    return rows
+      .filter((row) => !isOnboardingBasicsPayload(row.payload_json))
+      .map((row) => ({ id: row.id, session_id: row.session_id, created_at: row.created_at }));
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -1006,6 +1020,14 @@ export class PromptStore {
       SELECT * FROM pending_prompts
       WHERE session_id = ? AND status = 'pending' AND ${NOT_EXPIRED}
       ORDER BY created_at DESC LIMIT 1
+    `));
+  }
+
+  private _getListPendingStmt(): Database.Statement {
+    return (this._stmtListPending ??= this.db.prepare(`
+      SELECT id, session_id, created_at, payload_json FROM pending_prompts
+      WHERE status = 'pending' AND ${NOT_EXPIRED}
+      ORDER BY created_at DESC
     `));
   }
 

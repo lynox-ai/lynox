@@ -1096,6 +1096,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         runTaint: retryTaint,
         chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
         parentChangeset: deps.parentAgent?.changeset,
+        // The retried steps resolve their `secret:` references through the caller's store, as
+        // the first run's steps do: run_workflow lets references travel as written.
+        secretStore: deps.secretStore,
       }));
 
       // The retried state now holds what this chat's steps read as well as the cached outputs, so
@@ -1234,6 +1237,7 @@ interface RunPipelineInput {
 
 export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
   undo: 'none',
+  secretRefs: 'verbatim',
   definition: {
     name: 'run_workflow',
     description:

@@ -1,5 +1,6 @@
 import type { ToolEntry } from '../../types/index.js';
 import { urlScanForms } from '../../core/url-scan-forms.js';
+import { shellIsolation } from '../../core/shell-isolation.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
 import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
@@ -13,7 +14,7 @@ import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, pr
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
-import { requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
+import { clientlessSlot, requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
 import { outsideMemberNotes, refuseMemberConnection } from '../../core/member-connection-notes.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -85,7 +86,6 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('too many redirects')) return 'The server redirected too many times. The URL may be incorrect.';
   if (technical.includes('hourly')) return 'Hourly request limit reached. Try again later.';
   if (technical.includes('daily')) return 'Daily request limit reached. Try again tomorrow.';
-  if (technical.includes('session')) return 'Request limit reached for this session.';
   return technical;
 }
 
@@ -788,6 +788,31 @@ export function httpStoppedMessage(method: string, answeredStatus?: string, carr
  * shares with sub-agents.
  */
 export const MAX_REQUESTS_PER_SESSION = 100;
+
+/**
+ * What the model reads once this conversation or run has used its `http_request` budget (ux
+ * U-010). It names the two ways on for the person, both of which a person takes, never the
+ * model: a bulk run, which the owner approves before it writes, and a new chat, which starts
+ * without this one's context. Task, workflow and pipeline are not named, not even as a ban: a
+ * runner step gets fresh counters, so naming them would teach the model a way around the cap.
+ * Without a person in the conversation (a run, a read before a write) the sentence for the
+ * user has no reader, so it is conditional.
+ */
+export function requestLimitMessage(): string {
+  return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence: for many changes of the same kind they can plan a bulk run, which they approve before it writes; for the rest of the work they can start a new chat.`;
+}
+
+/**
+ * The refusal for a spent `http_request` budget: the model reads {@link requestLimitMessage},
+ * the ledger keeps the short technical `reason`. Not through `friendlyBlockMessage`: no rule
+ * there matches this reason, so the model would read the technical text, which names no way on.
+ */
+function blockedRequestLimit(reason: string): never {
+  throw new ToolSoftFailure(requestLimitMessage(), reason);
+}
+
+/** A read before a write that the spent budget stopped; refused as the budget, not as the read. */
+class RequestLimitReached extends WriteContextRefused {}
 
 // Cross-session rate limits live on ToolContext (rateLimitProvider,
 // hourlyRateLimit, dailyRateLimit). Engine-init configures them via
@@ -1881,7 +1906,7 @@ const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|sessio
  * B, B3 steps 1–5 and 6a), in that order; `null` when all hold. Reads no vault and asks nobody.
  *
  *  1. a provisioned managed instance (the control-plane env is there);
- *  2. the shell-exec sidecar (`LYNOX_SHELL_EXEC_SOCKET`), which contains what a store returns;
+ *  2. the shell-exec sidecar (`ToolContext.shellIsolation`), which contains what a store returns;
  *  3. exactly one profile on the host, of the store preset, whose own parameter derives exactly
  *     this host (`presetStoreHost`);
  *  4. no credential in the query;
@@ -1890,7 +1915,7 @@ const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|sessio
  */
 function storePassPrecheck(url: string, headers: Record<string, string>, toolContext: ToolContext | undefined): string | null {
   if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return SHOPIFY_UNAVAILABLE;
-  if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return SHOPIFY_UNAVAILABLE;
+  if (toolContext.shellIsolation.kind !== 'sidecar') return SHOPIFY_UNAVAILABLE;
   const apiStore = toolContext.apiStore;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return SHOPIFY_UNAVAILABLE; }
@@ -1947,13 +1972,17 @@ async function mintStorePassFor(
     return { refusal: 'a request to a Shopify store is sent only for a chat or a bulk run, and this one runs for neither, so nothing was sent. Make the request from a chat.' };
   }
   const containment = toolContext.containment;
-  if (!containment) return { refusal: CONTAINMENT_UNWRITABLE };
+  // Without engine.db there is a containment reader (history.db's copy) but no clearance, and
+  // `contain` would throw: refused here, before anything is asked.
+  if (!containment || !toolContext.exactClearance) return { refusal: CONTAINMENT_UNWRITABLE };
   const threads = target.kind === 'thread' ? toolContext.threadStore : null;
   if (target.kind === 'thread' && !threads) return { refusal: CONTAINMENT_UNWRITABLE };
-  const clearance = await toolContext.exactClearance!.ensure();
+  const clearance = await toolContext.exactClearance.ensure();
   if (!clearance.ok) return { refusal: SHOPIFY_UNAVAILABLE };
   try {
     containment.contain(target, connection);
+    // Read back in both records: `INSERT OR IGNORE` swallows a refused row as well.
+    if (!containment.holds(target, connection)) throw new Error('the containment row did not hold');
     if (threads) {
       // Read back, not trusted: an UPDATE of a thread row that does not exist (the session's
       // insert is best-effort) changes nothing and throws nothing.
@@ -2003,7 +2032,7 @@ export async function storeExchangePassFor(
 ): Promise<StorePass | undefined> {
   if (!shopifyExchangeSwitchOn()) return undefined;
   if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return undefined;
-  if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return undefined;
+  if (toolContext.shellIsolation.kind !== 'sidecar') return undefined;
   let parsed: URL;
   try { parsed = new URL(tokenUrl); } catch { return undefined; }
   const origin = storeOriginOf(parsed);
@@ -2170,7 +2199,7 @@ async function attachEngineManagedAuth(
     if (memberRefusal !== null) return { refusal: memberRefusal };
     // Before the revoked-grant check and the renewal: a request this refuses reads nothing.
     const offGrant = slotOffGrant([accessTokenKey(profile.id)]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
     // token and send the model to fetch_token, which cannot help. Only while the
@@ -2359,7 +2388,7 @@ async function attachEngineManagedAuth(
       return { refusal: protectedKeyRefusal(profile.id, protectedKeys.map((k) => shapedForLog(k, VAULT_NAME_SHAPE, 80)).join(' + ')) };
     }
     const offGrant = slotOffGrant([userKey, passKey]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     const unbound = unboundOf([userKey, passKey]);
     if (unbound !== undefined) return { refusal: `Error: ${unboundNameText(unbound, profile.id)}` };
     const user = secretStore.resolve(userKey);
@@ -2407,7 +2436,7 @@ async function attachEngineManagedAuth(
       return { refusal: protectedKeyRefusal(profile.id, shapedForLog(tokenKey, VAULT_NAME_SHAPE, 80)) };
     }
     const offGrant = slotOffGrant([tokenKey]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     // Refused, not hinted: a name the profile may not send here must not go by a `secret:`
     // reference either, and the hint below would invite one.
     // Over plain http nothing is attached anyway, and the hint below says so.
@@ -2724,7 +2753,16 @@ function modelOwnedAuthHint(a: {
  * token of an OAuth connection whose grant does not point at this URL, a refresh token, or a
  * name more than one profile claims.
  */
-function slotReachRefusal(profileId: string, name: string, hostname: string): string {
+function slotReachRefusal(profileId: string, name: string, hostname: string, clientless: ReturnType<typeof clientlessSlot> = null): string {
+  const shown = shapedForLog(name, DERIVED_NAME_SHAPE, 80);
+  // A token whose owner has no client to bind it to goes nowhere at all (901 D): the general text
+  // below would send the model looking for "the profile that holds the connection", which is this one.
+  if (clientless?.why === 'no_client_secret') {
+    return `Error: api_profile "${profileId}" would send ${shown} to ${hostname}, but that vault name holds an OAuth access token of profile "${clientless.owner}", and its OAuth settings name no client secret. A token goes only where the client secret it was minted with may go, so with none named it goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, name the client secret again (auth.oauth.client_secret_key) with api_setup action="update"; if the client secret is no longer stored, ask the user to provide it, then get a new token with action="fetch_token" or by connecting again. If no user is in this conversation, stop here; the owner fixes this in a chat.`;
+  }
+  if (clientless?.why === 'not_oauth2') {
+    return `Error: api_profile "${profileId}" would send ${shown} to ${hostname}, but that vault name holds an OAuth access token that an earlier sign-in of profile "${clientless.owner}" wrote, and that profile no longer signs in with OAuth. Such a token goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, store your own key under another vault name and name that one in auth.vault_keys with api_setup action="update", or switch the profile back to oauth2 and connect again. If no user is in this conversation, stop here; the owner fixes this in a chat.`;
+  }
   return `Error: api_profile "${profileId}" would send ${shapedForLog(name, DERIVED_NAME_SHAPE, 80)} to ${hostname}, but that vault name holds an OAuth token that goes only to where its own connection points (an access token to its base_url, a refresh token only to its token endpoint), or more than one profile claims it. Nothing was sent. Give this profile a credential of its own with api_setup action="update", or send the request through the profile that holds the connection.`;
 }
 
@@ -2884,7 +2922,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
     // Check session rate limit before any validation — only increment on actual request attempt
     if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-      blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+      blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
     // Per-API rate limiting + profile enforcement (from API Store)
@@ -3433,7 +3471,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           : query === undefined ? pv` The query (${querySize} bytes) is too large to show; the path above names its keys, cut short where it is long.`
             : pv`${onBoxBlock(query.text)}${query.secret ? pv` A stored secret is sent in this query; it is shown masked (***).` : pv``}`;
         const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
-        // N12-4 (rafael 2026-10-09): the question shows the body's VALUES where it is answered on
+        // N12-4 (2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
         // names only (`onBoxBlock`). Shown whole or not at all: a body over the limit is never
         // shown cut short. In a mandate's session, and for a write to an account connected through
@@ -3514,7 +3552,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // The readings count against the session's request budget, as the write itself will:
         // checked again here, before the person is asked about a write that could not be sent.
         if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-          blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+          blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
         }
         // The headers' names leave the box with the question; their values stay on it, like the body's.
         const headersBlock = 'lines' in askedHeaders && askedHeaders.lines.length > 0
@@ -4061,7 +4099,7 @@ async function describeConnectedWrite(
   const read: PresetRead = async (path) => {
     // Each reading is a request of this session, charged against the same budget.
     const counters = deps.agent.sessionCounters;
-    if (counters.httpRequests >= MAX_REQUESTS_PER_SESSION) throw new WriteContextRefused(`the session's HTTP request limit (${MAX_REQUESTS_PER_SESSION}) is reached`);
+    if (counters.httpRequests >= MAX_REQUESTS_PER_SESSION) throw new RequestLimitReached(`the session's HTTP request limit (${MAX_REQUESTS_PER_SESSION}) is reached`);
     counters.httpRequests++;
     const readUrl = `${origin}${path}`;
     const limited = deps.toolContext?.apiStore?.checkRateLimit(new URL(readUrl).hostname);
@@ -4105,6 +4143,7 @@ async function describeConnectedWrite(
   try {
     return await context.describe(method, new URL(url), body, read);
   } catch (err) {
+    if (err instanceof RequestLimitReached) blockedRequestLimit(err.message);
     const why = err instanceof WriteContextRefused ? err.message : 'its reading failed';
     blockedVerbatim(`Blocked: ${shownAs} to ${host} was not asked: lynox could not show what it changes in the ${presetId} account (${why}). Nothing was sent.`);
   }
@@ -4147,6 +4186,9 @@ export async function attachStoredCredential(
     containment?: ToolContext['containment'] | undefined;
     /** Where each vault secret may go; without it no secret of a profile's own is attached. */
     vaultNameBindings: ToolContext['vaultNameBindings'];
+    /** The process's shell mode; a store gets a pass only in sidecar mode. Defaults to the
+     *  process's own object (`shell-isolation.ts`), never to "local". */
+    shellIsolation?: ToolContext['shellIsolation'] | undefined;
   },
   /** The bulk run this request is for. The agent below is built by hand and has no thread, so
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
@@ -4162,9 +4204,10 @@ export async function attachStoredCredential(
       exactClearance: stores.exactClearance ?? null, storeBindingDigest: stores.storeBindingDigest ?? null,
       containment: stores.containment ?? null,
       vaultNameBindings: stores.vaultNameBindings,
+      shellIsolation: stores.shellIsolation ?? shellIsolation(),
       // A bulk run is not a chat: nothing of a thread is written for it.
       threadStore: null,
-    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings'> as ToolContext,
+    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings' | 'shellIsolation'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
     write,
     { bulkRunId: container.bulkRunId },

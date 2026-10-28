@@ -91,7 +91,7 @@ const rowsOf = (threadId: string): { kind: string; connection_id: string }[] =>
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'lynox-contained-reads-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
-  containment = new Containment(engineDb.getDb());
+  containment = new Containment(engineDb.getDb(), null);
   history = new RunHistory(join(dir, 'history.db'));
   history.setVerbGraph(engineDb);
 });
@@ -261,7 +261,7 @@ describe('pipeline_runs.origin_thread_id (history.db v64)', () => {
   it('exists on a fresh database, nullable and without a default', () => {
     const col = columns(history.getDb()).find((c) => c.name === 'origin_thread_id');
     expect(col).toMatchObject({ notnull: 0, dflt_value: null });
-    expect((history.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(69);
+    expect((history.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     seedRun('run-none', undefined);
     seedRun('run-chat', 'chat-1');
     expect(history.getPipelineRunOrigin('run-none')).toBeNull();
@@ -280,7 +280,7 @@ describe('pipeline_runs.origin_thread_id (history.db v64)', () => {
     before.close();
     const after = new RunHistory(path);
     try {
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(69);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
       expect(after.getPipelineRunOrigin('old-run')).toBeNull();
       after.insertPipelineRun({ id: 'new-run', manifestName: 'x', status: 'running', manifestJson: '{}', originThreadId: 'chat-2' });
       expect(after.getPipelineRunOrigin('new-run')).toBe('chat-2');
@@ -318,7 +318,7 @@ describe('the contained threads among many, in one read (the thread list)', () =
 
   it('is fail-closed like `isContained`: an empty id, or a read that throws, counts as contained', () => {
     expect([...containment.containedThreadIds(['', 't-c'])]).toEqual(['']);
-    const broken = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
+    const broken = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never, null);
     expect([...broken.containedThreadIds(['t-a', 't-c'])].sort()).toEqual(['t-a', 't-c']);
   });
 
