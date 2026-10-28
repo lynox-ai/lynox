@@ -172,7 +172,7 @@ const INTERRUPTED_RESULT =
 /** How long an event that did not run keeps its values. Nothing runs it again today. */
 const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
 /** What the owner is told of an event that was not run, or whose run did not complete: lynox's own sentences. */
-export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger no longer accepts events: it was switched off, stopped, deleted, or waits for your confirmation. Turn it on or confirm it under Automation; events that arrived meanwhile are not run.';
+export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger no longer accepts events: it was switched off, stopped, deleted, or waits for your confirmation. These events are not run. If the trigger is still listed under Automation, turn it on there so later events run.';
 export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves, so it was not run.';
 export const EVENT_RUN_FAILED = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual.';
 export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
