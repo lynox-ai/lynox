@@ -2058,6 +2058,30 @@ describe('LynoxHTTPApi', () => {
       const runningSessions = (): Map<string, unknown> =>
         (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
 
+      it('marks a file shown with a note instead of a diff as not compared, so its zero counts do not read as unchanged', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-compared-'));
+        const big = join(cwd, 'big.bin');
+        const small = join(cwd, 'small.txt');
+        writeFileSync(big, 'before', 'utf-8');
+        writeFileSync(small, 'before\n', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(big);
+        csm.backupBeforeWrite(small);
+        // Larger than the 5 MB the review reads.
+        truncateSync(big, 20 * 1024 * 1024);
+        writeFileSync(small, 'after\n', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          const res = await jsonFetch('/api/sessions/test/changeset');
+          const { files } = (await res.json()) as { files: Array<{ file: string; added: number; removed: number; compared: boolean }> };
+          expect(files.find((f) => f.file === 'big.bin')).toMatchObject({ compared: false, added: 0, removed: 0 });
+          expect(files.find((f) => f.file === 'small.txt')).toMatchObject({ compared: true, added: 1, removed: 1 });
+        } finally {
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+
       it('is refused while a run is in progress, and the files stay as the run left them', async () => {
         const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-review-'));
         const file = join(cwd, 'a.txt');
@@ -10344,7 +10368,7 @@ describe('LynoxHTTPApi', () => {
       filed({ createdBy: 'mandate:bea@example.com', mandateId: 'grant-b', triggerId: 'trg-setup' });
       as(OWNER_PRINCIPAL);
       const [card] = (await list()).entries;
-      expect(card!.setup).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com' }, { kind: 'set_up_by', name: 'Anna A.' }]);
+      expect(card!.setup).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
     });
 
     it('names another grant to a mandate by its address only, and the owner sees both names, on the same entry', async () => {
@@ -10359,12 +10383,12 @@ describe('LynoxHTTPApi', () => {
       const text = await res.text();
       const mine = (JSON.parse(text) as { entries: Card[] }).entries;
       expect(mine.map((e) => e.id)).toEqual([id]);
-      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'anna@example.com' }]);
+      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
       expect(text).not.toContain('Anna A.');
       // Counter-witness: the same entry, the same trail, read by the owner.
       as(OWNER_PRINCIPAL);
       const theirs = (await list('all')).entries.find((e) => e.id === id)!;
-      expect(theirs.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'Anna A.' }]);
+      expect(theirs.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
     });
 
     it('takes the marks only from the trigger with the entry\'s exact id, not from one whose id starts with it', async () => {
@@ -10375,7 +10399,7 @@ describe('LynoxHTTPApi', () => {
       const cards = (await list('all')).entries;
       expect(cards.find((e) => e.id === prefixed)!.setup).toEqual([]);
       // Twin: the trigger's own entry carries its mark, so the marks are read at all.
-      expect(cards.find((e) => e.id === exact)!.setup).toEqual([{ kind: 'set_up_by', name: 'anna@example.com' }]);
+      expect(cards.find((e) => e.id === exact)!.setup).toEqual([{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
     });
   });
 
@@ -19627,7 +19651,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/takeover-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });

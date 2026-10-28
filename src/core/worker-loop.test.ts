@@ -4785,11 +4785,12 @@ describe('hand runs carry the starter\'s principal', () => {
       vi.useRealTimers();
       const recs: Rec[] = [];
       mockFetchPinned.mockClear();
-      const task = watch({ created_by: undefined, edited_by: 'mandate:eva@kanzlei.example' });
+      // As markEditedBy leaves it: a mandate's change writes `edited_by` and `mandate_editor` together.
+      const task = watch({ created_by: undefined, edited_by: 'mandate:eva@kanzlei.example', mandate_editor: 'mandate:eva@kanzlei.example', mandate_editor_id: FIXTURE_GRANT_IDS['mandate:eva@kanzlei.example'], mandate_edited_at: '2026-10-02 00:00:00' });
       const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
       mockFetchPinned.mockResolvedValueOnce(page());
       await (loop as unknown as Exec).executeTask(task, null);
-      expect(reads(recs)).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read' })]);
+      expect(reads(recs)).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: FIXTURE_GRANT_IDS['mandate:eva@kanzlei.example'] }, action: 'watch:read' })]);
     });
 
     it('is a row under the mandate that changed it last, not the one that set it up', async () => {

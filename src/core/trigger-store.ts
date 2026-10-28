@@ -222,6 +222,12 @@ interface TriggerFullDbRow {
   paused_at: number | null;
   paused_due_at: string | null;
   paused_for: string | null;
+  covered_created_by: string | null;
+  covered_created_id: string | null;
+  covered_created_at: string | null;
+  covered_edited_by: string | null;
+  covered_edited_id: string | null;
+  covered_edited_at: string | null;
 }
 
 /**
@@ -232,6 +238,9 @@ interface TriggerFullDbRow {
 const KEEP_MARKER_IF_UNSTAMPED_SQL =
   "CASE WHEN COALESCE(?NEW, '') = '' AND COALESCE(confirmed_at, '') = '' THEN consent_reminded_at ELSE NULL END";
 
+/** Drops the owner's takeover of the editor mark: written with every new mandate editor mark. */
+export const CLEAR_EDITOR_COVER_SQL = 'covered_edited_by = NULL, covered_edited_id = NULL, covered_edited_at = NULL';
+
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
 const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
@@ -239,7 +248,8 @@ const TRIGGER_READ_COLS =
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
    confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by,
    created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, model_tier, last_escalation_at,
-   last_escalation_outcome, paused_at, paused_due_at, paused_for`;
+   last_escalation_outcome, paused_at, paused_due_at, paused_for,
+   covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -316,6 +326,12 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     ...(row.paused_at !== null ? { paused_at: row.paused_at } : {}),
     ...(row.paused_due_at !== null ? { paused_due_at: row.paused_due_at } : {}),
     ...(row.paused_for !== null ? { paused_for: row.paused_for } : {}),
+    ...(row.covered_created_by !== null ? { covered_created_by: row.covered_created_by } : {}),
+    ...(row.covered_created_id !== null ? { covered_created_id: row.covered_created_id } : {}),
+    ...(row.covered_created_at !== null ? { covered_created_at: row.covered_created_at } : {}),
+    ...(row.covered_edited_by !== null ? { covered_edited_by: row.covered_edited_by } : {}),
+    ...(row.covered_edited_id !== null ? { covered_edited_id: row.covered_edited_id } : {}),
+    ...(row.covered_edited_at !== null ? { covered_edited_at: row.covered_edited_at } : {}),
   };
 }
 
@@ -769,11 +785,15 @@ export class TriggerStore {
    * edits leave it, so a plan a mandate shaped still names that mandate after the owner
    * renamed and stamped it. The id comes from the same principal as the tag, and
    * `mandate_edited_at` says when: the time a mandate's plan is compared against.
+   *
+   * A mandate's new mark also drops the owner's takeover of the old one (`covered_edited_*`), in
+   * the same statement: the mark and its covered copy are compared whole, and a change by the same
+   * mandate in the same second as the takeover would otherwise read as taken over.
    */
   markEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
     const editedBy = principalTag(editor);
     const mandate = editor.kind === 'mandate'
-      ? ", mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now')"
+      ? `, mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now'), ${CLEAR_EDITOR_COVER_SQL}`
       : '';
     const params: Array<string | null> = editor.kind === 'mandate' ? [editedBy, editedBy, editor.mandateId ?? null] : [editedBy];
     return this.db.prepare(

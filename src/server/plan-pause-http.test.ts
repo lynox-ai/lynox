@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
-import { LynoxHTTPApi } from './http-api.js';
+import { LynoxHTTPApi, TAKEOVER_REFUSALS } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { PLAN_PAUSE_DEFAULT, setPlanPauseForTests } from '../core/plan-pause.js';
 import type { Engine } from '../core/engine.js';
@@ -104,14 +104,73 @@ describe('the pause is held to its takeover (real engine)', () => {
   };
   const marks = (id: string): unknown => db().prepare('SELECT edited_by, mandate_editor FROM triggers WHERE id = ?').get(id);
 
-  it('the default is off for as long as the takeover route is not registered (asked of the running router)', async () => {
+  it('the takeover route is registered, and the default stays off until the view has the button (asked of the running router)', async () => {
     const id = pausedPlan();
-    const res = await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie);
+    const res = await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie, { expect: 'x' });
     // A route that exists answers anything but the dispatcher's own 404 for no route; a renamed
     // route counts as missing, and then the default has to stay off.
     const registered = !(res.status === 404 && res.json['error'] === 'Not found' && res.json['code'] === undefined);
-    expect(registered).toBe(false);
+    expect(registered).toBe(true);
     expect(PLAN_PAUSE_DEFAULT && !registered).toBe(false);
+    // Turned on with the button at the plan in the view, in the change that brings it.
+    expect(PLAN_PAUSE_DEFAULT).toBe(false);
+  });
+
+  it('the takeover\'s refusals, exactly as ux wrote them (U-037, the API\'s fallback)', () => {
+    expect(TAKEOVER_REFUSALS).toEqual({
+      not_available: { status: 409, message: 'Taking over a plan is not available yet.' },
+      bulk: { status: 409, message: "You don't need to take over a bulk run: no helper set it up." },
+      nothing_to_take_over: { status: 409, message: 'This plan does not need to be taken over any more.' },
+      unreadable: { status: 409, message: 'lynox cannot read who set up the workflow of this plan, so it cannot take the plan over. You can complete or delete it. The plan stays paused.' },
+      running: { status: 409, message: 'A run of this plan, or of another plan that uses the same workflow, has not finished yet. Try again in a few minutes. The plan stays paused.' },
+      changed: { status: 409, message: 'The plan changed while you were looking at it. Look at it again, then take it over. The plan stays paused.' },
+      prompts: { status: 503, message: "lynox cannot close the plan's open questions right now, so it did not take the plan over. It stays paused. Try again in a few minutes." },
+      unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so lynox did not take the plan over; it stays paused. Try again in a few minutes.' },
+    });
+  });
+
+  it('with the pause off, both takeover routes answer not_available before anything is read or written', async () => {
+    const id = pausedPlan();
+    const before = db().prepare('SELECT * FROM triggers WHERE id = ?').get(id);
+    restore();
+    restore = setPlanPauseForTests(false);
+    const spy = vi.spyOn(engine.getRunHistory()!, 'getTrigger');
+    const post = await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie, { expect: 'x' });
+    const get = await ask('GET', `/api/triggers/${id}/takeover-preview`, ownerCookie);
+    const reads = spy.mock.calls.length;
+    spy.mockRestore();
+    expect([post.status, post.json['code'], get.status, get.json['code']]).toEqual([409, 'not_available', 409, 'not_available']);
+    expect(reads).toBe(0);
+    expect(db().prepare('SELECT * FROM triggers WHERE id = ?').get(id)).toEqual(before);
+  });
+
+  it('only the owner takes a plan over or sees its preview', async () => {
+    const id = pausedPlan();
+    const post = await ask('POST', `/api/triggers/${id}/takeover`, mandateCookie, { expect: 'x' });
+    const get = await ask('GET', `/api/triggers/${id}/takeover-preview`, mandateCookie);
+    expect([post.status, get.status]).toEqual([403, 403]);
+    expect((db().prepare('SELECT paused_at FROM triggers WHERE id = ?').get(id) as { paused_at: number | null }).paused_at).toBe(1);
+  });
+
+  it('the owner takes a paused plan over from its preview; without the digest, or with another, nothing changes', async () => {
+    const id = pausedPlan();
+    const missing = await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie, {});
+    const wrong = await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie, { expect: 'not-the-digest' });
+    expect([missing.status, wrong.status, wrong.json['code']]).toEqual([400, 409, 'changed']);
+    expect((db().prepare('SELECT paused_at FROM triggers WHERE id = ?').get(id) as { paused_at: number | null }).paused_at).toBe(1);
+    const preview = await ask('GET', `/api/triggers/${id}/takeover-preview`, ownerCookie);
+    expect([preview.status, preview.json['refusal'], preview.json['runsAs']]).toEqual([200, null, 'owner']);
+    const taken = await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie, { expect: preview.json['expect'] });
+    expect([taken.status, taken.json['paused'], taken.json['runsAs']]).toEqual([200, false, 'owner']);
+    const row = db().prepare('SELECT paused_at, paused_for, covered_created_by, covered_created_id, edited_by, confirmed_by FROM triggers WHERE id = ?').get(id);
+    expect(row).toEqual({
+      paused_at: null, paused_for: null, covered_created_by: 'mandate:ida@example.invalid', covered_created_id: 'TEST-MANDATE-PAUSE',
+      edited_by: 'owner', confirmed_by: 'owner',
+    });
+    const audit = db().prepare("SELECT actor_kind, target FROM audit_log WHERE action = 'plan.takeover'").all();
+    expect(audit).toContainEqual({ actor_kind: 'owner', target: `trigger=${id} mandates=TEST-MANDATE-PAUSE` });
+    const again = await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie, { expect: preview.json['expect'] });
+    expect([again.status, again.json['code']]).toEqual([409, 'nothing_to_take_over']);
   });
 
   it('Run now on a paused plan answers 409 with its own code', async () => {

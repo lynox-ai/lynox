@@ -17,13 +17,13 @@ import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planMandate, planMembers, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
-import type { RequestPrincipal } from './request-principal.js';
+import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
 import { runAsPlanOf, type StampEntry } from './plan-run-context.js';
 import { planOfTrigger, stampFromRow } from './plan-stamp.js';
-import { claimPauseNotices, pausePlanNow, pausedAtNow, planPauseOn } from './plan-pause.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, claimPauseNotices, pausePlanNow, pausedAtNow, planPauseOn } from './plan-pause.js';
 import { filingContextFor } from './approval-filing.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -207,12 +207,6 @@ export function outcomeOfRun(entry: Pick<ActiveTask, 'event'>): EventOutcome {
 /** Why a webhook run of a workflow that asks its owner did not start. */
 export const WEBHOOK_ASKS_RESULT = 'Not run: this workflow asks you a question while it runs, and a run started by a webhook event cannot wait for an answer. Change the workflow so it does not ask; later events then run, this one does not run again.';
 
-/** What a run that did not start because a mandate its plan depends on has ended reads as. */
-const PLAN_ENDED_RESULT = 'This schedule, or the workflow it runs, was set up or changed by someone whose access has ended, so it does not run.';
-/** What a run reads as that was stopped part-way because its plan's access ended (`plan-pause.ts`). */
-const ACCESS_ENDED_RESULT = 'Stopped part-way because the access of someone who set up or changed this plan ended.';
-/** The same, for a plan the stop paused. */
-const ACCESS_ENDED_PAUSED_RESULT = `${ACCESS_ENDED_RESULT} The plan is paused until the owner takes it over.`;
 /** A failed event's reasons that are lynox's own sentences, and so may be pushed as they are. */
 const OWN_FAILURE_REASONS: ReadonlySet<string> = new Set([EVENT_VALUES_UNREADABLE, EVENT_STOPPED, WEBHOOK_ASKS_RESULT, ACCESS_ENDED_RESULT]);
 /** A failed event's reasons the owner hears of from the paused plan's notice (`plan-pause.ts`), once. */
@@ -947,6 +941,17 @@ export class WorkerLoop {
       return this.engine.getPromptStore()?.getLatestForTrigger(id)?.closed_reason === 'mandate_ended';
     } catch {
       return false;
+    }
+  }
+
+  /** The trigger's row read again by its exact id; the record given when it cannot be read. */
+  #freshRecord(task: TriggerRecord): TriggerRecord {
+    if (!planPauseOn()) return task;
+    try {
+      const fresh = this.engine.getTaskManager()?.getTrigger(task.id);
+      return fresh !== undefined && fresh.id === task.id ? fresh : task;
+    } catch {
+      return task;
     }
   }
 
@@ -1798,7 +1803,12 @@ export class WorkerLoop {
    * paths that do not reserve (the manual "Run now" below, and any direct caller). Null
    * keeps each executor's own constant, so an unreserved run behaves exactly as before.
    */
-  private async executeTask(task: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker): Promise<void> {
+  private async executeTask(record: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker): Promise<void> {
+    // Who a plan depends on is read from the row as it is now, not as `getDue` returned it: the
+    // owner's takeover (`plan-takeover.ts`) can commit in between, and every reader below — the
+    // stamp checks, the plan's members and whom it acts for, the gate, the trail, the watch's
+    // reader — would otherwise decide on the marks it covered. Off with the pause, as on main.
+    const task = this.#freshRecord(record);
     // The one-time door (PRD customer-granted-operator-access §3.12 point 6): a marker
     // minted by a request for THIS trigger is the second disjunct of both stamp checks
     // below, and it is used up here, by the dispatch that sees it. Nothing passes them
@@ -1886,7 +1896,7 @@ export class WorkerLoop {
     // is known from the row; the workflow's is read inside the run, before the access gate.
     const entry: ActiveTask = {
       controller, ownerStop: new AbortController(), effect: task.effect, pauseDeadline, resumeDeadline, handRun, starter,
-      planMembers: planMembers(planMandate(task), undefined).members, event,
+      planMembers: planMembers(planMandate(planAuthorshipOf(task)), undefined).members, event,
     };
     this.activeTasks.set(task.id, entry);
     // A renewal fails for two reasons, and only one is another process: the row can also
@@ -1947,7 +1957,7 @@ export class WorkerLoop {
         // under the owner's stamp for someone whose access ended.
         // Only a workflow run reads anything more; every other effect stays as synchronous here
         // as it was.
-        const plan = effect === 'run_workflow' ? await this.#planMembersOf(task) : planMembers(planMandate(task), undefined);
+        const plan = effect === 'run_workflow' ? await this.#planMembersOf(task) : planMembers(planMandate(planAuthorshipOf(task)), undefined);
         if (effect === 'run_workflow') {
           entry.planMembers = plan.members;
           if ('unreadable' in plan && plan.unreadable) {
@@ -3901,14 +3911,14 @@ export function planRunTrail(
 
 /**
  * Who a watch's read is recorded for, or null for the owner's own watch: the mandate the run
- * is for (its plan's, or the delegated session that started it by hand), else one the record
- * names as its last editor, else
- * the one that set it up. Not `edited_by` alone: the owner's stamp writes itself there
+ * is for (its plan's, or the delegated session that started it by hand), else the mandate the
+ * plan names (`planMandate`: its last mandate editor, else its mandate creator, neither if the
+ * owner took them over). Not `edited_by`: the owner's stamp writes itself there
  * (`TriggerStore.setConfirmedAt`), and a watch a mandate set up runs on schedule only after
  * that stamp.
  */
-export function watchReader(task: Pick<TriggerRecord, 'created_by' | 'edited_by'>, starter: RequestPrincipal | undefined): RequestPrincipal | null {
+export function watchReader(task: PlanAuthorshipRow, starter: RequestPrincipal | undefined): RequestPrincipal | null {
   if (starter !== undefined && !isOwnerPrincipal(starter)) return starter;
-  if (isMandateTag(task.edited_by)) return principalFromTag(task.edited_by);
-  return isMandateTag(task.created_by) ? principalFromTag(task.created_by) : null;
+  // The plan's own mandate, as the gate reads it: a mark the owner took over is none.
+  return planMandate(planAuthorshipOf(task))?.principal ?? null;
 }

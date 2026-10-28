@@ -40,7 +40,7 @@ import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import type { CaptureSuppressedReason } from './capture-telemetry.js';
-import { chatIsContained, containedCallAllowed, CONTAINED_CALL_REFUSAL } from './containment.js';
+import { chatIsContained, containedCallRefusal } from './containment.js';
 import { isDangerousDetailed, pathFieldsRead } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
@@ -4585,11 +4585,16 @@ export class Agent implements IAgent {
     // user is never asked about a call that would not run. The tenant tools stay advertised;
     // only the provider-side web_search drops out of the list (`_callAPI`), so the cached prefix
     // changes once, on the first call after the chat becomes contained.
-    if (chatIsContained(this) && !containedCallAllowed(tc.name, tc.input)) {
+    const containedRefusal = chatIsContained(this) ? containedCallRefusal(tc.name, tc.input) : null;
+    if (containedRefusal !== null) {
+      // Streamed with its reason, so the chat's view can offer the way out under it.
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: tc.name, result: containedRefusal.text, agent: this.name, toolUseId: tc.id, isError: true, contained: containedRefusal.reason });
+      }
       return {
         type: 'tool_result',
         tool_use_id: tc.id,
-        content: annotateNonRetryable(CONTAINED_CALL_REFUSAL),
+        content: annotateNonRetryable(containedRefusal.text),
         is_error: true,
       };
     }

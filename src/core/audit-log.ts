@@ -186,13 +186,24 @@ type Piece = { readonly text: string } | { readonly raw: string };
 /** What stands in a row where a path segment or a value held an address. */
 export const ADDRESS_PLACEHOLDER = '<address>';
 
+/** How often `holdsAddress` undoes escapes before it stops: a value escaped more often is rare enough. */
+const ADDRESS_DECODE_ROUNDS = 4;
+
 /**
- * Whether a segment's text, escapes undone once, holds an address: an `@`, or a `%40` that a
- * server undoing escapes twice would read as one. The whole segment is replaced then, never only
- * the part before or after the sign, so neither the person nor the domain is left in the row.
+ * Whether a text holds an address: an `@`, or the full-width or small at sign a reader of the row
+ * takes for one, as sent or with escapes undone, again and again until nothing changes (`%2540`,
+ * `%EF%BC%A0`). The whole segment is replaced then, never only the part before or after the sign,
+ * so neither the person nor the domain is left in the row. A spelled-out `(at)` is not one.
  */
 function holdsAddress(text: string): boolean {
-  return text.includes('@') || /%40/i.test(text);
+  let t = text;
+  for (let round = 0; ; round++) {
+    if (/[@\uFF20\uFE6B]/.test(t)) return true;
+    if (round === ADDRESS_DECODE_ROUNDS) return false;
+    const next = textOf(decodePieces(t));
+    if (next === t) return false;
+    t = next;
+  }
 }
 
 /** What stands in a row where a path segment was a search text. */

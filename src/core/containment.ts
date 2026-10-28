@@ -5,8 +5,8 @@ import { isProvisionedInstance } from './wire-capture.js';
 import type { ThreadStore } from './thread-store.js';
 import type { ContainmentMirror } from './history-markers.js';
 import { isShopifyAdminHost, normalizeHostForMatch } from './shopify-host.js';
-import { canonicalHost } from './canonical-host.js';
 import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
+import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, type BodyReadings } from './outbound-write.js';
 
 /**
  * Containment: the record of which containers a store connection's credential was attached
@@ -290,15 +290,19 @@ export const CONTAINED_READ_REFUSAL =
   'Not shown: this run was started from a chat that read data through a store connection, and this engine could not record that this chat now reads that data too.';
 
 /**
- * The tools a contained chat may call. What such a chat holds may go to a store or stay in the
- * chat, so the set is what reads, asks, or works inside the chat: `http_request` only to a store
- * host ({@link containedCallAllowed}), the reads of memory and history, the follow-up chips, a
- * question to the user, the child agents and workflow steps (which are held by the same check,
- * since they run for this chat), and the bulk tools for a run that writes to a store.
- * Everything else — a tool registered later included — is refused.
+ * The tools a contained chat may call. What such a chat holds stays in the chat, so the set is
+ * what reads, asks, or works inside it: `http_request` only to a store host
+ * ({@link containedCallAllowed}) and only to read ({@link CONTAINED_WRITE_REFUSAL}), the reads of
+ * memory and history, the follow-up chips, a question to the user, the child agents and workflow
+ * steps (which are held by the same check, since they run for this chat), and the status of a
+ * bulk run. Planning a bulk run is not on it: the run is planned in a chat that has not read the
+ * store. Everything else — a tool registered later included — is refused.
  *
- * "A store" is any store host, not only the connections this chat is contained for: on an
- * engine with two stores connected, what a chat read from one may be written to the other.
+ * "A store" is any store host, not only the connections this chat is contained for. A read of
+ * another store contains the chat for that one as well (the credential funnel in
+ * `tools/builtin/http.ts`), and the chat makes no write request to either. Should a store write ever be
+ * let through here, it has to be bound to the connections the chat is contained for, or what the
+ * chat read from one store lands in another where erasing the first does not find it.
  */
 export const CONTAINED_TOOLS: ReadonlySet<string> = Object.freeze(new Set<string>([
   'http_request',
@@ -311,7 +315,6 @@ export const CONTAINED_TOOLS: ReadonlySet<string> = Object.freeze(new Set<string
   'ask_user',
   'spawn_agent',
   'run_workflow',
-  'bulk_plan',
   'bulk_status',
 ]));
 
@@ -324,23 +327,73 @@ export const CONTAINED_CDN_HOSTS: ReadonlySet<string> = Object.freeze(new Set<st
 
 /** Whether a contained chat may make this call (see {@link CONTAINED_TOOLS}). */
 export function containedCallAllowed(name: string, input: unknown): boolean {
-  if (!CONTAINED_TOOLS.has(name)) return false;
-  if (name === 'http_request') return storeRequestUrl(fieldOf(input, 'url'));
-  if (name === 'bulk_plan') {
-    if (fieldOf(input, 'target_system') !== 'http') return false;
-    const raw = fieldOf(input, 'target_host');
-    const host = typeof raw === 'string' ? canonicalHost(raw) : null;
-    return host !== null && isShopifyAdminHost(host);
-  }
-  return true;
+  return containedCallRefusal(name, input) === null;
+}
+
+/**
+ * Why a contained chat's call is refused: `contained_call` for a call outside
+ * {@link CONTAINED_TOOLS} (or a request to a host that is not a store's), `contained_write` for a
+ * write to a store, `contained_plan` for planning a bulk run. It travels with the refusal to the
+ * chat's own view (`tool_result.contained`), which offers to plan the change in a new chat for the
+ * last two, and keys on this, never on the text.
+ */
+export type ContainedRefusalReason = 'contained_call' | 'contained_write' | 'contained_plan';
+
+export interface ContainedRefusal {
+  readonly reason: ContainedRefusalReason;
+  readonly text: string;
+}
+
+/**
+ * The refusal a contained chat gets for this call, or `null` when it may make it. Read at
+ * dispatch, before any prompt; `tools/builtin/http.ts` reads the write again from the request as
+ * it is sent.
+ */
+export function containedCallRefusal(name: string, input: unknown): ContainedRefusal | null {
+  if (name === 'bulk_plan') return REFUSED_PLAN;
+  if (!CONTAINED_TOOLS.has(name)) return REFUSED_CALL;
+  if (name !== 'http_request') return null;
+  const url = fieldOf(input, 'url');
+  if (typeof url !== 'string') return REFUSED_CALL;
+  if (!storeRequestUrl(url)) return otherServiceUrl(url) ? REFUSED_OTHER_SERVICE : REFUSED_CALL;
+  const method = fieldOf(input, 'method') ?? 'GET';
+  const headers = fieldOf(input, 'headers') ?? {};
+  const body = fieldOf(input, 'body');
+  // A method or headers of a shape the tool does not take are not decided here. The tool's schema
+  // refuses a method that is not one of its own and headers that are not an object; a header
+  // value that is not text passes the schema, and `tools/builtin/http.ts` refuses the request
+  // before anything is sent when such a value names a method.
+  if (typeof method !== 'string') return null;
+  if (typeof headers !== 'object' || headers === null || Object.values(headers).some((v) => typeof v !== 'string')) return null;
+  return containedStoreWrite(method, headers as Record<string, string>, url, body) ? REFUSED_WRITE : null;
+}
+
+/**
+ * Whether a request writes, as a contained chat is held to it: a method, or any override the
+ * request names, that is not a read — or one that is not a method at all. The one write that
+ * reads is a GraphQL query: sent as a POST, naming no other method, to a GraphQL endpoint without
+ * a query string, whose document `graphqlWrite` reads as no mutation. `readings` is the body as
+ * the method gates read it, where the sender repairs it before sending; the GraphQL document is
+ * read from the body as given, which is the one `graphqlWrite` accepts.
+ */
+export function containedStoreWrite(method: string, headers: Record<string, string>, url: string, body: unknown, readings?: BodyReadings): boolean {
+  const gateBody = readings ?? (typeof body === 'string' ? body : undefined);
+  if (effectiveWriteMethod(method, headers, url, gateBody) === null) return true;
+  const named = writeMethodsNamed(method, headers, url, gateBody);
+  if (named.length === 0) return false;
+  if (method.trim().toUpperCase() !== 'POST' || named.length !== 1) return true;
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return true; }
+  if (!isGraphqlEndpoint(url) || parsed.search.length > 1) return true;
+  const reading = graphqlWrite(headers, body);
+  return 'refusal' in reading || reading.mutates;
 }
 
 function fieldOf(input: unknown, key: string): unknown {
   return typeof input === 'object' && input !== null ? (input as Record<string, unknown>)[key] : undefined;
 }
 
-function storeRequestUrl(url: unknown): boolean {
-  if (typeof url !== 'string') return false;
+function storeRequestUrl(url: string): boolean {
   let parsed: URL;
   try { parsed = new URL(url); } catch { return false; }
   if (parsed.protocol !== 'https:') return false;
@@ -348,10 +401,67 @@ function storeRequestUrl(url: unknown): boolean {
   return isShopifyAdminHost(host) || CONTAINED_CDN_HOSTS.has(host);
 }
 
+/** A request over http(s) to a host that is no store's and no store CDN: another service. */
+function otherServiceUrl(url: string): boolean {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+  const host = normalizeHostForMatch(parsed.hostname);
+  return !isShopifyAdminHost(host) && !CONTAINED_CDN_HOSTS.has(host);
+}
+
 /**
- * The answer a contained chat gets for a call outside {@link CONTAINED_TOOLS}. It names the
- * reason and where other work belongs, and nothing about which call would get through.
+ * The answer a contained chat gets for a call outside {@link CONTAINED_TOOLS} that is not a
+ * request to another service: a local tool, a read the list does not hold, a store URL of a form
+ * the chat does not send. It names the reason and where other work belongs, and nothing about
+ * which call would get through.
  */
 export const CONTAINED_CALL_REFUSAL =
   'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds stays in this chat. '
   + 'Work that does not need the store\'s data belongs in a new chat.';
+
+/**
+ * The answer a contained chat gets for a request to another service, such as a keyword lookup
+ * after the store was read. It names the way on (a new chat, through the button the chat's view
+ * shows in its bar), and the user as the one who opens it. No place: over the API there is no
+ * button. A wording that said the request "runs in a new chat" made a model promise to open
+ * that chat itself (tests/online/contained-way-out-eval.test.ts, case d).
+ */
+export const CONTAINED_OTHER_SERVICE_REFUSAL =
+  'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, so it reaches no other service. '
+  + 'Tell the user in one sentence that this chat only reads now, and that they can open a chat where this works with "Plan in a new chat" (you cannot open it for them).';
+
+/**
+ * The answer a contained chat gets at dispatch for a write to a store host: such a chat only
+ * reads. It names the way (a new chat) and the button the chat's view shows for it, without a
+ * place: after a reload the button stands only in the bar, and over the API there is none. The
+ * user is the one who opens it: in a passive wording a model offered to open or plan it itself.
+ */
+export const CONTAINED_WRITE_REFUSAL =
+  'Not sent: this chat has read data through a store connection, or this engine cannot read whether it has, so it only reads the store and changes nothing there. '
+  + 'Tell the user in one sentence that this chat only reads now, and that they plan the change in a new chat, which they open themselves with "Plan in a new chat" (you cannot open it for them); '
+  + 'there it runs as a bulk run that reads the store itself and shows a preview before anything is written.';
+
+/**
+ * The answer `tools/builtin/http.ts` gives when it refuses a contained store write the dispatch
+ * did not see (the request as it goes out differs from the call the model made). That refusal
+ * carries no reason to the chat's view, so no button is shown, and the text names none.
+ */
+export const CONTAINED_WRITE_REFUSAL_AT_SEND =
+  'Not sent: this chat has read data through a store connection, or this engine cannot read whether it has, so it only reads the store and changes nothing there. '
+  + 'A change to the store belongs in a new chat.';
+
+/**
+ * The answer a contained chat gets for `bulk_plan`. A bulk run on a store needs the store's data,
+ * so "work that does not need it belongs in a new chat" would point the wrong way: the run is
+ * planned in a new chat, and the run reads the store itself.
+ */
+export const CONTAINED_PLAN_REFUSAL =
+  'Not planned: this chat has read data through a store connection, or this engine cannot read whether it has, so it plans no bulk run. '
+  + 'Tell the user in one sentence that this chat only reads now, and that they plan the run in a new chat, which they open themselves with "Plan in a new chat" (you cannot open it for them); '
+  + 'there the run reads the store itself and shows a preview before anything is written.';
+
+const REFUSED_CALL: ContainedRefusal = Object.freeze({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
+const REFUSED_OTHER_SERVICE: ContainedRefusal = Object.freeze({ reason: 'contained_call', text: CONTAINED_OTHER_SERVICE_REFUSAL });
+const REFUSED_WRITE: ContainedRefusal = Object.freeze({ reason: 'contained_write', text: CONTAINED_WRITE_REFUSAL });
+const REFUSED_PLAN: ContainedRefusal = Object.freeze({ reason: 'contained_plan', text: CONTAINED_PLAN_REFUSAL });
