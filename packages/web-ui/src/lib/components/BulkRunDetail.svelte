@@ -10,7 +10,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkSentUnknownText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkSentUnknownText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -154,7 +154,11 @@
 		return act(async () => {
 			if (!run?.checksum) return t('common.load_failed');
 			const verb = target.deselected ? 'reselect' : 'deselect';
-			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/targets/${target.seq}/${verb}`, { checksum: run.checksum }));
+			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/targets/${target.seq}/${verb}`, { checksum: run.checksum });
+			// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
+			const code = r.body.code;
+			if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) return t(`bulk.deselect.refused.${code}`);
+			return refusalOf(r);
 		});
 	}
 

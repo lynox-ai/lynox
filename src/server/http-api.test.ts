@@ -10425,6 +10425,20 @@ describe('LynoxHTTPApi', () => {
         expect(none.status).toBe(400);
         expect(bulkLedger.getStatus(id)!.deselected).toBe(0);
       });
+
+      it('names by code a target that is not taken out and one already out, for the page to word (U-040)', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const seen = bulkLedger.computeChecksum(id)!;
+        const back = await jsonFetch(`/api/bulk/runs/${id}/targets/0/reselect`, { method: 'POST', body: JSON.stringify({ checksum: seen }) });
+        expect(back.status).toBe(409);
+        expect(await back.json()).toMatchObject({ code: 'not_taken_out' });
+        const off = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: seen }) });
+        const { checksum } = await off.json() as { checksum: string };
+        const again = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect(again.status).toBe(409);
+        expect(await again.json()).toMatchObject({ code: 'not_writing' });
+      });
     });
 
     describe('a run whose planner has ended (§3.13 B7)', () => {

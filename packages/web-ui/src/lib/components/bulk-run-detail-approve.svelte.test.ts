@@ -44,6 +44,7 @@ let run: BulkRunDetailData;
 let targets: BulkTarget[];
 let posts: { url: string; body: unknown }[];
 let gets: string[];
+let refuseDeselect: string | null;
 
 beforeEach(() => {
 	target = document.createElement('div');
@@ -52,6 +53,7 @@ beforeEach(() => {
 	targets = TARGETS.map((x) => ({ ...x }));
 	posts = [];
 	gets = [];
+	refuseDeselect = null;
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const reply = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -59,6 +61,7 @@ beforeEach(() => {
 			const body = JSON.parse(String(init.body)) as unknown;
 			posts.push({ url: u, body });
 			const m = /\/targets\/(\d+)\/deselect$/.exec(u);
+			if (m && refuseDeselect !== null) return reply({ error: 'engine English', code: refuseDeselect }, 409);
 			if (m) {
 				const seq = Number(m[1]);
 				targets = targets.map((x) => (x.seq === seq ? { ...x, deselected: true } : x));
@@ -148,5 +151,22 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain(t('common.load_failed'));
 		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
 		expect(target.textContent).not.toContain('Product/1');
+	});
+
+	it('words a refused take-out by its code, not by the engine\'s English (U-040)', async () => {
+		refuseDeselect = 'not_writing';
+		await render();
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(target.textContent).toContain(t('bulk.deselect.refused.not_writing'));
+		expect(target.textContent).not.toContain('engine English');
+	});
+
+	it('shows the engine\'s text for a refusal it has no sentence for', async () => {
+		refuseDeselect = 'something_else';
+		await render();
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(target.textContent).toContain('engine English');
 	});
 });

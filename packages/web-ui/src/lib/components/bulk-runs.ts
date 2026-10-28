@@ -494,6 +494,9 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
 	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char',
 };
+/** The refusals of taking a target out or putting it back that the owner's page words by
+ *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
+export const BULK_DESELECT_REFUSALS: readonly string[] = ['atomic_undo', 'not_writing', 'not_taken_out'];
 /** Sentences a managed instance follows with a way to support; a self-hosted one has none to name. */
 const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
 	not_json: 'bulk.invalid.persists_support', read_failed: 'bulk.invalid.persists_support', shape: 'bulk.invalid.many_support',
