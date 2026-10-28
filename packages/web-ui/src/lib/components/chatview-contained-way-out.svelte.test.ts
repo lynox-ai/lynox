@@ -241,7 +241,7 @@ describe('ChatView in a chat that only reads', () => {
 		expect(originLine()).toBe([t('contained.origin_line_off'), t('contained.way_support'), t('contained.origin_line_draft')].join(' '));
 	});
 
-	it('drops a config read that answers after the chat was left', async () => {
+	it('keeps the newer config read when an older one answers after it', async () => {
 		const { t } = await import('../i18n.svelte.js');
 		contained = true;
 		config = OPEN_CONFIG;
@@ -261,11 +261,14 @@ describe('ChatView in a chat that only reads', () => {
 		expect(originLine(), 'the read is still out').toBeNull();
 		store.newChat();
 		svelte.flushSync();
-		release();
-		await settle();
 		config = CLOSED_CONFIG;
 		await openAgain();
-		expect(originLine()).toBe([t('contained.origin_line_off'), t('contained.way_support'), t('contained.origin_line_draft')].join(' '));
+		const closed = [t('contained.origin_line_off'), t('contained.way_support'), t('contained.origin_line_draft')].join(' ');
+		expect(originLine(), 'positive control: the newer read answered').toBe(closed);
+		release();
+		await settle();
+		svelte.flushSync();
+		expect(originLine()).toBe(closed);
 	});
 
 	it('shows an example as the placeholder when the old chat holds nothing typed here', async () => {

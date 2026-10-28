@@ -1635,8 +1635,8 @@
 	const containedOrigin = $derived(getContainedOrigin());
 	/** What the line above the input of such a chat may promise, read from the config each time
 	 *  such a chat opens: a bulk run only where this instance runs one that reads a Shopify store.
-	 *  Null until read. A read that answers after the chat was left is dropped, so the next such
-	 *  chat reads again. */
+	 *  Null until read. A read that answers after a newer one began is dropped, so a chat
+	 *  left and opened again shows what the newer read found. */
 	let originKeys = $state<string[] | null>(null);
 	let originRead = 0;
 	$effect(() => {

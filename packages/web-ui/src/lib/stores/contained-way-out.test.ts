@@ -113,15 +113,15 @@ describe('the line of a chat opened from one that only reads', () => {
 
 	it('promises the bulk run only with bulk runs on and the Shopify read on', () => {
 		expect(originLineKeys(true, cfg({ on: true, source: 'config', shopify: true }))).toEqual(['contained.origin_line']);
-		expect(originLineKeys(true, cfg({ on: false, source: 'config', shopify: true }))).toEqual([OFF, 'contained.way_bulk_off', DRAFT]);
+		expect(originLineKeys(true, cfg({ on: false, source: 'config', shopify: true }))).toEqual([OFF, DRAFT]);
 		expect(originLineKeys(true, cfg({ on: true, source: 'config', shopify: false }))).toEqual([OFF, 'contained.way_flag', DRAFT]);
 	});
 
 	it('names the Shopify read first, then bulk runs, and support once', () => {
-		expect(originLineKeys(true, cfg({ on: false, source: 'config', shopify: false }))).toEqual([OFF, 'contained.way_flag', 'contained.way_bulk_off', DRAFT]);
+		expect(originLineKeys(true, cfg({ on: false, source: 'config', shopify: false }))).toEqual([OFF, 'contained.way_flag', DRAFT]);
 		expect(originLineKeys(true, cfg({ on: false, source: 'control-plane', shopify: false }, 'managed'))).toEqual([OFF, 'contained.way_support', DRAFT]);
 		expect(originLineKeys(true, cfg({ on: false, source: 'control-plane', shopify: true }, 'managed'))).toEqual([OFF, 'contained.way_support', DRAFT]);
-		expect(originLineKeys(true, cfg({ on: false, source: 'config', shopify: false }, 'hosted'))).toEqual([OFF, 'contained.way_support', 'contained.way_bulk_off', DRAFT]);
+		expect(originLineKeys(true, cfg({ on: false, source: 'config', shopify: false }, 'hosted'))).toEqual([OFF, 'contained.way_support', DRAFT]);
 	});
 
 	it('gives no line when the config could not be read', () => {
@@ -129,6 +129,7 @@ describe('the line of a chat opened from one that only reads', () => {
 		expect(originLineKeys(false, cfg({ on: true, source: 'config', shopify: true }))).toEqual([]);
 		expect(originLineKeys(true, {})).toEqual([]);
 		// The flag alone is not enough: a field that is not exactly true reads as off.
-		expect(originLineKeys(true, cfg({ on: 'true', source: 'config', shopify: true }))).toEqual([OFF, 'contained.way_bulk_off', DRAFT]);
+		expect(originLineKeys(true, cfg({ on: 'true', source: 'config', shopify: true }))).toEqual([OFF, DRAFT]);
+		expect(originLineKeys(true, cfg({ on: 'true', source: 'control-plane', shopify: true }, 'managed'))).toEqual([OFF, 'contained.way_support', DRAFT]);
 	});
 });
