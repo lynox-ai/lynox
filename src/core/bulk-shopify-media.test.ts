@@ -447,7 +447,8 @@ describe('applying a media run', () => {
     const id = await previewed();
     ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
     await apply(id);
-    expect(ledger.getStatus(id)).toMatchObject({ applied: 0 });
+    // Sent, with no answer that says what the store did: left to be checked, not counted written.
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 0, failed: 1, sentUnknown: 1 });
   });
 
   it('takes back what it wrote, an alt the image did not have as the empty string', async () => {
