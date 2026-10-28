@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, openSync, writeSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -12,20 +12,30 @@ import { tmpdir } from 'node:os';
  * runs through the context workspace's open directory (`anchor`) and by name (`name`).
  */
 
-/** Bytes read from open files, through `readSync` (the capped read) or `readFileSync(fd)` (a whole read). */
+/** Bytes read, through `readSync` (the capped read) or `readFileSync` (a whole read, by fd or by path). */
 const reads = vi.hoisted(() => ({ bytes: 0 }));
+/** While on, `fstatSync` reports a size of 1 byte, until the first `readSync`: as a file that
+ *  grows past the cap between the size check and the read would. */
+const grows = vi.hoisted(() => ({ on: false, seen: 0 }));
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>();
   return {
     ...real,
     readSync: ((...args: unknown[]) => {
+      grows.on = false;
       const n = (real.readSync as (...a: unknown[]) => number)(...args);
       reads.bytes += n;
       return n;
     }) as typeof real.readSync,
+    fstatSync: ((...args: unknown[]) => {
+      const st = (real.fstatSync as (...a: unknown[]) => import('node:fs').Stats)(...args);
+      if (!grows.on) return st;
+      grows.seen++;
+      return Object.assign(Object.create(Object.getPrototypeOf(st) as object) as import('node:fs').Stats, st, { size: 1 });
+    }) as typeof real.fstatSync,
     readFileSync: ((path: unknown, ...rest: unknown[]) => {
       const out = (real.readFileSync as (...a: unknown[]) => Buffer | string)(path, ...rest);
-      if (typeof path === 'number') reads.bytes += out.length;
+      reads.bytes += out.length;
       return out;
     }) as typeof real.readFileSync,
   };
@@ -81,6 +91,7 @@ function bytesReadBy(op: () => void): number {
 }
 
 afterEach(() => {
+  grows.on = false;
   mgr.cleanup();
   closeWorkspaceBase();
   clearTenantWorkspace();
@@ -99,15 +110,15 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     plant(path, HUGE);
 
     let changes: ReturnType<ChangesetManager['getChanges']> = [];
-    expect(bytesReadBy(() => { changes = mgr.getChanges(); }), 'getChanges reads at most the cap').toBeLessThanOrEqual(CAPPED_READ);
+    expect(bytesReadBy(() => { changes = mgr.getChanges(); }), 'getChanges does not read a file over the cap').toBe(0);
     expect(changes).toHaveLength(1);
     expect(changes[0]!.status).toBe('modified');
     expect(changes[0]!.diff).toBe(
       '--- a/notes.txt\n+++ b/notes.txt\n'
       + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes.)',
     );
-    expect(bytesReadBy(() => { expect(mgr.hasChanges()).toBe(true); }), 'hasChanges reads at most the cap').toBeLessThanOrEqual(CAPPED_READ);
-    expect(bytesReadBy(() => { expect(mgr.size).toBe(1); }), 'size reads at most the cap').toBeLessThanOrEqual(CAPPED_READ);
+    expect(bytesReadBy(() => { expect(mgr.hasChanges()).toBe(true); }), 'hasChanges does not read it').toBe(0);
+    expect(bytesReadBy(() => { expect(mgr.size).toBe(1); }), 'size does not read it').toBe(0);
   });
 
   it(`[${branch}] settle keeps a modified file over the cap, and the rollback restores the original`, () => {
@@ -116,7 +127,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     writeAsTheRun(path, 'the run wrote this');
     plant(path, HUGE);
 
-    expect(bytesReadBy(() => mgr.settle()), 'settle reads at most the cap per file').toBeLessThanOrEqual(2 * CAPPED_READ);
+    expect(bytesReadBy(() => mgr.settle()), 'settle does not read it').toBe(0);
     expect(mgr.isEmpty(), 'not dropped as unchanged').toBe(false);
     expect(mgr.getChanges().map((c) => c.file)).toEqual(['notes.txt']);
 
@@ -130,7 +141,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     plant(path, HUGE);
 
     let changes: ReturnType<ChangesetManager['getChanges']> = [];
-    expect(bytesReadBy(() => { changes = mgr.getChanges(); })).toBeLessThanOrEqual(CAPPED_READ);
+    expect(bytesReadBy(() => { changes = mgr.getChanges(); })).toBe(0);
     expect(changes).toHaveLength(1);
     expect(changes[0]!.status).toBe('added');
     expect(changes[0]!.diff).toBe(
@@ -138,22 +149,74 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
       + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. It did not exist before the run.)',
     );
 
-    expect(bytesReadBy(() => mgr.settle())).toBeLessThanOrEqual(2 * CAPPED_READ);
+    expect(bytesReadBy(() => mgr.settle())).toBe(0);
     expect(mgr.isEmpty(), 'not dropped as unchanged').toBe(false);
-    expect(bytesReadBy(() => mgr.rollbackAll()), 'the rollback reads at most the cap').toBeLessThanOrEqual(CAPPED_READ);
+    expect(bytesReadBy(() => mgr.rollbackAll()), 'the rollback does not read it').toBe(0);
     expect(statSync(path).size, 'another writer\'s file is not deleted').toBe(HUGE);
   });
 
-  it(`[${branch}] a file over the cap when the run's write is recorded is never taken for the run's own`, () => {
-    const path = join(ws, 'new.txt');
-    mgr.backupBeforeWrite(path);
-    writeFileSync(path, 'the run wrote this');
+  it(`[${branch}] a file that grows past the cap while it is read is shown as changed, read only up to the cap`, () => {
+    const path = join(ws, 'notes.txt');
+    writeFileSync(path, 'original');
+    writeAsTheRun(path, 'the run wrote this');
     plant(path, HUGE);
 
-    expect(bytesReadBy(() => mgr.recordWritten(path)), 'recordWritten reads at most the cap').toBeLessThanOrEqual(CAPPED_READ);
-    expect(bytesReadBy(() => mgr.rollbackAll())).toBeLessThanOrEqual(CAPPED_READ);
-    expect(existsSync(path), 'a file whose bytes were not compared is not deleted').toBe(true);
-    expect(statSync(path).size).toBe(HUGE);
+    let changes: ReturnType<ChangesetManager['getChanges']> = [];
+    grows.on = true;
+    grows.seen = 0;
+    const read = bytesReadBy(() => { changes = mgr.getChanges(); });
+    expect(grows.seen, 'the size check saw the small size').toBeGreaterThan(0);
+    expect(read, 'the read stops at the cap').toBeLessThanOrEqual(CAPPED_READ);
+    expect(read, 'and did read up to it').toBeGreaterThan(CAP);
+    expect(changes.map((c) => c.diff)).toEqual([
+      '--- a/notes.txt\n+++ b/notes.txt\n'
+      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes.)',
+    ]);
+  });
+
+  it(`[${branch}] the run's own added file over the cap is shown without being read, and rolled back`, () => {
+    const path = join(ws, 'big.txt');
+    mgr.backupBeforeWrite(path);
+    writeFileSync(path, 'b'.repeat(CAP + 1));
+    expect(bytesReadBy(() => mgr.recordWritten(path)), 'recordWritten does not read a file over the cap').toBe(0);
+
+    let changes: ReturnType<ChangesetManager['getChanges']> = [];
+    expect(bytesReadBy(() => { changes = mgr.getChanges(); })).toBe(0);
+    expect(changes[0]!.diff).toBe(
+      '--- /dev/null\n+++ b/big.txt\n'
+      + '(Content not compared: the file is 5.1 MB now, larger than the 5 MB the review reads. It did not exist before the run.)',
+    );
+    expect(bytesReadBy(() => mgr.rollbackAll())).toBe(0);
+    expect(existsSync(path), 'the run\'s own file is deleted').toBe(false);
+  });
+
+  it(`[${branch}] the run's own added file over the cap, changed in place since, is not deleted`, () => {
+    const path = join(ws, 'big.txt');
+    mgr.backupBeforeWrite(path);
+    writeFileSync(path, 'b'.repeat(CAP + 1));
+    mgr.recordWritten(path);
+    // Another writer changes one byte in place: same inode, same size.
+    const fd = openSync(path, 'r+');
+    writeSync(fd, 'X', 0);
+    closeSync(fd);
+
+    mgr.rollbackAll();
+    expect(existsSync(path), 'changed since the run wrote it').toBe(true);
+    expect(readFileSync(path, 'utf-8').slice(0, 2)).toBe('Xb');
+  });
+
+  it.skipIf(process.getuid?.() === 0)(`[${branch}] a modified file whose original could not be read shows that its size before is not known`, () => {
+    const path = join(ws, 'locked.txt');
+    writeFileSync(path, 'original');
+    chmodSync(path, 0o000);
+    mgr.backupBeforeWrite(path);
+    chmodSync(path, 0o644);
+    plant(path, HUGE);
+
+    expect(mgr.getChanges().map((c) => c.diff)).toEqual([
+      '--- a/locked.txt\n+++ b/locked.txt\n'
+      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Its size before the run is not known.)',
+    ]);
   });
 
   it(`[${branch}] a file of exactly the cap is still read and diffed, and the run's added file still rolled back (control)`, () => {

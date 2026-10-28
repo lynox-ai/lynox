@@ -25,9 +25,13 @@ function heldBase(): ReturnType<typeof workspaceBase> {
 /** A tracked file over {@link FILE_TOOL_READ_CAP_BYTES}, with its size: its bytes are not read. */
 type OverCap = { overCap: number };
 
-/** A size as the review shows it: bytes below 1 MB, MB to one decimal above. */
-const shownSize = (bytes: number): string =>
-  bytes < 1024 * 1024 ? `${bytes} bytes` : `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;
+/** A size as the review shows it: bytes below 1 MB, MB to one decimal above. `up` rounds up,
+ *  so a file one byte over the cap does not read as the cap itself. */
+const shownSize = (bytes: number, up = false): string => {
+  if (bytes < 1024 * 1024) return `${bytes} bytes`;
+  const tenths = (bytes / (1024 * 1024)) * 10;
+  return `${(up ? Math.ceil(tenths) : Math.round(tenths)) / 10} MB`;
+};
 
 /** The review's line for a file over the cap, in place of a diff. `before` is null for a file
  *  the run added, undefined when the size before the run is not known. */
@@ -35,7 +39,7 @@ function notComparedNote(before: number | null | undefined, now: number): string
   const was = before === null ? 'It did not exist before the run.'
     : before === undefined ? 'Its size before the run is not known.'
     : `Before the run it was ${shownSize(before)}.`;
-  return `(Content not compared: the file is ${shownSize(now)} now, larger than the ${shownSize(FILE_TOOL_READ_CAP_BYTES)} the review reads. ${was})`;
+  return `(Content not compared: the file is ${shownSize(now, true)} now, larger than the ${shownSize(FILE_TOOL_READ_CAP_BYTES)} the review reads. ${was})`;
 }
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -182,22 +186,34 @@ export class ChangesetManager {
    *  returned. Another writer can put a file of any size under a tracked path. */
   private _readTracked(abs: string): Buffer | OverCap | null {
     return this._withTracked(abs, (fd) => {
+      // The size first, so a file known to be over the cap is not read at all.
+      const size = fstatSync(fd).size;
+      if (size > FILE_TOOL_READ_CAP_BYTES) return { overCap: size };
       try {
         return readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
       } catch (err) {
+        // Grown past the cap since the fstat.
         if (isReadLimit(err)) return { overCap: fstatSync(fd).size };
         throw err;
       }
     });
   }
 
-  /** Which file a tracked path names now, read as {@link _readTracked} reads it. Null for a
-   *  file over the cap: it is never taken for the file the run wrote, so a rollback leaves it. */
+  /** Which file a tracked path names now: its inode and a hash of its bytes, read as
+   *  {@link _readTracked} reads them. A file over the cap is not read: it is known by its size
+   *  and its ctime instead, which every write changes and no caller can set back. So the run's
+   *  own large file is still rolled back, and one changed or put there since is not. (A kernel
+   *  with coarse timestamps can leave ctime as it was for a write in the same tick; one with
+   *  multigrain timestamps (Linux 6.13 on, for the filesystems that use them) does not after
+   *  the fstat here.) Null when
+   *  a file grows past the cap while it is read: never taken for the run's own. */
   private _identityOf(abs: string): { dev: number; ino: number; hash: string } | null {
     return this._withTracked(abs, (fd) => {
-      const st = fstatSync(fd);
+      const st = fstatSync(fd, { bigint: true });
+      const id = { dev: Number(st.dev), ino: Number(st.ino) };
+      if (st.size > BigInt(FILE_TOOL_READ_CAP_BYTES)) return { ...id, hash: `over-cap:${st.size}:${st.ctimeNs}` };
       const bytes = readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
-      return { dev: st.dev, ino: st.ino, hash: createHash('sha256').update(bytes).digest('hex') };
+      return { ...id, hash: createHash('sha256').update(bytes).digest('hex') };
     });
   }
 
