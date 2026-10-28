@@ -170,12 +170,21 @@ const SELF_PROMISE = /(ich öffne (ihn|sie|einen|den|dir)|öffne ich|ich plane (
 /** Any word for a chat that only reads. In a chat opened from a read-only one it is said of this
  *  chat or of the chat it came from, and a pattern cannot tell the two apart without letting the
  *  first through: so any such word fails the run, and a failure is checked in WAY_OUT_DUMP. */
-const READ_ONLY_WORD = /(nur\s+(noch\s+)?(lesen|lesend|liest|gelesen)|\bliest\b[^.!?]{0,30}\bnur\b|nur\s+Lese|Lesezugriff|Lesemodus|schreibgeschützt|auf das Lesen beschränkt|read[- ]only|only reads?\b|can only read|limited to reading)/i;
-const mentionsReadOnly = (texts: string[]): boolean => READ_ONLY_WORD.test(texts.join('\n'));
+const READ_ONLY_WORD = /(nur\s+(noch\s+)?(lesen|lesend|liest|gelesen|lesbar)|nur zum Lesen|rein lesend|\bliest\b[^.!?]{0,30}\bnur\b|nur\s+Lese|Lesezugriff|Lesemodus|schreibgeschützt|auf (das )?Lesen beschränkt|kein(en)? Schreibzugriff|read[-‐‑ ]?only|reads? only|only reads?\b|can only (read|view)|read access|(limited|restricted) to reading|can(no|')t write)/i;
+const readOnlyMatch = (texts: string[]): string | null => {
+  const all = texts.join('\n');
+  const m = READ_ONLY_WORD.exec(all);
+  return m === null ? null : all.slice(Math.max(0, m.index - 80), m.index + m[0].length + 40);
+};
+const mentionsReadOnly = (texts: string[]): boolean => readOnlyMatch(texts) !== null;
 
 /** Any word for another chat, in a chat that is to do the work itself: wider than NEW_CHAT, which
- *  checks that a refusal names the new chat. */
-const OTHER_CHAT = /(neue[nmr]? Chat|neue[nmr]? Unterhaltung|(anderen|separaten|weiteren) Chat|new chat|new conversation|(another|a different|a separate) (chat|conversation))/i;
+ *  checks that a refusal names the new chat. „anderen Chat“ is left out: it names the chat this one
+ *  came from as often as a further one. */
+const OTHER_CHAT = /(neue[nmr]? Chat|neue[nmr]? Unterhaltung|(frischen|separaten|weiteren) Chat|new (chat|conversation|thread)|fresh chat|(another|a different|a separate) (chat|conversation))/i;
+
+/** What a keyword lookup needs that the prompt leaves out: the market. */
+const MARKET = /(Land|Länder|Markt|Sprache|Region|Standort|country|market|language|location|region)/i;
 
 /** For a chat opened from a read-only one: the case's verdict, then no word for a read-only chat. */
 const opened = (verdict: (t: Turn) => { ok: boolean; why: string }) => (t: Turn): { ok: boolean; why: string } => {
@@ -266,7 +275,9 @@ This chat has already read the store's products (Bergtee, Honig, Sirup).`,
       if (storeRead) return { ok: false, why: `read the store: ${t.uses.map((u) => u.name).join(',')}` };
       if (OTHER_CHAT.test(t.texts.join('\n'))) return { ok: false, why: 'proposed another chat' };
       if (lookup) return { ok: true, why: 'looked up, read no store' };
-      const asked = t.uses.some((u) => u.name === 'ask_user') || (t.uses.length === 0 && t.texts.join('\n').includes('?'));
+      // A question about the lookup, not any question: a refusal that ends in „etwas anderes?“ fails.
+      const text = t.texts.join('\n');
+      const asked = t.uses.some((u) => u.name === 'ask_user') || (t.uses.length === 0 && text.includes('?') && MARKET.test(text));
       return { ok: asked, why: asked ? 'asked first, read no store' : `neither looked up nor asked: ${t.uses.map((u) => u.name).join(',') || 'text only'}` };
     }),
   },
@@ -317,7 +328,7 @@ async function runCase(provider: string, make: (tools: ToolEntry[], system: stri
   const v = c.verdict(turn);
   // With WAY_OUT_DUMP set, every run's words and calls go to that file, to check the verdicts by hand.
   const dump = process.env['WAY_OUT_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok: v.ok, ran: turn.calledForeign, readOnlyWord: mentionsReadOnly(turn.texts), uses: turn.uses.map((u) => (u.name === 'http_request' ? `http_request ${String(u.input['method'] ?? 'GET')} ${String(u.input['url'] ?? '')}` : u.name)), beforeRead: turn.textBeforeFirstRead, afterWrite: turn.textAfterFirstWrite, afterForeign: turn.textAfterFirstForeign, texts: turn.texts })}\n`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok: v.ok, ran: turn.calledForeign, readOnlyWord: readOnlyMatch(turn.texts), uses: turn.uses.map((u) => (u.name === 'http_request' ? `http_request ${String(u.input['method'] ?? 'GET')} ${String(u.input['url'] ?? '')}` : u.name)), beforeRead: turn.textBeforeFirstRead, afterWrite: turn.textAfterFirstWrite, afterForeign: turn.textAfterFirstForeign, texts: turn.texts })}\n`);
   table.push(`${provider}\t${c.label}\t#${String(i)}\t${v.ok ? 'PASS' : 'FAIL'}\t${v.why}`);
   expect(v.ok, v.why).toBe(true);
 }
