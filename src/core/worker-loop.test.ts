@@ -3185,6 +3185,20 @@ describe('WorkerLoop', () => {
     expect(session.run).not.toHaveBeenCalled();
   });
 
+  it('runTriggerNow refuses a webhook trigger before any run, since it has no event to run with', async () => {
+    const task = makeTask({ id: 'rn-hook', effect: 'run_workflow', pipeline_id: 'wf', schedule_cron: undefined, next_run_at: undefined, source: 'webhook' });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('should not run');
+    const engine = makeEngine({ taskManager: tm, session });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+
+    expect(await loop.runTriggerNow('rn-hook')).toEqual({ ok: false, reason: 'runs_on_events' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tm.recordTaskRun).not.toHaveBeenCalled();
+    expect(session.run).not.toHaveBeenCalled();
+    expect(tm.claimLease).not.toHaveBeenCalled();
+  });
+
   // ---- the one-time hand-run door (PRD customer-granted-operator-access §3.12 point 6) ----
   describe('the one-time hand-run door', () => {
     const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };

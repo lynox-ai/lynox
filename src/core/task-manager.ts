@@ -1089,7 +1089,11 @@ export class TaskManager {
     // run, no retry. A one-shot recorded `completed` or `failed` would never fire after the
     // owner stamps it. (The wait sweep, outside any run, decides on the row and records a
     // proposal's expired test question through the same scope.)
-    if (isHandRunOf(task.id) || opts?.keepSchedule === true) {
+    // A webhook trigger is the same case for another reason: its work comes from the events its
+    // provider sends, one ledger row each. It has no cron, so
+    // the branches below would read it as a one-shot and set it `completed` or `failed` — and a
+    // trigger in either state accepts no further delivery.
+    if (isHandRunOf(task.id) || task.source === 'webhook' || opts?.keepSchedule === true) {
       this.history.updateTriggerRunResult(id, {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,

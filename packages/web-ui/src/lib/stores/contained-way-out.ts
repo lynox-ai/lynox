@@ -2,8 +2,10 @@
  * The way out of a chat that only reads: "Plan in a new chat".
  *
  * A chat that read data through a store connection is contained: it reads and explains, and the
- * engine refuses every write and every bulk plan in it. The way out is a new chat that plans the
- * change as a bulk run, which reads the store itself. That chat starts with the user's own words
+ * engine refuses every write and every bulk plan in it. The way out is a new chat that does not read
+ * the store: where this instance runs bulk runs that read a Shopify store, it plans the change as
+ * one, which reads the store itself; where it does not, it says what is missing and drafts texts the
+ * user copies into the store. A request to another service runs there. That chat starts with the user's own words
  * from the old one in its input, unsent, so the user sees what goes across before it does.
  *
  * Only what the user typed (or dictated) goes across: never an answer, a tool result, a loaded
@@ -80,4 +82,31 @@ export function containedPrefill(messages: readonly PrefillSource[]): ContainedP
 	}
 	if (parts.length > 0 && typed.length > kept.length) parts.unshift('…');
 	return { text: parts.join('\n\n'), removedHidden };
+}
+
+/**
+ * The sentences above the input of a chat opened with "Plan in a new chat", as i18n keys, from
+ * `GET /api/config`. A bulk run is promised only where bulk runs are on and may read a Shopify
+ * store (`bulk_runs.on` and `bulk_runs.shopify`), as the engine's text for that chat does
+ * (`chat-context.ts › containedOriginContext`), and in the same order: what is missing for the
+ * Shopify read, then for bulk runs, support once. Bulk runs the owner's config turns off get no
+ * sentence of their own: the first one says they are not enabled, and there is no place to name
+ * where to turn them on. A config that could not be read gives no line:
+ * the engine reads the state when the message is sent, and a line saying either way could
+ * contradict its answer.
+ */
+export function originLineKeys(ok: boolean, data: unknown): string[] {
+	const cfg = ok && typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : null;
+	const bulk = cfg !== null && typeof cfg['bulk_runs'] === 'object' && cfg['bulk_runs'] !== null
+		? (cfg['bulk_runs'] as Record<string, unknown>) : null;
+	if (bulk === null) return [];
+	const bulkRuns = bulk['on'] === true;
+	const shopify = bulk['shopify'] === true;
+	if (bulkRuns && shopify) return ['contained.origin_line'];
+	const managed = !!cfg!['managed'];
+	const keys = ['contained.origin_line_off'];
+	if (!shopify) keys.push(managed ? 'contained.way_support' : 'contained.way_flag');
+	if (!bulkRuns && bulk['source'] !== 'config' && !keys.includes('contained.way_support')) keys.push('contained.way_support');
+	keys.push('contained.origin_line_draft');
+	return keys;
 }

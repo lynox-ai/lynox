@@ -74,7 +74,7 @@
 	import { formatCompactionDelta } from '../stores/compaction-result.js';
 	import { taskPreview } from '../stores/follow-ups.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
-	import { refusalOffersNewChat } from '../stores/contained-way-out.js';
+	import { originLineKeys, refusalOffersNewChat } from '../stores/contained-way-out.js';
 	import { formatCost } from '../format.js';
 	import { knowledgeCauseKey } from '../stores/knowledge-chip.js';
 
@@ -1633,6 +1633,21 @@
 	const compactionOffer = $derived(getCompactionOffer());
 	const threadContained = $derived(getThreadContained());
 	const containedOrigin = $derived(getContainedOrigin());
+	/** What the line above the input of such a chat may promise, read from the config each time
+	 *  such a chat opens: a bulk run only where this instance runs one that reads a Shopify store.
+	 *  Null until read. A read that answers after a newer one began is dropped, so a chat
+	 *  left and opened again shows what the newer read found. */
+	let originKeys = $state<string[] | null>(null);
+	let originRead = 0;
+	$effect(() => {
+		if (!containedOrigin) { originRead++; if (originKeys !== null) originKeys = null; return; }
+		if (originKeys !== null) return;
+		const read = ++originRead;
+		const keep = (keys: string[]): void => { if (read === originRead) originKeys = keys; };
+		fetch(`${getApiBase()}/config`)
+			.then(async (r) => { keep(originLineKeys(r.ok, r.ok ? await r.json() : null)); })
+			.catch(() => { keep(originLineKeys(false, null)); });
+	});
 
 	/** "Plan in a new chat": the store opens the chat; the composer takes the user's words,
 	 *  unsent, for the user to read and change first. */
@@ -3717,7 +3732,7 @@
 		{:else if containedOrigin}
 			<!-- A chat opened with "Plan in a new chat", before its first run. -->
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 space-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-origin>
-				<p>{t('contained.origin_line')}</p>
+				{#if originKeys && originKeys.length > 0}<p data-contained-origin-line>{originKeys.map((k) => t(k)).join(' ')}</p>{/if}
 				{#if containedOrigin.removedHidden}<p data-contained-removed-hidden>{t('contained.removed_hidden')}</p>{/if}
 			</div>
 		{/if}

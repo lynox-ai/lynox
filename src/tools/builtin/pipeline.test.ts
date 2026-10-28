@@ -1297,6 +1297,30 @@ describe('runSavedWorkflow', () => {
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 
+  it('asks the caller\'s check of the workflow as it read it, and runs nothing it refuses', async () => {
+    const id = seedSavedWorkflow({ steps: [{ id: 'fetch', task: 'Fetch' }] });
+    const checkWorkflow = vi.fn(() => 'refused by the check');
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, { a: 1 }, { checkWorkflow });
+    expect(result).toEqual({ ok: false, error: 'refused by the check' });
+    expect((checkWorkflow.mock.calls[0] as unknown as [{ id: string; steps: Array<{ id: string }> }])[0]).toMatchObject({ id, steps: [{ id: 'fetch' }] });
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('passes the instruction to keep params from the step agents on to the run', async () => {
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockResolvedValue(makeRunState({ runId: 'r-k' }));
+    await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { paramsKeptFromSteps: true });
+    await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(mockRunManifest.mock.calls.map((c) => (c[2] as { paramsKeptFromSteps?: boolean }).paramsKeptFromSteps)).toEqual([true, undefined]);
+  });
+
+  it('CONTROL: runs a workflow the caller\'s check lets through', async () => {
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'fresh-run-2' }));
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { checkWorkflow: () => null });
+    expect(result.ok).toBe(true);
+  });
+
   describe('the claim seam: runSavedWorkflow hands the run id and the hooks through', () => {
     // ⛔ THE SEAM NO OTHER TEST CAN SEE, and a refuter found it unwitnessed. The route
     // suite mocks `runSavedWorkflow`, so it proves the route CALLS it with a runtime
