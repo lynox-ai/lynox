@@ -378,9 +378,11 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // starting with a hyphen. Shopify itself admits upper case; the boundary does not.
     params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]*$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
     requiredScopes: [],
-    // Read only. `read_all_orders` stays out: Shopify grants it only on request. Write scopes
-    // come with the bulk form, not with the connection.
-    allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments'],
+    // `read_all_orders` stays out: Shopify grants it only on request. `write_products` is the one
+    // write scope: a bulk run writes a product only through the engine's own write document
+    // (`shopify-graphql.ts`), and Shopify grants a write only to the token, so the scope sits on
+    // the connection. It is asked for only when the profile names it. No other write scope.
+    allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products'],
     scopeSeparator: ',',
     tokenHeaderName: 'X-Shopify-Access-Token',
     tokenBodyFormat: 'form',

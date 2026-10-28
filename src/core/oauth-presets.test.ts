@@ -602,7 +602,8 @@ describe('the scopes a grant holds and the scopes a connection asks for', () => 
   });
 
   it('has nothing to compare for a scope the provider refuses, a provider that adds scopes of its own, or a profile of no provider', () => {
-    expect(askedScopes({ preset_id: 'shopify', scope: 'write_products' })).toBeUndefined();
+    expect(askedScopes({ preset_id: 'shopify', scope: 'write_files' })).toBeUndefined();
+    expect(askedScopes({ preset_id: 'shopify', scope: 'read_products write_products' })).toEqual(['read_products', 'write_products']);
     expect(askedScopes({ preset_id: 'bexio', scope: 'contact_show' })).toBeUndefined();
     expect(askedScopes({})).toBeUndefined();
     expect(askedScopes({ scope: 'a b' })).toBeUndefined();

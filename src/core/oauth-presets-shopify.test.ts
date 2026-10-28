@@ -21,15 +21,23 @@ describe('the Shopify preset', () => {
     expect(derivePresetEndpoints('shopify', { shop })).toMatchObject({ kind: 'bad-param' });
   });
 
-  it('asks for read scopes only and nothing it does not name', () => {
+  it('allows the read scopes and write_products, and asks for nothing it does not name', () => {
     expect(shopify.requiredScopes).toEqual([]);
-    expect(shopify.allowedScopes.every((s) => s.startsWith('read_'))).toBe(true);
-    // The whole list, not only its prefix: a scope added here reaches every store the preset
-    // connects, and the bulk run's GraphQL reads are reviewed against a read-only token.
-    expect(shopify.allowedScopes).toEqual(['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments']);
+    // The whole list: a scope added here reaches every store the preset connects. One write
+    // scope, for the bulk run's product write; any other write scope is a reviewed change.
+    expect(shopify.allowedScopes).toEqual(['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products']);
     expect(presetScopeRequest(shopify, 'read_products read_orders')).toEqual({ scopes: ['read_products', 'read_orders'] });
-    expect(presetScopeRequest(shopify, 'read_products write_products')).toEqual({ refused: ['write_products'] });
     expect(presetScopeRequest(shopify, 'read_all_orders')).toEqual({ refused: ['read_all_orders'] });
+  });
+
+  it('asks for write_products only when the profile names it', () => {
+    expect(presetScopeRequest(shopify, 'read_products write_products')).toEqual({ scopes: ['read_products', 'write_products'] });
+    expect(presetScopeRequest(shopify, 'read_products')).toEqual({ scopes: ['read_products'] });
+  });
+
+  it.each(['write_files', 'write_orders', 'write_inventory', 'write_customers', 'write_themes'])('still refuses %s, with write_products or without', (scope) => {
+    expect(presetScopeRequest(shopify, `read_products write_products ${scope}`)).toEqual({ refused: [scope] });
+    expect(presetScopeRequest(shopify, scope)).toEqual({ refused: [scope] });
   });
 });
 
