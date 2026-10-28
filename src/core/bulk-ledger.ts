@@ -2389,10 +2389,10 @@ export class BulkLedger {
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;
       const before = JSON.parse(this.engineDb.dec(row.before)) as BeforeImage;
-      // A verdict on a Shopify product run is completed as a planned after-state is
-      // (`shopifyPairedAfter`): a write never sends one seo field without the other. An image has no pair.
+      // A verdict on a Shopify run is completed as a planned after-state is (`shopifyPairedAfter`):
+      // a write never sends one seo field without the other.
       const run = this.runRow(runId);
-      const after = run !== undefined && this.shopifyFormOfRun(run) === 'shopify_product' && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
+      const after = run !== undefined && this.shopifyFormOfRun(run) !== null && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
         ? shopifyPairedAfter(verdict.after, before.value)
         : verdict.after;
       return db.prepare(

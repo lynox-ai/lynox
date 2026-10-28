@@ -221,9 +221,8 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       if ('invalid' in image) {
         ledger.recordRead(runId, seq, image);
       } else {
-        // A product's seo pair is completed before the target is classified and approved (PRD
-        // shopify-preset §16.3); an image has no pair.
-        const after = shopifyForm === 'shopify_product' ? shopifyPairedAfter(target.after, image.value) : target.after;
+        // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
+        const after = shopifyPairedAfter(target.after, image.value);
         ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after);
       }
       consecutive = 0;
