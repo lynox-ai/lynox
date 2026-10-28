@@ -1527,9 +1527,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.kind_step': { de: 'Schritt', en: 'Step' },
 	'access_trail.kind_read': { de: 'Lesezugriff', en: 'Read access' },
 	// Reads the person's web UI made by itself, grouped (access-trail-fold.ts; ux U-047).
-	'access_trail.polls_legend': { de: 'Abfragen, die die Oberfläche von selbst macht, stehen zusammengefasst. Aufklappen zeigt jede einzeln.', en: 'Requests the interface makes by itself are grouped. Expand to see each one.' },
-	'access_trail.polls_many': { de: '{n} automatische Abfragen der Oberfläche ({span})', en: '{n} automatic requests by the interface ({span})' },
-	'access_trail.polls_one': { de: 'Eine automatische Abfrage der Oberfläche ({time})', en: 'One automatic request by the interface ({time})' },
+	'access_trail.polls_legend': { de: 'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln.', en: 'Status requests (running work, tasks, costs, providers) are grouped. The interface makes most of them by itself. Expand to see each one.' },
+	'access_trail.polls_many': { de: '{n} Statusabfragen ({span})', en: '{n} status requests ({span})' },
+	'access_trail.polls_one': { de: 'Eine Statusabfrage ({time})', en: 'One status request ({time})' },
 	'access_trail.kind_event': { de: 'Ereignis', en: 'Event' },
 	'access_trail.started_hand': { de: 'von Hand gestartet', en: 'started by hand' },
 	'access_trail.started_schedule': { de: 'nach Zeitplan', en: 'on schedule' },

@@ -134,15 +134,15 @@ describe('the texts, as ux wrote them (U-047)', () => {
 		try {
 			setLocale('de');
 			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one')]).toEqual([
-				'Abfragen, die die Oberfläche von selbst macht, stehen zusammengefasst. Aufklappen zeigt jede einzeln.',
-				'{n} automatische Abfragen der Oberfläche ({span})',
-				'Eine automatische Abfrage der Oberfläche ({time})',
+				'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln.',
+				'{n} Statusabfragen ({span})',
+				'Eine Statusabfrage ({time})',
 			]);
 			setLocale('en');
 			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one')]).toEqual([
-				'Requests the interface makes by itself are grouped. Expand to see each one.',
-				'{n} automatic requests by the interface ({span})',
-				'One automatic request by the interface ({time})',
+				'Status requests (running work, tasks, costs, providers) are grouped. The interface makes most of them by itself. Expand to see each one.',
+				'{n} status requests ({span})',
+				'One status request ({time})',
 			]);
 		} finally {
 			setLocale(before);
