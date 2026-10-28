@@ -1721,6 +1721,7 @@ export class WorkerLoop {
             },
           };
           started = true;
+          // run-group-starter: fires once, when this run settles; it only frees the run's budget reservation and reports no spend.
           void this.#runInSlot(trigger, null, false, undefined, slotEvent).finally(() => releasePersistentBudget(reservation.reservedUSD));
         } finally {
           if (!started) {
