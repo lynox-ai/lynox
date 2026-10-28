@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { SHOPIFY_CALLBACK_WINDOW_SECONDS, bindShopifyCallback, verifyShopifyCallback } from './oauth-callback-hmac.js';
+import { SHOPIFY_CALLBACK_WINDOW_SECONDS, bindShopifyCallback, shopifyCallbackRefusalLine, verifyShopifyCallback } from './oauth-callback-hmac.js';
 
 // The example several third-party Shopify libraries carry in their docs (shopify_rest,
 // shopify_oauth, exshopify on hexdocs.pm), with the secret `hush`. Not computed here: the
@@ -196,5 +196,58 @@ describe('bindShopifyCallback', () => {
 
   it('passes the verifier\'s refusal through before it looks at the store', () => {
     expect(bindShopifyCallback(signed(BASE, 'other-secret'), SECRET, NOW, 'p1', null)).toEqual({ ok: false, reason: 'signature-mismatch' });
+  });
+});
+
+describe('shopifyCallbackRefusalLine', () => {
+  // Every way bindShopifyCallback refuses, each reached through it rather than typed in.
+  const STORE = 'demo-store.myshopify.com';
+  const cases: [string, string, string, string | null][] = [
+    ['no-secret', signed(BASE, SECRET), '', STORE],
+    ['repeated-param', `${signed(BASE, SECRET)}&code=again`, SECRET, STORE],
+    ['missing-hmac', new URLSearchParams(BASE).toString(), SECRET, STORE],
+    ['malformed-hmac', `${new URLSearchParams(BASE).toString()}&hmac=ZZ`, SECRET, STORE],
+    ['signature-mismatch', signed(BASE, 'not-the-secret'), SECRET, STORE],
+    ['missing-param', signed({ ...BASE, code: '' }, SECRET), SECRET, STORE],
+    ['bad-shop', signed({ ...BASE, shop: 'evil.example.com' }, SECRET), SECRET, STORE],
+    ['bad-timestamp', signed({ ...BASE, timestamp: 'soon' }, SECRET), SECRET, STORE],
+    ['timestamp-outside-window', signed({ ...BASE, timestamp: String(NOW / 1000 - 10 * SHOPIFY_CALLBACK_WINDOW_SECONDS) }, SECRET), SECRET, STORE],
+    ['not-a-store-profile', signed(BASE, SECRET), SECRET, null],
+    ['other-store', signed(BASE, SECRET), SECRET, 'other-store.myshopify.com'],
+  ];
+
+  it('has a case for each of the eleven reasons', () => {
+    expect(new Set(cases.map(([reason]) => reason)).size).toBe(11);
+  });
+
+  it.each(cases)('names %s, the profile and the parameter names, and no value', (reason, query, secret, storeHost) => {
+    const bound = bindShopifyCallback(query, secret, NOW, 'shop-acme', storeHost);
+    expect(bound.ok).toBe(false);
+    if (bound.ok) return;
+    expect(bound.reason).toBe(reason);
+    const line = shopifyCallbackRefusalLine(bound.reason, 'shop-acme', query);
+    expect(line).toContain(`reason=${reason} `);
+    expect(line).toContain('profile=shop-acme ');
+    expect(line).toMatch(/params=[a-z_,]*code[a-z_,]*/);
+    expect(line.indexOf('\n')).toBe(line.length - 1);
+    // The values the query carries: the code, the state, the signature, and the secret it was made with.
+    for (const value of [BASE.code, BASE.state, SECRET, new URLSearchParams(query).get('hmac') ?? 'no-hmac-in-this-case']) {
+      expect(line).not.toContain(value);
+    }
+  });
+
+  it('counts a name it will not print, and stays one line', () => {
+    const line = shopifyCallbackRefusalLine('missing-hmac', 'shop-acme', 'code=abc123&x%0A%5Bfake%5D=1&State=2');
+    expect(line).toBe('[lynox] shopify callback refused: reason=missing-hmac profile=shop-acme params=code +2 other\n');
+  });
+
+  it('writes no profile id it cannot print as it is', () => {
+    const line = shopifyCallbackRefusalLine('other-store', 'acme\nfake', 'code=abc123');
+    expect(line).toContain('profile=(unprintable) ');
+    expect(line.indexOf('\n')).toBe(line.length - 1);
+  });
+
+  it('says so when the query has no names at all', () => {
+    expect(shopifyCallbackRefusalLine('missing-hmac', 'shop-acme', '')).toContain('params=(none)');
   });
 });

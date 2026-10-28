@@ -28,7 +28,8 @@
  *
  * Tested against one published example (a third-party library's docs) and
  * vectors built with the library's procedure. No redirect from a real Shopify
- * store has gone through it yet.
+ * store had gone through it before October 2026. Why one is refused goes to the
+ * server log ({@link shopifyCallbackRefusalLine}); the page does not say.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
@@ -153,4 +154,32 @@ export function bindShopifyCallback(
     binding: { profileId, origin: `https://${shop}` },
     code: verdict.params.get('code') ?? '',
   };
+}
+
+/** A query parameter name that is written into the log as it is; anything else is only counted. */
+const LOGGABLE_PARAM = /^[a-z_]{1,32}$/;
+/** A profile id written into the log as it is; anything else is replaced. */
+const LOGGABLE_PROFILE = /^[A-Za-z0-9_.-]{1,64}$/;
+
+/**
+ * The server-log line for a refused Shopify callback: the reason, the profile and the NAMES of the
+ * query parameters, sorted. Never a value: the query carries the code, the state and the signature,
+ * and none of them belongs in a log. A name outside a plain lower-case pattern is counted, not
+ * written, since the query is whatever the browser was sent to, and the line must stay one line.
+ */
+export function shopifyCallbackRefusalLine(
+  reason: Extract<ShopifyCallbackBinding, { ok: false }>['reason'],
+  profileId: string,
+  rawQuery: string,
+): string {
+  const names = new Set<string>();
+  let other = 0;
+  for (const name of new URLSearchParams(rawQuery).keys()) {
+    if (LOGGABLE_PARAM.test(name)) names.add(name);
+    else other++;
+  }
+  const listed = [...names].sort((a, b) => a.localeCompare(b)).join(',');
+  const profile = LOGGABLE_PROFILE.test(profileId) ? profileId : '(unprintable)';
+  const extra = other > 0 ? ` +${String(other)} other` : '';
+  return `[lynox] shopify callback refused: reason=${reason} profile=${profile} params=${listed === '' ? '(none)' : listed}${extra}\n`;
 }
