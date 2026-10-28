@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -104,7 +104,7 @@ describe('the pause is held to its takeover (real engine)', () => {
   };
   const marks = (id: string): unknown => db().prepare('SELECT edited_by, mandate_editor FROM triggers WHERE id = ?').get(id);
 
-  it('the takeover route is registered, and the default stays off until the view has the button (asked of the running router)', async () => {
+  it('the default is on only with its way out: the takeover route is registered (asked of the running router), and the view has the button', async () => {
     const id = pausedPlan();
     const res = await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie, { expect: 'x' });
     // A route that exists answers anything but the dispatcher's own 404 for no route; a renamed
@@ -112,8 +112,12 @@ describe('the pause is held to its takeover (real engine)', () => {
     const registered = !(res.status === 404 && res.json['error'] === 'Not found' && res.json['code'] === undefined);
     expect(registered).toBe(true);
     expect(PLAN_PAUSE_DEFAULT && !registered).toBe(false);
-    // Turned on with the button at the plan in the view, in the change that brings it.
-    expect(PLAN_PAUSE_DEFAULT).toBe(false);
+    // The button at a paused plan, rendered: the view's own test mounts TriggersView with a paused
+    // plan and finds it. It is named here so that removing it fails this test too.
+    const view = readFileSync(new URL('../../packages/web-ui/src/lib/components/triggersview-takeover.svelte.test.ts', import.meta.url), 'utf8');
+    expect(view).toContain("it('shows for the owner at a paused plan'");
+    expect(view).toContain("expect(button()?.textContent?.trim()).toBe('Übernehmen');");
+    expect(PLAN_PAUSE_DEFAULT).toBe(true);
   });
 
   it('the takeover\'s refusals, exactly as ux wrote them (U-037, the API\'s fallback)', () => {
@@ -222,9 +226,17 @@ describe('the pause is held to its takeover (real engine)', () => {
     const owner = await rowOf(ownerCookie);
     expect(owner?.['paused']).toBe(true);
     expect(owner?.['paused_who']).toEqual(['ida@example.invalid']);
+    // How and when, for the notice the view says in full (the push shortens the name).
+    expect(owner?.['paused_ended']).toEqual([{ email: 'ida@example.invalid', reason: 'revoked', ends_at: '1970-01-01T00:00:01.000Z', warned: false }]);
     const helper = await rowOf(mandateCookie);
     expect(helper?.['paused']).toBe(true);
     expect(helper).not.toHaveProperty('paused_who');
+    expect(helper).not.toHaveProperty('paused_ended');
+    // An end the owner was warned of says so (641c-2b writes `warned`).
+    db().prepare('UPDATE triggers SET paused_for = ? WHERE id = ?').run(JSON.stringify([
+      { mandateId: 'TEST-MANDATE-PAUSE', email: 'ida@example.invalid', reason: 'expired', endsAt: 1, roles: ['created'], closedPrompt: false, warned: true },
+    ]), id);
+    expect((await rowOf(ownerCookie))?.['paused_ended']).toEqual([{ email: 'ida@example.invalid', reason: 'expired', ends_at: '1970-01-01T00:00:01.000Z', warned: true }]);
     for (const row of [owner, helper]) {
       for (const col of ['paused_at', 'paused_due_at', 'paused_for']) expect(row).not.toHaveProperty(col);
     }
@@ -232,6 +244,24 @@ describe('the pause is held to its takeover (real engine)', () => {
     const sw = await ask('PATCH', `/api/tasks/${id}`, ownerCookie, { enabled: true });
     expect(sw.json).not.toHaveProperty('paused_for');
     expect(sw.json['paused_who']).toEqual(['ida@example.invalid']);
+  });
+
+  it('the list says who reads it, the owner or a helper', async () => {
+    expect((await ask('GET', '/api/triggers', ownerCookie)).json['viewer']).toBe('owner');
+    expect((await ask('GET', '/api/triggers', mandateCookie)).json['viewer']).toBe('mandate');
+  });
+
+  it('the count of paused plans is for the owner, and leaves out a completed plan', async () => {
+    const count = async (cookie: string): Promise<unknown> => (await ask('GET', '/api/triggers/paused-count', cookie)).json['count'];
+    const before = await count(ownerCookie);
+    expect(typeof before).toBe('number');
+    const id = pausedPlan();
+    expect(await count(ownerCookie)).toBe((before as number) + 1);
+    db().prepare("UPDATE triggers SET status = 'completed' WHERE id = ?").run(id);
+    expect(await count(ownerCookie)).toBe(before);
+    // A helper is not told how many plans are paused (some may be another's).
+    const helper = await ask('GET', '/api/triggers/paused-count', mandateCookie);
+    expect([helper.status, helper.json['viewer'], helper.json['count']]).toEqual([200, 'mandate', null]);
   });
 
   it('the paused filter is applied before the list is cut at a hundred rows', async () => {

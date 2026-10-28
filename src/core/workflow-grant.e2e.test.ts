@@ -130,6 +130,8 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       getMemory: () => null,
       getRunHistory: () => history,
       getEngineDb: () => engineDb,
+      // No grant ends here: the plan pause (on by default) finds nothing to pause.
+      getMandateEnds: () => null,
       getSecretStore: () => null,
       getPromptStore: () => null,
       escalateToUser: () => null,

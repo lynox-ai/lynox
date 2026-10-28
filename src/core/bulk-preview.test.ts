@@ -803,6 +803,8 @@ function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: numbe
     getAuditLog: () => opts.auditLog ?? null,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => { opts.beforeRearm?.(); return triggers.updateFields(id, p); } }),
     getUserConfig: () => ({}),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   const notify = vi.fn(async () => {});
   const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
@@ -880,6 +882,8 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const notify = vi.fn(async () => {});
       const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);

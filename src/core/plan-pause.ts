@@ -22,13 +22,13 @@ import { MANDATE_TAG_PREFIX, planMandate, planMembers } from './request-principa
 import { processErrorText } from './error-egress.js';
 
 /**
- * Off until the owner can take a plan over from the view: a pause without a way out would leave
- * plans standing with no explanation, worse than main. Not an environment switch: the release
- * decides it, not the tenant. The takeover route is registered (`plan-takeover.ts`) and answers
- * `not_available` while this is off; it is turned on in the change that puts the button at the
- * paused plan, and a test holds the two together (`src/server/plan-pause-http.test.ts`).
+ * On since the owner can take a plan over from the view (641c-2): a pause without a way out would
+ * leave plans standing with no explanation, worse than main. Not an environment switch: the
+ * release decides it, not the tenant. Two tests hold the switch to its way out: the takeover route
+ * is registered (`src/server/plan-pause-http.test.ts`), and the view shows the button at a paused
+ * plan (`packages/web-ui/src/lib/components/triggersview-takeover.svelte.test.ts`).
  */
-export const PLAN_PAUSE_DEFAULT = false;
+export const PLAN_PAUSE_DEFAULT = true;
 let planPause = PLAN_PAUSE_DEFAULT;
 
 export function planPauseOn(): boolean {
@@ -445,19 +445,30 @@ function dateOf(s: number): string {
  * created or changed something" counts a plan through its workflow as well.
  */
 export function pauseNotice(entry: PausedFor, count: number): NotificationMessage {
+  // Until the advance notice exists, an expiry says that there was none: without it the notice
+  // would read as if one had come. A revocation never has one, so it is not said there.
+  const noAdvance = ADVANCE_NOTICE_ON ? '' : ' There was no advance notice.';
   const body = (name: string): string => entry.reason === 'revoked'
     ? (count === 1
       ? `${name}'s access was revoked. A plan in which they created or changed something is paused. It runs again only once you take it over.`
       : `${name}'s access was revoked. ${String(count)} plans in which they created or changed something are paused. The plans run again only once you take them over.`)
     : (count === 1
-      ? `${name} had access until ${dateOf(entry.endsAt)}. A plan in which they created or changed something is paused. It runs again only once you take it over, even if the access has since been extended.`
-      : `${name} had access until ${dateOf(entry.endsAt)}. ${String(count)} plans in which they created or changed something are paused. The plans run again only once you take them over, even if the access has since been extended.`);
+      ? `${name} had access until ${dateOf(entry.endsAt)}. A plan in which they created or changed something is paused. It runs again only once you take it over, even if the access has since been extended.${noAdvance}`
+      : `${name} had access until ${dateOf(entry.endsAt)}. ${String(count)} plans in which they created or changed something are paused. The plans run again only once you take them over, even if the access has since been extended.${noAdvance}`);
   return {
     title: count === 1 ? '⏸ A plan is paused' : `⏸ ${String(count)} plans are paused`,
     body: fitName(entry.email, body),
     priority: 'high',
+    // A tap opens the paused plans (`sw.js`), where the notice stands in full, name and all.
+    data: Object.freeze({ pausedPlans: '1' }),
   };
 }
+
+/**
+ * Whether the owner is warned before a grant's known end (641c-2b). Off until that warning is
+ * built; while it is off, the expiry notice says there was no advance notice.
+ */
+export const ADVANCE_NOTICE_ON = false;
 
 /**
  * The longest body a push carries: `web-push-channel.ts` cuts there, as `REMINDER_BODY_MAX` says.

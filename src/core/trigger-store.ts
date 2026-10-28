@@ -1345,6 +1345,17 @@ export class TriggerStore {
   }
 
   /**
+   * How many plans wait for the owner's takeover (`plan-pause.ts`): paused and not completed, so
+   * the count matches what a takeover would accept. 0 while the pause is switched off.
+   */
+  countPausedOpen(): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS n FROM triggers WHERE paused_at IS NOT NULL AND status != 'completed' AND ${PLAN_PAUSE_SQL_FN}() = 1`,
+    ).get() as { n: number };
+    return row.n;
+  }
+
+  /**
    * S3e read-cutover: triggers actively referencing a workflow (legacy
    * `getTriggersByPipelineId` — the destructive-edit guard). `target_workflow_id =
    * ? AND enabled != 0 AND status != 'completed' AND status != 'stopped' ORDER BY

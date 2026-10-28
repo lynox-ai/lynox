@@ -193,6 +193,7 @@ function makeEngine(opts?: {
     getAuditLog: vi.fn(() => (opts?.auditLog === undefined ? { record: vi.fn() } : opts.auditLog)),
     // A failed task's push asks whether its thread is contained.
     getToolContext: vi.fn(() => ({ containment: opts?.containment ?? null })),
+    getEngineDb: () => null,
   } as unknown as Engine;
 }
 
@@ -402,6 +403,8 @@ describe('WorkerLoop', () => {
       getUserConfig: vi.fn(() => ({})),
       createSession: vi.fn(() => analysisSession),
       escalateToUser: vi.fn(() => null), workerRunModelOverride: override,
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -426,6 +429,8 @@ describe('WorkerLoop', () => {
       getUserConfig: vi.fn(() => ({})),
       createSession: vi.fn(() => analysisSession),
       escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -454,6 +459,8 @@ describe('WorkerLoop', () => {
         getUserConfig: vi.fn(() => ({})),
         createSession: vi.fn(() => analysisSession),
         escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
       const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -549,6 +556,8 @@ describe('WorkerLoop', () => {
       getUserConfig: vi.fn(() => ({})),
       createSession: vi.fn(() => analysisSession),
       escalateToUser: vi.fn(() => null), workerRunModelOverride: override,
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -2162,6 +2171,8 @@ describe('WorkerLoop', () => {
           },
         });
       }),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const router = makeNotificationRouter();
 
@@ -2355,6 +2366,8 @@ describe('WorkerLoop', () => {
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
     const loop = new WorkerLoop(engine, router, 60_000);
@@ -2395,6 +2408,8 @@ describe('WorkerLoop', () => {
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({})), // truthy → executePipeline reaches the null-target skip
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
     const loop = new WorkerLoop(engine, router, 60_000);
@@ -2449,6 +2464,8 @@ describe('WorkerLoop', () => {
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
     const loop = new WorkerLoop(engine, router, 60_000);
@@ -2495,6 +2512,8 @@ describe('WorkerLoop', () => {
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
@@ -2558,6 +2577,8 @@ describe('WorkerLoop', () => {
         insertPipelineRun: insertPipelineRunMock,
         insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
     const loop = new WorkerLoop(engine, router, 60_000);
@@ -2651,6 +2672,8 @@ describe('WorkerLoop', () => {
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
     const loop = new WorkerLoop(engine, router, 60_000);
@@ -2720,6 +2743,8 @@ describe('WorkerLoop', () => {
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
     const loop = new WorkerLoop(engine, router, 60_000);
@@ -2772,6 +2797,8 @@ describe('WorkerLoop', () => {
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
@@ -2861,6 +2888,8 @@ describe('WorkerLoop', () => {
         insertPipelineRun: vi.fn(),
         insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
@@ -2890,6 +2919,8 @@ describe('WorkerLoop', () => {
       getUserConfig: vi.fn(() => ({})), workerRunModelOverride: vi.fn(() => ({})),
       createSession: vi.fn(() => analysisSession),
       escalateToUser: escalateSpy,
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -2921,6 +2952,8 @@ describe('WorkerLoop', () => {
       getUserConfig: vi.fn(() => ({})),
       createSession,
       escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -2964,6 +2997,8 @@ describe('WorkerLoop', () => {
       getUserConfig: vi.fn(() => ({})),
       createSession: vi.fn(() => analysisSession),
       escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -3027,6 +3062,8 @@ describe('WorkerLoop', () => {
         getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-interactive', manifest_json: interactivePlanned })),
         getPipelineRunManifest: vi.fn(() => null),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
     const loop = new WorkerLoop(engine, router, 60_000);
@@ -3058,6 +3095,8 @@ describe('WorkerLoop', () => {
         getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-asks', manifest_json: planned })),
         getPipelineRunManifest: vi.fn(() => null),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
@@ -3213,8 +3252,11 @@ describe('WorkerLoop', () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(await loop.runTriggerNow('hr-prop', mint('hr-prop', EVA))).toEqual({ ok: true });
         await vi.advanceTimersByTimeAsync(0);
-        // Twin: a run without a marker writes no such line.
-        await (loop as unknown as Exec).executeTask(proposal({ created_by: 'owner', confirmed_at: '2026-01-01T00:00:00.000Z' }), null);
+        // Twin: a run without a marker writes no such line. The store holds the twin too: the gate
+        // reads the row fresh (`#freshRecord`), not the record it is handed.
+        const twin = proposal({ created_by: 'owner', confirmed_at: '2026-01-01T00:00:00.000Z' });
+        vi.mocked(tm.getTrigger).mockReturnValue(twin);
+        await (loop as unknown as Exec).executeTask(twin, null);
       } finally { spy.mockRestore(); }
       expect(session.run).toHaveBeenCalledTimes(3);
       expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-prop', 'Tested by hand.', 'success');
@@ -3420,6 +3462,8 @@ describe('WorkerLoop', () => {
         getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
@@ -3449,6 +3493,7 @@ describe('WorkerLoop', () => {
         getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
@@ -3487,7 +3532,10 @@ describe('WorkerLoop', () => {
     expect(analysisSession.run).toHaveBeenCalledTimes(1);
     expect(updateWatchConfig).not.toHaveBeenCalled();
     mockFetchPinned.mockResolvedValueOnce(new Response(page, { status: 200 }));
-    await exec.executeTask(watch({ created_by: 'owner' }), null);
+    // The owner's row is what the store holds now: the gate reads it fresh, not the record handed in.
+    const ordinary = watch({ created_by: 'owner' });
+    vi.mocked(tm.getTrigger).mockReturnValue(ordinary);
+    await exec.executeTask(ordinary, null);
     expect(updateWatchConfig).toHaveBeenCalledTimes(1);
   });
 });
@@ -4883,6 +4931,7 @@ describe('hand runs carry the starter\'s principal', () => {
         getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
       })),
+      getEngineDb: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
@@ -4893,6 +4942,8 @@ describe('hand runs carry the starter\'s principal', () => {
     // owner's schedule instead, so the runner is reached both times.
     // 'stamped': the same proposal once the owner stamped it, fired without a marker.
     const row = marker === 'mandate' ? task : marker === 'stamped' ? { ...task, confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' } : { ...task, created_by: 'owner' };
+    // The store holds the row that runs: the gate reads it fresh (`#freshRecord`).
+    vi.mocked(taskManager.getTrigger).mockReturnValue(row);
     await (loop as unknown as Exec).executeTask(row, null, m);
     if (!live) {
       expect(mockRunManifest, 'no step ran').not.toHaveBeenCalled();

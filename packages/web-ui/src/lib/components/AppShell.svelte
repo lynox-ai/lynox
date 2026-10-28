@@ -22,6 +22,7 @@
 	import { installApiFetchInterceptor } from '../utils/api-fetch-interceptor.js';
 	import { installMandateRenewTimer } from '../utils/mandate-renew-timer.js';
 	import { startApprovalsNav, approvalsNavItem } from '../stores/approvals.svelte.js';
+	import { startPausedPlansNav, getPausedPlansBadge } from '../stores/paused-plans.svelte.js';
 	import type { Snippet } from 'svelte';
 
 	let { children, userSlot }: {
@@ -313,6 +314,8 @@
 		type?: 'threads';
 		/** A count shown beside the label (and as a dot on the collapsed rail). */
 		badge?: number | null;
+		/** What the count means, read out to a screen reader ({count}). */
+		badgeLabelKey?: string;
 	}
 
 	// Feature-flag gated nav entries. Fetched once on mount from the Engine.
@@ -320,6 +323,7 @@
 	// no dead link.
 	let inboxEnabled = $state(false);
 	let stopApprovalsNav: (() => void) | undefined;
+	let stopPausedPlansNav: (() => void) | undefined;
 
 	onMount(async () => {
 		// Catch any /api/* 401 globally so a Safari-PWA cookie eviction
@@ -332,6 +336,8 @@
 		// The approval queue's item shows when its count answers; the count is polled only while
 		// the latest answer names the owner's session.
 		stopApprovalsNav = startApprovalsNav();
+		// Plans waiting for the owner's takeover: a dot at "Automation" (ux UX-032).
+		stopPausedPlansNav = startPausedPlansNav();
 
 		// /inbox/counts returns 503 when the flag is off; treating ok=true as
 		// "enabled" mirrors the store's own probe (see inbox.svelte.ts).
@@ -359,7 +365,7 @@
 			// PRD-IA-V2 P2-PR-A: Activity is its own root (daily-frequency surface).
 			// Position 3 per PRD nav table — between Inbox and Hub.
 			{ href: '/app/activity', labelKey: 'nav.activity', exact: false, icon: 'clock' },
-			{ href: '/app/hub', labelKey: 'nav.automation', exact: false, icon: 'workflow' },
+			{ href: '/app/hub', labelKey: 'nav.automation', exact: false, icon: 'workflow', badge: getPausedPlansBadge(), badgeLabelKey: 'nav.paused_badge' },
 			{ href: '/app/intelligence', labelKey: 'nav.intelligence', exact: false, icon: 'brain' },
 			{ href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts' },
 		);
@@ -509,6 +515,7 @@
 		stopVisibilityRefresh?.();
 		stopActiveRunsPoll?.();
 		stopApprovalsNav?.();
+		stopPausedPlansNav?.();
 		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
 		railMq?.removeEventListener('change', onRailMq);
 	});
@@ -606,7 +613,7 @@
 					{#if item.badge}
 						<span class="shrink-0 text-[10px] tabular-nums rounded px-1.5 py-0.5 bg-accent/15 text-accent-text {railExpanded ? '' : 'md:sr-only'}" data-nav-badge>
 							<span aria-hidden="true">{item.badge}</span>
-							<span class="sr-only">{tf('nav.approvals_badge', { count: String(item.badge) })}</span>
+							<span class="sr-only">{tf(item.badgeLabelKey ?? 'nav.approvals_badge', { count: String(item.badge) })}</span>
 						</span>
 					{/if}
 					{#if isExpandable(item) && navExpanded}

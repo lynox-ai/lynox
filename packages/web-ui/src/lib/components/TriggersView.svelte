@@ -8,6 +8,8 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
 	import { awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
+	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
+	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -48,6 +50,8 @@
 		paused?: boolean;
 		// Whose ended access paused it, for the owner only (a helper is not told about another's).
 		paused_who?: string[];
+		// How and when each of those accesses ended, for the owner only: the notices above the list.
+		paused_ended?: PausedEnded[];
 	}
 
 	// How often the list is reloaded while the tab is visible, so a run that started on its
@@ -55,6 +59,9 @@
 	const LIVE_REFRESH_MS = 15_000;
 
 	let triggers = $state<Trigger[]>([]);
+	// Who reads the list (`GET /api/triggers`). Only the owner takes a plan over; the route says
+	// so too (ownerOnly), the button only follows it.
+	let viewer = $state<'owner' | 'mandate' | 'none'>('none');
 	let loading = $state(true);
 	let error = $state('');
 	// Per-trigger in-flight guard so a double-click can't fire two run-now /
@@ -80,10 +87,11 @@
 		try {
 			const res = await fetch(`${getApiBase()}/triggers`);
 			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { triggers: Trigger[] };
+			const data = (await res.json()) as { triggers: Trigger[]; viewer?: 'owner' | 'mandate' | 'none' };
 			if (load < shownLoad) return;
 			shownLoad = load;
 			triggers = data.triggers;
+			viewer = data.viewer ?? 'none';
 			error = '';
 			loading = false;
 		} catch {
@@ -242,6 +250,124 @@
 		}
 	}
 
+	// Take over = the owner's consent to what the preview shows (`plan-takeover.ts`): who the plan
+	// then runs for, what else changes. The POST carries the preview's digest, so a plan that
+	// changed in between is refused (`changed`) and shown again rather than taken over unseen.
+	// Not at a bulk run: no helper set one up (U-039). The route answers the same.
+	function offersTakeover(trigger: Trigger): boolean {
+		return viewer === 'owner' && trigger.paused === true && !(trigger.effect ?? '').startsWith('bulk_');
+	}
+
+	let takeoverFor = $state<Trigger | null>(null);
+	let takeoverPreview = $state<TakeoverPreview | null>(null);
+	// A line above the preview: why it was fetched again, or why the takeover was refused.
+	let takeoverNote = $state('');
+	let takeoverBusy = $state(false);
+	// The preview could not be loaded: the dialog offers to load it again (ux, as U-011).
+	let previewFailed = $state(false);
+	let takeoverCancel = $state<HTMLButtonElement | null>(null);
+
+	// Whether lynox hosts this instance, for the support line under a lasting failure. Asked only
+	// when one happens; unknown reads as not hosted, so no address is offered that may not help.
+	async function isHosted(): Promise<boolean> {
+		try {
+			const res = await fetch(`${getApiBase()}/secrets/status`);
+			if (!res.ok) return false;
+			const data = (await res.json()) as { managed?: string | null };
+			return typeof data.managed === 'string' && data.managed !== '';
+		} catch {
+			return false;
+		}
+	}
+
+	function dayOf(iso: string): string {
+		return new Date(iso).toLocaleDateString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric' });
+	}
+
+	async function fetchPreview(trigger: Trigger): Promise<void> {
+		takeoverPreview = null;
+		previewFailed = false;
+		try {
+			const res = await fetch(`${getApiBase()}/triggers/${trigger.id}/takeover-preview`);
+			if (!res.ok) throw new Error();
+			const data = (await res.json()) as TakeoverPreview & { refusal: string | null; message?: string };
+			if (data.refusal !== null) {
+				takeoverNote = refusalText(data.refusal, { workflow: null, managed: false, fallback: data.message ?? t('takeover.load_failed') });
+				if (data.refusal === 'nothing_to_take_over') void loadTriggers(true);
+				return;
+			}
+			takeoverPreview = data;
+		} catch {
+			takeoverNote = t('takeover.load_failed');
+			previewFailed = true;
+		}
+	}
+
+	async function reloadPreview(): Promise<void> {
+		if (takeoverFor === null) return;
+		takeoverNote = '';
+		await fetchPreview(takeoverFor);
+	}
+
+	async function openTakeover(trigger: Trigger): Promise<void> {
+		takeoverFor = trigger;
+		takeoverNote = '';
+		takeoverBusy = false;
+		await fetchPreview(trigger);
+	}
+
+	function closeTakeover(): void {
+		takeoverFor = null;
+		takeoverPreview = null;
+		takeoverNote = '';
+	}
+
+	// Focus on "Cancel" when the dialog opens: a confirmation that consents to something must not
+	// be one Enter away from it.
+	$effect(() => {
+		if (takeoverFor !== null && takeoverCancel !== null) takeoverCancel.focus();
+	});
+
+	async function confirmTakeover(): Promise<void> {
+		const trigger = takeoverFor;
+		const preview = takeoverPreview;
+		if (trigger === null || preview === null || takeoverBusy) return;
+		takeoverBusy = true;
+		try {
+			const res = await fetch(`${getApiBase()}/triggers/${trigger.id}/takeover`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ expect: preview.expect }),
+			});
+			if (res.ok) {
+				addToast(t('takeover.done'), 'success');
+				closeTakeover();
+				refreshPausedPlans();
+				await loadTriggers(true);
+				return;
+			}
+			const body = await res.json().then((b: { code?: string; error?: string }) => b).catch(() => ({} as { code?: string; error?: string }));
+			const code = body.code ?? '';
+			const managed = res.status === 503 ? await isHosted() : false;
+			const text = refusalText(code, { workflow: preview.workflow?.name ?? null, managed, fallback: body.error ?? t('takeover.load_failed') });
+			if (code === 'changed') {
+				// What changed is shown, with the line above it; the owner decides again.
+				await fetchPreview(trigger);
+				takeoverNote = text;
+			} else if (code === 'nothing_to_take_over') {
+				addToast(text, 'info');
+				closeTakeover();
+				await loadTriggers(true);
+			} else {
+				takeoverNote = text;
+			}
+		} catch {
+			takeoverNote = t('takeover.load_failed');
+		} finally {
+			takeoverBusy = false;
+		}
+	}
+
 	// Render a UTC cron in the user's local time so "0 7 * * *" (created locally
 	// as 09:00 in CEST) displays back as "Täglich um 09:00" instead of "07:00".
 	function utcHmToLocal(mmStr: string, hhStr: string): string {
@@ -336,6 +462,14 @@
 
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{/if}
+
+	<!-- Where a tap on the pause push lands: each ended access in full, address and all (the push
+	     shortens the name to fit). The owner's only — a helper's list carries no `paused_ended`. -->
+	{#if viewer === 'owner'}
+		{#each endedNotices(triggers, dayOf) as notice}
+			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice>{notice}</div>
+		{/each}
 	{/if}
 
 	{#if loading}
@@ -434,6 +568,10 @@
 							{#if trigger.stoppable === true}
 								<button onclick={() => stopRun(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.stop_run')} title={t('triggers.stop_run')} class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 disabled:opacity-40" data-trigger-stop>■ {t('triggers.stop_run')}</button>
 							{/if}
+							<!-- Take over: always visible, like Stop — a paused plan does nothing until it is. -->
+							{#if offersTakeover(trigger)}
+								<button onclick={() => openTakeover(trigger)} disabled={busy[trigger.id]} class="rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 disabled:opacity-40" data-trigger-takeover>{t('takeover.button')}</button>
+							{/if}
 							<!-- Not offered while waiting: the engine refuses the run after the request
 							     has already been answered as started. -->
 							{#if !awaitsConfirmation(trigger)}
@@ -454,3 +592,54 @@
 		</div>
 	{/if}
 </div>
+
+{#if takeoverFor !== null}
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="takeover-title"
+		tabindex="-1"
+		onkeydown={(e) => { if (e.key === 'Escape') closeTakeover(); }}
+		data-takeover-dialog
+	>
+		<div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">
+			<h2 id="takeover-title" class="text-sm font-medium mb-1">{t('takeover.title')}</h2>
+			<p class="text-xs text-text-subtle mb-3 break-words">{takeoverFor.title}</p>
+			{#if takeoverNote !== ''}
+				<p class="text-xs text-warning mb-3" role="status" data-takeover-note>{takeoverNote}</p>
+			{/if}
+			{#if takeoverPreview !== null}
+				<ul class="space-y-2 text-xs text-text-muted" data-takeover-lines>
+					{#each takeoverLines(takeoverPreview, dayOf) as line}
+						<li class="break-words" data-takeover-line={line.kind}>{line.text}</li>
+					{/each}
+				</ul>
+			{:else if takeoverNote === ''}
+				<p class="text-xs text-text-subtle">{t('takeover.loading')}</p>
+			{/if}
+			<div class="flex flex-wrap items-center justify-end gap-2 mt-5">
+				<button
+					bind:this={takeoverCancel}
+					onclick={closeTakeover}
+					class="rounded-[var(--radius-sm)] border border-border bg-bg-muted px-3 py-1 text-xs text-text-muted hover:bg-bg transition-colors"
+				>{t('common.cancel')}</button>
+				{#if previewFailed}
+					<button
+						onclick={reloadPreview}
+						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1 text-xs text-text hover:bg-bg-muted transition-colors"
+						data-takeover-reload
+					>{t('takeover.reload')}</button>
+				{/if}
+				{#if takeoverPreview !== null}
+					<button
+						onclick={confirmTakeover}
+						disabled={takeoverBusy}
+						class="rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-3 py-1 text-xs text-accent-text hover:bg-accent/20 transition-colors disabled:opacity-40"
+						data-takeover-confirm
+					>{t('takeover.button')}</button>
+				{/if}
+			</div>
+		</div>
+	</div>
+{/if}
