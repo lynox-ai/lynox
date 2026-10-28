@@ -18,11 +18,12 @@ import { setPinnedTransportForTests } from './network-guard.js';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, type BulkRunForPreview } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
-import { BulkHostBudget, externalClient, externalWriter, parseBulkContract, type ExternalClient } from './bulk-external.js';
+import { BulkHostBudget, externalClient, parseBulkContract, type ExternalClient } from './bulk-external.js';
+import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
 import { isOfferedListSource, listReadContract, maxListPages, parseListSource, type BulkListSource } from './bulk-list.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect } from './bulk-apply.js';
-import { shopifyMediaBeforeImage, shopifyMediaListPage, shopifyTargetIo } from './bulk-shopify.js';
+import { shopifyMediaBeforeImage, shopifyMediaListPage } from './bulk-shopify.js';
 import {
   SHOPIFY_MEDIA_LIST_PAGE_SIZE, SHOPIFY_MEDIA_PER_PRODUCT, SHOPIFY_READ_DOCUMENTS, SHOPIFY_WRITE_DOCUMENTS,
   shopifyMediaAltWriteBody, shopifyMediaListBody, shopifyTargetReadBody, shopifyWriteRequest,
@@ -352,7 +353,7 @@ describe('reading a store\'s images', () => {
     expect(targets(id).map((t) => [t.change, t.error])).toEqual([['invalid', 'not_found'], ['update', null]]);
   });
 
-  it('completes no seo pair in a judge\'s verdict on an image', async () => {
+  it('keeps a judge\'s verdict on an image as given', async () => {
     fill(1);
     const id = await previewed();
     engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'planned', halt_reason = NULL WHERE id = ?`).run(id);
@@ -366,13 +367,12 @@ describe('reading a store\'s images', () => {
 describe('applying a media run', () => {
   const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string }> => runBulkEffect(id, effect, {
     ledger, trailFor: () => null,
-    writerFor: (run) => bulkWriterFor(run, null, (r) => {
-      const granted = ledger.shopifyApplyOf(r.id);
-      const stored = r.contractJson === null ? null : parseBulkContract(r.contractJson);
-      if (granted === null || stored === null) return null;
-      const c = client(withShopifyApply(stored, HOST, granted));
-      return externalWriter(c, { sleep: async () => {}, io: shopifyTargetIo(c, ENDPOINT, granted.form) });
-    }),
+    // The worker's own writer: the form it reads and writes with comes from the run's rows.
+    writerFor: (run) => bulkWriterFor(run, null, (r) => externalRunWriter(r, ledger, (rr, _q, _r, shopifyApply) => {
+      const stored = rr.contractJson === null ? null : parseBulkContract(rr.contractJson);
+      const granted = stored === null ? null : bulkRunContract(stored, rr.targetSystem, { shopifyApply });
+      return granted === null ? null : client(granted);
+    })),
   });
   const writes = (): Record<string, unknown>[] => s.requests.filter((r) => r.query.startsWith('mutation')).map((r) => r.variables);
   beforeEach(() => { vi.stubEnv(FLAG, '1'); });
