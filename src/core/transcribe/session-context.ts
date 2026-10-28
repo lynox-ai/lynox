@@ -17,6 +17,7 @@
 
 import type { Engine } from './../engine.js';
 import type { TranscribeSessionContext } from './types.js';
+import { containedThreads } from '../containment.js';
 
 export interface ExtractOptions {
   /** Max contacts to include. Default 80 — matches glossary cap. */
@@ -88,7 +89,11 @@ function readThreadTitles(engine: Engine, sessionId: string | null, recent: numb
       if (current?.title) titles.push(current.title);
     }
     const list = store.listThreads({ limit: recent });
+    // Another chat's title goes into this chat's transcript and on to its model. A contained
+    // chat's title stays in that chat (with no record to read, every chat counts as contained).
+    const contained = containedThreads(engine.getToolContext().containment, list.map((t) => t.id));
     for (const t of list) {
+      if (t.id !== sessionId && contained.has(t.id)) continue;
       if (t.title && !titles.includes(t.title)) titles.push(t.title);
     }
   } catch {

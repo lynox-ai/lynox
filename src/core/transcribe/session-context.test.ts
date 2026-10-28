@@ -14,6 +14,8 @@ interface FakeEngineParts {
   apis?: Array<{ name: string }>;
   threads?: Array<{ id: string; title: string }>;
   currentThread?: { id: string; title: string };
+  /** Thread ids the containment record holds. */
+  contained?: string[];
 }
 
 function makeEngine(parts: FakeEngineParts): Engine {
@@ -34,6 +36,9 @@ function makeEngine(parts: FakeEngineParts): Engine {
     getCRM: () => crm,
     getApiStore: () => apiStore,
     getThreadStore: () => threadStore,
+    getToolContext: () => ({
+      containment: { containedThreadIds: (ids: readonly string[]) => new Set(ids.filter((id) => parts.contained?.includes(id))) },
+    }),
     // KG is intentionally never read by the session-context extractor.
     getKnowledgeLayer: () => null,
   } as unknown as Engine;
@@ -114,6 +119,24 @@ describe('extractSessionContext', () => {
     });
     const ctx = extractSessionContext(engine, 't1');
     expect(ctx.threadTitles).toEqual(['Current work', 'Other work']);
+  });
+
+  it('leaves out the title of a contained chat, and keeps the current chat\'s own', () => {
+    const engine = makeEngine({
+      currentThread: { id: 'shop', title: 'Shop audit' },
+      threads: [
+        { id: 'shop', title: 'Shop audit' },
+        { id: 'held', title: 'Bergtee Preise' },
+        { id: 'free', title: 'Newsletter' },
+      ],
+      contained: ['shop', 'held'],
+    });
+    expect(extractSessionContext(engine, 'free').threadTitles).toEqual(['Newsletter']);
+    // In the contained chat itself its own title stays; another contained chat's does not.
+    expect(extractSessionContext(engine, 'shop').threadTitles).toEqual(['Shop audit', 'Newsletter']);
+    // Control: with nothing contained every title is there.
+    const open = makeEngine({ threads: [{ id: 'held', title: 'Bergtee Preise' }, { id: 'free', title: 'Newsletter' }] });
+    expect(extractSessionContext(open, 'free').threadTitles).toEqual(['Bergtee Preise', 'Newsletter']);
   });
 
   it('caps contacts according to opts', () => {

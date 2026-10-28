@@ -3625,6 +3625,24 @@ describe('Engine + Session (Orchestrator)', () => {
       expect((title()![2] as Ctx).runGroupId).toBe('run-a');
     });
 
+    // A summary of another thread runs as an internal run in a session of its own. Its prompt is
+    // that thread's history, so it gets no title, and no second model call for one.
+    it('an internal run in a fresh session gets no title (control: a first user turn does)', async () => {
+      const { engine } = await createEngineAndSession();
+      stubTitleStream(engine);
+      const summary = engine.createSession();
+      const llmTitle = vi.spyOn(Object.getPrototypeOf(summary) as { _generateLLMTitle: () => Promise<void> }, '_generateLLMTitle');
+      mockSend.mockResolvedValueOnce('summary text');
+      await summary.run('Summarize this conversation concisely.\n\nuser: the price of Bergtee', { noTools: true, internal: true });
+      expect(llmTitle).not.toHaveBeenCalled();
+      const chat = engine.createSession();
+      mockSend.mockResolvedValueOnce('ok');
+      await chat.run('Plan the Q3 budget');
+      expect(llmTitle).toHaveBeenCalledTimes(1);
+      expect(llmTitle.mock.calls[0]?.[0]).toBe('Plan the Q3 budget');
+      llmTitle.mockRestore();
+    });
+
     it('two runs are two groups, also when the second is started from inside the first', async () => {
       const { engine, session } = await createEngineAndSession();
       const second = engine.createSession();
