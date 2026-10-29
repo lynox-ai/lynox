@@ -4,8 +4,10 @@ import { detectInjectionAcross, wrapChannelMessage, wrapUntrustedData } from './
 import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained, type Containment } from './containment.js';
 import type { ThreadStore } from './thread-store.js';
 import { stripUntrustedSeparators } from './sanitize.js';
-import { approvalQueueEnabled, type ApprovalEntry, type StoredAddress } from './approval-store.js';
-import { plainAddresses, type ApprovalScope } from './approval-view.js';
+import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
+import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
+
+const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
 /**
  * The chat a context is loaded into, and the stores that contain it: a run started from a
@@ -242,6 +244,9 @@ export interface ChatApprovalReader {
    * its original by uid only where this holds.
    */
   accountUidsStable(accountId: string): boolean;
+  /** Whether the entry's content is still the one its checksum was taken over when it was filed —
+   *  the store's own check, which the decision and the executor use. */
+  checksumMatches(id: string): boolean;
 }
 
 /**
@@ -583,6 +588,38 @@ function approvalInScope(entry: ApprovalEntry, scope: ApprovalScope): boolean {
   return entry.mandateId !== null && entry.mandateId === scope.mandateId;
 }
 
+/**
+ * Why an entry's draft may load into a chat, or null: the owner, or its own grant, moved it there;
+ * or it was approved and not sent for a reason that proves nothing went out
+ * ({@link APPROVAL_REWRITABLE_OUTCOMES}), and it still holds what was filed. The second is the
+ * owner's only — a mandate's grant may end, and the owner decides what it sends again.
+ */
+function approvalLoadable(
+  entry: ApprovalEntry,
+  scope: ApprovalScope,
+  checksumMatches: (id: string) => boolean,
+): { as: 'moved' } | { as: 'not_sent'; reason: ApprovalOutcome } | null {
+  if (!approvalInScope(entry, scope)) return null;
+  if (entry.status === 'rejected' && entry.decidedReason === 'moved_to_chat') return { as: 'moved' };
+  if (entry.status !== 'failed' || scope.viewer !== 'owner') return null;
+  const reason = approvalOutcome(entry);
+  if (reason === null || !REWRITABLE.has(reason)) return null;
+  // The reason is the last attempt's; a matching mail that went out before an earlier one still counts.
+  if (approvalResultSawDedup(entry.resultJson)) return null;
+  return checksumMatches(entry.id) ? { as: 'not_sent', reason } : null;
+}
+
+/**
+ * What a chat opened on an approval entry reads when its draft does not load: the entry was sent,
+ * closed, purged or changed since, the queue is off, or this session may not load it — the same
+ * words for each, so it tells a session nothing about an entry it may not see. Without it the
+ * chat's first line ("write this email again") would reach the model with no draft to go by.
+ */
+export const APPROVAL_DRAFT_UNAVAILABLE =
+  '[Loaded draft — not available]\n' +
+  'The draft from the approval queue that this chat was opened on cannot be loaded here. ' +
+  'Tell the user it is not available. Do not write the email from memory or look for it elsewhere; ask the user what they want to send.';
+
 /** Recipients as one line, at most {@link MAX_RECIPIENTS} of them, and how many were left out:
  *  that count is the engine's statement, so it goes into the framing, not beside the addresses. */
 function addressLine(list: ReadonlyArray<StoredAddress>): { line: string; left: number } {
@@ -702,8 +739,9 @@ function replyRoute(
 function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null): string | null {
   if (!approvalQueueEnabled() || approvals === null || approvals.scope === null) return null;
   const entry = approvals.get(id);
-  if (entry === null || !approvalInScope(entry, approvals.scope)) return null;
-  if (entry.status !== 'rejected' || entry.decidedReason !== 'moved_to_chat') return null;
+  if (entry === null) return null;
+  const loadable = approvalLoadable(entry, approvals.scope, (e) => approvals.checksumMatches(e));
+  if (loadable === null) return null;
   const filing = entry.filing;
   if (filing === null) return null;
   const p = filing.payload;
@@ -742,7 +780,11 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
     oneLine(p.fromAddress, MAX_NAME_CHARS), subject, followup === null ? '' : oneLine(followup.reason, MAX_NAME_CHARS),
     origSender, origSubject,
   ]);
-  const head = `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
+  // The reason is a code from a fixed list, never the stored result's text: a provider's error
+  // message is someone else's words.
+  const head = loadable.as === 'moved'
+    ? `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`
+    : `[Loaded draft of an approved email that was not sent — entry: ${entry.id} · ${filing.kind} · reason: ${loadable.reason} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
   const fields = wrapChannelMessage({
     source: `approval:${entry.id}`,
     injection,
@@ -780,7 +822,11 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   return (
     `${head}${fields}\n${message}\n\n` +
     `The draft's recipients are exactly those in the first block; the second block is only the message text. ` +
-    `This draft was not sent from the approval queue. It may have been sent from a chat since it was moved — before sending, ask the user whether it already went out. ` +
+    (loadable.as === 'moved'
+      ? `This draft was not sent from the approval queue. It may have been sent from a chat since it was moved — before sending, ask the user whether it already went out. `
+      : `This draft was approved, and the approval queue did not send it (reason in the first line); it will not send it later either. ` +
+        `It may have been sent another way since — before sending, ask the user whether it already went out. ` +
+        `Depending on the reason, sending it unchanged may fail again: tell the user the reason and ask what to change. `) +
     (leftCounts.length > 0 ? `Not every recipient is shown: ask the user how to handle the recipients not shown. ` : '') +
     (body.cut ? `Its message is cut here: ask the user before sending a shortened version. ` : '') +
     send +
