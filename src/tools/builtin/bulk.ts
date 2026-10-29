@@ -10,7 +10,7 @@ import {
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
 import { judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
-import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS } from '../../core/shopify-graphql.js';
+import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 
 /**
@@ -160,6 +160,18 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
     if (!(err instanceof BulkSourceError) || !isShopifyListForm(form) || err.message === SHOPIFY_READ_OFF) throw err;
     throw new BulkSourceError(`${err.message} ${SHOPIFY_FORM_RULES[String(form)]!}`);
   }
+}
+
+/** A plan on a Shopify store's host that does not use a Shopify form: the refusal it got (a path
+ *  that is not a woocommerce list, a source file that does not exist) says nothing about the store,
+ *  and the schema does not describe the forms, so the hint names them. */
+function shopifyHostHint(input: BulkPlanInput): string {
+  if (input.target_system !== 'http' || input.target_host === undefined) return '';
+  const host = canonicalHost(input.target_host);
+  if (host === null || !isShopifyStoreHostName(host)) return '';
+  const list = input.source_list;
+  if (typeof list === 'object' && list !== null && isShopifyListForm((list as Record<string, unknown>)['form'])) return '';
+  return ' target_host is a Shopify store: plan it with source_list and form shopify (product fields) or shopify_media (image alt texts).';
 }
 
 const SHOPIFY_READ_OFF = 'Reading a Shopify store in a bulk run is switched off on this instance.';
@@ -406,7 +418,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           'Only the user can approve and apply it, outside this chat; bulk_status shows how far it got.',
       ].join('\n');
     } catch (err: unknown) {
-      if (err instanceof BulkSourceError) return `Error: ${err.message}`;
+      if (err instanceof BulkSourceError) return `Error: ${err.message}${shopifyHostHint(input)}`;
       // The cap refuses a planner who is not the owner; its text is ux's and names no run.
       if (err instanceof BulkPreviewCapError) return `Error: ${err.message}`;
       // Data-store errors name the collection or filter column the caller passed —

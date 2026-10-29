@@ -75,9 +75,22 @@ describe('a refused bulk_plan in a Shopify form', () => {
       .toBe('Error: Reading a Shopify store in a bulk run is switched off on this instance.');
   });
 
+  it('a refused plan on a Shopify store in another form, or from a file, names the Shopify forms', async () => {
+    const HINT = ' target_host is a Shopify store: plan it with source_list and form shopify (product fields) or shopify_media (image alt texts).';
+    const woo = await plan({ source_list: { form: 'woocommerce', path: '/admin/api/2025-01/products.json', after: { title: 'x' } } });
+    expect(woo.startsWith('Error: source_list.path is not a list of the form woocommerce.'), woo).toBe(true);
+    expect(woo.endsWith(HINT), woo).toBe(true);
+    const file = await plan({ source_file: 'products.json' });
+    expect(file.startsWith('Error: The source file'), file).toBe(true);
+    expect(file.endsWith(HINT), file).toBe(true);
+    // A Shopify form carries its rules instead, not both.
+    expect(await plan({ write_method: 'PUT', source_list: { form: 'shopify', after: { title: 'x' } } })).not.toContain('target_host is a Shopify store');
+  });
+
   it('a refused plan in another form gets no Shopify rules', async () => {
     const answer = await plan({ target_host: 'shop.example.com', source_list: { form: 'woocommerce', path: '/nope', after: { name: 'x' } } });
     expect(answer).toMatch(/^Error: /);
     expect(answer).not.toContain('Form shopify');
+    expect(answer).not.toContain('Shopify store');
   });
 });
