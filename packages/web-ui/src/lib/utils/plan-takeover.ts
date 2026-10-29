@@ -68,9 +68,12 @@ export function planList(titles: readonly string[]): string {
 	return tf('takeover.plans_more', { plans: titles.slice(0, 5).join(', '), n: String(titles.length - 5) });
 }
 
-/** The role lines of one member (Fassung 4): every role that applies. */
-function roleLines(m: TakeoverMember, workflow: string | null): TakeoverLine[] {
-	return m.roles.map((role) => ({
+/**
+ * The role lines of one member (Fassung 4): every role that applies, except the workflow role F2
+ * already says for this member (ux, review of the dialog: the two lines said the same).
+ */
+function roleLines(m: TakeoverMember, workflow: string | null, saidByF2: TakeoverMember['roles'][number] | null): TakeoverLine[] {
+	return m.roles.filter((role) => role !== saidByF2).map((role) => ({
 		kind: 'role' as const,
 		text: role === 'created' || role === 'edited'
 			? tf(`takeover.role.${role}`, { name: m.name })
@@ -83,15 +86,16 @@ function roleLines(m: TakeoverMember, workflow: string | null): TakeoverLine[] {
  * one with a workflow role, its change before its creation. Without plans released, the last
  * sentence goes.
  */
-function f2Line(p: TakeoverPreview): TakeoverLine | null {
+function f2Line(p: TakeoverPreview): { line: TakeoverLine; by: TakeoverMember; role: 'workflow-edited' | 'workflow-created' } | null {
 	if (p.workflow === null || !p.workflow.takenOver) return null;
 	const by = p.members.find((m) => m.roles.includes('workflow-edited')) ?? p.members.find((m) => m.roles.includes('workflow-created'));
 	if (by === undefined) return null;
 	const changed = by.roles.includes('workflow-edited');
+	const role = changed ? 'workflow-edited' : 'workflow-created';
 	const vars = { workflow: p.workflow.name, name: by.name };
 	const head = tf(changed ? 'takeover.f2.changed' : 'takeover.f2.created', vars);
-	if (p.alsoReleased.length === 0) return { kind: 'f2', text: head };
-	return { kind: 'f2', text: `${head} ${tf('takeover.f2.released', { plans: planList(p.alsoReleased.map((r) => r.title)) })}` };
+	const text = p.alsoReleased.length === 0 ? head : `${head} ${tf('takeover.f2.released', { plans: planList(p.alsoReleased.map((r) => r.title)) })}`;
+	return { line: { kind: 'f2', text }, by, role };
 }
 
 /**
@@ -118,13 +122,17 @@ function memberChangeLines(p: TakeoverPreview): TakeoverLine[] {
 	});
 }
 
-/** T-3: a connection a helper made with their own account no longer counts once the owner takes over. */
+/**
+ * T-3: a connection a helper made with their own account no longer counts once the owner takes over.
+ * The account follows in brackets, unless it is the helper's own address, already named (ux).
+ */
 function connectionLines(p: TakeoverPreview): TakeoverLine[] {
 	return p.connections.map((c) => ({
 		kind: 'connection' as const,
 		text: tf('takeover.connection', {
-			connection: c.account !== null && c.account !== '' ? `${c.provider}: ${c.account}` : c.provider,
 			name: c.by ?? t('takeover.connection_someone'),
+			provider: c.provider,
+			account: c.account !== null && c.account !== '' && c.account !== c.by ? ` (${c.account})` : '',
 		}),
 	}));
 }
@@ -152,9 +160,9 @@ function scheduleLines(p: TakeoverPreview, formatDate: (iso: string) => string):
 /** Every line of the confirmation, in the order of the design (T-1, F2, T-2, T-3, T-4|T-5, T-6). */
 export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => string): TakeoverLine[] {
 	const lines: TakeoverLine[] = [];
-	for (const m of p.members) lines.push(...roleLines(m, p.workflow?.name ?? null));
 	const f2 = f2Line(p);
-	if (f2 !== null) lines.push(f2);
+	for (const m of p.members) lines.push(...roleLines(m, p.workflow?.name ?? null, f2 !== null && f2.by === m ? f2.role : null));
+	if (f2 !== null) lines.push(f2.line);
 	lines.push(...memberChangeLines(p));
 	lines.push(...connectionLines(p));
 	lines.push(runsAsLine(p));

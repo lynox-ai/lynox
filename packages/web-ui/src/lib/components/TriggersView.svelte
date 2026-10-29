@@ -622,10 +622,6 @@
 							{#if trigger.stoppable === true}
 								<button onclick={() => stopRun(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.stop_run')} title={t('triggers.stop_run')} class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 disabled:opacity-40" data-trigger-stop>■ {t('triggers.stop_run')}</button>
 							{/if}
-							<!-- Take over: always visible, like Stop — a paused plan does nothing until it is. -->
-							{#if offersTakeover(trigger)}
-								<button onclick={() => openTakeover(trigger)} disabled={busy[trigger.id]} class="rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 disabled:opacity-40" data-trigger-takeover>{t('takeover.button')}</button>
-							{/if}
 							<!-- Not offered while waiting: the engine refuses the run after the request
 							     has already been answered as started. -->
 							{#if !awaitsConfirmation(trigger)}
@@ -634,6 +630,11 @@
 							<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
 							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
 							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
+							<!-- Take over: always visible, like Stop — a paused plan does nothing until it is.
+							     Last, so it ends the row where the hidden controls hold their place (ux). -->
+							{#if offersTakeover(trigger)}
+								<button onclick={() => openTakeover(trigger)} disabled={busy[trigger.id]} class="rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 disabled:opacity-40" data-trigger-takeover>{t('takeover.button')}</button>
+							{/if}
 						</div>
 					</div>
 				</div>

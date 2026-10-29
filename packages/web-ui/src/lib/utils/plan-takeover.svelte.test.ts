@@ -44,8 +44,8 @@ describe('the role lines (T-1, Fassung 4)', () => {
 		expect(texts(p).slice(0, 4)).toEqual([
 			'Created by ida@x.ch',
 			'Edited by ida@x.ch',
-			'Uses the workflow "Rechnungen", which ida@x.ch created',
-			'Uses the workflow "Rechnungen", which ida@x.ch changed',
+			'Uses the workflow “Rechnungen”, which ida@x.ch created',
+			'Uses the workflow “Rechnungen”, which ida@x.ch changed',
 		]);
 	});
 });
@@ -70,6 +70,16 @@ describe('F2: the workflow is taken over with the plan', () => {
 			'Dieser Plan nutzt den Workflow „Rechnungen“, den ida@x.ch angelegt hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
 		);
 	});
+	it('takes the place of the role line it says, for that member only (ux)', () => {
+		const one = preview({ members: [wfMember(['created', 'workflow-created', 'workflow-edited'])], workflow: wf });
+		expect(texts(one).slice(0, 2)).toEqual(['Angelegt von ida@x.ch', 'Nutzt den Workflow „Rechnungen“, den ida@x.ch angelegt hat']);
+		expect(kinds(one).slice(0, 3)).toEqual(['role', 'role', 'f2']);
+		const two = preview({ members: [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')], workflow: wf });
+		expect(texts(two)[0]).toBe('Nutzt den Workflow „Rechnungen“, den a@x.ch angelegt hat');
+		expect(kinds(two).slice(0, 2)).toEqual(['role', 'f2']);
+		// Not taken over: no F2, every role line stays.
+		expect(kinds(preview({ members: [wfMember(['workflow-created'])], workflow: { ...wf, takenOver: false } })).slice(0, 1)).toEqual(['role']);
+	});
 	it('is not said when the workflow is not taken over, or no member is one of the workflow', () => {
 		expect(kinds(preview({ members: [wfMember(['workflow-created'])], workflow: { ...wf, takenOver: false } }))).not.toContain('f2');
 		expect(kinds(preview({ members: [wfMember(['created'])], workflow: wf }))).not.toContain('f2');
@@ -93,7 +103,7 @@ describe('T-2: plans that then run for someone else', () => {
 		setLocale('en');
 		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'member_change').map((l) => l.text)).toEqual([
 			"These plans then run under your name instead of ida@x.ch's: P1, P2.",
-			'The plan "P3" then runs under bo@x.ch\'s name instead of ida@x.ch\'s.',
+			'The plan “P3” then runs under bo@x.ch\'s name instead of ida@x.ch\'s.',
 		]);
 	});
 	it('the other forms: one plan to the owner, several to another member', () => {
@@ -119,13 +129,20 @@ describe('T-3: a helper\'s own connection', () => {
 	it('names the service, the account and whose it is, verbatim in DE and EN', () => {
 		const p = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'Shopify', account: 'laden.myshopify.com', by: 'ida@x.ch' }] });
 		const de = takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text;
-		expect(de).toBe('Shopify: laden.myshopify.com hat ida@x.ch mit einem eigenen Konto verbunden. Nach dem Übernehmen nutzt der Plan diese Verbindung nicht mehr. Braucht er sie, verbinde das Programm selbst mit deinem Konto: in den Einstellungen unter „APIs“ über „Neue API“. Sonst kann der Plan diesen Schritt nicht ausführen.');
+		expect(de).toBe('ida@x.ch hat Shopify mit einem eigenen Konto verbunden (laden.myshopify.com). Nach dem Übernehmen nutzt der Plan diese Verbindung nicht mehr. Braucht er sie, verbinde das Programm selbst mit deinem Konto: in den Einstellungen unter „APIs“ über „Neue API“. Sonst kann der Plan diesen Schritt nicht ausführen.');
 		setLocale('en');
-		expect(takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text).toBe('ida@x.ch connected Shopify: laden.myshopify.com with an account of their own. After you take over, the plan no longer uses this connection. If it needs it, connect the service yourself with your own account: in Settings under “APIs”, via “New API”. Otherwise the plan cannot run this step.');
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text).toBe('ida@x.ch connected Shopify with an account of their own (laden.myshopify.com). After you take over, the plan no longer uses this connection. If it needs it, connect the service yourself with your own account: in Settings under “APIs”, via “New API”. Otherwise the plan cannot run this step.');
 	});
 	it('without an account says the service alone, and without an owner someone with access', () => {
 		const p = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'bexio', account: null, by: null }] });
-		expect(takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text.startsWith('bexio hat jemand mit Zugang mit einem eigenen Konto verbunden.')).toBe(true);
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text.startsWith('Jemand mit Zugang hat bexio mit einem eigenen Konto verbunden. Nach')).toBe(true);
+	});
+	it('leaves the account out when it is the helper\'s own address, already named (ux)', () => {
+		const p = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'Google Sheets', account: 'ida@x.ch', by: 'ida@x.ch' }] });
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text.startsWith('ida@x.ch hat Google Sheets mit einem eigenen Konto verbunden. Nach')).toBe(true);
+		setLocale('en');
+		const unknown = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'Google Sheets', account: 'ida@x.ch', by: null }] });
+		expect(takeoverLines(unknown, fmt).find((l) => l.kind === 'connection')?.text.startsWith('Someone with access connected Google Sheets with an account of their own (ida@x.ch). After')).toBe(true);
 	});
 });
 
@@ -133,7 +150,9 @@ describe('T-4 or T-5: whom the plan runs for afterwards', () => {
 	it('T-4 for the owner, and not T-5', () => {
 		const k = kinds(preview());
 		expect([k.includes('runs_as_owner'), k.includes('runs_as_member')]).toEqual([true, false]);
-		expect(takeoverLines(preview(), fmt).find((l) => l.kind === 'runs_as_owner')?.text).toBe('Er läuft danach unter deinem Namen.');
+		expect(takeoverLines(preview(), fmt).find((l) => l.kind === 'runs_as_owner')?.text).toBe('Der Plan läuft danach unter deinem Namen.');
+		setLocale('en');
+		expect(takeoverLines(preview(), fmt).find((l) => l.kind === 'runs_as_owner')?.text).toBe('The plan then runs under your name.');
 	});
 	it('T-5 for the workflow\'s member that stays, created or changed, and not T-4', () => {
 		const stays = (roles: TakeoverMember['roles']) => preview({
@@ -148,7 +167,7 @@ describe('T-4 or T-5: whom the plan runs for afterwards', () => {
 		);
 		setLocale('en');
 		expect(takeoverLines(stays(['workflow-created', 'workflow-edited']), fmt).find((l) => l.kind === 'runs_as_member')?.text).toBe(
-			'bo@x.ch changed the workflow "Rechnungen" and still has access. So after you take over, the plan runs under bo@x.ch\'s name, not yours. If that access ends, the plan pauses again, and you can take it over once more.',
+			'bo@x.ch changed the workflow “Rechnungen” and still has access. So after you take over, the plan runs under bo@x.ch\'s name, not yours. If that access ends, the plan pauses again, and you can take it over once more.',
 		);
 	});
 });
@@ -196,7 +215,8 @@ describe('the order of the confirmation', () => {
 			schedule: 'run_now_only_partial',
 			dueAt: '2026-11-02T08:00:00.000Z',
 		});
-		expect(kinds(p)).toEqual(['role', 'role', 'f2', 'member_change', 'connection', 'runs_as_owner', 'missed', 'partial']);
+		// The member's workflow role is said by F2, so its own line goes (ux).
+		expect(kinds(p)).toEqual(['role', 'f2', 'member_change', 'connection', 'runs_as_owner', 'missed', 'partial']);
 	});
 });
 
@@ -249,7 +269,7 @@ describe('the notices above the plans, with the full address', () => {
 		setLocale('en');
 		const [unwarned, warned, revoked] = [end('a@x.ch', 'expired'), end('b@x.ch', 'expired', true), end('c@x.ch', 'revoked')].map((e) => endedNotices([{ title: 'Wochenreport', paused_ended: [e] }], fmt)[0]!);
 		expect(unwarned.endsWith(' There was no advance notice.')).toBe(true);
-		expect(warned).toBe('b@x.ch had access until [2026-10-31]. Since then, the plan "Wochenreport" in which b@x.ch created or changed something is paused. Take it over if it should keep running. This also applies if the access has since been extended: the plan only runs again once you take it over.');
+		expect(warned).toBe('b@x.ch had access until [2026-10-31]. Since then, the plan “Wochenreport” in which b@x.ch created or changed something is paused. Take it over if it should keep running. This also applies if the access has since been extended: the plan only runs again once you take it over.');
 		expect(revoked).not.toContain('advance notice');
 	});
 });

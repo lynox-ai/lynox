@@ -13,4 +13,9 @@ describe('the shell wires the dot', () => {
 		expect(shell).toContain('stopPausedPlansNav?.();');
 		expect(shell).toContain("tf(item.badgeLabelKey ?? 'nav.approvals_badge', { count: String(item.badge) })");
 	});
+	it('and at the menu button, where a phone folds the navigation away (ux UX-032)', () => {
+		expect(shell).toContain("const foldedBadges = $derived(nav.filter((item) => typeof item.badge === 'number' && item.badge > 0));");
+		expect(shell).toMatch(/\{#if foldedBadges\.length > 0\}\s*<span [^>]*data-menu-badge><\/span>/);
+		expect(shell).toContain("aria-label={['Open menu', ...foldedBadges.map((item) => tf(item.badgeLabelKey ?? 'nav.approvals_badge', { count: String(item.badge) }))].join('. ')}");
+	});
 });
