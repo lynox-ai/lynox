@@ -5596,12 +5596,15 @@ export class LynoxHTTPApi {
       const nameByAbs = new Map([...absByName].map(([name, abs]) => [abs, name]));
       // The files the rollback left as they are (replaced or linked since, or not writable).
       let notRestored: string[] = [];
-      // A file the review did not show and the backup could not read is left out: nothing was saved
-      // for it, so nothing was promised, and naming it would give the person a reason that is wrong.
+      const nameOf = (abs: string): string => nameByAbs.get(abs) ?? abs;
+      // Rollback all: a file the review does not show now and the backup could not read is left
+      // out. Nothing was saved for it, so nothing was promised, and the reason the answer gives for
+      // it would be wrong. A file shown once and replaced by a link since cannot be told apart from
+      // it here; a partial answer names what the person chose, so there nothing is left out.
       const shownNow = new Set(changes.map((c) => c.absolutePath));
       const named = (left: string[]): string[] => left
         .filter((abs) => shownNow.has(abs) || csm.hasOriginal(abs))
-        .map((abs) => nameByAbs.get(abs) ?? abs);
+        .map(nameOf);
 
       if (action === 'accept') {
         accepted = changes.length;
@@ -5623,7 +5626,7 @@ export class LynoxHTTPApi {
         }
 
         if (toRollback.length > 0) {
-          notRestored = named(csm.rollbackFiles(toRollback));
+          notRestored = csm.rollbackFiles(toRollback).map(nameOf);
         }
         rolledBack = toRollback.length - notRestored.length;
         accepted = changes.filter((c) => !toRollback.includes(c.absolutePath)).length;

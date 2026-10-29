@@ -405,9 +405,6 @@ export class ChangesetManager {
     return changed;
   }
 
-  /** Every tracked file by the name the review shows it under, changed now or not. A file replaced
-   *  by a link since the review is no longer among {@link getChanges}, but an answer to that review
-   *  still names it, and a rollback that leaves it has to name it back. */
   /** Whether a rollback has something to put back for a tracked file: the bytes read before the
    *  run, or a file the run added. False for a file the backup could not read. */
   hasOriginal(abs: string): boolean {
@@ -415,6 +412,9 @@ export class ChangesetManager {
     return entry !== undefined && (entry.status === 'added' || entry.originalContent !== null);
   }
 
+  /** Every tracked file by the name the review shows it under, changed now or not. A file replaced
+   *  by a link since the review is no longer among {@link getChanges}, but an answer to that review
+   *  still names it, and a rollback that leaves it has to name it back. */
   reviewNames(): Map<string, string> {
     return new Map([...this.entries.keys()].map((abs) => [relative(this.realCwd, abs), abs]));
   }
@@ -707,7 +707,7 @@ export class ChangesetManager {
       let off = 0;
       while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off, off);
     } catch {
-      // Left as it is, as in {@link _rollbackOne}.
+      // Not restored, as in {@link _rollbackOne}.
       return false;
     } finally {
       if (fd !== undefined) closeSync(fd);
