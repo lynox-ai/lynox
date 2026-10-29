@@ -83,8 +83,12 @@ const byText = (text: string): HTMLElement | null =>
 	[...target.querySelectorAll<HTMLElement>('button')].find((b) => b.textContent?.trim() === text) ?? null;
 const posts = (path: string): Call[] => calls.filter((c) => c.method === 'POST' && c.path === path);
 
+let scrolled: Element[];
+
 beforeEach(() => {
 	calls = [];
+	scrolled = [];
+	Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this); };
 	target = document.createElement('div');
 	document.body.appendChild(target);
 });
@@ -143,6 +147,8 @@ describe('the owner stamps what the preview showed', () => {
 		await click(q('stamp-confirm'));
 		expect(q('stamp-dialog')).not.toBeNull();
 		expect(q('stamp-line')?.textContent).toContain('Die Schritte haben sich geändert');
+		// The line is at the head of the view, the button at its foot: it is scrolled into sight.
+		expect(scrolled).toContain(q('stamp-line'));
 		expect(q('stamp-step')?.textContent).toContain('Send it somewhere else');
 		expect(posts('/api/workflows/wf-1/confirm')).toHaveLength(1);
 		await click(q('stamp-confirm'));
@@ -265,7 +271,7 @@ describe('what the refuter of the first version found', () => {
 		await click(byText('Planen'));
 		await click(byText('Bestätigen & planen'));
 		expect(q('stamp-dialog')).toBeNull();
-		expect(target.textContent).toContain('wenn die Inhaberin oder der Inhaber die Schritte bestätigt hat');
+		expect(target.textContent).toContain('wenn der Inhaber seine Schritte bestätigt hat. Wende dich an den Inhaber.');
 		expect(calls.some((c) => c.path.endsWith('/stamp-preview'))).toBe(false);
 	});
 

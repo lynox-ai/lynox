@@ -334,6 +334,12 @@
 	// Bumped by every opening and closing, so a confirm answered after its view was closed (or
 	// replaced by another workflow's) acts on nothing.
 	let stampOpening = 0;
+	// The confirm button sits at the foot of the view, the line at its head: on a phone the line
+	// that says the steps changed would be out of sight, so it is brought into view when it appears.
+	let stampChangedLine = $state<HTMLElement | null>(null);
+	$effect(() => {
+		stampChangedLine?.scrollIntoView?.({ block: 'nearest' });
+	});
 
 	/** Loads the preview; true only when this load's preview is now the one on screen. */
 	async function loadStampPreview(wf: SavedWorkflow): Promise<boolean> {
@@ -941,7 +947,7 @@
 		<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 			<h2 class="text-sm font-medium mb-1 break-words">{t('workflow_library.stamp.review')}: {visible(stampWf.name)}</h2>
 			{#if stampLine === 'steps_changed'}
-				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.refused.steps_changed')}</p>
+				<p bind:this={stampChangedLine} role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.refused.steps_changed')}</p>
 			{:else if stampLine === 'awaits_at_schedule'}
 				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.awaits_at_schedule')}</p>
 			{/if}
