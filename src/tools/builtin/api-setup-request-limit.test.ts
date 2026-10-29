@@ -27,9 +27,11 @@ import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 /**
- * Row 1005: api_setup's own fetches (the docs page, its linked sections, the OpenAPI spec) charge
- * the conversation's request budget, which `http_request` shares. Each now asks the budget before
- * it goes out, so none goes out past the limit (ux U-051 for the texts).
+ * Row 1005: api_setup's own fetches (the docs page, its linked sections, the OpenAPI spec, the
+ * token POST of `fetch_token`) charge the conversation's request budget, which `http_request`
+ * shares. Each now reserves its request before it goes out, in one step with the check, so a
+ * fetch that fails after it went out stays charged and parallel calls cannot share the last
+ * request (ux U-051 for the texts).
  */
 describe('api_setup and the request limit', () => {
   const ORIGINAL_FLAG = process.env.LYNOX_FEATURE_API_SETUP_V2;
@@ -129,6 +131,59 @@ describe('api_setup and the request limit', () => {
     });
   });
 
+  describe('a fetch that fails after it went out', () => {
+    it('stays charged, so a docs_url that never answers cannot fetch for free', async () => {
+      const spy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('socket hang up'));
+      const agent = agentAt(0);
+      const result = await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/api' }, agent as never);
+      expect(fetched(spy)).toEqual(['https://docs.example.com/api']);
+      expect(result).toContain('docs fetch failed');
+      expect(agent.sessionCounters.httpRequests).toBe(1);
+    });
+
+    it('stays charged for the OpenAPI spec too', async () => {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('socket hang up'));
+      const agent = agentAt(0);
+      await apiSetupTool.handler({ action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' }, agent as never);
+      expect(agent.sessionCounters.httpRequests).toBe(1);
+    });
+
+    it('stays charged for a linked section', async () => {
+      const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === 'https://docs.example.com/api') return new Response(LANDING, { status: 200, headers: { 'content-type': 'text/html' } });
+        throw new Error('socket hang up');
+      });
+      const agent = agentAt(0);
+      await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/api' }, agent as never);
+      expect(fetched(spy)).toHaveLength(3);
+      expect(agent.sessionCounters.httpRequests).toBe(3);
+    });
+  });
+
+  it('two parallel calls at the last request: one goes out, the other is refused', async () => {
+    const spy = spyFetch();
+    const agent = agentAt(MAX_REQUESTS_PER_SESSION - 1);
+    const results = await Promise.all([
+      apiSetupTool.handler({ action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' }, agent as never),
+      apiSetupTool.handler({ action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' }, agent as never),
+    ]);
+    expect(fetched(spy)).toHaveLength(1);
+    expect(results.filter((r) => r === blocked('the OpenAPI spec'))).toHaveLength(1);
+    expect(agent.sessionCounters.httpRequests).toBe(MAX_REQUESTS_PER_SESSION);
+  });
+
+  it('sections left out for the body budget, not the limit, carry no note', async () => {
+    // A landing page that leaves less than the minimum budget for a section (250 KB cap).
+    const big = `${LANDING}<p>${'x'.repeat(250 * 1024 - LANDING.length - 600)}</p>`;
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(big, { status: 200, headers: { 'content-type': 'text/html' } }));
+    const agent = agentAt(0);
+    const result = await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/api' }, agent as never);
+    expect(fetched(spy)).toEqual(['https://docs.example.com/api']);
+    expect(result).toContain('Bootstrapped draft profile');
+    expect(result).not.toContain('were not read');
+  });
+
   describe('openapi_url', () => {
     it('fetches nothing at the limit, and says why', async () => {
       const spy = spyFetch();
@@ -148,13 +203,15 @@ describe('api_setup and the request limit', () => {
     });
   });
 
-  // A text check, so it is rough: it counts, it does not pair. A fifth fetch that only charges
-  // the budget makes the counts differ until someone adds its check.
-  it('every charge of the budget in api-setup.ts has a check', () => {
+  // A text check, so it is rough: it counts fetch sites against reservations, it does not pair
+  // them. What it does hold: the budget is charged in one place only, `reserveRequest`, and a
+  // new fetch makes the counts differ until someone reserves for it.
+  it('api-setup.ts charges the budget only through reserveRequest, once per fetch site', () => {
     const src = readFileSync(join(__dirname, 'api-setup.ts'), 'utf-8');
-    const charges = src.match(/sessionCounters\.httpRequests\+\+/g) ?? [];
-    const checks = src.match(/requestLimitReached\(agent\)/g) ?? [];
-    expect(charges).toHaveLength(4);
-    expect(checks).toHaveLength(charges.length);
+    expect(src.match(/sessionCounters\.httpRequests\+\+/g) ?? []).toHaveLength(1);
+    const fetches = src.match(/\b(?:fetchWithValidatedRedirects|exchangeToken)\(/g) ?? [];
+    const reservations = src.match(/reserveRequest\(agent\)/g) ?? [];
+    expect(fetches).toHaveLength(4);
+    expect(reservations).toHaveLength(fetches.length);
   });
 });
