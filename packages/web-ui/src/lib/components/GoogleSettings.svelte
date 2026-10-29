@@ -417,6 +417,17 @@
 						<p class="text-sm font-medium">{t('integrations.google_switch_confirm_title')}</p>
 						<p class="text-xs">{t('integrations.google_switch_confirm_body')}</p>
 						<p class="text-xs text-text-subtle">{t('integrations.google_grant_stays')}</p>
+						<!-- The switch goes straight to lynox's consent, past the brokered card that says this:
+						     an admin who allowed this tenant's own client may not have allowed lynox's. -->
+						<p class="text-xs text-text-subtle" data-workspace-admin-hint>
+							{t('integrations.google_workspace_admin_hint')}
+							<a
+								href="https://docs.lynox.ai/integrations/google-workspace/#workspace-admin-approval"
+								target="_blank"
+								rel="noopener noreferrer"
+								class="text-accent-text hover:underline"
+							>{t('integrations.google_workspace_admin_link')}</a>
+						</p>
 						<div class="flex gap-2">
 							<button class="btn-primary text-sm" onclick={confirmSwitchToManaged}>
 								{t('integrations.google_switch_confirm_yes')}

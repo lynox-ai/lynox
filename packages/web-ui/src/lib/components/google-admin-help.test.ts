@@ -45,15 +45,27 @@ describe('the Google card names the admin\'s approval before the connect', () =>
 		const hint = inBranch.indexOf("{t('integrations.google_workspace_admin_hint')}");
 		expect(button).toBeGreaterThan(-1);
 		expect(hint).toBeGreaterThan(button);
-		expect(CARD.split("t('integrations.google_workspace_admin_hint')").length - 1).toBe(1);
+	});
+
+	it('the switch from the tenant\'s own client to lynox\'s says it too, inside its confirm', () => {
+		// The switch starts lynox's consent directly; it never passes the brokered card above.
+		const confirm = /\{#if switchConfirmOpen\}([\s\S]*?)\{\/if\}/.exec(CARD);
+		expect(confirm, 'the switch confirm is not where it was').not.toBeNull();
+		const inConfirm = confirm![1]!;
+		expect(inConfirm).toContain("{t('integrations.google_workspace_admin_hint')}");
+		expect(inConfirm.indexOf("{t('integrations.google_workspace_admin_hint')}")).toBeLessThan(inConfirm.indexOf('onclick={confirmSwitchToManaged}'));
+		// Those two places, and no third.
+		expect(CARD.split("t('integrations.google_workspace_admin_hint')").length - 1).toBe(2);
 	});
 
 	it('the link opens the docs section in a new tab, so the connect stays open', () => {
-		const link = /<a\s+href="([^"]+)"\s+target="([^"]+)"\s+rel="([^"]+)"[^>]*>\{t\('integrations\.google_workspace_admin_link'\)\}<\/a>/.exec(CARD);
-		expect(link, 'the link is not where it was').not.toBeNull();
-		expect(link![1]).toBe(HELP_URL);
-		expect(link![2]).toBe('_blank');
-		expect(link![3]).toBe('noopener noreferrer');
+		const links = [...CARD.matchAll(/<a\s+href="([^"]+)"\s+target="([^"]+)"\s+rel="([^"]+)"[^>]*>\{t\('integrations\.google_workspace_admin_link'\)\}<\/a>/g)];
+		expect(links).toHaveLength(2);
+		for (const link of links) {
+			expect(link[1]).toBe(HELP_URL);
+			expect(link[2]).toBe('_blank');
+			expect(link[3]).toBe('noopener noreferrer');
+		}
 	});
 });
 
@@ -61,6 +73,8 @@ describe('the docs section the link leads to', () => {
 	const section = (): string => {
 		const start = DOCS.indexOf('\n## Workspace admin approval\n');
 		expect(start, 'the heading the anchor is made from is gone').toBeGreaterThan(-1);
+		// A second heading of that name would move the anchor to `-1`.
+		expect(DOCS.split(/^#+ Workspace admin approval$/m).length - 1).toBe(1);
 		const end = DOCS.indexOf('\n## ', start + 1);
 		return DOCS.slice(start, end);
 	};
@@ -81,6 +95,10 @@ describe('the docs section the link leads to', () => {
 			'https://www.googleapis.com/auth/calendar.freebusy',
 			'https://www.googleapis.com/auth/drive.file',
 		]);
+	});
+
+	it('says what drive.file reaches as Google defines it', () => {
+		expect(section()).toContain('`drive.file` is per file: it reaches only files lynox created or that the person opened or shared with lynox, not the rest of their Drive.');
 	});
 
 	it('names the console path', () => {
