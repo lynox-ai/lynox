@@ -287,7 +287,7 @@ async function applyRunEffect(
     }
     if (now() > deadline) {
       // An atomic run must not stop half written: out of time, it rolls back instead.
-      if (run.atomic) return rollBack(ledger, writer, run, now);
+      if (run.atomic) return rollBack(ledger, writer, run, now, 'time');
       ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.timeBudget}.`) };
     }
@@ -418,13 +418,14 @@ async function applyRunEffect(
 }
 
 /**
- * An atomic run hit a target it could not write: take back every target it wrote, newest
- * first, each only while it still holds what the run wrote, and end the run `aborted`.
- * Local only — an external target has no transaction to lean on (PRD §3.4).
+ * An atomic run hit a target it could not write, was stopped, or ran out of time: take back
+ * every target it wrote, newest first, each only while it still holds what the run wrote, and
+ * end the run `aborted`. A target left as it is keeps no `undone_at`, which is how the owner's
+ * view finds it. Local only — an external target has no transaction to lean on (PRD §3.4).
  */
 async function rollBack(
   ledger: BulkLedger, writer: TargetWriter, run: BulkRunForApply, now: () => number,
-  cause: 'failed' | 'stopped' = 'failed',
+  cause: 'failed' | 'stopped' | 'time' = 'failed',
 ): Promise<BulkEffectOutcome> {
   let complete = true;
   for (const t of ledger.listAppliedDesc(run.id)) {
@@ -438,15 +439,19 @@ async function rollBack(
       complete = false;
     }
   }
-  // The reason names the cause: a stopped run that read "could not be written" would tell
-  // the owner a target failed when none did.
+  // The reason names the cause: a stopped or timed-out run that read "could not be written"
+  // would tell the owner a target failed when none did.
   const reason = cause === 'stopped'
     ? (complete ? BULK_HALT_REASONS.atomicStoppedRolledBack : BULK_HALT_REASONS.atomicStoppedRollbackIncomplete)
-    : (complete ? BULK_HALT_REASONS.atomicRolledBack : BULK_HALT_REASONS.atomicRollbackIncomplete);
+    : cause === 'time'
+      ? (complete ? BULK_HALT_REASONS.atomicTimeRolledBack : BULK_HALT_REASONS.atomicTimeRollbackIncomplete)
+      : (complete ? BULK_HALT_REASONS.atomicRolledBack : BULK_HALT_REASONS.atomicRollbackIncomplete);
   ledger.setPhase(run.id, ['writing'], 'aborted', reason);
   const lead = cause === 'stopped'
     ? (complete ? 'Atomic bulk run stopped and rolled back.' : 'Atomic bulk run stopped; the rollback did not complete.')
-    : (complete ? 'Atomic bulk run aborted and rolled back.' : 'Atomic bulk run aborted; the rollback did not complete.');
+    : cause === 'time'
+      ? (complete ? 'Atomic bulk run out of time and rolled back.' : 'Atomic bulk run out of time; the rollback did not complete.')
+      : (complete ? 'Atomic bulk run aborted and rolled back.' : 'Atomic bulk run aborted; the rollback did not complete.');
   return { status: 'aborted', summary: summarize(ledger, run.id, lead) };
 }
 

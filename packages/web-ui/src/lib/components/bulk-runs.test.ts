@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackLeft, bulkRollbackText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkInvalidText, bulkSkippedHead,
 } from './bulk-runs.js';
@@ -57,7 +57,7 @@ describe('bulk run helpers', () => {
 	});
 
 	it('offers an undo for what an undo would take back, a failed external write included', () => {
-		const stopped = { kind: 'apply' as const, phase: 'writing' as const, haltReason: 'x', probe: null };
+		const stopped = { kind: 'apply' as const, phase: 'writing' as const, haltReason: 'x', probe: null, atomic: false };
 		// Nothing applied, but a write that went out and failed may have landed.
 		expect(bulkCanUndo({ ...stopped, undoable: 1 })).toBe(true);
 		expect(bulkCanUndo({ ...stopped, undoable: 0 })).toBe(false);
@@ -69,6 +69,11 @@ describe('bulk run helpers', () => {
 		expect(bulkCanUndo({ ...stopped, phase: 'approved', undoable: 1 })).toBe(false);
 		// At its probe the run has its own way back.
 		expect(bulkCanUndo({ ...stopped, probe: { key: 'k', fields: [] }, undoable: 1 })).toBe(false);
+		// An atomic run is taken back whole or not at all: only once it finished. One that aborted
+		// rolled back what it could, and the engine refuses its undo (`atomic_partial`).
+		expect(bulkCanUndo({ ...stopped, atomic: true, phase: 'aborted', undoable: 2 })).toBe(false);
+		expect(bulkCanUndo({ ...stopped, atomic: true, phase: 'writing', undoable: 2 })).toBe(false);
+		expect(bulkCanUndo({ ...stopped, atomic: true, phase: 'done', haltReason: null, undoable: 2 })).toBe(true);
 	});
 
 	it('places a run on its step', () => {
@@ -281,6 +286,58 @@ describe('going on from a run that halted', () => {
 	const DE = from({ ...de, 'bulk.system.data_store': 'Datenspeicher' });
 	const EN = from(en);
 
+	// Over the engine's own set, not a list: every halt an atomic run ends in has its sentence.
+	const ATOMIC = Object.keys(BULK_HALT_REASONS).filter((k) => k.startsWith('atomic'));
+
+	it('says in both languages why an atomic run rolled back, for every reason it can roll back with', () => {
+		expect(ATOMIC.length).toBe(6);
+		for (const haltKey of ATOMIC) {
+			for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
+				const said = bulkRollbackText({ phase: 'aborted', haltKey }, i);
+				expect(said, `${lang} ${haltKey}`).not.toBeNull();
+				expect(said!.cause, `${lang} ${haltKey}`).not.toMatch(/bulk\.|\{/);
+				expect(said!.cause, `${lang} ${haltKey}`).not.toBe(BULK_HALT_REASONS[haltKey as keyof typeof BULK_HALT_REASONS]);
+				expect(said!.incomplete, haltKey).toBe(haltKey.endsWith('Incomplete'));
+			}
+		}
+		// The words ux decided (U-007, U-061), one of each kind.
+		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicRollbackIncomplete' }, DE)!.cause)
+			.toBe('lynox konnte nicht alles zurücknehmen. Bei den markierten Zielen hat lynox die Änderung nicht zurückgenommen. Prüf sie und korrigiere sie falls nötig von Hand.');
+		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicTimeRollbackIncomplete' }, EN)!.cause)
+			.toBe('The time for this run ran out. lynox could not take everything back. lynox did not take the change back on the marked targets. Check them and correct them by hand if needed.');
+		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicTimeRolledBack' }, DE)!.cause.startsWith('Die Zeit für diesen Lauf ist abgelaufen. ')).toBe(true);
+		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicStoppedRolledBack' }, EN)!.cause)
+			.toBe('The run was stopped. Because it is meant to apply completely or not at all, lynox took everything back. Nothing is changed.');
+		// Any other halt, or a run that did not abort, keeps its own sentence or the engine's reason.
+		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'failureRate' }, DE)).toBeNull();
+		expect(bulkRollbackText({ phase: 'writing', haltKey: 'atomicRolledBack' }, DE)).toBeNull();
+		expect(bulkRollbackText({ phase: 'aborted', haltKey: null }, DE)).toBeNull();
+	});
+
+	it('offers no way on from a run that rolled back', () => {
+		for (const haltKey of ATOMIC) {
+			const run = { phase: 'aborted' as const, haltKey, probe: null, haltReason: 'x', probeConfirmed: true, maxTargets: null, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 } };
+			expect(bulkResumeKind(run), haltKey).toBeNull();
+			expect(bulkRestartKind({ ...run, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false }), haltKey).toBeNull();
+			expect(bulkCanUndo({ ...run, kind: 'apply', undoable: 2, atomic: true }), haltKey).toBe(false);
+		}
+	});
+
+	it('marks exactly the targets an incomplete rollback left as they were', () => {
+		const left = { phase: 'aborted' as const, haltKey: 'atomicRollbackIncomplete' };
+		expect(bulkRollbackLeft(left, { written: true, undone: false })).toBe(true);
+		// Taken back, never written by the run, or sent by an engine that does not say: not marked.
+		expect(bulkRollbackLeft(left, { written: true, undone: true })).toBe(false);
+		expect(bulkRollbackLeft(left, { written: false, undone: false })).toBe(false);
+		expect(bulkRollbackLeft(left, {})).toBe(false);
+		for (const haltKey of ATOMIC.filter((k) => k.endsWith('Incomplete'))) expect(bulkRollbackLeft({ phase: 'aborted', haltKey }, { written: true, undone: false }), haltKey).toBe(true);
+		// A rollback that completed leaves nothing to mark, and neither does any other halt.
+		for (const haltKey of ['atomicRolledBack', 'atomicStoppedRolledBack', 'atomicTimeRolledBack', 'failureRate']) {
+			expect(bulkRollbackLeft({ phase: 'aborted', haltKey }, { written: true, undone: false }), haltKey).toBe(false);
+		}
+		expect(bulkRollbackLeft({ phase: 'writing', haltKey: 'atomicRollbackIncomplete' }, { written: true, undone: false })).toBe(false);
+	});
+
 	it('says the same about targets an earlier send left unclear on every halt, a finished run and every size', () => {
 		const one = 'Bei einem Ziel ist offen, ob die Änderung beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort. lynox sendet sie nicht noch einmal, sonst könnte die Änderung doppelt ankommen. Sieh beim Anbieter nach. Fehlt die Änderung dort, bitte lynox im Chat, den Lauf neu zu planen.';
 		const states = [
@@ -330,7 +387,7 @@ describe('going on from a run that halted', () => {
 	it('places every halt the engine names', () => {
 		const STARTS = ['awaitingStart', 'listed'];
 		const ENDS_THE_RUN = ['superseded', 'mandateEnded'];
-		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff'];
+		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff'];
 		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkRestartKind({ ...base, haltKey });
@@ -463,7 +520,7 @@ describe('going on from a run that halted', () => {
 
 	it('places every halt the engine names for a write run', () => {
 		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
-		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete'];
+		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete'];
 		const left = [...PLANNING_ONLY, ...NO_WRITE_ON];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkResumeKind(w(haltKey));

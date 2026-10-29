@@ -398,6 +398,10 @@ export interface BulkTarget {
 	error: string | null;
 	/** The owner took it out of the write before approving. */
 	deselected: boolean;
+	/** This run wrote it (not found already as planned). Optional: an older engine sends neither. */
+	written?: boolean | undefined;
+	/** A rollback or an undo took this run's write back. */
+	undone?: boolean | undefined;
 }
 
 /** The external host of a run's target system, or null for a local run. */
@@ -464,10 +468,36 @@ export function bulkWaitsForStart(run: Pick<BulkRun, 'phase' | 'haltKey'>): bool
 }
 
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo
- *  would take back, and is not at its probe (that has its own way back). */
-export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe'>): boolean {
+ *  would take back, and is not at its probe (that has its own way back). An atomic run is taken
+ *  back whole or not at all, so only once it finished: the engine refuses any other
+ *  (`atomic_partial`), and one that aborted has already rolled back what it could. */
+export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe' | 'atomic'>): boolean {
 	if (run.kind !== 'apply' || run.undoable <= 0 || bulkAtProbe(run)) return false;
+	if (run.atomic) return run.phase === 'done';
 	return run.phase === 'done' || run.phase === 'aborted' || (run.phase === 'writing' && run.haltReason !== null);
+}
+
+/** The halts that end an atomic run in a rollback, each with its own sentence on the page
+ *  (`bulk.halt.<key>`). The incomplete ones name targets, which the page marks. */
+const BULK_ROLLED_BACK = new Set(['atomicRolledBack', 'atomicStoppedRolledBack', 'atomicTimeRolledBack']);
+const BULK_ROLLBACK_INCOMPLETE = new Set(['atomicRollbackIncomplete', 'atomicStoppedRollbackIncomplete', 'atomicTimeRollbackIncomplete']);
+
+/** The page's own sentence for an atomic run that rolled back, and whether the rollback left
+ *  targets to mark. Null for any other run: it keeps the other sentences or the engine's reason.
+ *  A rolled-back run offers no way on: it is aborted, so neither writing on nor an undo applies. */
+export function bulkRollbackText(run: Pick<BulkRun, 'phase' | 'haltKey'>, i18n: BulkI18n): { cause: string; incomplete: boolean } | null {
+	const key = run.haltKey;
+	if (run.phase !== 'aborted' || key === null) return null;
+	const incomplete = BULK_ROLLBACK_INCOMPLETE.has(key);
+	if (!incomplete && !BULK_ROLLED_BACK.has(key)) return null;
+	return { cause: i18n.t(`bulk.halt.${key}`), incomplete };
+}
+
+/** Whether the page marks this target: the run's rollback did not complete, and this is a
+ *  target it wrote and did not take back. */
+export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
+	return run.phase === 'aborted' && run.haltKey !== null && BULK_ROLLBACK_INCOMPLETE.has(run.haltKey)
+		&& target.written === true && target.undone !== true;
 }
 
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;
