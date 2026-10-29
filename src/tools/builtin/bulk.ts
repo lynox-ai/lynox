@@ -10,7 +10,7 @@ import {
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
 import { judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
-import { SHOPIFY_WRITABLE_FIELDS } from '../../core/shopify-graphql.js';
+import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 
 /**
@@ -140,9 +140,31 @@ function refusePlannerStartDomains(input: BulkPlanInput): void {
   }
 }
 
+/** What a Shopify form takes, said with every refusal of a plan in that form: its checks stop at
+ *  the first fault, and the schema does not describe the form, so a model would learn the rules
+ *  one refusal at a time. */
+const SHOPIFY_FORM_RULES: Record<string, string> = {
+  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after (or a judge's schema, without after) sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null. For the images of the products, use form shopify_media.`,
+  shopify_media: `Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only ${SHOPIFY_MEDIA_WRITABLE_FIELDS.join(', ')}, as text of at most ${String(SHOPIFY_ALT_MAX_CHARS)} characters or null. For product fields, use form shopify.`,
+};
+
 /** Record a run whose targets come from a list on the host (PRD bulk-loop §3.2): nothing
- *  is read here — the list is read once the user starts the run. */
+ *  is read here — the list is read once the user starts the run. A refused plan in a Shopify form
+ *  gets that form's rules (`SHOPIFY_FORM_RULES`), unless the refusal is that the read is off. */
 function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judgeInput: unknown): string {
+  try {
+    return planListChecked(input, agent, ledger, judgeInput);
+  } catch (err) {
+    const list = input.source_list;
+    const form = typeof list === 'object' && list !== null ? (list as Record<string, unknown>)['form'] : undefined;
+    if (!(err instanceof BulkSourceError) || !isShopifyListForm(form) || err.message === SHOPIFY_READ_OFF) throw err;
+    throw new BulkSourceError(`${err.message} ${SHOPIFY_FORM_RULES[String(form)]!}`);
+  }
+}
+
+const SHOPIFY_READ_OFF = 'Reading a Shopify store in a bulk run is switched off on this instance.';
+
+function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judgeInput: unknown): string {
   if (input.target_system !== 'http') throw new BulkSourceError('source_list needs target_system "http".');
   // Said, not dropped: a planner who gave one expects it to narrow or shape the run.
   const unused = (['source_filter', 'source_format', 'target_collection'] as const).filter((k) => input[k] !== undefined && input[k] !== null);
@@ -154,7 +176,7 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
   if (typeof listInput === 'object' && listInput !== null && isShopifyListForm((listInput as Record<string, unknown>)['form'])) {
     const form = String((listInput as Record<string, unknown>)['form']);
     // Checked when the run is planned and again on every tick of it (`bulk-preview.ts`).
-    if (!shopifyBulkReadEnabled()) throw new BulkSourceError('Reading a Shopify store in a bulk run is switched off on this instance.');
+    if (!shopifyBulkReadEnabled()) throw new BulkSourceError(SHOPIFY_READ_OFF);
     // A judge plans its fields F like an after-state: the Shopify parse below bounds them to the
     // writable fields. Only the product form takes one: an image run writes its alt text from
     // source_list.after until a judge is decided for it. A verb would name a write nothing grants.
@@ -242,12 +264,11 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         source_list: {
           type: 'object',
           description: 'For target_system "http": a list on target_host to take the targets from, instead of source_file or source_collection.',
-          // A Shopify form names its fields here and nothing else: the rest of its rules (no path,
-          // filters, id_field or write_method, no judge for images, the alt text's length) live in the
-          // refusals of `parseListSource` and `planList`. In the schema they pushed a model off a keyword
-          // lookup in a chat opened from a read-only one; without the fields, a model guessed them.
+          // A Shopify form's rules are not described here: in the schema they pushed a model off a
+          // keyword lookup in a chat opened from a read-only one. A plan that breaks one gets them all
+          // with its refusal (`SHOPIFY_FORM_RULES`), since the checks name only the first they meet.
           properties: {
-            form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com); sets title, seo_title, seo_description. shopify_media: the images of its products; sets alt.' },
+            form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com); shopify_media: the images of its products.' },
             path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products. Not for the Shopify forms.' },
             filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status); values are 1–64 letters, digits, - or _.' },
             id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },
