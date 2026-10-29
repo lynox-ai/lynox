@@ -9737,6 +9737,13 @@ describe('LynoxHTTPApi', () => {
           const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
           expect(triggers[0]!['stamp_listed']).toMatchObject({ ended: true, ended_on: 'workflow' });
         });
+        // The schedule's mandate ended, the workflow's is live: a new plan on that workflow would run
+        // for the workflow's mandate, so the way out still copies the workflow.
+        ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [idaPlan] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          expect(triggers[0]!['stamp_listed']).toMatchObject({ ended: true, ended_on: 'workflow' });
+        });
       } finally {
         ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();

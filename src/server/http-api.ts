@@ -2346,9 +2346,11 @@ export class LynoxHTTPApi {
     const shown = stampListState(row.stampConnections, row.confirmedAt, plan.workflowConfirmedAt, plan.of, apiStore, ends);
     if (shown === null) return null;
     // The run is refused when ANY member ended (the worker's gate), not only the one it acts for.
+    // The way out the view names: with a mandate on the workflow's side, a new plan on the same
+    // workflow would still run for that mandate, so the workflow needs copying, whichever side ended.
     const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
-    const endedOn = plan.workflowMember !== undefined && principalHasEnded(plan.workflowMember, isLive) ? 'workflow'
-      : plan.members.some((m) => principalHasEnded(m, isLive)) ? 'plan' : null;
+    const anyEnded = plan.members.some((m) => principalHasEnded(m, isLive));
+    const endedOn = !anyEnded ? null : plan.workflowMember !== undefined ? 'workflow' : 'plan';
     return { ...shown, ended: shown.ended || endedOn !== null, ended_on: endedOn };
   }
 

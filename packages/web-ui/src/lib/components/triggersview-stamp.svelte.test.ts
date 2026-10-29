@@ -282,6 +282,12 @@ describe('the list of a confirmed plan (B3)', () => {
 		await render();
 		expect(q('[data-stamp-note]')!.textContent).not.toContain('Übernehmen');
 		expect(q('[data-stamp-note]')!.textContent).toContain('Lösch ihn');
+		// A completed plan keeps its pause but is offered no takeover: no "Take over" in the note.
+		unmount(component!);
+		component = undefined;
+		rows = [{ ...CONFIRMED, stamp_listed: ENDED, paused: true, status: 'completed' }];
+		await render();
+		expect(q('[data-stamp-note]')!.textContent).not.toContain('Übernehmen');
 	});
 
 	it('not to a helper, and not at a plan that waits (its block says it)', async () => {
