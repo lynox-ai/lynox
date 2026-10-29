@@ -4,7 +4,8 @@ import { resolve, dirname, basename, join } from 'node:path';
 import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
-import { ensureWorkspaceContextDir, getWorkspaceRoot, resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin } from './workspace-root.js';
+import { shellIsolation } from './shell-isolation.js';
+import { ensureWorkspaceContextDir, getWorkspaceRoot, namesSidecarLabel, resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin, WorkspaceRootError } from './workspace-root.js';
 
 let _cachedDir: string | null | undefined;
 let _tenantOverride: string | null = null;
@@ -29,9 +30,13 @@ export function clearTenantWorkspace(): void {
   _tenantOverride = null;
 }
 
-/** Whether workspace isolation is active. */
+/**
+ * Whether workspace isolation is active. Always in shell sidecar mode: the paths taken without
+ * isolation reach the workspace root by name, and there they must not (D3). The isolated path
+ * refuses instead when no context workspace is set (`workspaceBase`).
+ */
 export function isWorkspaceActive(): boolean {
-  return getWorkspaceDir() !== null;
+  return getWorkspaceDir() !== null || shellIsolation().kind === 'sidecar';
 }
 
 /** Working directory: workspace dir if active, else process.cwd(). */
@@ -145,11 +150,20 @@ export const READ_ONLY_ROOTS: readonly string[] = Object.freeze(['/app']);
  */
 export function validatePath(filePath: string, operation: 'read' | 'write'): string {
   const ws = getWorkspaceDir();
-  if (!ws) return resolve(filePath);
+  if (!ws) {
+    // Isolation is always on in shell sidecar mode (`isWorkspaceActive`); unchecked is not an answer.
+    if (shellIsolation().kind === 'sidecar') {
+      throw new WorkspaceRootError('In shell sidecar mode no context workspace is set, and the workspace is not reached by name.');
+    }
+    return resolve(filePath);
+  }
 
   // Resolve the path, following symlinks where possible. A path under the old `<data>/workspace`
   // is mapped to the root first, then confined like any other (identity unless the root is external).
   const resolved = translateLegacyWorkspacePath(resolve(filePath), resolveWorkspaceRoot());
+  if (namesSidecarLabel(resolved)) {
+    throw new Error(`Path '${filePath}' is in the workspace, which is reached only through its open directory, not by name.`);
+  }
   let real: string;
   if (existsSync(resolved)) {
     real = realpathSync(resolved);

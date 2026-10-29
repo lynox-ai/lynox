@@ -3,7 +3,7 @@ import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getWorkspaceDir, isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
-import { getWorkspaceRoot } from '../../core/workspace-root.js';
+import { getWorkspaceRoot, namesSidecarLabel } from '../../core/workspace-root.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
@@ -159,7 +159,7 @@ function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
     return { kind: 'anchored', anchor: base.anchor, rel: mapped.rel, shown: mapped.shown };
   }
   const real = validatePath(mapped.abs, operation);
-  const wsReal = existsSync(base.ws) ? realpathSync(base.ws) : base.ws;
+  const wsReal = !namesSidecarLabel(base.ws) && existsSync(base.ws) ? realpathSync(base.ws) : base.ws;
   if (isPathWithin(real, base.ws) || isPathWithin(real, wsReal)) {
     throw new Error(`${raw} reaches the workspace through a link. Name the file by its path in the workspace (${base.ws}).`);
   }
@@ -264,6 +264,14 @@ export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonl
  *  the agent shows before a write (agent.ts): it reads the file the write would
  *  change, so it resolves the path exactly as write_file and edit_file do. */
 export function resolveWritablePath(rawPath: string): string {
+  // In shell sidecar mode a path in the context workspace is reached through its open directory
+  // (the diff preview maps it there), so it is handed on by its workspace spelling, not resolved
+  // by name. Any other path below the label is refused by `validatePath` (D3).
+  const ws = getWorkspaceDir();
+  if (ws !== null && namesSidecarLabel(ws)) {
+    const mapped = toWorkspaceRel(rawPath, ws);
+    if (mapped.kind === 'inside') return mapped.shown;
+  }
   if (isWorkspaceActive()) {
     return validatePath(resolve(rawPath), 'write');
   }

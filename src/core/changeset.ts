@@ -6,12 +6,14 @@ import { tmpdir } from 'node:os';
 import { join, relative, dirname, resolve, basename } from 'node:path';
 import { isPathWithin, getWorkspaceCwd, writeRootsBesidesWorkspace } from './workspace.js';
 import { processUmask, toWorkspaceRel, workspaceBase } from './workspace-rel.js';
+import { namesSidecarLabel } from './workspace-root.js';
 import {
   FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, openWrite, readFdCapped, rmdirAt, statEntry, unlinkAt,
   WorkspaceAccessError, type WorkspaceAnchor,
 } from './workspace-fd.js';
 
-const realOr = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
+// In shell sidecar mode a path below the label is its own key: it is not looked up by name (D3).
+const realOr = (p: string): string => { if (namesSidecarLabel(p)) return resolve(p); try { return realpathSync(p); } catch { return resolve(p); } };
 
 /** Whether nothing is at `p`, not even a link. Anything else, an error included, counts as there. */
 function isMissing(p: string): boolean {
@@ -91,9 +93,8 @@ export class ChangesetManager {
    *  run registry's id). The review shows it and its answer carries it back, so an answer to
    *  one run's review never reaches the next run's files. */
   constructor(private readonly cwd: string, readonly runId: string, otherRoots: readonly string[] = []) {
-    const real = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
-    this.realCwd = real(cwd);
-    this.roots = [this.realCwd, ...otherRoots.map(real)];
+    this.realCwd = realOr(cwd);
+    this.roots = [this.realCwd, ...otherRoots.map(realOr)];
   }
 
   /** `cwd` with symlinks resolved: the workspace, which names in the review are relative to. */
@@ -112,6 +113,9 @@ export class ChangesetManager {
    */
   private _confine(filePath: string): string | null {
     const abs = resolve(filePath);
+    // In shell sidecar mode a path below the label outside the context workspace is not tracked,
+    // and not looked up by name to find out (D3).
+    if (namesSidecarLabel(abs)) return null;
     let ancestor = abs;
     let tail = '';
     while (!existsSync(ancestor)) {

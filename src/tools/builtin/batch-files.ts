@@ -5,7 +5,7 @@ import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/worksp
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
 import { FILE_TOOL_READ_CAP_BYTES, listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 import { anchoredError, artifactsRoot, isInArtifactsRoot, oversizeWayOut, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
-import { getWorkspaceRoot } from '../../core/workspace-root.js';
+import { getWorkspaceRoot, namesSidecarLabel } from '../../core/workspace-root.js';
 import { readEnvAlias } from '../../core/env.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
@@ -88,11 +88,12 @@ function findFilesAt(anchor: WorkspaceAnchor, rel: string, pattern: string, dept
  * through a link on the way (the closest existing ancestor, followed).
  */
 function landsInWorkspace(path: string, ws: string): boolean {
-  if (toWorkspaceRel(path, ws).kind === 'inside') return true;
+  // In shell sidecar mode any path below the label is the workspace's, by its spelling (D3).
+  if (namesSidecarLabel(path) || toWorkspaceRel(path, ws).kind === 'inside') return true;
   let probe = path;
   while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
   if (!existsSync(probe)) return false;
-  const wsReal = existsSync(ws) ? realpathSync(ws) : ws;
+  const wsReal = !namesSidecarLabel(ws) && existsSync(ws) ? realpathSync(ws) : ws;
   const real = realpathSync(probe);
   return isPathWithin(real, ws) || isPathWithin(real, wsReal);
 }
@@ -311,6 +312,11 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       const mapped = toWorkspaceRel(resolve(input.directory), base.ws);
       if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel, changeset, wayOut);
     }
+    // In shell sidecar mode a directory below the label outside the context workspace is not
+    // reached by name (D3).
+    if (namesSidecarLabel(input.directory)) {
+      throw new Error(`${input.directory} is in the workspace but not in this conversation's folder. Name a directory in ${base?.ws ?? 'the workspace'}.`);
+    }
     // Resolve symlinks on the directory itself to prevent traversal via symlinked root
     const dir = realpathSync(resolve(input.directory));
     if (base !== null) {
@@ -319,7 +325,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
         throw new Error(`${input.directory} reaches the workspace through a link. Name the directory by its path in the workspace (${base.ws}).`);
       }
       // A directory that holds the workspace would walk into it, and reach its files by name.
-      const wsReal = existsSync(base.ws) ? realpathSync(base.ws) : base.ws;
+      const wsReal = !namesSidecarLabel(base.ws) && existsSync(base.ws) ? realpathSync(base.ws) : base.ws;
       if (isPathWithin(base.ws, dir) || isPathWithin(wsReal, dir)) {
         throw new Error(`${input.directory} holds the workspace. Name a directory in the workspace (${base.ws}), or one beside it.`);
       }
