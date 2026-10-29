@@ -1,5 +1,5 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import { BULK_HALT_REASONS, bulkFoundAsPlannedNote, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BulkPreviewCapError, bulkFoundAsPlannedNote, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
 import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
 import { isShopifyListForm, listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { shopifyBulkReadEnabled } from '../../core/bulk-shopify.js';
@@ -211,7 +211,8 @@ const JUDGE_NOTE = 'With judge, no model is called until the user starts the run
 
 export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
   // Writes only the ledger — but recording a run also drops the oldest unapproved
-  // previews beyond the cap, and nothing keeps what was dropped.
+  // previews beyond the cap (a planner who is not the owner: only its own, else it is
+  // refused), and nothing keeps what was dropped.
   undo: 'none',
   definition: {
     name: 'bulk_plan',
@@ -380,6 +381,8 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       ].join('\n');
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return `Error: ${err.message}`;
+      // The cap refuses a planner who is not the owner; its text is ux's and names no run.
+      if (err instanceof BulkPreviewCapError) return `Error: ${err.message}`;
       // Data-store errors name the collection or filter column the caller passed —
       // the caller's own strings, not a target's content.
       return `Error: the dry run failed: ${err instanceof Error ? err.message : String(err)}`;
