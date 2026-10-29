@@ -4233,7 +4233,8 @@ export class LynoxHTTPApi {
       // message — the reusable injection point, so any future "discuss this X"
       // entry passes the same shape and the server owns how each kind renders.
       // Best-effort: an unknown/foreign id yields no preamble and the chat still
-      // runs. Single-tenant container ⇒ the id is always the tenant's own; an
+      // runs — except an approval entry, whose chat is told its draft is not
+      // available (APPROVAL_DRAFT_UNAVAILABLE). Single-tenant container ⇒ the id is always the tenant's own; an
       // approval entry is the one kind also read by whose grant filed it.
       let contextPreamble = '';
       const rawCtx = b?.['context'];

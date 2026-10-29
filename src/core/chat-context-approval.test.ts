@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, type FileApprovalInput, type MailReplyPayload, type MailSendPayload } from './approval-store.js';
-import { closeLoadedContext, resolveChatContext, stripLoadedContext, type ChatApprovalReader } from './chat-context.js';
+import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext, resolveChatContext, stripLoadedContext, type ChatApprovalReader } from './chat-context.js';
 import { APPROVAL_OUTCOMES, APPROVAL_REWRITABLE_OUTCOMES, type ApprovalScope } from './approval-view.js';
 import { channels } from './observability.js';
 import { containsUntrustedMarker } from './data-boundary.js';
@@ -494,5 +494,17 @@ describe('the approval chat context for an approved email that was not sent', ()
     expect(store.get(id)!.status).toBe('failed');
     expect(store.claim(id)).toEqual({ ok: false, reason: 'not_claimable' });
     expect(store.decide(id, { action: 'approve', checksum: store.get(id)!.checksum }, 'owner')).toEqual({ ok: false, reason: 'not_pending' });
+  });
+});
+
+describe('what a chat reads when its approval draft does not load', () => {
+  it('says so, tells the model not to make one up, and names no entry', () => {
+    expect(APPROVAL_DRAFT_UNAVAILABLE).toBe(
+      '[Loaded draft — not available]\n' +
+      'The draft from the approval queue that this chat was opened on cannot be loaded here. ' +
+      'Tell the user it is not available. Do not write the email from memory or look for it elsewhere; ask the user what they want to send.',
+    );
+    // The web-ui and the title strip it as every other loaded block.
+    expect(stripLoadedContext(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}change it`)).toBe('change it');
   });
 });
