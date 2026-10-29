@@ -1310,7 +1310,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     ? `\nDocs body was truncated at ${String(DOCS_BODY_MAX_BYTES)} bytes — verify rate limits and pricing before trusting this draft.`
     : '';
   const limitNote = sectionsCutByLimit
-    ? `\nSome linked docs sections were not read: this conversation reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests. The profile is built from the sections read so far and may miss endpoints. When you present it, tell the user that in one sentence.`
+    ? `\nSome linked docs sections were not read: this conversation or run reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests. The profile is built from the sections read so far and may miss endpoints. If a user is in this conversation, tell them that in one sentence when you present it.`
     : '';
   const linkedNote = fetchedSections.length > 0
     ? `\nIncluded ${String(fetchedSections.length)} linked section(s): ${fetchedSections.map(s => s.url).join(', ')}`

@@ -66,7 +66,7 @@ describe('api_setup and the request limit', () => {
   }
   const fetched = (spy: ReturnType<typeof vi.spyOn>): string[] => spy.mock.calls.map((c) => String(c[0]));
 
-  const NOT_READ = `Some linked docs sections were not read: this conversation reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests. The profile is built from the sections read so far and may miss endpoints. When you present it, tell the user that in one sentence.`;
+  const NOT_READ = `Some linked docs sections were not read: this conversation or run reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests. The profile is built from the sections read so far and may miss endpoints. If a user is in this conversation, tell them that in one sentence when you present it.`;
   const blocked = (what: string): string => `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it, so api_setup cannot fetch ${what}. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not start here and that they can start it in a new chat.`;
 
   beforeEach(() => {
