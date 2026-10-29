@@ -23,6 +23,10 @@
  *     support as the way to have them enabled, and offers to draft the texts here.
  * (h) The same on a self-hosted instance with bulk runs off: it names the variable that enables
  *     the Shopify read instead of support.
+ * (i) The keyword lookup of (e) in a chat with no loaded context, as any chat starts: it runs the
+ *     lookup with the names typed and reads no store. A question instead of the lookup fails here,
+ *     unlike in (e): the names are given, and asking first is the regression this case guards
+ *     against when a tool description changes.
  * In (a), (e), (f), (g) and (h) no word may call a chat read-only: this one is not, and a word
  * about the chat it came from is checked by hand.
  *
@@ -338,6 +342,18 @@ This chat has already read the store's products (Bergtee, Honig, Sirup).`,
       if (!DRAFT_OFFER.test(text)) return { ok: false, why: 'offered no draft' };
       return { ok: true, why: `named the way, offered drafts: ${t.uses.map((u) => u.name).join(',') || 'text only'}` };
     }),
+  },
+  {
+    label: '(i) a chat with no loaded context, keyword lookup with the names typed: runs the lookup, reads no store',
+    message: 'Hol mir bei DataForSEO die monatlichen Suchvolumen für Bergtee und Sirup.',
+    tools: OPENED_TOOLS,
+    system: KEYWORD_SYSTEM,
+    verdict: (t) => {
+      const storeRead = t.uses.some((u) => u.name === 'http_request' && !isForeign(u));
+      if (storeRead) return { ok: false, why: `read the store: ${t.uses.map((u) => u.name).join(',')}` };
+      if (t.uses.some((u) => isForeign(u))) return { ok: true, why: 'looked up, read no store' };
+      return { ok: false, why: `did not run the lookup: ${t.uses.map((u) => u.name).join(',') || 'text only'}` };
+    },
   },
 ];
 
