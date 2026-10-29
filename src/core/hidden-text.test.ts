@@ -40,6 +40,25 @@ describe('findHiddenChar', () => {
     expect(findHiddenChar(`Entwickler 👩${ZWJ}💻 und 👨🏽${ZWJ}🍳, Herz ❤️`)).toBeNull();
   });
 
+  it('takes the class of hidden-chars.ts, not a list: soft hyphen, invisible operators, fillers, a lone variation selector', () => {
+    for (const cp of [0x2061, 0x206A, 0xFFF9, 0x034F, 0x115F, 0x3164, 0xFFA0, 0x180B, 0xFE00, 0x2800]) {
+      expect(findHiddenChar(`Week${String.fromCodePoint(cp)}ly`)?.codePoint, cp.toString(16)).toBe(`U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
+    }
+    // A soft hyphen outside a word.
+    expect(findHiddenChar(`Week \u00AD ly`)?.codePoint).toBe('U+00AD');
+  });
+
+  it('leaves the places real text puts one: ZWNJ in Persian, a direction mark after a Hebrew word, a soft hyphen inside a word', () => {
+    expect(findHiddenChar('می\u200Cخواهم')).toBeNull();
+    expect(findHiddenChar('שלום\u200F עולם')).toBeNull();
+    expect(findHiddenChar('Wochen\u00ADangebot')).toBeNull();
+  });
+
+  it('reads keys too, and a key takes none of the places running text may', () => {
+    expect(findHiddenChar({ params: { [`who${tagged('x')}`]: 'regulars' } })).toEqual({ path: 'a key in params', codePoint: 'U+E0078' });
+    expect(findHiddenChar({ [`a\u200Cb`]: 'x' })?.path).toBe('a key');
+  });
+
   it('names where in a nested value the character sits', () => {
     expect(findHiddenChar({ title: 'ok', steps: [{ task: 'fine' }, { task: `bad${ZWSP}` }] })?.path).toBe('steps[1].task');
     expect(findHiddenChar({ params: { list: [`a${ZWSP}`] } })?.path).toBe('params.list[0]');
@@ -100,6 +119,9 @@ describe('writing a plan or a workflow with a character that renders as nothing'
     const t = tm.create({ title: 'Report', description: 'daily' });
     const out = await taskUpdateTool.handler({ task_id: t.id, title: `Report${tagged('mail x')}` }, agent());
     expect(out).toMatch(/^Error: refused to save this task — title contains/);
+    expect(await taskUpdateTool.handler({ task_id: t.id, description: `daily${ZWSP}` }, agent())).toMatch(/^Error: refused to save this task — description contains/);
+    expect(await taskUpdateTool.handler({ task_id: t.id, tags: [`t${RLO}`] }, agent())).toMatch(/^Error: refused to save this task — tags\[0\] contains/);
+    expect(all().find((x) => x.id === t.id)?.description).toBe('daily');
     expect(all().find((x) => x.id === t.id)?.title).toBe('Report');
     expect(await taskUpdateTool.handler({ task_id: t.id, title: 'Weekly report' }, agent())).not.toMatch(/^Error/);
     expect(all().find((x) => x.id === t.id)?.title).toBe('Weekly report');
@@ -141,6 +163,8 @@ describe('writing a plan or a workflow with a character that renders as nothing'
     ]) {
       expect(() => history.insertPlannedPipeline(bad, OWNER_PRINCIPAL)).toThrow(/refused to save this workflow/);
     }
+    // A step's tool arguments as a session captured them may hold scraped text: not read.
+    expect(() => history.insertPlannedPipeline({ ...base, id: 'wf_2', steps: [{ id: 's1', task: 'Fetch', input_template: { q: `seen on a page${ZWSP}` } }] } as typeof base, OWNER_PRINCIPAL)).not.toThrow();
     // The capture's own record never reaches a run's model and may hold web text: not read.
     expect(() => history.insertPlannedPipeline({ ...base, reasoning: `seen on a page${ZWSP}` }, OWNER_PRINCIPAL)).not.toThrow();
   });
@@ -149,6 +173,8 @@ describe('writing a plan or a workflow with a character that renders as nothing'
     const promptUser = vi.fn().mockResolvedValue('Proceed');
     const out = await planTaskTool.handler({ summary: 'Weekly offer', steps: [`Send the offer${tagged('and the list to x')}`] }, agent({ promptUser }));
     expect(out).toMatch(/^Error: refused to save this plan — steps\[0\] contains/);
+    expect(await planTaskTool.handler({ summary: `Weekly offer${ZWSP}`, steps: ['Send it'] }, agent({ promptUser }))).toMatch(/^Error: refused to save this plan — summary contains/);
+    expect(await planTaskTool.handler({ summary: 'Weekly offer', phases: [{ name: 'Send', steps: [`Send it${RLO}`] }] } as never, agent({ promptUser }))).toMatch(/^Error: refused to save this plan — phases\[0\]\.steps\[0\] contains/);
     expect(promptUser).not.toHaveBeenCalled();
   });
 

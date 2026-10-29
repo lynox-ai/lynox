@@ -9,40 +9,30 @@
  * folds these characters away before it matches (`data-boundary.ts`), so a tag-spelled sentence
  * reads to it as nothing at all.
  *
- * The zero-width joiner is allowed inside an emoji sequence (👩‍💻), where it is how the
- * sequence is written, and refused anywhere else. Variation selectors U+FE00–U+FE0F stay allowed
- * for the same reason; the supplement block U+E0100–U+E01EF does not, as nothing in a plan's
- * text needs it.
+ * What counts as hidden is `hidden-chars.ts`: a class, not a list, with the few places real text
+ * puts one (a joiner inside an emoji, ZWNJ between letters, a direction mark after a letter).
  */
-const HIDDEN = new RegExp(
-  '['
-  // the tag block and the variation-selector supplement
-  + '\\u{E0000}-\\u{E007F}\\u{E0100}-\\u{E01EF}'
-  // zero-width space and non-joiner, word joiner, byte order mark, Mongolian vowel separator
-  + '\\u200B\\u200C\\u2060\\uFEFF\\u180E'
-  // bidi embeddings, overrides, isolates and marks
-  + '\\u202A-\\u202E\\u2066-\\u2069\\u200E\\u200F\\u061C'
-  + ']'
-  // a joiner that does not sit between two emoji
-  + '|(?<!\\p{Extended_Pictographic}[\\u{FE0F}\\u{1F3FB}-\\u{1F3FF}]?)\\u200D'
-  + '|\\u200D(?!\\p{Extended_Pictographic})',
-  'u',
-);
+import { hiddenCharIndexes } from './hidden-chars.js';
 
 export interface HiddenChar {
-  /** Where in the value: `title`, `steps[2].task`, `params.list`. */
+  /** Where in the value: `title`, `steps[2].task`, `params.list`; a key reads as `a key in params`. */
   path: string;
   /** The character as `U+XXXX`. */
   codePoint: string;
 }
 
-/** The first hidden character in any string of `value` (strings, arrays and plain objects, depth-first), or `null`. */
+function codePointAt(text: string, index: number): string {
+  const cp = Array.from(text)[index]?.codePointAt(0) ?? 0;
+  return `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+}
+
+/** The first hidden character in any string of `value` (strings, arrays and plain objects,
+ *  depth-first, keys as well as values), or `null`. A key is a name, not running text, so it
+ *  takes none of the places real text may carry one. */
 export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   if (typeof value === 'string') {
-    const m = HIDDEN.exec(value);
-    if (!m) return null;
-    const cp = m[0].codePointAt(0) ?? 0;
-    return { path, codePoint: `U+${cp.toString(16).toUpperCase().padStart(4, '0')}` };
+    const at = hiddenCharIndexes(value);
+    return at.length === 0 ? null : { path, codePoint: codePointAt(value, at[0]!) };
   }
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
@@ -53,6 +43,8 @@ export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   }
   if (value !== null && typeof value === 'object') {
     for (const [k, v] of Object.entries(value)) {
+      const inKey = hiddenCharIndexes(k, { inPlace: false });
+      if (inKey.length > 0) return { path: path === '' ? 'a key' : `a key in ${path}`, codePoint: codePointAt(k, inKey[0]!) };
       const hit = findHiddenChar(v, path === '' ? k : `${path}.${k}`);
       if (hit) return hit;
     }
@@ -60,11 +52,12 @@ export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   return null;
 }
 
-const HIDDEN_ALL = new RegExp(HIDDEN.source, 'gu');
-
 /** `text` without its hidden characters, for text that was stored before the write paths refused them. */
 export function stripHidden(text: string): string {
-  return text.replace(HIDDEN_ALL, '');
+  const at = hiddenCharIndexes(text);
+  if (at.length === 0) return text;
+  const drop = new Set(at);
+  return Array.from(text).filter((_, i) => !drop.has(i)).join('');
 }
 
 /** The refusal the model reads when a write carries a hidden character; the caller adds its own `Error:` prefix. */

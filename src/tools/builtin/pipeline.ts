@@ -22,6 +22,7 @@ import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, hiddenInBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
+import { stripHidden } from '../../core/hidden-text.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
@@ -858,16 +859,20 @@ export async function runSavedWorkflow(
   if (grant.contract !== undefined && runtime?.startedVia === undefined) {
     grant = { contract: undefined, note: 'Ran without its write grant: this way of starting it does not say how the run was started.' };
   }
-  // Asked again here and not only when the grant is accepted: a grant stamped before the
-  // check existed carries its values unchecked, and its stamp still matches.
-  if (grant.contract !== undefined && hiddenInBoundValues(grant.boundParams) !== null) {
-    grant = { contract: undefined, note: 'Ran without its write grant: a value it was accepted with holds a character that does not show as text. Schedule the workflow again from the library to grant it.' };
-  }
   // ⛔ Only beside the contract, and built from the ACCEPTED values, not the bound ones: the
   // two are equal here, but the person saw the accepted ones.
   const isAcceptedParam = grant.contract !== undefined ? acceptedValueMatcher(grant.boundParams) : undefined;
+  // With a grant or without one, a value that holds a character that renders as nothing does not
+  // run: it is bound into a step's task, and the person who stamped the schedule did not see it.
+  // This also covers a grant stamped before its values were checked at acceptance: a grant only
+  // survives to here with values equal to the bound ones.
+  const hiddenValue = hiddenInBoundValues(bound.params);
+  if (hiddenValue !== null) return { ok: false, error: hiddenValue };
 
-  const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
+  // Each step's task without the characters that render as nothing: the save refuses them now,
+  // but a workflow saved before that still carries them, and a hidden clause would run as part
+  // of the step's instruction. Stripped, not refused, so it keeps running on what can be seen.
+  const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s, task: stripHidden(s.task) }));
   if (steps.length === 0) {
     return { ok: false, error: 'Workflow has no steps to execute.' };
   }
@@ -1205,6 +1210,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   if (!bound.ok) {
     return `Error: ${bound.error}`;
   }
+  // A value that holds a character that renders as nothing does not run (see `runSavedWorkflow`).
+  const hiddenValue = hiddenInBoundValues(bound.params);
+  if (hiddenValue !== null) return `Error: ${hiddenValue}`;
 
   // Deep copy steps for modification
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
@@ -1213,6 +1221,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     const error = applyModifications(steps, input.modifications);
     if (error) return error;
   }
+  // Each step's task without the characters that render as nothing, after the modifications too.
+  for (const s of steps) s.task = stripHidden(s.task);
 
   if (steps.length === 0) {
     return 'Error: All steps were removed. Nothing to execute.';

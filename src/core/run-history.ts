@@ -3334,11 +3334,19 @@ export class RunHistory {
     // through here, so a contract-governed workflow with an unconstrained
     // re-targetable param is rejected before it can be persisted + scheduled.
     // No contract → no-op, so existing playbooks are unaffected.
-    // The text a run hands the model (name, goal, steps, parameters) carries no character that
-    // renders as nothing (`hidden-text.ts`): a workflow copied from someone else's would bring its
-    // hidden instructions along. Only tools save here, so a refusal reaches the model that wrote it.
-    // `reasoning` is the capture's own record and never reaches a run's model, so it is not read.
-    const hidden = findHiddenChar({ name: planned.name, goal: planned.goal, steps: planned.steps, parameters: (planned as { parameters?: unknown }).parameters });
+    // The text a run hands the model as its instruction (name, goal, each step's task, the
+    // parameters) carries no character that renders as nothing (`hidden-text.ts`): a workflow
+    // copied from someone else's would bring its hidden instructions along. Only tools save here,
+    // so a refusal reaches the model that wrote it. Not read: a step's `input_template`, which is
+    // a tool's arguments as a session captured them (scraped text may hold such a character, and
+    // the model saving it cannot rewrite them), and `reasoning`, the capture's own record, which
+    // never reaches a run's model.
+    const hidden = findHiddenChar({
+      name: planned.name,
+      goal: planned.goal,
+      steps: planned.steps.map((s) => ({ task: s.task })),
+      parameters: (planned as { parameters?: unknown }).parameters,
+    });
     if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
