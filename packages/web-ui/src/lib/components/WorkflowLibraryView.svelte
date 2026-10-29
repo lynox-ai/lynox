@@ -6,7 +6,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
-	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, onceTriggersLine, parseStampPreview, stepHeading, templateText, timeoutText, visible, type StampPreview } from '../utils/workflow-stamp.js';
+	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, stepHeading, templateText, timeoutText, visible, type StampPreview } from '../utils/workflow-stamp.js';
 
 	// The card actions show on hover only where there is room beside the name AND a pointer that
 	// hovers. Below `md` they sit under the name and stay visible, and on a device without hover
@@ -334,6 +334,8 @@
 	// Bumped by every opening and closing, so a confirm answered after its view was closed (or
 	// replaced by another workflow's) acts on nothing.
 	let stampOpening = 0;
+	// After a stamp: plans the wait switched off, which stay off. Kept until the next review.
+	let stampOnceLine = $state('');
 	// The confirm button sits at the foot of the view, the line at its head: on a phone the line
 	// that says the steps changed would be out of sight, so it is brought into view when it appears.
 	let stampChangedLine = $state<HTMLElement | null>(null);
@@ -366,6 +368,7 @@
 		stampOpening++;
 		error = '';
 		notice = '';
+		stampOnceLine = '';
 		stampLine = line;
 		stampWf = wf;
 		void loadStampPreview(wf);
@@ -395,7 +398,7 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ expect: shown.expect }),
 			});
-			const body = (await res.json().catch(() => null)) as { code?: string; disabledOnce?: unknown } | null;
+			const body = (await res.json().catch(() => null)) as { code?: string; stillOff?: unknown } | null;
 			if (opening !== stampOpening) return;
 			const outcome = confirmOutcome(res.status, body?.code);
 			if (outcome.kind === 'changed') {
@@ -408,12 +411,14 @@
 			const resume = stampResumesSchedule;
 			closeStamp();
 			const after = stampOpening;
-			// Plans that run only once and fired while the workflow waited stay off: say so, and where
+			// Plans the wait switched off (one that runs once, a webhook) stay off: say so, and where
 			// to switch them on, or the notice promises more than the stamp did.
-			const once = onceTriggersLine(body?.disabledOnce);
-			notice = once
-				? `${t('workflow_library.stamp.stamped')} ${tf(once.key, { n: String(once.n) })}`
-				: t('workflow_library.stamp.stamped');
+			// Its own line, not part of the notice: the way back to the schedule replaces the notice
+			// (`reopen_schedule`, then `scheduled`), and the owner coming from there is the one most
+			// likely to have such plans.
+			const once = stillOffLine(body?.stillOff);
+			stampOnceLine = once ? tf(once.key, { n: String(once.n) }) : '';
+			notice = t('workflow_library.stamp.stamped');
 			const listed = await loadWorkflows();
 			// Another view opened meanwhile is the one on screen now, and the dialog stays shut. The
 			// cards are hidden while a list loads, but a rename or delete answered meanwhile reloads
@@ -616,6 +621,9 @@
 	{/if}
 	{#if notice}
 		<div class="rounded-[var(--radius-md)] bg-success/10 border border-success/20 px-4 py-3 text-sm text-success mb-4">{notice}</div>
+	{/if}
+	{#if stampOnceLine}
+		<div role="status" data-testid="stamp-once" class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/30 px-4 py-3 text-sm mb-4">{stampOnceLine}</div>
 	{/if}
 
 	{#if loading}
@@ -958,6 +966,9 @@
 			{:else if stampLine === 'awaits_at_schedule' && stampPreview}
 				<!-- Worded by who changed it, which only the preview says: the line waits for it. -->
 				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t(awaitsLineKey(stampPreview.changedBy))}</p>
+			{:else if stampLine === 'awaits_at_schedule' && !stampLoading}
+				<!-- The preview did not load, so who changed it is unknown: the line says why, not who. -->
+				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.awaits_at_schedule_unloaded')}</p>
 			{/if}
 			{#if error}
 				<p class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3">{error}</p>
@@ -996,6 +1007,9 @@
 				{/if}
 
 				<div class="space-y-2">
+					{#if p.steps.length === 0}
+						<p data-testid="stamp-no-steps" class="text-xs text-text-subtle">{t('workflow_library.stamp.no_steps')}</p>
+					{/if}
 					{#each p.steps as step, i (i)}
 						{@const h = stepHeading(step)}
 						<div data-testid="stamp-step" class="rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-3 py-2 text-xs">
@@ -1014,7 +1028,17 @@
 							<p class="whitespace-pre-wrap break-words">{visible(step.task)}</p>
 							{#if step.role}
 								<!-- First: a role can change the tools and the model below at run time. -->
-								<p class="mt-2" data-testid="stamp-role"><span class="text-text-subtle">{t('workflow_library.stamp.role')}:</span> <span class="font-mono break-all">{visible(step.role)}</span></p>
+								<p class="mt-2" data-testid="stamp-role"><span class="text-text-subtle">{t('workflow_library.stamp.role')}:</span> <span class="font-mono break-all">{visible(step.role)}</span>{#if step.roleGrant?.readOnly} <span class="ml-1 rounded-[var(--radius-sm)] border border-border px-1 text-text-subtle">{t('workflow_library.stamp.role_read_only')}</span>{/if}</p>
+								{#if step.roleGrant}
+									{@const g = step.roleGrant}
+									<div data-testid="stamp-role-grant">
+										{#if g.model}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_model')}:</span> <span class="font-mono break-all">{visible(g.model)}</span></p>{/if}
+										{#if g.effort}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_effort')}:</span> <span class="font-mono">{g.effort}</span></p>{/if}
+										{#if g.allowTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_allows')}:</span> <span class="font-mono break-all">{visible(g.allowTools.join(', '))}</span></p>{/if}
+										{#if g.denyTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_blocks')}:</span> <span class="font-mono break-all">{visible(g.denyTools.join(', '))}</span></p>{/if}
+									</div>
+								{/if}
+								<p class="mt-1 text-text-subtle">{t('workflow_library.stamp.role_hint')}</p>
 							{/if}
 							{#if step.tools.length > 0}
 								<p class="mt-2"><span class="text-text-subtle">{t('workflow_library.stamp.tools')}:</span> <span class="font-mono break-all">{visible(step.tools.join(', '))}</span></p>
@@ -1029,7 +1053,7 @@
 								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.thinking')}:</span> <span class="font-mono">{step.thinking}</span></p>
 							{/if}
 							{#if step.timeoutMs !== null}
-								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.timeout')}:</span> <span class="font-mono">{timeoutText(step.timeoutMs)}</span></p>
+								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.timeout')}:</span> <span class="font-mono">{step.timeoutMs === 0 ? t('workflow_library.stamp.timeout_zero') : timeoutText(step.timeoutMs)}</span></p>
 							{/if}
 							{#if step.inputFrom.length > 0}
 								<p class="mt-1"><span class="text-text-subtle">{t('workflow.depends_on')}:</span> <span class="font-mono break-all">{visible(step.inputFrom.join(', '))}</span></p>

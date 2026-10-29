@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  STEP_TASK_HEAD, awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, onceTriggersLine, parseStampPreview, stepHeading, templateText, timeoutText, visible,
+  STEP_TASK_HEAD, awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, stepHeading, templateText, timeoutText, visible,
 } from './workflow-stamp.js';
 
 /** An answer of `GET /api/workflows/:id/stamp-preview` as the contract (242 r1) describes it. */
@@ -96,10 +96,28 @@ describe('parseStampPreview — role, effort, thinking and time limit (contract 
     expect(parseStampPreview(step({}))!.steps[0]).toMatchObject({ role: null, effort: null, thinking: null, timeoutMs: null });
   });
 
-  it('refuses a value it cannot show truthfully: a role must not vanish while still being stamped', () => {
-    for (const over of [{ role: 3 }, { effort: 'huge' }, { effort: 2 }, { thinking: true }, { thinking: 'on' }, { timeoutMs: '90s' }, { timeoutMs: -1 }, { timeoutMs: Number.NaN }]) {
-      expect(parseStampPreview(step(over)), JSON.stringify(over)).toBeNull();
-    }
+  // One case per test, so a mutant's kill names the value it let through.
+  it.each([
+    ['role', 3], ['effort', 'huge'], ['effort', 2], ['thinking', true], ['thinking', 'on'],
+    ['timeoutMs', '90s'], ['timeoutMs', -1], ['timeoutMs', Number.NaN],
+  ] as const)('refuses %s = %s: a value it cannot show truthfully must not be stamped unseen', (field, value) => {
+    expect(parseStampPreview(step({ [field]: value }))).toBeNull();
+  });
+
+  it('reads what a role grants, and none without one', () => {
+    const grant = { model: 'fast', effort: 'low', allowTools: ['read_file'], denyTools: ['http_request'], readOnly: true };
+    expect(parseStampPreview(step({ role: 'reviewer', roleGrant: grant }))!.steps[0]!.roleGrant).toEqual(grant);
+    expect(parseStampPreview(step({ role: 'reviewer', roleGrant: { model: null, effort: null, allowTools: null, denyTools: null, readOnly: false } }))!.steps[0]!.roleGrant)
+      .toEqual({ model: null, effort: null, allowTools: null, denyTools: null, readOnly: false });
+    expect(parseStampPreview(step({}))!.steps[0]!.roleGrant).toBeNull();
+  });
+
+  it.each([
+    ['not an object', 'reviewer'], ['readOnly missing', { model: null }], ['readOnly not a boolean', { readOnly: 'yes' }],
+    ['allowTools not a list', { readOnly: false, allowTools: 'read_file' }], ['denyTools with a non-string', { readOnly: false, denyTools: [1] }],
+    ['effort unknown', { readOnly: false, effort: 'huge' }], ['model not a string', { readOnly: false, model: 3 }],
+  ] as const)('refuses a grant it cannot read whole: %s', (_label, roleGrant) => {
+    expect(parseStampPreview(step({ role: 'reviewer', roleGrant }))).toBeNull();
   });
 
   it('reads a workflow with no steps: it runs nothing, and can be stamped', () => {
@@ -108,22 +126,22 @@ describe('parseStampPreview — role, effort, thinking and time limit (contract 
 });
 
 describe('timeoutText — a time limit in seconds or minutes, never raw milliseconds', () => {
-  it('rounds up to whole seconds below a minute, and shows minutes above', () => {
-    expect([timeoutText(500), timeoutText(30_000), timeoutText(59_001), timeoutText(60_000), timeoutText(150_000)])
-      .toEqual(['1 s', '30 s', '1 min', '1 min', '2 min 30 s']);
+  it('keeps milliseconds below a second, rounds up to whole seconds below a minute, and shows minutes above', () => {
+    expect([timeoutText(1), timeoutText(500), timeoutText(1000), timeoutText(30_000), timeoutText(59_001), timeoutText(60_000), timeoutText(150_000)])
+      .toEqual(['1 ms', '500 ms', '1 s', '30 s', '1 min', '1 min', '2 min 30 s']);
   });
 });
 
-describe('onceTriggersLine — plans that run only once stay off after the stamp', () => {
+describe('stillOffLine — plans the wait switched off stay off after the stamp', () => {
   it('names one, or many, and says nothing for none', () => {
-    expect(onceTriggersLine(1)).toEqual({ key: 'workflow_library.stamp.once_one', n: 1 });
-    expect(onceTriggersLine(3)).toEqual({ key: 'workflow_library.stamp.once_many', n: 3 });
-    expect(onceTriggersLine(0)).toBeNull();
+    expect(stillOffLine(1)).toEqual({ key: 'workflow_library.stamp.still_off_one', n: 1 });
+    expect(stillOffLine(3)).toEqual({ key: 'workflow_library.stamp.still_off_many', n: 3 });
+    expect(stillOffLine(0)).toBeNull();
   });
 
   it('words it as a condition when the engine does not count', () => {
     for (const v of [undefined, null, '2', 1.5, -1]) {
-      expect(onceTriggersLine(v), String(v)).toEqual({ key: 'workflow_library.stamp.once_unknown', n: 0 });
+      expect(stillOffLine(v), String(v)).toEqual({ key: 'workflow_library.stamp.still_off_unknown', n: 0 });
     }
   });
 });

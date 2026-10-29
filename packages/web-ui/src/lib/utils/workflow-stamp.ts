@@ -28,6 +28,17 @@ export interface StampStep {
   effort: StampEffort | null;
   thinking: StampThinking | null;
   timeoutMs: number | null;
+  /** What the role grants. Which tools a step finally uses is worked out at run time from this
+   *  and the step's own `tools` (read-only surface first, then allow, then deny). */
+  roleGrant: StampRoleGrant | null;
+}
+
+export interface StampRoleGrant {
+  model: string | null;
+  effort: StampEffort | null;
+  allowTools: string[] | null;
+  denyTools: string[] | null;
+  readOnly: boolean;
 }
 
 export const STAMP_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -66,6 +77,17 @@ const optOneOf = <T extends string>(v: unknown, values: readonly T[]): T | null 
 /** Absent or null is none; a finite, non-negative number is itself; anything else is BAD. */
 const optMs = (v: unknown): number | null | typeof BAD =>
   v === undefined || v === null ? null : typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : BAD;
+/** Absent or null is none; a grant read whole is itself; anything else is BAD. */
+const optGrant = (v: unknown): StampRoleGrant | null | typeof BAD => {
+  if (v === undefined || v === null) return null;
+  if (!isRecord(v) || typeof v['readOnly'] !== 'boolean') return BAD;
+  const model = optStr(v['model']);
+  const effort = optOneOf(v['effort'], STAMP_EFFORTS);
+  const allow = v['allowTools'] === null || v['allowTools'] === undefined ? null : optStrings(v['allowTools']);
+  const deny = v['denyTools'] === null || v['denyTools'] === undefined ? null : optStrings(v['denyTools']);
+  if (model === BAD || effort === BAD || allow === BAD || deny === BAD) return BAD;
+  return { model, effort, allowTools: allow, denyTools: deny, readOnly: v['readOnly'] };
+};
 /** Absent or null is the empty list; an array of strings is itself; anything else, or any non-string entry, is BAD. */
 const optStrings = (v: unknown): string[] | typeof BAD => {
   if (v === undefined || v === null) return [];
@@ -97,12 +119,14 @@ export function parseStampPreview(body: unknown): StampPreview | null {
     const effort = optOneOf(s['effort'], STAMP_EFFORTS);
     const thinking = optOneOf(s['thinking'], STAMP_THINKING);
     const timeoutMs = optMs(s['timeoutMs']);
+    const roleGrant = optGrant(s['roleGrant']);
+    if (roleGrant === BAD) return null;
     if (tool === BAD || tools === BAD || model === BAD || inputFrom === BAD) return null;
     if (role === BAD || effort === BAD || thinking === BAD || timeoutMs === BAD) return null;
     const inputTemplate = s['inputTemplate'] ?? null;
     // A call's input without the call: the view prints the input under the tool, so it would vanish.
     if (inputTemplate !== null && tool === null) return null;
-    steps.push({ id: s['id'], task: s['task'], tool, inputTemplate, tools, model, inputFrom, role, effort, thinking, timeoutMs });
+    steps.push({ id: s['id'], task: s['task'], tool, inputTemplate, tools, model, inputFrom, role, effort, thinking, timeoutMs, roleGrant });
   }
   const contract = body['contract'] === undefined || body['contract'] === null ? null : optStrings(body['contract']);
   if (contract === BAD) return null;
@@ -173,13 +197,12 @@ export type ConfirmOutcome =
   | { kind: 'failed'; key: string };
 
 /**
- * What an answer of `POST /api/workflows/:id/confirm` means for the view.
- *
- * Only a 2xx stamps. `steps_changed` is the one refusal with a way forward inside the view; every
- * other answer, including a 409 with another code or none, is a failure — never read as "stamped".
+ * A step's time limit as a person reads it: milliseconds below a second (a tiny limit decides
+ * whether the step can finish at all, so it is not rounded up), seconds below a minute, minutes
+ * (and seconds) above.
  */
-/** A step's time limit as a person reads it: seconds below a minute, minutes (and seconds) above. */
 export function timeoutText(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
   const s = Math.ceil(ms / 1000);
   if (s < 60) return `${s} s`;
   const m = Math.floor(s / 60);
@@ -187,18 +210,17 @@ export function timeoutText(ms: number): string {
 }
 
 /**
- * The line after a stamp about plans that run only once. The engine switches such a plan off
- * when it fires while the workflow waits, and leaves it off: someone has to switch it on again.
- * `disabledOnce` is how many there are; an engine that does not count sends none, and the line
- * is then worded as a condition, since there may be no such plan at all.
+ * The line after a stamp about plans that stay off. The wait switches off a plan that fires while
+ * the workflow waits (one that runs once, a webhook — not a cron or watch schedule) and leaves it
+ * off: someone has to switch it on again. `stillOff` is how many there are; an engine that does
+ * not count sends none, and the line is then worded as a condition, since there may be none.
  */
-export function onceTriggersLine(disabledOnce: unknown): { key: string; n: number } | null {
-  if (disabledOnce === undefined || disabledOnce === null) return { key: 'workflow_library.stamp.once_unknown', n: 0 };
-  if (typeof disabledOnce !== 'number' || !Number.isInteger(disabledOnce) || disabledOnce < 0) {
-    return { key: 'workflow_library.stamp.once_unknown', n: 0 };
+export function stillOffLine(stillOff: unknown): { key: string; n: number } | null {
+  if (typeof stillOff !== 'number' || !Number.isInteger(stillOff) || stillOff < 0) {
+    return { key: 'workflow_library.stamp.still_off_unknown', n: 0 };
   }
-  if (disabledOnce === 0) return null;
-  return { key: disabledOnce === 1 ? 'workflow_library.stamp.once_one' : 'workflow_library.stamp.once_many', n: disabledOnce };
+  if (stillOff === 0) return null;
+  return { key: stillOff === 1 ? 'workflow_library.stamp.still_off_one' : 'workflow_library.stamp.still_off_many', n: stillOff };
 }
 
 /** Which line a schedule refused for the stamp shows: the owner's own change reads differently. */
@@ -206,6 +228,12 @@ export function awaitsLineKey(changedBy: StampPreview['changedBy']): string {
   return changedBy === 'owner' ? 'workflow_library.stamp.awaits_at_schedule_own' : 'workflow_library.stamp.awaits_at_schedule';
 }
 
+/**
+ * What an answer of `POST /api/workflows/:id/confirm` means for the view.
+ *
+ * Only a 2xx stamps. `steps_changed` is the one refusal with a way forward inside the view; every
+ * other answer, including a 409 with another code or none, is a failure — never read as "stamped".
+ */
 export function confirmOutcome(status: number, code: string | undefined): ConfirmOutcome {
   if (status >= 200 && status < 300) return { kind: 'stamped' };
   if (status === 409 && code === 'steps_changed') return { kind: 'changed' };
