@@ -137,7 +137,7 @@ export interface ChatMessage {
 	 *  engine sends a structured code (not prose) so the UI renders a localized
 	 *  banner; `detail` is a sanitized provider-error snippet. Present only on
 	 *  rows the render projection flagged as notes (reload path). */
-	note?: { code: string; detail?: string };
+	note?: { code: string; detail?: string; approval?: { id: string; outcome: string } };
 	/** ISO timestamp the server persisted this message at (`created_at`), carried
 	 *  through the render projection so the UI can show a subtle per-message time.
 	 *  Optional/undefined-safe: older persisted rows + not-yet-reconciled live
@@ -3788,7 +3788,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 				blocks?: ContentBlock[];
 				toolCalls?: ToolCallInfo[];
 				usage?: UsageInfo;
-				note?: { code: string; detail?: string };
+				note?: { code: string; detail?: string; approval?: { id: string; outcome: string } };
 				created_at?: string;
 			}
 			const msgData = (await msgRes.json()) as {
@@ -3980,7 +3980,7 @@ export async function reconcileThread(): Promise<void> {
 			blocks?: ContentBlock[];
 			toolCalls?: ToolCallInfo[];
 			usage?: UsageInfo;
-			note?: { code: string; detail?: string };
+			note?: { code: string; detail?: string; approval?: { id: string; outcome: string } };
 			created_at?: string;
 		}
 		const data = (await res.json()) as {

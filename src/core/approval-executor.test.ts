@@ -162,7 +162,7 @@ describe('the executor sends an approved mail once, as it was filed', () => {
     expect(trail[0]!.action).toBe('mail_send:send');
     expect(trail[0]!.target).toBe(`approval ${id}: mail_send, 2 recipients, approved by owner`);
     expect(trail[0]!.target).not.toContain('bob@');
-    expect(notes).toEqual([{ threadId: 'th-1', content: { _lynox_note: { code: 'approval_sent' } } }]);
+    expect(notes).toEqual([{ threadId: 'th-1', content: { _lynox_note: { code: 'approval_sent', approval: { id, outcome: 'sent' } } } }]);
     // A second tick has nothing left to send.
     expect(await executor().tick()).toBeNull();
     expect(provider.send).toHaveBeenCalledTimes(1);
@@ -235,7 +235,8 @@ describe('what the executor checks again before it sends', () => {
     expect(await executor().tick()).toEqual({ id, status: 'failed' });
     expect(provider.send).not.toHaveBeenCalled();
     expect(reason(id)).toBe('checksum');
-    expect(notes[0]!.content).toEqual({ _lynox_note: { code: 'approval_failed' } });
+    // The note names the entry and the reason the approvals page shows for it.
+    expect(notes[0]!.content).toEqual({ _lynox_note: { code: 'approval_failed', approval: { id, outcome: 'checksum' } } });
   });
 
   it('a mail a mandate filed is not sent once that mandate has ended', async () => {
@@ -306,7 +307,7 @@ describe('what the executor checks again before it sends', () => {
     advance(10 * 60_000);
     expect(await executor().tick()).toBeNull();
     expect(provider.send).toHaveBeenCalledTimes(1);
-    expect(notes.at(-1)!.content).toEqual({ _lynox_note: { code: 'approval_unknown' } });
+    expect(notes.at(-1)!.content).toEqual({ _lynox_note: { code: 'approval_unknown', approval: { id, outcome: 'send_threw' } } });
   });
 
   it('a mail_send whose provider fails ends unknown', async () => {

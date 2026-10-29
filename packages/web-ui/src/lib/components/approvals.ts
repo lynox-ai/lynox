@@ -218,6 +218,49 @@ export function approvalNextStepKey(card: Pick<ApprovalCardData, 'status' | 'out
 	return viewer === 'owner' ? step : 'approvals.next.ask_owner';
 }
 
+/** The entry and outcome a chat note about an approved mail carries (core `render-projection.ts`). */
+export interface ApprovalNoteRef {
+	id: string;
+	outcome: string;
+}
+
+/** What a chat note about an approved mail shows: its sentence, the next step, and where its entry is. */
+export interface ApprovalNoteLines {
+	bodyKey: string;
+	nextKey: string | null;
+	href: string | null;
+}
+
+/** The page's path with one entry picked out: the "all" tab, that card marked. */
+export function approvalEntryHref(id: string): string {
+	return `/app/approvals?entry=${encodeURIComponent(id)}`;
+}
+
+/**
+ * The lines of a chat note about an approved mail that did not go out (`approval_failed`) or may
+ * have (`approval_unknown`), or null for any other note. The reason is the sentence the page shows
+ * for the same entry, and the next step the page's, for the same viewer. A note without a known
+ * reason keeps its own sentence: the page's sentence for an unrecorded reason ("closed without a
+ * recorded reason") reads wrong in a note about a failure, and its own sentence already says what
+ * to do. Without a viewer, no next step: whether it is the owner's or "ask the owner" depends on it.
+ */
+export function approvalNoteLines(code: string, ref: ApprovalNoteRef | undefined, viewer: ApprovalViewer | null): ApprovalNoteLines | null {
+	let status: 'failed' | 'unknown';
+	if (code === 'approval_failed') status = 'failed';
+	else if (code === 'approval_unknown') status = 'unknown';
+	else return null;
+	const own = `chat.note.${code}`;
+	if (ref === undefined) return { bodyKey: own, nextKey: null, href: null };
+	const href = approvalEntryHref(ref.id);
+	if (!SENTENCES.has(ref.outcome) || ref.outcome === 'other') return { bodyKey: own, nextKey: null, href };
+	const card = { status, outcome: ref.outcome };
+	return {
+		bodyKey: approvalOutcomeKey(card, viewer ?? 'none') ?? own,
+		nextKey: viewer === null ? null : approvalNextStepKey(card, viewer),
+		href,
+	};
+}
+
 /** The decide refusals the page has a sentence for; anything else reads as the general one. */
 export const APPROVAL_DECIDE_REFUSALS: readonly string[] = ['not_found', 'not_pending', 'not_unknown', 'expired', 'checksum', 'not_executable', 'mandate_ended'];
 const DECIDE_REFUSALS: ReadonlySet<string> = new Set(APPROVAL_DECIDE_REFUSALS);

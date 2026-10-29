@@ -16,6 +16,11 @@ const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLI
 /** Every step of a decision and of opening the chat, in the order the page took them. */
 const steps: string[] = [];
 vi.mock('$app/navigation', () => ({ goto: vi.fn(async (path: string) => { steps.push(`goto ${path}`); }) }));
+/** The address the page is opened at; a chat note leads to `?entry=<id>`. */
+let pageUrl = new URL('http://localhost/app/approvals');
+vi.mock('$app/stores', () => ({
+	page: { subscribe: (run: (v: { url: URL }) => void) => { run({ url: pageUrl }); return () => {}; } },
+}));
 vi.mock('../stores/chat.svelte.js', () => ({
 	newChat: vi.fn(() => { steps.push('newChat'); }),
 	resumeThread: vi.fn(async (id: string) => { steps.push(`resume ${id}`); }),
@@ -57,6 +62,7 @@ let decideAnswer: { status: number; body: unknown };
 
 beforeEach(() => {
 	lists = { open: { entries: [card()], pending: 1, viewer: 'owner' }, all: { entries: [card()], pending: 1, viewer: 'owner' } };
+	pageUrl = new URL('http://localhost/app/approvals');
 	listReads = [];
 	decides = [];
 	steps.length = 0;
@@ -768,5 +774,27 @@ describe('opening a moved draft in chat again', () => {
 		expect(label('mv')).toBe('In den Chat verschoben');
 		// Control: an entry discarded on its card keeps the discarded label.
 		expect(label('d')).toBe('Verworfen');
+	});
+});
+
+describe('a chat note leads to its entry', () => {
+	it('opened with `?entry=`, the page shows the "all" tab and marks that entry', async () => {
+		lists.all = { entries: [card({ id: 'e-0', status: 'done' }), card({ id: 'e-2', status: 'failed', outcome: 'checksum' })], pending: 0, viewer: 'owner' };
+		pageUrl = new URL('http://localhost/app/approvals?entry=e-2');
+		Element.prototype.scrollIntoView = vi.fn();
+		await render();
+		expect(listReads).toEqual(['all']);
+		const marked = target.querySelectorAll('[data-entry-focused]');
+		expect(marked).toHaveLength(1);
+		expect(marked[0]!.querySelector('[data-approval-id]')?.getAttribute('data-approval-id')).toBe('e-2');
+		expect(target.querySelectorAll('[data-approval-id]')).toHaveLength(2);
+		expect(q('[data-tab="all"]')?.getAttribute('aria-selected')).toBe('true');
+		expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+	});
+
+	it('control: without it, the page opens on the open tab and marks nothing', async () => {
+		await render();
+		expect(listReads).toEqual(['open']);
+		expect(q('[data-entry-focused]')).toBeNull();
 	});
 });
