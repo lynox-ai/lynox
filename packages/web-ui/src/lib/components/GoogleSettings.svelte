@@ -420,7 +420,7 @@
 						<p class="text-xs text-text">{t('integrations.google_grant_stays')}</p>
 						<!-- The switch goes straight to lynox's consent, past the brokered card's sentence: an
 						     admin who allowed this tenant's own client may not have allowed lynox's. The way
-						     back is the body's: enter the pair again under "Advanced". -->
+						     back is in the body: enter the pair again (the brokered card's "Advanced"). -->
 						<p class="text-xs text-text" data-workspace-admin-hint>
 							{t('integrations.google_switch_admin_hint')}
 							<a

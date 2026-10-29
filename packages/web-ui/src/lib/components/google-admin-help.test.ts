@@ -48,8 +48,8 @@ describe('the Google card names the admin\'s approval before the connect', () =>
 	});
 
 	it('the switch from the tenant\'s own client to lynox\'s says it in its own words, inside its confirm', () => {
-		// The switch starts lynox's consent directly; it never passes the brokered card above. The way back
-		// (the pair entered again under "Advanced") is the confirm's body; the next test holds it reachable.
+		// The switch starts lynox's consent directly; it never passes the brokered card above. The way back,
+		// entering the pair again, is in the confirm's body; the next test holds the place to do it reachable.
 		const confirm = /\{#if switchConfirmOpen\}([\s\S]*?)\{\/if\}/.exec(CARD);
 		expect(confirm, 'the switch confirm is not where it was').not.toBeNull();
 		const inConfirm = confirm![1]!;
