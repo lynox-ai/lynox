@@ -118,6 +118,18 @@ describe('files the migration could not transfer', () => {
 		expect(summary()).toBe(t('migration.skipped_one'));
 	});
 
+	it('a second migration in the same wizard does not keep the first one\'s list', async () => {
+		done = { ...done, skipped: ['workspace/a'] };
+		await migrate();
+		expect(paths()).toEqual(['workspace/a']);
+		done = { success: true, verification: VERIFICATION };
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		await startMigration();
+		await settle();
+		expect(getStep()).toBe('done');
+		expect(skippedBlock()).toBeNull();
+	});
+
 	it('ignores a `skipped` that is not a list of names', async () => {
 		done = { ...done, skipped: 'workspace/a' };
 		await migrate();
