@@ -951,10 +951,12 @@ function requestLimitReached(agent: IAgent): boolean {
 
 /**
  * Reserves one request of the budget for one of api_setup's own fetches, right before it goes
- * out; false at the limit, and then nothing is reserved (row 1005). Checked and charged in one
- * step before the first await, as `http_request` charges before it sends: parallel calls cannot
- * all pass the check at 99, and a fetch that fails after it went out (a timeout, a redirect loop)
- * stays charged. A fetch the egress policy refuses is charged too, as in `http_request`.
+ * out; false at the limit, and then nothing is reserved (row 1005). Charged before it sends, as
+ * `http_request` is, so a fetch that fails after it went out (a timeout, a redirect loop) stays
+ * charged, and a fetch the egress policy refuses is charged too. Checked and charged in one step
+ * before the first await, so parallel api_setup fetches cannot all pass the check at 99. That
+ * holds among api_setup's fetches only: `http_request` checks and charges with awaits between,
+ * so a racing `http_request` can still take one past the limit.
  * `api-setup-request-limit.test.ts` holds every fetch here to this.
  */
 function reserveRequest(agent: IAgent): boolean {

@@ -29,8 +29,9 @@
  * - **Rate limiting.** The `fetch_token` path charges the session HTTP budget
  *   and consumes the profile's per-host bucket; a route has no session. Both
  *   are the caller's. `fetch_token` reserves its request before it calls this
- *   (row 1005); `onRequestSent` fires after the response arrives, for a caller
- *   that charges on arrival instead.
+ *   (row 1005). `onRequestSent`, which fires after the response arrives, has no
+ *   caller since then; it stays with its tests for a caller that charges on
+ *   arrival.
  * - **What a non-2xx MEANS.** A 400 is `invalid_grant` to one caller and a
  *   misconfigured client to another. This returns the status and the text.
  *

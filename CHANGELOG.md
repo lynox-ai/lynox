@@ -62,8 +62,8 @@
   `http_request` shares. Its own fetches (docs page, linked sections, OpenAPI
   spec, the `fetch_token` POST) used to count only after an answer arrived and
   never checked. Now each reserves its request before it goes out. A fetch
-  that fails after it was sent stays counted, and parallel calls cannot all
-  use the last request. At the limit, bootstrap fetches neither the docs page
+  that fails after it was sent stays counted, and parallel `api_setup` calls
+  cannot all use the last request. At the limit, bootstrap fetches neither the docs page
   nor the OpenAPI spec and says so. If the limit is reached after the docs
   page, it reads no further linked sections and tells the model that the draft
   may miss endpoints.
