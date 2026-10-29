@@ -371,6 +371,7 @@ function approvalChatReaderOf(
     get: (id) => store.get(id),
     scope: approvalScopeOf(principal),
     accountUidsStable: (accountId) => mail !== null && mail.registry.get(accountId)?.authType === 'imap',
+    checksumMatches: (id) => store.checksumMatches(id),
   };
 }
 

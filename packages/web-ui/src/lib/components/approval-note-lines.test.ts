@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { APPROVAL_OUTCOME_SENTENCES, approvalEntryHref, approvalNoteLines, type ApprovalViewer } from './approvals.js';
+import { APPROVAL_OUTCOME_SENTENCES, APPROVAL_REWRITABLE_OUTCOMES, approvalEntryHref, approvalNoteLines, type ApprovalViewer } from './approvals.js';
 
 /**
  * A chat note about an approved mail that did not go out names the reason the approvals page shows
@@ -12,6 +12,7 @@ import { APPROVAL_OUTCOME_SENTENCES, approvalEntryHref, approvalNoteLines, type 
 const read = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
 const I18N = read('../i18n.svelte.ts');
 const CHAT_VIEW = read('./ChatView.svelte');
+const CORE_VIEW = read('../../../../../src/core/approval-view.ts');
 
 function entry(key: string): { de: string; en: string } | null {
 	const lines = I18N.split('\n').filter((l) => l.trimStart().startsWith(`'${key}':`));
@@ -30,6 +31,7 @@ describe('the lines of a note about an approved mail', () => {
 			bodyKey: 'approvals.outcome.account_changed',
 			nextKey: 'approvals.next.account_changed',
 			href: `/app/approvals?entry=${ID}`,
+			rewriteId: ID,
 		});
 	});
 
@@ -55,6 +57,7 @@ describe('the lines of a note about an approved mail', () => {
 			bodyKey: 'approvals.outcome.send_threw',
 			nextKey: 'chat.note.approval_unknown.next',
 			href: `/app/approvals?entry=${ID}`,
+			rewriteId: null,
 		});
 	});
 
@@ -62,7 +65,7 @@ describe('the lines of a note about an approved mail', () => {
 		for (const outcome of ['other', 'something_new']) {
 			for (const code of ['approval_failed', 'approval_unknown']) {
 				expect(approvalNoteLines(code, { id: ID, outcome }, 'owner')).toEqual({
-					bodyKey: `chat.note.${code}`, nextKey: null, href: `/app/approvals?entry=${ID}`,
+					bodyKey: `chat.note.${code}`, nextKey: null, href: `/app/approvals?entry=${ID}`, rewriteId: null,
 				});
 			}
 		}
@@ -74,7 +77,7 @@ describe('the lines of a note about an approved mail', () => {
 			['approval_failed', 'send_threw'], ['approval_failed', 'provider_error'], ['approval_failed', 'send_timeout'], ['approval_failed', 'stale_claim'],
 		] as const) {
 			expect(approvalNoteLines(code, { id: ID, outcome }, 'owner')).toEqual({
-				bodyKey: `chat.note.${code}`, nextKey: null, href: `/app/approvals?entry=${ID}`,
+				bodyKey: `chat.note.${code}`, nextKey: null, href: `/app/approvals?entry=${ID}`, rewriteId: null,
 			});
 		}
 	});
@@ -84,7 +87,7 @@ describe('the lines of a note about an approved mail', () => {
 	});
 
 	it('a note written before it carried its entry keeps its own sentence, without a link', () => {
-		expect(approvalNoteLines('approval_failed', undefined, 'owner')).toEqual({ bodyKey: 'chat.note.approval_failed', nextKey: null, href: null });
+		expect(approvalNoteLines('approval_failed', undefined, 'owner')).toEqual({ bodyKey: 'chat.note.approval_failed', nextKey: null, href: null, rewriteId: null });
 	});
 
 	it('every other note is left to the chat\'s own lines', () => {
@@ -139,5 +142,57 @@ describe('the chat\'s note row is wired to those lines (source)', () => {
 		// The link's hit area is at least 24 px high (WCAG 2.5.8, ux U-054), by padding, not by type size.
 		expect(CHAT_VIEW).toMatch(/<a href=\{approvalLines\.href\} class="[^"]*\bmin-h-6\b[^"]*"/);
 		expect(CHAT_VIEW).toMatch(/\{#if approvalLines\?\.href\}\s*<a href=\{approvalLines\.href\}[^>]*>\{t\('chat\.note\.approval_view_entry'\)\}<\/a>\s*\{\/if\}/);
+	});
+});
+
+describe('a note about a mail that was not sent offers to write it again in a chat', () => {
+	const REWRITABLE = ['account_not_configured', 'receive_only', 'account_changed', 'mandate_ended', 'invalid_recipients', 'rate_limit',
+		'cancelled', 'mail_unavailable', 'sending_address_unavailable', 'deadline_before_send', 'trail_unavailable', 'executor_error'];
+
+	it('to the owner, for each reason given before the send began', () => {
+		for (const outcome of REWRITABLE) {
+			expect(approvalNoteLines('approval_failed', { id: ID, outcome }, 'owner')?.rewriteId, outcome).toBe(ID);
+		}
+	});
+
+	it('to no other session, and not without a known viewer', () => {
+		for (const viewer of ['mandate', 'none', null] as const) {
+			expect(approvalNoteLines('approval_failed', { id: ID, outcome: 'receive_only' }, viewer)?.rewriteId).toBeNull();
+		}
+	});
+
+	it('not for a reason the engine does not load', () => {
+		for (const outcome of ['checksum', 'not_executable', 'secret_in_body', 'dedup_window', 'queued', 'other', 'something_new']) {
+			expect(approvalNoteLines('approval_failed', { id: ID, outcome }, 'owner')?.rewriteId, outcome).toBeNull();
+		}
+	});
+
+	it('not on a note whose outcome is unclear, whatever its reason', () => {
+		for (const outcome of ['send_threw', 'provider_error', 'receive_only']) {
+			expect(approvalNoteLines('approval_unknown', { id: ID, outcome }, 'owner')?.rewriteId, outcome).toBeNull();
+		}
+	});
+
+	it('the list is the engine\'s, so the note never offers what the chat would not load', () => {
+		const list = /export const APPROVAL_REWRITABLE_OUTCOMES: readonly ApprovalOutcome\[\] = \[([^\]]*)\]/.exec(CORE_VIEW);
+		expect(list, 'the engine\'s list is not where it was').not.toBeNull();
+		const engine = [...list![1]!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+		expect(engine).toEqual(REWRITABLE);
+		expect([...APPROVAL_REWRITABLE_OUTCOMES]).toEqual(REWRITABLE);
+	});
+
+	it('the button and the chat\'s first line read as written', () => {
+		expect(entry('chat.note.approval_rewrite')).toEqual({ de: 'Im Chat neu erstellen', en: 'Write it again in a chat' });
+		expect(entry('chat.note.approval_rewrite_framing')).toEqual({ de: 'Ich möchte diese Mail neu erstellen.', en: 'I want to write this email again.' });
+	});
+
+	it('the note row shows the button under its guard, and it opens a new chat that loads the entry (source)', () => {
+		expect(CHAT_VIEW).toMatch(/\{#if approvalLines\?\.rewriteId\}\s*\{@const rewriteId = approvalLines\.rewriteId\}\s*<div>\s*<button type="button" class="[^"]*\bmin-h-6\b[^"]*" onclick=\{\(\) => rewriteApprovalInChat\(rewriteId\)\} data-approval-rewrite>\{t\('chat\.note\.approval_rewrite'\)\}<\/button>\s*<\/div>\s*\{\/if\}/);
+		const fn = /function rewriteApprovalInChat\(id: string\) \{([\s\S]*?)\n\t\}/.exec(CHAT_VIEW);
+		expect(fn).not.toBeNull();
+		const body = fn![1]!;
+		expect(body.indexOf('newChat();')).toBeGreaterThan(-1);
+		expect(body.indexOf('sendMessage(')).toBeGreaterThan(body.indexOf('newChat();'));
+		expect(body).toContain("sendMessage(t('chat.note.approval_rewrite_framing'), undefined, undefined, { context: { kind: 'approval', id } })");
 	});
 });

@@ -59,6 +59,21 @@ export const APPROVAL_OUTCOMES = [
 export type ApprovalOutcome = (typeof APPROVAL_OUTCOMES)[number];
 const OUTCOME_SET: ReadonlySet<string> = new Set(APPROVAL_OUTCOMES);
 
+/**
+ * The reasons a `failed` entry's draft may be loaded into the owner's chat to write it again. An
+ * entry ends `failed` only before its send began: a send that threw or timed out ends `unknown`
+ * (`approval-executor.ts`). Left out, though nothing went out either: `checksum` and
+ * `not_executable` (the content is not what was filed, or is gone), `secret_in_body` (the body
+ * holds something like a credential, which would reach the model), `dedup_window` (a matching
+ * mail to the same people went out shortly before), `queued` (queued elsewhere, it may still go
+ * out), and `other`. A list, not exclusions: a reason added later loads nothing until named here.
+ */
+export const APPROVAL_REWRITABLE_OUTCOMES: readonly ApprovalOutcome[] = [
+  'account_not_configured', 'receive_only', 'account_changed', 'mandate_ended', 'invalid_recipients', 'rate_limit',
+  'cancelled', 'mail_unavailable', 'sending_address_unavailable', 'deadline_before_send', 'trail_unavailable',
+  'executor_error',
+];
+
 const DECIDED_OUTCOME: ReadonlyMap<string, ApprovalOutcome> = new Map([
   ['owner', 'discarded'],
   ['moved_to_chat', 'moved_to_chat'],
