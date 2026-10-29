@@ -39,6 +39,10 @@ const POLLERS: Record<string, Poller> = {
     reads: [],
     excepted: [{ path: '/approvals/count', action: 'GET /api/approvals/count', why: 'polled for the owner only (`viewer !== \'owner\'` stops it); a helper reads it once per mount, with a few retries on failure' }],
   },
+  'lib/stores/paused-plans.svelte.ts': {
+    reads: [],
+    excepted: [{ path: '/triggers/paused-count', action: 'GET /api/triggers/paused-count', why: 'polled for the owner only (`viewer !== \'owner\'` stops it); a helper reads it once per mount, with a few retries on failure' }],
+  },
   'lib/components/TriggersView.svelte': {
     reads: [],
     excepted: [{ path: '/triggers', action: 'GET /api/triggers', why: 'polled every 15 s while the triggers view is open and visible; the person opened it, and it stays ungrouped (noise, nothing hidden)' }],

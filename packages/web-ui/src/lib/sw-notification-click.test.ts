@@ -45,6 +45,13 @@ describe('service worker — where a click on a push leads', () => {
 		expect(await clickWith(undefined)).toEqual(['/']);
 	});
 
+	// The owner's notice that plans are paused: a tap opens the plans view, where the notice
+	// stands in full (the push shortens the name to fit).
+	it('opens the plans view for the paused-plans push', async () => {
+		expect(await clickWith({ pausedPlans: '1', priority: 'high' })).toEqual(['/app/hub?section=triggers']);
+		expect(await clickWith({ approvals: '1', pausedPlans: '1' })).toEqual(['/app/approvals']);
+	});
+
 	// Controls: the existing deep links keep their targets and take precedence.
 	it('keeps the inbox and thread deep links', async () => {
 		expect(await clickWith({ itemId: 'i-1' })).toEqual(['/app/inbox?item=i-1']);

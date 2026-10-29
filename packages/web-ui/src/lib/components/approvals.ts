@@ -24,6 +24,8 @@ export type ApprovalStatus = 'pending' | 'approved' | 'executing' | 'done' | 're
 export interface ApprovalSetupLine {
 	kind: 'set_up_by' | 'last_changed_by' | 'test_run_by';
 	name: string;
+	/** The owner took the plan over since (641c): the helper's mark stays, and the line says so. */
+	takenOver?: boolean | undefined;
 }
 
 export interface ApprovalCardData {
@@ -309,6 +311,17 @@ export function approvalDecideErrorKey(code: unknown): string {
 /** Whether a refusal means the list the owner decided from is stale and is read again. */
 export function approvalRefusalReloads(code: unknown): boolean {
 	return code === 'checksum' || code === 'not_pending' || code === 'not_unknown' || code === 'expired' || code === 'mandate_ended' || code === 'not_found';
+}
+
+/**
+ * Which sentence a setup line is (the key under `approvals.setup.`). After a takeover the line
+ * keeps the helper's name and adds who took it over: "by you" to the owner, "by the owner" to
+ * anyone else (ux U-039). A test run is no mark, so it has no taken-over form.
+ */
+export function approvalSetupKind(line: Pick<ApprovalSetupLine, 'kind' | 'takenOver'>, viewer: ApprovalViewer): string {
+	if (line.takenOver !== true || line.kind === 'test_run_by') return line.kind;
+	const what = line.kind === 'set_up_by' ? 'set_up_by' : 'changed_by';
+	return `${what}_taken_over_${viewer === 'owner' ? 'you' : 'owner'}`;
 }
 
 /** A setup line's name, with the engine's neutral label translated. */

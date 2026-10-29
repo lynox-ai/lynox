@@ -3,7 +3,7 @@
 	import { visibleText } from '../visible-text.js';
 	import {
 		approvalActionable, approvalClosable, approvalNeedsSecondClick, approvalNextStepKey, approvalOutcomeKey,
-		approvalReopensInChat, approvalSendable, approvalSetupName,
+		approvalReopensInChat, approvalSendable, approvalSetupKind, approvalSetupName,
 		type ApprovalAddress, type ApprovalCardData, type ApprovalViewer,
 	} from './approvals.js';
 
@@ -95,7 +95,7 @@
 	</p>
 
 	{#each card.setup as line}
-		<p class="text-xs text-text-muted" data-setup={line.kind}>{tf(`approvals.setup.${line.kind}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>
+		<p class="text-xs text-text-muted" data-setup={line.kind}>{tf(`approvals.setup.${approvalSetupKind(line, viewer)}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>
 	{/each}
 
 	{#if card.massSend}
