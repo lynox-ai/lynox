@@ -127,7 +127,7 @@ import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, httpTarget, newCorrelationId
 import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
-import { instanceTrailFor, InstanceWriteUnrecorded } from './instance-trail.js';
+import { ifNotDeduped, instanceTrailFor, InstanceWriteUnrecorded, withInstanceWriteAs, type InstanceActor } from './instance-trail.js';
 import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 /** What the `secret:` destination check decides for a call (`Agent._secretVerdict`). */
@@ -1962,7 +1962,12 @@ export class Agent implements IAgent {
    * is exactly why it is closed by construction instead of by assertion. `knowledge.ts` derives
    * once for the same reason.
    */
-  private async _captureFallback(text: string, turnUntrusted: boolean, turnCause: UntrustedCause): Promise<void> {
+  /**
+   * `actor` is PASSED IN as well, for the same reason: who the turn ran for is read once, at the
+   * end of the turn (`_captureAtTurnEnd`), and every fact's row names it (660a-3). The session
+   * sets the agent's principal per run, and this pass can still be out when it does.
+   */
+  private async _captureFallback(text: string, turnUntrusted: boolean, turnCause: UntrustedCause, actor: InstanceActor): Promise<void> {
     // `_sawRememberCall` — do not second-guess a model that already did the work.
     // Same shape as the follow-up guard: the fallback recovers, it never duplicates.
     //
@@ -2135,16 +2140,44 @@ export class Agent implements IAgent {
         // yielded a fact gated for review while labelled as released.
         const { routing, untrusted: factUntrusted } =
           routeCapturedFact(turnUntrusted, attributionOverride, fact.source);
-        const result = ks.write({
-          text: fact.text,
-          ...(fact.subject !== undefined ? { subjectName: fact.subject } : {}),
-          sourceChannel: 'agent',
-          sourceUntrusted: factUntrusted,
-          // A step or sub-agent has no thread of its own; the chat it runs for is where the
-          // private-mode purge looks (see `chatThreadOf` in tools/builtin/private-thread.ts).
-          sourceThreadId: this.currentThreadId ?? this.originThreadId,
-          sourceRunId: this.currentRunId,
-        });
+        // One row per fact (660a-3, `capture#durable`): written before the write, under the actor
+        // the turn held, `auto=1` because no tool call made it. A fact whose row cannot be
+        // written is not written; the facts after it still are, each under its own row.
+        let result: ReturnType<typeof ks.write>;
+        try {
+          result = withInstanceWriteAs(actor, this.toolContext?.auditLog ?? null, {
+            site: 'capture#durable', kind: 'create', store: 'knowledge', target: () => [['auto', 1]], main: ['write'],
+          }, (w) => {
+            const written = w.run('write', () => ks.write({
+              text: fact.text,
+              ...(fact.subject !== undefined ? { subjectName: fact.subject } : {}),
+              sourceChannel: 'agent',
+              sourceUntrusted: factUntrusted,
+              // A step or sub-agent has no thread of its own; the chat it runs for is where the
+              // private-mode purge looks (see `chatThreadOf` in tools/builtin/private-thread.ts).
+              sourceThreadId: this.currentThreadId ?? this.originThreadId,
+              sourceRunId: this.currentRunId,
+            }), ifNotDeduped);
+            w.created('write', written.id);
+            return written;
+          });
+        } catch (err) {
+          // Its own branch, before the pass-wide catch below: a refused row costs this fact, not
+          // the pass, and it is counted rather than swallowed — "nothing captured" and "nothing
+          // could be recorded" must not read alike in the report.
+          if (!(err instanceof InstanceWriteUnrecorded)) throw err;
+          void appendCaptureTelemetry(this._durableMemoryEnabled, {
+            ts: Date.now(),
+            event: 'capture_suppressed',
+            thread: undefined,
+            model: this.model,
+            untrusted: turnUntrusted,
+            reason: 'trail_unavailable',
+            // The run the refused row would have named: the actor's, held at the end of the turn.
+            runId: actor.runId,
+          });
+          continue;
+        }
         // The SAME two emits the `remember` tool makes. Without them the fire-rate
         // report keeps dividing a numerator that only the tool writes by a
         // denominator this hook writes — so the feature would land and the measured
@@ -2305,6 +2338,9 @@ export class Agent implements IAgent {
     // Derived beside the boolean, from the same signals at the same moment, and handed to the
     // pass rather than re-read there. See `_captureFallback`.
     const turnCause = describeTurnUntrusted(this);
+    // Who the turn ran for, held as a value from here on (660a-3): both writes below run after
+    // the turn, and the session sets `principal` again for the next run.
+    const actor: InstanceActor = { principal: this.principal, runId: this.currentRunId };
     if (this._durableMemoryEnabled) {
       void appendCaptureTelemetry(true, {
         ts: Date.now(),
@@ -2344,7 +2380,7 @@ export class Agent implements IAgent {
       // appeared on the NEXT turn's line or nowhere; and `costGuard` never saw the
       // spend for its own run. The turn already drains this list in its `finally`,
       // for exactly the reason it exists — an orphaned stream.
-      this._pendingMemory.push(this._captureFallback(text, turnUntrusted, turnCause));
+      this._pendingMemory.push(this._captureFallback(text, turnUntrusted, turnCause, actor));
       return;
     }
     // Recorded on BOTH branches, because a numerator without a denominator answers
@@ -2368,6 +2404,7 @@ export class Agent implements IAgent {
       safeText, this._loopToolCount, this.currentThreadId ?? this.originThreadId, this.currentRunId,
       // Read when the extraction returns, not now: see the same re-read on the durable path.
       () => this._captureStoodDown(),
+      actor, this.toolContext?.auditLog ?? null,
     ));
   }
 

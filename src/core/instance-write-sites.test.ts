@@ -5,7 +5,8 @@
  *
  * 1. Every `withInstanceWrite` call names its site as a string literal in an object literal, every
  *    literal is the site of exactly one call, and every entry of `INSTANCE_WRITE_SITES` has its
- *    call, and `MANDATE_INSIDE_WRITERS` requires a site per writer.
+ *    call, and `MANDATE_INSIDE_WRITERS` requires a site per writer. `withInstanceWriteAs` (an actor
+ *    held as a value, 660a-3) is the same kind of call, with its spec one argument later.
  * 2. The writing handlers make no write past the objects handed to them (a direct file or
  *    database write) other than the ones on a closed list, each with its reason. A store method
  *    on a passed object is no finding: the fixtures in `mandate-inside-writes.test.ts` hand those
@@ -35,14 +36,19 @@ function parse(file: string): ts.SourceFile {
 
 const lineOf = (sf: ts.SourceFile, node: ts.Node): number => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
 
+/** The calls that open a site, and where their spec stands: the block follows it. */
+const SITE_OPENERS: Readonly<Record<string, number>> = { withInstanceWrite: 1, withInstanceWriteAs: 2 };
+const specIndexOf = (name: string): number | undefined => (Object.hasOwn(SITE_OPENERS, name) ? SITE_OPENERS[name] : undefined);
+
 interface SiteCall { file: string; line: number; site: string | null; problem?: string }
 
-/** Every reference to `withInstanceWrite` in `sf`: a call with its literal site, or a problem. */
+/** Every reference to `withInstanceWrite`/`withInstanceWriteAs` in `sf`: a call with its literal site, or a problem. */
 function siteCallsOf(sf: ts.SourceFile): SiteCall[] {
   const file = relative(SRC, sf.fileName);
   const out: SiteCall[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isIdentifier(node) && node.text === 'withInstanceWrite') {
+    const specAt = ts.isIdentifier(node) ? specIndexOf(node.text) : undefined;
+    if (ts.isIdentifier(node) && specAt !== undefined) {
       const parent = node.parent;
       const renamed = (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent))
         && parent.propertyName !== undefined && parent.propertyName.text !== parent.name.text;
@@ -54,7 +60,7 @@ function siteCallsOf(sf: ts.SourceFile): SiteCall[] {
         if (!ts.isCallExpression(parent) || parent.expression !== node) {
           out.push({ file, line: lineOf(sf, node), site: null, problem: 'referenced other than as a call' });
         } else {
-          const spec = parent.arguments[1];
+          const spec = parent.arguments[specAt];
           if (spec === undefined || !ts.isObjectLiteralExpression(spec)) {
             out.push({ file, line: lineOf(sf, node), site: null, problem: 'spec is not an object literal' });
           } else {
@@ -104,10 +110,14 @@ describe('INSTANCE_WRITE_SITES against the source', () => {
       const site = 'x'; withInstanceWrite(a, { site, kind: 'create', store: 'knowledge' }, () => 3);
       const f = withInstanceWrite;
       // withInstanceWrite(a, { site: 'memory_store#create' }, () => 4)
+      withInstanceWriteAs(actor, log, { site: 'derived#memory', kind: 'create', store: 'knowledge' }, () => 5);
+      withInstanceWriteAs(actor, { site: 'derived#memory', kind: 'create', store: 'knowledge' }, () => 6);
     `, ts.ScriptTarget.Latest, true);
     const found = siteCallsOf(planted);
     expect(found.filter(c => c.site === 'remember#create')).toHaveLength(2);
-    expect(found.filter(c => c.problem !== undefined).map(c => c.problem)).toEqual(['site is not a string literal', 'referenced other than as a call']);
+    // The spec of `withInstanceWriteAs` stands third: one in second place is no spec at all.
+    expect(found.filter(c => c.site === 'derived#memory')).toHaveLength(1);
+    expect(found.filter(c => c.problem !== undefined).map(c => c.problem)).toEqual(['site is not a string literal', 'referenced other than as a call', 'spec is not an object literal']);
     const aliased = ts.createSourceFile(join(SRC, 'planted.ts'), `
       import { withInstanceWrite as w } from './instance-trail.js';
       import { withInstanceWrite } from './instance-trail.js';
@@ -137,7 +147,7 @@ const FS_WRITES = new Set([
   'createWriteStream', 'openSync', 'open',
 ]);
 /** An imported function whose name says it changes something. */
-const WRITE_NAME = /^(write|append|mkdir|mkdtemp|rm|unlink|rename|copy|insert|upsert|drop|purge|truncate|store|forget|debit|persist|delete|remove|save|prune)/i;
+const WRITE_NAME = /^(write|append|mkdir|mkdtemp|rm|unlink|rename|copy|insert|upsert|drop|purge|truncate|store|forget|debit|persist|delete|remove|save|prune|publish)/i;
 /** Methods that reach a database directly, whoever the receiver is. */
 const DB_METHODS = new Set(['prepare', 'exec', 'getDb', 'transaction', 'pragma']);
 /** Members of a passed object that write past it (`engine.sweepConnectionErasures` over raw `getDb()`). */
@@ -211,7 +221,7 @@ const EXCEPTIONS: Readonly<Record<string, string>> = {
   'tools/builtin/knowledge.ts|appendUntrustedCauseLog': 'telemetry file sink before the wrapper',
   'tools/builtin/memory.ts|appendUntrustedCauseLog': 'telemetry file sink before the wrapper',
   'tools/builtin/knowledge.ts|appendCaptureTelemetry': 'capture telemetry, not an entry',
-  'tools/builtin/memory.ts|channels.memoryStore.publish': 'derived graph writes by subscribers holding the engine\'s stores; inside the wrappers',
+  'tools/builtin/memory.ts|publishMemoryStore': 'the derived graph write of the one subscriber, which writes its own derived#memory row under the actor the message carries (660a-3); inside the wrappers',
   'tools/builtin/data-store.ts|channels.dataStoreInsert.publish': 'derived graph writes by subscribers holding the engine\'s stores; inside the wrappers',
   'tools/builtin/plan-task.ts|storePipeline': 'volatile module cache, after the spied insertPlannedPipeline',
   'tools/builtin/process.ts|storePipeline': 'volatile module cache, after the spied insertPlannedPipeline',
@@ -260,7 +270,7 @@ describe('direct writes in the writing handlers', () => {
  *    read `undefined > 0` as a change. And every step a site names as `main` is run in its block:
  *    a main step never run would keep the row from ever saying `wrote=all`.
  */
-const DECODERS = new Set(['ifReturned', 'ifTrue', 'ifPositive', 'ifNonNull', 'ifOk', 'ifCounts', 'ifNotDeduped', 'ifCreated', 'ifEmptiedAny', 'ifNonEmptyList', 'ifRemovedIds']);
+const DECODERS = new Set(['ifReturned', 'ifTrue', 'ifPositive', 'ifNonNull', 'ifOk', 'ifCounts', 'ifNotDeduped', 'ifCreated', 'ifEmptiedAny', 'ifNonEmptyList', 'ifRemovedIds', 'ifStored', 'ifChanged']);
 
 interface StepUse { file: string; line: number; site: string | null; step: string | null; decoder: string | null; main: string[]; createdFor?: string | null; call?: string; affected?: boolean }
 
@@ -268,9 +278,10 @@ function stepUsesOf(sf: ts.SourceFile): StepUse[] {
   const file = relative(SRC, sf.fileName);
   const out: StepUse[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'withInstanceWrite') {
-      const spec = node.arguments[1];
-      const block = node.arguments[2];
+    const specAt = ts.isCallExpression(node) && ts.isIdentifier(node.expression) ? specIndexOf(node.expression.text) : undefined;
+    if (ts.isCallExpression(node) && specAt !== undefined) {
+      const spec = node.arguments[specAt];
+      const block = node.arguments[specAt + 1];
       const prop = (name: string) => (spec !== undefined && ts.isObjectLiteralExpression(spec)
         ? spec.properties.find((p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === name)
         : undefined);

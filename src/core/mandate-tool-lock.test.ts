@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
-import { INSTANCE_WRITE_SITES, MANDATE_INSIDE_NON_WRITERS, MANDATE_INSIDE_WRITERS, MANDATE_OUTWARD_READERS, MANDATE_PATTERN_WRITE_TOOLS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
+import { TOOL_WRITE_SITES, MANDATE_INSIDE_NON_WRITERS, MANDATE_INSIDE_WRITERS, MANDATE_OUTWARD_READERS, MANDATE_PATTERN_WRITE_TOOLS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
 import type { MailRegistry } from '../integrations/mail/tools/registry.js';
 import type { SearchProvider } from '../integrations/search/search-provider.js';
 import type { ToolEntry } from '../types/index.js';
@@ -183,7 +183,8 @@ describe('Engine boot — every tool a mandate may use is placed for what it rea
     expect([...new Set([...MANDATE_INSIDE_WRITERS, ...nonWriters])].sort()).toEqual([...MANDATE_TOOL_SURFACE].sort());
     for (const n of [...MANDATE_INSIDE_WRITERS, ...nonWriters]) expect(all.has(n), `${n} is a tool this engine builds`).toBe(true);
     for (const n of nonWriters) expect(MANDATE_INSIDE_NON_WRITERS[n]!.length, n).toBeGreaterThan(10);
-    const siteTools = new Set(INSTANCE_WRITE_SITES.map(s => s.slice(0, s.indexOf('#'))));
+    // The tools' sites only: a derived site (`capture#…`, `derived#…`) belongs to no tool.
+    const siteTools = new Set(TOOL_WRITE_SITES.map(s => s.slice(0, s.indexOf('#'))));
     expect([...MANDATE_INSIDE_WRITERS].filter(n => !siteTools.has(n)), 'a writer without a write site').toEqual([]);
     expect([...siteTools].filter(n => !MANDATE_INSIDE_WRITERS.has(n)), 'a write site of a tool that is no writer').toEqual([]);
   });

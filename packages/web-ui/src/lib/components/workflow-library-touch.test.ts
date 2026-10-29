@@ -46,7 +46,7 @@ describe('the workflow cards on a narrow or touch screen', () => {
     expect(classes, 'compact again only with a mouse at md and up').toEqual(expect.arrayContaining([
       'md:[@media(hover:hover)]:min-h-0', 'md:[@media(hover:hover)]:px-2', 'md:[@media(hover:hover)]:py-0.5', 'md:[@media(hover:hover)]:text-[10px]',
     ]));
-    expect(source.match(/\{actionSize\}/g) ?? [], 'the five actions and save/cancel').toHaveLength(7);
+    expect(source.match(/\{actionSize\}/g) ?? [], 'the six actions (stamp review included) and save/cancel').toHaveLength(8);
   });
 
   it('makes the rename field as tall as its buttons on touch', () => {

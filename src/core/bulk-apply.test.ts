@@ -1340,6 +1340,35 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     await runBulkEffect(runId, 'bulk_apply', effectDeps(sneaky));
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicRollbackIncomplete);
     expect(state.get('k000')).toBe('touched');
+    // The owner's view names the one target the rollback left: written by the run, not taken
+    // back. The ones it took back are undone, and the one that failed was never written.
+    const view = ledger.getPreview(runId).map((t) => [t.key, t.written, t.undone]);
+    expect(view).toEqual([['k000', true, false], ['k001', true, true], ['k002', true, true], ['k003', false, false]]);
+  });
+
+  // The page marks what the rollback would still take back, no more: the same set. The row below
+  // is made by hand — a non-writing target recorded as applied, which no write path produces
+  // today — so the marking cannot drift from the rollback's own predicate unseen.
+  it('marks exactly the set the rollback takes back', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial, new Set(['k003'])).writer));
+    const forced = engineDb.getDb().prepare(
+      `UPDATE bulk_targets SET change = 'unchanged', undone_at = NULL
+       WHERE run_id = ? AND applied_at IS NOT NULL AND seq = (SELECT MIN(seq) FROM bulk_targets WHERE run_id = ?)`,
+    ).run(runId, runId);
+    expect(forced.changes).toBe(1);
+    const marked = ledger.getPreview(runId).filter((t) => t.written && !t.undone).map((t) => t.key).sort();
+    expect(marked).toEqual(ledger.listAppliedDesc(runId).map((t) => t.key).sort());
+    expect(marked).toEqual([]);
+  });
+
+  it('a target found already as planned is not one the run wrote', async () => {
+    const { runId, initial } = recordMemoryRun(3, { atomic: true });
+    approve(runId);
+    const { writer } = memory({ ...initial, k000: 'w0' }, new Set(['k002']));
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    expect(ledger.getPreview(runId).map((t) => [t.key, t.written, t.undone])).toEqual([['k000', false, false], ['k001', true, true], ['k002', false, false]]);
   });
 
   it('an atomic run cannot be approved with a cap below its size', () => {
@@ -1356,7 +1385,58 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     const clock = (): number => ((ledger.getStatus(runId)?.applied ?? 0) >= 4 ? t + 10 * 60 * 60_000 : t);
     expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer, clock))).status).toBe('aborted');
     expect([...state.values()]).toEqual(Object.values(initial));
-    expect(ledger.getStatus(runId)!.phase).toBe('aborted');
+    // Its reason says time ran out: no target failed, so "could not be written" would be wrong.
+    expect([ledger.getStatus(runId)!.phase, ledger.getStatus(runId)!.haltReason]).toEqual(['aborted', BULK_HALT_REASONS.atomicTimeRolledBack]);
+  });
+
+  it('an atomic run out of time whose rollback does not complete says both', async () => {
+    const { runId, initial } = recordMemoryRun(6, { atomic: true });
+    approve(runId);
+    const { writer, state } = memory(initial);
+    const t = Date.now();
+    const clock = (): number => ((ledger.getStatus(runId)?.applied ?? 0) >= 3 ? t + 10 * 60 * 60_000 : t);
+    const sneaky: TargetWriter = {
+      read: (k) => writer.read(k),
+      write: async (k, a) => {
+        const r = await writer.write(k, a);
+        if (k === 'k002') state.set('k001', 'touched');
+        return r;
+      },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(sneaky, clock))).status).toBe('aborted');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.atomicTimeRollbackIncomplete);
+    expect(ledger.getPreview(runId).filter((p) => p.written && !p.undone).map((p) => p.key)).toEqual(['k001']);
+  });
+
+  it('an atomic run out of time after ONE write rolls it back: one write is already half written', async () => {
+    const { runId, initial } = recordMemoryRun(5, { atomic: true });
+    approve(runId);
+    const { writer, state } = memory(initial);
+    const t = Date.now();
+    const clock = (): number => ((ledger.getStatus(runId)?.applied ?? 0) >= 1 ? t + 10 * 60 * 60_000 : t);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer, clock))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(Object.values(initial));
+  });
+
+  it('an atomic run out of time before its first write halts, and a resume writes every target', async () => {
+    const { runId, initial } = recordMemoryRun(5, { atomic: true });
+    approve(runId);
+    const { writer, state } = memory(initial);
+    let t = Date.now();
+    // Out of time before the first target: nothing is written, so nothing is half written. The
+    // clock jumps after its first two reads (the approval's expiry, then the run's deadline), so
+    // the deadline check in front of the first target already finds the time gone.
+    let reads = 0;
+    const late = (): number => (++reads > 2 ? t + 10 * 60 * 60_000 : t);
+    const first = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer, late));
+    expect(first.status).toBe('halted');
+    expect(ledger.getStatus(runId)!.phase).not.toBe('aborted');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.timeBudget);
+    expect([...state.values()]).toEqual(Object.values(initial));
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+    t = Date.now();
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer, () => t))).status).toBe('done');
+    expect(ledger.getStatus(runId)!.applied).toBe(5);
   });
 
   // The undo of an atomic run is atomic too. When IT rolls back, the source's targets

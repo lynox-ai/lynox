@@ -1,6 +1,6 @@
 import {
   mkdtempSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, realpathSync,
-  openSync, closeSync, writeSync, constants, fstatSync, ftruncateSync,
+  openSync, closeSync, writeSync, constants, fstatSync, ftruncateSync, lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, dirname, resolve, basename } from 'node:path';
@@ -13,6 +13,16 @@ import {
 
 const realOr = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
 
+/** Whether nothing is at `p`, not even a link. Anything else, an error included, counts as there. */
+function isMissing(p: string): boolean {
+  try {
+    lstatSync(p);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
 /** The context workspace's open directory, or null without isolation or when it cannot be reached. */
 function heldBase(): ReturnType<typeof workspaceBase> {
   try {
@@ -22,8 +32,9 @@ function heldBase(): ReturnType<typeof workspaceBase> {
   }
 }
 
-/** A tracked file over {@link FILE_TOOL_READ_CAP_BYTES}, with its size: its bytes are not read. */
-type OverCap = { overCap: number };
+/** A tracked file over {@link FILE_TOOL_READ_CAP_BYTES}, with its size: its bytes are not read.
+ *  The size is null when it could not be read once the file was found over the cap. */
+type OverCap = { overCap: number | null };
 
 /** A size as the review shows it: bytes below 1 MB, MB to one decimal above. `up` rounds up,
  *  so a file one byte over the cap does not read as the cap itself. */
@@ -36,19 +47,20 @@ const shownSize = (bytes: number, up = false): string => {
 /** The review's line for a file over the cap, in place of a diff: what is known, and what the
  *  person deciding without the content can do. `before` is null for a file the run added,
  *  undefined when the original could not be read (then nothing was saved to restore). */
-function notComparedNote(before: number | null | undefined, now: number): string {
+function notComparedNote(before: number | null | undefined, now: number | null): string {
   const was = before === null
     ? 'It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it unless it was changed or replaced after the run wrote it.'
     : before === undefined
       ? 'Its size before the run is not known. Look at the file yourself before you keep the change; Rollback cannot restore it, because the original could not be read.'
-      : `Before the run it was ${shownSize(before)}. Look at the file yourself before you keep the change; Rollback restores the original.`;
-  return `(Content not compared: the file is ${shownSize(now, true)} now, larger than the ${shownSize(FILE_TOOL_READ_CAP_BYTES)} the review reads. ${was})`;
+      : `Before the run it was ${shownSize(before)}. Look at the file yourself before you keep the change; Rollback restores the original, or says it could not.`;
+  const size = now === null ? 'now larger than' : `${shownSize(now, true)} now, larger than`;
+  return `(Content not compared: the file is ${size} the ${shownSize(FILE_TOOL_READ_CAP_BYTES)} the review reads. ${was})`;
 }
 /** The most of a diff the review shows (Node's default `maxBuffer`, now named), and how long
  *  `diff` may take. A diff stopped by either is shown cut, with {@link DIFF_CUT_NOTE}. */
 const DIFF_MAX_BYTES = 1024 * 1024;
 const DIFF_TIMEOUT_MS = 5000;
-const DIFF_CUT_NOTE = `(Diff cut: only its start is shown, as it is longer than ${shownSize(DIFF_MAX_BYTES)} or took longer than ${DIFF_TIMEOUT_MS / 1000} seconds. Look at the file yourself before you keep the change; Rollback restores the original.)`;
+const DIFF_CUT_NOTE = `(Diff cut: only its start is shown, as it is longer than ${shownSize(DIFF_MAX_BYTES)} or took longer than ${DIFF_TIMEOUT_MS / 1000} seconds. Look at the file yourself before you keep the change; Rollback restores the original, or says it could not.)`;
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { ChangesetEntry, ChangesetDiff } from '../types/index.js';
@@ -200,9 +212,14 @@ export class ChangesetManager {
       try {
         return readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
       } catch (err) {
-        // Grown past the cap since the fstat.
-        if (isReadLimit(err)) return { overCap: fstatSync(fd).size };
-        throw err;
+        if (!isReadLimit(err)) throw err;
+        // Grown past the cap since the fstat. A size that cannot be read now leaves it unknown:
+        // the file is still shown as changed, never left out of the review as if it were gone.
+        try {
+          return { overCap: fstatSync(fd).size };
+        } catch {
+          return { overCap: null };
+        }
       }
     });
   }
@@ -388,6 +405,20 @@ export class ChangesetManager {
     return changed;
   }
 
+  /** Whether a rollback has something to put back for a tracked file: the bytes read before the
+   *  run, or a file the run added. False for a file the backup could not read. */
+  hasOriginal(abs: string): boolean {
+    const entry = this.entries.get(abs);
+    return entry !== undefined && (entry.status === 'added' || entry.originalContent !== null);
+  }
+
+  /** Every tracked file by the name the review shows it under, changed now or not. A file replaced
+   *  by a link since the review is no longer among {@link getChanges}, but an answer to that review
+   *  still names it, and a rollback that leaves it has to name it back. */
+  reviewNames(): Map<string, string> {
+    return new Map([...this.entries.keys()].map((abs) => [relative(this.realCwd, abs), abs]));
+  }
+
   /**
    * Produce unified diffs for all changed files.
    */
@@ -466,25 +497,31 @@ export class ChangesetManager {
   }
 
   /**
-   * Restore ALL files to their pre-run state.
+   * Restore ALL files to their pre-run state. Returns the files it left as they are: the
+   * caller names them, so a rollback that skipped one does not read as done.
    */
-  rollbackAll(): void {
+  rollbackAll(): string[] {
+    const notRestored: string[] = [];
     for (const [abs, entry] of this.entries) {
-      this._rollbackOne(abs, entry);
+      if (!this._rollbackOne(abs, entry)) notRestored.push(abs);
     }
+    return notRestored;
   }
 
   /**
-   * Restore specific files (by absolute path) to pre-run state.
+   * Restore specific files (by absolute path) to pre-run state. Returns those it left as they
+   * are, as {@link rollbackAll} does.
    */
-  rollbackFiles(files: string[]): void {
+  rollbackFiles(files: string[]): string[] {
+    const notRestored: string[] = [];
     for (const file of files) {
       const abs = resolve(file);
       const entry = this.entries.get(abs);
       if (entry) {
-        this._rollbackOne(abs, entry);
+        if (!this._rollbackOne(abs, entry)) notRestored.push(abs);
       }
     }
+    return notRestored;
   }
 
   /**
@@ -579,17 +616,18 @@ export class ChangesetManager {
     return this._changed().length;
   }
 
-  private _rollbackOne(abs: string, entry: ChangesetEntry): void {
-    if (this.anchored.has(abs)) {
-      this._rollbackAnchored(abs, entry);
-      return;
-    }
+  /** Puts one file back as it was before the run. True when it now is: the original written
+   *  back, or a file the run added gone. False when the file was left as it is: replaced, linked
+   *  or moved out of reach since, not a regular file, or the write failed. */
+  private _rollbackOne(abs: string, entry: ChangesetEntry): boolean {
+    if (this.anchored.has(abs)) return this._rollbackAnchored(abs, entry);
     // Checked again here: a directory on the way may have become a symlink out of the
     // workspace since the backup. Such a file is left alone.
-    if (this._confine(abs) !== abs) return;
+    if (this._confine(abs) !== abs) return false;
     if (entry.status === 'added') {
-      // Another file under the name since the run's last write is left alone.
-      if (!this._isRunsOwn(abs)) return;
+      // Another file under the name since the run's last write is left alone. One that is gone
+      // is as it was before the run.
+      if (!this._isRunsOwn(abs)) return isMissing(abs);
       // New file — delete it (unlink removes a symlink itself, never its target)
       try {
         unlinkSync(abs);
@@ -603,38 +641,42 @@ export class ChangesetManager {
             break; // Dir not empty
           }
         }
-      } catch {
-        // File already gone
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ENOENT';
       }
-    } else {
-      // Modified file — restore the pre-run bytes; the decoded text loses any that are not UTF-8
-      if (entry.originalContent !== null) {
-        let fd: number | undefined;
-        try {
-          // O_NOFOLLOW: a symlink planted at the file since the backup is not written through.
-          // O_NONBLOCK: a FIFO at the file does not hold the process. ftruncate refuses anything
-          // but a regular file (EINVAL), so a FIFO or device is never written.
-          fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o666);
-          ftruncateSync(fd, 0);
-          const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
-          let off = 0;
-          while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);
-        } catch {
-          // Best-effort
-        } finally {
-          if (fd !== undefined) closeSync(fd);
-        }
-      }
+      return true;
     }
+    // Modified file — restore the pre-run bytes; the decoded text loses any that are not UTF-8.
+    // Without them (the original could not be read) there is nothing to put back.
+    if (entry.originalContent === null) return false;
+    let fd: number | undefined;
+    try {
+      // O_NOFOLLOW: a symlink planted at the file since the backup is not written through.
+      // O_NONBLOCK: a FIFO at the file does not hold the process. ftruncate refuses anything
+      // but a regular file (EINVAL), so a FIFO or device is never written.
+      fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o666);
+      ftruncateSync(fd, 0);
+      const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
+      let off = 0;
+      while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);
+    } catch {
+      // Not restored: a symlink or something other than a regular file at the name, or the write
+      // failed (a failed write after the truncate leaves the file shorter). The caller names it.
+      return false;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    return true;
   }
 
   /** {@link _rollbackOne} through the workspace's open directory: nothing on the way is followed. */
-  private _rollbackAnchored(abs: string, entry: ChangesetEntry): void {
+  private _rollbackAnchored(abs: string, entry: ChangesetEntry): boolean {
     const at = this._at(abs);
-    if (at === null) return;
+    if (at === null) return false;
     if (entry.status === 'added') {
-      // Another file under the name since the run's last write is left alone.
-      if (!this._isRunsOwn(abs)) return;
+      // Another file under the name since the run's last write is left alone. One that is gone
+      // is as it was before the run.
+      if (!this._isRunsOwn(abs)) return this._presentAnchored(abs) === false;
       try {
         // New file — delete it (unlinkat removes a link itself, never its target)
         unlinkAt(at.anchor, at.rel);
@@ -647,28 +689,30 @@ export class ChangesetManager {
             break; // Dir not empty
           }
         }
-      } catch {
-        // File already gone
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ENOENT';
       }
-      return;
+      return true;
     }
-    if (entry.originalContent === null) return;
+    if (entry.originalContent === null) return false;
     let fd: number | undefined;
     try {
       // In place, as before: the file keeps its inode, owner and mode; one that is gone is made
       // again with the mode a write by name gives it. Its directories are not made again.
       ({ fd } = openWrite(at.anchor, at.rel, { createMode: 0o666 & ~processUmask() }));
       // A file with a second name may be a file outside the workspace: not written.
-      if (fstatSync(fd).nlink > 1) return;
+      if (fstatSync(fd).nlink > 1) return false;
       const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
       ftruncateSync(fd, 0);
       let off = 0;
       while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off, off);
     } catch {
-      // Best-effort
+      // Not restored, as in {@link _rollbackOne}.
+      return false;
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
+    return true;
   }
 }
 

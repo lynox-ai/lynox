@@ -183,6 +183,18 @@ export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
 }
 
 /**
+ * Run `fn` outside any call's slot: `fn`, and everything it awaits, sees no slot at all. For work
+ * that a call starts but does not own — a `memory:store` subscriber, which `diagnostics_channel`
+ * runs synchronously inside the publisher's slot, or a write the call leaves running after its
+ * outcome row. Inheriting the slot would hand that work the call's trail, and let its refusal
+ * poison a call that has already answered. Only this storage is left; every other async context
+ * (run group, plan, worker) stays.
+ */
+export function runOutsideCallSlot<T>(fn: () => T): T {
+  return slotStorage.exit(fn);
+}
+
+/**
  * Record a block `wrapUntrustedData` produced while the current call runs. Outside a
  * slot (prompt building between calls, a test calling the wrapper directly) this is a
  * no-op, so nothing recorded here can reach another call's scan. A block from

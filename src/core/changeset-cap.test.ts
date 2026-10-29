@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, closeSync, existsSync, openSync, writeSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, linkSync, openSync, writeSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 
 /**
@@ -17,6 +18,9 @@ const reads = vi.hoisted(() => ({ bytes: 0 }));
 /** While on, `fstatSync` reports a size of 1 byte, until the first `readSync`: as a file that
  *  grows past the cap between the size check and the read would. */
 const grows = vi.hoisted(() => ({ on: false }));
+/** While on, the first `fstatSync` after a `readSync` fails: as a size that cannot be read once the
+ *  file was found over the cap. */
+const fstatFailsAfterRead = vi.hoisted(() => ({ on: false, armed: false }));
 /** When set, `execFileSync` throws this instead of running: as a `diff` stopped by its timeout would. */
 const diffThrows = vi.hoisted(() => ({ err: null as Record<string, unknown> | null }));
 vi.mock('node:child_process', async (importOriginal) => {
@@ -35,11 +39,17 @@ vi.mock('node:fs', async (importOriginal) => {
     ...real,
     readSync: ((...args: unknown[]) => {
       grows.on = false;
+      if (fstatFailsAfterRead.on) fstatFailsAfterRead.armed = true;
       const n = (real.readSync as (...a: unknown[]) => number)(...args);
       reads.bytes += n;
       return n;
     }) as typeof real.readSync,
     fstatSync: ((...args: unknown[]) => {
+      if (fstatFailsAfterRead.armed) {
+        fstatFailsAfterRead.armed = false;
+        fstatFailsAfterRead.on = false;
+        throw Object.assign(new Error('EIO: i/o error, fstat'), { code: 'EIO' });
+      }
       const st = (real.fstatSync as (...a: unknown[]) => import('node:fs').Stats)(...args);
       if (!grows.on) return st;
       return Object.assign(Object.create(Object.getPrototypeOf(st) as object) as import('node:fs').Stats, st, { size: 1 });
@@ -112,6 +122,8 @@ function bytesReadBy(op: () => void): number {
 
 afterEach(() => {
   grows.on = false;
+  fstatFailsAfterRead.on = false;
+  fstatFailsAfterRead.armed = false;
   diffThrows.err = null;
   mgr.cleanup();
   closeWorkspaceBase();
@@ -137,7 +149,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(changes[0]!.compared, 'a note, not a diff').toBe(false);
     expect(changes[0]!.diff).toBe(
       '--- a/notes.txt\n+++ b/notes.txt\n'
-      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes. Look at the file yourself before you keep the change; Rollback restores the original.)',
+      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes. Look at the file yourself before you keep the change; Rollback restores the original, or says it could not.)',
     );
     expect(bytesReadBy(() => { expect(mgr.hasChanges()).toBe(true); }), 'hasChanges does not read it').toBe(0);
     expect(bytesReadBy(() => { expect(mgr.size).toBe(1); }), 'size does not read it').toBe(0);
@@ -190,8 +202,25 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(read, 'and did read up to it').toBeGreaterThan(CAP);
     expect(changes.map((c) => c.diff)).toEqual([
       '--- a/notes.txt\n+++ b/notes.txt\n'
-      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes. Look at the file yourself before you keep the change; Rollback restores the original.)',
+      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes. Look at the file yourself before you keep the change; Rollback restores the original, or says it could not.)',
     ]);
+  });
+
+  it(`[${branch}] a file that grows past the cap, whose size then cannot be read, is still shown as changed`, () => {
+    const path = join(ws, 'notes.txt');
+    writeFileSync(path, 'original');
+    writeAsTheRun(path, 'the run wrote this');
+    plant(path, HUGE);
+
+    grows.on = true;
+    fstatFailsAfterRead.on = true;
+    const changes = mgr.getChanges();
+    expect(fstatFailsAfterRead.on, 'precondition: the size read after the capped read failed').toBe(false);
+    expect(changes.map((c) => [c.diff, c.compared])).toEqual([[
+      '--- a/notes.txt\n+++ b/notes.txt\n'
+      + '(Content not compared: the file is now larger than the 5 MB the review reads. Before the run it was 8 bytes. Look at the file yourself before you keep the change; Rollback restores the original, or says it could not.)',
+      false,
+    ]]);
   });
 
   it(`[${branch}] recordWritten on a file that grows past the cap while it is read stops at the cap, and does not take it for the run's own`, () => {
@@ -310,7 +339,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     const [change] = mgr.getChanges();
     expect(change!.diff.startsWith('--- a/notes.txt\n+++ b/notes.txt\n@@ ')).toBe(true);
     expect(change!.diff.endsWith(
-      '\n(Diff cut: only its start is shown, as it is longer than 1 MB or took longer than 5 seconds. Look at the file yourself before you keep the change; Rollback restores the original.)',
+      '\n(Diff cut: only its start is shown, as it is longer than 1 MB or took longer than 5 seconds. Look at the file yourself before you keep the change; Rollback restores the original, or says it could not.)',
     )).toBe(true);
     // Node stops the read after the chunk that crosses the limit; the whole diff is about 5 MB.
     expect(change!.diff.length, 'only the start').toBeLessThan(2 * 1024 * 1024);
@@ -373,4 +402,74 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(change!.diff).toBe('--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-original\n+changed\n');
     expect(change!.compared).toBe(true);
   });
+});
+
+/**
+ * A rollback leaves a file as it is when it was replaced or linked since the run wrote it, or
+ * cannot be written. It returns those files, so the answer to the review can name them: the review
+ * promised the original back, and a skip nobody hears of reads as done.
+ */
+describe.each<Branch>(['anchor', 'name'])('what a rollback reports, %s branch', (branch) => {
+  beforeEach(() => setup(branch));
+
+  it(`[${branch}] a modified file restored, and an added file removed, are not reported (control)`, () => {
+    const modified = join(ws, 'notes.txt');
+    const added = join(ws, 'new.txt');
+    writeFileSync(modified, 'original');
+    writeAsTheRun(modified, 'the run wrote this');
+    writeAsTheRun(added, 'the run made this');
+    expect(mgr.rollbackAll()).toEqual([]);
+    expect(readFileSync(modified, 'utf-8')).toBe('original');
+    expect(existsSync(added)).toBe(false);
+  });
+
+  it(`[${branch}] a modified file replaced by a symlink since is left, not written through, and reported`, () => {
+    const path = join(ws, 'notes.txt');
+    const outside = join(data, 'outside.txt');
+    writeFileSync(outside, 'not the workspace');
+    writeFileSync(path, 'original');
+    writeAsTheRun(path, 'the run wrote this');
+    rmSync(path);
+    symlinkSync(outside, path);
+    expect(mgr.rollbackAll()).toEqual([path]);
+    expect(readFileSync(outside, 'utf-8'), 'the link target is not written').toBe('not the workspace');
+  });
+
+  // Inside the workspace, so the name passes its confinement and the write itself fails: a FIFO
+  // without a reader refuses a non-blocking open for writing, and is never truncated.
+  it(`[${branch}] a modified file replaced by a FIFO since is left and reported`, () => {
+    const path = join(ws, 'notes.txt');
+    writeFileSync(path, 'original');
+    writeAsTheRun(path, 'the run wrote this');
+    rmSync(path);
+    execFileSync('mkfifo', [path]);
+    expect(statSync(path).isFIFO(), 'precondition: a FIFO is at the name').toBe(true);
+    expect(mgr.rollbackAll()).toEqual([path]);
+  });
+
+  it(`[${branch}] an added file replaced by another writer's file is left and reported`, () => {
+    const path = join(ws, 'new.txt');
+    writeAsTheRun(path, 'the run made this');
+    plant(path, 5);
+    expect(mgr.rollbackFiles([path])).toEqual([path]);
+    expect(statSync(path).size, 'the other writer\'s file stays').toBe(5);
+  });
+
+  it(`[${branch}] an added file already gone is not reported: it is as it was before the run`, () => {
+    const path = join(ws, 'new.txt');
+    writeAsTheRun(path, 'the run made this');
+    rmSync(path);
+    expect(mgr.rollbackFiles([path])).toEqual([]);
+  });
+
+  if (branch === 'anchor') {
+    it('[anchor] a modified file that got a second name since is left and reported', () => {
+      const path = join(ws, 'notes.txt');
+      writeFileSync(path, 'original');
+      writeAsTheRun(path, 'the run wrote this');
+      linkSync(path, join(data, 'second-name.txt'));
+      expect(mgr.rollbackAll()).toEqual([path]);
+      expect(readFileSync(path, 'utf-8'), 'not written').toBe('the run wrote this');
+    });
+  }
 });

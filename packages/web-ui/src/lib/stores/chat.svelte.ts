@@ -1,7 +1,7 @@
 import { getApiBase } from '../config.svelte.js';
 import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
 import {
 	recordToolCall,
@@ -2937,6 +2937,9 @@ async function fetchChangeset(): Promise<void> {
 	finally { changesetLoading = false; }
 }
 
+/** The most file names the "not restored" message lists before it counts the rest. */
+const NOT_RESTORED_SHOWN = 5;
+
 export async function submitChangesetReview(
 	action: 'accept' | 'rollback' | 'partial',
 	rolledBackFiles?: string[],
@@ -2948,8 +2951,9 @@ export async function submitChangesetReview(
 		body['rolledBackFiles'] = rolledBackFiles;
 	}
 	let status: number;
+	let res: Response;
 	try {
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset/review`, {
+		res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset/review`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(body),
@@ -2962,7 +2966,24 @@ export async function submitChangesetReview(
 	}
 	pendingChangeset = null;
 	pendingChangesetRunId = null;
-	if (status >= 200 && status < 300) return;
+	if (status >= 200 && status < 300) {
+		// A rollback leaves a file as it is when it was replaced or linked since the review, or
+		// could not be written. Closing the review without a word would read as all restored.
+		const notRestored = await res.json().then(
+			(j: unknown) => (j as { notRestored?: unknown } | null)?.notRestored,
+			() => undefined,
+		);
+		const names = Array.isArray(notRestored) ? notRestored.filter((f): f is string => typeof f === 'string') : [];
+		if (names.length > 0) {
+			// The person has to act on this list: it stays until they close it, and names at most five.
+			const shown = names.slice(0, NOT_RESTORED_SHOWN).join(', ');
+			const files = names.length > NOT_RESTORED_SHOWN
+				? tf('changeset.not_restored_more', { files: shown, n: String(names.length - NOT_RESTORED_SHOWN) })
+				: shown;
+			addToast(tf('changeset.not_restored', { files }), 'error', null);
+		}
+		return;
+	}
 	// The answer did nothing. Closing the review silently would read as done: say so, and show
 	// what is pending now. 409 is the review of an earlier run, or a run in progress.
 	addToast(t(status === 409 ? 'changeset.review_refused' : 'changeset.review_failed'), 'info', 5000);
