@@ -108,6 +108,7 @@ const { RunHistory } = await import('./run-history.js');
 const { TaskManager } = await import('./task-manager.js');
 const { ApiStore } = await import('./api-store.js');
 const { ConnectionStore } = await import('./connection-store.js');
+const { GrantLedger } = await import('./grant-ledger.js');
 const { setTenantWorkspace, clearTenantWorkspace, _resetCache: resetWorkspaceCache } = await import('./workspace.js');
 const { closeWorkspaceBase } = await import('./workspace-rel.js');
 const { toPortableWorkflow, buildFence, LYNOX_WORKFLOW_INFO_STRING } = await import('./workflow-portable.js');
@@ -1005,6 +1006,37 @@ describe('a mandate\'s row names an API profile by its opaque id', () => {
     const targets = (trail.db.prepare('SELECT target FROM audit_log').all() as Array<{ target: string }>).map((r) => r.target);
     expect(targets.length).toBeGreaterThan(0);
     expect(targets.filter((t) => t.includes('mueller')), 'a row that names the slug').toEqual([]);
+  });
+
+  it('with the grant ledger, as the engine wires it: the create that mints names the id it stores', async () => {
+    let made: ReturnType<typeof apiStoreOnDb> | undefined;
+    const { result, trail } = await drive(createFixture(MUELLER as unknown as Record<string, unknown>, () => {
+      made = apiStoreOnDb(null);
+      made.store.setGrantLedger(new GrantLedger(made.engine.getDb()));
+      return made;
+    }), false);
+    expect(result.is_error, JSON.stringify(result.content)).not.toBe(true);
+    expect(made!.store.get('mueller-crm')?.oauth_grant?.grant_id, 'precondition: the save minted').toBeDefined();
+    expect(attemptTarget(trail, 'api_setup#save')).toBe(`api_profiles profile=${made!.store.trailIdOf('mueller-crm')!}`);
+  });
+
+  it('an update of a row without an id names the id the row then carries', async () => {
+    let made: ReturnType<typeof apiStoreOnDb> | undefined;
+    const f: Fixture = {
+      site: 'api_setup#save', branch: 'update', row: { verb: 'change', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: { ...MUELLER, description: 'Changed.' } },
+      build: () => {
+        setDataDir(tmp('lynox-iw-api-'));
+        made = apiStoreOnDb(MUELLER);
+        // As an older binary leaves a row after a pin back.
+        made.engine.getDb().exec("UPDATE connections SET trail_id = NULL WHERE id = 'mueller-crm'");
+        return { ctx: { apiStore: { obj: made.store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) };
+      },
+    };
+    const { result, trail } = await drive(f, false);
+    expect(result.is_error, JSON.stringify(result.content)).not.toBe(true);
+    const carried = made!.store.trailIdOf('mueller-crm');
+    expect(carried).toMatch(/^apf_[0-9a-f]{16}$/);
+    expect(attemptTarget(trail, 'api_setup#save')).toBe(`api_profiles profile=${carried!}`);
   });
 
   it('an id the model puts in the profile is neither named nor stored', async () => {
