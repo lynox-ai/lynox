@@ -24,6 +24,7 @@ import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
+import { findHiddenChar, hiddenCharRefusal } from './hidden-text.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
@@ -3333,6 +3334,12 @@ export class RunHistory {
     // through here, so a contract-governed workflow with an unconstrained
     // re-targetable param is rejected before it can be persisted + scheduled.
     // No contract → no-op, so existing playbooks are unaffected.
+    // The text a run hands the model (name, goal, steps, parameters) carries no character that
+    // renders as nothing (`hidden-text.ts`): a workflow copied from someone else's would bring its
+    // hidden instructions along. Only tools save here, so a refusal reaches the model that wrote it.
+    // `reasoning` is the capture's own record and never reaches a run's model, so it is not read.
+    const hidden = findHiddenChar({ name: planned.name, goal: planned.goal, steps: planned.steps, parameters: (planned as { parameters?: unknown }).parameters });
+    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
     // S3f write-cutover: write the workflow definition DIRECTLY to engine.db. The
