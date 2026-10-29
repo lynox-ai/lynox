@@ -103,6 +103,7 @@ import {
   PERSON_ERASURE_CONFIRM, erasePerson, previewPersonErasure,
   type PersonErasureDeps, type PersonErasurePreview, type PersonErasureRefusal, type PersonErasureResult,
 } from '../core/person-erasure.js';
+import { durableMemoryState } from '../core/memory-tool-set.js';
 import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
 import type { WorkerLoop } from '../core/worker-loop.js';
 import type {
@@ -2077,6 +2078,7 @@ export class LynoxHTTPApi {
       engine: {
         active_sessions: this.runningSessions.size,
         total_threads: threadCount,
+        ...(engine !== null ? { durable_memory: durableMemoryState(engine.getLegacyMemoryReason()) } : {}),
       },
     };
 
