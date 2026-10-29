@@ -2036,7 +2036,8 @@ ${draftJson}
       // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
       const existingId = existing.id;
       const refine = input.refine;
-      return withInstanceWrite(agent, { site: 'api_setup#refine', kind: 'change', store: 'api_profiles', target: () => [['profile', existingId]], main: ['save'] }, (w) => {
+      // A mandate's row names the profile by its opaque id, never by the slug the model chose.
+      return withInstanceWrite(agent, { site: 'api_setup#refine', kind: 'change', store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(existingId)]], main: ['save'] }, (w) => {
         const mergedSave = w.run('save', () => apiStore.save(merged, apisDir), ifOk);
         if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
 
@@ -2402,7 +2403,13 @@ ${draftJson}
       const growth = await askBindingGrowth(agent, profile);
       if ('refusal' in growth) return growth.refusal;
       const savedId = profile.id;
-      return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', savedId]], main: ['save'] }, (w) => {
+      // A mandate's row names the profile by its opaque id, never by the slug the model chose. Read
+      // from the database, not from `prior`: a row the store could not load still has its id, and
+      // the save keeps it. A new row takes the id made here, which the save is handed, so the row
+      // and the profile name the same one. Without engine.db there is no id and the row names the
+      // kind only.
+      const freshTrailId = apiStore.newTrailId();
+      return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(savedId) ?? freshTrailId]], main: ['save'] }, (w) => {
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);
           if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
@@ -2412,7 +2419,7 @@ ${draftJson}
             return `Error: this update of profile "${profile.id}" changes where its credentials go, or where the tokens it read from another profile's refresh slot go. The tokens it holds were minted for the old destinations or may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
           }
         }
-        const saved = w.run('save', () => apiStore.save(profile, apisDir), ifOk);
+        const saved = w.run('save', () => apiStore.save(profile, apisDir, { trailId: freshTrailId }), ifOk);
         // A refusal used to arrive here as `isNew`, so the tool answered "Created
         // … saved and activated immediately" for a profile that was never stored.
         // Fail-closed in effect, false-confident in report — and the only trace was
@@ -2736,7 +2743,8 @@ ${draftJson}
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
       // One block from the removal to the purge (the sweep, the releases and the vault among it): a
       // throw of `remove` that the catch below answers reads `returned`, which claims nothing.
-      return withInstanceWrite(agent, { site: 'api_setup#delete', kind: 'delete', store: 'api_profiles', target: () => [['profile', ID_PATTERN.test(id) ? id : undefined]], main: ['removal'] }, (w) => {
+      // Read while the row is still there; the slug is never named.
+      return withInstanceWrite(agent, { site: 'api_setup#delete', kind: 'delete', store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(id)]], main: ['removal'] }, (w) => {
         let removed: boolean;
         try {
           // The person was asked above. Only the owner's delete erases the run-history record of

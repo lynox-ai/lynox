@@ -1743,6 +1743,14 @@ export class Engine {
         // estimate that said "the store is already on the engine" was measuring
         // a reachability that did not exist.
         this._connectionStore = connStore;
+        // Every API profile row without its opaque id gets one, on every boot (660a-1c S-2): the
+        // migration ran once, and a row an older binary wrote after a pin back has none. In its own
+        // catch: a failure costs a row's id, never the profiles or engine.db.
+        try {
+          connStore.fillApiTrailIds();
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox] API profile id fill failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
         this._apiStore.importFromDirectoryIfNeeded(apisDir, connStore);
         loaded = this._apiStore.loadFromConnections(connStore);
         this._apiStore.setConnectionStore(connStore);

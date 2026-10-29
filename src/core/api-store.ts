@@ -15,7 +15,7 @@ import { compose, engineText, wrapUntrustedData, renderFence } from './data-boun
 import { SUGGESTED_API_CATALOG, type SuggestedApiCatalog } from './suggested-apis.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import type { OAuthAccount } from './oauth-account.js';
-import { ConnectionStore, type ConnectionRow } from './connection-store.js';
+import { ConnectionStore, newApiTrailId, type ConnectionRow } from './connection-store.js';
 import type { GrantLedger, GrantMintReason } from './grant-ledger.js';
 import { auditProviderCancels, cancelHeldProviderRecords, mayCancelProviderErasure, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
 import type { AuditLog } from './audit-log.js';
@@ -639,9 +639,12 @@ export function hasTokenSlotShape(name: string): boolean {
   return /_(ACCESS|REFRESH)_TOKEN$/.test(name);
 }
 
-/** Map an `ApiProfile` onto a `kind='api'` connection row (outbound, no subject). */
-function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
-  const { id, name, ...rest } = profile;
+/** Map an `ApiProfile` onto a `kind='api'` connection row (outbound, no subject). `trailId` is the
+ *  opaque id a save hands in for a new row (`SaveOptions.trailId`), never one from the profile. */
+function profileToConnectionRow(profile: ApiProfile, trailId?: string): ConnectionRow {
+  // `trail_id` is the row's own column, never part of the profile: a profile is spread from the
+  // model's input, so a `trail_id` key in it would otherwise be stored as if it were the id.
+  const { id, name, trail_id: _trail, ...rest } = profile as ApiProfile & { trail_id?: unknown };
   return {
     id,
     kind: 'api',
@@ -660,6 +663,7 @@ function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
     // Where the connection's epoch starts (PRD source-connection R8-3): the store keeps the
     // first value a row is written with, so passing the current grant on every write is safe.
     firstGrantId: typeof profile.oauth_grant?.grant_id === 'string' ? profile.oauth_grant.grant_id : null,
+    trailId,
   };
 }
 
@@ -1214,6 +1218,11 @@ export interface SaveOptions {
    * it is the actor of the audit row of every cancel. A save without one cancels nothing.
    */
   actor?: RequestPrincipal | undefined;
+  /**
+   * The opaque id the caller already named in the instance trail (`newTrailId`), for a row that
+   * has none yet. A row that has one keeps it. Never read from the profile, which the model writes.
+   */
+  trailId?: string | undefined;
 }
 
 /** A save the store refused, with the reason it gives the caller. */
@@ -1464,6 +1473,20 @@ export class ApiStore {
   }
 
   /**
+   * The opaque id a mandate's row names the profile `id` by, read from the database (not from the
+   * profiles this store loaded: a row it could not read still has its id). Undefined without
+   * engine.db, where profiles have no id.
+   */
+  trailIdOf(id: string): string | undefined {
+    return this.connStore?.trailIdOf(id);
+  }
+
+  /** A fresh opaque id for a save to pass as `SaveOptions.trailId`; undefined without engine.db. */
+  newTrailId(): string | undefined {
+    return this.connStore === null ? undefined : newApiTrailId();
+  }
+
+  /**
    * Another kind's connection under `id`, or null. `connections.id` is one key across every
    * kind, so an upsert of an api row would turn another kind's row into an api row: its
    * config replaced, its kind rewritten, and nothing left to say what was there.
@@ -1480,11 +1503,11 @@ export class ApiStore {
    * already log a failed write. Two writes do not: the one-shot flat-file import, on purpose (see
    * there), and the static re-gate, which rewrites only rows it read as kind api.
    */
-  private _writeRow(profile: ApiProfile): void {
+  private _writeRow(profile: ApiProfile, trailId?: string): void {
     if (!this.connStore) return;
     const kind = this._otherKindAt(profile.id);
     if (kind !== null) throw new Error(`a ${kind} connection already uses the id ${JSON.stringify(profile.id)}`);
-    this.connStore.upsert(profileToConnectionRow(profile));
+    this.connStore.upsert(profileToConnectionRow(profile, trailId));
     this._recordGrantHosts(profile);
   }
 
@@ -2646,7 +2669,7 @@ export class ApiStore {
         for (const name of exchange.wrote) if (Object.hasOwn(moved, name)) moved[name] = keyedOf(f, name);
         kept = { ...kept, fingerprints: moved };
       }
-      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew);
+      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew, options?.trailId);
       // A save that clears a revocation from the grant it keeps (an exchange that worked again with
       // the same token) lifts it: a provider's erasure of that grant still held is cancelled with it,
       // whoever saves, since the same grant works again. A save that names no actor cancels nothing.
@@ -2686,7 +2709,7 @@ export class ApiStore {
           consentRefresh: options?.newConsent === true ? options.consentRefresh : undefined,
           adopt: mintReason === 'exchange' ? exchange?.presentedRefreshTokenFp ?? undefined : undefined,
         }));
-        const result = this._persist(minted, apisDir, isNew);
+        const result = this._persist(minted, apisDir, isNew, options?.trailId);
         // A refused save must not leave a ledger row behind for a grant nothing carries:
         // throwing rolls the mint back with it.
         if (!result.ok) throw new SaveRefused(result.reason);
@@ -2719,11 +2742,11 @@ export class ApiStore {
     }
   }
 
-  private _persist(profile: ApiProfile, apisDir: string | undefined, isNew: boolean): { ok: true; isNew: boolean } | { ok: false; reason: string } {
+  private _persist(profile: ApiProfile, apisDir: string | undefined, isNew: boolean, trailId: string | undefined): { ok: true; isNew: boolean } | { ok: false; reason: string } {
     const refusal = this._saveAdmit(profile, false);
     if (refusal !== null) return { ok: false, reason: refusal };
     if (this.connStore) {
-      this._writeRow(profile);
+      this._writeRow(profile, trailId);
     } else if (apisDir) {
       mkdirSync(apisDir, { recursive: true, mode: 0o700 });
       writeFileSync(join(apisDir, `${profile.id}.json`), JSON.stringify(profile, null, 2), { mode: 0o600 });
