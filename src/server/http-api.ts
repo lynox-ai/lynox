@@ -93,6 +93,7 @@ import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, Promp
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
+import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
@@ -1854,6 +1855,9 @@ export class LynoxHTTPApi {
   private _captureReportCache: { report: Promise<import('../core/capture-telemetry-report.js').CaptureReport>; expiresAt: number } | null = null;
   /** Serialized model catalog + its ETag, computed once — the catalog is a frozen module constant. */
   private _catalogCache: { payload: string; etag: string } | null = null;
+  /** A keyless boot over encrypted data, as the check after listen found it; null = not found (or not checked). */
+  private _keyless: (KeylessState & { readonly since: string }) | null = null;
+  private _stopping = false;
   /** Test-only: drop cached usage summaries between tests so 30s TTL doesn't bleed mocks across cases. */
   public _clearUsageCache(): void { this._usageSummaryCache.clear(); }
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
@@ -2037,6 +2041,10 @@ export class LynoxHTTPApi {
     // as one word, not which store or why: this endpoint answers without auth.
     const engine = this.engine;
     const bootStoreMissing = engine !== null && (engine.getEngineDb() === null || engine.getRunHistory() === null);
+    // The same one word for a second state: no vault key over stores that already hold encrypted
+    // values (`_checkKeyless`), so new data in them lands in plain. Which state, and why, stays in the
+    // boot log and in the owner's status field; `unknown` does not set it.
+    const keylessOverCiphertext = this._keyless?.state === 'missing_over_encrypted_data';
 
     // BUILD_SHA is baked into the production Dockerfile via --build-arg.
     // Empty in dev images and any locally-built container that didn't pass
@@ -2049,7 +2057,7 @@ export class LynoxHTTPApi {
     // non-null garbage SHA and force every rollout into the rollback path.
     const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
     const data: HealthBody = {
-      status: bootStoreMissing ? 'degraded' : 'ok',
+      status: bootStoreMissing || keylessOverCiphertext ? 'degraded' : 'ok',
       version: PKG_VERSION,
       build_sha: buildSha.length > 0 ? buildSha : null,
       uptime_s: Math.floor(process.uptime()),
@@ -3373,10 +3381,53 @@ export class LynoxHTTPApi {
     this.sessionStore.startEviction();
 
     await listening;
+    void this._checkKeyless();
+  }
+
+  /**
+   * After listen, and only without a vault key: do the stores already hold encrypted values? Reads
+   * through the stores' own connections in bounded steps (`vault-key-detect.ts`), writes nothing,
+   * never throws. The result goes to the boot log, the owner's status field and `degraded`.
+   */
+  private async _checkKeyless(): Promise<void> {
+    if (process.env['LYNOX_VAULT_KEY']) return;
+    const engine = this.engine;
+    const stores: Array<{ name: KeylessStore; db: import('better-sqlite3').Database }> = [];
+    // Runs unawaited after listen, so getting a connection must not reject. The production getters
+    // return a field and do not throw (a closed handle fails later, in the check, as `unknown`);
+    // an engine stand-in without them skips that store only, and the other is still checked.
+    const reach = (name: KeylessStore, get: () => { getDb(): import('better-sqlite3').Database } | null | undefined): void => {
+      try {
+        const store = get();
+        if (store) stores.push({ name, db: store.getDb() });
+      } catch { /* not reachable: not checked */ }
+    };
+    reach('engine.db', () => engine?.getEngineDb());
+    reach('history.db', () => engine?.getRunHistory());
+    if (stores.length === 0) return;
+    const found = await checkKeylessOverCiphertext(stores);
+    if (found === null || this._stopping) return;
+    this._keyless = { ...found, since: new Date().toISOString() };
+    // A health body cached before the check ended would say `ok` for up to ten more seconds.
+    this.healthCache = null;
+    process.stderr.write(found.state === 'unknown'
+      ? '⚠ No vault key is set, and whether the stores already hold encrypted values could not be checked. If they do, new data in them is being stored unencrypted.\n'
+      : `⚠ No vault key is set, but ${found.stores.join(' and ')} already ${found.stores.length === 1 ? 'holds' : 'hold'} encrypted values. New data in them is being stored unencrypted. Restore LYNOX_VAULT_KEY (env, ~/.lynox/.env or vault.key in the data dir).\n`);
+  }
+
+  /** The keyless state for the owner's status field; absent for anyone else and when nothing was found. */
+  private _keylessField(req: IncomingMessage): Record<string, unknown> {
+    if (this._keyless === null || !isOwnerPrincipal(this._principalOf(req))) return {};
+    return {
+      vault_key: this._keyless.state,
+      vault_key_since: this._keyless.since,
+      ...(this._keyless.state === 'missing_over_encrypted_data' ? { vault_key_stores: this._keyless.stores } : {}),
+    };
   }
 
   /** @param options.inboxBacklog passed to `Engine.shutdown`; a signal handler passes `'bounded'`. */
   async shutdown(options: { inboxBacklog?: 'classify' | 'bounded' | undefined } = {}): Promise<void> {
+    this._stopping = true;
     if (this.rateGcTimer) clearInterval(this.rateGcTimer);
     this.sessionStore.stopEviction();
     // Expire pending prompts in SQLite on shutdown — except a trigger's parked
@@ -9773,9 +9824,10 @@ export class LynoxHTTPApi {
     // configuration, not public data. The status bar polls it alongside
     // `/api/tasks` and `/api/history/cost/daily`, which are user-scoped too, so
     // it already carries credentials on this call.
-    this.addStatic('user', 'GET /api/providers/status', async (_req, res) => {
+    this.addStatic('user', 'GET /api/providers/status', async (req, res) => {
       const providers = await this.getProvidersStatus();
-      jsonResponse(res, 200, { providers });
+      // The status bar polls this on every page; the keyless field rides it for the owner only.
+      jsonResponse(res, 200, { providers, ...this._keylessField(req) });
     }, READS);
 
     // ── LLM model catalog ──
@@ -13668,7 +13720,8 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'GET /api/vault/key', async (req, res) => {
       const key = process.env['LYNOX_VAULT_KEY'];
       if (!key) {
-        jsonResponse(res, 200, { configured: false });
+        // A mandate keeps its 200 with `configured`; only the owner sees the keyless field.
+        jsonResponse(res, 200, { configured: false, ...this._keylessField(req) });
         return;
       }
       // Only return the actual key when explicitly requested (settings page reveal)
