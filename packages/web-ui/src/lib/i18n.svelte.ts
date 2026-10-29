@@ -1414,6 +1414,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'changeset.review_pending': { de: 'Bitte prüfe die ausstehenden Änderungen bevor du weiterschreibst.', en: 'Please review the pending changes before sending another message.' },
 	'changeset.review_unsent': { de: 'Deine Antwort ist möglicherweise nicht angekommen. Bitte versuche es erneut.', en: 'Your answer may not have arrived. Please try again.' },
 	'changeset.review_failed': { de: 'Deine Antwort konnte nicht übernommen werden.', en: 'Your answer could not be applied.' },
+	'changeset.not_restored': { de: 'Nicht zurückgesetzt: {files}. Diese Dateien wurden seit der Prüfung ersetzt oder verknüpft, oder sie liessen sich nicht schreiben. Sieh sie dir selbst an.', en: 'Not restored: {files}. These files were replaced or linked since the review, or could not be written. Look at them yourself.' },
+	'changeset.not_restored_more': { de: '{files} und {n} weitere', en: '{files} and {n} more' },
 	'changeset.review_refused': { de: 'Deine Antwort wurde nicht übernommen: Diese Änderungen gehören zu einem früheren Lauf, oder ein Lauf ist gerade aktiv.', en: 'Your answer was not applied: these changes belong to an earlier run, or a run is in progress.' },
 
 	// Context management

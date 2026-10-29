@@ -5587,36 +5587,42 @@ export class LynoxHTTPApi {
       const changes = csm.getChanges();
       let accepted = 0;
       let rolledBack = 0;
+      // Every tracked file by the name the review shows: a file replaced by a link since the review
+      // is no longer among `changes`, but the answer still names it, and the rollback names it back.
+      const absByName = csm.reviewNames();
+      const nameByAbs = new Map([...absByName].map(([name, abs]) => [abs, name]));
+      // The files the rollback left as they are (replaced or linked since, or not writable).
+      let notRestored: string[] = [];
+      const named = (left: string[]): string[] => left.map((abs) => nameByAbs.get(abs) ?? abs);
 
       if (action === 'accept') {
         accepted = changes.length;
         csm.acceptAll();
       } else if (action === 'rollback') {
-        rolledBack = changes.length;
-        csm.rollbackAll();
+        notRestored = named(csm.rollbackAll());
+        rolledBack = changes.filter((c) => !notRestored.includes(c.file)).length;
       } else {
         // Partial: validate rolledBackFiles against changeset entries
         const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
         // The paths the review showed, mapped back to the files they name. Not resolved
         // against `process.cwd()`: the review's paths are relative to the workspace.
-        const absByRel = new Map(changes.map(c => [c.file, c.absolutePath]));
         const toRollback: string[] = [];
 
         for (const f of clientFiles) {
           if (typeof f !== 'string') continue;
-          const abs = absByRel.get(f);
-          if (abs !== undefined) toRollback.push(abs);
+          const abs = absByName.get(f);
+          if (abs !== undefined && !toRollback.includes(abs)) toRollback.push(abs);
         }
 
         if (toRollback.length > 0) {
-          csm.rollbackFiles(toRollback);
+          notRestored = named(csm.rollbackFiles(toRollback));
         }
-        rolledBack = toRollback.length;
-        accepted = changes.length - rolledBack;
+        rolledBack = toRollback.length - notRestored.length;
+        accepted = changes.filter((c) => !toRollback.includes(c.absolutePath)).length;
       }
 
       csm.cleanup();
-      jsonResponse(res, 200, { ok: true, accepted, rolledBack });
+      jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });
     }, OWN));
 
     // ── Compact (context management) ──
