@@ -192,6 +192,8 @@ describe('stampListState: what the owner\'s list of a confirmed plan shows (B3)'
     const ended = { isLive: () => false };
     expect(stampListState(stamped([p]), AT, null, EVA, store(p), ended)).toEqual({ lapsed: false, ended: true, entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'waits' }] });
     expect(stampListState(stamped([p]), AT, null, EVA, store(p), null)!.ended).toBe(true);
+    // One removed since stays removed, under the ended note.
+    expect(stampListState(stamped([p]), AT, null, EVA, store(), ended)).toEqual({ lapsed: false, ended: true, entries: [{ provider: null, account: null, state: 'changed' }] });
   });
 
   it('carries no grant, no binding, no mandate id', () => {

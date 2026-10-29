@@ -9677,14 +9677,16 @@ describe('LynoxHTTPApi', () => {
       ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
       const { bindingOf } = await import('../core/profile-secret-view.js');
       const raw = JSON.stringify({ at: AT, wf: null, entries: [{ profile: 'crm-api', grant: 'grant-1', binding: bindingOf(crm as never) }] });
-      const history = { getTriggerStampConnections: (id: string) => (id === 'trg-eva' ? { confirmedAt: AT, stampConnections: raw } : undefined) };
+      const history = { getTriggerStampConnections: (id: string) => (id === 'trg-eva' || id === 'trg-held' ? { confirmedAt: id === 'trg-eva' ? AT : null, stampConnections: raw } : undefined) };
       const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
       try {
-        await withEngine({ getTaskManager: () => ({ listTriggers: () => [row, { id: 'trg-own', title: 'o', effect: 'run_agent', created_by: 'owner', confirmed_at: AT }] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [row, { id: 'trg-own', title: 'o', effect: 'run_agent', created_by: 'owner', confirmed_at: AT }, { ...row, id: 'trg-held', confirmed_at: undefined }] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
           const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
           expect(triggers.find((t) => t.id === 'trg-eva')!['stamp_listed']).toEqual({ lapsed: false, ended: false, entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'listed' }] });
           // The owner's own plan acts for no mandate: nothing to list, no field.
           expect(triggers.find((t) => t.id === 'trg-own')).not.toHaveProperty('stamp_listed');
+          // A plan that waits for its stamp shows its confirm block, not a list (it holds a stale column).
+          expect(triggers.find((t) => t.id === 'trg-held')).not.toHaveProperty('stamp_listed');
           expect(JSON.stringify(triggers)).not.toContain('grant-1');
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@kanzlei.example', mandateId: MID }) as RequestPrincipal);
           const helper = (await (await jsonFetch('/api/triggers')).json()) as Flags;

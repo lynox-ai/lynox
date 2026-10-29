@@ -201,7 +201,9 @@ export function stampListState(
   };
   const entries = storedEntries.map((e) => {
     const p = byId.get(e.profile);
-    if (ended || (p !== undefined && connectionWaits(p, ends))) return shown(e.profile, 'waits');
+    // An ended mandate makes every connection it made wait (`connectionWaits`); one removed since
+    // is said as removed, which the note above the list (`ended`) does not hide.
+    if (p !== undefined && connectionWaits(p, ends)) return shown(e.profile, 'waits');
     const listed = now.some((n) => n.profile === e.profile && n.grant === e.grant && n.binding === e.binding);
     return shown(e.profile, listed ? 'listed' : 'changed');
   });
