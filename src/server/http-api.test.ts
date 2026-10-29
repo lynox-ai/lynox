@@ -6097,6 +6097,7 @@ describe('LynoxHTTPApi', () => {
       ['hosted', ['MISTRAL_API_KEY'], '', true],
       ['', ['MISTRAL_API_KEY'], '', true],
     ] as const)('mistral_available on tier "%s" with vault %j and env "%s" is %s', async (tier, vault, env, available) => {
+      repayRateWindow();
       vi.stubEnv('LYNOX_BILLING_TIER', tier);
       vi.stubEnv('MISTRAL_API_KEY', env);
       mockSecretListNames.mockReturnValue([...vault]);
@@ -12867,6 +12868,7 @@ describe('LynoxHTTPApi', () => {
       it.each([['managed', 403], ['managed_pro', 403], ['managed_max', 403], ['hosted', 403], ['', 200]] as const)(
         'PUT and DELETE /api/secrets/LYNOX_INBOX_MISTRAL_API_KEY in mode="%s" answer %s (self-host is the control)',
         async (mode, status) => {
+          repayRateWindow();
           vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
           vi.stubEnv('LYNOX_MANAGED_MODE', mode);
           try {
