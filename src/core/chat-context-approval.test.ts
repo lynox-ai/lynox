@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, type FileApprovalInput, type MailReplyPayload, type MailSendPayload } from './approval-store.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext, resolveChatContext, stripLoadedContext, type ChatApprovalReader } from './chat-context.js';
-import { APPROVAL_OUTCOMES, APPROVAL_REWRITABLE_OUTCOMES, type ApprovalScope } from './approval-view.js';
+import { APPROVAL_OUTCOMES, APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, type ApprovalScope } from './approval-view.js';
 import { channels } from './observability.js';
 import { containsUntrustedMarker } from './data-boundary.js';
 
@@ -486,6 +486,26 @@ describe('the approval chat context for an approved email that was not sent', ()
     expect(containsUntrustedMarker(out)).toBe(true);
     // The same mechanism the moved draft rides on.
     expect(containsUntrustedMarker(load(moved(file()), OWNER)!)).toBe(true);
+  });
+
+  /** Approved, then three attempts with these reasons, each a retry, as the executor ends them. */
+  function retried(id: string, reasons: [string, string, string]): string {
+    expect(store.decide(id, { action: 'approve', checksum: store.get(id)!.checksum }, 'owner')).toEqual({ ok: true });
+    for (const [i, reason] of reasons.entries()) {
+      expect(store.claim(id).ok).toBe(true);
+      expect(store.finish(id, 'retry', { reason })).toBe(i < 2 ? 'approved' : 'failed');
+    }
+    return id;
+  }
+
+  it('does not load one that met a matching recent mail on an earlier attempt, whatever its last reason', () => {
+    const id = retried(file(), ['dedup_window', 'mail_unavailable', 'executor_error']);
+    // The page shows the last attempt's reason, which alone would load.
+    expect(approvalOutcome(store.get(id)!)).toBe('executor_error');
+    expect(load(id, OWNER)).toBeNull();
+    expect(load(retried(file(), ['mail_unavailable', 'dedup_window', 'mail_unavailable']), OWNER)).toBeNull();
+    // Control: the same history without it loads.
+    expect(load(retried(file(), ['mail_unavailable', 'mail_unavailable', 'executor_error']), OWNER)).toContain('· reason: executor_error ·');
   });
 
   it('leaves the entry failed: loading it neither reopens nor queues it', () => {

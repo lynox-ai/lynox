@@ -319,7 +319,7 @@
 
 	/** A new chat on the draft of an approved mail that was not sent, as the approvals page opens
 	 *  one moved there. The engine loads it only for the owner and for a reason that proves nothing
-	 *  went out; the new mail goes through the approval queue again. */
+	 *  went out. The chat writes a new mail; the old entry stays as it ended. */
 	function rewriteApprovalInChat(id: string) {
 		newChat();
 		void sendMessage(t('chat.note.approval_rewrite_framing'), undefined, undefined, { context: { kind: 'approval', id } }); /* never rejects */

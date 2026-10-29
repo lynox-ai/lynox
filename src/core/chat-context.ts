@@ -4,7 +4,7 @@ import { detectInjectionAcross, wrapChannelMessage, wrapUntrustedData } from './
 import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained, type Containment } from './containment.js';
 import type { ThreadStore } from './thread-store.js';
 import { stripUntrustedSeparators } from './sanitize.js';
-import { approvalQueueEnabled, type ApprovalEntry, type StoredAddress } from './approval-store.js';
+import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
 import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
 
 const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
@@ -604,6 +604,8 @@ function approvalLoadable(
   if (entry.status !== 'failed' || scope.viewer !== 'owner') return null;
   const reason = approvalOutcome(entry);
   if (reason === null || !REWRITABLE.has(reason)) return null;
+  // The reason is the last attempt's; a matching mail that went out before an earlier one still counts.
+  if (approvalResultSawDedup(entry.resultJson)) return null;
   return checksumMatches(entry.id) ? { as: 'not_sent', reason } : null;
 }
 
