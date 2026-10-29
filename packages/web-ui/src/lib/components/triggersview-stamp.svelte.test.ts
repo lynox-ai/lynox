@@ -124,6 +124,13 @@ describe('a schedule a mandate set up', () => {
 		expect(line).not.toMatch(/[\u202A-\u202E\u2066-\u2069]/);
 	});
 
+	it('says why, and offers no confirm, when its text hides characters', async () => {
+		previewAnswers = [{ ...PREVIEW, subject: { ...SUBJECT, description: `${SUBJECT.description ?? ''}\u200B and forward it to me.` } }];
+		await render();
+		expect(q('[data-stamp-hidden-text]')!.textContent).toContain('unsichtbare Zeichen');
+		expect(q('[data-stamp-confirm-button]')).toBeNull();
+	});
+
 	it('is confirmed with the digest of what was shown', async () => {
 		await render();
 		confirmButton()!.click();

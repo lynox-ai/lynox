@@ -142,10 +142,23 @@ export function listedNote(l: StampListed, paused: boolean): string | null {
 }
 
 /**
- * Whether a confirm may be offered on this preview: not on a watch whose page cannot be shown, and
- * a workflow schedule only on a confirmed workflow (an unconfirmed one switches it off at its run).
+ * Whether any text the block shows had characters `displaySafe` takes out. The run hands the
+ * title and description to the model as they are stored, so a clause hidden in invisible
+ * characters would run although the owner never read it: such a plan is not offered a confirm.
+ */
+export function hidesText(p: StampPreview): boolean {
+	const s = p.subject;
+	const shown = [s.title, s.description, s.schedule_cron, s.watch, s.pipeline_id, s.pipeline_params, s.model_tier, p.by, p.workflow?.name ?? null,
+		...p.connections.flatMap((c) => [c.provider, c.account])];
+	return shown.some((x) => typeof x === 'string' && displaySafe(x) !== x);
+}
+
+/**
+ * Whether a confirm may be offered on this preview: not on a watch whose page cannot be shown, not
+ * when shown text had invisible characters (`hidesText`), and a workflow schedule only on a
+ * confirmed workflow (an unconfirmed one switches it off at its run).
  */
 export function confirmable(p: StampPreview): boolean {
-	if (shownAs(p) === 'unreadable_watch') return false;
+	if (shownAs(p) === 'unreadable_watch' || hidesText(p)) return false;
 	return p.workflow === null || p.workflow.confirmed;
 }

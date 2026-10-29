@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mandateNeedsOwnerStamp } from '../../../../../src/core/request-principal.js';
 import { setLocale, getLocale } from '../i18n.svelte.js';
-import { awaitsOwnerStamp, confirmable, connectionsSentence, listedLine, listedNote, paramsOf, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
+import { awaitsOwnerStamp, confirmable, connectionsSentence, hidesText, listedLine, listedNote, paramsOf, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
 
 const before = getLocale();
 afterEach(() => { setLocale(before); });
@@ -67,6 +67,22 @@ describe('what the preview shows', () => {
 		expect(confirmable(preview({}, { source: 'watch', watch: 'not json' }))).toBe(false);
 		expect(confirmable(preview({ workflow: { name: 'W', confirmed: false } }, { effect: 'run_workflow' }))).toBe(false);
 		expect(confirmable(preview({ workflow: { name: 'W', confirmed: true } }, { effect: 'run_workflow' }))).toBe(true);
+	});
+
+	it('offers no confirm when shown text had characters the display takes out', () => {
+		// The run hands the stored text to the model: what the owner cannot read must not run on their stamp.
+		const ZW = '\u200B';
+		const TAG = String.fromCodePoint(0xE0041);
+		expect(hidesText(preview())).toBe(false);
+		expect(hidesText(preview({}, { title: `Report${ZW}` }))).toBe(true);
+		expect(hidesText(preview({}, { description: `Send it.${TAG}` }))).toBe(true);
+		expect(hidesText(preview({}, { pipeline_params: `{"to":"all${ZW}"}` }))).toBe(true);
+		expect(hidesText(preview({ by: `eva${ZW}@kanzlei.example` }))).toBe(true);
+		expect(hidesText(preview({ workflow: { name: `W${TAG}`, confirmed: true } }))).toBe(true);
+		expect(hidesText(preview({ connections: [{ id: 'c', profile: 'p', provider: 'CRM', account: `eva${ZW}@crm` }] }))).toBe(true);
+		// Line breaks and tabs are an instruction's own layout, not hidden text.
+		expect(hidesText(preview({}, { description: 'One.\n\tTwo.' }))).toBe(false);
+		expect(confirmable(preview({}, { title: `Report${ZW}` }))).toBe(false);
 	});
 
 	it('names whose logins and which, with "account unknown" where the provider told nothing', () => {

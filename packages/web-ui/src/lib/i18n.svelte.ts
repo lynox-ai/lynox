@@ -2120,6 +2120,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'stamp.account_unknown': { de: 'Konto unbekannt', en: 'account unknown' },
 	'stamp.none': { de: 'Dieser Plan nutzt keine Verbindung, die jemand mit eigenem Login verbunden hat.', en: 'This plan uses no connection that someone connected with their own login.' },
 	'stamp.check': { de: 'Verbindungen prüfen', en: 'Check connections' },
+	'stamp.hidden_text': { de: 'Dieser Plan enthält unsichtbare Zeichen, die hier nicht angezeigt werden. Du kannst ihn deshalb nicht bestätigen. Lösch ihn und bitte lynox im Chat, ihn neu anzulegen.', en: 'This plan contains invisible characters that are not shown here, so you cannot confirm it. Delete it and ask lynox in the chat to create it again.' },
 	'stamp.workflow_unconfirmed': { de: 'Prüf zuerst seine Schritte unter Automation → Workflows, mit „Schritte prüfen“.', en: 'Review its steps first under Automation → Workflows, with “Review steps”.' },
 	'stamp.changed': { de: 'Der Plan hat sich geändert, während du ihn angesehen hast. Unten steht der neue Stand. Prüf ihn und bestätige ihn dann.', en: 'The plan changed while you were looking at it. The current state is below. Check it, then confirm it.' },
 	'stamp.load_failed': { de: 'Was du bestätigen würdest, lässt sich gerade nicht laden.', en: 'What you would confirm cannot be loaded right now.' },

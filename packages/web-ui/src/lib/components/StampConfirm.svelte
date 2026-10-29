@@ -8,7 +8,7 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { displaySafe, instructionOf, watchOf } from '../utils/trigger-consent.js';
-	import { confirmable, connectionsSentence, paramsOf, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
+	import { confirmable, connectionsSentence, hidesText, paramsOf, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
 		id: string;
@@ -136,7 +136,9 @@
 		{:else if mode === 'check'}
 			<p data-stamp-none>{t('stamp.none')}</p>
 		{/if}
-		{#if as === 'workflow' && !confirmable(preview)}
+		{#if hidesText(preview)}
+			<p class="text-warning" data-stamp-hidden-text>{t('stamp.hidden_text')}</p>
+		{:else if as === 'workflow' && !confirmable(preview)}
 			<p class="text-warning" data-stamp-workflow-unconfirmed>{t('stamp.workflow_unconfirmed')}</p>
 		{:else if !confirmable(preview)}
 			<!-- A watch whose page cannot be read: nothing to agree to, so no button. -->
