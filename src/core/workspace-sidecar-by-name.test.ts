@@ -108,6 +108,37 @@ describe('in shell sidecar mode nothing below /workspace is reached by name (D3)
     expect(touched.join(' ; ')).toBe('');
   });
 
+  it('another context\'s path, or the label itself, is refused without a lookup by name', async () => {
+    const other = `${WORKSPACE_LABEL}/ctx2/x.txt`;
+    for (const p of [other, `${WORKSPACE_LABEL}/ctx1/../ctx2/x.txt`, `${WORKSPACE_LABEL}/x.txt`]) {
+      expect(() => diffPreviewText(p)).toThrow(/reached only through its open directory/);
+      await expect(writeFileTool.handler({ path: p, content: 'x' }, agent)).rejects.toThrow();
+      await expect(readFileTool.handler({ path: p }, agent)).rejects.toThrow(/reached only through its open directory/);
+    }
+    const cs = workspaceChangeset('run-2');
+    try {
+      expect(cs.backupBeforeWrite(other)).toBe(true);
+      expect(cs.getChanges()).toEqual([]);
+    } finally {
+      cs.cleanup();
+    }
+    const outside = join(tmp, 'src-dir');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'm.txt'), 'm');
+    await expect(batchFilesTool.handler({ pattern: '*.txt', directory: `${WORKSPACE_LABEL}/ctx2`, operation: 'transform', find: 'a', replace: 'b' }, agent)).rejects.toThrow(/not in this conversation's folder/);
+    // A move or a rename into another context is refused (as an error or as the tool's answer); the file stays.
+    const settle = (p: Promise<unknown>): Promise<string> => p.then(String, String);
+    expect(await settle(batchFilesTool.handler({ pattern: '*.txt', directory: outside, operation: 'move', destination: `${WORKSPACE_LABEL}/ctx2` }, agent))).toMatch(/workspace/);
+    expect(await settle(batchFilesTool.handler({ pattern: '*.txt', directory: outside, operation: 'rename', rename_pattern: '../../../workspace/ctx2/$1.txt' }, agent))).toMatch(/workspace|lands/);
+    expect(readFileSync(join(outside, 'm.txt'), 'utf8')).toBe('m');
+    expect(touched.join(' ; ')).toBe('');
+  });
+
+  it('a legacy spelling of a workspace path still gets its preview through fd 3', () => {
+    expect(diffPreviewText(join(tmp, 'data', 'workspace', 'ctx1', 'a.txt'))).toBe('v1\n');
+    expect(touched.join(' ; ')).toBe('');
+  });
+
   it('the permission guard judges a workspace path', () => {
     isDangerous('read_file', { path: `${WORKSPACE_LABEL}/ctx1/a.txt` }, 'autonomous');
     isDangerous('write_file', { path: `${WORKSPACE_LABEL}/ctx1/a.txt`, content: 'x' }, 'autonomous');

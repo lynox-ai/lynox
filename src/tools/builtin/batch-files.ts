@@ -88,7 +88,8 @@ function findFilesAt(anchor: WorkspaceAnchor, rel: string, pattern: string, dept
  * through a link on the way (the closest existing ancestor, followed).
  */
 function landsInWorkspace(path: string, ws: string): boolean {
-  if (toWorkspaceRel(path, ws).kind === 'inside') return true;
+  // In shell sidecar mode any path below the label is the workspace's, by its spelling (D3).
+  if (namesSidecarLabel(path) || toWorkspaceRel(path, ws).kind === 'inside') return true;
   let probe = path;
   while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
   if (!existsSync(probe)) return false;
@@ -310,6 +311,11 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
     if (base !== null) {
       const mapped = toWorkspaceRel(resolve(input.directory), base.ws);
       if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel, changeset, wayOut);
+    }
+    // In shell sidecar mode a directory below the label outside the context workspace is not
+    // reached by name (D3).
+    if (namesSidecarLabel(input.directory)) {
+      throw new Error(`${input.directory} is in the workspace but not in this conversation's folder. Name a directory in ${base?.ws ?? 'the workspace'}.`);
     }
     // Resolve symlinks on the directory itself to prevent traversal via symlinked root
     const dir = realpathSync(resolve(input.directory));

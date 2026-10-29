@@ -264,9 +264,14 @@ export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonl
  *  the agent shows before a write (agent.ts): it reads the file the write would
  *  change, so it resolves the path exactly as write_file and edit_file do. */
 export function resolveWritablePath(rawPath: string): string {
-  // In shell sidecar mode a workspace path is reached through its open directory (the diff
-  // preview maps it there); it is not resolved by name (D3).
-  if (namesSidecarLabel(rawPath)) return resolve(rawPath);
+  // In shell sidecar mode a path in the context workspace is reached through its open directory
+  // (the diff preview maps it there), so it is handed on by its workspace spelling, not resolved
+  // by name. Any other path below the label is refused by `validatePath` (D3).
+  const ws = getWorkspaceDir();
+  if (ws !== null && namesSidecarLabel(ws)) {
+    const mapped = toWorkspaceRel(rawPath, ws);
+    if (mapped.kind === 'inside') return mapped.shown;
+  }
   if (isWorkspaceActive()) {
     return validatePath(resolve(rawPath), 'write');
   }

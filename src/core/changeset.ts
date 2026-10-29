@@ -113,6 +113,9 @@ export class ChangesetManager {
    */
   private _confine(filePath: string): string | null {
     const abs = resolve(filePath);
+    // In shell sidecar mode a path below the label outside the context workspace is not tracked,
+    // and not looked up by name to find out (D3).
+    if (namesSidecarLabel(abs)) return null;
     let ancestor = abs;
     let tail = '';
     while (!existsSync(ancestor)) {
