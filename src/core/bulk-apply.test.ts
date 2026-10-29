@@ -1346,6 +1346,20 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect(view).toEqual([['k000', true, false], ['k001', true, true], ['k002', true, true], ['k003', false, false]]);
   });
 
+  // The page marks what the rollback would still take back, no more: the same set, whichever
+  // way a row came to be recorded as applied.
+  it('marks exactly the set the rollback takes back', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial, new Set(['k003'])).writer));
+    engineDb.getDb().prepare(
+      `UPDATE bulk_targets SET change = 'unchanged', undone_at = NULL WHERE run_id = ? AND seq = (SELECT MIN(seq) FROM bulk_targets WHERE run_id = ?)`,
+    ).run(runId, runId);
+    const marked = ledger.getPreview(runId).filter((t) => t.written && !t.undone).map((t) => t.key).sort();
+    expect(marked).toEqual(ledger.listAppliedDesc(runId).map((t) => t.key).sort());
+    expect(marked).toEqual([]);
+  });
+
   it('a target found already as planned is not one the run wrote', async () => {
     const { runId, initial } = recordMemoryRun(3, { atomic: true });
     approve(runId);
