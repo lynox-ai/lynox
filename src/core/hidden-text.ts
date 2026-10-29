@@ -60,6 +60,13 @@ export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   return null;
 }
 
+const HIDDEN_ALL = new RegExp(HIDDEN.source, 'gu');
+
+/** `text` without its hidden characters, for text that was stored before the write paths refused them. */
+export function stripHidden(text: string): string {
+  return text.replace(HIDDEN_ALL, '');
+}
+
 /** The refusal the model reads when a write carries a hidden character; the caller adds its own `Error:` prefix. */
 export function hiddenCharRefusal(what: string, hit: HiddenChar): string {
   return `refused to save this ${what} — ${hit.path} contains a character that renders as nothing (${hit.codePoint}). Nothing was saved. `
