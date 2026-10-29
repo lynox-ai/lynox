@@ -1530,6 +1530,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.kind_bulk': { de: 'Massenlauf', en: 'Bulk run' },
 	'access_trail.kind_step': { de: 'Schritt', en: 'Step' },
 	'access_trail.kind_read': { de: 'Lesezugriff', en: 'Read access' },
+	// Reads on routes the person's web UI polls by itself, grouped (access-trail-fold.ts; ux U-047).
+	'access_trail.polls_legend': { de: 'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln.', en: 'Status requests (running work, tasks, costs, providers) are grouped. The interface makes most of them by itself. Expand to see each one.' },
+	'access_trail.polls_many': { de: '{n} Statusabfragen ({span})', en: '{n} status requests ({span})' },
+	'access_trail.polls_one': { de: 'Eine Statusabfrage ({time})', en: 'One status request ({time})' },
 	'access_trail.kind_event': { de: 'Ereignis', en: 'Event' },
 	'access_trail.started_hand': { de: 'von Hand gestartet', en: 'started by hand' },
 	'access_trail.started_schedule': { de: 'nach Zeitplan', en: 'on schedule' },
@@ -2436,6 +2440,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'session.expired_hint': { de: 'Die Engine läuft, deine Anmeldung muss erneuert werden.', en: 'The engine is running, your login needs to be refreshed.' },
 	'session.relogin': { de: 'Neu anmelden', en: 'Sign in again' },
 	'session.dismiss': { de: 'Später', en: 'Dismiss' },
+	'session.mandate_memory_off': { de: 'Mit deinem Zugang kannst du dich auf dieser Instanz gerade nicht anmelden. Der Wissensspeicher ist hier ausgeschaltet, und ohne ihn kann lynox nicht festhalten, was du am Gedächtnis änderst. Bitte den Inhaber, ihn einzuschalten; danach funktioniert dein Zugang.', en: 'You cannot sign in to this instance with your access right now. Durable knowledge is turned off here, and without it lynox cannot record what you change in its memory. Ask the owner to turn it on; your access then works.' },
+	'session.mandate_memory_missing': { de: 'Mit deinem Zugang kannst du dich auf dieser Instanz gerade nicht anmelden. Der Wissensspeicher ist eingeschaltet, aber lynox konnte ihn beim Start nicht laden. Das ist ein Fehler der Instanz, nicht deines Zugangs. Gib dem Inhaber Bescheid.', en: 'You cannot sign in to this instance with your access right now. Durable knowledge is turned on, but lynox could not load it when it started. This is a fault of the instance, not of your access. Let the owner know.' },
 	'common.copy': { de: 'Kopieren', en: 'Copy' },
 	'common.cancel': { de: 'Abbrechen', en: 'Cancel' },
 

@@ -100,7 +100,7 @@ const { join } = await import('node:path');
 const { Agent } = await import('./agent.js');
 const { AuditLog, INSTANCE_WRITE_UNRECORDED } = await import('./audit-log.js');
 const { createToolContext } = await import('./tool-context.js');
-const { INSTANCE_WRITE_SITES } = await import('./mandate-tool-lock.js');
+const { INSTANCE_WRITE_SITES, MANDATE_PATTERN_WRITE_TOOLS } = await import('./mandate-tool-lock.js');
 const { setDataDir } = await import('./config.js');
 const { EngineDb } = await import('./engine-db.js');
 const { SubjectStore } = await import('./subject-store.js');
@@ -207,13 +207,22 @@ interface Fixture {
    */
   wrote?: 'all' | 'part' | null;
   created?: boolean;
+  /** What a set-hitting step names after the attempt's pairs: its count, then its ids (660a-2). */
+  hit?: string[];
   build: () => Built | Promise<Built>;
 }
 
 const isGuarded = (v: unknown): v is { obj: object; reads: readonly string[] } =>
   typeof v === 'object' && v !== null && 'obj' in v && 'reads' in v && Array.isArray((v as { reads: unknown }).reads);
 
-async function drive(f: Fixture, failing: boolean): Promise<{ result: { content: unknown; is_error?: boolean }; st: GuardState; trail: Trail; on: string; method: string; target: string | RegExp }> {
+/**
+ * The pattern writers (`MANDATE_PATTERN_WRITE_TOOLS`) are held back from a mandate by the lock,
+ * so a mandate's call never reaches their blocks (checked on its own below). Their blocks stay
+ * as a second wall, and (a)/(b) still prove them, with the lock set aside (which also lifts the lock's `secret:` refusal; these fixtures name no secret).
+ */
+const lockAside = (f: Fixture): boolean => Object.hasOwn(MANDATE_PATTERN_WRITE_TOOLS, f.tool.definition.name);
+
+async function drive(f: Fixture, failing: boolean, keepLock = false): Promise<{ result: { content: unknown; is_error?: boolean }; st: GuardState; trail: Trail; on: string; method: string; target: string | RegExp }> {
   const trail = await freshTrail(failing ? f.site : null);
   const st: GuardState = {
     calls: [], violations: [],
@@ -240,6 +249,7 @@ async function drive(f: Fixture, failing: boolean): Promise<{ result: { content:
       ...(b.activeScopes ? { activeScopes: b.activeScopes } : {}),
     });
     if (b.currentThreadId !== undefined) agent.currentThreadId = b.currentThreadId;
+    if (!keepLock && lockAside(f)) (agent as unknown as { _toolLock: ReadonlySet<string> | null })._toolLock = null;
     const result = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
       ._executeOneInner({ type: 'tool_use', id: 'tu_1', name: f.tool.definition.name, input: f.input });
     st.calls.push(...fsWatch.calls.map(c => ({ on: 'fs', method: c.fn, read: false, own: c.own, any: c.any })));
@@ -459,7 +469,8 @@ const FIXTURES: Fixture[] = [
   { site: 'data_store_insert#save', branch: 'insert', row: { verb: 'save', target: 'data_store' }, tool: dataStoreInsertTool as ToolEntry, input: { collection: 'leads', records: [{ email: 'a@b.c' }] },
     build: () => ({ ctx: { dataStore: { obj: { insertRecords: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: [] } }, spy: 'ctx.dataStore.insertRecords' }) },
   { site: 'data_store_delete#delete', branch: 'delete', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDeleteTool as ToolEntry, input: { collection: 'leads', filter: { email: 'a@b.c' } },
-    build: () => ({ ctx: { dataStore: { obj: { deleteRecords: vi.fn(() => 1) }, reads: [] } }, spy: 'ctx.dataStore.deleteRecords' }) },
+    hit: ['records=2', 'id=7', 'id=9'],
+    build: () => ({ ctx: { dataStore: { obj: { deleteRecordsReturningIds: vi.fn(() => ({ deleted: 2, ids: [7, 9] })) }, reads: [] } }, spy: 'ctx.dataStore.deleteRecordsReturningIds' }) },
   { site: 'data_store_drop#delete', branch: 'drop', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDropTool as ToolEntry, input: { collection: 'leads' },
     build: () => ({ ctx: { dataStore: { obj: { dropCollection: vi.fn(() => true) }, reads: [] } }, spy: 'ctx.dataStore.dropCollection' }) },
   { site: 'contacts_save#save', branch: 'save', row: { verb: 'save', target: 'contacts' }, tool: contactsSaveTool as ToolEntry, input: { name: 'Ada', email: 'ada@x.example' },
@@ -708,7 +719,7 @@ describe('every write site of a mandate\'s call writes its attempt row before it
       } else {
         const created = /^\S+ wrote=\S+ (created=\S+) /.exec(`${outcomeTarget} `)?.[1];
         expect(created !== undefined, `created= in ${outcomeTarget}`).toBe(f.created === true);
-        expect(outcomeTarget).toBe([store, `wrote=${wrote}`, ...(created ? [created] : []), ...rest].join(' '));
+        expect(outcomeTarget).toBe([store, `wrote=${wrote}`, ...(created ? [created] : []), ...rest, ...(f.hit ?? [])].join(' '));
       }
       expect(rows[0]!['correlation_id']).toBe(rows[1]!['correlation_id']);
       const others = trail.db.prepare(`SELECT action FROM audit_log WHERE action LIKE 'instance:%' AND action NOT LIKE ?`).all(`instance:${f.site}:%`) as Array<{ action: string }>;
@@ -721,6 +732,25 @@ describe('every write site of a mandate\'s call writes its attempt row before it
       expect(st.calls.filter(c => c.on === on && c.method === method), `${on}.${method} ran though its row could not be written`).toEqual([]);
       expect(result.is_error).toBe(true);
       expect(result.content).toBe(INSTANCE_WRITE_UNRECORDED);
+    });
+  });
+});
+
+// 660a-2: with the lock in place, a mandate's call to a pattern writer is refused before the tool
+// runs — nothing changes, and no row of the site is written, whatever the branch.
+describe('a mandate\'s call to a pattern writer is refused by the lock', () => {
+  const pattern = FIXTURES.filter(lockAside);
+  it('covers each pattern writer', () => {
+    expect([...new Set(pattern.map(f => f.tool.definition.name))].sort()).toEqual(Object.keys(MANDATE_PATTERN_WRITE_TOOLS).sort());
+  });
+  describe.each(pattern.map(f => [`${f.site} · ${f.branch}`, f] as const))('%s', (_label, f) => {
+    it('(c) refuses the tool, makes no change and writes no row', async () => {
+      const { result, st, trail, on, method } = await drive(f, false, true);
+      expect(result.is_error).toBe(true);
+      expect(String(result.content)).toContain(`Tool not available in this session: ${f.tool.definition.name}`);
+      expect(st.calls.filter(c => c.on === on && c.method === method), `${on}.${method} ran`).toEqual([]);
+      expect(st.violations).toEqual([]);
+      expect(trail.db.prepare(`SELECT count(*) AS n FROM audit_log WHERE action LIKE 'instance:%'`).get()).toEqual({ n: 0 });
     });
   });
 });

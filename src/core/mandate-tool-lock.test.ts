@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
-import { INSTANCE_WRITE_SITES, MANDATE_INSIDE_NON_WRITERS, MANDATE_INSIDE_WRITERS, MANDATE_OUTWARD_READERS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
+import { INSTANCE_WRITE_SITES, MANDATE_INSIDE_NON_WRITERS, MANDATE_INSIDE_WRITERS, MANDATE_OUTWARD_READERS, MANDATE_PATTERN_WRITE_TOOLS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
 import type { MailRegistry } from '../integrations/mail/tools/registry.js';
 import type { SearchProvider } from '../integrations/search/search-provider.js';
 import type { ToolEntry } from '../types/index.js';
@@ -26,9 +26,24 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { LynoxConfig } from '../types/index.js';
 
 describe('toolLockFor', () => {
-  it('locks a mandate to the surface and leaves the owner unlocked', () => {
-    expect(toolLockFor({ kind: 'mandate', email: 'setup@example.org' })).toBe(MANDATE_TOOL_SURFACE);
+  it('locks a mandate to the surface without the pattern writers and leaves the owner unlocked', () => {
+    const lock = toolLockFor({ kind: 'mandate', email: 'setup@example.org' });
+    const pattern = Object.keys(MANDATE_PATTERN_WRITE_TOOLS);
+    expect([...lock!].sort()).toEqual([...MANDATE_TOOL_SURFACE].filter(n => !pattern.includes(n)).sort());
     expect(toolLockFor(OWNER_PRINCIPAL)).toBeNull();
+  });
+
+  // 660a-2: the sign-in refuses a mandate on an engine with the legacy memory, but its plan
+  // runs later under the mandate — the lock is the one place every turn of it passes.
+  it('holds back the three pattern writers from a mandate, though they stay on the surface', () => {
+    const lock = toolLockFor({ kind: 'mandate', email: 'setup@example.org' })!;
+    expect(Object.keys(MANDATE_PATTERN_WRITE_TOOLS).sort()).toEqual(['memory_delete', 'memory_promote', 'memory_update']);
+    for (const name of ['memory_delete', 'memory_update', 'memory_promote']) {
+      expect(lock.has(name), name).toBe(false);
+      expect(MANDATE_TOOL_SURFACE.has(name), name).toBe(true);
+    }
+    // control: the other memory tools stay
+    for (const name of ['memory_store', 'memory_recall', 'memory_list']) expect(lock.has(name), name).toBe(true);
   });
 
   it('withholds what D1 names: the shell and every tool that reads or writes the process filesystem', () => {

@@ -1234,7 +1234,10 @@ export async function spawnInline(
   // parent lacks for any other reason (the owner turned it off, a role of an enclosing step
   // bounds it, a flag leaves it unregistered) is dropped as before. A role's grant is a ceiling,
   // not a request, so a withheld tool in it narrows the step as it narrows the mandate's own
-  // agents (`collector` lists `read_file` among nine).
+  // agents (`collector` lists `read_file` among nine). The pattern writers the lock also holds
+  // back (`MANDATE_PATTERN_WRITE_TOOLS`) are dropped, not refused: they are registered only beside
+  // the legacy memory, so on the engines a mandate signs in to the step names a tool that is not
+  // there, and the planners still offer `memory_update` for steps.
   const lock = principal !== undefined ? toolLockFor(principal) : null;
   if (lock !== null) {
     const named = [...(step.tools ?? []), ...(step.tool !== undefined ? [step.tool] : [])];

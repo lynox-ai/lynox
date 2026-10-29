@@ -3,7 +3,8 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider, getActiveProvider } from './llm-client.js';
 import type { RunFailure } from './provider-failure.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
-import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds } from './llm/provider-keys.js';
+import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds, poolSuppliesLLMKeys } from './llm/provider-keys.js';
+import { resolveInboxMistralKey } from '../integrations/inbox/mistral-key.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
   LynoxConfig,
@@ -54,6 +55,7 @@ import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
+import { legacyMemoryReason, type LegacyMemoryReason } from './memory-tool-set.js';
 import { compose, engineText, renderFence } from '../core/data-boundary.js';
 
 import {
@@ -439,6 +441,8 @@ export class Engine {
   /** Durable Knowledge Substrate (DK.1) — the user-owned Know store. Null unless
    *  `durable_memory_enabled` is on (+ engine.db present). */
   private _knowledgeStore: import('./knowledge-store.js').KnowledgeStore | null = null;
+  /** Read by the mandate lock; until the tools are registered it refuses, as `dk_off` would. */
+  private _legacyMemory: LegacyMemoryReason | null = 'dk_off';
   /** Onboarding Wave 1 — the server-side onboarding-flag store. Present whenever
    *  engine.db is (unconditional, NOT DK-gated); null only when engine.db failed to
    *  open (→ HTTP/flow layer fails open: onboarding counts as done, AC-1.7). */
@@ -845,6 +849,19 @@ export class Engine {
   }
 
   /**
+   * The inbox classifier's Mistral key, and whether its spend is debited to the instance, for
+   * the cold boot and the rebootstrap alike. The managed credit gate and debit apply to the
+   * pool's spend only: on a pool tier, the US classifier (the pool's Anthropic client) and the
+   * EU one on the pool's Mistral key. A classifier on the user's own key is not debited, as the
+   * user already pays the provider for it and would pay twice.
+   */
+  private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
+    const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
+    if (key !== undefined) bootOpts.mistralApiKey = key;
+    if (poolSuppliesLLMKeys() && (bootOpts.llmRegion !== 'eu' || poolPays)) bootOpts.meteredHost = this;
+  }
+
+  /**
    * Rebuild the inbox classifier runtime when a UI provider-switch crosses
    * the us/eu region boundary. Idempotent + region-gated: a same-region
    * rotation (BYOK refresh, Anthropic→Anthropic) short-circuits to avoid
@@ -892,11 +909,6 @@ export class Engine {
       const { bootstrapInbox } = await import('../integrations/inbox/bootstrap.js');
       const rawMode = process.env['LYNOX_INBOX_SENSITIVE_MODE'];
       const sensitiveMode = rawMode === 'mask' || rawMode === 'allow' ? rawMode : 'skip';
-      const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
-        ?? this.secretStore?.resolve('MISTRAL_API_KEY')
-        ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
-        ?? process.env['MISTRAL_API_KEY']
-        ?? undefined;
       const folderBlacklistRaw = process.env['LYNOX_INBOX_FOLDER_BLACKLIST'] ?? '';
       const folderBlacklist = new Set(
         folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
@@ -914,14 +926,12 @@ export class Engine {
         requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
         privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
       };
-      if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
       if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
       if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
       bootOpts.notificationRouter = this._notificationRouter;
       const runHistoryForInbox = this.getRunHistory();
       if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
-      // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
-      bootOpts.meteredHost = this;
+      this._applyInboxKeyAndMeter(bootOpts);
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
         // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
@@ -1903,7 +1913,8 @@ export class Engine {
     // was carried as dormant. The CP default flipped ON (pro migration 0048), so it is now the
     // path every newly provisioned tenant takes. Falling back to the legacy tools here is not a
     // silent downgrade over the alternative — the alternative was silence with nothing working.
-    if (this.userConfig.durable_memory_enabled === true && this._knowledgeStore) {
+    this._legacyMemory = legacyMemoryReason(this.userConfig.durable_memory_enabled, this._knowledgeStore);
+    if (this._legacyMemory === null) {
       this.registry
         .register(rememberTool)
         .register(recallTool)
@@ -2212,11 +2223,6 @@ export class Engine {
         // the runtime — without this, switching the main provider to Mistral
         // would leave the classifier on Anthropic-US (the H-012 leak).
         this._inboxLlmRegion = llmRegion;
-        const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
-          ?? this.secretStore?.resolve('MISTRAL_API_KEY')
-          ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
-          ?? process.env['MISTRAL_API_KEY']
-          ?? undefined;
         // Folder blacklist: comma-separated env, case-insensitive match.
         // Use case: "Banking, Privat, Healthcare" — those folders' mails
         // never reach the inbox classifier path at all.
@@ -2238,7 +2244,6 @@ export class Engine {
           requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
           privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
         };
-        if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
         if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
         if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
         // Wire the notification router so the reminder poller can fire
@@ -2249,8 +2254,7 @@ export class Engine {
         // in the dashboard.
         const runHistoryForInbox = this.getRunHistory();
         if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
-        // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
-        bootOpts.meteredHost = this;
+        this._applyInboxKeyAndMeter(bootOpts);
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured
@@ -2824,6 +2828,8 @@ export class Engine {
   getKnowledgeLayer(): KnowledgeLayer | null { return this.knowledgeLayer; }
   /** Durable Knowledge Substrate (DK.1) store, or null when `durable_memory_enabled` is off. */
   getKnowledgeStore(): import('./knowledge-store.js').KnowledgeStore | null { return this._knowledgeStore; }
+  /** Why the legacy memory tools are registered, or `null` for the durable ones; set where they are registered. */
+  getLegacyMemoryReason(): LegacyMemoryReason | null { return this._legacyMemory; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }

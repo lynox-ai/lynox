@@ -19,7 +19,8 @@
 import type { RequestPrincipal } from './request-principal.js';
 
 /**
- * Every tool the engine itself registers that a mandate's turn keeps. Each one works on the
+ * Every tool the engine itself registers that a mandate's turn keeps, apart from the pattern
+ * writers the lock still holds back (`MANDATE_PATTERN_WRITE_TOOLS`). Each one works on the
  * engine's own stores, the file area (`media_process` resolves its paths there), or the
  * network behind its gates. The agent also refuses a mandate's turn the provider keys and
  * infrastructure secrets as `secret:` references (`Agent._executeOneInner`).
@@ -160,9 +161,28 @@ export const MANDATE_INSIDE_NON_WRITERS: Readonly<Record<string, string>> = Obje
 });
 
 /**
+ * The tools on `MANDATE_TOOL_SURFACE` that the lock still holds back, each with the reason.
+ * They change memory by a pattern the model writes, so a trail row cannot name what they hit.
+ * The engine registers them only beside the legacy memory (`legacyMemoryReason`), and the
+ * sign-in refuses a mandate on such an engine — but a mandate's plan runs later under the
+ * mandate, outside any sign-in, so the lock is where they are kept from it. They stay on the
+ * surface and among the writers: their write sites are real, and the owner calls them.
+ */
+export const MANDATE_PATTERN_WRITE_TOOLS: Readonly<Record<string, string>> = Object.freeze({
+  memory_delete: 'deletes memory by a pattern, and what it hits cannot be recorded',
+  memory_update: 'changes memory by a pattern, and what it hits cannot be recorded',
+  memory_promote: 'moves memory by a pattern, and what it hits cannot be recorded',
+});
+
+/** What a mandate's turn may use: the surface without the pattern writers. */
+const MANDATE_TURN_TOOLS: ReadonlySet<string> = new Set(
+  [...MANDATE_TOOL_SURFACE].filter(n => !Object.hasOwn(MANDATE_PATTERN_WRITE_TOOLS, n)),
+);
+
+/**
  * The lock for a principal: the set of tool names its turn may use, or `null` when nothing
  * is locked (the owner). Every agent turn applies it on top of the user's disabled tools.
  */
 export function toolLockFor(principal: RequestPrincipal): ReadonlySet<string> | null {
-  return principal.kind === 'owner' ? null : MANDATE_TOOL_SURFACE;
+  return principal.kind === 'owner' ? null : MANDATE_TURN_TOOLS;
 }
