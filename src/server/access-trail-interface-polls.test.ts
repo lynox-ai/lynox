@@ -24,7 +24,9 @@ describe('reads on the routes the web UI polls by itself, in the owner\'s view (
   let mandateCookie: string;
   let ownerCookie: string;
   const saved: Record<string, string | undefined> = {};
-  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'];
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_DURABLE_MEMORY_ENABLED'];
+  /** Status of each read the fixture made as the helper; a refused one leaves no row to mark. */
+  const refused: string[] = [];
 
   type Inner = { rateCounts: Map<string, unknown>; server: Server | null };
   type Entry = { kind: string; action?: string; target?: string | null; auto?: boolean };
@@ -66,6 +68,8 @@ describe('reads on the routes the web UI polls by itself, in the owner\'s view (
     process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
     delete process.env['LYNOX_BILLING_TIER'];
     delete process.env['LYNOX_MANAGED_MODE'];
+    // A mandate signs in only on durable knowledge (it refuses on the legacy memory tools).
+    process.env['LYNOX_DURABLE_MEMORY_ENABLED'] = 'true';
     reloadConfig();
     api = new LynoxHTTPApi();
     await api.init();
@@ -83,10 +87,15 @@ describe('reads on the routes the web UI polls by itself, in the owner\'s view (
     mandateCookie = m;
     ownerCookie = o;
 
-    for (const path of Object.values(POLLED)) await (await ask(path, mandateCookie)).arrayBuffer();
-    for (const path of [...Object.keys(OWN_ON_LISTED), ...OWN]) await (await ask(path, mandateCookie)).arrayBuffer();
+    const read = async (path: string, method = 'GET'): Promise<void> => {
+      const res = await ask(path, mandateCookie, method);
+      await res.arrayBuffer();
+      if (res.status === 401 || res.status === 403) refused.push(`${method} ${path} ${String(res.status)}`);
+    };
+    for (const path of Object.values(POLLED)) await read(path);
+    for (const path of [...Object.keys(OWN_ON_LISTED), ...OWN]) await read(path);
     // A listed route read with HEAD.
-    await (await ask('/api/runs/active', mandateCookie, 'HEAD')).arrayBuffer();
+    await read('/api/runs/active', 'HEAD');
   }, 120_000);
 
   afterAll(async () => {
@@ -100,6 +109,10 @@ describe('reads on the routes the web UI polls by itself, in the owner\'s view (
       if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
       reloadConfig();
     }
+  });
+
+  it('the helper got in: no read of the fixture was refused', () => {
+    expect(refused).toEqual([]);
   });
 
   it('the test reads every listed route, and no other', () => {
