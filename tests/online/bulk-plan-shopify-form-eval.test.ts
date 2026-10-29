@@ -12,8 +12,7 @@
  * A run passes when the plan it records is in that form and sets that field, however many calls
  * it took. How many it took is the price, counted apart: `handled` is the calls that reached
  * `bulk_plan`'s handler, and `first` that the first of them was recorded right. Both are a lower
- * bound: a call the dispatch validator refuses never reaches the handler, and the agent's own
- * transcript cannot count it either (it held fewer calls than the handler saw, measured).
+ * bound: a call the dispatch validator refuses never reaches the handler.
  *
  * `bulk_plan` is the real tool on a real ledger in a temporary directory, with the Shopify read
  * switched on, so a wrong plan gets the engine's own refusal. The other tools answer canned:
