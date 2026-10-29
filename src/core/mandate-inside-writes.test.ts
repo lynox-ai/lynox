@@ -1039,6 +1039,24 @@ describe('a mandate\'s row names an API profile by its opaque id', () => {
     expect(attemptTarget(trail, 'api_setup#save')).toBe(`api_profiles profile=${carried!}`);
   });
 
+  it('a refine of a row without an id names the id the row then carries', async () => {
+    let made: ReturnType<typeof apiStoreOnDb> | undefined;
+    const f: Fixture = {
+      site: 'api_setup#refine', branch: 'refine', row: { verb: 'change', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'refine', id: 'mueller-crm', refine: { addNotes: ['x'] } },
+      build: () => {
+        setDataDir(tmp('lynox-iw-api-'));
+        made = apiStoreOnDb(MUELLER);
+        made.engine.getDb().exec("UPDATE connections SET trail_id = NULL WHERE id = 'mueller-crm'");
+        return { ctx: { apiStore: { obj: made.store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) };
+      },
+    };
+    const { result, trail } = await drive(f, false);
+    expect(result.is_error, JSON.stringify(result.content)).not.toBe(true);
+    const carried = made!.store.trailIdOf('mueller-crm');
+    expect(carried).toMatch(/^apf_[0-9a-f]{16}$/);
+    expect(attemptTarget(trail, 'api_setup#refine')).toBe(`api_profiles profile=${carried!}`);
+  });
+
   it('an id the model puts in the profile is neither named nor stored', async () => {
     const chosen = 'apf_00000000000000ff';
     let made: ReturnType<typeof apiStoreOnDb> | undefined;

@@ -43,9 +43,10 @@ describe('Engine boot — the opaque id of an API profile', () => {
 
   /**
    * A data dir whose engine.db holds the profile `shop` and an API row `legacy`, both without an
-   * id, as an older binary leaves them. `shop` the boot rewrites (its grant is issued again), and
-   * that write gives it an id through the upsert. `legacy` has a config the store cannot read, so
-   * no part of the boot but the fill touches it: that row is the one that shows the fill.
+   * id, as an older binary leaves them. `shop` gets its id from the fill, but also, when the fill
+   * fails, from the boot's own write of its row (its grant is issued again, `_reissue`), so it
+   * cannot tell the fill apart. `legacy` has a config the store cannot read, so no part of the boot
+   * but the fill touches it: that row is the one that shows the fill.
    */
   function withProfileWithoutId(): string {
     prevDataDir = process.env['LYNOX_DATA_DIR'];

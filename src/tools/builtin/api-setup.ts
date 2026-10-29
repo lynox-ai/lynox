@@ -2036,9 +2036,11 @@ ${draftJson}
       // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
       const existingId = existing.id;
       const refine = input.refine;
-      // A mandate's row names the profile by its opaque id, never by the slug the model chose.
-      return withInstanceWrite(agent, { site: 'api_setup#refine', kind: 'change', store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(existingId)]], main: ['save'] }, (w) => {
-        const mergedSave = w.run('save', () => apiStore.save(merged, apisDir), ifOk);
+      // A mandate's row names the profile by its opaque id, never by the slug the model chose. A
+      // row without one (an older binary's) gets the id made here, as for `save` below.
+      const refineTrailId = apiStore.newTrailId();
+      return withInstanceWrite(agent, { site: 'api_setup#refine', kind: 'change', store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(existingId) ?? refineTrailId]], main: ['save'] }, (w) => {
+        const mergedSave = w.run('save', () => apiStore.save(merged, apisDir, { trailId: refineTrailId }), ifOk);
         if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
 
         const changed: string[] = [];
