@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 import { DIR_MODE_PRIVATE, FILE_MODE_PRIVATE } from './constants.js';
 import { chatUploadRel, persistChatUpload } from './workspace.js';
 import { toWorkspaceRel, workspaceBase, WorkspacePathRefused } from './workspace-rel.js';
+import { sidecarWriteModes } from './workspace-write-modes.js';
 import {
   listDir, openRead, statEntry, unlinkAt, writeFileAt, WorkspaceAccessError,
   type EntryInfo, type WorkspaceAnchor,
@@ -154,7 +155,9 @@ export function persistChatUploadInArea(fileName: string, text: string): { rel: 
   }
   if (t === null) return persistChatUpload(fileName, text);
   try {
-    writeFileAt(t.anchor, t.rel, text, { fileMode: FILE_MODE_PRIVATE, dirMode: DIR_MODE_PRIVATE });
+    // In sidecar mode `bash` must read an upload: the layout's modes and group, not private ones.
+    const sidecar = sidecarWriteModes();
+    writeFileAt(t.anchor, t.rel, text, sidecar ?? { fileMode: FILE_MODE_PRIVATE, dirMode: DIR_MODE_PRIVATE });
   } catch {
     return null;
   }

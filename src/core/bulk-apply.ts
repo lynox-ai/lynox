@@ -26,6 +26,7 @@ import {
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
 import { processUmask } from './workspace-rel.js';
+import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
 
 export type BulkEffect = BulkWriteEffect;
@@ -611,8 +612,15 @@ export function anchoredWorkspaceWriter(): TargetWriter {
       // Something other than a file at the leaf (a link planted since the read) is not what the
       // run planned for — and a link's mode would be copied onto the new file.
       if (st !== null && st.type !== 'file') throw new Error('not a regular file');
-      const umask = processUmask();
-      writeFileAt(at.anchor, at.rel, after.value, {
+      const sidecar = sidecarWriteModes();
+      const umask = sidecar === null ? processUmask() : 0;
+      writeFileAt(at.anchor, at.rel, after.value, sidecar !== null ? {
+        // In sidecar mode the shell's pool keeps group read and write on what the run replaced
+        // (a pool file written under umask 022 is 0644), and a new file takes the layout's mode.
+        fileMode: st !== null ? sidecarReplaceMode(st.mode) : sidecar.fileMode,
+        dirMode: sidecar.dirMode,
+        group: sidecar.group,
+      } : {
         // The new file is the engine's: setuid and setgid are not carried over, as the kernel drops
         // them on a write to the file in place.
         fileMode: st !== null ? st.mode & ~0o6000 : 0o666 & ~umask,

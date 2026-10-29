@@ -7,6 +7,7 @@ import { join, relative, dirname, resolve, basename } from 'node:path';
 import { isPathWithin, getWorkspaceCwd, writeRootsBesidesWorkspace } from './workspace.js';
 import { processUmask, toWorkspaceRel, workspaceBase } from './workspace-rel.js';
 import { namesSidecarLabel } from './workspace-root.js';
+import { sidecarWriteModes } from './workspace-write-modes.js';
 import {
   FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, openWrite, readFdCapped, rmdirAt, statEntry, unlinkAt,
   WorkspaceAccessError, type WorkspaceAnchor,
@@ -703,7 +704,10 @@ export class ChangesetManager {
     try {
       // In place, as before: the file keeps its inode, owner and mode; one that is gone is made
       // again with the mode a write by name gives it. Its directories are not made again.
-      ({ fd } = openWrite(at.anchor, at.rel, { createMode: 0o666 & ~processUmask() }));
+      const sidecar = sidecarWriteModes();
+      ({ fd } = openWrite(at.anchor, at.rel, sidecar !== null
+        ? { createMode: sidecar.fileMode, group: sidecar.group }
+        : { createMode: 0o666 & ~processUmask() }));
       // A file with a second name may be a file outside the workspace: not written.
       if (fstatSync(fd).nlink > 1) return false;
       const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
