@@ -94,7 +94,11 @@ export interface TakeoverPreview {
   readonly memberChanges: readonly TakeoverMemberChange[];
   readonly alsoReleased: ReadonlyArray<{ readonly id: string; readonly title: string }>;
   readonly connections: readonly StampEntry[];
+  /** Whose connection each of {@link connections} is, by index: the address of the mandate with its grant, null when not known. */
+  readonly connectionBy: ReadonlyArray<string | null>;
   readonly schedule: TakeoverSchedule;
+  /** The run the plan was due for, when it runs only on "Run now" afterwards; null otherwise. */
+  readonly dueAt: string | null;
 }
 
 export type TakeoverPreviewResult =
@@ -125,7 +129,9 @@ interface TakeoverPlan {
   readonly memberChanges: readonly TakeoverMemberChange[];
   readonly released: readonly TriggerRecord[];
   readonly connections: readonly StampEntry[];
+  readonly connectionBy: ReadonlyArray<string | null>;
   readonly schedule: TakeoverSchedule;
+  readonly dueAt: string | null;
   readonly coveredMandates: readonly string[];
   readonly expect: string;
 }
@@ -297,7 +303,15 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
 
   const stamp = deps.triggers.getStampConnections(id);
   const connections = stamp === undefined ? [] : (stampFromRow(stamp.stampConnections, stamp.confirmedAt, workflowConfirmedAt(wf)) ?? []);
+  // A stamped connection is the grant's whose plan it was: its address from who the plan was
+  // paused for, or from a mark the takeover covers.
+  const grantEmail = new Map<string, string>();
+  for (const e of pausedForOf(trigger.paused_for).entries) grantEmail.set(e.mandateId, e.email);
+  for (const m of coveredMarks) if (isMandateTag(m.tag) && m.id) grantEmail.set(m.id, m.tag!.slice(MANDATE_TAG_PREFIX.length));
+  const connectionBy = connections.map((c) => grantEmail.get(c.grant) ?? null);
   const schedule = scheduleOf(trigger, now);
+  const dueAt = schedule === 'run_now_only_missed' || schedule === 'run_now_only_partial'
+    ? trigger.paused_due_at ?? trigger.next_run_at ?? null : null;
   const marks = (a: { created_by?: string | null | undefined; created_mandate_id?: string | null | undefined; created_at?: string | null | undefined; mandate_editor?: string | null | undefined; mandate_editor_id?: string | null | undefined; mandate_edited_at?: string | null | undefined }): unknown[] =>
     [a.created_by ?? null, a.created_mandate_id ?? null, a.created_at ?? null, a.mandate_editor ?? null, a.mandate_editor_id ?? null, a.mandate_edited_at ?? null];
   const expect = createHash('sha256').update(JSON.stringify([
@@ -308,11 +322,11 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
     wf === undefined ? null : [wf.id, wf.name, createHash('sha256').update(wf.definition_json).digest('hex'), marks(wf)],
     coverWorkflow, principalTag(runsAs),
     memberChanges, released.map((r) => [r.id, r.title, r.status, r.next_run_at ?? null, r.paused_for ?? null]),
-    schedule,
+    schedule, dueAt,
   ])).digest('hex');
 
   return {
-    trigger, row, wf, coverWorkflow, runsAs, members, memberChanges, released, connections, schedule,
+    trigger, row, wf, coverWorkflow, runsAs, members, memberChanges, released, connections, connectionBy, schedule, dueAt,
     coveredMandates: [...coveredMandates].sort(), expect,
   };
 }
@@ -334,7 +348,9 @@ export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreview
       memberChanges: plan.memberChanges,
       alsoReleased: plan.released.map((r) => ({ id: r.id, title: r.title })),
       connections: plan.connections,
+      connectionBy: plan.connectionBy,
       schedule: plan.schedule,
+      dueAt: plan.dueAt,
     },
   };
 }

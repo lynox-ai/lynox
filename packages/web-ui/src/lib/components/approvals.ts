@@ -24,6 +24,8 @@ export type ApprovalStatus = 'pending' | 'approved' | 'executing' | 'done' | 're
 export interface ApprovalSetupLine {
 	kind: 'set_up_by' | 'last_changed_by' | 'test_run_by';
 	name: string;
+	/** The owner took the plan over since (641c): the helper's mark stays, and the line says so. */
+	takenOver?: boolean | undefined;
 }
 
 export interface ApprovalCardData {
@@ -229,7 +231,21 @@ export interface ApprovalNoteLines {
 	bodyKey: string;
 	nextKey: string | null;
 	href: string | null;
+	/** The entry whose draft a chat can load to write it again, or null: no button. */
+	rewriteId: string | null;
 }
+
+/**
+ * The reasons a failed entry's draft can be written again in a chat: the engine's list (core
+ * `approval-view.ts`, `APPROVAL_REWRITABLE_OUTCOMES`), each a reason given before the send began.
+ * The engine decides again when the chat asks; this only decides whether the note offers it.
+ */
+export const APPROVAL_REWRITABLE_OUTCOMES: readonly string[] = [
+	'account_not_configured', 'receive_only', 'account_changed', 'mandate_ended', 'invalid_recipients', 'rate_limit',
+	'cancelled', 'mail_unavailable', 'sending_address_unavailable', 'deadline_before_send', 'trail_unavailable',
+	'executor_error',
+];
+const REWRITABLE: ReadonlySet<string> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
 /** The page's path with one entry picked out: the "all" tab, that card marked. */
 export function approvalEntryHref(id: string): string {
@@ -269,15 +285,17 @@ export function approvalNoteLines(code: string, ref: ApprovalNoteRef | undefined
 	else if (code === 'approval_unknown') status = 'unknown';
 	else return null;
 	const own = `chat.note.${code}`;
-	if (ref === undefined) return { bodyKey: own, nextKey: null, href: null };
+	if (ref === undefined) return { bodyKey: own, nextKey: null, href: null, rewriteId: null };
 	const href = approvalEntryHref(ref.id);
-	if (!noteOutcomeFits(status, ref.outcome)) return { bodyKey: own, nextKey: null, href };
+	if (!noteOutcomeFits(status, ref.outcome)) return { bodyKey: own, nextKey: null, href, rewriteId: null };
 	const card = { status, outcome: ref.outcome };
 	return {
 		// The sentences of the codes that fit read the same for every viewer.
 		bodyKey: approvalOutcomeKey(card, 'none') ?? own,
 		nextKey: noteNextStepKey(card, viewer),
 		href,
+		// Only the owner's chat loads the draft of a mail that was not sent.
+		rewriteId: status === 'failed' && viewer === 'owner' && REWRITABLE.has(ref.outcome) ? ref.id : null,
 	};
 }
 
@@ -293,6 +311,17 @@ export function approvalDecideErrorKey(code: unknown): string {
 /** Whether a refusal means the list the owner decided from is stale and is read again. */
 export function approvalRefusalReloads(code: unknown): boolean {
 	return code === 'checksum' || code === 'not_pending' || code === 'not_unknown' || code === 'expired' || code === 'mandate_ended' || code === 'not_found';
+}
+
+/**
+ * Which sentence a setup line is (the key under `approvals.setup.`). After a takeover the line
+ * keeps the helper's name and adds who took it over: "by you" to the owner, "by the owner" to
+ * anyone else (ux U-039). A test run is no mark, so it has no taken-over form.
+ */
+export function approvalSetupKind(line: Pick<ApprovalSetupLine, 'kind' | 'takenOver'>, viewer: ApprovalViewer): string {
+	if (line.takenOver !== true || line.kind === 'test_run_by') return line.kind;
+	const what = line.kind === 'set_up_by' ? 'set_up_by' : 'changed_by';
+	return `${what}_taken_over_${viewer === 'owner' ? 'you' : 'owner'}`;
 }
 
 /** A setup line's name, with the engine's neutral label translated. */

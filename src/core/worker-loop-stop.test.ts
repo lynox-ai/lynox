@@ -251,6 +251,8 @@ function makeHarness(opts?: {
     // A failed run's push asks whether its thread is contained; no store here, as on an
     // instance that never connected one.
     getToolContext: () => ({ containment: null }),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
 
   // ⚠ `hasChannels` decides whether the loop even composes a notification, so a
@@ -749,6 +751,8 @@ function makeClassHarness(opts: {
       sessions.push(1);
       return { run: () => hold('unexpected'), abort: () => { /* noop */ }, _recreateAgent: () => { /* noop */ } } as unknown as Session;
     },
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
 
   const router = {

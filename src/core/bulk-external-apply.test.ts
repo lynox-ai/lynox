@@ -814,6 +814,8 @@ describe('applying an external run', () => {
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       s.requests.length = 0;
@@ -866,6 +868,8 @@ describe('applying an external run', () => {
         getAuditLog: () => ({ record: (e: (typeof recs)[number]) => { sentAtRecord.push(s.requests.length); recs.push(e); } }),
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       s.requests.length = 0;
@@ -923,6 +927,8 @@ describe('applying an external run', () => {
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       // The run was approved under this file's stand-in, which counts every form on HOST as
@@ -976,6 +982,8 @@ describe('applying an external run', () => {
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       s.requests.length = 0;
@@ -2137,6 +2145,8 @@ describe('the connection and grant of each bulk target (A7)', () => {
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       await loop.tick();

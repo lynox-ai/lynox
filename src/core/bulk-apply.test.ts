@@ -176,6 +176,8 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
       getDataStore: () => store,
       getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
       getUserConfig: () => ({}),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const router = { hasChannels: () => true, notify } as unknown as NotificationRouter;
     const loop = new WorkerLoop(engine, router, 60_000);
@@ -226,6 +228,8 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
       getDataStore: () => store,
       getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
       getUserConfig: () => ({}),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     // The in-memory targets need an in-memory writer: route the run to one.
     const { writer } = memory({ k000: 'v0', k001: 'v1' });
@@ -254,6 +258,8 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
       getToolContext: () => ({ containment: null }),
       getBulkLedger: () => null,
       getUserConfig: () => ({}),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
     await loop.tick();
@@ -274,6 +280,8 @@ async function tickMemoryRun(runId: string, writer: TargetWriter): Promise<{ sta
     getDataStore: () => store,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
     getUserConfig: () => ({}),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   const mod = await import('./bulk-apply.js');
   const spy = vi.spyOn(mod, 'bulkWriterFor').mockReturnValue(writer);
@@ -683,6 +691,8 @@ async function stopMidWrite(n: number, holdAt: string, opts: { atomic?: boolean;
     getDataStore: () => store,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
     getUserConfig: () => ({}),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   const notify = vi.fn(async () => {});
   const mod = await import('./bulk-apply.js');
@@ -732,6 +742,8 @@ async function tickWhileOff(n: number, opts: { atomic?: boolean; heldElsewhere?:
     getDataStore: () => store,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
     getUserConfig: () => ({}),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   const mod = await import('./bulk-apply.js');
   const spy = vi.spyOn(mod, 'bulkWriterFor').mockReturnValue(writer);
@@ -1590,6 +1602,8 @@ describe('§7(i) before-images reach no model context', () => {
       getDataStore: () => store,
       getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
       getUserConfig: () => ({}),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     // A conflict on one target, so the run's result carries more than a clean count.
     writeFileSync(join(ws, `pages/${IN_KEY}-0.md`), `changed by someone else ${IN_BEFORE}\n`);
