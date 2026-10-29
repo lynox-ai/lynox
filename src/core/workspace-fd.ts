@@ -318,20 +318,38 @@ export function ensureSubAnchor(anchor: WorkspaceAnchor, name: string, dirMode: 
   return { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf };
 }
 
+/** A directory that is not, or could not be made, what the caller asked for. */
+export class DirStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DirStateError';
+  }
+}
+
 /**
  * As {@link ensureSubAnchor}, and the directory gets `dirMode` and `group` whether this call made it
  * or it was there already (a context directory left at mkdir's 0700 by an earlier start, or changed
  * since). Set through a reopened fd, as `setMode` does: on the O_PATH anchor fchown and fchmod are
- * EBADF. Returns the anchor and the directory's owner, for the caller to check; a failed call
- * closes what it opened and throws, naming the call in its errno message.
+ * EBADF.
+ *
+ * A directory that does not belong to `owner` is refused before anything is changed. Afterwards
+ * the directory is read back: a kernel that drops the set-group-ID bit without an error (fchmod by
+ * a process outside `group`) leaves a mode nobody asked for, and that is refused as well. A
+ * failed call closes what it opened and throws, naming the call in its errno message.
  */
-export function ensureSubAnchorWithMode(anchor: WorkspaceAnchor, name: string, dirMode: number, group: number): { anchor: WorkspaceAnchor; uid: number } {
+export function ensureSubAnchorWithMode(anchor: WorkspaceAnchor, name: string, dirMode: number, group: number, owner: number): WorkspaceAnchor {
   const parts = splitRel(name);
   if (parts.length !== 1) throw new WorkspaceAccessError('BAD_PATH', `a sub-anchor is one component, got ${JSON.stringify(name)}`);
   const dir = walkDir(anchor, parts, { dirMode, group });
   try {
+    const before = fstatSync(dir.fd).uid;
+    if (before !== owner) throw new DirStateError(`it belongs to uid ${before}, not to uid ${owner}`);
     setMode(dir, dirMode, group);
-    return { anchor: { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf }, uid: fstatSync(dir.fd).uid };
+    const after = fstatSync(dir.fd);
+    if ((after.mode & 0o7777) !== dirMode || after.gid !== group) {
+      throw new DirStateError(`after fchown and fchmod it has mode 0o${(after.mode & 0o7777).toString(8)} and group ${after.gid}, not 0o${dirMode.toString(8)} and ${group}`);
+    }
+    return { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf };
   } catch (err) {
     closeSync(dir.fd);
     throw err;

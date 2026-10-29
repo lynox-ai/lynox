@@ -9,6 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  */
 const chowns = vi.hoisted(() => [] as number[]);
 const chownFails = vi.hoisted(() => ({ on: false }));
+// The group each inode was given, as fstat reports it back: the real call ran with the runner's
+// own group. `reported: false` reports the real group instead.
+const chownedTo = vi.hoisted(() => ({ map: new Map<number, number>(), reported: true }));
+// `chmodFails` fails fchmod; `dropsSetgid` makes it drop the set-group-ID bit without an error,
+// as the kernel does for a process outside the directory's group.
+const chmod = vi.hoisted(() => ({ fails: false, dropsSetgid: false }));
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>();
   return {
@@ -17,11 +23,22 @@ vi.mock('node:fs', async (importOriginal) => {
       chowns.push(gid);
       if (chownFails.on) throw Object.assign(new Error('EPERM: operation not permitted, fchown'), { code: 'EPERM' });
       real.fchownSync(fd, uid, process.getgid!());
+      chownedTo.map.set(real.fstatSync(fd).ino, gid);
+    },
+    fstatSync: ((fd: number, opts?: never) => {
+      const st = real.fstatSync(fd, opts);
+      const gid = chownedTo.reported ? chownedTo.map.get(Number(st.ino)) : undefined;
+      if (gid !== undefined) Object.defineProperty(st, 'gid', { value: gid });
+      return st;
+    }) as typeof real.fstatSync,
+    fchmodSync: (fd: number, mode: number): void => {
+      if (chmod.fails) throw Object.assign(new Error('EPERM: operation not permitted, fchmod'), { code: 'EPERM' });
+      real.fchmodSync(fd, chmod.dropsSetgid ? mode & ~0o2000 : mode);
     },
   };
 });
 
-const { chmodSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, statSync } = await import('node:fs');
+const { chmodSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } = await import('node:fs');
 const { tmpdir } = await import('node:os');
 const { join } = await import('node:path');
 const { resetShellIsolationForTest, setShellIsolationForTest, WORKSPACE_LABEL } = await import('./shell-isolation.js');
@@ -49,6 +66,10 @@ describe('the context directory in shell sidecar mode (W1)', () => {
     _resetCache();
     chowns.length = 0;
     chownFails.on = false;
+    chmod.fails = false;
+    chmod.dropsSetgid = false;
+    chownedTo.map.clear();
+    chownedTo.reported = true;
   });
 
   afterEach(() => {
@@ -83,14 +104,51 @@ describe('the context directory in shell sidecar mode (W1)', () => {
       .toThrow(/The context directory \/workspace\/ctx1 cannot be made ready from fd 3 \(EPERM: operation not permitted, fchown\)/);
   });
 
-  it('a context directory that belongs to another uid stops the start', () => {
+  it('a context directory that belongs to another uid stops the start before anything is changed', () => {
+    mkdirSync(join(tree, 'ctx1'));
+    chmodSync(join(tree, 'ctx1'), 0o700);
     const geteuid = vi.spyOn(process, 'geteuid').mockReturnValue(4242);
     try {
       expect(() => ensureContextWorkspace(ctx('ctx1', `${WORKSPACE_LABEL}/ctx1`)))
-        .toThrow(/The context directory \/workspace\/ctx1 belongs to uid \d+, not to the engine \(uid 4242\)/);
+        .toThrow(/The context directory \/workspace\/ctx1 cannot be made ready from fd 3 \(it belongs to uid \d+, not to uid 4242\)/);
     } finally {
       geteuid.mockRestore();
     }
+    expect(chowns).toEqual([]);
+    expect(statSync(join(tree, 'ctx1')).mode & 0o7777).toBe(0o700);
+  });
+
+  it('a set-group-ID bit the kernel dropped without an error stops the start', () => {
+    chmod.dropsSetgid = true;
+    expect(() => ensureContextWorkspace(ctx('ctx1', `${WORKSPACE_LABEL}/ctx1`)))
+      .toThrow(/cannot be made ready from fd 3 \(after fchown and fchmod it has mode 0o770 and group \d+, not 0o2770 and 1002\)/);
+  });
+
+  it('a group the directory did not get stops the start', () => {
+    // fchown ran with the runner's own group; reported as it is, the directory does not have 1002.
+    chownedTo.reported = false;
+    expect(statSync(tree).gid).not.toBe(GROUP);
+    expect(() => ensureContextWorkspace(ctx('ctx1', `${WORKSPACE_LABEL}/ctx1`))).toThrow(/not 0o2770 and 1002/);
+  });
+
+  it('a failed fchmod stops the start, naming the call', () => {
+    chmod.fails = true;
+    expect(() => ensureContextWorkspace(ctx('ctx1', `${WORKSPACE_LABEL}/ctx1`)))
+      .toThrow(/cannot be made ready from fd 3 \(EPERM: operation not permitted, fchmod\)/);
+  });
+
+  it('a file or a symlink at the context directory stops the start and stays as it is', () => {
+    writeFileSync(join(tree, 'file'), 'x');
+    expect(() => ensureContextWorkspace(ctx('file', `${WORKSPACE_LABEL}/file`))).toThrow(WorkspaceRootError);
+    expect(lstatSync(join(tree, 'file')).isFile()).toBe(true);
+    const target = join(tmp, 'elsewhere');
+    mkdirSync(target);
+    chmodSync(target, 0o700);
+    symlinkSync(target, join(tree, 'link'));
+    expect(() => ensureContextWorkspace(ctx('link', `${WORKSPACE_LABEL}/link`))).toThrow(WorkspaceRootError);
+    expect(readlinkSync(join(tree, 'link'))).toBe(target);
+    expect(statSync(target).mode & 0o7777).toBe(0o700);
+    expect(chowns).toEqual([]);
   });
 
   it('a context directory that is not one directory below the label is refused', () => {

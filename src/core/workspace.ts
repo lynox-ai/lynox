@@ -4,8 +4,8 @@ import { resolve, dirname, basename, join, relative } from 'node:path';
 import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
-import { SHARED_GROUP, shellIsolation, type SidecarRoot } from './shell-isolation.js';
-import { closeAnchor, ensureSubAnchorWithMode } from './workspace-fd.js';
+import { ENGINE_ID, SHARED_GROUP, shellIsolation, type SidecarRoot } from './shell-isolation.js';
+import { closeAnchor, ensureSubAnchorWithMode, type WorkspaceAnchor } from './workspace-fd.js';
 import { SIDECAR_DIR_MODE } from './workspace-write-modes.js';
 import { ensureWorkspaceContextDir, getWorkspaceRoot, namesSidecarLabel, resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin, WorkspaceRootError } from './workspace-root.js';
 
@@ -259,17 +259,16 @@ function ensureSidecarContextDir(root: SidecarRoot, workspaceDir: string): strin
   if (name === '' || name.includes('/') || name.startsWith('..')) {
     throw new WorkspaceRootError(`In shell sidecar mode the context directory ${workspaceDir} must be one directory below ${root.label}.`);
   }
-  let made: ReturnType<typeof ensureSubAnchorWithMode>;
+  // Start check (h) has pinned the engine to the layout's uid before sidecar mode exists, so the
+  // engine's own uid is the owner to expect; off POSIX there is no fd 3 and no sidecar mode.
+  const owner = process.geteuid?.() ?? ENGINE_ID;
+  let made: WorkspaceAnchor;
   try {
-    made = ensureSubAnchorWithMode(root.anchor, name, SIDECAR_DIR_MODE, SHARED_GROUP);
+    made = ensureSubAnchorWithMode(root.anchor, name, SIDECAR_DIR_MODE, SHARED_GROUP, owner);
   } catch (err) {
-    throw new WorkspaceRootError(`The context directory ${workspaceDir} cannot be made ready from fd 3 (${err instanceof Error ? err.message : String(err)}).`);
+    throw new WorkspaceRootError(`The context directory ${workspaceDir} cannot be made ready from fd 3 (${err instanceof Error ? err.message : String(err)}). Give it to uid ${owner} or remove it, then start again.`);
   }
-  closeAnchor(made.anchor);
-  const own = process.geteuid?.();
-  if (own !== undefined && made.uid !== own) {
-    throw new WorkspaceRootError(`The context directory ${workspaceDir} belongs to uid ${made.uid}, not to the engine (uid ${own}). Give it to the engine's uid or remove it, then start again.`);
-  }
+  closeAnchor(made);
   return workspaceDir;
 }
 

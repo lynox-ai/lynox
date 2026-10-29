@@ -10,6 +10,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
  */
 const touched = vi.hoisted(() => [] as string[]);
 const chowns = vi.hoisted(() => [] as number[]);
+// The group each inode was given, as fstat reports it back (the real call ran with the runner's own).
+const chownedTo = vi.hoisted(() => new Map<number, number>());
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>();
   const namesLabel = (a: unknown): boolean => typeof a === 'string' && (a === '/workspace' || a.startsWith('/workspace/'));
@@ -25,6 +27,13 @@ vi.mock('node:fs', async (importOriginal) => {
   wrapped['fchownSync'] = (fd: number, uid: number, gid: number): void => {
     chowns.push(gid);
     real.fchownSync(fd, uid, process.getgid!());
+    chownedTo.set(real.fstatSync(fd).ino, gid);
+  };
+  wrapped['fstatSync'] = (fd: number, opts?: never) => {
+    const st = real.fstatSync(fd, opts);
+    const gid = chownedTo.get(Number(st.ino));
+    if (gid !== undefined) Object.defineProperty(st, 'gid', { value: gid });
+    return st;
   };
   return { ...wrapped, default: wrapped };
 });
