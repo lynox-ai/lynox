@@ -113,11 +113,14 @@ function isLive(anchor: WorkspaceAnchor): boolean {
  */
 export function workspaceBase(): { readonly ws: string; readonly anchor: WorkspaceAnchor } | null {
   const ws = getWorkspaceDir();
+  const sidecar = shellIsolation().kind === 'sidecar';
   if (ws === null) {
     dropBase();
+    // Null would send every caller to its path by name; in sidecar mode there is none (D3).
+    if (sidecar) throw new WorkspaceRootError('In shell sidecar mode no context workspace is set, and the workspace is not reached by name.');
     return null;
   }
-  if (shellIsolation().kind === 'sidecar') return sidecarBase(ws);
+  if (sidecar) return sidecarBase(ws);
   const wsPath = resolve(ws);
   const rootPath = resolve(resolveWorkspaceRoot().path);
   const rootReal = realOr(rootPath);

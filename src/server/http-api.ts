@@ -13801,8 +13801,12 @@ export class LynoxHTTPApi {
         const { getFileAreaDir } = await import('../core/workspace.js');
         const { ensureDirSync: ensureDir } = await import('../core/atomic-write.js');
 
-        const base = getFileAreaDir();
-        try { await access(base); } catch { ensureDir(base); }
+        // In shell sidecar mode the area is reached only below, through fd 3: nothing is made by
+        // name (PRD shell-sidecar-activation D3).
+        if ((await import('../core/shell-isolation.js')).shellIsolation().kind !== 'sidecar') {
+          const base = getFileAreaDir();
+          try { await access(base); } catch { ensureDir(base); }
+        }
         // With isolation: through the workspace's open directory, links not followed.
         const area = await import('../core/file-area-anchor.js');
         try {

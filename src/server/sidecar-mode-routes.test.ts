@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -10,7 +10,10 @@ import { MigrationExporter } from '../core/migration-export.js';
 import type { MigrationImporter } from '../core/migration-import.js';
 import { generateEphemeralKeypair, serializePublicKey, deserializePublicKey, deriveTransferKey } from '../core/migration-crypto.js';
 import { _resetWorkspaceAccess } from '../core/workspace-access.js';
-import { resetShellIsolationForTest, setShellIsolationForTest, type ShellIsolation } from '../core/shell-isolation.js';
+import { resetShellIsolationForTest, setShellIsolationForTest, WORKSPACE_LABEL, type ShellIsolation } from '../core/shell-isolation.js';
+import { anchorFromFd, closeAnchor } from '../core/workspace-fd.js';
+import { getWorkspaceDir, setTenantWorkspace } from '../core/workspace.js';
+import { closeWorkspaceBase } from '../core/workspace-rel.js';
 
 /**
  * The routes that would walk or empty the shared workspace tree, in shell sidecar mode (PRD D6,
@@ -132,6 +135,55 @@ describe('routes in sidecar mode (real engine)', () => {
       expect(body.code).toBe('workspace_sidecar_mode');
       expect(body.error).toBe('This backup contains files from the workspace. On this instance lynox does not restore them from a backup; nothing was changed. You can restore the rest from a backup without the workspace. On this instance you manage the workspace files outside lynox.');
       expect(readFileSync(join(dir, 'workspace', 'kept.md'), 'utf8')).toBe('ZZ-live');
+    });
+  });
+
+  // The tree is a directory of the test machine handed over as fd 3; `/workspace` does not exist
+  // here, so a route that still reached it by name would fail or answer from somewhere else (D3).
+  describe('D3: the file area and the workspace status, reached through fd 3', () => {
+    const withTree = async (fn: (tree: string) => Promise<void>): Promise<void> => {
+      const tree = join(dir, 'fd3-tree');
+      mkdirSync(join(tree, 'ctx1'), { recursive: true });
+      const anchor = anchorFromFd(openSync(tree, constants.O_RDONLY | constants.O_DIRECTORY), WORKSPACE_LABEL);
+      const before = getWorkspaceDir();
+      setShellIsolationForTest({ kind: 'sidecar', socket: '/run/lynox/shell.sock', root: { mode: 'sidecar', anchor, label: WORKSPACE_LABEL } });
+      _resetWorkspaceAccess();
+      setTenantWorkspace(`${WORKSPACE_LABEL}/ctx1`);
+      try {
+        await fn(tree);
+      } finally {
+        closeWorkspaceBase();
+        setTenantWorkspace(before);
+        resetShellIsolationForTest();
+        _resetWorkspaceAccess();
+        closeAnchor(anchor);
+        rmSync(tree, { recursive: true, force: true });
+      }
+    };
+
+    it('GET /api/files lists the context folder from fd 3 and makes nothing by name', async () => {
+      await withTree(async (tree) => {
+        writeFileSync(join(tree, 'ctx1', 'report.md'), 'x');
+        const res = await call('GET', '/api/files');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { entries: Array<{ name: string }> };
+        expect(body.entries.map(e => e.name)).toEqual(['report.md']);
+      });
+    });
+
+    it('the workspace status names the sidecar mode, compares fd 3\'s mount, and reads no old location', async () => {
+      await withTree(async () => {
+        mkdirSync(join(dir, 'workspace'), { recursive: true });
+        writeFileSync(join(dir, 'workspace', 'left.md'), 'x');
+        const res = await call('GET', '/api/admin/workspace/status');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect(body['workspace_root_mode']).toBe('sidecar');
+        expect(body['workspace_legacy_pending']).toBe(false);
+        // fd 3 and the data directory are on the same mount here: not a mount of its own.
+        if (process.platform === 'linux') expect(body['workspace_root_is_mount']).toBe(false);
+        rmSync(join(dir, 'workspace', 'left.md'));
+      });
     });
   });
 

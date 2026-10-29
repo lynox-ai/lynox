@@ -3,7 +3,7 @@ import type { Stats } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { ensureDirSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
-import { mountIdOfDir } from './workspace-fd.js';
+import { mountIdOf, mountIdOfDir } from './workspace-fd.js';
 import { shellIsolation, WORKSPACE_LABEL } from './shell-isolation.js';
 
 /**
@@ -245,6 +245,15 @@ function assertUsableDir(path: string, what: string, mode: number): void {
  * mount id cannot be read (no `/proc`, e.g. macOS).
  */
 export function workspaceRootIsMount(rootPath: string): boolean | null {
+  // In shell sidecar mode the label is not looked at: fd 3 against the data directory's mount, as
+  // start check (c) compares them (D3).
+  const isolation = shellIsolation();
+  if (isolation.kind === 'sidecar') {
+    const own = mountIdOf(isolation.root.anchor.fd);
+    const data = mountIdOfDir(getLynoxDir());
+    if (own === null || data === null) return null;
+    return own !== data;
+  }
   let real: string;
   try { real = realpathSync(rootPath); } catch { return null; }
   const own = mountIdOfDir(real);

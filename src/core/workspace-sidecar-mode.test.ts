@@ -9,6 +9,7 @@ import { _resetWorkspaceAccess, leaseWorkspaceFor, workspaceAccess } from './wor
 import { closeWorkspaceBase, workspaceBase } from './workspace-rel.js';
 import { _resetCache, setTenantWorkspace } from './workspace.js';
 import { workspaceChangeset } from './changeset.js';
+import { reachWorkspace } from '../tools/builtin/fs.js';
 
 /**
  * In shell sidecar mode the workspace is the fd the entrypoint hands over, and `/workspace` is only
@@ -99,6 +100,12 @@ describe('the workspace in shell sidecar mode (D3)', () => {
     expect(() => workspaceBase()).toThrow(/must be a directory below \/workspace/);
   });
 
+  it('without a context workspace the file tools are refused, not sent to a path by name', () => {
+    setTenantWorkspace(null);
+    expect(() => workspaceBase()).toThrow(/no context workspace is set/);
+    expect(() => reachWorkspace('/workspace/ctx1/a.txt')).toThrow(/no context workspace is set/);
+  });
+
   it('old workspace paths map onto the label without reading `<data>/workspace`', () => {
     // By name a non-empty `<data>/workspace` counts as pending, and the old path is refused.
     mkdirSync(join(data, 'workspace'));
@@ -162,6 +169,10 @@ describe('the workspace outside shell sidecar mode is unchanged (D3)', () => {
     const lease = leaseWorkspaceFor(foreign, { create: true });
     expect(existsSync(join(foreign, 'workspace'))).toBe(true);
     lease?.release();
+  });
+
+  it('without a context workspace there is still no isolation (null), not a refusal', () => {
+    expect(workspaceBase()).toBeNull();
   });
 
   it('a context workspace outside the root is still opened by name', () => {
