@@ -2228,6 +2228,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Managed broker card
 	'integrations.google_broker_connect': { de: 'Mit Google verbinden', en: 'Connect with Google' },
 	'integrations.google_workspace_admin_hint': { de: 'Nutzt du ein Google-Workspace-Konto deiner Firma, muss dessen Admin lynox womöglich zuerst freigeben.', en: 'Using a company Google Workspace account? Its admin may need to allow lynox first.' },
+	'integrations.google_switch_admin_hint': { de: 'Hat der Admin deiner Firma bisher nur deinen eigenen Client freigegeben, sperrt Google den Client von lynox, bis er auch diesen freigibt.', en: 'If your company\'s admin has approved only your own client so far, Google blocks lynox\'s client until they approve it too.' },
+	'integrations.google_switch_admin_way_back': { de: 'Sperrt Google, trägst du deinen eigenen Client unter „Erweitert“ wieder ein.', en: 'If Google blocks it, enter your own client again under “Advanced”.' },
 	'integrations.google_workspace_admin_link': { de: 'Anleitung für den Admin (englisch)', en: 'Instructions for your admin' },
 	'integrations.google_broker_desc': { de: 'lynox fragt Kalender und die Dateien, die lynox für dich anlegt. Kein eigener Google-Cloud-Zugang nötig.', en: 'lynox asks for your calendar and the files lynox creates for you. No Google Cloud project of your own required.' },
 	'integrations.google_broker_unavailable': { de: 'Die verwaltete Google-Verbindung wird gerade eingerichtet — noch nicht verfügbar.', en: 'Managed Google connection is being set up — not available yet.' },

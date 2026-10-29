@@ -47,15 +47,41 @@ describe('the Google card names the admin\'s approval before the connect', () =>
 		expect(hint).toBeGreaterThan(button);
 	});
 
-	it('the switch from the tenant\'s own client to lynox\'s says it too, inside its confirm', () => {
-		// The switch starts lynox's consent directly; it never passes the brokered card above.
+	it('the switch from the tenant\'s own client to lynox\'s says it in its own words, with the way back, inside its confirm', () => {
+		// The switch starts lynox's consent directly; it never passes the brokered card above. The tenant's
+		// own pair is deleted by then, so the sentence names "Advanced", which the brokered card offers.
 		const confirm = /\{#if switchConfirmOpen\}([\s\S]*?)\{\/if\}/.exec(CARD);
 		expect(confirm, 'the switch confirm is not where it was').not.toBeNull();
 		const inConfirm = confirm![1]!;
-		expect(inConfirm).toContain("{t('integrations.google_workspace_admin_hint')}");
-		expect(inConfirm.indexOf("{t('integrations.google_workspace_admin_hint')}")).toBeLessThan(inConfirm.indexOf('onclick={confirmSwitchToManaged}'));
-		// Those two places, and no third.
-		expect(CARD.split("t('integrations.google_workspace_admin_hint')").length - 1).toBe(2);
+		const hint = inConfirm.indexOf("{t('integrations.google_switch_admin_hint')}");
+		const link = inConfirm.indexOf("{t('integrations.google_workspace_admin_link')}");
+		const wayBack = inConfirm.indexOf("{t('integrations.google_switch_admin_way_back')}");
+		expect(hint).toBeGreaterThan(-1);
+		expect(link).toBeGreaterThan(hint);
+		expect(wayBack).toBeGreaterThan(link);
+		expect(wayBack).toBeLessThan(inConfirm.indexOf('onclick={confirmSwitchToManaged}'));
+		// Each sentence in its one place.
+		expect(CARD.split("t('integrations.google_workspace_admin_hint')").length - 1).toBe(1);
+		expect(CARD.split("t('integrations.google_switch_admin_hint')").length - 1).toBe(1);
+	});
+
+	it('the way back it names is on the brokered card, outside the condition on lynox\'s client being offered', () => {
+		const brokered = /\{:else if isBroker && !getGoogleStatus\(\)\?\.authenticated\}([\s\S]*?)\{:else if/.exec(CARD);
+		expect(brokered).not.toBeNull();
+		const afterBranch = brokered![1]!.slice(brokered![1]!.indexOf('{/if}'));
+		expect(afterBranch).toContain("{t('integrations.google_advanced')}");
+		expect(afterBranch).toContain('onclick={saveGoogleCredentials}');
+	});
+
+	it('the switch\'s sentences read as ux wrote them (U-057)', () => {
+		expect(entry('integrations.google_switch_admin_hint')).toEqual({
+			de: 'Hat der Admin deiner Firma bisher nur deinen eigenen Client freigegeben, sperrt Google den Client von lynox, bis er auch diesen freigibt.',
+			en: 'If your company\\\'s admin has approved only your own client so far, Google blocks lynox\\\'s client until they approve it too.',
+		});
+		expect(entry('integrations.google_switch_admin_way_back')).toEqual({
+			de: 'Sperrt Google, trägst du deinen eigenen Client unter „Erweitert“ wieder ein.',
+			en: 'If Google blocks it, enter your own client again under “Advanced”.',
+		});
 	});
 
 	it('the link opens the docs section in a new tab, so the connect stays open', () => {
