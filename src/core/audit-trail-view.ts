@@ -161,6 +161,8 @@ export interface TrailBulkRun {
   readonly runId: string;
   readonly action: string;
   readonly host: string | null;
+  /** The store a run inside the instance writes (660b), null for a run outside it or a store the view does not know. */
+  readonly store: 'files' | 'data_store' | null;
   readonly at: string;
   readonly person: TrailPerson;
   readonly status: TrailStatus | null;
@@ -235,6 +237,11 @@ function planEndStatus(outcome: string | undefined): TrailStatus {
     // `interrupted`, `unrecorded` (the end is known to have come, not how) and anything else.
     default: return 'interrupted';
   }
+}
+
+/** The store a bulk run inside the instance names (`store=`), or null for any other value. */
+function storeOf(value: string | undefined): 'files' | 'data_store' | null {
+  return value === 'files' || value === 'data_store' ? value : null;
 }
 
 /** A bulk window's end, from its `outcome=`. `pending` is decided by the caller. */
@@ -438,6 +445,7 @@ export function buildTrail(rows: readonly TrailRow[], src: TrailSources, opts: {
       order: (windows[0]?.start ?? first).id,
       entry: {
         kind: 'bulk', id: `bulk:${runId}`, runId, action: first.action, host: targetPairs(first.target).get('host') ?? null,
+        store: storeOf(targetPairs(first.target).get('store')),
         at: (windows[0]?.start ?? first).ts, person: personOf(first), status, planned,
         windows: windows.length,
         targets: sumTargets(windows.map((w) => (w.end === undefined ? UNKNOWN_COUNTS : targetPairs(w.end.target)))),

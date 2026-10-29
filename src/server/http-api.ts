@@ -9285,6 +9285,13 @@ export class LynoxHTTPApi {
       // not reach its host would only halt again on its first target.
       const reach = await bulkExternalReach(params['id']!, ledger);
       if (reach !== null) { errorResponse(res, 409, reach); return; }
+      // A run no one can be shown to have planned would write without a row in the instance's
+      // trail: it is not resumed (660b). It stays as it is; its approval was the owner's act.
+      // The text is ux's. No await between this and the resume.
+      if (ledger.resumeRefusedForPlanner(params['id']!, engine.getBulkOwnership())) {
+        errorResponse(res, 409, 'lynox cannot show who planned this run, so it does not continue it. Have it planned again in a chat.', 'planner_unknown');
+        return;
+      }
       const out = ledger.resume(params['id']!, { checksum, maxTargets: resumeMax });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));

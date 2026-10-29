@@ -43,6 +43,21 @@ describe('a bulk run: one entry over its windows', () => {
     expect(entry).toMatchObject({ kind: 'bulk', runId: 'b1', windows: 2, status: 'done', host: 'shop.example.com', targets: { written: 5, failed: 1, atLeast: false } });
   });
 
+  it('names the store of a run inside the instance, and no host (660b)', () => {
+    const inside = (runId: string, where: string): TrailRow[] => {
+      const c = newCorrelationId();
+      return [
+        row({ action: 'bulk:apply', phase: 'attempt', correlation_id: c, run_id: runId, target: `${where} approved_by=owner` }),
+        row({ action: 'bulk:apply', phase: 'done', correlation_id: c, run_id: runId, target: `${where} approved_by=owner outcome=done written=2 failed=0` }),
+      ];
+    };
+    const of = (rows: TrailRow[]) => buildTrail(rows, quiet)[0] as TrailBulkRun;
+    expect(of(inside('b1', 'store=files'))).toMatchObject({ host: null, store: 'files', targets: { written: 2, failed: 0, atLeast: false } });
+    expect(of(inside('b2', 'store=data_store'))).toMatchObject({ host: null, store: 'data_store' });
+    expect(of(inside('b3', 'store=other')).store, 'a store the view does not know is not named').toBeNull();
+    expect(of(window('b4', 'outcome=done written=1 failed=0'))).toMatchObject({ host: 'shop.example.com', store: null });
+  });
+
   it('counts a window whose numbers are unknown as "or more", never as zero', () => {
     const rows = [...window('b1', 'outcome=pending written=3 failed=0'), ...window('b1', 'outcome=done written=unread failed=unread')];
     expect((buildTrail(rows, quiet)[0] as TrailBulkRun).targets).toEqual({ written: 3, failed: 0, atLeast: true });

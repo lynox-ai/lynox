@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import {
-  BulkLedger, BULK_HALT_REASONS, BULK_OWNER_THREADS_SINCE, plannerHasEnded, type BulkOwnership, type PlannedTarget,
+  BulkLedger, BULK_HALT_REASONS, BULK_OWNER_THREADS_SINCE, plannerHasEnded, plannerUnshown, type BulkOwnership, type PlannedTarget,
 } from './bulk-ledger.js';
 import { mintBulkContract } from './bulk-external.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
@@ -127,6 +127,64 @@ describe('whose run has ended', () => {
     expect(plannerHasEnded(legacy({}), ownership([], {}))).toBe(true);
     expect(plannerHasEnded(legacy({}), ownership([], { 'thread-1': null }))).toBe(true);
     expect(plannerHasEnded(legacy({ created_by: null }), ownership([], { 'thread-1': 'owner' }))).toBe(true);
+  });
+});
+
+// 660b: an approved run is not resumed when no one can be shown as its planner — no trail
+// would name anyone. Unlike an ended planner, an ended grant does not count: the run names it.
+describe('whose run cannot be shown to have a planner', () => {
+  const NEW = '2026-10-13 08:00:00';
+  const legacy = (over: Partial<{ created_by: string | null; created_at: string }>) =>
+    ({ principal: null, mandate_id: null, created_by: 'thread-1', created_at: NEW, ...over });
+  const ownerThread = (threadsKnown = true) => ownership([], { 'thread-1': 'owner' }, threadsKnown);
+
+  it('the owner\'s run never, also when the conversations cannot be read', () => {
+    expect(plannerUnshown({ principal: 'owner', mandate_id: null, created_by: 't', created_at: NEW }, ownership())).toBe(false);
+    expect(plannerUnshown({ principal: 'owner', mandate_id: null, created_by: 't', created_at: NEW }, ownership([], {}, false))).toBe(false);
+  });
+
+  it('a mandate\'s run never, also once its grant ended or when the conversations cannot be read', () => {
+    expect(plannerUnshown({ principal: 'mandate:helper@example.invalid', mandate_id: 'grant-1', created_by: 't', created_at: NEW }, ownership(['grant-1']))).toBe(false);
+    expect(plannerUnshown({ principal: 'mandate:helper@example.invalid', mandate_id: 'grant-1', created_by: 't', created_at: NEW }, ownership())).toBe(false);
+    expect(plannerUnshown({ principal: 'mandate:helper@example.invalid', mandate_id: null, created_by: 't', created_at: NEW }, ownership([], {}, false))).toBe(false);
+  });
+
+  it('a planner tag that is neither the owner\'s nor a mandate\'s, always', () => {
+    expect(plannerUnshown({ principal: 'member:someone@example.invalid', mandate_id: null, created_by: 't', created_at: NEW }, ownerThread())).toBe(true);
+  });
+
+  it('a run from before v31 only when it cannot be placed in a conversation the owner started after H2c', () => {
+    expect(plannerUnshown(legacy({}), ownerThread()), 'the owner\'s conversation, after H2c').toBe(false);
+    expect(plannerUnshown(legacy({ created_at: BULK_OWNER_THREADS_SINCE }), ownerThread()), 'on the boundary').toBe(true);
+    expect(plannerUnshown(legacy({}), ownership([], { 'thread-1': 'mandate:helper@example.invalid' })), 'a mandate\'s conversation').toBe(true);
+    expect(plannerUnshown(legacy({}), ownership()), 'no conversation').toBe(true);
+    expect(plannerUnshown(legacy({ created_by: null }), ownerThread()), 'no conversation named').toBe(true);
+    expect(plannerUnshown(legacy({}), ownerThread(false)), 'the conversations cannot be read').toBe(true);
+  });
+
+  it('the ledger asks it of the run as stored, and ends nothing', () => {
+    const id = dryRun(OWNER_PRINCIPAL);
+    const approved = ledger.approve(id, { checksum: ledger.computeChecksum(id)! });
+    if (!approved.ok) throw new Error(approved.reason);
+    expect(ledger.resumeRefusedForPlanner(id, ownership())).toBe(false);
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET principal = NULL, created_at = ? WHERE id = ?`).run(NEW, id);
+    expect(ledger.resumeRefusedForPlanner(id, ownership())).toBe(true);
+    expect(ledger.resumeRefusedForPlanner(id, ownerThread())).toBe(false);
+    expect(row(id)).toMatchObject({ phase: 'approved', halt_reason: null });
+    expect(ledger.resumeRefusedForPlanner('no-such-run', ownership())).toBe(false);
+  });
+
+  it('asks it only of a run a resume could move on: another phase is the resume\'s own refusal', () => {
+    const id = dryRun(OWNER_PRINCIPAL);
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET principal = NULL, created_at = ? WHERE id = ?`).run(NEW, id);
+    for (const phase of ['previewed', 'done', 'aborted', 'undone']) {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET phase = ? WHERE id = ?').run(phase, id);
+      expect(ledger.resumeRefusedForPlanner(id, ownership()), phase).toBe(false);
+    }
+    for (const phase of ['approved', 'writing']) {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET phase = ? WHERE id = ?').run(phase, id);
+      expect(ledger.resumeRefusedForPlanner(id, ownership()), phase).toBe(true);
+    }
   });
 });
 
