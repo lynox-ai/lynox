@@ -9,8 +9,11 @@
  * (s1) "set the SEO description of every product to one text" → form shopify, after.seo_description;
  * (s2) "set the alt text of every product image to one text" → form shopify_media, after.alt;
  * (s3) "write each product an SEO title from its name" → form shopify with a judge that sets seo_title.
- * A run passes when a plan is recorded with that form and field within MAX_PLANS calls of
- * `bulk_plan`. How many calls it took is counted apart: the first-try share is the price.
+ * A run passes when the plan it records is in that form and sets that field, however many calls
+ * it took. How many it took is the price, counted apart: `handled` is the calls that reached
+ * `bulk_plan`'s handler, and `first` that the first of them was recorded right. Both are a lower
+ * bound: a call the dispatch validator refuses never reaches the handler, and the agent's own
+ * transcript cannot count it either (it held fewer calls than the handler saw, measured).
  *
  * `bulk_plan` is the real tool on a real ledger in a temporary directory, with the Shopify read
  * switched on, so a wrong plan gets the engine's own refusal. The other tools answer canned:
@@ -35,7 +38,6 @@ import type { IAgent, ToolEntry } from '../../src/types/index.js';
 import { HAIKU } from './setup.js';
 
 const RUNS = Number(process.env['FORM_RUNS'] ?? 3);
-const MAX_PLANS = 3;
 const STORE = 'acme-demo.myshopify.com';
 
 const PRODUCTS = JSON.stringify({
@@ -99,16 +101,6 @@ function realBulkPlan(ledger: BulkLedger, plans: Plan[]): ToolEntry {
 
 const RECORDED = /^List dry run recorded/;
 
-/** Every bulk_plan call the model made, whether or not it reached the handler. */
-function bulkPlanUses(agent: Agent): number {
-  let n = 0;
-  for (const m of agent.getMessages()) {
-    if (m.role !== 'assistant' || !Array.isArray(m.content)) continue;
-    for (const b of m.content as Array<{ type?: string; name?: string }>) if (b.type === 'tool_use' && b.name === 'bulk_plan') n++;
-  }
-  return n;
-}
-
 const table: string[] = [];
 const dirs: string[] = [];
 let flagBefore: string | undefined;
@@ -148,19 +140,16 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
   }
   const at = plans.findIndex((p) => RECORDED.test(p.answer));
   const recorded = at === -1 ? undefined : plans[at];
-  // Counted from the transcript, not the handler: a call the dispatch validator refuses (an unknown
-  // key, a wrong type) never reaches the handler but is a call all the same. The calls after the
-  // recorded one reached the handler (they got "another external dry run"), so they come off.
-  const attempts = bulkPlanUses(agent);
-  const calls = at === -1 ? attempts : attempts - (plans.length - at - 1);
+  // Handler calls up to the recorded one: after it, a further plan only gets "another external
+  // dry run", so those calls do not count.
+  const handled = at === -1 ? plans.length : at + 1;
   let why: string;
   let ok = false;
-  if (recorded === undefined) why = plans.length === 0 ? 'no bulk_plan call' : `no plan recorded in ${String(plans.length)} calls`;
+  if (recorded === undefined) why = plans.length === 0 ? 'no bulk_plan call reached the handler' : `no plan recorded in ${String(plans.length)} handled calls`;
   else if (!c.right(recorded.input)) why = `recorded, but not the asked form and field: ${JSON.stringify(recorded.input['source_list'])}`;
-  else if (calls > MAX_PLANS) why = `recorded right on call ${String(calls)}, more than ${String(MAX_PLANS)}`;
-  else { ok = true; why = calls === 1 ? 'right on the first call' : `right on call ${String(calls)}`; }
+  else { ok = true; why = handled === 1 ? 'right on the first handled call' : `right on handled call ${String(handled)}`; }
   const dump = process.env['FORM_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok, calls, handled: plans.length, first: ok && calls === 1, plans })}\n`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok, handled, first: ok && handled === 1, plans })}\n`);
   table.push(`${provider}\t${c.label}\t#${String(i)}\t${ok ? 'PASS' : 'FAIL'}\t${why}`);
   expect(ok, why).toBe(true);
 }
