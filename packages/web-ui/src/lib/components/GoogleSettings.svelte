@@ -209,6 +209,17 @@
 					>
 						{t('integrations.google_broker_connect')}
 					</button>
+					<!-- Before the connect, not after: an admin's block shows on Google's own error page,
+					     which may never come back here. -->
+					<p class="text-sm text-text-muted" data-workspace-admin-hint>
+						{t('integrations.google_workspace_admin_hint')}
+						<a
+							href="https://docs.lynox.ai/integrations/google-workspace/#workspace-admin-approval"
+							target="_blank"
+							rel="noopener noreferrer"
+							class="text-accent-text hover:underline"
+						>{t('integrations.google_workspace_admin_link')}</a>
+					</p>
 				{:else}
 					<p class="text-sm text-text-muted">{t('integrations.google_broker_unavailable')}</p>
 				{/if}
