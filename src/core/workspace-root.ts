@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { ensureDirSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
 import { mountIdOfDir } from './workspace-fd.js';
+import { shellIsolation, WORKSPACE_LABEL } from './shell-isolation.js';
 
 /**
  * The workspace root: the directory that holds one directory per context (`<root>/<ctx.id>`,
@@ -22,9 +23,13 @@ import { mountIdOfDir } from './workspace-fd.js';
  * Backup, migration and the Art. 17 erasure reach the root through its anchor
  * (`workspace-access.ts`), so an external root is covered by all three. The anchor refuses the
  * roots the erasure must never empty (see `workspaceAccess`).
+ *
+ * In shell sidecar mode the root is the label `/workspace`, a name for showing that is never
+ * opened: the engine reaches the tree only through the fd the entrypoint handed over (PRD
+ * shell-sidecar-activation D3). Nothing here touches the filesystem in that mode.
  */
 
-export type WorkspaceRootMode = 'default' | 'external';
+export type WorkspaceRootMode = 'default' | 'external' | 'sidecar';
 
 export interface WorkspaceRoot {
   readonly path: string;
@@ -130,6 +135,7 @@ function classify(named: Stats, byName: string): WorkspaceRootMode {
  * (`allowExternal: false` refuses any external root; a test seam.)
  */
 export function resolveWorkspaceRoot(opts: { allowExternal?: boolean } = {}): WorkspaceRoot {
+  if (shellIsolation().kind === 'sidecar') return { path: WORKSPACE_LABEL, mode: 'sidecar' };
   const byName = defaultWorkspaceRootPath();
   const raw = process.env['LYNOX_WORKSPACE_ROOT'];
   if (raw === undefined || raw === '') return { path: byName, mode: 'default' };
@@ -189,6 +195,8 @@ export function getWorkspaceRoot(): string {
  */
 export function ensureWorkspaceRoot(): WorkspaceRoot {
   const root = resolveWorkspaceRoot();
+  // The sidecar's root is fd 3, checked at start (D2); its label is not a directory here.
+  if (root.mode === 'sidecar') return root;
   if (root.mode === 'default') {
     try {
       ensureDirSync(root.path);
@@ -251,7 +259,9 @@ export function workspaceRootIsMount(rootPath: string): boolean | null {
  * `<data>/workspace` IS the root.
  */
 export function workspaceLegacyPending(root: WorkspaceRoot): boolean {
-  if (root.mode === 'default') return false;
+  // Default: `<data>/workspace` IS the root. Sidecar: nothing is read by name, and check (i)
+  // found `<data>/workspace` absent at start.
+  if (root.mode !== 'external') return false;
   try {
     return readdirSync(defaultWorkspaceRootPath()).length > 0;
   } catch (err) {

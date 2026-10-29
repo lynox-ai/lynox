@@ -4,6 +4,7 @@ import { getLynoxDir } from './config.js';
 import { getWorkspaceDir } from './workspace.js';
 import { workspaceAccess, type WorkspaceAccess } from './workspace-access.js';
 import { closeAnchor, openAnchor, openSubAnchor, splitRel, type WorkspaceAnchor } from './workspace-fd.js';
+import { shellIsolation } from './shell-isolation.js';
 import { resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin, unsafeRoot, WorkspaceRootError } from './workspace-root.js';
 
 /**
@@ -116,6 +117,7 @@ export function workspaceBase(): { readonly ws: string; readonly anchor: Workspa
     dropBase();
     return null;
   }
+  if (shellIsolation().kind === 'sidecar') return sidecarBase(ws);
   const wsPath = resolve(ws);
   const rootPath = resolve(resolveWorkspaceRoot().path);
   const rootReal = realOr(rootPath);
@@ -160,6 +162,25 @@ export function workspaceBase(): { readonly ws: string; readonly anchor: Workspa
     }
     anchor = openAnchor(real);
   }
+  base = { ws, from, anchor };
+  return base;
+}
+
+/**
+ * The context workspace in shell sidecar mode: `ws` is its label below `/workspace`, and the
+ * directory is reached from fd 3 one component at a time. Decided on the label's string alone;
+ * nothing is resolved or opened by name (PRD shell-sidecar-activation D3).
+ */
+function sidecarBase(ws: string): Base {
+  const from = workspaceAccess();
+  const label = from.root.path;
+  const wsPath = resolve(ws);
+  if (wsPath === label || !isPathWithin(wsPath, label)) {
+    throw new WorkspaceRootError(`In shell sidecar mode the workspace ${ws} must be a directory below ${label}.`);
+  }
+  if (base !== null && base.ws === ws && base.from === from && isLive(base.anchor)) return base;
+  dropBase();
+  const anchor = openSubAnchor(from.anchor, relative(label, wsPath));
   base = { ws, from, anchor };
   return base;
 }
