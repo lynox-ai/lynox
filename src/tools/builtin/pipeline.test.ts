@@ -57,7 +57,9 @@ import {
   _resetPipelineStore,
   _summarizeStepOutput,
   headlessRunTaint,
+  WORKFLOW_RUN_UNRECORDED_RESULT,
 } from './pipeline.js';
+import { targetPairs } from '../../core/audit-trail-view.js';
 import { ConversationGrants, UNKNOWN_GRANT } from '../../core/conversation-grants.js';
 import type { RunTaint } from '../../orchestrator/runtime-adapter.js';
 import type { IAgent, ProcessParameter, AutonomyLevel } from '../../types/index.js';
@@ -2702,5 +2704,42 @@ describe('the run row of a stored workflow run from a chat', () => {
       [`workflow=${WF} one_shot=no retry=yes outcome=success`, 'done'],
     ]);
     expect(recs[2]!.correlationId).not.toBe(recs[0]!.correlationId);
+  });
+
+  it('ends a failed retry as failed, and its steps carry the retry\'s key', async () => {
+    const { agent, recs } = agentAs(HELPER);
+    const id = seed({ template: true });
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    let keyInRetry: string | undefined;
+    mockRetryManifest.mockImplementationOnce(async () => {
+      const { currentWorkflowRun } = await import('../../core/plan-run-context.js');
+      keyInRetry = currentWorkflowRun(HELPER);
+      return makeRunState({ status: 'failed' });
+    });
+    await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
+    expect(recs.slice(2).map((r) => r.phase)).toEqual(['attempt', 'failed']);
+    expect(recs[3]!.target).toContain('outcome=failed');
+    expect(keyInRetry).toBe(recs[2]!.correlationId);
+  });
+
+  it('runs no retried step when the retry\'s start row cannot be written', async () => {
+    const { agent, recs } = agentAs(HELPER);
+    const id = seed({ template: true });
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    (agent.toolContext as Record<string, unknown>)['auditLog'] = { record: () => { throw new Error('disk full'); } };
+    expect(await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent)).toBe(WORKFLOW_RUN_UNRECORDED_RESULT);
+    expect(mockRetryManifest).not.toHaveBeenCalled();
+    expect(recs).toHaveLength(2);
+  });
+
+  it('ends a run as failed when its bookkeeping throws after the steps completed', async () => {
+    const { agent, recs } = agentAs(HELPER);
+    // Its steps completed, then reading their outputs for the answer throws.
+    const outputs = { [Symbol.iterator]: () => { throw new Error('outputs gone'); } };
+    mockRunManifest.mockResolvedValueOnce({ ...makeRunState(), outputs });
+    expect(await runWorkflowTool.handler({ workflow_id: seed() }, agent)).toMatch(/^Error: Workflow execution failed: outputs gone/);
+    expect(recs.map((r) => [r.phase, targetPairs(r.target).get('outcome') ?? null])).toEqual([['attempt', null], ['failed', 'failed']]);
   });
 });

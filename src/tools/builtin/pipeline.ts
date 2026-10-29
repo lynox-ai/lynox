@@ -1166,7 +1166,6 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         // the first run's steps do: run_workflow lets references travel as written.
         secretStore: deps.secretStore,
       })));
-      retryOutcome = state.status === 'completed' ? 'success' : 'failed';
 
       // The retried state now holds what this chat's steps read as well as the cached outputs, so
       // this chat is its origin from here on: it carries the first origin's rows if that one was
@@ -1174,7 +1173,10 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // the next retry from a third chat skip the check while this chat is contained.
       recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin });
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents, prev.state.outputs);
-      return formatResult(state, planned.name, resultLimit);
+      const text = formatResult(state, planned.name, resultLimit);
+      // Set last: a throw above returns an error, and the end row must not say success then.
+      retryOutcome = state.status === 'completed' ? 'success' : 'failed';
+      return text;
     } catch (err: unknown) {
       return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
     } finally {
@@ -1277,7 +1279,6 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
       parentChangeset: deps.parentAgent?.changeset,
     })));
-    outcome = state.status === 'completed' ? 'success' : 'failed';
 
     recordExecutedState(planned.id, { manifest, state, runTaint, originThreadId: (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined });
     if (!isTemplate) {
@@ -1285,7 +1286,10 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }
 
     debitInSessionWorkflowCost(deps, state, manifest.agents, null);
-    return formatResult(state, planned.name, resultLimit);
+    const text = formatResult(state, planned.name, resultLimit);
+    // Set last: a throw above returns an error, and the end row must not say success then.
+    outcome = state.status === 'completed' ? 'success' : 'failed';
+    return text;
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;

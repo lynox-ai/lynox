@@ -81,6 +81,12 @@ describe('the cap of unapproved runs', () => {
     expect(ids).not.toContain(helpers[0]);
   });
 
+  it('counts as its own only the runs of its own grant: the same person\'s under another do not make room', () => {
+    fill(HELPER_AGAIN, BULK_MAX_PREVIEWED_RUNS);
+    expect(() => plan(HELPER)).toThrow(BulkPreviewCapError);
+    expect(runs().every((r) => r.mandate_id === 'grant-3')).toBe(true);
+  });
+
   it('a mandate whose principal names no grant finds its own runs too', () => {
     const noGrant: RequestPrincipal = { kind: 'mandate', email: 'helper@example.invalid' };
     fill(OWNER_PRINCIPAL, BULK_MAX_PREVIEWED_RUNS - 1);
@@ -95,7 +101,8 @@ describe('the cap of unapproved runs', () => {
 
   it('the owner\'s planning drops the oldest over the cap, whoever planned it', () => {
     const helpers = fill(HELPER, BULK_MAX_PREVIEWED_RUNS);
-    const next = plan(OWNER_PRINCIPAL);
+    let next = '';
+    expect(() => { next = plan(OWNER_PRINCIPAL); }, 'the owner is never refused').not.toThrow();
     const ids = runs().map((r) => r.id);
     expect(ids).toHaveLength(BULK_MAX_PREVIEWED_RUNS);
     expect(ids).not.toContain(helpers[0]);

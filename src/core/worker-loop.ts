@@ -3803,8 +3803,8 @@ export class WorkerLoop {
  * value bound into it (`detail`).
  *
  * No row names a token host, because a run renews no OAuth token: its attach builds an agent from
- * the stores alone, and `mayRenewOAuthUnattended` refuses it twice over — it has no
- * `sessionCounters` and no `toolContext` (`attachStoredCredential`, `http.ts`). A run that may
+ * the stores alone, and `mayRenewOAuthUnattended` refuses it three times over — it has no
+ * `sessionCounters`, no `toolContext` and no `getAvailableTools` (`attachStoredCredential`, `http.ts`). A run that may
  * renew needs a row for the exchange first (`bulk-preview.test.ts`, "a preview never renews").
  */
 export function bulkReadRecorder(
