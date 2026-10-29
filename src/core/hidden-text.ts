@@ -64,5 +64,5 @@ export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
 export function hiddenCharRefusal(what: string, hit: HiddenChar): string {
   return `refused to save this ${what} — ${hit.path} contains a character that renders as nothing (${hit.codePoint}). Nothing was saved. `
     + 'Characters like this can carry instructions that no one can see. Write the text again in your own words, '
-    + 'without copying it from another plan or workflow.';
+    + `without copying it from another plan or workflow, and call this tool again: until that call succeeds, the ${what} does not exist.`;
 }
