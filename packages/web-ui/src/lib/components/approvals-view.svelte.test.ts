@@ -816,6 +816,20 @@ describe('a chat note leads to its entry', () => {
 		expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(2);
 	});
 
+	it('the same entry asked for again after the page was opened without one is scrolled to again', async () => {
+		lists.all = { entries: [card({ id: 'e-0', status: 'done' }), card({ id: 'e-2', status: 'failed', outcome: 'checksum' })], pending: 0, viewer: 'owner' };
+		pageUrl = new URL('http://localhost/app/approvals?entry=e-2');
+		Element.prototype.scrollIntoView = vi.fn();
+		await render();
+		expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+		navigate('http://localhost/app/approvals');
+		await settle();
+		navigate('http://localhost/app/approvals?entry=e-2');
+		await settle();
+		expect(q('[data-entry-focused] [data-approval-id]')?.getAttribute('data-approval-id')).toBe('e-2');
+		expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(2);
+	});
+
 	it('control: without it, the page opens on the open tab and marks nothing', async () => {
 		await render();
 		expect(listReads).toEqual(['open']);

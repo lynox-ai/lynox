@@ -14,12 +14,13 @@
 	/** The entry a chat note leads to (`?entry=`): shown on the "all" tab, where a closed one is, and marked. */
 	const focusedId = $derived($page.url.searchParams.get('entry'));
 	let view = $state<'open' | 'all'>('open');
-	/** The entry last scrolled to, so a later read of the list does not move the page again; a new
-	 *  entry is another id, so it is scrolled to. */
+	/** The entry last scrolled to, so a later read of the list does not move the page again. Each time
+	 *  an entry is asked for, also the same one again after the page was opened without one, it is
+	 *  scrolled to anew. */
 	let scrolledTo: string | null = null;
 	// Each new entry asked for opens the "all" tab, also when the page is already on screen.
 	$effect.pre(() => {
-		if (focusedId !== null) view = 'all';
+		if (focusedId !== null) { view = 'all'; scrolledTo = null; }
 	});
 	let list = $state<ApprovalList | null>(null);
 	let loading = $state(false);
