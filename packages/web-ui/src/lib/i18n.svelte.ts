@@ -1528,6 +1528,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.period_30d': { de: 'Letzte 30 Tage', en: 'Last 30 days' },
 	'access_trail.filter_partial': { de: 'Ältere Einträge sind noch nicht geladen, die Auswahl zeigt nur die geladenen. Mit „Ältere laden“ holst du sie dazu.', en: 'Older entries are not loaded yet, so the selection shows only the loaded ones. Use “Load older” to add them.' },
 	'access_trail.kind_plan': { de: 'Lauf eines Plans', en: 'Plan run' },
+	'access_trail.kind_workflow': { de: 'Lauf eines Workflows', en: 'Workflow run' },
 	'access_trail.kind_bulk': { de: 'Massenlauf', en: 'Bulk run' },
 	'access_trail.kind_step': { de: 'Schritt', en: 'Step' },
 	'access_trail.kind_read': { de: 'Lesezugriff', en: 'Read access' },

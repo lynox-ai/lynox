@@ -27,6 +27,10 @@ import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsCon
 import { chatThreadOf } from './private-thread.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
 import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes } from '../../core/member-connection-notes.js';
+import { namedTarget, newCorrelationId, type AuditLog, type AuditPhase } from '../../core/audit-log.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, type RequestPrincipal } from '../../core/request-principal.js';
+import { currentPlanRun, runAsWorkflowRun } from '../../core/plan-run-context.js';
+import { isEngineRowId } from '../../core/instance-trail.js';
 
 const MAX_PLANS = 10;
 /** Retry-state buffer cap — larger than the plan cache so a burst of distinct
@@ -955,6 +959,63 @@ export async function runSavedWorkflow(
   }
 }
 
+/** What `run_workflow` answers when the start of a workflow run for someone the owner let in
+ *  cannot be recorded (660b). Its own text, not a plan's: nothing ran, and nothing was marked run. */
+export const WORKFLOW_RUN_UNRECORDED_RESULT = 'Not run: this workflow runs for someone you let in, and its start cannot be recorded in the instance\'s log right now.';
+
+/** The two rows of one run of a stored workflow. */
+export interface WorkflowRunTrail {
+  /** The start row. Throws when it cannot be written; no step runs then. */
+  begin: () => void;
+  /** The end row: how the run ended, and whether its one-shot definition was removed after it. Never throws. */
+  end: (outcome: 'success' | 'failed', definitionRemoved: boolean) => void;
+  /** The key every row of its steps carries (`plan_run`): the correlation id of these two rows. */
+  readonly key: string;
+}
+
+/**
+ * The trail of a stored workflow that someone other than the owner runs from a chat (660b): one
+ * row before its first step, one after it, in that person's name. Its steps write their own rows
+ * under its key. The run's bookkeeping is in its end row: whether the definition of a one-shot was
+ * removed. Null for the owner's run, and for a run inside a plan's run (`currentPlanRun`), whose
+ * steps already carry the plan's key. `workflow=` only for an id the engine chose: an imported
+ * workflow's id is whatever its file said. Exported for its test.
+ */
+export function workflowRunTrail(
+  principal: RequestPrincipal | undefined,
+  auditLog: AuditLog | null,
+  run: { workflowId: string; oneShot: boolean; retry: boolean },
+): WorkflowRunTrail | null {
+  // No agent: internal code, which runs as the owner (an agent always has a principal).
+  const p = principal ?? OWNER_PRINCIPAL;
+  if (isOwnerPrincipal(p) || currentPlanRun(p) !== undefined) return null;
+  const correlationId = newCorrelationId();
+  const named: ReadonlyArray<readonly [string, string | number | undefined]> = [
+    ['workflow', isEngineRowId(run.workflowId) ? run.workflowId : undefined],
+    ['one_shot', run.oneShot ? 'yes' : 'no'],
+    ['retry', run.retry ? 'yes' : undefined],
+  ];
+  const write = (phase: AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
+    if (auditLog === null) throw new Error('no audit log');
+    auditLog.record({ principal: p, action: 'workflow:run', target: namedTarget([...named, ...more]), phase, correlationId, planRun: correlationId });
+  };
+  return {
+    key: correlationId,
+    begin: () => { write('attempt', []); },
+    end: (outcome, definitionRemoved) => {
+      // `success`/`failed`: a plan's vocabulary, which the owner's view reads (`planEndStatus`).
+      try {
+        write(outcome === 'success' ? 'done' : 'failed', [['outcome', outcome], ['definition', definitionRemoved ? 'removed' : undefined]]);
+      } catch { /* the start row stands alone, as a write's attempt row does */ }
+    },
+  };
+}
+
+/** Run `fn` under a workflow run's key when there is a trail; as it is otherwise. */
+function underWorkflowRun<T>(trail: WorkflowRunTrail | null, principal: RequestPrincipal | undefined, fn: () => T): T {
+  return trail === null ? fn() : runAsWorkflowRun(principal ?? OWNER_PRINCIPAL, trail.key, fn);
+}
+
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
   const planned = getPipeline(input.workflow_id!, deps.runHistory);
   if (!planned) {
@@ -1034,6 +1095,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }
     }
 
+    const retryTrail = workflowRunTrail(deps.parentAgent?.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true });
+    if (retryTrail !== null) {
+      try { retryTrail.begin(); } catch { return WORKFLOW_RUN_UNRECORDED_RESULT; }
+    }
+    let retryOutcome: 'success' | 'failed' = 'failed';
     try {
       const hooks = buildProgressHooks(deps.streamHandler, prev.manifest);
       // buildRunCtx restores the two fields the retry path used to drop
@@ -1070,7 +1136,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       const prevGrants = prev.runTaint?.grants;
       if (prevGrants !== undefined) for (const id of prevGrants.members()) retryGrants?.add(id);
       else retryGrants?.add(UNKNOWN_GRANT);
-      const state = await retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
+      const state = await underWorkflowRun(retryTrail, deps.parentAgent?.principal, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
         source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
         autonomy: deps.autonomy,
         parentTools: deps.tools,
@@ -1099,7 +1165,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         // The retried steps resolve their `secret:` references through the caller's store, as
         // the first run's steps do: run_workflow lets references travel as written.
         secretStore: deps.secretStore,
-      }));
+      })));
+      retryOutcome = state.status === 'completed' ? 'success' : 'failed';
 
       // The retried state now holds what this chat's steps read as well as the cached outputs, so
       // this chat is its origin from here on: it carries the first origin's rows if that one was
@@ -1110,6 +1177,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
       return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
+    } finally {
+      retryTrail?.end(retryOutcome, false);
     }
   }
 
@@ -1152,6 +1221,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return `Error: Workflow exceeds maximum of ${maxSteps} steps.`;
   }
 
+  let trail: WorkflowRunTrail | null = null;
+  let outcome: 'success' | 'failed' = 'failed';
+  let definitionRemoved = false;
   try {
     const manifest = buildManifest(
       planned.name,
@@ -1161,6 +1233,12 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     );
 
     validateManifest(manifest);
+    // Before the run is marked run, with no await since the executed-guard above: a one-shot whose
+    // start cannot be recorded stays unrun, and a second call cannot slip in between (660b).
+    trail = workflowRunTrail(deps.parentAgent?.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false });
+    if (trail !== null) {
+      try { trail.begin(); } catch { trail = null; return WORKFLOW_RUN_UNRECORDED_RESULT; }
+    }
     if (!isTemplate) {
       planned.executed = true;
       // Mark in-flight so a concurrent retry sees "still running" instead of the
@@ -1171,7 +1249,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const runTaint = newRunTaint(deps.parentAgent);
-    const state = await runManifest(manifest, deps.config, buildRunCtx({
+    const state = await underWorkflowRun(trail, deps.parentAgent?.principal, () => runManifest(manifest, deps.config, buildRunCtx({
       source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
       autonomy: deps.autonomy,
       parentTools: deps.tools,
@@ -1198,11 +1276,12 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       runTaint,
       chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
       parentChangeset: deps.parentAgent?.changeset,
-    }));
+    })));
+    outcome = state.status === 'completed' ? 'success' : 'failed';
 
     recordExecutedState(planned.id, { manifest, state, runTaint, originThreadId: (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined });
     if (!isTemplate) {
-      try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
+      try { definitionRemoved = deps.runHistory?.markPipelineExecuted(planned.id) === true; } catch { /* fire-and-forget */ }
     }
 
     debitInSessionWorkflowCost(deps, state, manifest.agents, null);
@@ -1212,6 +1291,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   } finally {
     if (!isTemplate) inFlightNonTemplatePipelines.delete(planned.id);
+    trail?.end(outcome, definitionRemoved);
   }
 }
 
