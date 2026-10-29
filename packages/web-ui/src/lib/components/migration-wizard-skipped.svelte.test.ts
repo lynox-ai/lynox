@@ -88,7 +88,9 @@ describe('files the migration could not transfer', () => {
 		expect(toasts()).toEqual([['success', t('migration.success')]]);
 	});
 
+	// The number-sensitive tests run in English: in German the singular and plural next step read the same.
 	it('one file: the singular, its path, and the next step', async () => {
+		setLocale('en');
 		done = { ...done, skipped: ['workspace/link-to-home'] };
 		await migrate();
 		expect(summary()).toBe(t('migration.skipped_one'));
@@ -103,6 +105,7 @@ describe('files the migration could not transfer', () => {
 	});
 
 	it('three files: the count, and every path', async () => {
+		setLocale('en');
 		done = { ...done, skipped: ['workspace/a', 'workspace/b', 'workspace/c'] };
 		await migrate();
 		expect(summary()).toBe(tf('migration.skipped_many', { n: '3' }));
@@ -179,6 +182,7 @@ describe('files the migration could not transfer', () => {
 
 	// Last: the managed status the wizard loads stays in its store for the rest of the file.
 	it('names support as the next step on a managed instance', async () => {
+		setLocale('en');
 		config = { managed: 'managed' };
 		done = { ...done, skipped: ['workspace/a'] };
 		await migrate();
@@ -186,6 +190,7 @@ describe('files the migration could not transfer', () => {
 	});
 
 	it('names support for several files on a managed instance', async () => {
+		setLocale('en');
 		config = { managed: 'managed' };
 		done = { ...done, skipped: ['workspace/a', 'workspace/b'] };
 		await migrate();
