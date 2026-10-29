@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BulkPreviewCapError, BULK_MAX_PREVIEWED_RUNS, type PlannedTarget } from './bulk-ledger.js';
 import { mintBulkContract } from './bulk-external.js';
+import { parseListSource } from './bulk-list.js';
+import type { CapabilityContract } from '../types/capability-contract.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { bulkPlanTool } from '../tools/builtin/bulk.js';
@@ -17,6 +19,8 @@ import type { IAgent } from '../types/index.js';
 
 const HELPER: RequestPrincipal = { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'grant-1' };
 const OTHER: RequestPrincipal = { kind: 'mandate', email: 'other@example.invalid', mandateId: 'grant-2' };
+// The same person under another grant: a grant ended and given again is another planner.
+const HELPER_AGAIN: RequestPrincipal = { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'grant-3' };
 
 let dir: string;
 let engineDb: EngineDb;
@@ -68,6 +72,15 @@ describe('the cap of unapproved runs', () => {
     expect(runs().every((r) => r.mandate_id === 'grant-2')).toBe(true);
   });
 
+  it('drops only the runs of its own grant, not the same person\'s under another', () => {
+    const before = fill(HELPER_AGAIN, 5);
+    const helpers = fill(HELPER, BULK_MAX_PREVIEWED_RUNS - 5);
+    plan(HELPER);
+    const ids = runs().map((r) => r.id);
+    expect(before.every((id) => ids.includes(id)), 'the other grant\'s runs stay').toBe(true);
+    expect(ids).not.toContain(helpers[0]);
+  });
+
   it('a mandate whose principal names no grant finds its own runs too', () => {
     const noGrant: RequestPrincipal = { kind: 'mandate', email: 'helper@example.invalid' };
     fill(OWNER_PRINCIPAL, BULK_MAX_PREVIEWED_RUNS - 1);
@@ -97,6 +110,20 @@ describe('the cap of unapproved runs', () => {
       createdBy: 't', principal: HELPER, host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]),
     })).toThrow(BulkPreviewCapError);
     expect(runs()).toHaveLength(BULK_MAX_PREVIEWED_RUNS);
+  });
+
+  it('holds for an external list plan too', () => {
+    fill(OWNER_PRINCIPAL, BULK_MAX_PREVIEWED_RUNS);
+    const host = 'shop.example.com';
+    const readContract: CapabilityContract = {
+      version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET'],
+      hostPatterns: [host], pathPatterns: ['/wp-json/wc/v3/products'], paramConstraints: {},
+    };
+    const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
+    expect(() => ledger.recordExternalListPlan({ createdBy: 't', principal: HELPER, host, source, readContract })).toThrow(BulkPreviewCapError);
+    expect(runs()).toHaveLength(BULK_MAX_PREVIEWED_RUNS);
+    // The control: the owner's list plan goes through, over the cap.
+    expect(ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract }).ok).toBe(true);
   });
 
   it('counts only the previews waiting for approval in its text, and has a sentence without a number when none does', () => {
