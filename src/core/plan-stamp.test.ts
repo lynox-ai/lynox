@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { encodeStamp, planOfTrigger, stampExpect, stampFromRow } from './plan-stamp.js';
+import { encodeStamp, planOfTrigger, stampExpect, stampFromRow, stampSubject } from './plan-stamp.js';
 import { _resetPipelineStore, storePipeline, type PlannedPipeline } from '../tools/builtin/pipeline.js';
 import type { RunHistory } from './run-history.js';
 import type { TriggerRecord } from '../types/index.js';
@@ -66,6 +66,28 @@ describe('stampExpect', () => {
     ]) {
       expect(stampExpect({ ...T, ...change } as TriggerRecord, null, ENTRIES)).not.toBe(stampExpect(T, null, ENTRIES));
     }
+  });
+});
+
+describe('stampSubject', () => {
+  const T = { id: 't1', effect: 'run_agent', title: 'Report', description: 'Weekly', created_mandate_id: 'M-EVA' } as unknown as TriggerRecord;
+  it('is what the digest binds: a field changes the subject exactly when it changes the digest', () => {
+    // The preview shows the owner this subject, so a field the digest held but the subject did
+    // not would be stamped unseen.
+    for (const change of [
+      { id: 't2' }, { effect: 'run_workflow' }, { title: 'Report, then mail everyone' }, { description: 'Daily' },
+      { schedule_cron: '* * * * *' }, { watch_config: '{}' }, { pipeline_id: 'wf-2' }, { pipeline_params: '{"a":1}' },
+      { model_tier: 'deep' }, { created_mandate_id: 'M-OTHER' }, { mandate_editor_id: 'M-OTHER' },
+      { watch_config: JSON.stringify({ url: 'https://a.example', interval_minutes: 5 }) },
+    ]) {
+      const t = { ...T, ...change } as TriggerRecord;
+      expect([stampSubject(t, null)].map((x) => JSON.stringify(x))).not.toEqual([JSON.stringify(stampSubject(T, null))]);
+      expect(stampExpect(t, null, ENTRIES)).not.toBe(stampExpect(T, null, ENTRIES));
+    }
+    expect(stampSubject(T, WF).wf).toBe(WF);
+    // And a run moving only a watch's baseline changes neither.
+    const W = { ...T, watch_config: JSON.stringify({ url: 'https://a.example', last_hash: 'h1' }) } as TriggerRecord;
+    expect(stampSubject({ ...W, watch_config: JSON.stringify({ url: 'https://a.example', last_hash: 'h2' }) }, null)).toEqual(stampSubject(W, null));
   });
 });
 

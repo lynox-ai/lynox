@@ -33,7 +33,7 @@ import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
+import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles, stampSubject } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
@@ -2291,12 +2291,33 @@ export class LynoxHTTPApi {
    * workflow's authorship cannot be read: then a stamp lists none.
    */
   async #stampListFor(trigger: TriggerRecord): Promise<{ wf: string | null; entries: readonly StampEntry[] } | null> {
+    return (await this.#stampPlanOf(trigger)).listed;
+  }
+
+  /**
+   * {@link #stampListFor} with what the preview shows beside it, from the same reading of the
+   * plan: whom the plan acts for, and for a workflow schedule the workflow's name and whether it is
+   * confirmed — a schedule on an unconfirmed workflow is switched off by its first run, so the
+   * view offers no confirm there.
+   */
+  async #stampPlanOf(trigger: TriggerRecord): Promise<{
+    listed: { wf: string | null; entries: readonly StampEntry[] } | null;
+    by: string | null;
+    workflow: { name: string | null; confirmed: boolean } | null;
+  }> {
     const engine = this.engine;
     const apiStore = engine?.getApiStore();
-    if (!engine || !apiStore || trigger.effect.startsWith('bulk_')) return null;
+    if (!engine || !apiStore || trigger.effect.startsWith('bulk_')) return { listed: null, by: null, workflow: null };
     const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
-    if (plan.unreadable || plan.of === undefined) return null;
-    return { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) };
+    const workflow = trigger.effect === 'run_workflow'
+      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null }
+      : null;
+    if (plan.unreadable || plan.of === undefined) return { listed: null, by: null, workflow };
+    return {
+      listed: { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) },
+      by: plan.of.email,
+      workflow,
+    };
   }
 
   private _principalOf(req: IncomingMessage): RequestPrincipal {
@@ -8659,7 +8680,8 @@ export class LynoxHTTPApi {
     // (an unconfirmed run_agent trigger is neither, closing the injection-
     // amplification hole). This user-scope HTTP action is the ONLY consent surface;
     // the agent `task_create` tool cannot reach it, so confirmation is always an
-    // explicit human step. Idempotent (re-confirming just re-stamps).
+    // explicit human step. A confirm of a confirmed schedule stamps it again: a new `confirmed_at`,
+    // and a list only when it is sent the preview's `expect` (without, a stamp lists none).
     // What the owner's stamp of this schedule would list: the connections the mandate its plan acts
     // for made with its own login (`plan-stamp.ts`). The confirm below writes the list only when
     // it is sent back the digest of exactly this list on exactly this schedule (`stampExpect`).
@@ -8667,12 +8689,19 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/tasks/:id/stamp-preview', async (_req, res, params) => {
       const trigger = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
-      const listed = await this.#stampListFor(trigger);
+      const { listed, by, workflow } = await this.#stampPlanOf(trigger);
       const entries = listed?.entries ?? [];
       const apiStore = engine.getApiStore();
       const profiles = apiStore ? stampProfiles(entries, apiStore) : [];
+      // `subject` is what `expect` is the digest of, field for field: the view shows the schedule
+      // from here, not from the list it polls, so the owner confirms what they read. The mandate
+      // ids stay on the engine (`by` says whom the plan acts for); the digest still holds them.
+      const { created_mandate_id: _created, mandate_editor_id: _editor, ...subject } = stampSubject(trigger, listed?.wf ?? null);
       jsonResponse(res, 200, {
         expect: stampExpect(trigger, listed?.wf ?? null, entries),
+        subject,
+        by,
+        workflow,
         connections: profiles.map((p) => ({ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null })),
       });
     }, ownerOnly('see what a schedule would be confirmed with')));
@@ -8695,7 +8724,7 @@ export class LynoxHTTPApi {
         // what is stamped.
         const now = engine.getRunHistory()?.getTrigger(params['id']!);
         if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
-          errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.');
+          errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
           return;
         }
         if (listed !== null && listed.entries.length > 0) connections = listed;

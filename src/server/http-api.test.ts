@@ -19099,8 +19099,11 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         mockConfirmTrigger.mockClear();
         const preview = await jsonFetch('/api/tasks/task-1/stamp-preview');
         expect(preview.status).toBe(200);
-        const shown = await preview.json() as { expect: string; connections: unknown[] };
+        const shown = await preview.json() as { expect: string; connections: unknown[]; subject: Record<string, unknown>; by: unknown; workflow: unknown };
         expect(shown.connections).toEqual([{ id: 'crm-api', profile: 'CRM', provider: 'api.crm.example', account: 'eva@crm' }]);
+        // What the digest holds, shown field for field (the mandate ids as whom it acts for).
+        expect(shown.subject).toEqual({ id: 'task-1', effect: 'run_agent', title: 'Report', description: 'Weekly', schedule_cron: null, watch: null, pipeline_id: null, pipeline_params: null, model_tier: null, wf: null });
+        expect([shown.by, shown.workflow]).toEqual(['eva@kanzlei.example', null]);
         // Names only: the grant and the mandate's id stay on the engine.
         expect(JSON.stringify(shown)).not.toContain('grant-secret-1');
         expect(JSON.stringify(shown)).not.toContain(MID);
@@ -19109,6 +19112,8 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         profiles = [crm, { ...crm, id: 'crm2-api', name: 'CRM 2', oauth_grant: { ...crm.oauth_grant, grant_id: 'grant-2' } }];
         const stale = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) });
         expect(stale.status).toBe(409);
+        // The one 409 that asks for another look carries its own code; the view reloads only on it.
+        expect(((await stale.json()) as { code?: unknown }).code).toBe('changed');
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
 
         // The schedule changed since the preview (a mandate's edit): the same list no longer
@@ -19167,8 +19172,9 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
       try {
         mockConfirmTrigger.mockClear();
-        const shown = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[] };
+        const shown = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[]; workflow: unknown; subject: Record<string, unknown> };
         expect(shown.connections).toHaveLength(1);
+        expect([shown.workflow, shown.subject['pipeline_id'], shown.subject['wf']]).toEqual([{ name: 'W', confirmed: true }, 'wf-eva', WF]);
         // The workflow was confirmed again since the preview: the list shown went with the
         // earlier confirmation, so it does not confirm this one.
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: '2026-10-09T00:00:00.000Z' } : undefined));
@@ -19181,6 +19187,10 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         editAfter = Infinity;
         expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: WF, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-1' })] });
+        // A workflow nobody confirmed: the preview says so, and the view offers no confirm (a
+        // confirmed schedule on it is switched off by its first run).
+        mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W' } : undefined));
+        expect(((await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json()) as { workflow: unknown }).workflow).toEqual({ name: 'W', confirmed: false });
       } finally {
         ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();

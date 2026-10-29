@@ -55,19 +55,51 @@ export function stampProfiles(entries: readonly StampEntry[], apiStore: Pick<Api
 }
 
 /**
+ * The schedule a stamp is held to, field by field: which trigger, what it does and for whom, and
+ * the workflow confirmation the list goes with. The preview hands the owner exactly this, and
+ * {@link stampExpect} digests exactly this, so nothing is stamped that the owner was not shown.
+ */
+export interface StampSubject {
+  readonly id: string;
+  readonly effect: string | null;
+  readonly title: string;
+  readonly description: string | null;
+  readonly schedule_cron: string | null;
+  readonly watch: string | null;
+  readonly pipeline_id: string | null;
+  readonly pipeline_params: string | null;
+  readonly model_tier: string | null;
+  readonly created_mandate_id: string | null;
+  readonly mandate_editor_id: string | null;
+  readonly wf: string | null;
+}
+
+/** The fields of {@link StampSubject} in the order the digest reads them. */
+const SUBJECT_ORDER = [
+  'id', 'effect', 'title', 'description', 'schedule_cron', 'watch', 'pipeline_id', 'pipeline_params',
+  'model_tier', 'created_mandate_id', 'mandate_editor_id', 'wf',
+] as const satisfies readonly (keyof StampSubject)[];
+
+export function stampSubject(trigger: TriggerRecord, wf: string | null): StampSubject {
+  return {
+    id: trigger.id, effect: trigger.effect ?? null, title: trigger.title, description: trigger.description ?? null,
+    schedule_cron: trigger.schedule_cron ?? null, watch: watchWithoutBaseline(trigger.watch_config),
+    pipeline_id: trigger.pipeline_id ?? null, pipeline_params: trigger.pipeline_params ?? null,
+    model_tier: trigger.model_tier ?? null, created_mandate_id: trigger.created_mandate_id ?? null,
+    mandate_editor_id: trigger.mandate_editor_id ?? null, wf,
+  };
+}
+
+/**
  * What the owner's confirm sends back to say "this, as I was shown it": a digest of the list
- * together with the schedule it is stamped onto — which trigger, what it does and for whom, and
- * the workflow confirmation the list goes with. A change to any of them between the preview and
- * the confirm makes the confirm refuse, so a list is never stamped onto an instruction the owner
- * did not see next to it. By content, not by a change time: those are kept to the second.
+ * together with the schedule it is stamped onto ({@link stampSubject}). A change to any of them
+ * between the preview and the confirm makes the confirm refuse, so a list is never stamped onto
+ * an instruction the owner did not see next to it. By content, not by a change time: those are
+ * kept to the second.
  */
 export function stampExpect(trigger: TriggerRecord, wf: string | null, entries: readonly StampEntry[]): string {
-  const subject = [
-    trigger.id, trigger.effect, trigger.title, trigger.description, trigger.schedule_cron ?? null,
-    watchWithoutBaseline(trigger.watch_config), trigger.pipeline_id ?? null, trigger.pipeline_params ?? null,
-    trigger.model_tier ?? null, trigger.created_mandate_id ?? null, trigger.mandate_editor_id ?? null, wf,
-  ];
-  return createHash('sha256').update(JSON.stringify([subject, entries])).digest('hex');
+  const subject = stampSubject(trigger, wf);
+  return createHash('sha256').update(JSON.stringify([SUBJECT_ORDER.map((k) => subject[k]), entries])).digest('hex');
 }
 
 /** A watch's config without `last_hash`, the baseline every run of the watch moves: what the
@@ -124,9 +156,9 @@ export function stampFromRow(raw: string | null, confirmedAt: string | null, wor
 export async function planOfTrigger(
   task: TriggerRecord,
   runHistory: RunHistory | null,
-): Promise<ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: string | null }> {
+): Promise<ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: string | null; workflowName: string | null }> {
   const fromTrigger = planMandate(planAuthorshipOf(task));
-  const only = (unreadable: boolean): ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: null } => ({ ...planMembers(fromTrigger, undefined), unreadable, workflowConfirmedAt: null });
+  const only = (unreadable: boolean): ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: null; workflowName: null } => ({ ...planMembers(fromTrigger, undefined), unreadable, workflowConfirmedAt: null, workflowName: null });
   if (task.effect !== 'run_workflow' || !task.pipeline_id) return only(false);
   try {
     const { getPipeline } = await import('../tools/builtin/pipeline.js');
@@ -136,7 +168,7 @@ export async function planOfTrigger(
     const a = runHistory?.getWorkflowAuthorship(planned.id);
     if (a === undefined) return only(true);
     const fromWorkflow = planMandate(planAuthorshipOfWorkflow(a));
-    return { ...planMembers(fromTrigger, fromWorkflow), unreadable: false, workflowConfirmedAt: planned.confirmedAt ?? null };
+    return { ...planMembers(fromTrigger, fromWorkflow), unreadable: false, workflowConfirmedAt: planned.confirmedAt ?? null, workflowName: planned.name };
   } catch {
     return only(true);
   }
