@@ -271,7 +271,7 @@ describe('what the refuter of the first version found', () => {
 		await click(byText('Planen'));
 		await click(byText('Bestätigen & planen'));
 		expect(q('stamp-dialog')).toBeNull();
-		expect(target.textContent).toContain('wenn der Inhaber seine Schritte bestätigt hat. Wende dich an den Inhaber.');
+		expect(target.textContent).toContain('wartet auf die Bestätigung des Inhabers. Ein Plan kann ihn erst danach ausführen. Wende dich an den Inhaber.');
 		expect(calls.some((c) => c.path.endsWith('/stamp-preview'))).toBe(false);
 	});
 
@@ -339,5 +339,142 @@ describe('what the refuter of the fixes found', () => {
 		await settle();
 		expect(q('stamp-dialog')?.textContent).toContain('Other');
 		expect(byText('Bestätigen & planen')).toBeNull();
+	});
+});
+
+describe('contract r3: what the view adds', () => {
+	it('names a step\'s role, effort, thinking and time limit', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, {
+			role: 'researcher', effort: 'high', thinking: 'adaptive', timeoutMs: 150_000,
+			roleGrant: { model: 'deep', effort: 'max', allowTools: ['web_search'], denyTools: ['http_request'], readOnly: true },
+		});
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		const step = q('stamp-step')?.textContent ?? '';
+		expect(q('stamp-role')?.textContent).toContain('researcher');
+		expect(step).toContain('Aufwand: high');
+		expect(step).toContain('Nachdenken: adaptive');
+		expect(step).toContain('Zeitlimit: 2 min 30 s');
+		// What the role grants: the step's own tools are not all a run gets.
+		const grant = q('stamp-role-grant')?.textContent ?? '';
+		expect(grant).toContain('Modell (Rolle): deep');
+		// The step sets its own effort, which wins: the role's is not shown as if it applied.
+		expect(grant).not.toContain('Aufwand (Rolle)');
+		expect(grant).toContain('Erlaubt die Rolle: web_search');
+		expect(grant).toContain('Sperrt die Rolle: http_request');
+		expect(q('stamp-role')?.textContent).toContain('Rolle: nur lesen');
+		expect(step).toContain('Werkzeuge des Schritts:');
+		expect(step).toContain('ergibt sich beim Lauf aus Schritt und Rolle');
+	});
+
+	it('a schedule refused for the owner\'s own changed steps says so, not that someone else changed them', async () => {
+		await open('owner', WF, {
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: { ...preview('d1'), changedBy: 'owner' } }],
+		});
+		await click(byText('Planen'));
+		await click(byText('Bestätigen & planen'));
+		expect(q('stamp-line')?.textContent).toContain('seit deiner letzten Bestätigung geändert');
+		expect(q('stamp-line')?.textContent).not.toContain('Eine Person mit Zugang');
+	});
+
+	it('after the stamp, says how many plans the wait switched off stay off, and where to switch them on', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 200, body: { stillOff: 2 } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		expect(target.textContent).toContain('2 Pläne warteten auf diese Bestätigung');
+	});
+
+	it('says nothing about such plans when there are none', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 200, body: { stillOff: 0 } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		expect(target.textContent).toContain('Schritte bestätigt.');
+		expect(q('stamp-once')).toBeNull();
+	});
+
+	it('the line about such plans survives the way back to the schedule', async () => {
+		await open('owner', WF, {
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }, { status: 200, body: {} }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 200, body: { stillOff: 1 } }],
+		});
+		await click(byText('Planen'));
+		await click(byText('Bestätigen & planen'));
+		await click(q('stamp-confirm'));
+		await click(byText('Bestätigen & planen'));
+		expect(q('stamp-once')?.textContent).toContain('1 Plan wartete auf diese Bestätigung');
+	});
+
+	it('a schedule refused while the preview cannot load says why, without naming who changed it', async () => {
+		await open('owner', WF, {
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 500, body: {} }],
+		});
+		await click(byText('Planen'));
+		await click(byText('Bestätigen & planen'));
+		expect(q('stamp-line')?.textContent).toContain('Sie liessen sich gerade nicht laden');
+		// The line says it; the dialog does not repeat it, nor introduce steps it cannot show.
+		const dialog = q('stamp-dialog')?.textContent ?? '';
+		expect(dialog).not.toContain('Laden fehlgeschlagen');
+		expect(dialog).not.toContain('Das läuft, wenn ein Plan');
+	});
+
+	it('a workflow without steps says so, and can be stamped', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: { ...preview('d1'), steps: [] } }],
+			'POST /workflows/wf-1/confirm': [{ status: 200, body: {} }],
+		});
+		await click(q('stamp-review'));
+		expect(q('stamp-no-steps')?.textContent).toContain('keine Schritte');
+		expect((q('stamp-confirm') as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it('a time limit of 0 says the step times out at once', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { timeoutMs: 0 });
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-step')?.textContent).toContain('Zeitlimit: 0 s (bricht sofort ab)');
+	});
+
+	it('an empty allow list reads as no tools, not as a missing value', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, {
+			role: 'reviewer', roleGrant: { model: null, effort: null, allowTools: [], denyTools: null, readOnly: false },
+		});
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-role-grant')?.textContent).toContain('Erlaubt die Rolle: keine Werkzeuge');
+		// In plain type: in mono it would read as a tool of that name.
+		expect([...q('stamp-role-grant')!.querySelectorAll('.font-mono')].some((e) => e.textContent?.includes('keine Werkzeuge'))).toBe(false);
+	});
+
+	it('shows the role\'s model and effort only where the step sets none: the step\'s own value wins', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, {
+			model: 'fast', effort: null, role: 'reviewer',
+			roleGrant: { model: 'deep', effort: 'max', allowTools: null, denyTools: null, readOnly: false },
+		});
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		const grant = q('stamp-role-grant')?.textContent ?? '';
+		expect(grant).not.toContain('Modell (Rolle)');
+		expect(grant).toContain('Aufwand (Rolle): max');
+	});
+
+	it('a role the engine does not know says the step stops', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { role: 'made-up', roleGrant: null });
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-role-unknown')?.textContent).toContain('Diese Rolle gibt es auf dieser Instanz nicht');
 	});
 });
