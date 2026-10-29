@@ -242,11 +242,12 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         source_list: {
           type: 'object',
           description: 'For target_system "http": a list on target_host to take the targets from, instead of source_file or source_collection.',
-          // A Shopify form's rules (which fields after may set, no path, filters, id_field or judge for
-          // images) live in the refusals of `parseListSource` and `planList`, not here: in the schema they
-          // pushed a model off a keyword lookup in a chat opened from a read-only one.
+          // A Shopify form names its fields here and nothing else: the rest of its rules (no path,
+          // filters, id_field or write_method, no judge for images, the alt text's length) live in the
+          // refusals of `parseListSource` and `planList`. In the schema they pushed a model off a keyword
+          // lookup in a chat opened from a read-only one; without the fields, a model guessed them.
           properties: {
-            form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com); shopify_media: the images of its products.' },
+            form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com); sets title, seo_title, seo_description. shopify_media: the images of its products; sets alt.' },
             path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products. Not for the Shopify forms.' },
             filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status); values are 1–64 letters, digits, - or _.' },
             id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },
