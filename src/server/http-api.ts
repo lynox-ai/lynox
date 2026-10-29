@@ -4521,7 +4521,9 @@ export class LynoxHTTPApi {
                 // dropped from a turn it had already survived. Found by a route test whose
                 // engine stub lacked `getActiveScopes`, which is exactly the shape of the
                 // production failure (a method absent or throwing).
-                // Deferred until the run is accepted (see `deferredIngests`).
+                // Deferred until the run is accepted (see `deferredIngests`). Who uploaded is read
+                // now, with the request.
+                const uploadPrincipal = this._principalOf(req);
                 deferredIngests.push(() => {
                   try {
                     const kl = this.engine?.getKnowledgeLayer();
@@ -4538,6 +4540,8 @@ export class LynoxHTTPApi {
                         // can be flipped while the chunks embed.
                         isPrivate: () => this.engine?.getThreadStore()?.getThread(session.sessionId)?.skip_extraction === 1,
                         cutAtExtraction: extracted.truncated,
+                        // A mandate's upload archives nothing (660a-3).
+                        principal: uploadPrincipal,
                       }).catch(() => { /* best-effort */ });
                     }
                   } catch (ingestErr) {
@@ -7055,14 +7059,17 @@ export class LynoxHTTPApi {
       // Bulk runs as the engine runs them right now, and who decides (`core/bulk-switch.ts`):
       // on a managed pool tier the control plane opens them per instance and the owner can only
       // turn them off; elsewhere the config alone decides. `allowed` is whether turning them ON
-      // here would take effect, so the settings page can grey the switch with its reason.
+      // here would take effect, so the settings page can grey the switch; `db` tells its two
+      // reasons apart (no engine database, or a pool tier lynox has not opened them on).
       {
         const { isFeatureEnabled } = await import('../core/features.js');
         const source = bulkRunsSource(tier ?? undefined);
+        const db = engine.getEngineDb() !== null;
         redacted['bulk_runs'] = {
           on: engine.getBulkLedger() !== null,
           source,
-          allowed: engine.getEngineDb() !== null && (source === 'config' || isFeatureEnabled('bulk-runs')),
+          allowed: db && (source === 'config' || isFeatureEnabled('bulk-runs')),
+          db,
           // Whether a bulk run may read a Shopify store: the second half of what a chat opened from
           // a read-only one may promise (`chat-context.ts › storeChangeByBulkRun`).
           shopify: shopifyBulkReadEnabled(),

@@ -5772,7 +5772,7 @@ describe('LynoxHTTPApi', () => {
           const res = await jsonFetch('/api/config');
           expect(res.status).toBe(200);
           const body = await res.json() as Record<string, unknown>;
-          expect(body['bulk_runs']).toEqual({ on, ...expected, shopify: false });
+          expect(body['bulk_runs']).toEqual({ on, ...expected, db: true, shopify: false });
         }
       } finally {
         host.engine['getEngineDb'] = origDb;
@@ -5788,9 +5788,15 @@ describe('LynoxHTTPApi', () => {
       try {
         const res = await jsonFetch('/api/config');
         const body = await res.json() as Record<string, unknown>;
-        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false, shopify: false });
+        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false, db: false, shopify: false });
+        // On a pool tier lynox opened, the missing database is still the reason, not the tier.
+        vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+        repayRateWindow();
+        const pool = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        expect(pool['bulk_runs']).toEqual({ on: false, source: 'control-plane', allowed: false, db: false, shopify: false });
       } finally {
         vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
       }
     });
 

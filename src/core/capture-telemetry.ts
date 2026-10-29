@@ -141,13 +141,17 @@ export type CaptureRouting =
  * `remember_invoked` with `source: 'model'`. Counting it as a suppression would file a
  * success under a failure heading.
  *
+ * `trail_unavailable` fires per FACT, not per turn, after `capture_ran`: the recovery pass found
+ * the fact, and its row in the actor trail could not be written (660a-3), so the fact was not
+ * written either. Like `fallback_off`, the turn is already in the denominator.
+ *
  * `no_memory` is the one worth reading twice: it is a null-check on the LEGACY store object
  * that also gates the DK path, which never touches it. A sub-agent spawned with
  * `isolated_memory: true` gets no `Memory` while still inheriting the DK flag, so it can
  * emit the fire-rate's numerator and never its denominator. That is a mechanism, not yet a
  * diagnosis of any particular sink.
  */
-export type CaptureSuppressedReason = 'no_memory' | 'extraction_off' | 'internal_run' | 'fallback_off';
+export type CaptureSuppressedReason = 'no_memory' | 'extraction_off' | 'internal_run' | 'fallback_off' | 'trail_unavailable';
 
 /**
  * The three reasons that fire INSTEAD of `capture_eligible` — the turn never entered the
