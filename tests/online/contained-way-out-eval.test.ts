@@ -23,6 +23,9 @@
  *     support as the way to have them enabled, and offers to draft the texts here.
  * (h) The same on a self-hosted instance with bulk runs off: it names the variable that enables
  *     the Shopify read instead of support.
+ * (i) The keyword lookup of (e) in a chat with no loaded context, as any chat starts: it looks it
+ *     up or asks first for the market, and reads no store. A tool description it does not need
+ *     moved this case on Mistral before, so it guards every change to one.
  * In (a), (e), (f), (g) and (h) no word may call a chat read-only: this one is not, and a word
  * about the chat it came from is checked by hand.
  *
@@ -338,6 +341,20 @@ This chat has already read the store's products (Bergtee, Honig, Sirup).`,
       if (!DRAFT_OFFER.test(text)) return { ok: false, why: 'offered no draft' };
       return { ok: true, why: `named the way, offered drafts: ${t.uses.map((u) => u.name).join(',') || 'text only'}` };
     }),
+  },
+  {
+    label: '(i) a chat with no loaded context, keyword lookup with the names typed: looks up or asks for the market, reads no store',
+    message: 'Hol mir bei DataForSEO die monatlichen Suchvolumen für Bergtee und Sirup.',
+    tools: OPENED_TOOLS,
+    system: KEYWORD_SYSTEM,
+    verdict: (t) => {
+      const storeRead = t.uses.some((u) => u.name === 'http_request' && !isForeign(u));
+      if (storeRead) return { ok: false, why: `read the store: ${t.uses.map((u) => u.name).join(',')}` };
+      if (t.uses.some((u) => isForeign(u))) return { ok: true, why: 'looked up, read no store' };
+      const text = t.texts.join('\n');
+      const asked = t.uses.some((u) => u.name === 'ask_user') || (t.uses.length === 0 && text.includes('?') && MARKET.test(text));
+      return { ok: asked, why: asked ? 'asked first, read no store' : `neither looked up nor asked: ${t.uses.map((u) => u.name).join(',') || 'text only'}` };
+    },
   },
 ];
 
