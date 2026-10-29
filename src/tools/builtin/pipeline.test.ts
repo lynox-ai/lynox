@@ -2734,7 +2734,7 @@ describe('the run row of a stored workflow run from a chat', () => {
     expect(recs).toHaveLength(2);
   });
 
-  it('ends a run as failed when its bookkeeping throws after the steps completed', async () => {
+  it('ends a run as failed when its answer fails after its steps completed', async () => {
     const { agent, recs } = agentAs(HELPER);
     // Its steps completed, then reading their outputs for the answer throws.
     const outputs = { [Symbol.iterator]: () => { throw new Error('outputs gone'); } };

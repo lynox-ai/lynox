@@ -92,6 +92,8 @@ function engineContext(): ReturnType<typeof createToolContext> {
 
 function chat(principal?: IAgent['principal']): IAgent {
   const ctx = engineContext();
+  // A stored workflow a mandate runs writes its run row first (660b): without a log it would not run.
+  if (principal !== undefined) (ctx as unknown as Record<string, unknown>)['auditLog'] = { record: vi.fn() };
   return {
     toolContext: ctx,
     getAvailableTools: () => ctx.tools,
