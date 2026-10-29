@@ -121,6 +121,8 @@ export function parseStampPreview(body: unknown): StampPreview | null {
     const timeoutMs = optMs(s['timeoutMs']);
     const roleGrant = optGrant(s['roleGrant']);
     if (roleGrant === BAD) return null;
+    // What a role grants without the role: the view shows the grant under the role, so it would vanish.
+    if (roleGrant !== null && role === null) return null;
     if (tool === BAD || tools === BAD || model === BAD || inputFrom === BAD) return null;
     if (role === BAD || effort === BAD || thinking === BAD || timeoutMs === BAD) return null;
     const inputTemplate = s['inputTemplate'] ?? null;

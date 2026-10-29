@@ -120,6 +120,10 @@ describe('parseStampPreview — role, effort, thinking and time limit (contract 
     expect(parseStampPreview(step({ role: 'reviewer', roleGrant }))).toBeNull();
   });
 
+  it('refuses a grant without a role, since the view shows it under the role', () => {
+    expect(parseStampPreview(step({ role: null, roleGrant: { model: null, effort: null, allowTools: null, denyTools: null, readOnly: true } }))).toBeNull();
+  });
+
   it('reads a workflow with no steps: it runs nothing, and can be stamped', () => {
     expect(parseStampPreview(preview({ steps: [] }))!.steps).toEqual([]);
   });

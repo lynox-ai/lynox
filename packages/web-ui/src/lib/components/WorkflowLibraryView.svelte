@@ -1032,11 +1032,15 @@
 								{#if step.roleGrant}
 									{@const g = step.roleGrant}
 									<div data-testid="stamp-role-grant">
-										{#if g.model}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_model')}:</span> <span class="font-mono break-all">{visible(g.model)}</span></p>{/if}
-										{#if g.effort}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_effort')}:</span> <span class="font-mono">{g.effort}</span></p>{/if}
-										{#if g.allowTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_allows')}:</span> <span class="font-mono break-all">{visible(g.allowTools.join(', '))}</span></p>{/if}
-										{#if g.denyTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_blocks')}:</span> <span class="font-mono break-all">{visible(g.denyTools.join(', '))}</span></p>{/if}
+										<!-- The step's own value wins at run time; the role's applies only where the step sets none. -->
+										{#if g.model && !step.model}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_model')}:</span> <span class="font-mono break-all">{visible(g.model)}</span></p>{/if}
+										{#if g.effort && !step.effort}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_effort')}:</span> <span class="font-mono">{g.effort}</span></p>{/if}
+										{#if g.allowTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_allows')}:</span> <span class="font-mono break-all">{g.allowTools.length === 0 ? t('workflow_library.stamp.no_tools') : visible(g.allowTools.join(', '))}</span></p>{/if}
+										{#if g.denyTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_blocks')}:</span> <span class="font-mono break-all">{g.denyTools.length === 0 ? t('workflow_library.stamp.no_tools') : visible(g.denyTools.join(', '))}</span></p>{/if}
 									</div>
+								{:else}
+									<!-- A role the engine does not know: the step stops at run time. -->
+									<p class="mt-1 text-warning" data-testid="stamp-role-unknown">{t('workflow_library.stamp.role_unknown')}</p>
 								{/if}
 								<p class="mt-1 text-text-subtle">{t('workflow_library.stamp.role_hint')}</p>
 							{/if}

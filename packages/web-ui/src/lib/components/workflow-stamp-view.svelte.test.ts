@@ -359,7 +359,8 @@ describe('contract r3: what the view adds', () => {
 		// What the role grants: the step's own tools are not all a run gets.
 		const grant = q('stamp-role-grant')?.textContent ?? '';
 		expect(grant).toContain('Modell (Rolle): deep');
-		expect(grant).toContain('Aufwand (Rolle): max');
+		// The step sets its own effort, which wins: the role's is not shown as if it applied.
+		expect(grant).not.toContain('Aufwand (Rolle)');
 		expect(grant).toContain('Erlaubt die Rolle: web_search');
 		expect(grant).toContain('Sperrt die Rolle: http_request');
 		expect(q('stamp-role')?.textContent).toContain('Rolle: nur lesen');
@@ -378,7 +379,7 @@ describe('contract r3: what the view adds', () => {
 		expect(q('stamp-line')?.textContent).not.toContain('Eine Person mit Zugang');
 	});
 
-	it('after the stamp, says how many plans that run only once stay off, and where to switch them on', async () => {
+	it('after the stamp, says how many plans the wait switched off stay off, and where to switch them on', async () => {
 		await open('owner', WF, {
 			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
 			'POST /workflows/wf-1/confirm': [{ status: 200, body: { stillOff: 2 } }],
@@ -438,5 +439,36 @@ describe('contract r3: what the view adds', () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
 		expect(q('stamp-step')?.textContent).toContain('Zeitlimit: 0 s (bricht sofort ab)');
+	});
+
+	it('an empty allow list reads as no tools, not as a missing value', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, {
+			role: 'reviewer', roleGrant: { model: null, effort: null, allowTools: [], denyTools: null, readOnly: false },
+		});
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-role-grant')?.textContent).toContain('Erlaubt die Rolle: keine Werkzeuge');
+	});
+
+	it('shows the role\'s model and effort only where the step sets none: the step\'s own value wins', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, {
+			model: 'fast', effort: null, role: 'reviewer',
+			roleGrant: { model: 'deep', effort: 'max', allowTools: null, denyTools: null, readOnly: false },
+		});
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		const grant = q('stamp-role-grant')?.textContent ?? '';
+		expect(grant).not.toContain('Modell (Rolle)');
+		expect(grant).toContain('Aufwand (Rolle): max');
+	});
+
+	it('a role the engine does not know says the step stops', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { role: 'made-up', roleGrant: null });
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-role-unknown')?.textContent).toContain('Unbekannte Rolle');
 	});
 });
