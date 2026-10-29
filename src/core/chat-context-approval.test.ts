@@ -8,6 +8,7 @@ import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext, resolveChatContext, str
 import { APPROVAL_OUTCOMES, APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, type ApprovalScope } from './approval-view.js';
 import { channels } from './observability.js';
 import { containsUntrustedMarker } from './data-boundary.js';
+import { ENCRYPTED_PREFIX } from './strict-decrypt.js';
 
 /**
  * The `approval` chat context: the draft of an entry the owner moved to chat. Driven against a
@@ -506,6 +507,26 @@ describe('the approval chat context for an approved email that was not sent', ()
     expect(load(retried(file(), ['mail_unavailable', 'dedup_window', 'mail_unavailable']), OWNER)).toBeNull();
     // Control: the same history without it loads.
     expect(load(retried(file(), ['mail_unavailable', 'mail_unavailable', 'executor_error']), OWNER)).toContain('· reason: executor_error ·');
+  });
+
+  it.each([
+    ['does not decrypt', `${ENCRYPTED_PREFIX}AAAA`],
+    ['is not JSON', 'not-json'],
+  ])('does not load one whose earlier result %s: it may have been the matching recent mail', (_what, stored) => {
+    const id = file();
+    expect(store.decide(id, { action: 'approve', checksum: store.get(id)!.checksum }, 'owner')).toEqual({ ok: true });
+    expect(store.claim(id).ok).toBe(true);
+    expect(store.finish(id, 'retry', { reason: 'mail_unavailable' })).toBe('approved');
+    // A result written under another key, or damaged, does not decrypt.
+    const raw = db.getDb();
+    raw.exec('DROP TRIGGER IF EXISTS approval_entries_written_once');
+    raw.prepare('UPDATE approval_entries SET result_json = ? WHERE id = ?').run(stored, id);
+    for (const [i, reason] of ['mail_unavailable', 'executor_error'].entries()) {
+      expect(store.claim(id).ok).toBe(true);
+      expect(store.finish(id, 'retry', { reason })).toBe(i === 0 ? 'approved' : 'failed');
+    }
+    expect(approvalOutcome(store.get(id)!)).toBe('executor_error');
+    expect(load(id, OWNER)).toBeNull();
   });
 
   it('leaves the entry failed: loading it neither reopens nor queues it', () => {

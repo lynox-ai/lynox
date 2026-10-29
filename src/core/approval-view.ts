@@ -63,7 +63,8 @@ const OUTCOME_SET: ReadonlySet<string> = new Set(APPROVAL_OUTCOMES);
  * The reasons a `failed` entry's draft may be loaded into the owner's chat to write it again. Each
  * is given before the provider is called: a send that threw or timed out ends `unknown`
  * (`approval-executor.ts`). The reason stored is the last attempt's; an entry that met
- * `dedup_window` on an earlier attempt is marked and not loaded either (`approvalResultSawDedup`). Left out, though nothing went out either: `checksum` and
+ * `dedup_window` on an earlier attempt is marked and not loaded either (`approvalResultSawDedup`).
+ * Left out, though nothing went out either: `checksum` and
  * `not_executable` (the content is not what was filed, or is gone), `secret_in_body` (the body
  * holds something like a credential, which would reach the model), `dedup_window` (a matching
  * mail to the same people went out shortly before), `queued` (queued elsewhere, it may still go
