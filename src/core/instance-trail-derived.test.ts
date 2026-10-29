@@ -476,26 +476,36 @@ function rawPublishes(sf: ts.SourceFile, channel: string): string[] {
 /**
  * Every other way to reach the memory:store channel past the helper. Matched by NAME, not by the
  * object it is read from, so a renamed import (`import { channels as ch }`, `obs.channels`) and a
- * destructuring (`const { memoryStore } = channels`) are found as well: any `.memoryStore`, any
- * `['memoryStore']`, any binding of that name, and the channel's name `lynox:memory:store` in any
- * string or template literal. A listener's `.subscribe(` is the one use let through. Each finding
- * is `<file>:<line> <form>`. What this cannot see: the name built at run time
- * (`channel(NAME_CONST)` from a constant defined elsewhere, a concatenation) — a named limit.
+ * destructuring (`const { memoryStore } = channels`, also by assignment) are found as well: a
+ * `.memoryStore`, a `['memoryStore']` (quoted, template or computed), a binding or an object
+ * property of that name, and the channel's name `lynox:memory:store` in any string or template
+ * literal. A listener's `.subscribe(` is the one use let through. Each finding is
+ * `<file>:<line> <form>`.
+ *
+ * What this cannot see, a named limit: a reach with no name in it at all — the channel's name built
+ * at run time (a concatenation, a constant from another file), and the channels read wholesale
+ * (`Object.values(channels)`, a spread, `for…in`). Those are left to review.
  */
 function memoryStoreReach(sf: ts.SourceFile): string[] {
   const out: string[] = [];
   const at = (n: ts.Node, form: string): void => { out.push(`${rel(sf)}:${String(lineOf(sf, n))} ${form}`); };
-  const isName = (n: ts.Node | undefined): boolean => n !== undefined
-    && (ts.isIdentifier(n) || ts.isStringLiteral(n)) && n.text === 'memoryStore';
+  const isName = (n: ts.Node | undefined): boolean => {
+    if (n === undefined) return false;
+    const inner = ts.isComputedPropertyName(n) ? n.expression : n;
+    return (ts.isIdentifier(inner) || ts.isStringLiteral(inner) || ts.isNoSubstitutionTemplateLiteral(inner)) && inner.text === 'memoryStore';
+  };
   const visit = (n: ts.Node): void => {
     if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && n.text === 'lynox:memory:store') {
-      // A listed listener may name the channel it formats (a map key, a `case` label); it may not
-      // open it by that name, which is the way to publish past the helper.
-      const opens = ts.isCallExpression(n.parent) && n.parent.arguments.includes(n as ts.Expression);
-      if (opens || !Object.hasOwn(LISTENERS['memoryStore']!, rel(sf))) at(n, "'lynox:memory:store'");
+      // A listed listener may name the channel it formats, as a map key or a `case` label, and
+      // nowhere else: a name held in a variable, or wrapped in a call, can open the channel and
+      // publish past the helper.
+      const p = n.parent;
+      const labelOnly = (ts.isPropertyAssignment(p) && p.name === n) || (ts.isCaseClause(p) && p.expression === n);
+      if (!labelOnly || !Object.hasOwn(LISTENERS['memoryStore']!, rel(sf))) at(n, "'lynox:memory:store'");
     }
     if (ts.isElementAccessExpression(n) && isName(n.argumentExpression)) at(n, "['memoryStore']");
     if (ts.isBindingElement(n) && isName(n.propertyName ?? n.name)) at(n, '{ memoryStore }');
+    if ((ts.isShorthandPropertyAssignment(n) || ts.isPropertyAssignment(n)) && isName(n.name)) at(n, '{ memoryStore }');
     if (ts.isPropertyAccessExpression(n) && n.name.text === 'memoryStore') {
       const up = n.parent;
       const use = ts.isPropertyAccessExpression(up) && up.expression === n ? up.name.text : null;
@@ -530,20 +540,29 @@ describe('K1: every memory:store publish goes through publishMemoryStore', () =>
       const { memoryStore } = channels;
       const { memoryStore: g } = obs.channels;
       const h = tracingChannel(\`lynox:memory:store\`);
+      const i = channels[\`memoryStore\`];
+      const { ['memoryStore']: j } = channels;
+      let k; ({ memoryStore: k } = channels);
       channel('lynox:datastore:insert'); channels.dataStoreInsert; const { dataStoreInsert } = channels;
     `);
     expect(memoryStoreReach(planted).map(f => f.split(' ').slice(1).join(' '))).toEqual([
       "'lynox:memory:store'", "['memoryStore']", '.memoryStore', '.memoryStore', '.memoryStore.subscribe',
       '.memoryStore', '.memoryStore', '{ memoryStore }', '{ memoryStore }', "'lynox:memory:store'",
+      "['memoryStore']", '{ memoryStore }', '{ memoryStore }',
     ]);
     expect(memoryStoreReach(parse(join(SRC, 'core/engine-init.ts'), 'channels.memoryStore.subscribe(fn);'))).toEqual([]);
-    // A listed listener may name the channel as a key or a label, but not open it by that name.
+    // A listed listener may name the channel as a key or a label, nowhere else: not as a call's
+    // argument, not held in a variable it can open later, not wrapped.
     const listener = parse(join(SRC, 'core/debug-subscriber.ts'), `
       const groups = { 'lynox:memory:store': 'memory' };
       switch (name) { case 'lynox:memory:store': break; }
       channel('lynox:memory:store').publish(x);
+      const N = 'lynox:memory:store'; channel(N).publish(x);
+      channel(('lynox:memory:store' as string));
     `);
-    expect(memoryStoreReach(listener).map(f => f.split(' ').slice(1).join(' '))).toEqual(["'lynox:memory:store'"]);
+    expect(memoryStoreReach(listener).map(f => f.split(' ').slice(1).join(' '))).toEqual([
+      "'lynox:memory:store'", "'lynox:memory:store'", "'lynox:memory:store'",
+    ]);
   });
 
   it('the six publishers use the helper (positive control), and the scan sees a raw one (planted)', () => {
@@ -656,7 +675,9 @@ describe('B1: the callers of KnowledgeLayer.store are a closed set', () => {
  *
  * What it does NOT see, and does not claim to: a write left running without `void` and without a
  * chained `.catch/.then/.finally` (a bare `kg.eraseAll(p);` statement), a promise assigned and never
- * awaited, and a write scheduled through a timer. Those are left to review.
+ * awaited, a write scheduled through a timer, a callee read by key (`void kg['storeX'](…)`), a
+ * write inside a `void` immediately-invoked function, and a callee not in camelCase (`store2`,
+ * `upsert_x`). Those are left to review.
  *
  * The verb is the whole camelCase head of the callee (`setFlag`, `set`), never a prefix of a longer
  * word (`settle`, `setup`); the timer functions, whose head is a write verb, are not writes.
