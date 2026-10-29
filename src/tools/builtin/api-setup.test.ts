@@ -3451,8 +3451,13 @@ describe('api_setup tool', () => {
       // Simulate a session that has already spent its HTTP budget.
       (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const rateSpy = vi.spyOn(store, 'checkRateLimit');
 
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+      // Refused before the token host's rate bucket is consumed (row 1005); the call below the
+      // limit in 'reserves fetch_token's POST before it goes out' shows the bucket is consumed there.
+      expect(rateSpy).not.toHaveBeenCalled();
+      rateSpy.mockRestore();
 
       // ux U-010 for fetch_token, written out: the profile is stored, so the way on is to continue it.
       expect(result).toBe('Blocked: this conversation or run has reached its limit of 100 HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.');
@@ -3853,6 +3858,29 @@ describe('api_setup tool', () => {
       expect(result).toMatch(/Token exchange OK/i);
       expect(fetchSpy).toHaveBeenCalled();
       fetchSpy.mockRestore();
+    });
+
+    // Row 1005: reserved before the POST, as http_request does, so an exchange that fails after it
+    // went out still counts against the budget.
+    it('reserves fetch_token\'s POST before it goes out, so a failed exchange stays charged', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({ OAUTH_ID: 'id', OAUTH_SECRET: 'sec' }));
+      store.register({
+        id: 'allowlisted_oauth', name: 'Allowlisted OAuth', base_url: 'https://api.openai.com/v1', description: 'Allowlisted OAuth profile.',
+        auth: { type: 'oauth2', vault_keys: ['OAUTH_ID', 'OAUTH_SECRET'], oauth: { token_url: 'https://api.anthropic.com/oauth/token', grant_type: 'client_credentials', client_id_key: 'OAUTH_ID', client_secret_key: 'OAUTH_SECRET', body_format: 'json' } },
+        endpoints: [{ method: 'POST', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('socket hang up'));
+      const rateSpy = vi.spyOn(store, 'checkRateLimit');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'allowlisted_oauth' }, agent);
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(result).toContain('failed');
+      expect((agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests).toBe(1);
+      expect(rateSpy).toHaveBeenCalledTimes(1);
+      fetchSpy.mockRestore();
+      rateSpy.mockRestore();
     });
 
     it('does the token exchange and stores the access_token in the vault', async () => {

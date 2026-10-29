@@ -943,9 +943,52 @@ function findLinkedSections(html: string, baseUrl: string): LinkedSection[] {
   return candidates.slice(0, LINKED_SECTION_MAX_COUNT).map(c => ({ url: c.url, anchor: c.anchor }));
 }
 
+/**
+ * Whether this conversation or run has used up its request budget (`MAX_REQUESTS_PER_SESSION`,
+ * shared with `http_request`). Only a read: it reserves nothing.
+ */
+function requestLimitReached(agent: IAgent): boolean {
+  return agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION;
+}
+
+/**
+ * Reserves one request of the budget for one of api_setup's own fetches, right before it goes
+ * out; false at the limit, and then nothing is reserved (row 1005). Charged before it sends, as
+ * `http_request` is, so a fetch that fails after it went out (a timeout, a redirect loop) stays
+ * charged, and a fetch the egress policy refuses is charged too. Checked and charged in one step
+ * before the first await, so parallel api_setup fetches cannot all pass the check at 99. That
+ * holds among api_setup's fetches only: `http_request` checks and charges with awaits between,
+ * so a racing `http_request` can still take one past the limit.
+ * `api-setup-request-limit.test.ts` holds every fetch here to this.
+ */
+function reserveRequest(agent: IAgent): boolean {
+  if (requestLimitReached(agent)) return false;
+  agent.sessionCounters.httpRequests++;
+  return true;
+}
+
+/**
+ * What the model reads when a bootstrap cannot fetch its page because the budget is spent (ux
+ * U-051, after U-010 for `fetch_token`). Nothing is stored yet, so the way on is to start the
+ * setup in a new chat; a bulk run is no way on for a setup.
+ */
+function bootstrapLimitMessage(what: 'the docs page' | 'the OpenAPI spec'): string {
+  return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it, so api_setup cannot fetch ${what}. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not start here and that they can start it in a new chat.`;
+}
+
+/**
+ * What the model reads when `fetch_token` cannot run because the budget is spent (ux U-010 for
+ * this step): no bulk run, which is no way on for a setup, and "continue", because the profile
+ * is already stored and outlives this chat.
+ */
+function fetchTokenLimitMessage(): string {
+  return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.`;
+}
+
 /** Fetch one linked docs section honouring the remaining body budget. Returns
- *  the empty string on any failure — sub-page reads are best-effort. */
-async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: number): Promise<string> {
+ *  the empty string on any failure — sub-page reads are best-effort — and null when the
+ *  request budget is spent, so the caller can tell the model. */
+async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: number): Promise<string | null> {
   if (remainingBudget < LINKED_SECTION_MIN_BUDGET) return '';
   try {
     const ac = new AbortController();
@@ -953,13 +996,12 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
     try {
       // A sub-page is a read the call's own row did not name: a delegated session records it
       // first, and what the recorder throws ends here as a section not read.
+      // Bootstrap fetches go around the http_request tool, so they reserve from its budget here,
+      // before the read is recorded: a section the budget stops leaves no row.
+      if (!reserveRequest(agent)) return null;
       outwardReadRecorder(agent, 'api_setup:read')?.(httpTarget('GET', url));
       const { response: resp } = await fetchWithValidatedRedirects(url, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
         undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
-      // Bootstrap fetches go around the http_request tool, so the session
-      // limit didn't see them pre-1.5.0. Charge each successful fetch so a
-      // pathological docs_url can't laundromat its way past the budget.
-      agent.sessionCounters.httpRequests++;
       if (!resp.ok) return '';
       const { text } = await readBodyLimited(resp, remainingBudget);
       return text;
@@ -1104,6 +1146,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     return 'Error: docs_url bootstrap requires the `api-setup-v2` feature, which is ON by default but has been disabled here (LYNOX_FEATURE_API_SETUP_V2=0). Remove that override to re-enable, or use `openapi_url` if the API has an OpenAPI 3.x spec.';
   }
 
+  if (!reserveRequest(agent)) return bootstrapLimitMessage('the docs page');
   emitBootstrapProgress(agent, 'fetching_docs');
   let docsText: string;
   let truncated: boolean;
@@ -1113,9 +1156,6 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     try {
       const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
         undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
-      // Charge the primary docs fetch against the session HTTP budget so
-      // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
-      agent.sessionCounters.httpRequests++;
       if (!resp.ok) {
         // `resp.statusText` is the HTTP reason phrase — chosen by the REMOTE server,
         // free-form, and was echoed here verbatim. When this was written `api_setup`
@@ -1150,11 +1190,15 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   const linkedSections = findLinkedSections(docsText, docsUrl);
   const fetchedSections: Array<{ url: string; text: string }> = [];
   let remainingBudget = DOCS_BODY_MAX_BYTES - Buffer.byteLength(docsText, 'utf8');
+  // Sections the request budget left unread: the model is told, so it does not present a profile
+  // built from part of the docs as complete (ux U-051).
+  let sectionsCutByLimit = false;
   for (const section of linkedSections) {
     if (remainingBudget < LINKED_SECTION_MIN_BUDGET) break;
     // Stopped with the run: no further section is recorded or fetched.
     if (currentCallSignal()?.aborted === true) break;
     const text = await fetchLinkedSection(section.url, agent, remainingBudget);
+    if (text === null) { sectionsCutByLimit = true; break; }
     if (text) {
       fetchedSections.push({ url: section.url, text });
       remainingBudget -= Buffer.byteLength(text, 'utf8');
@@ -1269,6 +1313,9 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   const truncatedNote = truncated
     ? `\nDocs body was truncated at ${String(DOCS_BODY_MAX_BYTES)} bytes — verify rate limits and pricing before trusting this draft.`
     : '';
+  const limitNote = sectionsCutByLimit
+    ? `\nSome linked docs sections were not read: this conversation or run reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests. The profile is built from the sections read so far and may miss endpoints. If a user is in this conversation, tell them that in one sentence when you present it.`
+    : '';
   const linkedNote = fetchedSections.length > 0
     ? `\nIncluded ${String(fetchedSections.length)} linked section(s): ${fetchedSections.map(s => s.url).join(', ')}`
     : '';
@@ -1282,7 +1329,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   // dropped, the next steps) stay outside. The id here is a slug of the docs URL's host, the
   // model's own input.
   return compose([
-    engineText(`Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).${injectedNote}${truncatedNote}${apiHostCandidates.length > 0 ? `\n${String(apiHostCandidates.length)} other API host(s) seen on the docs page are listed in the block below; verify against an authoritative source before swapping base_url.` : ''}
+    engineText(`Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).${injectedNote}${truncatedNote}${limitNote}${apiHostCandidates.length > 0 ? `\n${String(apiHostCandidates.length)} other API host(s) seen on the docs page are listed in the block below; verify against an authoritative source before swapping base_url.` : ''}
 
 Review the draft, fill auth.vault_keys via ask_secret, then call action="create":`),
     renderFence('api_bootstrap_draft', `${summary}${linkedNote}${hostHintNote}
@@ -1855,6 +1902,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
       if (!input.openapi_url) {
         return 'Error: bootstrap requires either "openapi_url" (OpenAPI 3.x JSON spec, preferred) or "docs_url" (human-readable docs page; gated behind feature flag `api-setup-v2`). If neither is available, read the docs via web_research and build a profile manually with action "create".';
       }
+      if (!reserveRequest(agent)) return bootstrapLimitMessage('the OpenAPI spec');
       let spec: OpenApiDoc;
       try {
         const ac = new AbortController();
@@ -1863,8 +1911,6 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         try {
           ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
             undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'))));
-          // Charge OpenAPI bootstrap fetches against the session budget too.
-          agent.sessionCounters.httpRequests++;
         } finally {
           clearTimeout(timer);
         }
@@ -3069,14 +3115,9 @@ ${draftJson}
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
       }
       // fetch_token drives a real outbound POST; honour the same per-session HTTP
-      // ceiling http_request enforces. It already increments httpRequests after a
-      // successful fetch (below), so without this pre-check it could charge past
-      // the limit rather than being bounded by it.
-      if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-        // ux U-010 for this step: no bulk run (it is no way on for a setup), and "continue",
-        // because the profile is already stored and outlives this chat.
-        return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.`;
-      }
+      // ceiling http_request enforces. Checked here, before the rate bucket below is
+      // consumed, and reserved right before the POST (row 1005).
+      if (requestLimitReached(agent)) return fetchTokenLimitMessage();
       // Honour the per-API rate buckets too (http_request enforces these via
       // checkRateLimit). Without this a fetch_token loop against a profiled token
       // host bypasses the profile's own declared hourly/daily ceiling. Creds are
@@ -3120,13 +3161,14 @@ ${draftJson}
       // the tenant's network policy says, which is the exfiltration channel this
       // path is shaped around.
       //
-      // The session HTTP budget is charged through the callback, after the
-      // response: a refused egress never reached the provider to be charged for,
-      // and `fetch_token` must not be a freebie bypass of the per-session cap.
+      // The session HTTP budget is reserved before the POST, not charged after the response:
+      // an exchange that times out or fails after it went out stays charged, and parallel
+      // calls cannot all pass the check above (row 1005). A refused egress is charged too, as
+      // in `http_request`.
+      if (!reserveRequest(agent)) return fetchTokenLimitMessage();
       const exchanged = await exchangeToken(
         { endpoint: vetting, params, bodyFormat },
         agent.toolContext,
-        () => { agent.sessionCounters.httpRequests++; },
       );
       if (!exchanged.ok) return `Error: ${exchanged.message}`;
       const respText = exchanged.text;
