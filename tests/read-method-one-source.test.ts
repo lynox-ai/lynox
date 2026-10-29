@@ -27,6 +27,9 @@ const COMPARES = new RegExp(
 );
 // A line holding both names is a set of them, whatever builds it (`['GET', 'HEAD'].includes`, `new Set`).
 const BOTH = /['"`](?:GET|get)['"`].*['"`](?:HEAD|head)['"`]|['"`](?:HEAD|head)['"`].*['"`](?:GET|get)['"`]/;
+// A run every match above contains whole. Blanking writes only spaces, so it can join an
+// operator to a literal (`=== /* c */ 'GET'`) but never make one of these.
+const NAMES = new RegExp(`${LIT}|GET\\|HEAD|HEAD\\|GET`);
 
 /**
  * Source with its comments blanked, line numbers unchanged. The comments are the ones the
@@ -43,7 +46,8 @@ function withoutComments(src: string): string {
     for (const child of node.getChildren(file)) visit(child);
   };
   visit(file);
-  const chars = [...src];
+  // UTF-16 code units, the unit the comment ranges are counted in.
+  const chars = src.split('');
   for (const [pos, end] of comments) {
     for (let i = pos; i < end; i++) if (chars[i] !== '\n') chars[i] = ' ';
   }
@@ -52,9 +56,8 @@ function withoutComments(src: string): string {
 
 /** The lines of `src` that compare a method with GET or HEAD, trimmed and with runs of space collapsed. */
 export function methodComparisons(src: string): string[] {
-  // Blanking comments only removes text, so a file with no candidate line has none after it
-  // either; only the files that have one are parsed.
-  if (!src.split('\n').some((line) => COMPARES.test(line) || BOTH.test(line))) return [];
+  // Only a file that names a method this way can hold a comparison; only those are parsed.
+  if (!NAMES.test(src)) return [];
   return withoutComments(src).split('\n')
     .filter((line) => COMPARES.test(line) || BOTH.test(line))
     .map((line) => line.trim().replace(/\s+/g, ' '));
@@ -155,6 +158,12 @@ describe('the read set is written once', () => {
       "if (method.toLowerCase() === 'get') {}",
       // A quote inside a regex literal and a `//` inside a string, on the same line as the check.
       "const PATH = /^[a-z'/]*$/; if (url.startsWith('https://') && method !== 'GET') return null;",
+      // A comment between the comparison and the name, which the raw line does not match.
+      "if (m === /* read */ 'GET') return 1;",
+      "switch (m) { case /* r */ 'HEAD': break; }",
+      "if (reads.includes(/* m */ 'GET')) x();",
+      // Comment offsets count UTF-16 units: a character outside the BMP before it must not shift them.
+      `const e = '${'\u{1F680}'.repeat(12)}'; /* c */ if (m === 'GET') y();`,
     ]) {
       expect(methodComparisons(line), line).toHaveLength(1);
     }

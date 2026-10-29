@@ -18,7 +18,7 @@ import { normalizeApprovalHost } from './untrusted-epoch.js';
 /**
  * The two methods this engine reads with; everything else may change something. The one
  * answer to "does this request only read?": every outbound gate calls it, and
- * `tests/read-method-one-source.test.ts` lists each remaining line that names GET or HEAD
+ * `tests/read-method-one-source.test.ts` lists each remaining line that compares a method with GET or HEAD
  * with the other question it asks.
  *
  * An exact match, on purpose: no trim, no case fold. Each caller normalises the way its own
