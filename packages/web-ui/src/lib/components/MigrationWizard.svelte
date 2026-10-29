@@ -32,6 +32,11 @@
 	// the same next step as for a workspace left out. At most this many paths are listed.
 	const SKIPPED_SHOWN = 50;
 	const skipped = $derived(getDoneSkipped());
+	const skippedNextKey = $derived(
+		isManaged()
+			? (skipped.length === 1 ? 'migration.skipped_next_managed_one' : 'migration.skipped_next_managed_many')
+			: (skipped.length === 1 ? 'migration.skipped_next_self_one' : 'migration.skipped_next_self_many'),
+	);
 	// The tier picks the way out the workspace notice names; a failed read leaves the self-hosted one.
 	$effect(() => { void loadManagedStatus(); });
 	const targetUrl = $derived(getTargetUrl());
@@ -259,7 +264,7 @@
 		<div class="rounded-[var(--radius-md)] border border-success/30 bg-success/5">
 			<div class="border-b border-success/20 px-4 py-3">
 				<h2 class="text-sm font-medium text-success">{t('migration.success')}</h2>
-				<p class="mt-1 text-xs text-text-muted">{t(workspaceNotice?.description ?? 'migration.success_desc')}</p>
+				<p class="mt-1 text-xs text-text-muted">{t(workspaceNotice?.description ?? (skipped.length > 0 ? 'migration.success_desc_skipped' : 'migration.success_desc'))}</p>
 				{#if workspaceNotice}
 					<p data-testid="migration-workspace-omitted" class="mt-1 text-xs text-warning">{t(workspaceNotice.line)}</p>
 				{/if}
@@ -274,7 +279,7 @@
 						{/if}
 					</details>
 					{#if !workspaceNotice}
-						<p data-testid="migration-skipped-next" class="mt-1 text-xs text-warning">{t(isManaged() ? 'migration.workspace_omitted_managed' : 'migration.workspace_omitted_self')}</p>
+						<p data-testid="migration-skipped-next" class="mt-1 text-xs text-warning">{t(skippedNextKey)}</p>
 					{/if}
 				{/if}
 			</div>

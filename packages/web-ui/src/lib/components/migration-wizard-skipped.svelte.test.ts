@@ -73,6 +73,7 @@ const summary = (): string | undefined => skippedBlock()?.querySelector('summary
 const paths = (): string[] => [...(skippedBlock()?.querySelectorAll('li') ?? [])].map((li) => li.textContent ?? '');
 const nextLine = (): string | undefined => target.querySelector('[data-testid="migration-skipped-next"]')?.textContent?.trim();
 const omittedLine = (): string | undefined => target.querySelector('[data-testid="migration-workspace-omitted"]')?.textContent?.trim();
+const description = (): string | undefined => target.querySelector('h2 + p')?.textContent?.trim();
 const toasts = (): Array<[string, string]> => getToasts().map((toast) => [toast.type, toast.message]);
 
 describe('files the migration could not transfer', () => {
@@ -83,6 +84,7 @@ describe('files the migration could not transfer', () => {
 		await migrate();
 		expect(skippedBlock()).toBeNull();
 		expect(nextLine()).toBeUndefined();
+		expect(description()).toBe(t('migration.success_desc'));
 		expect(toasts()).toEqual([['success', t('migration.success')]]);
 	});
 
@@ -91,7 +93,9 @@ describe('files the migration could not transfer', () => {
 		await migrate();
 		expect(summary()).toBe(t('migration.skipped_one'));
 		expect(paths()).toEqual(['workspace/link-to-home']);
-		expect(nextLine()).toBe(t('migration.workspace_omitted_self'));
+		expect(nextLine()).toBe(t('migration.skipped_next_self_one'));
+		// Not "your data is available" without the exception.
+		expect(description()).toBe(t('migration.success_desc_skipped'));
 		// Closed until asked: the count is what the step says first.
 		expect(skippedBlock()?.open).toBe(false);
 		// Not the green toast: it is read and dismissed with the files left behind (as in U-046).
@@ -103,6 +107,7 @@ describe('files the migration could not transfer', () => {
 		await migrate();
 		expect(summary()).toBe(tf('migration.skipped_many', { n: '3' }));
 		expect(paths()).toEqual(['workspace/a', 'workspace/b', 'workspace/c']);
+		expect(nextLine()).toBe(t('migration.skipped_next_self_many'));
 		expect(toasts()).toEqual([['info', tf('migration.success_skipped_many', { n: '3' })]]);
 	});
 
@@ -127,6 +132,8 @@ describe('files the migration could not transfer', () => {
 		await migrate();
 		expect(omittedLine()).toBe(t('migration.workspace_omitted_self'));
 		expect(nextLine()).toBeUndefined();
+		// The workspace notice's own description (U-046) wins over the skipped one.
+		expect(description()).toBe(t('migration.success_desc_without_workspace'));
 		expect(summary()).toBe(t('migration.skipped_one'));
 		// The workspace notice's toast, from U-046.
 		expect(toasts()).toEqual([['info', t('migration.success_without_workspace')]]);
@@ -175,7 +182,14 @@ describe('files the migration could not transfer', () => {
 		config = { managed: 'managed' };
 		done = { ...done, skipped: ['workspace/a'] };
 		await migrate();
-		expect(nextLine()).toBe(t('migration.workspace_omitted_managed'));
+		expect(nextLine()).toBe(t('migration.skipped_next_managed_one'));
+	});
+
+	it('names support for several files on a managed instance', async () => {
+		config = { managed: 'managed' };
+		done = { ...done, skipped: ['workspace/a', 'workspace/b'] };
+		await migrate();
+		expect(nextLine()).toBe(t('migration.skipped_next_managed_many'));
 	});
 
 	it('the texts, word for word (ux U-056)', () => {
@@ -185,11 +199,21 @@ describe('files the migration could not transfer', () => {
 		expect(tf('migration.skipped_more', { m: '3' })).toBe('… und 3 weitere');
 		expect(t('migration.success_skipped_one')).toBe('Migration abgeschlossen. 1 Datei wurde nicht übertragen.');
 		expect(tf('migration.success_skipped_many', { n: '3' })).toBe('Migration abgeschlossen. 3 Dateien wurden nicht übertragen.');
+		expect(t('migration.success_desc_skipped')).toBe('Deine Daten sind jetzt auf deiner Managed-Instanz verfügbar, ausser den Dateien unten.');
+		expect(t('migration.skipped_next_managed_one')).toBe('Für eine Kopie auf die neue Instanz schreib an support@lynox.ai.');
+		expect(t('migration.skipped_next_managed_many')).toBe('Für eine Kopie auf die neue Instanz schreib an support@lynox.ai.');
+		expect(t('migration.skipped_next_self_one')).toBe('Übertrage sie dort, wo du sie verwaltest.');
+		expect(t('migration.skipped_next_self_many')).toBe('Übertrage sie dort, wo du sie verwaltest.');
 		setLocale('en');
 		expect(t('migration.skipped_one')).toBe('1 file was not transferred. Links, special files and some names cannot be transferred.');
 		expect(tf('migration.skipped_many', { n: '3' })).toBe('3 files were not transferred. Links, special files and some names cannot be transferred.');
 		expect(tf('migration.skipped_more', { m: '3' })).toBe('… and 3 more');
 		expect(t('migration.success_skipped_one')).toBe('Migration complete. 1 file was not transferred.');
 		expect(tf('migration.success_skipped_many', { n: '3' })).toBe('Migration complete. 3 files were not transferred.');
+		expect(t('migration.success_desc_skipped')).toBe('Your data is now available on your managed instance, except for the files below.');
+		expect(t('migration.skipped_next_managed_one')).toBe('To have it copied to the new instance, write to support@lynox.ai.');
+		expect(t('migration.skipped_next_managed_many')).toBe('To have them copied to the new instance, write to support@lynox.ai.');
+		expect(t('migration.skipped_next_self_one')).toBe('Move it where you manage it.');
+		expect(t('migration.skipped_next_self_many')).toBe('Move them where you manage them.');
 	});
 });
