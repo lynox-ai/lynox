@@ -68,6 +68,8 @@ const providerRecords = (): readonly erasure.StoredConnectionRecord[] => erasure
 const stateOf = (grant: string): string | undefined => providerRecords().find((r) => r.revokedGrant === grant)?.historyState;
 interface AuditRow { actor_kind: string; actor_email: string | null; mandate_id: string | null; target: string; phase: string; correlation_id: string }
 const cancelRows = (): AuditRow[] => db.getDb().prepare("SELECT actor_kind, actor_email, mandate_id, target, phase, correlation_id FROM audit_log WHERE action = 'connection.erasure.cancel' ORDER BY id").all() as AuditRow[];
+/** The opaque id the audit rows name the profile by, never its slug. */
+const trailOf = (): string => { const t = store.trailIdOf('shop'); expect(t).toMatch(/^apf_[0-9a-f]{16}$/); return t!; };
 const notices = (now: Date): readonly erasure.ProviderNotice[] => erasure.providerNotices(db.getDb(), now);
 
 describe('who may cancel by a new consent', () => {
@@ -150,7 +152,7 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     markRevoked();
     reconnectAs(OWNER_PRINCIPAL);
     const id = providerRecords()[0]!.id;
-    expect(cancelRows()).toEqual([{ actor_kind: 'owner', actor_email: null, mandate_id: null, target: `shop ${id} consent`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
+    expect(cancelRows()).toEqual([{ actor_kind: 'owner', actor_email: null, mandate_id: null, target: `${trailOf()} ${id} consent`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
   });
 
   it('a mandate\'s consent names the mandate', () => {
@@ -159,7 +161,7 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     markRevoked();
     reconnectAs(HELPER);
     const id = providerRecords()[0]!.id;
-    expect(cancelRows()).toEqual([{ actor_kind: 'mandate', actor_email: 'helper@example.com', mandate_id: 'm-1', target: `shop ${id} consent`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
+    expect(cancelRows()).toEqual([{ actor_kind: 'mandate', actor_email: 'helper@example.com', mandate_id: 'm-1', target: `${trailOf()} ${id} consent`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
   });
 
   it('a lift names whoever saved it', () => {
@@ -171,7 +173,7 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     expect(store.save({ ...current, oauth_grant: grant }, undefined, { actor: HELPER }).ok).toBe(true);
     const id = providerRecords()[0]!.id;
     expect(providerRecords()[0]!.historyState).toBe('cancelled');
-    expect(cancelRows()).toEqual([{ actor_kind: 'mandate', actor_email: 'helper@example.com', mandate_id: 'm-1', target: `shop ${id} lift`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
+    expect(cancelRows()).toEqual([{ actor_kind: 'mandate', actor_email: 'helper@example.com', mandate_id: 'm-1', target: `${trailOf()} ${id} lift`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
   });
 
   it('a lift saved without an actor is refused: the profile stays revoked and its erasure held', () => {
@@ -210,8 +212,9 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     store.save(profile());
     markRevoked();
     const id = providerRecords()[0]!.id;
+    const trail = trailOf();
     expect(store.remove('shop', undefined, { record: 'erasure' })).toBe(true);
-    expect(cancelRows()).toEqual([{ actor_kind: 'owner', actor_email: null, mandate_id: null, target: `shop ${id} owner_delete`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
+    expect(cancelRows()).toEqual([{ actor_kind: 'owner', actor_email: null, mandate_id: null, target: `${trail} ${id} owner_delete`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
   });
 
   it('a store without an audit log does not cancel: the consent throws and the erasure stays held', () => {

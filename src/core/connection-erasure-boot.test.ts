@@ -151,7 +151,7 @@ describe('Engine boot — erasure by connection', () => {
       expect(store.save(store.get('shop')!, undefined, { newConsent: true, actor: OWNER_PRINCIPAL }).ok).toBe(true);
       const db = engine.getEngineDb()!.getDb();
       const id = erasureRecords(db, 'shop')[0]!.id;
-      expect(db.prepare("SELECT actor_kind AS a, target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all()).toEqual([{ a: 'owner', t: `shop ${id} consent` }]);
+      expect(db.prepare("SELECT actor_kind AS a, target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all()).toEqual([{ a: 'owner', t: `${store.trailIdOf('shop')} ${id} consent` }]);
     } finally {
       restore();
     }
