@@ -629,8 +629,9 @@
 											<li data-stamp-entry={entry.state}>{listedLine(entry)}</li>
 										{/each}
 									</ul>
-									{#if listedNote(listed, trigger.paused === true)}
-										<p class="mt-0.5 text-warning" data-stamp-note>{listedNote(listed, trigger.paused === true)}</p>
+									{@const note = listedNote(listed, trigger.paused === true)}
+									{#if note}
+										<p class="mt-0.5 text-warning" data-stamp-note>{note}</p>
 									{/if}
 								</div>
 							{/if}

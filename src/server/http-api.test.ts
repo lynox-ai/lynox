@@ -9729,6 +9729,14 @@ describe('LynoxHTTPApi', () => {
           expect(side('trg-wf')).toMatchObject({ ended: true, ended_on: 'workflow' });
           expect(side('trg-plan')).toMatchObject({ ended: true, ended_on: 'plan' });
         });
+        // The member the plan acts for is live, the workflow's has ended: the run is refused all
+        // the same (the gate reads every member), so the list says ended.
+        ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === 'M-IDA', record: (): void => {} });
+        const idaPlan = { ...onWorkflow, id: 'trg-ida', created_by: 'mandate:ida@kanzlei.example', created_mandate_id: 'M-IDA', created_at: '2026-10-08 00:00:00' };
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [idaPlan] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          expect(triggers[0]!['stamp_listed']).toMatchObject({ ended: true, ended_on: 'workflow' });
+        });
       } finally {
         ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();
