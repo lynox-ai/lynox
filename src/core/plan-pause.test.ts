@@ -7,7 +7,7 @@ import { EngineDb } from './engine-db.js';
 import { TaskManager } from './task-manager.js';
 import { MandateEnds } from './mandate-ends.js';
 import { TriggerStore } from './trigger-store.js';
-import { ADVANCE_NOTICE_ON, PAUSE_NOTICE_BODY_MAX, pauseNotice, type PausedFor } from './plan-pause.js';
+import { ADVANCE_WARNING_S, PAUSE_NOTICE_BODY_MAX, advanceWarning, claimAdvanceWarnings, deliveredWarning, markWarningsDelivered, pauseNotice, pausePlanNow, type PausedFor } from './plan-pause.js';
 import {
   claimPauseNotices, pauseEndedPlans, pausedForOf, planEndedMembers, rowPlanMembers, setPlanPauseForTests,
   writePause, PLAN_PAUSE_DEFAULT, type PausePlanRow,
@@ -163,7 +163,8 @@ describe('who pauses: a member whose end is proven', () => {
     expect(c.paused_due_at).toBe(DUE);
     expect(c.pause_noticed_at).toBeNull();
     expect(pausedForOf(c.paused_for).entries).toEqual([
-      { mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: NOW - H, roles: ['created'], closedPrompt: false },
+      // No warning was delivered for this end, so the entry says so (641c-2b).
+      { mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: NOW - H, roles: ['created'], closedPrompt: false, warned: false },
     ]);
   });
 
@@ -502,6 +503,48 @@ describe("the owner's notice", () => {
     expect(claimPauseNotices(b.db, NOW + 20)).toEqual([]);
   });
 
+  it('one mandate with one end is one notice, as before the grouping by end', () => {
+    const b = box();
+    paused(b, 'a', 'h@x.ch');
+    paused(b, 'c', 'h@x.ch');
+    paused(b, 'd', 'h@x.ch');
+    const notices = claimPauseNotices(b.db, NOW);
+    expect(notices.map((n) => n.title)).toEqual(['⏸ 3 plans are paused']);
+  });
+
+  it('one mandate with two ends is two notices, each with its own date and count, and none is lost', () => {
+    const b = box();
+    const at = (id: string, endsAt: number): void => {
+      plan(b, id, { by: 'h@x.ch' });
+      writePause(b.db, id, [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt, roles: ['created'], closedPrompt: false }], NOW);
+    };
+    at('a', Date.UTC(2026, 9, 31) / 1000);
+    at('c', Date.UTC(2026, 10, 30) / 1000);
+    at('d', Date.UTC(2026, 10, 30) / 1000);
+    const bodies = claimPauseNotices(b.db, NOW).map((n) => n.body).sort();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatch(/^h@x\.ch had access until 2026-10-31\. A plan /);
+    expect(bodies[1]).toMatch(/^h@x\.ch had access until 2026-11-30\. 2 plans /);
+  });
+
+  it('the sentence about a warning follows the entries of the group: all, some or none warned', () => {
+    const b = box();
+    const at = (id: string, email: string, warned: boolean): void => {
+      plan(b, id, { by: email });
+      writePause(b.db, id, [{ mandateId: `g-${email}`, email, reason: 'expired', endsAt: NOW - H, roles: ['created'], closedPrompt: false, warned }], NOW);
+    };
+    at('a1', 'all@x.ch', true);
+    at('a2', 'all@x.ch', true);
+    at('s1', 'some@x.ch', true);
+    at('s2', 'some@x.ch', false);
+    at('n1', 'none@x.ch', false);
+    at('n2', 'none@x.ch', false);
+    const byName = Object.fromEntries(claimPauseNotices(b.db, NOW).map((n) => [n.body.split(' ')[0]!, n.body]));
+    expect(byName['all@x.ch']).not.toContain('advance notice');
+    expect(byName['some@x.ch']!.endsWith(' Not all had advance notice.')).toBe(true);
+    expect(byName['none@x.ch']!.endsWith(' There was no advance notice.')).toBe(true);
+  });
+
   it('says a revoke as a revoke, and one plan in the singular', () => {
     const b = box();
     paused(b, 'p', 'h@x.ch', 'revoked');
@@ -516,34 +559,37 @@ describe("the owner's notice", () => {
   const NO_ADVANCE = 'There was no advance notice.';
 
   it('the four wordings, exactly', () => {
-    expect([1, 3].map((c) => pauseNotice(ended('h@x.ch', 'expired'), c).body)).toEqual([
+    expect([1, 3].map((c) => pauseNotice(ended('h@x.ch', 'expired'), c, 'none').body)).toEqual([
       'h@x.ch had access until 2026-10-31. A plan in which they created or changed something is paused. It runs again only once you take it over, even if the access has since been extended. There was no advance notice.',
       'h@x.ch had access until 2026-10-31. 3 plans in which they created or changed something are paused. The plans run again only once you take them over, even if the access has since been extended. There was no advance notice.',
     ]);
-    expect([1, 3].map((c) => pauseNotice(ended('h@x.ch', 'revoked'), c).body)).toEqual([
+    expect([1, 3].map((c) => pauseNotice(ended('h@x.ch', 'revoked'), c, 'none').body)).toEqual([
       "h@x.ch's access was revoked. A plan in which they created or changed something is paused. It runs again only once you take it over.",
       "h@x.ch's access was revoked. 3 plans in which they created or changed something are paused. The plans run again only once you take them over.",
     ]);
   });
 
-  it('until the advance notice exists, an expiry says there was none, and a revocation does not', () => {
-    // 641c-2b turns the switch on with the advance notice; then the sentence goes.
-    expect(ADVANCE_NOTICE_ON).toBe(false);
+  it('an expiry says whether its plans were warned, per entry; a revocation never does', () => {
+    // The sentence follows the delivered warnings, not a switch (legal, POS-069 Nachtrag 5).
     for (const count of [1, 3]) {
-      expect(pauseNotice(ended('h@x.ch', 'expired'), count).body.endsWith(NO_ADVANCE)).toBe(true);
-      expect(pauseNotice(ended('h@x.ch', 'revoked'), count).body).not.toContain('advance notice');
+      expect(pauseNotice(ended('h@x.ch', 'expired'), count, 'none').body.endsWith(NO_ADVANCE)).toBe(true);
+      expect(pauseNotice(ended('h@x.ch', 'expired'), count, 'all').body.endsWith(EXTENDED)).toBe(true);
+      for (const warned of ['all', 'some', 'none'] as const) {
+        expect(pauseNotice(ended('h@x.ch', 'revoked'), count, warned).body).not.toContain('advance notice');
+      }
     }
+    expect(pauseNotice(ended('h@x.ch', 'expired'), 3, 'some').body.endsWith(' Not all had advance notice.')).toBe(true);
   });
 
   it('a tap on the notice opens the paused plans, for either reason', () => {
     for (const reason of ['expired', 'revoked'] as const) {
-      expect(pauseNotice(ended('h@x.ch', reason), 2).data).toEqual({ pausedPlans: '1' });
+      expect(pauseNotice(ended('h@x.ch', reason), 2, 'none').data).toEqual({ pausedPlans: '1' });
     }
   });
 
   it('goes to the owner\'s devices only: it names a helper and how their access ended', () => {
     for (const reason of ['expired', 'revoked'] as const) {
-      for (const count of [1, 3]) expect(pauseNotice(ended('h@x.ch', reason), count).audience).toBe('owner');
+      for (const count of [1, 3]) expect(pauseNotice(ended('h@x.ch', reason), count, 'none').audience).toBe('owner');
     }
   });
 
@@ -551,7 +597,7 @@ describe("the owner's notice", () => {
     const long = `${'a'.repeat(70)}@example.invalid`;
     for (const reason of ['expired', 'revoked'] as const) {
       for (const count of [1, 12, 1234]) {
-        const body = pauseNotice(ended(long, reason), count).body;
+        const body = pauseNotice(ended(long, reason), count, 'none').body;
         expect(body.length, `${reason} ${String(count)}`).toBeLessThanOrEqual(PAUSE_NOTICE_BODY_MAX);
         // Cut only where the full name does not fit, and then to the bound exactly.
         if (body.startsWith(long)) expect(body).not.toContain('…');
@@ -561,20 +607,270 @@ describe("the owner's notice", () => {
       }
     }
     // The expiry with a long name is the case that is cut.
-    expect(pauseNotice(ended(long, 'expired'), 12).body).toMatch(/^a+… had access until/);
-    // A name that fits is not touched. Until the advance notice exists, its sentence leaves an
-    // expiry of 2–99 plans 24 characters of name: 24 fit, 25 give way.
-    const fits = pauseNotice(ended(`${'b'.repeat(19)}@x.ch`, 'expired'), 12).body;
+    expect(pauseNotice(ended(long, 'expired'), 12, 'none').body).toMatch(/^a+… had access until/);
+    // A name that fits is not touched. The sentence that no warning came leaves an expiry of 2–99
+    // plans 24 characters of name: 24 fit, 25 give way.
+    const fits = pauseNotice(ended(`${'b'.repeat(19)}@x.ch`, 'expired'), 12, 'none').body;
     expect(fits).toContain(`${'b'.repeat(19)}@x.ch had access until`);
     expect(fits).not.toContain('…');
-    expect(pauseNotice(ended(`${'b'.repeat(20)}@x.ch`, 'expired'), 12).body).toContain('…');
+    expect(pauseNotice(ended(`${'b'.repeat(20)}@x.ch`, 'expired'), 12, 'none').body).toContain('…');
+    // A mixed group leaves 25 (ux U-065), and with every plan warned there is no sentence to make room for.
+    expect(pauseNotice(ended(`${'b'.repeat(20)}@x.ch`, 'expired'), 12, 'some').body).not.toContain('…');
+    expect(pauseNotice(ended(`${'b'.repeat(21)}@x.ch`, 'expired'), 12, 'some').body).toContain('…');
+    expect(pauseNotice(ended(`${'b'.repeat(48)}@x.ch`, 'expired'), 12, 'all').body).not.toContain('…');
+    expect(pauseNotice(ended(`${'b'.repeat(49)}@x.ch`, 'expired'), 12, 'all').body).toContain('…');
+  });
+});
+
+describe("the owner's advance warning (641c-2b)", () => {
+  /** A mandate whose end is `endsAt`, as its login wrote it. */
+  const ending = (b: Box, endsAt: number, email = 'h@x.ch'): void => { login(b, email, endsAt, NOW - 2 * H); };
+  const warnedRows = (b: Box): Array<{ trigger_id: string; delivered_at: number | null }> =>
+    b.db.prepare('SELECT trigger_id, delivered_at FROM plan_advance_warnings ORDER BY trigger_id').all() as never;
+  /** A one-off a mandate created, run once at `at`. */
+  const oneOff = (b: Box, id: string, at: string, status?: string): void => {
+    b.history.insertTrigger({
+      id, title: `Plan ${id}`, source: 'manual', effect: 'run_agent', nextRunAt: at,
+      confirmedAt: '2027-01-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: tag('h@x.ch'), createdMandateId: 'g-h@x.ch',
+    });
+    if (status !== undefined) b.db.prepare('UPDATE triggers SET status = ? WHERE id = ?').run(status, id);
+  };
+  const iso = (s: number): string => new Date(s * 1000).toISOString();
+
+  it('goes out once the end is less than a day away, not before, not once it has passed, never for a revoke', () => {
+    const b = box();
+    plan(b, 'p', { by: 'h@x.ch' });
+    ending(b, NOW + ADVANCE_WARNING_S);
+    expect(claimAdvanceWarnings(b.db, NOW - 1)).toEqual([]);
+    expect(claimAdvanceWarnings(b.db, NOW)).toHaveLength(1);
+
+    const passed = box();
+    plan(passed, 'p', { by: 'h@x.ch' });
+    ending(passed, NOW);
+    expect(claimAdvanceWarnings(passed.db, NOW)).toEqual([]);
+
+    const revoked = box();
+    plan(revoked, 'p', { by: 'h@x.ch' });
+    ending(revoked, NOW + H);
+    revoked.ends.revoke('g-h@x.ch', NOW - H);
+    expect(claimAdvanceWarnings(revoked.db, NOW)).toEqual([]);
+  });
+
+  it('the plans there at the first sweep are one warning per mandate and end, with their count, and it goes once', () => {
+    const b = box();
+    plan(b, 'a', { by: 'h@x.ch' });
+    plan(b, 'c', { by: 'h@x.ch' });
+    plan(b, 'o', { by: 'other@x.ch' });
+    ending(b, NOW + H);
+    ending(b, NOW + 2 * H, 'other@x.ch');
+    const first = claimAdvanceWarnings(b.db, NOW);
+    expect(first.map((w) => [w.message.title, w.keys.length]).sort()).toEqual([['A plan will pause soon', 1], ['Plans will pause soon', 2]]);
+    expect(first.find((w) => w.keys.length === 2)!.message.body).toContain('Then 2 plans in which they created');
+    expect(claimAdvanceWarnings(b.db, NOW + 60)).toEqual([]);
+    expect(warnedRows(b).map((r) => r.trigger_id)).toEqual(['a', 'c', 'o']);
+  });
+
+  it('a plan that joins after the warning gets its own, as one more plan; those named before are not named again', () => {
+    const b = box();
+    plan(b, 'a', { by: 'h@x.ch' });
+    ending(b, NOW + H);
+    expect(claimAdvanceWarnings(b.db, NOW)).toHaveLength(1);
+    plan(b, 'late', { by: 'h@x.ch' });
+    const [w, ...rest] = claimAdvanceWarnings(b.db, NOW + 60);
+    expect(rest).toEqual([]);
+    expect(w!.keys.map((k) => k.triggerId)).toEqual(['late']);
+    expect(w!.message.title).toBe('A plan will pause soon');
+    expect(w!.message.body).toContain('Then one more plan in which they created');
+  });
+
+  it('an extension (a later end) warns again once that end is less than a day away', () => {
+    const b = box();
+    plan(b, 'a', { by: 'h@x.ch' });
+    plan(b, 'c', { by: 'h@x.ch' });
+    ending(b, NOW + H);
+    expect(claimAdvanceWarnings(b.db, NOW)).toHaveLength(1);
+    login(b, 'h@x.ch', NOW + 30 * H, NOW);
+    expect(claimAdvanceWarnings(b.db, NOW + 60)).toEqual([]);
+    const again = claimAdvanceWarnings(b.db, NOW + 6 * H);
+    expect(again.map((w) => w.keys.length)).toEqual([2]);
+    // A new end, so not "one more": the earlier warning was of another end.
+    expect(again[0]!.message.body).toContain('Then 2 plans');
+  });
+
+  it('counts the plans the end would pause: through the workflow too, without completed, paused, disabled or unconsented ones, nor a one-off done by then', () => {
+    const b = box();
+    const end = NOW + H;
+    ending(b, end);
+    plan(b, 'cron', { by: 'h@x.ch' });
+    workflow(b, 'wf', { email: 'h@x.ch', grant: 'g-h@x.ch' });
+    plan(b, 'via-wf', { effect: 'run_workflow', workflow: 'wf' });
+    plan(b, 'done', { by: 'h@x.ch' });
+    b.manager.complete('done');
+    plan(b, 'paused', { by: 'h@x.ch' });
+    b.db.prepare('UPDATE triggers SET paused_at = 1 WHERE id = ?').run('paused');
+    plan(b, 'off', { by: 'h@x.ch' });
+    b.db.prepare('UPDATE triggers SET enabled = 0 WHERE id = ?').run('off');
+    plan(b, 'proposal', { by: 'h@x.ch', stamped: false });
+    plan(b, 'failed-cron', { by: 'h@x.ch' });
+    b.db.prepare("UPDATE triggers SET status = 'failed' WHERE id = ?").run('failed-cron');
+    oneOff(b, 'once-before', iso(end - 60));
+    oneOff(b, 'once-after', iso(end + 60));
+    oneOff(b, 'once-failed', iso(end + 60), 'failed');
+    const [w] = claimAdvanceWarnings(b.db, NOW);
+    expect(w!.keys.map((k) => k.triggerId).sort()).toEqual(['cron', 'failed-cron', 'once-after', 'via-wf']);
+    expect(w!.message.body).toContain('Then 4 plans');
+  });
+
+  it('a plan whose workflow cannot be read is skipped with one line on stderr per process, and the others are warned', () => {
+    const b = box();
+    plan(b, 'a', { by: 'h@x.ch' });
+    workflow(b, 'wf', { email: 'h@x.ch', grant: 'g-h@x.ch' });
+    plan(b, 'via-wf', { effect: 'run_workflow', workflow: 'wf' });
+    ending(b, NOW + H);
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const prepare = b.db.prepare.bind(b.db);
+    vi.spyOn(b.db, 'prepare').mockImplementation(((sql: string) => {
+      if (sql.includes('FROM workflows WHERE id')) throw new Error('disk I/O error');
+      return prepare(sql);
+    }) as typeof b.db.prepare);
+    const [w] = claimAdvanceWarnings(b.db, NOW);
+    expect(w!.keys.map((k) => k.triggerId)).toEqual(['a']);
+    claimAdvanceWarnings(b.db, NOW + 60);
+    expect(err.mock.calls.filter(([l]) => String(l).includes('plan via-wf'))).toHaveLength(1);
+  });
+
+  it('the three wordings, exactly, to the owner only, with no tap target', () => {
+    const end = Date.UTC(2026, 10, 12, 9) / 1000;
+    expect([advanceWarning('h@x.ch', end, 3, false), advanceWarning('h@x.ch', end, 1, false), advanceWarning('h@x.ch', end, 1, true)]
+      .map((m) => [m.title, m.body, m.audience, m.data])).toEqual([
+      ['Plans will pause soon', 'h@x.ch has access until 2026-11-12. Then 3 plans in which they created or changed something will pause, even if you extended the access, unless they sign in once before then. Once paused, you can take them over.', 'owner', undefined],
+      ['A plan will pause soon', 'h@x.ch has access until 2026-11-12. Then a plan in which they created or changed something will pause, even if you extended the access, unless they sign in once before then. Once paused, you can take it over.', 'owner', undefined],
+      ['A plan will pause soon', 'h@x.ch has access until 2026-11-12. Then one more plan in which they created or changed something will pause, even if you extended the access, unless they sign in once before then. Once paused, you can take it over.', 'owner', undefined],
+    ]);
+  });
+
+  it('every wording fits a push with a 30-character name and 99 plans, and a longer name gives way to the bound', () => {
+    const end = Date.UTC(2026, 10, 12, 9) / 1000;
+    const name = `${'n'.repeat(25)}@x.ch`;
+    for (const [count, more] of [[99, false], [1, false], [1, true]] as const) {
+      const body = advanceWarning(name, end, count, more).body;
+      expect(body.length, `${String(count)} ${String(more)}`).toBeLessThanOrEqual(PAUSE_NOTICE_BODY_MAX);
+      expect(body.startsWith(name)).toBe(true);
+      const long = advanceWarning(`${'a'.repeat(70)}@example.invalid`, end, count, more).body;
+      expect([long.length, /^a+… has access until/.test(long)]).toEqual([PAUSE_NOTICE_BODY_MAX, true]);
+    }
+  });
+
+  it('a pause says warned only for a plan whose warning of that end was delivered, on every way of pausing', () => {
+    const b = box();
+    for (const id of ['delivered', 'claimed', 'gate']) plan(b, id, { by: 'h@x.ch' });
+    ending(b, NOW + H);
+    const [w] = claimAdvanceWarnings(b.db, NOW);
+    markWarningsDelivered(b.db, w!.keys.filter((k) => k.triggerId !== 'claimed'), NOW + 1);
+    const after = NOW + 2 * H;
+    expect(pausePlanNow(b.db, 'gate', (id) => b.ends.endRow(id), false, after)).toBe(true);
+    sweep(b, after);
+    const warned = (id: string): boolean | undefined => pausedForOf(col(b, id).paused_for).entries[0]?.warned;
+    expect([warned('delivered'), warned('claimed'), warned('gate')]).toEqual([true, false, true]);
+  });
+
+  it('a delivered warning of an earlier end does not make a pause at a later end warned', () => {
+    const b = box();
+    plan(b, 'p', { by: 'h@x.ch' });
+    ending(b, NOW + H);
+    const [w] = claimAdvanceWarnings(b.db, NOW);
+    markWarningsDelivered(b.db, w!.keys, NOW);
+    login(b, 'h@x.ch', NOW + 2 * H, NOW + 1);
+    expect(deliveredWarning(b.db, 'p')('g-h@x.ch', NOW + H)).toBe(true);
+    expect(deliveredWarning(b.db, 'p')('g-h@x.ch', NOW + 2 * H)).toBe(false);
+    sweep(b, NOW + 3 * H);
+    expect(pausedForOf(col(b, 'p').paused_for).entries[0]?.warned).toBe(false);
+  });
+
+  it('marks only the rows it is given, and keeps the first delivery time', () => {
+    const b = box();
+    plan(b, 'a', { by: 'h@x.ch' });
+    plan(b, 'c', { by: 'h@x.ch' });
+    ending(b, NOW + H);
+    const [w] = claimAdvanceWarnings(b.db, NOW);
+    markWarningsDelivered(b.db, w!.keys.filter((k) => k.triggerId === 'a'), NOW + 5);
+    markWarningsDelivered(b.db, w!.keys, NOW + 9);
+    expect(warnedRows(b)).toEqual([{ trigger_id: 'a', delivered_at: NOW + 5 }, { trigger_id: 'c', delivered_at: NOW + 9 }]);
+  });
+
+  it('with the switch off nothing is claimed', () => {
+    const b = box();
+    plan(b, 'p', { by: 'h@x.ch' });
+    ending(b, NOW + H);
+    restore();
+    restore = setPlanPauseForTests(false);
+    expect(claimAdvanceWarnings(b.db, NOW)).toEqual([]);
+    expect(warnedRows(b)).toEqual([]);
+  });
+
+  it("a plan's rows go with the plan, and the owner's erasure empties the table", () => {
+    const b = box();
+    plan(b, 'a', { by: 'h@x.ch' });
+    plan(b, 'c', { by: 'h@x.ch' });
+    ending(b, NOW + H);
+    claimAdvanceWarnings(b.db, NOW);
+    b.db.prepare('DELETE FROM triggers WHERE id = ?').run('a');
+    expect(warnedRows(b).map((r) => r.trigger_id)).toEqual(['c']);
+    b.engineDb.deleteAllData();
+    expect(warnedRows(b)).toEqual([]);
+  });
+});
+
+describe('the advance warning under a forced race', () => {
+  /** Runs `between` after A has read what it would claim and before its claiming transaction. */
+  function raced(a: Box, between: () => void): ReturnType<Box['engineDb']['getDb']> {
+    return new Proxy(a.db, {
+      get(target, key, receiver) {
+        if (key !== 'prepare') return Reflect.get(target, key, receiver) as unknown;
+        return (sql: string) => {
+          if (sql.startsWith('INSERT OR IGNORE INTO plan_advance_warnings')) between();
+          return target.prepare(sql);
+        };
+      },
+    });
+  }
+  function two(): { a: Box; c: Box } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-warn-race-'));
+    const a = box(dir);
+    const c = box(dir);
+    plan(a, 'p', { by: 'h@x.ch' });
+    plan(a, 'q', { by: 'h@x.ch' });
+    login(a, 'h@x.ch', NOW + H, NOW - 2 * H);
+    return { a, c };
+  }
+
+  it('a second process that claims in between leaves the first one warning of nothing: one warning in all', () => {
+    const { a, c } = two();
+    let fromC: ReturnType<typeof claimAdvanceWarnings> = [];
+    const fromA = claimAdvanceWarnings(raced(a, () => { fromC = claimAdvanceWarnings(c.db, NOW); }), NOW);
+    expect(fromC.map((w) => w.keys.length)).toEqual([2]);
+    expect(fromA).toEqual([]);
+  });
+
+  it('a plan paused in between, or an end a login moved in between, is not warned of', () => {
+    const { a, c } = two();
+    const fromA = claimAdvanceWarnings(raced(a, () => {
+      c.db.prepare('UPDATE triggers SET paused_at = 1 WHERE id = ?').run('p');
+    }), NOW);
+    expect(fromA.map((w) => w.keys.map((k) => k.triggerId))).toEqual([['q']]);
+
+    const moved = two();
+    const none = claimAdvanceWarnings(raced(moved.a, () => {
+      login(moved.c, 'h@x.ch', NOW + 40 * H, NOW);
+    }), NOW);
+    expect(none).toEqual([]);
   });
 });
 
 describe('the migration', () => {
   it('v57 adds the four pause columns, NULL on every existing row', () => {
     const b = box();
-    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(62);
+    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(63);
     const cols = (b.db.prepare('PRAGMA table_info(triggers)').all() as Array<{ name: string; dflt_value: unknown }>)
       .filter((c) => c.name.startsWith('pause'));
     // `paused_db_at` is v60's (the takeover's clock), not v57's.

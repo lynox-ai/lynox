@@ -23,7 +23,7 @@ import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
 import { runAsPlanOf, type StampEntry } from './plan-run-context.js';
 import { planOfTrigger, stampFromRow } from './plan-stamp.js';
-import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, claimPauseNotices, pausePlanNow, pausedAtNow, planPauseOn } from './plan-pause.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, claimAdvanceWarnings, claimPauseNotices, markWarningsDelivered, pausePlanNow, pausedAtNow, planPauseOn } from './plan-pause.js';
 import { filingContextFor } from './approval-filing.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -33,7 +33,7 @@ import { readBodyCapped, stripUntrustedSeparators, collapseToSingleLine } from '
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
-import { inquiryOptions } from './notification-router.js';
+import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
@@ -1443,6 +1443,29 @@ export class WorkerLoop {
       } catch (err: unknown) {
         process.stderr.write(
           `[lynox:worker] paused-plan notice failed: ${processErrorText(err)}\n`,
+        );
+      }
+
+      // The owner's advance warning before a mandate's known end (`plan-pause.ts`), in the same
+      // order: only with a channel, claimed before it is sent. Not awaited, so a slow channel does
+      // not hold up the due plans below; the warning counts as given only once a channel accepted
+      // it, and a warning no channel accepted is not sent again. Fenced like the notice.
+      try {
+        if (planPauseOn() && this.notificationRouter.hasChannels()) {
+          const db = this.engine.getEngineDb()?.getDb();
+          if (db !== undefined) {
+            for (const { message, keys } of claimAdvanceWarnings(db)) {
+              void this.notificationRouter.notify(message)
+                .then((report) => { if (summarizeDelivery(report) === 'delivered') markWarningsDelivered(db, keys); })
+                .catch((err: unknown) => {
+                  process.stderr.write(`[lynox:worker] advance warning: sending it or recording it as delivered failed: ${processErrorText(err)}\n`);
+                });
+            }
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:worker] advance warning failed: ${processErrorText(err)}\n`,
         );
       }
 

@@ -1569,6 +1569,19 @@ const MIGRATIONS: string[] = [
   // own migration, so that a database that already ran the one before it gets it too.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (62);
    CREATE INDEX IF NOT EXISTS idx_inbound_events_state_received ON inbound_events(state, received_at);`,
+  // v63: the owner's advance warning before a mandate's known end (`plan-pause.ts`). One row per
+  // plan, mandate and end: a plan the mandate joins after the warning gets its own, and an
+  // extension (a new end) warns again. `claimed_at` is when a process took it, `delivered_at` when
+  // a channel of the owner accepted the warning; only a delivered row makes a pause say "warned".
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (63);
+   CREATE TABLE IF NOT EXISTS plan_advance_warnings (
+     trigger_id TEXT NOT NULL REFERENCES triggers(id) ON DELETE CASCADE,
+     mandate_id TEXT NOT NULL,
+     ends_at INTEGER NOT NULL,
+     claimed_at INTEGER NOT NULL,
+     delivered_at INTEGER,
+     PRIMARY KEY (trigger_id, mandate_id, ends_at)
+   );`,
 ];
 
 export interface EngineDbOptions {

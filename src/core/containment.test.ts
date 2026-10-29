@@ -59,7 +59,7 @@ describe('the contained table (v40)', () => {
     raw.close();
     const e = new EngineDb(path, '');
     try {
-      expect((e.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(62);
+      expect((e.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(63);
       expect(e.exactMarkerSet()).toBe(true);
       const c = new Containment(e.getDb(), null);
       c.contain({ kind: 'bulk_run', id: 'r1' }, { kind: 'api', connectionId: 'shop-acme' });
