@@ -271,8 +271,21 @@ function checkAfter(after: unknown, idField: string, scan: (text: string) => str
   const afterText = JSON.stringify(after);
   if (Buffer.byteLength(afterText, 'utf8') > BULK_MAX_TARGET_BYTES) throw new BulkSourceError('source_list.after is too large.');
   if (scan(afterText) !== null) throw new BulkSourceError('source_list.after holds something that looks like a credential.');
+  if (Object.values(after).some((v) => typeof v === 'string' && PLACEHOLDER_RE.test(v))) throw new BulkSourceError(PLACEHOLDER_REFUSAL);
   return after as ExternalImage;
 }
+
+/**
+ * A placeholder in a list's after-state: `{{ … }}`, `{% … %}`, `${ … }`, `<% … %>` or `{name}`.
+ * Nothing fills it in: the after-state is written as it stands into every target, so a model that
+ * meant "each product's own name" would write the placeholder itself into the whole store. Refused
+ * on the syntax, not on a guess at the intent — a text that really holds such braces is rare in a
+ * field written to every target, and a judge can still write it.
+ */
+const PLACEHOLDER_RE = /\{\{|\{%|\$\{|<%|\{\s*[A-Za-z_][\w.]*\s*\}/;
+export const PLACEHOLDER_REFUSAL =
+  'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. ' +
+  'Give the literal text; for a value that differs per target, use a judge where the form takes one.';
 
 /**
  * The address of one page. Built here, in a fixed order — filters by name, then the form's

@@ -7,6 +7,7 @@ import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { validateToolInput } from '../../core/tool-input-validator.js';
+import { PLACEHOLDER_REFUSAL } from '../../core/bulk-list.js';
 import type { IAgent } from '../../types/index.js';
 
 /**
@@ -95,6 +96,33 @@ describe('a refused bulk_plan in a Shopify form', () => {
     const answer = await plan({ target_host: 'shop.example.com', source_list: { form: 'woocommerce', path: '/nope', after: { name: 'x' } } });
     // Exactly the refusal, nothing appended.
     expect(answer).toBe('Error: source_list.path is not a list of the form woocommerce.');
+  });
+});
+
+describe('a placeholder in a list\'s after', () => {
+  // The after-state is written as it stands into every target: a placeholder would land verbatim.
+  it.each([
+    ['shopify', { title: '{{ truncate(name, 60) }}' }],
+    ['shopify', { seo_title: '{{ truncate(title, 60) | lower }}' }],
+    ['shopify', { seo_description: '{title} | Bergladen' }],
+    ['shopify', { seo_title: 'Buy ${product.title} now' }],
+    ['shopify', { seo_title: '{% if x %}a{% endif %}' }],
+    ['shopify', { seo_title: '<%= title %>' }],
+    ['shopify_media', { alt: '{{ product.title }}' }],
+  ])('in form %s, %j is refused and nothing is recorded', async (form, after) => {
+    const answer = await plan({ source_list: { form, after } });
+    expect(answer.startsWith(`Error: ${PLACEHOLDER_REFUSAL}`), answer).toBe(true);
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+  });
+
+  it('in another form too', async () => {
+    const answer = await plan({ target_host: 'shop.example.com', source_list: { form: 'woocommerce', path: '/wp-json/wc/v3/products', after: { name: '{{name}} – Sale' } } });
+    expect(answer).toBe(`Error: ${PLACEHOLDER_REFUSAL}`);
+  });
+
+  it('a literal text with braces that name nothing, and a judged plan, are recorded', async () => {
+    expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'Sale {50%} – {} – }{' } } })).toMatch(/^List dry run recorded/);
+    expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } })).toMatch(/^List dry run recorded|^Another external dry run/);
   });
 });
 
