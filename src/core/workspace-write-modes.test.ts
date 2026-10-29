@@ -22,7 +22,12 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 import { resetShellIsolationForTest, setShellIsolationForTest, SHARED_GROUP, type ShellIsolation } from './shell-isolation.js';
-import { SIDECAR_DIR_MODE, SIDECAR_FILE_MODE, sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
+import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
+
+// The layout's values as literals, not the module's constants: an expectation that imports the
+// constant moves with it and checks nothing.
+const SIDECAR_FILE_MODE = 0o660;
+const SIDECAR_DIR_MODE = 0o2770;
 import { anchoredWorkspaceWriter } from './bulk-apply.js';
 import { ChangesetManager } from './changeset.js';
 import { persistChatUploadInArea } from './file-area-anchor.js';
