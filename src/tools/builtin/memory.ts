@@ -1,6 +1,7 @@
 import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef } from '../../types/index.js';
 import { ALL_NAMESPACES } from '../../types/index.js';
-import { channels } from '../../core/observability.js';
+import { publishMemoryStore } from '../../core/observability.js';
+import { runOutsideCallSlot } from '../../core/call-connection.js';
 import { DATE_PREFIX_RE } from '../../core/memory-facade.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTION } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
@@ -8,13 +9,27 @@ import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 import { chatThreadOf, privateThreadRefusal } from './private-thread.js';
 import { containedRefusal } from '../../core/containment.js';
-import { ifNonEmptyList, ifPositive, ifTrue, withInstanceWrite, type InstanceTargetPairs } from '../../core/instance-trail.js';
+import { ifChanged, ifNonEmptyList, ifPositive, ifTrue, InstanceWriteUnrecorded, withInstanceWrite, withInstanceWriteAs, type InstanceActor, type InstanceTargetPairs } from '../../core/instance-trail.js';
 
 /** A memory row's target: the namespace when it is one of the fixed ones, and the scope's type
  *  only — a scope's id can be a name (`user:<name>`). */
 function memoryTarget(namespace: unknown, ...scopes: Array<readonly [string, MemoryScopeRef | null | undefined]>): InstanceTargetPairs {
   const ns = typeof namespace === 'string' && (ALL_NAMESPACES as readonly string[]).includes(namespace) ? namespace : 'other';
   return [['ns', ns], ...scopes.map(([name, ref]) => [name, ref?.type] as const)];
+}
+
+/**
+ * Who acts in the derived writes a handler leaves behind (660a-3), read now, while the handler
+ * runs for its call: the subscriber of `memory:store` and a write left running cannot read it
+ * later, the agent may by then run for someone else.
+ */
+function actorOf(agent: IAgent): InstanceActor {
+  return { principal: agent.principal, runId: agent.currentRunId };
+}
+
+/** The act a derived write follows from: its site and row. Absent for the owner, who has none. */
+function trailOf(site: 'memory_store#create' | 'memory_update#fallback' | 'memory_promote#move', correlationId: string | undefined): { site: typeof site; correlationId: string } | undefined {
+  return correlationId === undefined ? undefined : { site, correlationId };
 }
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
@@ -304,12 +319,12 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     return withInstanceWrite(agent, { site: 'memory_store#create', kind: 'create', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['append'] }, async (w) => {
       if (scopeRef) {
         await w.run('append', () => memory.appendScoped(input.namespace, input.content, scopeRef), ifTrue);
-        channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
+        publishMemoryStore({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted, actor: actorOf(agent), trail: trailOf('memory_store#create', w.correlationId) });
         return `Stored in ${input.namespace} (scope: ${input.scope}). Entities and relationships are extracted automatically for future cross-referencing.`;
       }
 
       await w.run('append', () => memory.append(input.namespace, input.content), ifTrue);
-      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
+      publishMemoryStore({ namespace: input.namespace, content: input.content, sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted, actor: actorOf(agent), trail: trailOf('memory_store#create', w.correlationId) });
       return `Stored in ${input.namespace}. Entities and relationships are extracted automatically for future cross-referencing.`;
     });
   },
@@ -528,13 +543,34 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
         // attacker-influenced `new_content` into the KG untainted. The flat-file line is already
         // updated above (it edits content the user can already see); the trust-sensitive KG
         // re-extraction is skipped — the KG keeps its prior extraction until a clean-turn edit.
-        if (agent.toolContext.knowledgeLayer && !deriveTurnUntrusted(agent)) {
+        const kg = agent.toolContext.knowledgeLayer;
+        if (kg && !deriveTurnUntrusted(agent)) {
           const defaultScope: MemoryScopeRef = scopeRef
             ?? agent.activeScopes?.[0]
             ?? { type: 'context', id: '' };
-          void agent.toolContext.knowledgeLayer.updateMemoryText(
-            input.old_content, input.new_content, input.namespace, defaultScope,
-          ).catch(() => {});
+          // Left running, not awaited: it embeds, passes the credit gate and re-extracts by
+          // model, none of which belongs in this call's time or slot. So it is a derived write
+          // with its own row (660a-3), its actor and its log read now, before the call returns,
+          // and outside the call's slot, so a refused row poisons nothing the call answers. A
+          // row that cannot be written keeps it from running; the call's own row stands.
+          const actor = actorOf(agent);
+          const auditLog = agent.toolContext.auditLog;
+          const ref = w.correlationId;
+          void runOutsideCallSlot(async () => withInstanceWriteAs(actor, auditLog, {
+            site: 'derived#memory_update', kind: 'change', store: 'knowledge',
+            target: () => [['from', 'memory_update#exact'], ['ref', ref]], main: ['update'],
+          }, async (dw) => {
+            const r = await dw.run('update', () => (kg.updateMemoryTextReporting
+              ? kg.updateMemoryTextReporting(input.old_content, input.new_content, input.namespace, defaultScope)
+              : kg.updateMemoryText(input.old_content, input.new_content, input.namespace, defaultScope).then(changed => ({ changed, created: undefined }))), ifChanged);
+            dw.counts([
+              ['changed', r.changed ? 1 : 0],
+              ['new_entities', r.created?.entities], ['new_relations', r.created?.relations], ['new_subjects', r.created?.subjects],
+            ]);
+          })).catch((err: unknown) => {
+            // The re-extraction's own failure stays swallowed as before; a refused row is said.
+            if (err instanceof InstanceWriteUnrecorded) process.stderr.write('[lynox:trail] derived knowledge write refused: its row could not be written (memory_update)\n');
+          });
         }
         return scopeRef
           ? `Updated content in ${input.namespace} namespace (scope: ${input.scope}).`
@@ -602,7 +638,7 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
         const defaultScope: MemoryScopeRef = scopeRef
           ?? agent.activeScopes?.[0]
           ?? { type: 'context', id: '' };
-        channels.memoryStore.publish({
+        publishMemoryStore({
           namespace: input.namespace,
           content: input.new_content,
           scopeType: defaultScope.type,
@@ -611,6 +647,7 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
           // Wave 0.6: force-floored — no agent-declared provenance (PRD §2.8).
           // Write-trust derived from the FULL union, not the bare marker (deriveTurnUntrusted).
           sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
+          actor: actorOf(agent), trail: trailOf('memory_update#fallback', w.correlationId),
         });
       }
 
@@ -823,7 +860,7 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
         // when the graph mirror throws.
         movedIds = await w.run('retire', () => knowledge.retireForMove(matchedBody, input.namespace, fromRef), ifNonEmptyList).catch((): string[] => []);
       }
-      channels.memoryStore.publish({
+      publishMemoryStore({
         namespace: input.namespace,
         content: matchedLine,
         scopeType: toRef.type,
@@ -836,6 +873,7 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
         // not the bare marker — a promote on an external-content turn quarantines.
         sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
         ...(movedIds.length > 0 ? { replaces: { ids: movedIds } } : {}),
+        actor: actorOf(agent), trail: trailOf('memory_promote#move', w.correlationId),
       });
 
       return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n"${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}"`;

@@ -48,7 +48,12 @@ export interface IMemory {
   render():                                                     string;
   hasContent():                                                 boolean;
   loadAll():                                                    Promise<void>;
-  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined): Promise<void>;
+  /**
+   * `actor` and `auditLog` (660a-3): who the turn ran for, held as a value at the end of the turn,
+   * and the log each namespace's write is recorded in (`capture#extract`). Without an actor the
+   * namespaces are written as before, unrecorded, with a line on stderr.
+   */
+  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined, actor?: import('../core/instance-trail.js').InstanceActor | undefined, auditLog?: import('../core/audit-log.js').AuditLog | null | undefined): Promise<void>;
   // Scope-aware methods (Phase 1)
   appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef):            Promise<boolean | void>;
   loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef):                            Promise<string | null>;
@@ -205,6 +210,18 @@ export interface ContradictionInfo {
   existingSourceType?: ProvenanceKind | undefined;
 }
 
+/**
+ * What one write created in the knowledge graph, counted where it creates (660a-3, B4′): an
+ * entity row inserted, an edge inserted (a re-asserted edge is none), a subject minted. An alias
+ * folded into an existing subject changes it and is not counted. `entities`/`relations` above
+ * are what the text MENTIONS, found or made; this is what is new.
+ */
+export interface KnowledgeCreatedCounts {
+  entities: number;
+  relations: number;
+  subjects: number;
+}
+
 export interface KnowledgeStoreResult {
   memoryId: string;
   entities: EntityRecord[];
@@ -212,6 +229,7 @@ export interface KnowledgeStoreResult {
   contradictions: ContradictionInfo[];
   stored: boolean;
   deduplicated: boolean;
+  created: KnowledgeCreatedCounts;
 }
 
 export interface KnowledgeRetrievalResult {
@@ -339,6 +357,14 @@ export interface IKnowledgeLayer {
     namespace: MemoryNamespace,
     scope: MemoryScopeRef,
   ): Promise<boolean>;
+  /** {@link updateMemoryText} with what its re-extraction created. Optional on the interface so a
+   *  test double need not wire it; the caller falls back to `updateMemoryText`. */
+  updateMemoryTextReporting?(
+    oldText: string,
+    newText: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+  ): Promise<{ changed: boolean; created: KnowledgeCreatedCounts }>;
 
   gc(options?: { dryRun?: boolean | undefined }): Promise<KnowledgeGcResult>;
   stats(): Promise<KnowledgeGraphStats>;

@@ -32,6 +32,8 @@ export class EntityResolver {
       description?: string | undefined;
       createIfMissing?: boolean | undefined;
       aliases?: readonly string[] | undefined;
+      /** Called once when this call created the entity, not when it found one (a count, 660a-3). */
+      onCreate?: (() => void) | undefined;
     },
   ): Promise<EntityRecord | null> {
     const normalized = name.trim();
@@ -67,6 +69,7 @@ export class EntityResolver {
     // 4. Create new entity if allowed
     if (options?.createIfMissing !== false) {
       const created = await this._createEntity(normalized, entityType, scopes, options?.description);
+      options?.onCreate?.();
       this._registerAliases(created.id, options?.aliases);
       return created;
     }

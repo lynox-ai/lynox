@@ -1673,6 +1673,9 @@ export class Engine {
       this.context?.id ?? '',
       // Read per write, not captured: the store and the flag can change after boot.
       (threadId) => this._threadStore?.getThread(threadId)?.skip_extraction === 1,
+      // The log a mandate's derived entry is recorded in (660a-3); read per write, like the
+      // flag above.
+      () => this._toolContext.auditLog,
     );
 
     // Durable Knowledge Substrate (DK.1): construct the KnowledgeStore + expose it to the

@@ -4521,7 +4521,9 @@ export class LynoxHTTPApi {
                 // dropped from a turn it had already survived. Found by a route test whose
                 // engine stub lacked `getActiveScopes`, which is exactly the shape of the
                 // production failure (a method absent or throwing).
-                // Deferred until the run is accepted (see `deferredIngests`).
+                // Deferred until the run is accepted (see `deferredIngests`). Who uploaded is read
+                // now, with the request.
+                const uploadPrincipal = this._principalOf(req);
                 deferredIngests.push(() => {
                   try {
                     const kl = this.engine?.getKnowledgeLayer();
@@ -4538,6 +4540,8 @@ export class LynoxHTTPApi {
                         // can be flipped while the chunks embed.
                         isPrivate: () => this.engine?.getThreadStore()?.getThread(session.sessionId)?.skip_extraction === 1,
                         cutAtExtraction: extracted.truncated,
+                        // A mandate's upload archives nothing (660a-3).
+                        principal: uploadPrincipal,
                       }).catch(() => { /* best-effort */ });
                     }
                   } catch (ingestErr) {
@@ -5581,7 +5585,10 @@ export class LynoxHTTPApi {
         return;
       }
       const csm = session.getChangesetManager();
-      if (!csm || !csm.hasChanges()) {
+      // Not `hasChanges()`: a file replaced by a link since the review drops out of the changes,
+      // and a review whose every file did so must still be answered, so the rollback can name them.
+      // An answered review is cleaned up and empty, so a second answer is still refused.
+      if (!csm || csm.isEmpty()) {
         errorResponse(res, 400, 'No changeset to review');
         return;
       }
@@ -5603,36 +5610,50 @@ export class LynoxHTTPApi {
       const changes = csm.getChanges();
       let accepted = 0;
       let rolledBack = 0;
+      // Every tracked file by the name the review shows: a file replaced by a link since the review
+      // is no longer among `changes`, but the answer still names it, and the rollback names it back.
+      const absByName = csm.reviewNames();
+      const nameByAbs = new Map([...absByName].map(([name, abs]) => [abs, name]));
+      // The files the rollback left as they are (replaced or linked since, or not writable).
+      let notRestored: string[] = [];
+      const nameOf = (abs: string): string => nameByAbs.get(abs) ?? abs;
+      // Rollback all: a file the review does not show now and the backup could not read is left
+      // out. Nothing was saved for it, so nothing was promised, and the reason the answer gives for
+      // it would be wrong. A file shown once and replaced by a link since cannot be told apart from
+      // it here; a partial answer names what the person chose, so there nothing is left out.
+      const shownNow = new Set(changes.map((c) => c.absolutePath));
+      const named = (left: string[]): string[] => left
+        .filter((abs) => shownNow.has(abs) || csm.hasOriginal(abs))
+        .map(nameOf);
 
       if (action === 'accept') {
         accepted = changes.length;
         csm.acceptAll();
       } else if (action === 'rollback') {
-        rolledBack = changes.length;
-        csm.rollbackAll();
+        notRestored = named(csm.rollbackAll());
+        rolledBack = changes.filter((c) => !notRestored.includes(c.file)).length;
       } else {
         // Partial: validate rolledBackFiles against changeset entries
         const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
         // The paths the review showed, mapped back to the files they name. Not resolved
         // against `process.cwd()`: the review's paths are relative to the workspace.
-        const absByRel = new Map(changes.map(c => [c.file, c.absolutePath]));
         const toRollback: string[] = [];
 
         for (const f of clientFiles) {
           if (typeof f !== 'string') continue;
-          const abs = absByRel.get(f);
-          if (abs !== undefined) toRollback.push(abs);
+          const abs = absByName.get(f);
+          if (abs !== undefined && !toRollback.includes(abs)) toRollback.push(abs);
         }
 
         if (toRollback.length > 0) {
-          csm.rollbackFiles(toRollback);
+          notRestored = csm.rollbackFiles(toRollback).map(nameOf);
         }
-        rolledBack = toRollback.length;
-        accepted = changes.length - rolledBack;
+        rolledBack = toRollback.length - notRestored.length;
+        accepted = changes.filter((c) => !toRollback.includes(c.absolutePath)).length;
       }
 
       csm.cleanup();
-      jsonResponse(res, 200, { ok: true, accepted, rolledBack });
+      jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });
     }, OWN));
 
     // ── Compact (context management) ──
@@ -7055,14 +7076,17 @@ export class LynoxHTTPApi {
       // Bulk runs as the engine runs them right now, and who decides (`core/bulk-switch.ts`):
       // on a managed pool tier the control plane opens them per instance and the owner can only
       // turn them off; elsewhere the config alone decides. `allowed` is whether turning them ON
-      // here would take effect, so the settings page can grey the switch with its reason.
+      // here would take effect, so the settings page can grey the switch; `db` tells its two
+      // reasons apart (no engine database, or a pool tier lynox has not opened them on).
       {
         const { isFeatureEnabled } = await import('../core/features.js');
         const source = bulkRunsSource(tier ?? undefined);
+        const db = engine.getEngineDb() !== null;
         redacted['bulk_runs'] = {
           on: engine.getBulkLedger() !== null,
           source,
-          allowed: engine.getEngineDb() !== null && (source === 'config' || isFeatureEnabled('bulk-runs')),
+          allowed: db && (source === 'config' || isFeatureEnabled('bulk-runs')),
+          db,
           // Whether a bulk run may read a Shopify store: the second half of what a chat opened from
           // a read-only one may promise (`chat-context.ts › storeChangeByBulkRun`).
           shopify: shopifyBulkReadEnabled(),

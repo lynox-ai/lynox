@@ -53,7 +53,7 @@ import { encodeStamp } from './plan-stamp.js';
 import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
-import type { NotificationMessage } from './notification-router.js';
+import type { DeliverySummary, NotificationMessage } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PlannedPipeline, PromptMeta } from '../types/index.js';
 import type { TaskManager } from './task-manager.js';
 import type { Session } from './session.js';
@@ -187,6 +187,9 @@ function makeEngine(opts?: {
     getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
+    // A task's question hands its delivery here, as a workflow question's does: the caller's
+    // record, then the hooks (none on this engine).
+    escalationReporter: vi.fn((caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); }),
     // The real Engine always has this. Every grant here is live: a mandate's run reaches the
     // worker only past the door, and the tests of an ended grant pass their own engine.
     getMandateEnds: vi.fn(() => ({ isLive: () => true })),

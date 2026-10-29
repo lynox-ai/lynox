@@ -90,7 +90,7 @@ export const MANDATE_WITHHELD_TOOLS: Readonly<Record<string, string>> = Object.f
  * The type makes a label that is not listed fail to compile. Every tool with a site is in
  * `MANDATE_INSIDE_WRITERS`, and each of them has at least one site.
  */
-export const INSTANCE_WRITE_SITES = [
+export const TOOL_WRITE_SITES = [
   'remember#create', 'memory_block_edit#change', 'memory_retire#change',
   'memory_store#create', 'memory_delete#delete', 'memory_update#exact', 'memory_update#fallback',
   'memory_promote#move', 'subjects_merge#change',
@@ -104,6 +104,22 @@ export const INSTANCE_WRITE_SITES = [
   'save_workflow#copy', 'save_workflow#session', 'update_workflow_steps#change', 'import_workflow#create',
   'api_setup#refine', 'api_setup#save', 'api_setup#delete',
 ] as const;
+
+/**
+ * The write sites no tool call owns (660a-3), as `'<kind>#<what>'`: entries the engine writes after
+ * or beside a mandate's act, under that mandate, through `withInstanceWriteAs` with the actor
+ * captured as a value. `capture#…` writes at the end of a turn, unasked (`auto=1`); `derived#…`
+ * is what a subscriber or a write left running derives from an act whose own row names it
+ * (`ref=`). Each is the `site` of exactly one such call, held by the same source scan; their
+ * fixtures live with their tests (`instance-trail-derived.test.ts`, `capture-trail.test.ts`), not
+ * with the tool dispatch's.
+ */
+export const DERIVED_WRITE_SITES = [
+  'capture#durable', 'capture#extract', 'derived#memory', 'derived#memory_update',
+] as const;
+
+/** Every write site inside the instance: a tool's, then a derived one's. */
+export const INSTANCE_WRITE_SITES = [...TOOL_WRITE_SITES, ...DERIVED_WRITE_SITES] as const;
 
 export type InstanceWriteSite = typeof INSTANCE_WRITE_SITES[number];
 

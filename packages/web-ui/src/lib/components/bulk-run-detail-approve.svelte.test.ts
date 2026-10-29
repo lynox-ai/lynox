@@ -202,3 +202,49 @@ describe('writing on a halted run', () => {
 		expect(target.textContent).toContain('engine English');
 	});
 });
+
+// An atomic run that rolled back: the page says why in its own words, marks the targets the
+// rollback left, and offers neither writing on nor an undo the engine would refuse.
+describe('an atomic run that rolled back', () => {
+	const aborted = (haltKey: string): BulkRunDetailData => makeRun({
+		phase: 'aborted', atomic: true, haltKey, haltReason: 'engine English', applied: 2, failed: 1, undone: 1, undoable: 1,
+		changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+	});
+	const ROLLED: BulkTarget[] = [
+		{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false, written: true, undone: false },
+		{ seq: 2, key: 'gid://shopify/Product/2', change: 'update', diff: fieldsDiff('C', 'D'), error: null, deselected: false, written: true, undone: true },
+		{ seq: 3, key: 'gid://shopify/Product/3', change: 'update', diff: fieldsDiff('E', 'F'), error: 'write failed', deselected: false, written: false, undone: false },
+	];
+	const marked = (): string[] => [...target.querySelectorAll('[data-testid="bulk-rollback-left"]')]
+		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+
+	it('marks exactly the target the rollback left, with its own sentence and no way on', async () => {
+		run = aborted('atomicRollbackIncomplete');
+		targets = ROLLED.map((x) => ({ ...x }));
+		await render();
+		expect(marked()).toEqual(['gid://shopify/Product/1']);
+		expect(target.textContent).toContain(t('bulk.halt.atomicRollbackIncomplete'));
+		expect(target.textContent).not.toContain('engine English');
+		expect(buttonByText(t('bulk.resume.write'))).toBeUndefined();
+		expect(buttonByText(t('bulk.undo.prepare'))).toBeUndefined();
+	});
+
+	it('loads every target of a run whose rollback left one, so a mark past the first page is seen', async () => {
+		run = { ...aborted('atomicStoppedRollbackIncomplete'), total: 9, changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 } };
+		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false,
+			written: true, undone: i !== 7,
+		}));
+		await render();
+		expect(marked()).toEqual(['gid://shopify/Product/8']);
+	});
+
+	it('marks nothing after a rollback that completed', async () => {
+		run = aborted('atomicTimeRolledBack');
+		targets = ROLLED.map((x) => ({ ...x }));
+		await render();
+		expect(marked()).toEqual([]);
+		expect(target.textContent).toContain(t('bulk.halt.atomicTimeRolledBack'));
+		expect(buttonByText(t('bulk.undo.prepare'))).toBeUndefined();
+	});
+});
