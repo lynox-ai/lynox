@@ -41,6 +41,7 @@ const { bulkFileKey } = await import('./bulk-plan.js');
 const { readFileTool, writeFileTool, editFileTool } = await import('../tools/builtin/fs.js');
 const { isDangerous } = await import('../tools/permission-guard.js');
 const { diffPreviewText } = await import('./agent.js');
+const { batchFilesTool } = await import('../tools/builtin/batch-files.js');
 
 describe('in shell sidecar mode nothing below /workspace is reached by name (D3)', () => {
   let tmp: string;
@@ -95,6 +96,15 @@ describe('in shell sidecar mode nothing below /workspace is reached by name (D3)
     expect(diffPreviewText(`${WORKSPACE_LABEL}/ctx1/b.txt`)).toBe('c\n');
     // A path outside the workspace is still checked against it, by the label's spelling.
     await writeFileTool.handler({ path: join(tmp, 'outside.txt'), content: 'o' }, agent);
+    expect(touched.join(' ; ')).toBe('');
+  });
+
+  it('batch_files in a directory outside the workspace checks it against the label by its spelling', async () => {
+    const outside = join(tmp, 'outside-dir');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'x.txt'), 'old');
+    await batchFilesTool.handler({ pattern: '*.txt', directory: outside, operation: 'transform', find: 'old', replace: 'new' }, agent);
+    expect(readFileSync(join(outside, 'x.txt'), 'utf8')).toBe('new');
     expect(touched.join(' ; ')).toBe('');
   });
 

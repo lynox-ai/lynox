@@ -92,7 +92,7 @@ function landsInWorkspace(path: string, ws: string): boolean {
   let probe = path;
   while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
   if (!existsSync(probe)) return false;
-  const wsReal = existsSync(ws) ? realpathSync(ws) : ws;
+  const wsReal = !namesSidecarLabel(ws) && existsSync(ws) ? realpathSync(ws) : ws;
   const real = realpathSync(probe);
   return isPathWithin(real, ws) || isPathWithin(real, wsReal);
 }
