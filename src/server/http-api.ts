@@ -2347,9 +2347,9 @@ export class LynoxHTTPApi {
     if (shown === null) return null;
     // The run is refused when ANY member ended (the worker's gate), not only the one it acts for.
     // The way out the view names: with a mandate on the workflow's side, a new plan on the same
-    // workflow would still run for that mandate, so the workflow has to go too, whichever side
-    // ended. `workflow_other` when that mandate is still live and another member ended, so the
-    // note does not say the ended person wrote the workflow.
+    // workflow would still run for that mandate. `workflow` when that mandate ended (its workflow
+    // goes too); `workflow_other` when it is still live and another member ended — the note then
+    // leaves the live member's workflow alone and does not say the ended person wrote it.
     const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
     const anyEnded = plan.members.some((m) => principalHasEnded(m, isLive));
     const wf = plan.workflowMember;

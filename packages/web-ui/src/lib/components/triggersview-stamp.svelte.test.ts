@@ -307,6 +307,12 @@ describe('the list of a confirmed plan (B3)', () => {
 		await render();
 		expect(q('[data-trigger-check]')!.className).toContain(hidden);
 	});
+	it('offers no check once a member\'s access ended: the gate refuses the run whatever is listed', async () => {
+		rows = [{ ...CONFIRMED, stamp_listed: { lapsed: false, ended: true, ended_on: 'plan', entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'waits' }] } }];
+		await render();
+		expect(q('[data-stamp-note]')).not.toBeNull();
+		expect(q('[data-trigger-check]')).toBeNull();
+	});
 	it('in the check, says a plan with hidden characters still runs', async () => {
 		rows = [{ ...CONFIRMED, stamp_listed: LISTED }];
 		previewAnswers = [{ ...PREVIEW, subject: { ...SUBJECT, description: 'Mail every customer\u200B the totals' } }];

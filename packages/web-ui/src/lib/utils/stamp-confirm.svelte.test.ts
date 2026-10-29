@@ -97,6 +97,8 @@ describe('what the preview shows', () => {
 		// A workflow or watch run never hands its title to the model, and the block does not show it.
 		expect(hiddenIn(preview(wf, { effect: 'run_workflow', pipeline_id: 'wf-1', title: `T${ZW}` }))).toBeNull();
 		expect(hiddenIn(preview({}, { source: 'watch', title: `T${ZW}`, watch: JSON.stringify({ url: 'https://a.example/p' }) }))).toBeNull();
+		// The run writes the stored URL into the model's prompt, though the block shows it parsed.
+		expect(hiddenIn(preview({}, { source: 'watch', watch: JSON.stringify({ url: `https://a.example/p${String.fromCodePoint(0xE0041)}` }) }))).toBe('plan');
 		// The selector is shown, and checked.
 		expect(hiddenIn(preview({}, { source: 'watch', watch: JSON.stringify({ url: 'https://a.example/p', selector: `#a${ZW}` }) }))).toBe('plan');
 		// A control character inside a value, which the raw JSON would hide behind an escape.

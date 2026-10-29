@@ -9765,8 +9765,7 @@ describe('LynoxHTTPApi', () => {
           expect(triggers[0]!['stamp_listed']).toMatchObject({ ended: true, ended_on: 'workflow' });
         });
         // The schedule's mandate ended, the workflow's is live: a new plan on that workflow would run
-        // for the workflow's mandate, so the way out still removes the workflow, and the note says it
-        // is someone else's.
+        // for the workflow's mandate, so the note says the workflow is someone else's.
         ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
         await withEngine({ getTaskManager: () => ({ listTriggers: () => [idaPlan] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
           const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;

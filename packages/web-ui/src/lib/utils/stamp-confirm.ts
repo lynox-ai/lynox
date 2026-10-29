@@ -157,13 +157,17 @@ function paramsHide(raw: string | null): boolean {
 	}
 }
 
-function selectorOf(watch: string | null): string | null {
-	if (watch === null) return null;
+/**
+ * The watch's selector, which the block shows, and its URL as stored: the block shows the URL
+ * parsed (percent-encoded, clamped), but the run writes the stored one into the model's prompt.
+ */
+function watchTexts(watch: string | null): string[] {
+	if (watch === null) return [];
 	try {
-		const s = (JSON.parse(watch) as { selector?: unknown }).selector;
-		return typeof s === 'string' ? s : null;
+		const c = JSON.parse(watch) as { selector?: unknown; url?: unknown };
+		return [c.selector, c.url].filter((x): x is string => typeof x === 'string');
 	} catch {
-		return null;
+		return [];
 	}
 }
 
@@ -179,7 +183,7 @@ export function hiddenIn(p: StampPreview): 'plan' | 'workflow' | null {
 	const as = shownAs(p);
 	if (as === 'workflow' && hides(p.workflow?.name ?? s.pipeline_id)) return 'workflow';
 	const ofKind = as === 'workflow' ? paramsHide(s.pipeline_params)
-		: as === 'watch' ? hides(selectorOf(s.watch))
+		: as === 'watch' ? watchTexts(s.watch).some(hides)
 		: as === 'instruction' ? hides(s.title) || hides(s.description)
 		: false;
 	const always = [s.schedule_cron, s.model_tier, p.by, ...p.connections.flatMap((c) => [c.provider, c.account])];

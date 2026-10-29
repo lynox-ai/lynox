@@ -168,7 +168,9 @@
 	// so the preview is not asked for on every refresh (ux U-058, ii-c-min).
 	let checking = $state<Record<string, boolean>>({});
 	function offersCheck(trigger: Trigger): boolean {
-		return ownerStamps(trigger) && !held(trigger) && !!trigger.confirmed_at && usesConnections(trigger);
+		// Not once a member's access ended: the gate refuses the run whatever is listed, so allowing a
+		// connection there changes nothing, and the ended note already names the way out.
+		return ownerStamps(trigger) && !held(trigger) && !!trigger.confirmed_at && usesConnections(trigger) && trigger.stamp_listed?.ended !== true;
 	}
 	// The note under a list that no longer holds, or that has a new connection, sends the owner to
 	// "Check connections": then the button stays visible, like Take over, not only on hover.
