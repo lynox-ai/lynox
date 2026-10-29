@@ -288,11 +288,13 @@ function checkAfter(after: unknown, idField: string, scan: (text: string) => str
 const PLACEHOLDER_RE = /\{\{|\{%|\$\{|<%|%%[\p{L}\p{N}_]+%%|\{\s*\$?[\p{L}\p{N}_][\p{L}\p{N}_. -]*\}/u;
 export const PLACEHOLDER_REFUSAL =
   'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. ' +
-  'Give the literal text; for a value that differs per target, use a judge where the form takes one.';
+  'Give the literal text; for a value that differs per target, use a judge where the form takes one. ' +
+  'If the user wants such braces as literal text, tell them in one sentence that a bulk run cannot write them as a fixed text.';
 /** Form shopify_media takes no judge: there is no way to a per-image text, and saying so saves the retry. */
 export const PLACEHOLDER_REFUSAL_MEDIA =
   'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. ' +
-  'Form shopify_media writes one alt text into every image and takes no judge: give that one text, without such braces.';
+  'Form shopify_media writes one alt text into every image and takes no judge: give that one text, without such braces. ' +
+  'If the user wanted a different alt text per image, or braces as literal text, tell them in one sentence that this run cannot do that.';
 
 /**
  * The address of one page. Built here, in a fixed order — filters by name, then the form's

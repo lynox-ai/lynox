@@ -21,8 +21,8 @@ const IMAGE_RULES = 'Form shopify_media plans the images of the products of targ
 
 // The placeholder refusals word for word: they are prompt surface, and the measured switch to a
 // judge (tests/online/bulk-plan-shopify-form-eval.test.ts, case s3) rests on this wording.
-const PLACEHOLDER_REFUSAL = 'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. Give the literal text; for a value that differs per target, use a judge where the form takes one.';
-const PLACEHOLDER_REFUSAL_MEDIA = 'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. Form shopify_media writes one alt text into every image and takes no judge: give that one text, without such braces.';
+const PLACEHOLDER_REFUSAL = 'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. Give the literal text; for a value that differs per target, use a judge where the form takes one. If the user wants such braces as literal text, tell them in one sentence that a bulk run cannot write them as a fixed text.';
+const PLACEHOLDER_REFUSAL_MEDIA = 'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. Form shopify_media writes one alt text into every image and takes no judge: give that one text, without such braces. If the user wanted a different alt text per image, or braces as literal text, tell them in one sentence that this run cannot do that.';
 
 let dir: string;
 let engineDb: EngineDb;
