@@ -107,6 +107,8 @@ const { SubjectStore } = await import('./subject-store.js');
 const { RunHistory } = await import('./run-history.js');
 const { TaskManager } = await import('./task-manager.js');
 const { ApiStore } = await import('./api-store.js');
+const { ConnectionStore } = await import('./connection-store.js');
+const { GrantLedger } = await import('./grant-ledger.js');
 const { setTenantWorkspace, clearTenantWorkspace, _resetCache: resetWorkspaceCache } = await import('./workspace.js');
 const { closeWorkspaceBase } = await import('./workspace-rel.js');
 const { toPortableWorkflow, buildFence, LYNOX_WORKFLOW_INFO_STRING } = await import('./workflow-portable.js');
@@ -331,13 +333,29 @@ const PROFILE: ApiProfile = {
   endpoints: [{ method: 'POST', path: '/search', description: 'Search items' }],
   guidelines: ['Always POST'], avoid: ['No GET for mutations'],
 };
-/** An API store with flat-JSON files under the data dir, seeded with the mandate's own profile. */
+/** An API store with flat-JSON files under the data dir, seeded with the mandate's own profile.
+ *  Without engine.db a profile has no opaque id, so its rows name the kind only, never the slug. */
 function apiStore(seed: ApiProfile | null): InstanceType<typeof ApiStore> {
   const store = new ApiStore();
   if (seed !== null) store.register({ ...seed, created_by: TAG });
   return store;
 }
-const API_READS = ['get', 'storedProfile', 'knownProfiles', 'saveRefusal', 'deleteRefusal', 'unreadableSourceOf', 'unreadableClearedByHand',
+/** A profile under a slug that names a client: the slug must never reach a row (660a-1c S-2). */
+const MUELLER: ApiProfile = { ...PROFILE, id: 'mueller-crm', name: 'Mueller CRM' };
+const APF_TARGET = /^api_profiles profile=apf_[0-9a-f]{16}$/;
+/** An API store on engine.db, as the engine wires it, seeded with the mandate's own profile. */
+function apiStoreOnDb(seed: ApiProfile | null): { store: InstanceType<typeof ApiStore>; engine: InstanceType<typeof EngineDb> } {
+  const engine = new EngineDb(join(tmp('lynox-iw-apidb-'), 'engine.db'), '');
+  closers.push(() => engine.close());
+  const store = new ApiStore();
+  store.setConnectionStore(new ConnectionStore(engine));
+  if (seed !== null) {
+    const saved = store.save({ ...seed, created_by: TAG });
+    if (!saved.ok) throw new Error(saved.reason);
+  }
+  return { store, engine };
+}
+const API_READS = ['get', 'storedProfile', 'knownProfiles', 'saveRefusal', 'deleteRefusal', 'unreadableSourceOf', 'unreadableClearedByHand', 'trailIdOf', 'newTrailId',
   'getProfiles', 'getAll', 'list', 'heldBackProfiles', 'hostOwners', 'profileForHost', 'isHeldBack', 'waitingConnections', 'heldBack'] as const;
 
 // ── the fixtures: one per site and branch ───────────────────────────────────
@@ -626,9 +644,9 @@ const FIXTURES: Fixture[] = [
     build: () => { _resetPipelineStore(); return { ctx: { runHistory: { obj: workflowHistory(), reads: [] } }, spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore() }; } },
 
   // api_setup
-  { site: 'api_setup#refine', branch: 'refine', row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'refine', id: 'test-api', refine: { addNotes: ['x'] } },
+  { site: 'api_setup#refine', branch: 'refine', row: { verb: 'change', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'refine', id: 'test-api', refine: { addNotes: ['x'] } },
     build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(PROFILE), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) }; } },
-  { site: 'api_setup#save', branch: 'update that empties token slots', row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+  { site: 'api_setup#save', branch: 'update that empties token slots', row: { verb: 'change', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
     build: () => {
       setDataDir(tmp('lynox-iw-api-'));
       // Stored as oauth2: its access and refresh slots were minted for the token endpoint, which
@@ -641,7 +659,7 @@ const FIXTURES: Fixture[] = [
       };
     } },
   // The vault keeps the value through the delete: nothing emptied, nothing saved, no change proven.
-  { site: 'api_setup#save', branch: 'token slots that cannot be emptied', wrote: null, row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+  { site: 'api_setup#save', branch: 'token slots that cannot be emptied', wrote: null, row: { verb: 'change', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
     build: () => {
       setDataDir(tmp('lynox-iw-api-'));
       const stored: ApiProfile = { ...PROFILE, auth: { type: 'oauth2', oauth: { token_url: 'https://api.openai.com/oauth/token', authorize_url: 'https://api.openai.com/oauth/authorize', client_id_key: 'TEST_CID', client_secret_key: 'TEST_CSECRET' } } } as ApiProfile;
@@ -653,7 +671,7 @@ const FIXTURES: Fixture[] = [
       };
     } },
   // A vault with no delete: nothing can be emptied, so nothing is proven, and the call refuses.
-  { site: 'api_setup#save', branch: 'a vault without delete', wrote: null, row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+  { site: 'api_setup#save', branch: 'a vault without delete', wrote: null, row: { verb: 'change', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
     build: () => {
       setDataDir(tmp('lynox-iw-api-'));
       const stored: ApiProfile = { ...PROFILE, auth: { type: 'oauth2', oauth: { token_url: 'https://api.openai.com/oauth/token', authorize_url: 'https://api.openai.com/oauth/authorize', client_id_key: 'TEST_CID', client_secret_key: 'TEST_CSECRET' } } } as ApiProfile;
@@ -664,7 +682,7 @@ const FIXTURES: Fixture[] = [
         promptUser: async () => 'Allow', spy: 'ctx.apiStore.saveRefusal', cleanup: () => setDataDir(null),
       };
     } },
-  { site: 'api_setup#save', branch: 'empties token slots, then the save is refused', wrote: 'part', row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+  { site: 'api_setup#save', branch: 'empties token slots, then the save is refused', wrote: 'part', row: { verb: 'change', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
     build: () => {
       setDataDir(tmp('lynox-iw-api-'));
       const stored: ApiProfile = { ...PROFILE, auth: { type: 'oauth2', oauth: { token_url: 'https://api.openai.com/oauth/token', authorize_url: 'https://api.openai.com/oauth/authorize', client_id_key: 'TEST_CID', client_secret_key: 'TEST_CSECRET' } } } as ApiProfile;
@@ -676,10 +694,31 @@ const FIXTURES: Fixture[] = [
         promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
       };
     } },
-  { site: 'api_setup#save', branch: 'create, nothing to empty', row: { verb: 'create', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'create', profile: PROFILE },
+  { site: 'api_setup#save', branch: 'create, nothing to empty', row: { verb: 'create', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'create', profile: PROFILE },
     build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(null), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) }; } },
-  { site: 'api_setup#delete', branch: 'delete', row: { verb: 'delete', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'delete', id: 'test-api' },
+  { site: 'api_setup#delete', branch: 'delete', row: { verb: 'delete', target: 'api_profiles' }, tool: apiSetupTool as ToolEntry, input: { action: 'delete', id: 'test-api' },
     build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(PROFILE), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'Allow', spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) }; } },
+  // On engine.db, as in production: the row names the profile by its opaque id, never by the slug.
+  { site: 'api_setup#refine', branch: 'refine on engine.db', row: { verb: 'change', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'refine', id: 'mueller-crm', refine: { addNotes: ['x'] } },
+    build: () => {
+      setDataDir(tmp('lynox-iw-api-'));
+      const { store } = apiStoreOnDb(MUELLER);
+      return { ctx: { apiStore: { obj: store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, target: `api_profiles profile=${store.trailIdOf('mueller-crm')!}`, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) };
+    } },
+  { site: 'api_setup#save', branch: 'create on engine.db', row: { verb: 'create', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'create', profile: MUELLER },
+    build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStoreOnDb(null).store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) }; } },
+  { site: 'api_setup#save', branch: 'update on engine.db', row: { verb: 'change', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: { ...MUELLER, description: 'Changed.' } },
+    build: () => {
+      setDataDir(tmp('lynox-iw-api-'));
+      const { store } = apiStoreOnDb(MUELLER);
+      return { ctx: { apiStore: { obj: store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, target: `api_profiles profile=${store.trailIdOf('mueller-crm')!}`, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) };
+    } },
+  { site: 'api_setup#delete', branch: 'delete on engine.db', row: { verb: 'delete', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'delete', id: 'mueller-crm' },
+    build: () => {
+      setDataDir(tmp('lynox-iw-api-'));
+      const { store } = apiStoreOnDb(MUELLER);
+      return { ctx: { apiStore: { obj: store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'Allow', target: `api_profiles profile=${store.trailIdOf('mueller-crm')!}`, spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) };
+    } },
 ];
 
 // ── the checks ─────────────────────────────────────────────────────────────────────────────────
@@ -942,5 +981,106 @@ describe('a memory row names a namespace only from the fixed list', () => {
       (memoryStoreTool as ToolEntry).handler({ namespace: 'Mueller GmbH', content: 'x' }, agent));
     const rows = trail.db.prepare(`SELECT target FROM audit_log WHERE action LIKE 'instance:memory_store#create:%'`).all() as Array<{ target: string }>;
     expect(rows.map(r => r.target)).toEqual(['memory ns=other', 'memory wrote=all ns=other']);
+  });
+});
+
+// 660a-1c S-2: a mandate's row names an API profile by an opaque id the engine makes, never by the
+// slug the model chose. The id the row names is the one the profile carries in engine.db.
+describe('a mandate\'s row names an API profile by its opaque id', () => {
+  const attemptTarget = (trail: { db: Database.Database }, site: string): string =>
+    String((trail.db.prepare('SELECT target FROM audit_log WHERE action LIKE ? AND phase = ? ORDER BY id').get(`instance:${site}:%`, 'attempt') as { target: string }).target);
+  const rawRow = (engine: InstanceType<typeof EngineDb>, id: string): { trail_id: string | null; config_json: string } =>
+    engine.getDb().prepare('SELECT trail_id, config_json FROM connections WHERE id = ?').get(id) as { trail_id: string | null; config_json: string };
+  const createFixture = (profile: Record<string, unknown>, onDb: () => { store: InstanceType<typeof ApiStore> }): Fixture => ({
+    site: 'api_setup#save', branch: 'create', row: { verb: 'create', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'create', profile },
+    build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: onDb().store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) }; },
+  });
+
+  it('a create names the id the new profile then carries, and the slug in no row', async () => {
+    let made: ReturnType<typeof apiStoreOnDb> | undefined;
+    const { result, trail } = await drive(createFixture(MUELLER as unknown as Record<string, unknown>, () => (made = apiStoreOnDb(null))), false);
+    expect(result.is_error, JSON.stringify(result.content)).not.toBe(true);
+    const carried = made!.store.trailIdOf('mueller-crm');
+    expect(carried).toMatch(/^apf_[0-9a-f]{16}$/);
+    expect(attemptTarget(trail, 'api_setup#save')).toBe(`api_profiles profile=${carried!}`);
+    const targets = (trail.db.prepare('SELECT target FROM audit_log').all() as Array<{ target: string }>).map((r) => r.target);
+    expect(targets.length).toBeGreaterThan(0);
+    expect(targets.filter((t) => t.includes('mueller')), 'a row that names the slug').toEqual([]);
+  });
+
+  it('with the grant ledger, as the engine wires it: the create that mints names the id it stores', async () => {
+    let made: ReturnType<typeof apiStoreOnDb> | undefined;
+    const { result, trail } = await drive(createFixture(MUELLER as unknown as Record<string, unknown>, () => {
+      made = apiStoreOnDb(null);
+      made.store.setGrantLedger(new GrantLedger(made.engine.getDb()));
+      return made;
+    }), false);
+    expect(result.is_error, JSON.stringify(result.content)).not.toBe(true);
+    expect(made!.store.get('mueller-crm')?.oauth_grant?.grant_id, 'precondition: the save minted').toBeDefined();
+    expect(attemptTarget(trail, 'api_setup#save')).toBe(`api_profiles profile=${made!.store.trailIdOf('mueller-crm')!}`);
+  });
+
+  it('an update of a row without an id names the id the row then carries', async () => {
+    let made: ReturnType<typeof apiStoreOnDb> | undefined;
+    const f: Fixture = {
+      site: 'api_setup#save', branch: 'update', row: { verb: 'change', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: { ...MUELLER, description: 'Changed.' } },
+      build: () => {
+        setDataDir(tmp('lynox-iw-api-'));
+        made = apiStoreOnDb(MUELLER);
+        // As an older binary leaves a row after a pin back.
+        made.engine.getDb().exec("UPDATE connections SET trail_id = NULL WHERE id = 'mueller-crm'");
+        expect(rawRow(made.engine, 'mueller-crm').trail_id, 'precondition: the row has no id').toBeNull();
+        return { ctx: { apiStore: { obj: made.store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) };
+      },
+    };
+    const { result, trail } = await drive(f, false);
+    expect(result.is_error, JSON.stringify(result.content)).not.toBe(true);
+    const carried = made!.store.trailIdOf('mueller-crm');
+    expect(carried).toMatch(/^apf_[0-9a-f]{16}$/);
+    expect(attemptTarget(trail, 'api_setup#save')).toBe(`api_profiles profile=${carried!}`);
+  });
+
+  it('a refine of a row without an id names the id the row then carries', async () => {
+    let made: ReturnType<typeof apiStoreOnDb> | undefined;
+    const f: Fixture = {
+      site: 'api_setup#refine', branch: 'refine', row: { verb: 'change', target: APF_TARGET }, tool: apiSetupTool as ToolEntry, input: { action: 'refine', id: 'mueller-crm', refine: { addNotes: ['x'] } },
+      build: () => {
+        setDataDir(tmp('lynox-iw-api-'));
+        made = apiStoreOnDb(MUELLER);
+        made.engine.getDb().exec("UPDATE connections SET trail_id = NULL WHERE id = 'mueller-crm'");
+        expect(rawRow(made.engine, 'mueller-crm').trail_id, 'precondition: the row has no id').toBeNull();
+        return { ctx: { apiStore: { obj: made.store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) };
+      },
+    };
+    const { result, trail } = await drive(f, false);
+    expect(result.is_error, JSON.stringify(result.content)).not.toBe(true);
+    const carried = made!.store.trailIdOf('mueller-crm');
+    expect(carried).toMatch(/^apf_[0-9a-f]{16}$/);
+    expect(attemptTarget(trail, 'api_setup#refine')).toBe(`api_profiles profile=${carried!}`);
+  });
+
+  it('an id the model puts in the profile is neither named nor stored', async () => {
+    const chosen = 'apf_00000000000000ff';
+    let made: ReturnType<typeof apiStoreOnDb> | undefined;
+    const { result, trail } = await drive(createFixture({ ...MUELLER, trail_id: chosen }, () => (made = apiStoreOnDb(null))), false);
+    expect(result.is_error, `precondition: the save went through; ${JSON.stringify(result.content)}`).not.toBe(true);
+    const row = rawRow(made!.engine, 'mueller-crm');
+    expect(row.trail_id).toMatch(/^apf_[0-9a-f]{16}$/);
+    expect(row.trail_id).not.toBe(chosen);
+    expect(attemptTarget(trail, 'api_setup#save')).toBe(`api_profiles profile=${row.trail_id!}`);
+    expect(JSON.parse(row.config_json), 'the profile in config_json carries no id').not.toHaveProperty('trail_id');
+  });
+
+  it('a row the store could not read keeps its id, and the save names that one', async () => {
+    let made: ReturnType<typeof apiStoreOnDb> | undefined;
+    const { result, trail } = await drive(createFixture(MUELLER as unknown as Record<string, unknown>, () => {
+      made = apiStoreOnDb(null);
+      // A row from before, whose config this store did not load: it looks like a create.
+      made.engine.getDb().prepare("INSERT INTO connections (id, kind, name, config_json, trail_id) VALUES ('mueller-crm', 'api', 'Mueller CRM', 'not-json', 'apf_00000000000000aa')").run();
+      return made;
+    }), false);
+    expect(result.is_error, `precondition: the save went through; ${JSON.stringify(result.content)}`).not.toBe(true);
+    expect(attemptTarget(trail, 'api_setup#save')).toBe('api_profiles profile=apf_00000000000000aa');
+    expect(rawRow(made!.engine, 'mueller-crm').trail_id).toBe('apf_00000000000000aa');
   });
 });
