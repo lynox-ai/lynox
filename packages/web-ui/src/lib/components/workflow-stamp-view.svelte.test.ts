@@ -259,12 +259,13 @@ describe('what the refuter of the first version found', () => {
 
 	it('a helper refused with workflow_awaits_stamp sees the refusal, not a view asking them to confirm', async () => {
 		await open('mandate', WF, {
-			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1', error: 'waits for the owner' } }],
+			// The contract's refusal carries no text: what the helper reads is the view's own line.
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
 		});
 		await click(byText('Planen'));
 		await click(byText('Bestätigen & planen'));
 		expect(q('stamp-dialog')).toBeNull();
-		expect(target.textContent).toContain('waits for the owner');
+		expect(target.textContent).toContain('wenn die Inhaberin oder der Inhaber die Schritte bestätigt hat');
 		expect(calls.some((c) => c.path.endsWith('/stamp-preview'))).toBe(false);
 	});
 
@@ -283,4 +284,21 @@ describe('what the refuter of the first version found', () => {
 		expect(q('stamp-step')?.textContent).toContain('evil<U+202E>elpmaxe');
 		expect(q('stamp-step')?.textContent).not.toContain('\u202E');
 	});
+});
+
+describe('what the refuter of the fixes found', () => {
+	it('a reload that fails after the stamp does not bring the dialog back on the old workflow', async () => {
+		await open('owner', WF, {
+			'GET /workflows/library': [{ status: 200, body: { workflows: [WF], viewer: 'owner' } }, { status: 500, body: {} }],
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 200, body: {} }],
+		});
+		await click(byText('Planen'));
+		await click(byText('Bestätigen & planen'));
+		await click(q('stamp-confirm'));
+		expect(byText('Bestätigen & planen')).toBeNull();
+		expect(target.textContent).toContain('Öffne „Planen“ noch einmal');
+	});
+
 });

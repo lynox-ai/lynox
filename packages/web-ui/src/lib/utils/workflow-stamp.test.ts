@@ -90,6 +90,9 @@ describe('visible — what changes how text reads is printed, not applied', () =
     expect(visible('https://evil\u202Eelpmaxe.com/')).toBe('https://evil<U+202E>elpmaxe.com/');
     expect(visible('a\u2066b\u200Bc\uFEFF')).toBe('a<U+2066>b<U+200B>c<U+FEFF>');
     expect(visible('plain text — ok')).toBe('plain text — ok');
+    // Tag characters: invisible on screen, read by a model.
+    expect(visible('send it\u{E0049}\u{E0067}')).toBe('send it<U+E0049><U+E0067>');
+    expect(visible('Grüße 😀')).toBe('Grüße 😀');
   });
 
   it('applies to the recorded call and the step heading', () => {

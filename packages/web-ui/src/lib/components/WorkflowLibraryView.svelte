@@ -84,7 +84,8 @@
 		expandedCards = next;
 	}
 
-	async function loadWorkflows(): Promise<void> {
+	/** Loads the list; true only when the list on screen is the one just fetched. */
+	async function loadWorkflows(): Promise<boolean> {
 		loading = true;
 		error = '';
 		try {
@@ -94,10 +95,13 @@
 			workflows = data.workflows;
 			grantEnabled = data.grantEnabled === true;
 			viewer = typeof data.viewer === 'string' ? data.viewer : undefined;
+			loading = false;
+			return true;
 		} catch {
 			error = t('common.load_failed');
 		}
 		loading = false;
+		return false;
 	}
 
 	// "💬 Bearbeiten" (§4.6): editing is chat-with-context, not a bespoke step
@@ -288,7 +292,12 @@
 				const msg = (await res.json().catch(() => null)) as { error?: string } | null;
 				// Only the owner stamps; a helper refused the same way is shown the refusal, not a view
 				// whose line asks them to confirm what they cannot.
-				if (viewer === 'owner' && awaitsStampRefusal(res.status, msg, wf.id)) {
+				if (awaitsStampRefusal(res.status, msg, wf.id) && viewer !== 'owner') {
+					// The contract's refusal carries no text of its own.
+					error = t('workflow_library.stamp.awaits_owner');
+					return;
+				}
+				if (awaitsStampRefusal(res.status, msg, wf.id)) {
 					// The way out of this refusal is the stamp itself: the steps open in place of the
 					// dialog, and the dialog comes back with what was typed once they are confirmed.
 					scheduleModalWf = null;
@@ -393,17 +402,24 @@
 			const resume = stampResumesSchedule;
 			closeStamp();
 			notice = t('workflow_library.stamp.stamped');
-			await loadWorkflows();
+			const listed = await loadWorkflows();
+			// No other view can open meanwhile: while the list reloads, its cards (and their buttons)
+			// are not rendered.
+			if (!resume) return;
 			// The dialog comes back on the workflow as it is NOW, not the one the list held before
 			// the detour: its contract, asking steps and parameters are what the schedule consents
 			// to. Typed values carry over where the parameter still exists, and a grant preview taken
 			// before the stamp is dropped — it was computed against the old workflow.
-			const fresh = resume ? workflows.find((w) => w.id === resume.id) : undefined;
-			if (fresh) {
-				paramValues = Object.fromEntries((fresh.parameters ?? []).map((p) => [p.name, paramValues[p.name] ?? '']));
-				grantPreview = null;
-				scheduleModalWf = fresh;
+			// Without a fresh list (reload failed) or without the workflow in it, there is nothing
+			// current to reopen the dialog on — the old object is exactly what must not come back.
+			const fresh = listed ? workflows.find((w) => w.id === resume.id) : undefined;
+			if (!fresh) {
+				notice = t('workflow_library.stamp.reopen_schedule');
+				return;
 			}
+			paramValues = Object.fromEntries((fresh.parameters ?? []).map((p) => [p.name, paramValues[p.name] ?? '']));
+			grantPreview = null;
+			scheduleModalWf = fresh;
 		} catch {
 			if (opening === stampOpening) error = t('common.save_failed');
 		} finally {
