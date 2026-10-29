@@ -103,6 +103,12 @@ describe('the docs section the link leads to', () => {
 		return DOCS.slice(start, end);
 	};
 
+	it('has the heading the link\'s anchor is made from, once', () => {
+		expect(DOCS).toContain('\n## Workspace admin approval\n');
+		// A second heading of that name would move the anchor to `-1`.
+		expect(DOCS.split(/^#+ Workspace admin approval$/m).length - 1).toBe(1);
+	});
+
 	it('names the client id an admin searches for', () => {
 		expect(section()).toContain('`554097075249-lcpcoqjhjef3aum3olhffshtvr0k94k5.apps.googleusercontent.com`');
 	});
