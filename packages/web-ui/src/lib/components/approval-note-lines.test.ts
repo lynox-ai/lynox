@@ -176,6 +176,8 @@ describe('a note about a mail that was not sent offers to write it again in a ch
 	it('the list is the engine\'s, so the note never offers what the chat would not load', () => {
 		const list = /export const APPROVAL_REWRITABLE_OUTCOMES: readonly ApprovalOutcome\[\] = \[([^\]]*)\]/.exec(CORE_VIEW);
 		expect(list, 'the engine\'s list is not where it was').not.toBeNull();
+		// A commented-out entry would still match below.
+		expect(list![1]).not.toMatch(/\/\/|\/\*/);
 		const engine = [...list![1]!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
 		expect(engine).toEqual(REWRITABLE);
 		expect([...APPROVAL_REWRITABLE_OUTCOMES]).toEqual(REWRITABLE);

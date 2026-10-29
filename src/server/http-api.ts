@@ -59,7 +59,7 @@ import { readEnvAlias } from '../core/env.js';
 import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js';
 import { eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
-import { resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
+import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
 import { bulkRunsSource } from '../core/bulk-switch.js';
 import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
 import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
@@ -4279,7 +4279,9 @@ export class LynoxHTTPApi {
           // draft's text, which keeps its lines and has a sentinel line escaped
           // instead — and the id fields are internally-generated (single-tenant). Keep in sync with the
           // web-ui stripLoadedContext() matcher (packages/web-ui now-marker.ts).
-          if (preamble) contextPreamble = closeLoadedContext(preamble);
+          // An approval draft that does not load is said to be missing, never passed over in silence.
+          const loaded = preamble ?? (ref.kind === 'approval' ? APPROVAL_DRAFT_UNAVAILABLE : null);
+          if (loaded) contextPreamble = closeLoadedContext(loaded);
         }
       }
       // Defense-in-depth: the client sanitises chat-over-bespoke framings, but

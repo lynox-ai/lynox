@@ -607,6 +607,17 @@ function approvalLoadable(
   return checksumMatches(entry.id) ? { as: 'not_sent', reason } : null;
 }
 
+/**
+ * What a chat opened on an approval entry reads when its draft does not load: the entry was sent,
+ * closed, purged or changed since, the queue is off, or this session may not load it — the same
+ * words for each, so it tells a session nothing about an entry it may not see. Without it the
+ * chat's first line ("write this email again") would reach the model with no draft to go by.
+ */
+export const APPROVAL_DRAFT_UNAVAILABLE =
+  '[Loaded draft — not available]\n' +
+  'The draft from the approval queue that this chat was opened on cannot be loaded here. ' +
+  'Tell the user it is not available. Do not write the email from memory or look for it elsewhere; ask the user what they want to send.';
+
 /** Recipients as one line, at most {@link MAX_RECIPIENTS} of them, and how many were left out:
  *  that count is the engine's statement, so it goes into the framing, not beside the addresses. */
 function addressLine(list: ReadonlyArray<StoredAddress>): { line: string; left: number } {
@@ -813,7 +824,7 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
       ? `This draft was not sent from the approval queue. It may have been sent from a chat since it was moved — before sending, ask the user whether it already went out. `
       : `This draft was approved, and the approval queue did not send it (reason in the first line); it will not send it later either. ` +
         `It may have been sent another way since — before sending, ask the user whether it already went out. ` +
-        `Sent unchanged, it may fail for the same reason: tell the user the reason and ask what to change. `) +
+        `Depending on the reason, sending it unchanged may fail again: tell the user the reason and ask what to change. `) +
     (leftCounts.length > 0 ? `Not every recipient is shown: ask the user how to handle the recipients not shown. ` : '') +
     (body.cut ? `Its message is cut here: ask the user before sending a shortened version. ` : '') +
     send +

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, type FileApprovalInput, type MailReplyPayload, type MailSendPayload } from './approval-store.js';
 import { closeLoadedContext, resolveChatContext, stripLoadedContext, type ChatApprovalReader } from './chat-context.js';
-import type { ApprovalScope } from './approval-view.js';
+import { APPROVAL_OUTCOMES, APPROVAL_REWRITABLE_OUTCOMES, type ApprovalScope } from './approval-view.js';
 import { channels } from './observability.js';
 import { containsUntrustedMarker } from './data-boundary.js';
 
@@ -393,13 +393,24 @@ describe('the approval chat context for an approved email that was not sent', ()
     const said = outside(out!);
     expect(said).toContain('This draft was approved, and the approval queue did not send it (reason in the first line); it will not send it later either.');
     expect(said).toContain('before sending, ask the user whether it already went out.');
-    expect(said).toContain('tell the user the reason and ask what to change.');
+    expect(said).toContain('Depending on the reason, sending it unchanged may fail again: tell the user the reason and ask what to change.');
     expect(said).not.toContain('since it was moved');
     expect(said).toContain('call mail_send from account "acc-1" with to, cc and bcc as in the draft unless the user changes them.');
   });
 
-  it.each(['account_not_configured', 'receive_only', 'account_changed', 'mandate_ended', 'invalid_recipients', 'rate_limit',
-    'cancelled', 'mail_unavailable', 'sending_address_unavailable', 'deadline_before_send', 'trail_unavailable', 'executor_error'])(
+  // The list is pinned here: a reason joins it only with a change to this test, where it has to be
+  // shown to come before the send began.
+  const PRE_SEND = ['account_not_configured', 'receive_only', 'account_changed', 'mandate_ended', 'invalid_recipients', 'rate_limit',
+    'cancelled', 'mail_unavailable', 'sending_address_unavailable', 'deadline_before_send', 'trail_unavailable', 'executor_error'];
+
+  it('the reasons that load are exactly the pinned ones; every other reason the page knows loads nothing', () => {
+    expect([...APPROVAL_REWRITABLE_OUTCOMES]).toEqual(PRE_SEND);
+    for (const reason of APPROVAL_OUTCOMES) {
+      expect(load(failed(file(), { reason }), OWNER) !== null, reason).toBe(PRE_SEND.includes(reason));
+    }
+  });
+
+  it.each(PRE_SEND)(
     'loads one that failed with %s, a reason given before the send began',
     (reason) => {
       expect(load(failed(file(), { reason }), OWNER)).toContain(`· reason: ${reason} ·`);
