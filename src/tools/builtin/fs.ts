@@ -8,6 +8,7 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { processUmask, toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
+import { sidecarWriteModes } from '../../core/workspace-write-modes.js';
 import {
   FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, openWrite, readFdCapped, WorkspaceAccessError, type WorkspaceAnchor,
 } from '../../core/workspace-fd.js';
@@ -235,8 +236,13 @@ export function anchoredError(shown: string, err: unknown): Error {
 export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonly rel: string; readonly shown: string }, data: string | Uint8Array, create: boolean): void {
   let fd: number;
   try {
-    const umask = create ? processUmask() : 0;
-    ({ fd } = openWrite(target.anchor, target.rel, create ? { createMode: 0o666 & ~umask, dirMode: 0o777 & ~umask } : {}));
+    // In sidecar mode the shell's pool must read and write what is created here: the modes and
+    // group of the layout document, not the umask (`workspace-write-modes.ts`).
+    const sidecar = create ? sidecarWriteModes() : null;
+    const umask = create && sidecar === null ? processUmask() : 0;
+    ({ fd } = openWrite(target.anchor, target.rel, !create ? {}
+      : sidecar !== null ? { createMode: sidecar.fileMode, dirMode: sidecar.dirMode, group: sidecar.group }
+      : { createMode: 0o666 & ~umask, dirMode: 0o777 & ~umask }));
   } catch (err) {
     throw anchoredError(target.shown, err);
   }

@@ -24,6 +24,10 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       : value;
   }
+  // In sidecar mode the engine gives what it creates the shell's group; no test runner is in it,
+  // so the call goes on with the process's own group (an O_PATH fd still fails, as it would).
+  const fchown = wrapped['fchownSync'] as (fd: number, uid: number, gid: number) => void;
+  wrapped['fchownSync'] = (fd: number, uid: number, _gid: number) => fchown(fd, uid, process.getgid!());
   return { ...wrapped, default: wrapped };
 });
 

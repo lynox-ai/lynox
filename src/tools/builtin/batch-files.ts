@@ -3,6 +3,7 @@ import { join, dirname, basename, resolve, posix } from 'node:path';
 import type { ToolEntry, IAgent, ChangesetWriter } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
+import { sidecarWriteModes } from '../../core/workspace-write-modes.js';
 import { FILE_TOOL_READ_CAP_BYTES, listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 import { anchoredError, artifactsRoot, isInArtifactsRoot, oversizeWayOut, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
 import { getWorkspaceRoot, namesSidecarLabel } from '../../core/workspace-root.js';
@@ -220,7 +221,8 @@ function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: stri
         return `destination ${input.destination} is outside the workspace; batch_files moves files within the workspace only.`;
       }
       try {
-        if (dest.rel !== '') mkdirAt(anchor, dest.rel, 0o777 & ~processUmask());
+        const sidecar = sidecarWriteModes();
+        if (dest.rel !== '') mkdirAt(anchor, dest.rel, sidecar?.dirMode ?? 0o777 & ~processUmask(), sidecar?.group);
       } catch (err: unknown) {
         return `Error creating ${dest.shown}: ${anchoredError(dest.shown, err).message}`;
       }
