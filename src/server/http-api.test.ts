@@ -19102,7 +19102,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         const shown = await preview.json() as { expect: string; connections: unknown[]; subject: Record<string, unknown>; by: unknown; workflow: unknown };
         expect(shown.connections).toEqual([{ id: 'crm-api', profile: 'CRM', provider: 'api.crm.example', account: 'eva@crm' }]);
         // What the digest holds, shown field for field (the mandate ids as whom it acts for).
-        expect(shown.subject).toEqual({ id: 'task-1', effect: 'run_agent', title: 'Report', description: 'Weekly', schedule_cron: null, watch: null, pipeline_id: null, pipeline_params: null, model_tier: null, wf: null });
+        expect(shown.subject).toEqual({ id: 'task-1', effect: 'run_agent', source: null, title: 'Report', description: 'Weekly', schedule_cron: null, watch: null, pipeline_id: null, pipeline_params: null, model_tier: null, wf: null });
         expect([shown.by, shown.workflow]).toEqual(['eva@kanzlei.example', null]);
         // Names only: the grant and the mandate's id stay on the engine.
         expect(JSON.stringify(shown)).not.toContain('grant-secret-1');

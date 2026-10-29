@@ -75,7 +75,7 @@ describe('stampSubject', () => {
     // The preview shows the owner this subject, so a field the digest held but the subject did
     // not would be stamped unseen.
     for (const change of [
-      { id: 't2' }, { effect: 'run_workflow' }, { title: 'Report, then mail everyone' }, { description: 'Daily' },
+      { id: 't2' }, { effect: 'run_workflow' }, { source: 'watch' }, { title: 'Report, then mail everyone' }, { description: 'Daily' },
       { schedule_cron: '* * * * *' }, { watch_config: '{}' }, { pipeline_id: 'wf-2' }, { pipeline_params: '{"a":1}' },
       { model_tier: 'deep' }, { created_mandate_id: 'M-OTHER' }, { mandate_editor_id: 'M-OTHER' },
       { watch_config: JSON.stringify({ url: 'https://a.example', interval_minutes: 5 }) },

@@ -62,6 +62,8 @@ export function stampProfiles(entries: readonly StampEntry[], apiStore: Pick<Api
 export interface StampSubject {
   readonly id: string;
   readonly effect: string | null;
+  /** Which executor a `run_agent` takes: `watch` runs on a page, not on the text. */
+  readonly source: string | null;
   readonly title: string;
   readonly description: string | null;
   readonly schedule_cron: string | null;
@@ -76,13 +78,13 @@ export interface StampSubject {
 
 /** The fields of {@link StampSubject} in the order the digest reads them. */
 const SUBJECT_ORDER = [
-  'id', 'effect', 'title', 'description', 'schedule_cron', 'watch', 'pipeline_id', 'pipeline_params',
+  'id', 'effect', 'source', 'title', 'description', 'schedule_cron', 'watch', 'pipeline_id', 'pipeline_params',
   'model_tier', 'created_mandate_id', 'mandate_editor_id', 'wf',
 ] as const satisfies readonly (keyof StampSubject)[];
 
 export function stampSubject(trigger: TriggerRecord, wf: string | null): StampSubject {
   return {
-    id: trigger.id, effect: trigger.effect ?? null, title: trigger.title, description: trigger.description ?? null,
+    id: trigger.id, effect: trigger.effect ?? null, source: trigger.source ?? null, title: trigger.title, description: trigger.description ?? null,
     schedule_cron: trigger.schedule_cron ?? null, watch: watchWithoutBaseline(trigger.watch_config),
     pipeline_id: trigger.pipeline_id ?? null, pipeline_params: trigger.pipeline_params ?? null,
     model_tier: trigger.model_tier ?? null, created_mandate_id: trigger.created_mandate_id ?? null,

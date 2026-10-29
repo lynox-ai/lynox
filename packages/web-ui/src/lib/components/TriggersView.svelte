@@ -7,9 +7,11 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
-	import { awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
+	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
+	import { awaitsOwnerStamp, stampable, usesConnections } from '../utils/stamp-confirm.js';
+	import StampConfirm from './StampConfirm.svelte';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -36,6 +38,10 @@
 		// Set when a person confirmed the trigger; absent = not confirmed. An agent
 		// run without it is skipped by the scheduler — see `awaitsConfirmation`.
 		confirmed_at?: string;
+		// Who set the trigger up and who last changed it (tags: `owner`, `mandate:<address>`). A
+		// schedule a mandate set up or last changed waits for the owner's stamp (`awaitsOwnerStamp`).
+		created_by?: string;
+		edited_by?: string;
 		// Whether the last escalation of this trigger (a failed scheduled run, a watch
 		// finding) reached anyone — see `escalationNotice`.
 		last_escalation_at?: string;
@@ -143,28 +149,28 @@
 		}
 	}
 
-	// Confirm = a person allows this trigger to run unattended. Stamps
-	// `confirmed_at` through `POST /api/tasks/:id/confirm`; the trigger keeps its
-	// schedule and becomes due in place — nothing else about it changes.
+	// Confirm = the owner allows this trigger to run unattended. `StampConfirm` shows the schedule
+	// from the stamp preview and confirms with its `expect` (641 4b (ii-a)): the owner stamps what
+	// they read, and the connections listed beside it. The message says what confirming did and
+	// nothing about when the run comes — that is the scheduler's answer, on its own surface.
 	//
-	// The message says what confirming did and nothing about when the run comes.
-	// Two earlier versions tried to say that — "runs on its schedule", then a date
-	// line — and both spoke for reasons the consent does not settle: a paused row,
-	// a completed one, a row with no next run at all. When the run happens is the
-	// scheduler's answer to give, on its own surface.
-	async function confirmTrigger(trigger: Trigger): Promise<void> {
-		if (busy[trigger.id]) return;
-		busy[trigger.id] = true;
-		try {
-			const res = await fetch(`${getApiBase()}/tasks/${trigger.id}/confirm`, { method: 'POST' });
-			if (!res.ok) throw new Error();
-			addToast(t('triggers.confirmed'), 'success');
-			await loadTriggers();
-		} catch {
-			addToast(t('triggers.confirm_failed'), 'error');
-		} finally {
-			busy[trigger.id] = false;
-		}
+	// Waiting for a stamp: an unconfirmed agent run, or anything a mandate set up or last changed.
+	function held(trigger: Trigger): boolean {
+		return awaitsConfirmation(trigger) || awaitsOwnerStamp(trigger);
+	}
+	// The stamp is the owner's (the route is ownerOnly); a helper sees what waits, not a button.
+	function ownerStamps(trigger: Trigger): boolean {
+		return viewer === 'owner' && stampable(trigger);
+	}
+	// "Check connections": a confirmed schedule whose run can use a connection, opened on demand,
+	// so the preview is not asked for on every refresh (ux U-058, ii-c-min).
+	let checking = $state<Record<string, boolean>>({});
+	function offersCheck(trigger: Trigger): boolean {
+		return ownerStamps(trigger) && !held(trigger) && !!trigger.confirmed_at && usesConnections(trigger);
+	}
+	async function stamped(trigger: Trigger): Promise<void> {
+		checking[trigger.id] = false;
+		await loadTriggers(true);
 	}
 
 	// Run now = dispatch this trigger off-schedule. The engine runs it through
@@ -530,7 +536,7 @@
 		<p class="text-text-subtle text-sm mb-4">{t('common.loading')}</p>
 	{:else if triggers.length > 0}
 		<div class="space-y-2 mb-6">
-			{#each triggers as trigger}
+			{#each triggers as trigger (trigger.id)}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 group {trigger.enabled === 0 ? 'opacity-60' : ''}">
 					<!-- Stacked below `sm`: the controls are a fixed ~290px and the card is ~310px
 					     wide on a phone, so side by side left the text column a few pixels and the
@@ -547,8 +553,8 @@
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
 								{/if}
-								{#if awaitsConfirmation(trigger)}
-									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.awaiting_confirmation')}</span>
+								{#if held(trigger)}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-held>{t('triggers.awaiting_confirmation')}</span>
 								{/if}
 								{#if trigger.running === true}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-accent/10 px-1.5 py-0.5 text-accent-text" data-trigger-running>{t('triggers.running')}</span>
@@ -568,7 +574,7 @@
 								     past — it is not a next run, so it is not labelled as one. It is said
 								     in the consent block below instead, where it is the thing a person
 								     needs: what confirming starts, and when. -->
-								{#if trigger.next_run_at && trigger.enabled !== 0 && !awaitsConfirmation(trigger) && trigger.paused !== true}
+								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true}
 									<span>{t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
 								{#if trigger.last_run_at}
@@ -579,7 +585,7 @@
 									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
 								{/if}
 							</div>
-							{#if awaitsConfirmation(trigger)}
+							{#if held(trigger)}
 								<!-- Confirming allows this to run without the owner present, so what the run
 								     would carry out is shown beside the button — a button next to nothing but an
 								     agent-written heading is a rubber stamp. `displaySafe` removes what could
@@ -591,13 +597,17 @@
 								     never outlive the thing it consents to. -->
 								<div class="mt-2 space-y-1.5" data-trigger-consent>
 									<p class="text-xs text-warning">{t('triggers.awaiting_hint')}</p>
-									{#if showsInstruction(trigger)}
+									{#if ownerStamps(trigger)}
+										<!-- The owner's block reads the schedule from the stamp preview, so what
+										     is shown is what the stamp holds (`StampConfirm`). -->
+										<StampConfirm id={trigger.id} mode="held" cronText={cronToHuman} onstamped={() => void stamped(trigger)} />
+									{:else if showsInstruction(trigger)}
 										<div class="text-xs text-text-muted" data-consent-instruction>
 											<span class="font-medium" data-consent-label="instruction">{t('triggers.instruction')}:</span>
 											<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{displaySafe(instructionOf(trigger))}</p>
 										</div>
 									{/if}
-									{#if showsWatchTarget(trigger)}
+									{#if !ownerStamps(trigger) && showsWatchTarget(trigger)}
 										<div class="text-xs text-text-muted" data-consent-watch>
 											<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>
 											<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}</p>
@@ -606,10 +616,10 @@
 											{/if}
 										</div>
 									{/if}
-									{#if offersConfirmation(trigger)}
-										<button onclick={() => confirmTrigger(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.confirm_label')} title={t('triggers.confirm_label')} class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-xs text-accent-text hover:bg-accent/15 disabled:opacity-40">{t('triggers.confirm')}</button>
-									{/if}
 								</div>
+							{/if}
+							{#if checking[trigger.id] && offersCheck(trigger)}
+								<StampConfirm id={trigger.id} mode="check" cronText={cronToHuman} onstamped={() => void stamped(trigger)} onclose={() => (checking[trigger.id] = false)} />
 							{/if}
 						</div>
 						<!-- The controls hide until hover where hovering exists, and stay visible
@@ -624,12 +634,15 @@
 							{/if}
 							<!-- Not offered while waiting: the engine refuses the run after the request
 							     has already been answered as started. -->
-							{#if !awaitsConfirmation(trigger)}
+							{#if !held(trigger)}
 								<button onclick={() => runNow(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
 							<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
 							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
 							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
+							{#if offersCheck(trigger)}
+								<button onclick={() => (checking[trigger.id] = !checking[trigger.id])} aria-expanded={checking[trigger.id] === true} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity" data-trigger-check>{t('stamp.check')}</button>
+							{/if}
 							<!-- Take over: always visible, like Stop — a paused plan does nothing until it is.
 							     Last, so it ends the row where the hidden controls hold their place (ux). -->
 							{#if offersTakeover(trigger)}
