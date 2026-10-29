@@ -271,6 +271,18 @@ describe('the list of a confirmed plan (B3)', () => {
 		expect(q('[data-stamp-note]')!.textContent).toContain('gilt nicht mehr');
 		expect(q('[data-trigger-check]')).not.toBeNull();
 	});
+	it('keeps "Check connections" in sight when its note asks for it, and hidden until hover when not', async () => {
+		// The row's other controls show on hover only; a note that names a button the owner cannot see leads nowhere.
+		const hidden = '[@media(hover:hover)]:opacity-0';
+		rows = [{ ...CONFIRMED, stamp_listed: LISTED }];
+		await render();
+		expect(q('[data-trigger-check]')!.className).not.toContain(hidden);
+		unmount(component!);
+		component = undefined;
+		rows = [{ ...CONFIRMED, stamp_listed: { lapsed: false, ended: false, entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'listed' }] } }];
+		await render();
+		expect(q('[data-trigger-check]')!.className).toContain(hidden);
+	});
 	it('names "Take over" at an ended plan only when it is paused', async () => {
 		const ENDED = { lapsed: false, ended: true, ended_on: 'plan', entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'waits' }] };
 		rows = [{ ...CONFIRMED, stamp_listed: ENDED, paused: true }];

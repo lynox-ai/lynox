@@ -170,6 +170,12 @@
 	function offersCheck(trigger: Trigger): boolean {
 		return ownerStamps(trigger) && !held(trigger) && !!trigger.confirmed_at && usesConnections(trigger);
 	}
+	// The note under a list that no longer holds, or that has a new connection, sends the owner to
+	// "Check connections": then the button stays visible, like Take over, not only on hover.
+	function checkAsked(trigger: Trigger): boolean {
+		const l = trigger.stamp_listed;
+		return offersCheck(trigger) && !!l && !l.ended && listedNote(l, pausedOpen(trigger)) !== null;
+	}
 	async function stamped(trigger: Trigger): Promise<void> {
 		checking[trigger.id] = false;
 		await loadTriggers(true);
@@ -658,7 +664,7 @@
 							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
 							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
 							{#if offersCheck(trigger)}
-								<button onclick={() => (checking[trigger.id] = !checking[trigger.id])} aria-expanded={checking[trigger.id] === true} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity" data-trigger-check>{t('stamp.check')}</button>
+								<button onclick={() => (checking[trigger.id] = !checking[trigger.id])} aria-expanded={checking[trigger.id] === true} class="{checkAsked(trigger) ? '' : '[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100'} rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity" data-trigger-check>{t('stamp.check')}</button>
 							{/if}
 							<!-- Take over: always visible, like Stop — a paused plan does nothing until it is.
 							     Last, so it ends the row where the hidden controls hold their place (ux). -->
