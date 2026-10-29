@@ -50,7 +50,7 @@ describe('what the bulk-runs switch shows', () => {
 		// With the database there, a pool tier's lock is lynox's.
 		expect(bulkRunsView(bulk({ on: false, source: 'control-plane', allowed: false, db: true, shopify: false }, 'managed'))?.lockedKey)
 			.toBe('bulk.setting.locked_pool');
-		// A self-hosted lock with `db` reported true would be the tier's too; the engine never sends it.
+		// The engine's own self-hosted lock, with `db` sent: the database again.
 		expect(bulkRunsView(bulk({ on: false, source: 'config', allowed: false, db: false, shopify: false }))?.lockedKey)
 			.toBe('bulk.setting.locked_db');
 	});
