@@ -89,6 +89,17 @@ export interface InstanceWriteReport {
    * the shape of an engine-chosen id.
    */
   created(step: string, id: string): void;
+  /**
+   * Counts the block read from its results (`new_entities=3`), for the outcome row only: after
+   * the attempt's pairs, whether or not a step proved a change. Numbers and fixed words, never a
+   * name or a text: the row is read by whoever reads the trail.
+   */
+  counts(pairs: InstanceTargetPairs): void;
+  /**
+   * The correlation id of this block's attempt row, so a write that follows from it (a derived
+   * entry, see {@link withInstanceWriteAs}) can name it. `undefined` for the owner: no row.
+   */
+  readonly correlationId: string | undefined;
 }
 
 // The decoders a site may read a step with. Each says `changed` only for a value that proves a
@@ -109,6 +120,10 @@ export const ifEmptiedAny: InstanceDecoder<unknown> = (v) => (listLength(field(v
 export const ifNonEmptyList: InstanceDecoder<unknown> = (v) => (listLength(v) > 0 ? 'changed' : 'unknown');
 /** A delete that names what it removed: one id removed is a write. */
 export const ifRemovedIds: InstanceDecoder<unknown> = (v) => (listLength(field(v, 'ids')) > 0 ? 'changed' : 'unknown');
+/** A write that reports `changed`: true is a row changed, false proves nothing. */
+export const ifChanged: InstanceDecoder<unknown> = (v) => (field(v, 'changed') === true ? 'changed' : 'unknown');
+/** A knowledge-layer store: `stored` is a row written, a dedup that raised the tier included. */
+export const ifStored: InstanceDecoder<unknown> = (v) => (field(v, 'stored') === true ? 'changed' : 'unknown');
 
 function field(v: unknown, name: string): unknown {
   return (v as Record<string, unknown> | null | undefined)?.[name];
@@ -145,6 +160,13 @@ export interface InstanceWriter {
   readonly currentRunId?: string | undefined;
   readonly toolContext?: { readonly auditLog?: AuditLog | null | undefined } | undefined;
 }
+
+/**
+ * Who acts in a write that runs apart from the call that caused it — a derived entry written by a
+ * subscriber, an extraction at the end of a turn — captured as a value where the cause still
+ * knows it. Never read again when the write starts: by then the agent may run for someone else.
+ */
+export type InstanceActor = { readonly principal: RequestPrincipal; readonly runId: string | undefined };
 
 /** Thrown in place of the block when its row could not be written: the block did not run. */
 export class InstanceWriteUnrecorded extends Error {
@@ -201,6 +223,20 @@ function refuse(): never {
   throw new InstanceWriteUnrecorded();
 }
 
+/** Writes the attempt row on `trail`. Throws, whatever the cause, when it was not written. */
+function openOn(trail: InstanceTrail, spec: InstanceWriteSpec): Opened {
+  const kind = typeof spec.kind === 'function' ? spec.kind() : spec.kind;
+  const pairs = spec.target?.() ?? [];
+  const opened: Opened = {
+    trail, action: instanceAction(spec.site, kind),
+    target: fitInstanceTarget(spec.store, pairs), correlationId: newCorrelationId(),
+    store: spec.store, pairs, main: spec.main ?? [],
+  };
+  if (trail.log === null) throw new InstanceWriteUnrecorded();
+  trail.log.record({ principal: trail.principal, correlationId: opened.correlationId, action: opened.action, target: opened.target, phase: 'attempt', runId: trail.runId });
+  return opened;
+}
+
 /** Writes the attempt row, or refuses. `null` for the owner: no row. */
 function open(by: InstanceWriter, spec: InstanceWriteSpec): Opened | null {
   if (isInstanceRefused()) throw new InstanceWriteUnrecorded();
@@ -208,21 +244,28 @@ function open(by: InstanceWriter, spec: InstanceWriteSpec): Opened | null {
   const trail = fromSlot ?? (inCallSlot() ? instanceTrailFor(by, '(slot without a trail)') : instanceTrailFor(by, '(outside a call)'));
   if (trail === 'exempt') return null;
   if (trail === 'unnamed') refuse();
-  let opened: Opened;
   try {
-    const kind = typeof spec.kind === 'function' ? spec.kind() : spec.kind;
-    const pairs = spec.target?.() ?? [];
-    opened = {
-      trail, action: instanceAction(spec.site, kind),
-      target: fitInstanceTarget(spec.store, pairs), correlationId: newCorrelationId(),
-      store: spec.store, pairs, main: spec.main ?? [],
-    };
-    if (trail.log === null) refuse();
-    trail.log.record({ principal: trail.principal, correlationId: opened.correlationId, action: opened.action, target: opened.target, phase: 'attempt', runId: trail.runId });
+    return openOn(trail, spec);
   } catch {
     refuse();
   }
-  return opened;
+}
+
+/**
+ * The attempt row of a write whose actor is a value (`withInstanceWriteAs`). It neither reads nor
+ * sets the refusal of the call slot it may run in: that slot belongs to the call that caused the
+ * write, which has answered already or answers for itself, and a refusal here is this write's
+ * own. `null` for the owner: no row.
+ */
+function openAs(actor: InstanceActor, auditLog: AuditLog | null | undefined, spec: InstanceWriteSpec): Opened | null {
+  const trail = instanceTrailFor({ principal: actor.principal, currentRunId: actor.runId, toolContext: { auditLog } }, '(derived)');
+  if (trail === 'exempt') return null;
+  if (trail === 'unnamed') throw new InstanceWriteUnrecorded();
+  try {
+    return openOn(trail, spec);
+  } catch {
+    throw new InstanceWriteUnrecorded();
+  }
 }
 
 /** The steps a block noted. What a step notes after the outcome row is read by nothing. */
@@ -230,7 +273,11 @@ class Report implements InstanceWriteReport {
   readonly notes: StepNote[] = [];
   /** What the set-hitting calls hit, each read from a call whose own value proved a change. */
   readonly affected: InstanceAffected[] = [];
+  /** What the block counted from its results, for the outcome row. */
+  readonly counted: Array<readonly [string, string | number | undefined]> = [];
   createdBy: { readonly step: string; readonly id: string } | undefined;
+
+  constructor(readonly correlationId: string | undefined) {}
 
   run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>, affected?: InstanceAffectedOf<Awaited<V>>): V {
     let v: V;
@@ -264,6 +311,10 @@ class Report implements InstanceWriteReport {
 
   created(step: string, id: string): void {
     if (ENGINE_ID.test(id)) this.createdBy = { step, id };
+  }
+
+  counts(pairs: InstanceTargetPairs): void {
+    this.counted.push(...pairs);
   }
 
   /** The created id, when the step that created it noted a change. */
@@ -316,7 +367,7 @@ function close(o: Opened, phase: 'returned' | 'failed', report: Report): void {
   try {
     const wrote = instanceWrote(report.notes, o.main, phase === 'failed');
     const hit = wrote === null ? [] : affectedPairs(report.affected);
-    const target = fitInstanceTarget(o.store, [['wrote', wrote ?? undefined], ['created', wrote === null ? undefined : report.provenCreated()], ...o.pairs, ...hit]);
+    const target = fitInstanceTarget(o.store, [['wrote', wrote ?? undefined], ['created', wrote === null ? undefined : report.provenCreated()], ...o.pairs, ...report.counted, ...hit]);
     o.trail.log?.record({ principal: o.trail.principal, correlationId: o.correlationId, action: o.action, target, phase, runId: o.trail.runId });
   } catch { /* the attempt row stands alone */ }
 }
@@ -331,9 +382,25 @@ function isThenable(v: unknown): v is PromiseLike<unknown> {
  * `fn` when the row cannot be written; the outcome row follows `fn`'s own settling.
  */
 export function withInstanceWrite<T>(by: InstanceWriter, spec: InstanceWriteSpec, fn: (w: InstanceWriteReport) => T): T {
-  const opened = open(by, spec);
+  return runOpened(open(by, spec), fn);
+}
+
+/**
+ * {@link withInstanceWrite} for a write that runs apart from the call that caused it: the trail
+ * is built from `actor`, a value captured where the cause still knew it, and `auditLog`. The call
+ * slot is not read at all, so a slot this runs in by inheritance (a `diagnostics_channel`
+ * subscriber runs inside its publisher's) lends it neither its trail nor its refusal, and a
+ * refusal here does not poison that slot: it is thrown to the caller as
+ * {@link InstanceWriteUnrecorded}, with `fn` not run. The owner leaves no row.
+ */
+export function withInstanceWriteAs<T>(actor: InstanceActor, auditLog: AuditLog | null | undefined, spec: InstanceWriteSpec, fn: (w: InstanceWriteReport) => T): T {
+  return runOpened(openAs(actor, auditLog, spec), fn);
+}
+
+/** `fn` after its attempt row, `opened`, and the outcome row once `fn` has settled. */
+function runOpened<T>(opened: Opened | null, fn: (w: InstanceWriteReport) => T): T {
   // The owner's block runs its steps all the same; it has no row to note them in.
-  const report = new Report();
+  const report = new Report(opened?.correlationId);
   if (opened === null) return fn(report);
   let result: T;
   try {
