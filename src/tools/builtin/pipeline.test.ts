@@ -2742,4 +2742,15 @@ describe('the run row of a stored workflow run from a chat', () => {
     expect(await runWorkflowTool.handler({ workflow_id: seed() }, agent)).toMatch(/^Error: Workflow execution failed: outputs gone/);
     expect(recs.map((r) => [r.phase, targetPairs(r.target).get('outcome') ?? null])).toEqual([['attempt', null], ['failed', 'failed']]);
   });
+
+  it('ends a retry as failed when its answer fails after its steps completed', async () => {
+    const { agent, recs } = agentAs(HELPER);
+    const id = seed({ template: true });
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    const outputs = { [Symbol.iterator]: () => { throw new Error('outputs gone'); } };
+    mockRetryManifest.mockResolvedValueOnce({ ...makeRunState(), outputs });
+    expect(await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent)).toMatch(/^Error: Workflow retry failed: outputs gone/);
+    expect(recs.slice(2).map((r) => [r.phase, targetPairs(r.target).get('outcome') ?? null])).toEqual([['attempt', null], ['failed', 'failed']]);
+  });
 });
