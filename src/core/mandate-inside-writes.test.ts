@@ -100,7 +100,7 @@ const { join } = await import('node:path');
 const { Agent } = await import('./agent.js');
 const { AuditLog, INSTANCE_WRITE_UNRECORDED } = await import('./audit-log.js');
 const { createToolContext } = await import('./tool-context.js');
-const { INSTANCE_WRITE_SITES, MANDATE_PATTERN_WRITE_TOOLS } = await import('./mandate-tool-lock.js');
+const { TOOL_WRITE_SITES, MANDATE_PATTERN_WRITE_TOOLS } = await import('./mandate-tool-lock.js');
 const { setDataDir } = await import('./config.js');
 const { EngineDb } = await import('./engine-db.js');
 const { SubjectStore } = await import('./subject-store.js');
@@ -691,8 +691,10 @@ afterEach(() => {
 beforeEach(() => { _resetPipelineStore(); });
 
 describe('every write site of a mandate\'s call writes its attempt row before its first change', () => {
-  it('has a fixture for every site on INSTANCE_WRITE_SITES, and none for a site that is not', () => {
-    expect([...new Set(FIXTURES.map(f => f.site))].sort()).toEqual([...INSTANCE_WRITE_SITES].sort());
+  // A tool's sites only: the derived sites no tool call owns have their fixtures with their own
+  // tests (`instance-trail-derived.test.ts`, `capture-trail.test.ts`).
+  it('has a fixture for every site on TOOL_WRITE_SITES, and none for a site that is not', () => {
+    expect([...new Set(FIXTURES.map(f => f.site))].sort()).toEqual([...TOOL_WRITE_SITES].sort());
   });
 
   describe.each(FIXTURES.map(f => [`${f.site} · ${f.branch}`, f] as const))('%s', (_label, f) => {
