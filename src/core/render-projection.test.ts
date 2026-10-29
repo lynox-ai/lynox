@@ -475,6 +475,8 @@ describe('projectMessages — B-full failure notes', () => {
   it('drops an approval reference that is not an entry id and an outcome code, and keeps the note', () => {
     for (const approval of [
       { id: 'a/../b', outcome: 'checksum' },
+      { id: 'a"><img src=x>', outcome: 'checksum' },
+      { id: 'a b', outcome: 'checksum' },
       { id: 'abc', outcome: 'Checksum!' },
       { id: 42, outcome: 'checksum' },
       { id: 'a'.repeat(65), outcome: 'checksum' },
