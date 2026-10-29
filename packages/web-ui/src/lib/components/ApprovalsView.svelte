@@ -3,7 +3,6 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { get } from 'svelte/store';
 	import { getApprovalsViewer, setApprovalsOff, setApprovalsPending } from '../stores/approvals.svelte.js';
 	import { newChat, resumeThread, sendMessage } from '../stores/chat.svelte.js';
 	import ApprovalCard from './ApprovalCard.svelte';
@@ -13,8 +12,14 @@
 	} from './approvals.js';
 
 	/** The entry a chat note leads to (`?entry=`): shown on the "all" tab, where a closed one is, and marked. */
-	const focusedId = get(page).url.searchParams.get('entry');
-	let view = $state<'open' | 'all'>(focusedId !== null ? 'all' : 'open');
+	const focusedId = $derived($page.url.searchParams.get('entry'));
+	let view = $state<'open' | 'all'>('open');
+	/** The entry last scrolled to, so a later read of the list does not move the page again. */
+	let scrolledTo: string | null = null;
+	// Each new entry asked for opens the "all" tab, also when the page is already on screen.
+	$effect.pre(() => {
+		if (focusedId !== null) { view = 'all'; scrolledTo = null; }
+	});
 	let list = $state<ApprovalList | null>(null);
 	let loading = $state(false);
 	let loadFailed = $state(false);
@@ -158,12 +163,11 @@
 	$effect(() => { void load(view); });
 
 	// Brings the entry a chat note led to into view, once its card is on the page.
-	let scrolledTo = false;
 	$effect(() => {
-		if (focusedId === null || scrolledTo || list === null) return;
+		if (focusedId === null || scrolledTo === focusedId || list === null) return;
 		const el = document.querySelector('[data-entry-focused]');
 		if (el === null) return;
-		scrolledTo = true;
+		scrolledTo = focusedId;
 		el.scrollIntoView({ block: 'center' });
 	});
 </script>

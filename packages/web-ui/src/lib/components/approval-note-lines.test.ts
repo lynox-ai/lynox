@@ -67,6 +67,21 @@ describe('the lines of a note about an approved mail', () => {
 		}
 	});
 
+	it('a reason that does not fit the title keeps the note\'s own sentence: a decision, or "unclear" on a "not sent" note', () => {
+		for (const [code, outcome] of [
+			['approval_failed', 'cleared_unknown'], ['approval_failed', 'discarded'], ['approval_unknown', 'cleared_unknown'],
+			['approval_failed', 'send_threw'], ['approval_failed', 'provider_error'], ['approval_failed', 'send_timeout'], ['approval_failed', 'stale_claim'],
+		] as const) {
+			expect(approvalNoteLines(code, { id: ID, outcome }, 'owner')).toEqual({
+				bodyKey: `chat.note.${code}`, nextKey: null, href: `/app/approvals?entry=${ID}`,
+			});
+		}
+	});
+
+	it('control: the same unclear reason on an "unclear" note reads the page\'s sentence', () => {
+		expect(approvalNoteLines('approval_unknown', { id: ID, outcome: 'provider_error' }, 'owner')?.bodyKey).toBe('approvals.outcome.provider_error');
+	});
+
 	it('a note written before it carried its entry keeps its own sentence, without a link', () => {
 		expect(approvalNoteLines('approval_failed', undefined, 'owner')).toEqual({ bodyKey: 'chat.note.approval_failed', nextKey: null, href: null });
 	});
@@ -106,13 +121,15 @@ describe('every line such a note can show exists in both languages', () => {
 	});
 });
 
-describe('the chat renders those lines', () => {
-	// ChatView cannot be mounted here; this reads that the note row asks the helper and shows what it
-	// answers. What it looks like is checked on screenshots.
+describe('the chat\'s note row is wired to those lines (source)', () => {
+	// ChatView cannot be mounted here; this reads, in its source, that the note row asks the helper and
+	// shows each line under the condition that line exists. It does not render: what it looks like is
+	// checked on screenshots.
 	it('the note row takes its sentence, its step and its link from the helper', () => {
 		expect(CHAT_VIEW).toMatch(/approvalNoteLines\(msg\.note\.code, msg\.note\.approval, getApprovalsViewer\(\)\)/);
 		expect(CHAT_VIEW).toMatch(/noteKey = approvalLines\?\.bodyKey \?\? `chat\.note\.\$\{msg\.note\.code\}`/);
-		expect(CHAT_VIEW).toMatch(/\{t\(approvalLines\.nextKey\)\}/);
-		expect(CHAT_VIEW).toMatch(/<a href=\{approvalLines\.href\}[^>]*>\{t\('chat\.note\.approval_view_entry'\)\}<\/a>/);
+		// Each line inside the guard that holds it, and nothing else in that guard.
+		expect(CHAT_VIEW).toMatch(/\{#if approvalLines\?\.nextKey\}\s*<div[^>]*>\{t\(approvalLines\.nextKey\)\}<\/div>\s*\{\/if\}/);
+		expect(CHAT_VIEW).toMatch(/\{#if approvalLines\?\.href\}\s*<a href=\{approvalLines\.href\}[^>]*>\{t\('chat\.note\.approval_view_entry'\)\}<\/a>\s*\{\/if\}/);
 	});
 });

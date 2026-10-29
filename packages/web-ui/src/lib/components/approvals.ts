@@ -237,12 +237,23 @@ export function approvalEntryHref(id: string): string {
 }
 
 /**
+ * Whether an outcome code reads right under the note's title: one the page has a sentence for,
+ * not the unrecorded `other`, not a decision (an entry the owner closed after it ended unclear is no
+ * longer "not sent"), and on a "not sent" note none of the codes that say the outcome is unclear.
+ */
+function noteOutcomeFits(status: 'failed' | 'unknown', outcome: string): boolean {
+	if (!SENTENCES.has(outcome) || outcome === 'other' || DECIDED_BY_OWNER.has(outcome)) return false;
+	return status === 'unknown' || !UNCLEAR.has(outcome);
+}
+
+/**
  * The lines of a chat note about an approved mail that did not go out (`approval_failed`) or may
  * have (`approval_unknown`), or null for any other note. The reason is the sentence the page shows
- * for the same entry, and the next step the page's, for the same viewer. A note without a known
- * reason keeps its own sentence: the page's sentence for an unrecorded reason ("closed without a
- * recorded reason") reads wrong in a note about a failure, and its own sentence already says what
- * to do. Without a viewer, no next step: whether it is the owner's or "ask the owner" depends on it.
+ * for the same entry when the note was written, and the next step the page's, for the same viewer.
+ * A note whose reason does not fit its title (`noteOutcomeFits`) keeps its own sentence, which already
+ * says what to do. Without a viewer, no next step: whether it is the owner's or "ask the owner"
+ * depends on it. The note is written once; the entry may be closed or purged since, and the link
+ * then opens the page without a marked card.
  */
 export function approvalNoteLines(code: string, ref: ApprovalNoteRef | undefined, viewer: ApprovalViewer | null): ApprovalNoteLines | null {
 	let status: 'failed' | 'unknown';
@@ -252,10 +263,11 @@ export function approvalNoteLines(code: string, ref: ApprovalNoteRef | undefined
 	const own = `chat.note.${code}`;
 	if (ref === undefined) return { bodyKey: own, nextKey: null, href: null };
 	const href = approvalEntryHref(ref.id);
-	if (!SENTENCES.has(ref.outcome) || ref.outcome === 'other') return { bodyKey: own, nextKey: null, href };
+	if (!noteOutcomeFits(status, ref.outcome)) return { bodyKey: own, nextKey: null, href };
 	const card = { status, outcome: ref.outcome };
 	return {
-		bodyKey: approvalOutcomeKey(card, viewer ?? 'none') ?? own,
+		// The sentences of the codes that fit read the same for every viewer.
+		bodyKey: approvalOutcomeKey(card, 'none') ?? own,
 		nextKey: viewer === null ? null : approvalNextStepKey(card, viewer),
 		href,
 	};

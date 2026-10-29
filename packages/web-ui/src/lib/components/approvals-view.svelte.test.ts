@@ -18,9 +18,15 @@ const steps: string[] = [];
 vi.mock('$app/navigation', () => ({ goto: vi.fn(async (path: string) => { steps.push(`goto ${path}`); }) }));
 /** The address the page is opened at; a chat note leads to `?entry=<id>`. */
 let pageUrl = new URL('http://localhost/app/approvals');
+const pageRuns = new Set<(v: { url: URL }) => void>();
 vi.mock('$app/stores', () => ({
-	page: { subscribe: (run: (v: { url: URL }) => void) => { run({ url: pageUrl }); return () => {}; } },
+	page: { subscribe: (run: (v: { url: URL }) => void) => { pageRuns.add(run); run({ url: pageUrl }); return () => { pageRuns.delete(run); }; } },
 }));
+/** A navigation within the page: the component stays mounted and sees the new address. */
+function navigate(url: string): void {
+	pageUrl = new URL(url);
+	for (const run of pageRuns) run({ url: pageUrl });
+}
 vi.mock('../stores/chat.svelte.js', () => ({
 	newChat: vi.fn(() => { steps.push('newChat'); }),
 	resumeThread: vi.fn(async (id: string) => { steps.push(`resume ${id}`); }),
@@ -790,6 +796,24 @@ describe('a chat note leads to its entry', () => {
 		expect(target.querySelectorAll('[data-approval-id]')).toHaveLength(2);
 		expect(q('[data-tab="all"]')?.getAttribute('aria-selected')).toBe('true');
 		expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+	});
+
+	it('a later read of the list does not scroll again; a second entry asked for is marked and scrolled to', async () => {
+		lists.all = { entries: [card({ id: 'e-0', status: 'done' }), card({ id: 'e-2', status: 'failed', outcome: 'checksum' })], pending: 0, viewer: 'owner' };
+		pageUrl = new URL('http://localhost/app/approvals?entry=e-2');
+		Element.prototype.scrollIntoView = vi.fn();
+		await render();
+		await click('[data-tab="open"]');
+		await click('[data-tab="all"]');
+		expect(listReads).toEqual(['all', 'open', 'all']);
+		expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+		await click('[data-tab="open"]');
+		navigate('http://localhost/app/approvals?entry=e-0');
+		await settle();
+		expect(q('[data-tab="all"]')?.getAttribute('aria-selected')).toBe('true');
+		expect(q('[data-entry-focused] [data-approval-id]')?.getAttribute('data-approval-id')).toBe('e-0');
+		expect(target.querySelectorAll('[data-entry-focused]')).toHaveLength(1);
+		expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(2);
 	});
 
 	it('control: without it, the page opens on the open tab and marks nothing', async () => {

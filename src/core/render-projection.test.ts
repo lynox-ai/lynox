@@ -467,6 +467,9 @@ describe('projectMessages — B-full failure notes', () => {
     const id = '0b6f1f9e-3c1a-4d6e-9c2a-6f0e4b1d2a33';
     const out = projectMessages([rec(0, 'assistant', buildApprovalNoteContent('approval_failed', { id, outcome: 'account_changed' }))]);
     expect(out[0]?.note).toEqual({ code: 'approval_failed', approval: { id, outcome: 'account_changed' } });
+    // The longest id and code that are kept.
+    const long = projectMessages([rec(0, 'assistant', buildApprovalNoteContent('approval_failed', { id: 'a'.repeat(64), outcome: 'b'.repeat(40) }))]);
+    expect(long[0]?.note?.approval).toEqual({ id: 'a'.repeat(64), outcome: 'b'.repeat(40) });
   });
 
   it('drops an approval reference that is not an entry id and an outcome code, and keeps the note', () => {
@@ -474,6 +477,8 @@ describe('projectMessages — B-full failure notes', () => {
       { id: 'a/../b', outcome: 'checksum' },
       { id: 'abc', outcome: 'Checksum!' },
       { id: 42, outcome: 'checksum' },
+      { id: 'a'.repeat(65), outcome: 'checksum' },
+      { id: 'abc', outcome: 'a'.repeat(41) },
       'abc',
     ]) {
       const out = projectMessages([rec(0, 'assistant', { _lynox_note: { code: 'approval_failed', approval } })]);
