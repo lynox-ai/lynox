@@ -262,6 +262,64 @@ describe('an owner\'s delete supersedes a held provider erasure only with an era
   });
 });
 
+describe('a profile stored again under the same id begins a later epoch, whose cancels leave the earlier one held', () => {
+  /** A provider refused the first connection, which the owner then deleted with a closing record, and stored again. */
+  const earlierEpochHeld = (): string => {
+    store.save(profile());
+    const a = grantOf();
+    markRevoked();
+    expect(store.remove('shop', undefined, { record: 'closing' })).toBe(true);
+    expect(store.save(profile()).ok).toBe(true);
+    expect(grantOf()).not.toBe(a);
+    expect(stateOf(a)).toBe('pending');
+    return a;
+  };
+
+  it('the owner\'s new consent on the later connection', () => {
+    const a = earlierEpochHeld();
+    reconnectAs(OWNER_PRINCIPAL);
+    expect(stateOf(a)).toBe('pending');
+    expect(cancelRows()).toEqual([]);
+  });
+
+  it('the owner\'s erasure delete of the later connection', () => {
+    const a = earlierEpochHeld();
+    expect(store.remove('shop', undefined, { record: 'erasure' })).toBe(true);
+    expect(stateOf(a)).toBe('pending');
+    expect(cancelRows()).toEqual([]);
+  });
+
+  it('a refusal in the later epoch is still cancelled by the owner\'s consent, and the earlier one stays held (positive control)', () => {
+    const a = earlierEpochHeld();
+    const b = grantOf();
+    markRevoked();
+    reconnectAs(OWNER_PRINCIPAL);
+    expect(stateOf(b)).toBe('cancelled');
+    expect(stateOf(a)).toBe('pending');
+  });
+
+  it('a row that does not say where its epoch starts ends none: the earlier connection\'s erasure stays held', () => {
+    const a = earlierEpochHeld();
+    db.getDb().prepare("UPDATE connections SET first_grant_id = NULL WHERE id = 'shop'").run();
+    reconnectAs(OWNER_PRINCIPAL);
+    expect(stateOf(a)).toBe('pending');
+    expect(cancelRows()).toEqual([]);
+  });
+
+  it('a refusal of a grant the boot minted inside the epoch is still the connection\'s: a later backfill does not cut it off', () => {
+    store.save(profile());
+    const reissue = (store as unknown as { _reissue(id: string, reason: string): boolean })._reissue.bind(store);
+    expect(reissue('shop', 'backfill')).toBe(true);
+    const b = grantOf();
+    markRevoked();
+    expect(reissue('shop', 'backfill')).toBe(true);
+    expect(grantOf()).not.toBe(b);
+    expect(stateOf(b)).toBe('pending');
+    reconnectAs(OWNER_PRINCIPAL);
+    expect(stateOf(b)).toBe('cancelled');
+  });
+});
+
 describe('the erasures the owner is told about', () => {
   const at = (ms: number): Date => new Date(T0.getTime() + ms);
 
