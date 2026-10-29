@@ -2970,7 +2970,7 @@ export async function submitChangesetReview(
 		// A rollback leaves a file as it is when it was replaced or linked since the review, or
 		// could not be written. Closing the review without a word would read as all restored.
 		const notRestored = await res.json().then(
-			(j: unknown) => (j as { notRestored?: unknown }).notRestored,
+			(j: unknown) => (j as { notRestored?: unknown } | null)?.notRestored,
 			() => undefined,
 		);
 		const names = Array.isArray(notRestored) ? notRestored.filter((f): f is string => typeof f === 'string') : [];

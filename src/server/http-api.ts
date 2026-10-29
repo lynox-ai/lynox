@@ -5565,7 +5565,10 @@ export class LynoxHTTPApi {
         return;
       }
       const csm = session.getChangesetManager();
-      if (!csm || !csm.hasChanges()) {
+      // Not `hasChanges()`: a file replaced by a link since the review drops out of the changes,
+      // and a review whose every file did so must still be answered, so the rollback can name them.
+      // An answered review is cleaned up and empty, so a second answer is still refused.
+      if (!csm || csm.isEmpty()) {
         errorResponse(res, 400, 'No changeset to review');
         return;
       }
@@ -5593,7 +5596,12 @@ export class LynoxHTTPApi {
       const nameByAbs = new Map([...absByName].map(([name, abs]) => [abs, name]));
       // The files the rollback left as they are (replaced or linked since, or not writable).
       let notRestored: string[] = [];
-      const named = (left: string[]): string[] => left.map((abs) => nameByAbs.get(abs) ?? abs);
+      // A file the review did not show and the backup could not read is left out: nothing was saved
+      // for it, so nothing was promised, and naming it would give the person a reason that is wrong.
+      const shownNow = new Set(changes.map((c) => c.absolutePath));
+      const named = (left: string[]): string[] => left
+        .filter((abs) => shownNow.has(abs) || csm.hasOriginal(abs))
+        .map((abs) => nameByAbs.get(abs) ?? abs);
 
       if (action === 'accept') {
         accepted = changes.length;

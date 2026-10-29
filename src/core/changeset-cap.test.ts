@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, closeSync, existsSync, linkSync, openSync, writeSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 
 /**
@@ -432,6 +433,18 @@ describe.each<Branch>(['anchor', 'name'])('what a rollback reports, %s branch', 
     symlinkSync(outside, path);
     expect(mgr.rollbackAll()).toEqual([path]);
     expect(readFileSync(outside, 'utf-8'), 'the link target is not written').toBe('not the workspace');
+  });
+
+  // Inside the workspace, so the name passes its confinement and the write itself fails: a FIFO
+  // without a reader refuses a non-blocking open for writing, and is never truncated.
+  it(`[${branch}] a modified file replaced by a FIFO since is left and reported`, () => {
+    const path = join(ws, 'notes.txt');
+    writeFileSync(path, 'original');
+    writeAsTheRun(path, 'the run wrote this');
+    rmSync(path);
+    execFileSync('mkfifo', [path]);
+    expect(statSync(path).isFIFO(), 'precondition: a FIFO is at the name').toBe(true);
+    expect(mgr.rollbackAll()).toEqual([path]);
   });
 
   it(`[${branch}] an added file replaced by another writer's file is left and reported`, () => {
