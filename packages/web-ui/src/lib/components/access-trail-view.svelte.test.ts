@@ -109,6 +109,18 @@ describe('each kind of entry', () => {
 		expect(text(li)).toContain('nach Zeitplan');
 	});
 
+	it('a workflow run from a chat is named a workflow run, not a plan\'s, and names no trigger (660b)', async () => {
+		await render([{
+			kind: 'plan', run: 'workflow', key: 'k2', trigger: null, startedBy: null, at: NOW, person: IDA, status: 'done',
+			writeSteps: 2, entries: [{ kind: 'step', action: 'mail_send', target: 'to=<address>', at: NOW, person: IDA, status: 'done' }],
+		}]);
+		const [li] = items();
+		expect(text(li)).toContain('Lauf eines Workflows');
+		expect(text(li)).not.toContain('Lauf eines Plans');
+		expect(text(li)).not.toContain('gestartet');
+		expect(text(li?.querySelector('[data-targets]'))).toBe('2 Schreibschritte');
+	});
+
 	it('a bulk run: windows, targets as a lower bound, and the planned halt', async () => {
 		await render([{
 			kind: 'bulk', runId: 'r1', action: 'bulk:apply', host: 'shop.example.invalid', at: NOW, person: IDA, status: 'halted',

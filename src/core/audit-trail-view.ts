@@ -6,8 +6,9 @@
  * owner's route only, never by a tool, so the trail still never reaches a model's context.
  *
  * Three kinds of entry:
- * - a run: a plan's run (its `plan:run` rows and every row keyed to it by `plan_run`), or a bulk
- *   run (its windows, the `bulk:apply` / `bulk:undo` row pairs of one `run_id`);
+ * - a run: a plan's run (its `plan:run` rows and every row keyed to it by `plan_run`), a stored
+ *   workflow someone the owner let in ran from a chat (its `workflow:run` rows, keyed the same
+ *   way), or a bulk run (its windows, the `bulk:apply` / `bulk:undo` row pairs of one `run_id`);
  * - a step: an `attempt` row and its outcome row, joined by `correlation_id`;
  * - an event: a row that stands alone (a read, an act that has no outcome row by design).
  *
@@ -139,6 +140,8 @@ export interface TrailTargets {
 
 export interface TrailPlanRun {
   readonly kind: 'plan';
+  /** A plan's run, or a workflow run started in a chat (660b): that one has no trigger. */
+  readonly run: 'plan' | 'workflow';
   readonly id: string;
   /** The run's key; null for a run whose rows carry none, which then has no steps under it. */
   readonly key: string | null;
@@ -209,6 +212,8 @@ function approvalOfFiling(r: TrailRow): string | undefined {
 }
 
 const BULK_ACTIONS: ReadonlySet<string> = new Set(['bulk:apply', 'bulk:undo']);
+/** The rows of a run's own start and end: a plan's, or a workflow run's from a chat (660b). */
+const RUN_ACTIONS: ReadonlySet<string> = new Set(['plan:run', 'workflow:run']);
 
 /**
  * The pairs of a target written by `namedTarget`: `name=value` separated by spaces, each value
@@ -399,30 +404,31 @@ export function buildTrail(rows: readonly TrailRow[], src: TrailSources, opts: {
   const planEntry = (key: string | null, own: readonly TrailRow[], inner: readonly TrailRow[]): void => {
     const start = own.find((r) => r.phase === 'attempt') ?? own[0]!;
     const end = own.find((r) => r.phase !== 'attempt');
+    const run = start.action === 'workflow:run' ? 'workflow' : 'plan';
     const head = targetPairs(start.target);
     const trigger = head.get('trigger') ?? null;
     const started = head.get('started');
     let status: TrailStatus | null;
     if (end !== undefined) status = planEndStatus(targetPairs(end.target).get('outcome'));
     // No end row: running if this very run is its trigger's run in flight. A run without a key
-    // cannot be asked for, so no source says.
-    else if (key === null) status = null;
+    // cannot be asked for, so no source says; nor for a workflow run, which has no trigger.
+    else if (key === null || run === 'workflow') status = null;
     else status = trigger !== null && src.planRunRunning(trigger, key) ? 'running' : 'interrupted';
     // A run without a key is given no rows of its own (`inner` is empty), so it has no steps.
     const steps = stepsOf(inner, src, sends, claimed);
     entries.push({
       order: start.id,
       entry: {
-        kind: 'plan', id: key === null ? `plan:c:${start.correlation_id}` : `plan:${key}`, key, trigger, startedBy: started === 'hand' || started === 'schedule' ? started : null,
+        kind: 'plan', run, id: key === null ? `plan:c:${start.correlation_id}` : `plan:${key}`, key, trigger, startedBy: started === 'hand' || started === 'schedule' ? started : null,
         at: start.ts, person: personOf(start), status, writeSteps: key === null || opts.complete === false ? null : steps.filter((e) => e.kind === 'step').length, entries: steps,
       },
     });
   };
   for (const [key, group] of byKey) {
-    const own = group.filter((r) => r.action === 'plan:run');
+    const own = group.filter((r) => RUN_ACTIONS.has(r.action));
     // Rows keyed to a run whose own rows are not in this page: shown as they are, not as a run.
     if (own.length === 0) { loose.push(...group); continue; }
-    planEntry(key, own, group.filter((r) => r.action !== 'plan:run'));
+    planEntry(key, own, group.filter((r) => !RUN_ACTIONS.has(r.action)));
   }
   for (const own of keylessPlan.values()) planEntry(null, own, []);
 
@@ -506,7 +512,7 @@ export function readTrailPage(db: Database.Database, opts: { limit: number; befo
             AND EXISTS (SELECT 1 FROM json_each(?) j WHERE substr(target, -length(' approval=' || j.value)) = ' approval=' || j.value)))
       -- Past the bound, a run's start and end and a bulk run's windows are kept before inner steps,
       -- so what is cut is a step, not the row a status is read from.
-      ORDER BY CASE WHEN action IN ('plan:run', 'bulk:apply', 'bulk:undo') THEN 0 ELSE 1 END, id
+      ORDER BY CASE WHEN action IN ('plan:run', 'workflow:run', 'bulk:apply', 'bulk:undo') THEN 0 ELSE 1 END, id
       LIMIT ?`,
   );
   // Only the mail tools file for approval (mail-send.ts, mail-reply.ts), under these actions, so

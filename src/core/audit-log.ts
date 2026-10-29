@@ -20,7 +20,7 @@ import { isOwnerPrincipal, type RequestPrincipal } from './request-principal.js'
 import { effectiveWriteMethod, isReadMethod } from './outbound-write.js';
 import { oneLineForLog } from './profile-value-shape.js';
 import { maskSecretPatterns } from './secret-store.js';
-import { currentPlanRun } from './plan-run-context.js';
+import { currentPlanRun, currentWorkflowRun } from './plan-run-context.js';
 
 /**
  * - `attempt` — about to run; written first, and the act does not run without it.
@@ -66,7 +66,8 @@ export interface AuditEntry {
   readonly at?: string | undefined;
   /**
    * The plan run the row belongs to, for a row written outside the run's async context (its own
-   * end row). Absent: the run this code runs in (`currentPlanRun`), if any.
+   * end row). Absent: the run this code runs in (`currentPlanRun`, else a workflow run started in
+   * a chat, `currentWorkflowRun`), if any.
    */
   readonly planRun?: string | undefined;
 }
@@ -129,7 +130,7 @@ export class AuditLog {
       entry.runId ?? null,
       entry.requestId ?? null,
       recordedAt,
-      entry.planRun ?? currentPlanRun(p) ?? null,
+      entry.planRun ?? currentPlanRun(p) ?? currentWorkflowRun(p) ?? null,
       TRAIL_FORM,
     );
   }

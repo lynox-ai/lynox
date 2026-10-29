@@ -116,8 +116,9 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
   it('markPipelineExecuted drops the one-shot def from the engine.db library', () => {
     const { history, engine, reader } = make();
     history.insertPlannedPipeline(planned({ template: false }), null);
-    history.markPipelineExecuted('wf-1');
+    expect(history.markPipelineExecuted('wf-1'), 'says it removed the one-shot (660b: definition=removed)').toBe(true);
     expect(reader.get('wf-1')).toBeUndefined();
+    expect(history.markPipelineExecuted('wf-1'), 'and says no when there was nothing to remove').toBe(false);
     engine.close();
     history.close();
   });

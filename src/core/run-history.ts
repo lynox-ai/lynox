@@ -3450,11 +3450,12 @@ export class RunHistory {
     return this._requireWorkflowStore().remove(id);
   }
 
-  markPipelineExecuted(id: string): void {
+  /** Whether the definition was removed: its run row says so (660b). */
+  markPipelineExecuted(id: string): boolean {
     // A one-shot that executed leaves the DEFINITION set (only non-templates reach
     // markPipelineExecuted). Drop its engine.db def row so the library no longer
     // lists it. The Run itself is a separate pipeline_runs SPINE row (D6).
-    this._requireWorkflowStore().dropExecuted(id);
+    return this._requireWorkflowStore().dropExecuted(id);
   }
 
   insertTask(params: {

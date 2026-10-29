@@ -132,7 +132,7 @@ export const MANDATE_INSIDE_NON_WRITERS: Readonly<Record<string, string>> = Obje
   http_request: 'writes outside the instance, recorded by the outward trail; a due renewal runs api_setup fetch_token, which records its own pair',
   web_research: 'reads outside, recorded as a read',
   task_list: 'reads tasks',
-  run_workflow: 'its steps record their own calls; its run bookkeeping is not an entry',
+  run_workflow: 'its steps record their own calls; its run, with its bookkeeping, has a run row',
   export_workflow: 'reads a workflow',
   diagnose_workflow_run: 'reads a run',
   bulk_plan: 'writes a preview to the bulk ledger; a preview is not an entry',
