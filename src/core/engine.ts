@@ -1749,7 +1749,7 @@ export class Engine {
         try {
           connStore.fillApiTrailIds();
         } catch (err: unknown) {
-          process.stderr.write(`[lynox] API profile id fill failed: ${err instanceof Error ? err.message : String(err)}\n`);
+          process.stderr.write(`[lynox] API profile id fill failed: ${processErrorText(err)}\n`);
         }
         this._apiStore.importFromDirectoryIfNeeded(apisDir, connStore);
         loaded = this._apiStore.loadFromConnections(connStore);

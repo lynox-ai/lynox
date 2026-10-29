@@ -1029,6 +1029,7 @@ describe('a mandate\'s row names an API profile by its opaque id', () => {
         made = apiStoreOnDb(MUELLER);
         // As an older binary leaves a row after a pin back.
         made.engine.getDb().exec("UPDATE connections SET trail_id = NULL WHERE id = 'mueller-crm'");
+        expect(rawRow(made.engine, 'mueller-crm').trail_id, 'precondition: the row has no id').toBeNull();
         return { ctx: { apiStore: { obj: made.store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) };
       },
     };
@@ -1047,6 +1048,7 @@ describe('a mandate\'s row names an API profile by its opaque id', () => {
         setDataDir(tmp('lynox-iw-api-'));
         made = apiStoreOnDb(MUELLER);
         made.engine.getDb().exec("UPDATE connections SET trail_id = NULL WHERE id = 'mueller-crm'");
+        expect(rawRow(made.engine, 'mueller-crm').trail_id, 'precondition: the row has no id').toBeNull();
         return { ctx: { apiStore: { obj: made.store, reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) };
       },
     };
