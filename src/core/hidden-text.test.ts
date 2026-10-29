@@ -154,7 +154,7 @@ describe('writing a plan or a workflow with a character that renders as nothing'
 
   it('the refusal names the place and the character, and asks for the text in the model\'s own words', () => {
     expect(hiddenCharRefusal('task', { path: 'title', codePoint: 'U+200B' })).toBe(
-      'refused to save this task — title contains a character that renders as nothing (U+200B). '
+      'refused to save this task — title contains a character that renders as nothing (U+200B). Nothing was saved. '
       + 'Characters like this can carry instructions that no one can see. Write the text again in your own words, '
       + 'without copying it from another plan or workflow.',
     );
