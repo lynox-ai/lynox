@@ -229,13 +229,21 @@ describe('E2: maybeUpdate writes each namespace under its own capture#extract ro
     const mem = memory();
     await mem.maybeUpdate(LONG, 1, 't-1', 'run-1', undefined, { principal: MANDATE, runId: 'run-1' }, log.log);
     const rows = rowsOf(log, 'capture#extract');
-    expect(rows.map(r => [r.phase, r.actor_kind, r.target?.replace(/ wrote=all/, '')])).toEqual([
-      ['attempt', 'mandate', 'memory ns=knowledge auto=1'], ['attempt', 'mandate', 'memory ns=methods auto=1'],
-      ['returned', 'mandate', 'memory ns=knowledge auto=1'], ['returned', 'mandate', 'memory ns=methods auto=1'],
-    ]);
-    expect(published.map(p => [p.namespace, p.actor?.principal.kind, p.trail?.site])).toEqual([['knowledge', 'mandate', 'capture#extract'], ['methods', 'mandate', 'capture#extract']]);
-    const attempts = rows.filter(r => r.phase === 'attempt').map(r => r.correlation_id);
-    expect(published.map(p => p.trail?.correlationId)).toEqual(attempts);
+    // The namespaces are written side by side, so their rows interleave in either order: compared
+    // as sets per phase, and every attempt still comes before any outcome of its own namespace.
+    const shown = (phase: string): string[] => rows.filter(r => r.phase === phase)
+      .map(r => `${String(r.actor_kind)} ${String(r.target?.replace(/ wrote=all/, ''))}`).sort();
+    expect(shown('attempt')).toEqual(['mandate memory ns=knowledge auto=1', 'mandate memory ns=methods auto=1']);
+    expect(shown('returned')).toEqual(['mandate memory ns=knowledge auto=1', 'mandate memory ns=methods auto=1']);
+    expect(rows).toHaveLength(4);
+    for (const ns of ['knowledge', 'methods']) {
+      const mine = rows.filter(r => r.target?.includes(`ns=${ns} `) === true);
+      expect(mine.map(r => r.phase)).toEqual(['attempt', 'returned']);
+    }
+    expect(published.map(p => [p.namespace, p.actor?.principal.kind, p.trail?.site]).sort()).toEqual([['knowledge', 'mandate', 'capture#extract'], ['methods', 'mandate', 'capture#extract']]);
+    // Each publish names the attempt row of its own namespace.
+    const attemptOf = (ns: string): string | undefined => rows.find(r => r.phase === 'attempt' && r.target?.includes(`ns=${ns} `) === true)?.correlation_id;
+    for (const p of published) expect(p.trail?.correlationId).toBe(attemptOf(p.namespace));
     expect(await mem.load('knowledge')).toContain('Veltamare orders quarterly');
     expect(extraction).toEqual([{ status: 'success', entries: 2 }]);
   });
@@ -272,7 +280,7 @@ describe('E2: maybeUpdate writes each namespace under its own capture#extract ro
     const mem = memory();
     await mem.maybeUpdate(LONG, 1, 't-1', 'run-1', undefined, { principal: OWNER_PRINCIPAL, runId: 'run-1' }, log.log);
     expect(log.rows()).toEqual([]);
-    expect(published.map(p => [p.namespace, p.actor?.principal.kind, p.trail])).toEqual([['knowledge', 'owner', undefined], ['methods', 'owner', undefined]]);
+    expect(published.map(p => [p.namespace, p.actor?.principal.kind, p.trail]).sort()).toEqual([['knowledge', 'owner', undefined], ['methods', 'owner', undefined]]);
   });
 
   it('the agent hands its turn\'s actor and log to maybeUpdate, held as a value (B7, synthetic)', async () => {
