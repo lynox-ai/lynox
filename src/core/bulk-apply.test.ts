@@ -1359,6 +1359,16 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect(ledger.getStatus(runId)!.phase).toBe('aborted');
   });
 
+  it('an atomic run out of time after ONE write rolls it back: one write is already half written', async () => {
+    const { runId, initial } = recordMemoryRun(5, { atomic: true });
+    approve(runId);
+    const { writer, state } = memory(initial);
+    const t = Date.now();
+    const clock = (): number => ((ledger.getStatus(runId)?.applied ?? 0) >= 1 ? t + 10 * 60 * 60_000 : t);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer, clock))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(Object.values(initial));
+  });
+
   it('an atomic run out of time before its first write halts, and a resume writes every target', async () => {
     const { runId, initial } = recordMemoryRun(5, { atomic: true });
     approve(runId);
