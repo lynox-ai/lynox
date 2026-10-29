@@ -2730,7 +2730,7 @@
 								<div class="text-text-subtle" data-approval-next>{t(approvalLines.nextKey)}</div>
 							{/if}
 							{#if approvalLines?.href}
-								<a href={approvalLines.href} class="mt-1 inline-block text-accent hover:underline" data-approval-entry>{t('chat.note.approval_view_entry')}</a>
+								<a href={approvalLines.href} class="inline-flex min-h-6 items-center py-1 text-accent hover:underline" data-approval-entry>{t('chat.note.approval_view_entry')}</a>
 							{/if}
 							{#if msg.note.detail}
 								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>

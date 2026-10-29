@@ -246,6 +246,14 @@ function noteOutcomeFits(status: 'failed' | 'unknown', outcome: string): boolean
 	return status === 'unknown' || !UNCLEAR.has(outcome);
 }
 
+/** The page's next step, except where it says "here" for the page: an unclear outcome's step, which
+ *  the chat words with the page's name. */
+function noteNextStepKey(card: { status: 'failed' | 'unknown'; outcome: string }, viewer: ApprovalViewer | null): string | null {
+	if (viewer === null) return null;
+	const step = approvalNextStepKey(card, viewer);
+	return step === 'approvals.next.unknown' ? 'chat.note.approval_unknown.next' : step;
+}
+
 /**
  * The lines of a chat note about an approved mail that did not go out (`approval_failed`) or may
  * have (`approval_unknown`), or null for any other note. The reason is the sentence the page shows
@@ -268,7 +276,7 @@ export function approvalNoteLines(code: string, ref: ApprovalNoteRef | undefined
 	return {
 		// The sentences of the codes that fit read the same for every viewer.
 		bodyKey: approvalOutcomeKey(card, 'none') ?? own,
-		nextKey: viewer === null ? null : approvalNextStepKey(card, viewer),
+		nextKey: noteNextStepKey(card, viewer),
 		href,
 	};
 }

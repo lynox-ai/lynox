@@ -40,6 +40,7 @@ describe('the lines of a note about an approved mail', () => {
 	it('a session that is not the owner\'s is told to ask the owner, as on the page', () => {
 		for (const viewer of ['mandate', 'none'] as const) {
 			expect(approvalNoteLines('approval_failed', { id: ID, outcome: 'account_changed' }, viewer)?.nextKey).toBe('approvals.next.ask_owner');
+			expect(approvalNoteLines('approval_unknown', { id: ID, outcome: 'send_threw' }, viewer)?.nextKey).toBe('approvals.next.ask_owner');
 		}
 	});
 
@@ -52,7 +53,7 @@ describe('the lines of a note about an approved mail', () => {
 	it('an unclear outcome reads as unclear, with the step to ask the recipient first', () => {
 		expect(approvalNoteLines('approval_unknown', { id: ID, outcome: 'send_threw' }, 'owner')).toEqual({
 			bodyKey: 'approvals.outcome.send_threw',
-			nextKey: 'approvals.next.unknown',
+			nextKey: 'chat.note.approval_unknown.next',
 			href: `/app/approvals?entry=${ID}`,
 		});
 	});
@@ -118,6 +119,11 @@ describe('every line such a note can show exists in both languages', () => {
 		expect(entry('chat.note.approval_failed.title')).toEqual({ de: 'Mail nicht gesendet', en: 'Email not sent' });
 		expect(entry('chat.note.approval_unknown.title')).toEqual({ de: 'Unklar, ob die Mail rausging', en: 'Unclear whether the email went out' });
 		expect(entry('chat.note.approval_view_entry')).toEqual({ de: 'Unter „Wartet auf dich“ ansehen', en: 'View under “Waiting for you”' });
+		expect(entry('chat.note.approval_failed')?.en).toBe('The email you approved was not sent.');
+		expect(entry('chat.note.approval_unknown.next')).toEqual({
+			de: 'Der Gesendet-Ordner zeigt das nicht sicher. Frag im Zweifel beim Empfänger nach, bevor du sie neu senden lässt. Schliesse den Eintrag danach unter „Wartet auf dich“ ab.',
+			en: 'The Sent folder does not reliably show it. If in doubt, ask the recipient before you have it sent again. Then close the entry under “Waiting for you”.',
+		});
 	});
 });
 
@@ -130,6 +136,8 @@ describe('the chat\'s note row is wired to those lines (source)', () => {
 		expect(CHAT_VIEW).toMatch(/noteKey = approvalLines\?\.bodyKey \?\? `chat\.note\.\$\{msg\.note\.code\}`/);
 		// Each line inside the guard that holds it, and nothing else in that guard.
 		expect(CHAT_VIEW).toMatch(/\{#if approvalLines\?\.nextKey\}\s*<div[^>]*>\{t\(approvalLines\.nextKey\)\}<\/div>\s*\{\/if\}/);
+		// The link's hit area is at least 24 px high (WCAG 2.5.8, ux U-054), by padding, not by type size.
+		expect(CHAT_VIEW).toMatch(/<a href=\{approvalLines\.href\} class="[^"]*\bmin-h-6\b[^"]*"/);
 		expect(CHAT_VIEW).toMatch(/\{#if approvalLines\?\.href\}\s*<a href=\{approvalLines\.href\}[^>]*>\{t\('chat\.note\.approval_view_entry'\)\}<\/a>\s*\{\/if\}/);
 	});
 });
