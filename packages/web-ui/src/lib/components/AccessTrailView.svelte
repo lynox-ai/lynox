@@ -19,7 +19,7 @@
 	/** `auto`: a read on a route the person's web UI polls by itself, marked by the engine (row 1034). */
 	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true }
 	interface PlanRun { kind: 'plan'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; writeSteps: number | null; entries: Array<Step | Event> }
-	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
+	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; store?: 'files' | 'data_store' | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
 	type Entry = PlanRun | BulkRun | Step | Event;
 
 	const PERIODS = { all: null, '1d': 86_400_000, '7d': 7 * 86_400_000, '30d': 30 * 86_400_000 } as const;
@@ -252,7 +252,7 @@
 							<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
 								<span class="text-xs text-text-subtle tabular-nums">{when(e.at)}</span>
 								<span class="text-text-muted">{kindText(e)}</span>
-								<span class="font-mono text-xs break-all">{e.action}{#if e.host} · {e.host}{/if}</span>
+								<span class="font-mono text-xs break-all">{e.action}{#if e.host} · {e.host}{:else if e.store} · {t(e.store === 'files' ? 'bulk.system.workspace' : 'bulk.system.data_store')}{/if}</span>
 								<span class="text-xs" data-status>{statusText(e.status)}</span>
 								<span class="text-xs text-text-muted">{tf('access_trail.windows', { n: String(e.windows) })}</span>
 								<span class="text-xs text-text-muted" data-targets>{targetsText(e.targets)}</span>

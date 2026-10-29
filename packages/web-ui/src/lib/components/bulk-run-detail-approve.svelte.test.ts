@@ -45,6 +45,7 @@ let targets: BulkTarget[];
 let posts: { url: string; body: unknown }[];
 let gets: string[];
 let refuseDeselect: string | null;
+let refuseResume: string | null;
 
 beforeEach(() => {
 	target = document.createElement('div');
@@ -54,6 +55,7 @@ beforeEach(() => {
 	posts = [];
 	gets = [];
 	refuseDeselect = null;
+	refuseResume = null;
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const reply = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -62,6 +64,7 @@ beforeEach(() => {
 			posts.push({ url: u, body });
 			const m = /\/targets\/(\d+)\/deselect$/.exec(u);
 			if (m && refuseDeselect !== null) return reply({ error: 'engine English', code: refuseDeselect }, 409);
+			if (u.endsWith('/resume') && refuseResume !== null) return reply({ error: 'engine English', code: refuseResume }, 409);
 			if (m) {
 				const seq = Number(m[1]);
 				targets = targets.map((x) => (x.seq === seq ? { ...x, deselected: true } : x));
@@ -166,6 +169,35 @@ describe('approving a preview', () => {
 		refuseDeselect = 'something_else';
 		await render();
 		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(target.textContent).toContain('engine English');
+	});
+});
+
+// 660b: a halted run no one can be shown to have planned is refused a resume by its code; the
+// page words it (ux U-052), and tells the owner to have it planned again.
+describe('writing on a halted run', () => {
+	const halted = (): BulkRunDetailData => makeRun({
+		targetSystem: 'workspace', phase: 'writing', total: 1, haltKey: 'runUnrecorded', haltReason: 'engine reason',
+		changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 }, probeConfirmed: true,
+	});
+
+	it('words a refusal for want of a planner by its code, not by the engine\'s English', async () => {
+		run = halted();
+		refuseResume = 'planner_unknown';
+		await render();
+		buttonByText(t('bulk.resume.write'))!.click();
+		await settle();
+		expect(posts.map((p) => p.url)).toEqual([expect.stringMatching(/\/bulk\/runs\/r1\/resume$/)]);
+		expect(target.textContent).toContain(t('bulk.resume.refused.planner_unknown'));
+		expect(target.textContent).not.toContain('engine English');
+	});
+
+	it('control: another refusal still shows the engine\'s text', async () => {
+		run = halted();
+		refuseResume = 'checksum';
+		await render();
+		buttonByText(t('bulk.resume.write'))!.click();
 		await settle();
 		expect(target.textContent).toContain('engine English');
 	});
