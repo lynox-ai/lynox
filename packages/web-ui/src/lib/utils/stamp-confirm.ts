@@ -7,7 +7,7 @@
 // preview's `expect`: what the owner reads is what is stamped, or the engine answers 409 `changed`.
 
 import { t, tf } from '../i18n.svelte.js';
-import { markHidden, watchOf } from './trigger-consent.js';
+import { markHidden, marksHidden, watchOf } from './trigger-consent.js';
 
 /** `GET /api/tasks/:id/stamp-preview` (owner only). */
 export interface StampPreview {
@@ -117,7 +117,7 @@ export interface StampListed {
 	lapsed: boolean;
 	ended: boolean;
 	/** Where the member whose access ended sits: its workflow side needs a copy of the workflow too. */
-	ended_on?: 'plan' | 'workflow' | null;
+	ended_on?: 'plan' | 'workflow' | 'workflow_other' | null;
 	entries: { provider: string | null; account: string | null; state: 'listed' | 'changed' | 'waits' | 'new' }[];
 }
 
@@ -134,28 +134,65 @@ export function listedLine(e: StampListed['entries'][number]): string {
  * note names "Take over" only at a paused plan: an end the engine cannot prove does not pause it,
  * and then there is no such button (`plan-pause.ts`).
  */
+const ENDED_NOTE = { plan: 'stamp.ended_unpaused', workflow: 'stamp.ended_unpaused_workflow', workflow_other: 'stamp.ended_unpaused_workflow_other' } as const;
+
 export function listedNote(l: StampListed, paused: boolean): string | null {
-	if (l.ended) return t(paused ? 'stamp.ended' : l.ended_on === 'workflow' ? 'stamp.ended_unpaused_workflow' : 'stamp.ended_unpaused');
+	if (l.ended) return t(paused ? 'stamp.ended' : ENDED_NOTE[l.ended_on ?? 'plan']);
 	if (l.lapsed) return t('stamp.lapsed');
 	if (l.entries.some((e) => e.state === 'changed' || e.state === 'new')) return t('stamp.not_listed');
 	return null;
 }
 
-const hides = (x: string | null | undefined): boolean => typeof x === 'string' && markHidden(x) !== x.replace(/\u00AD/gu, '');
+const hides = (x: string | null | undefined): boolean => typeof x === 'string' && marksHidden(x);
+
+/** The parameters as `paramsOf` shows them: each key and value, a non-string value as its JSON. */
+function paramsHide(raw: string | null): boolean {
+	if (raw === null || raw === '') return false;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return hides(raw);
+		return Object.entries(parsed as Record<string, unknown>).some(([k, v]) => hides(k) || hides(typeof v === 'string' ? v : JSON.stringify(v) ?? ''));
+	} catch {
+		return hides(raw);
+	}
+}
+
+function selectorOf(watch: string | null): string | null {
+	if (watch === null) return null;
+	try {
+		const s = (JSON.parse(watch) as { selector?: unknown }).selector;
+		return typeof s === 'string' ? s : null;
+	} catch {
+		return null;
+	}
+}
 
 /**
- * Where text the block shows hid characters (`markHidden` marks them), or null. The run hands the
- * title and description to the model as they are stored, so a clause hidden in invisible
- * characters would run although the owner never read it: such a plan is not offered a confirm.
- * `workflow` when the workflow's name hides them: the model reads a workflow raw, so a new plan
- * needs the workflow gone too, not just the plan.
+ * Where text the block SHOWS hid characters (`markHidden` marks them there), or null — exactly the
+ * fields the block renders for this kind of plan, so "marked above" always points at a mark. The
+ * run hands the stored text to the model, so a clause hidden in invisible characters would run
+ * although the owner never read it: such a plan is not offered a confirm. `workflow` when the
+ * workflow's name hides them: the model reads a workflow raw, so the workflow has to go too.
  */
 export function hiddenIn(p: StampPreview): 'plan' | 'workflow' | null {
-	if (hides(p.workflow?.name)) return 'workflow';
 	const s = p.subject;
-	const shown = [s.title, s.description, s.schedule_cron, s.watch, s.pipeline_id, s.pipeline_params, s.model_tier, p.by,
-		...p.connections.flatMap((c) => [c.provider, c.account])];
-	return shown.some(hides) ? 'plan' : null;
+	const as = shownAs(p);
+	if (as === 'workflow' && hides(p.workflow?.name ?? s.pipeline_id)) return 'workflow';
+	const ofKind = as === 'workflow' ? paramsHide(s.pipeline_params)
+		: as === 'watch' ? hides(selectorOf(s.watch))
+		: as === 'instruction' ? hides(s.title) || hides(s.description)
+		: false;
+	const always = [s.schedule_cron, s.model_tier, p.by, ...p.connections.flatMap((c) => [c.provider, c.account])];
+	return ofKind || always.some(hides) ? 'plan' : null;
+}
+
+/**
+ * The note under a block that hid characters. In the check, the plan was confirmed before and
+ * still runs, so the note says that rather than leave the owner thinking refusing stops it.
+ */
+export function hiddenNote(onWorkflow: boolean, check: boolean): string {
+	if (onWorkflow) return t(check ? 'stamp.hidden_text_workflow_check' : 'stamp.hidden_text_workflow');
+	return t(check ? 'stamp.hidden_text_check' : 'stamp.hidden_text');
 }
 
 export function hidesText(p: StampPreview): boolean {

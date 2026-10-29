@@ -8,7 +8,7 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
-	import { confirmable, connectionsSentence, hiddenIn, hidesText, paramsOf, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
+	import { confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, paramsOf, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
 		id: string;
@@ -137,7 +137,7 @@
 			<p data-stamp-none>{t('stamp.none')}</p>
 		{/if}
 		{#if hidesText(preview)}
-			<p class="text-warning" data-stamp-hidden-text={hiddenIn(preview)}>{t(hiddenIn(preview) === 'workflow' ? 'stamp.hidden_text_workflow' : 'stamp.hidden_text')}</p>
+			<p class="text-warning" data-stamp-hidden-text={hiddenIn(preview)}>{hiddenNote(hiddenIn(preview) === 'workflow', mode === 'check')}</p>
 		{:else if as === 'workflow' && !confirmable(preview)}
 			<p class="text-warning" data-stamp-workflow-unconfirmed>{t('stamp.workflow_unconfirmed')}</p>
 		{:else if !confirmable(preview)}

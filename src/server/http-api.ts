@@ -2347,10 +2347,13 @@ export class LynoxHTTPApi {
     if (shown === null) return null;
     // The run is refused when ANY member ended (the worker's gate), not only the one it acts for.
     // The way out the view names: with a mandate on the workflow's side, a new plan on the same
-    // workflow would still run for that mandate, so the workflow needs copying, whichever side ended.
+    // workflow would still run for that mandate, so the workflow has to go too, whichever side
+    // ended. `workflow_other` when that mandate is still live and another member ended, so the
+    // note does not say the ended person wrote the workflow.
     const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
     const anyEnded = plan.members.some((m) => principalHasEnded(m, isLive));
-    const endedOn = !anyEnded ? null : plan.workflowMember !== undefined ? 'workflow' : 'plan';
+    const wf = plan.workflowMember;
+    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : principalHasEnded(wf, isLive) ? 'workflow' : 'workflow_other';
     return { ...shown, ended: shown.ended || endedOn !== null, ended_on: endedOn };
   }
 
@@ -8353,7 +8356,7 @@ export class LynoxHTTPApi {
           try {
             listed = await this.#stampListShown(rows[i]!);
           } catch (err: unknown) {
-            console.warn(`[lynox:http] stamp list of trigger ${t.id} not readable: ${err instanceof Error ? err.message : String(err)}`);
+            console.warn(`[lynox:http] stamp list of trigger ${t.id} not readable: ${processErrorText(err)}`);
           }
           return listed === null ? t : { ...t, stamp_listed: listed };
         }))

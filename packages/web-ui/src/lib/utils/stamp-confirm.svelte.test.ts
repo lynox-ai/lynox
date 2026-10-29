@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mandateNeedsOwnerStamp } from '../../../../../src/core/request-principal.js';
 import { setLocale, getLocale } from '../i18n.svelte.js';
-import { awaitsOwnerStamp, confirmable, connectionsSentence, hiddenIn, hidesText, listedLine, listedNote, paramsOf, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
+import { awaitsOwnerStamp, confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, listedLine, listedNote, paramsOf, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
 
 const before = getLocale();
 afterEach(() => { setLocale(before); });
@@ -76,9 +76,9 @@ describe('what the preview shows', () => {
 		expect(hidesText(preview())).toBe(false);
 		expect(hidesText(preview({}, { title: `Report${ZW}` }))).toBe(true);
 		expect(hidesText(preview({}, { description: `Send it.${TAG}` }))).toBe(true);
-		expect(hidesText(preview({}, { pipeline_params: `{"to":"all${ZW}"}` }))).toBe(true);
+		expect(hidesText(preview({ workflow: { name: 'W', confirmed: true } }, { effect: 'run_workflow', pipeline_id: 'wf-1', pipeline_params: `{"to":"all${ZW}"}` }))).toBe(true);
 		expect(hidesText(preview({ by: `eva${ZW}@kanzlei.example` }))).toBe(true);
-		expect(hidesText(preview({ workflow: { name: `W${TAG}`, confirmed: true } }))).toBe(true);
+		expect(hidesText(preview({ workflow: { name: `W${TAG}`, confirmed: true } }, { effect: 'run_workflow', pipeline_id: 'wf-1' }))).toBe(true);
 		expect(hidesText(preview({ connections: [{ id: 'c', profile: 'p', provider: 'CRM', account: `eva${ZW}@crm` }] }))).toBe(true);
 		// Line breaks and tabs are an instruction's own layout, not hidden text.
 		expect(hidesText(preview({}, { description: 'One.\n\tTwo.' }))).toBe(false);
@@ -86,9 +86,39 @@ describe('what the preview shows', () => {
 		// A soft hyphen is common in pasted text and cannot hold a clause.
 		expect(hidesText(preview({}, { description: 'Rech\u00ADnung' }))).toBe(false);
 		// In the workflow's name, the way out has to remove the workflow too.
-		expect(hiddenIn(preview({ workflow: { name: `W${TAG}`, confirmed: true } }, { title: `R${ZW}` }))).toBe('workflow');
-		expect(hiddenIn(preview({}, { pipeline_params: `{"to":"all${ZW}"}` }))).toBe('plan');
+		expect(hiddenIn(preview({ workflow: { name: `W${TAG}`, confirmed: true } }, { effect: 'run_workflow', pipeline_id: 'wf-1', pipeline_params: `{"to":"all${ZW}"}` }))).toBe('workflow');
+		expect(hiddenIn(preview({ workflow: { name: 'W', confirmed: true } }, { effect: 'run_workflow', pipeline_id: 'wf-1', pipeline_params: `{"to":"all${ZW}"}` }))).toBe('plan');
 		expect(hiddenIn(preview())).toBeNull();
+	});
+
+	it('looks only at what the block shows for the kind, and at values as the block shows them', () => {
+		const ZW = '\u200B';
+		const wf = { workflow: { name: 'W', confirmed: true } };
+		// A workflow or watch run never hands its title to the model, and the block does not show it.
+		expect(hiddenIn(preview(wf, { effect: 'run_workflow', pipeline_id: 'wf-1', title: `T${ZW}` }))).toBeNull();
+		expect(hiddenIn(preview({}, { source: 'watch', title: `T${ZW}`, watch: JSON.stringify({ url: 'https://a.example/p' }) }))).toBeNull();
+		// The selector is shown, and checked.
+		expect(hiddenIn(preview({}, { source: 'watch', watch: JSON.stringify({ url: 'https://a.example/p', selector: `#a${ZW}` }) }))).toBe('plan');
+		// A control character inside a value, which the raw JSON would hide behind an escape.
+		expect(hiddenIn(preview(wf, { effect: 'run_workflow', pipeline_id: 'wf-1', pipeline_params: JSON.stringify({ to: 'all\u0001' }) }))).toBe('plan');
+		// Windows line endings are pasted text, not a hidden clause.
+		expect(hiddenIn(preview({}, { description: 'One.\r\nTwo.' }))).toBeNull();
+	});
+
+	it('says in the check that a confirmed plan still runs', () => {
+		setLocale('de');
+		expect(hiddenNote(false, false)).not.toContain('läuft trotzdem weiter');
+		expect(hiddenNote(false, true)).toContain('läuft trotzdem weiter');
+		expect(hiddenNote(true, true)).toContain('in seinem Workflow');
+		expect(hiddenNote(true, false)).toContain('in seinem Workflow');
+		expect(hiddenNote(true, false)).not.toContain('läuft trotzdem weiter');
+	});
+
+	it('does not say the ended person wrote the workflow when someone else did', () => {
+		setLocale('de');
+		const note = listedNote({ lapsed: false, ended: true, ended_on: 'workflow_other', entries: [{ provider: 'p', account: 'a', state: 'waits' }] }, false)!;
+		expect(note).toContain('von einer anderen Person mit Zugang');
+		expect(note).not.toContain('sie hat den Workflow');
 	});
 
 	it('names whose logins and which, with "account unknown" where the provider told nothing', () => {

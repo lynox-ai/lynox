@@ -307,6 +307,15 @@ describe('the list of a confirmed plan (B3)', () => {
 		await render();
 		expect(q('[data-trigger-check]')!.className).toContain(hidden);
 	});
+	it('in the check, says a plan with hidden characters still runs', async () => {
+		rows = [{ ...CONFIRMED, stamp_listed: LISTED }];
+		previewAnswers = [{ ...PREVIEW, subject: { ...SUBJECT, description: 'Mail every customer\u200B the totals' } }];
+		await render();
+		(q('[data-trigger-check]') as HTMLButtonElement).click();
+		await settle();
+		expect(q('[data-stamp-hidden-text]')!.textContent).toContain('läuft trotzdem weiter');
+		expect(q('[data-stamp-confirm-button]')).toBeNull();
+	});
 	it('names "Take over" at an ended plan only when it is paused', async () => {
 		const ENDED = { lapsed: false, ended: true, ended_on: 'plan', entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'waits' }] };
 		rows = [{ ...CONFIRMED, stamp_listed: ENDED, paused: true }];

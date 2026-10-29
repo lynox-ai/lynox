@@ -182,10 +182,11 @@ export interface StampListShown {
   /**
    * The way out the view names once a member's access ended: `workflow` when a mandate created or
    * changed the plan's workflow (a new plan on it would still run for that mandate, so the workflow
-   * needs copying too), `plan` when no mandate is on the workflow's side, null when none ended. Set
-   * by the route, which reads both sides.
+   * needs copying too), `workflow_other` when that mandate is live and another member ended, `plan`
+   * when no mandate is on the workflow's side, null when none ended. Set by the route, which reads
+   * both sides.
    */
-  readonly ended_on?: 'plan' | 'workflow' | null;
+  readonly ended_on?: 'plan' | 'workflow' | 'workflow_other' | null;
   readonly entries: readonly { readonly provider: string | null; readonly account: string | null; readonly state: StampEntryState }[];
 }
 
