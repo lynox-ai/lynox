@@ -319,6 +319,26 @@ export function ensureSubAnchor(anchor: WorkspaceAnchor, name: string, dirMode: 
 }
 
 /**
+ * As {@link ensureSubAnchor}, and the directory gets `dirMode` and `group` whether this call made it
+ * or it was there already (a context directory left at mkdir's 0700 by an earlier start, or changed
+ * since). Set through a reopened fd, as `setMode` does: on the O_PATH anchor fchown and fchmod are
+ * EBADF. Returns the anchor and the directory's owner, for the caller to check; a failed call
+ * closes what it opened and throws, naming the call in its errno message.
+ */
+export function ensureSubAnchorWithMode(anchor: WorkspaceAnchor, name: string, dirMode: number, group: number): { anchor: WorkspaceAnchor; uid: number } {
+  const parts = splitRel(name);
+  if (parts.length !== 1) throw new WorkspaceAccessError('BAD_PATH', `a sub-anchor is one component, got ${JSON.stringify(name)}`);
+  const dir = walkDir(anchor, parts, { dirMode, group });
+  try {
+    setMode(dir, dirMode, group);
+    return { anchor: { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf }, uid: fstatSync(dir.fd).uid };
+  } catch (err) {
+    closeSync(dir.fd);
+    throw err;
+  }
+}
+
+/**
  * Open the directory `rel` below `anchor` as its own anchor, every component with O_NOFOLLOW.
  * Creates nothing: a missing component is ENOENT, a symlink on the way is refused. `rel` must
  * name at least one component (the anchor itself is not handed out twice).
