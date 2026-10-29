@@ -17,7 +17,7 @@
  * fields a write does not send is documented by none of them; that is what the one-target
  * probe before a wider approval is for (`BulkLedger.confirmProbe`).
  */
-import { effectiveWriteMethod, gateReading, isGraphqlEndpoint, isOutboundEffectWrite, normalizeWritePath, outboundEffectField } from './outbound-write.js';
+import { effectiveWriteMethod, gateReading, isGraphqlEndpoint, isOutboundEffectWrite, isReadMethod, normalizeWritePath, outboundEffectField } from './outbound-write.js';
 import { shopifyReadRequest, shopifyWriteRequest, type ShopifyRead, type ShopifyWrite } from './shopify-graphql.js';
 import { isMeasuredWriteForm } from './bulk-write-forms.js';
 import { canonicalHost } from './canonical-host.js';
@@ -220,7 +220,11 @@ export function refuseExternalAfter(
  * target paths. `origin: 'reviewed'` because nothing acts on it before a human approved
  * the run it belongs to. Every request the run sends is checked against it.
  */
-/** The verbs an external run may write with. Each targets an existing resource's URL. */
+/**
+ * The verbs an external run may write with. Each targets an existing resource's URL. A
+ * deliberate subset of the writes, not a read/write split: whether a method only reads is
+ * answered by `isReadMethod` (core/outbound-write.ts).
+ */
 export const BULK_WRITE_METHODS = ['PATCH', 'PUT', 'POST'] as const;
 export type BulkWriteMethod = (typeof BULK_WRITE_METHODS)[number];
 
@@ -420,7 +424,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // the one place every body leaves, whichever source the run was planned from, and an undo's.
     // A GraphQL read's body is one of the engine's JSON documents — the contract above admitted
     // nothing else — so it parses; checked after the contract for that reason.
-    if (method !== 'GET' && outboundEffectField(url, graphql !== undefined ? JSON.parse(graphql.body) as unknown : body) !== null) return { kind: 'not_granted' };
+    if (!isReadMethod(gated) && outboundEffectField(url, graphql !== undefined ? JSON.parse(graphql.body) as unknown : body) !== null) return { kind: 'not_granted' };
     const hostname = new URL(url).hostname;
     // On a connected account a run writes only in a measured form; any other write is not
     // granted, whatever the run's approval said. A GraphQL read is no write. A write of the
@@ -428,7 +432,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // byte for byte (`withShopifyApply`), the owner confirmed the form as unmeasured, and the run
     // wrote and read back its own probe first (PRD shopify-preset §16.4).
     const engineFormWrite = graphql !== undefined && (graphql.writes !== true || isMintedShopifyWrite(deps.contract, payload));
-    if (method !== 'GET' && !engineFormWrite && deps.connectedAccount(url) && !isMeasuredWriteForm(hostname, new URL(url).pathname, gated)) {
+    if (!isReadMethod(gated) && !engineFormWrite && deps.connectedAccount(url) && !isMeasuredWriteForm(hostname, new URL(url).pathname, gated)) {
       return { kind: 'not_granted' };
     }
     try {
@@ -458,7 +462,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     // Last before it leaves, so the row stands for a request that is sent.
-    if ((method === 'GET' || (graphql !== undefined && graphql.writes !== true)) && deps.recordRead !== null && !deps.recordRead(url, graphql?.detail)) return { kind: 'unrecorded' };
+    if ((isReadMethod(method) || (graphql !== undefined && graphql.writes !== true)) && deps.recordRead !== null && !deps.recordRead(url, graphql?.detail)) return { kind: 'unrecorded' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
     carried.push(connection);
     onSend?.();
@@ -477,7 +481,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
       // The body streams after the headers: a reset or a timeout there is a failed read
       // like one before them, never an exception out of the effect.
       try {
-        const read = await readResponse(res, now(), method === 'GET' || graphql !== undefined, maxBytes);
+        const read = await readResponse(res, now(), isReadMethod(method) || graphql !== undefined, maxBytes);
         if (graphql === undefined) return read;
         const answer = graphqlAnswer(read, res.headers.get('retry-after'), now());
         return graphql.writes === true ? graphqlWriteAnswer(answer) : answer;
