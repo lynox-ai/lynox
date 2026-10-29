@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, existsSync, mkdirSync, openSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -24,7 +24,9 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-import { resetShellIsolationForTest, setShellIsolationForTest, SHARED_GROUP, type ShellIsolation } from './shell-isolation.js';
+import { resetShellIsolationForTest, setShellIsolationForTest, SHARED_GROUP, WORKSPACE_LABEL, type ShellIsolation } from './shell-isolation.js';
+import { anchorFromFd, closeAnchor, type WorkspaceAnchor } from './workspace-fd.js';
+import { _resetWorkspaceAccess } from './workspace-access.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 
 // The layout's values as literals, not the module's constants: an expectation that imports the
@@ -32,9 +34,9 @@ import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.j
 const SIDECAR_FILE_MODE = 0o660;
 const SIDECAR_DIR_MODE = 0o2770;
 import { anchoredWorkspaceWriter } from './bulk-apply.js';
-import { ChangesetManager } from './changeset.js';
+import { ChangesetManager, workspaceChangeset } from './changeset.js';
 import { persistChatUploadInArea } from './file-area-anchor.js';
-import { clearTenantWorkspace, setTenantWorkspace } from './workspace.js';
+import { _resetCache, clearTenantWorkspace, setTenantWorkspace } from './workspace.js';
 import { closeWorkspaceBase } from './workspace-rel.js';
 import { writeFileTool } from '../tools/builtin/fs.js';
 import { batchFilesTool } from '../tools/builtin/batch-files.js';
@@ -91,70 +93,101 @@ describe('the modes and group of a write in sidecar mode', () => {
 });
 
 describe.each(UMASKS)('in sidecar mode under umask %o', (mask) => {
-  beforeEach(() => { setShellIsolationForTest(SIDECAR); });
+  // As the boot in sidecar mode: the tree is the fd the entrypoint hands over, the tools name it by
+  // its label. Paths go in by label (`at`) and are checked on the disk (`on`).
+  let tree: string;
+  let anchor: WorkspaceAnchor;
+  let prevData: string | undefined;
+  const at = (...p: string[]): string => join(WORKSPACE_LABEL, 'ctx1', ...p);
+  const on = (...p: string[]): string => join(tree, 'ctx1', ...p);
+
+  beforeEach(() => {
+    tree = join(ws, 'tree');
+    mkdirSync(join(tree, 'ctx1'), { recursive: true });
+    mkdirSync(join(ws, 'data'));
+    prevData = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = join(ws, 'data');
+    closeWorkspaceBase();
+    anchor = anchorFromFd(openSync(tree, constants.O_RDONLY | constants.O_DIRECTORY), WORKSPACE_LABEL);
+    setShellIsolationForTest({ kind: 'sidecar', socket: join(ws, 'exec.sock'), root: { mode: 'sidecar', anchor, label: WORKSPACE_LABEL } });
+    _resetCache();
+    setTenantWorkspace(at());
+  });
+
+  afterEach(() => {
+    closeWorkspaceBase();
+    _resetWorkspaceAccess();
+    _resetCache();
+    closeAnchor(anchor);
+    if (prevData === undefined) delete process.env['LYNOX_DATA_DIR']; else process.env['LYNOX_DATA_DIR'] = prevData;
+  });
 
   it('write_file (and media_process, through the same writeInPlace) makes 0660 files in 02770 directories with the group', async () => {
-    await underUmask(mask, () => writeFileTool.handler({ path: join(ws, 'deep', 'new.txt'), content: 'n' }, agent()));
-    expect(mode(join(ws, 'deep', 'new.txt'))).toBe(SIDECAR_FILE_MODE);
-    expect(mode(join(ws, 'deep'))).toBe(SIDECAR_DIR_MODE);
+    await underUmask(mask, () => writeFileTool.handler({ path: at('deep', 'new.txt'), content: 'n' }, agent()));
+    expect(mode(on('deep', 'new.txt'))).toBe(SIDECAR_FILE_MODE);
+    expect(mode(on('deep'))).toBe(SIDECAR_DIR_MODE);
     expect(chowns).toEqual([SHARED_GROUP, SHARED_GROUP]);
   });
 
   it('a failed group change leaves no file or directory behind, so a retry does not write a private one', async () => {
     chownFails.on = true;
-    await expect(underUmask(mask, () => writeFileTool.handler({ path: join(ws, 'deep', 'new.txt'), content: 'n' }, agent()))).rejects.toThrow(/EPERM/);
-    expect(existsSync(join(ws, 'deep'))).toBe(false);
-    mkdirSync(join(ws, 'there'));
-    await expect(underUmask(mask, () => writeFileTool.handler({ path: join(ws, 'there', 'new.txt'), content: 'n' }, agent()))).rejects.toThrow(/EPERM/);
-    expect(existsSync(join(ws, 'there', 'new.txt'))).toBe(false);
+    await expect(underUmask(mask, () => writeFileTool.handler({ path: at('deep', 'new.txt'), content: 'n' }, agent()))).rejects.toThrow(/EPERM/);
+    expect(existsSync(on('deep'))).toBe(false);
+    mkdirSync(on('there'));
+    await expect(underUmask(mask, () => writeFileTool.handler({ path: at('there', 'new.txt'), content: 'n' }, agent()))).rejects.toThrow(/EPERM/);
+    expect(existsSync(on('there', 'new.txt'))).toBe(false);
     // The control: with the group change working, the same writes land.
     chownFails.on = false;
-    await underUmask(mask, () => writeFileTool.handler({ path: join(ws, 'deep', 'new.txt'), content: 'n' }, agent()));
-    expect(mode(join(ws, 'deep'))).toBe(SIDECAR_DIR_MODE);
+    await underUmask(mask, () => writeFileTool.handler({ path: at('deep', 'new.txt'), content: 'n' }, agent()));
+    expect(mode(on('deep'))).toBe(SIDECAR_DIR_MODE);
   });
 
   it('write_file over an existing file writes in place and changes neither mode nor group', async () => {
-    writeFileSync(join(ws, 'kept.sh'), 'one');
-    chmodSync(join(ws, 'kept.sh'), 0o750);
-    await underUmask(mask, () => writeFileTool.handler({ path: join(ws, 'kept.sh'), content: 'two' }, agent()));
-    expect(mode(join(ws, 'kept.sh'))).toBe(0o750);
+    writeFileSync(on('kept.sh'), 'one');
+    chmodSync(on('kept.sh'), 0o750);
+    await underUmask(mask, () => writeFileTool.handler({ path: at('kept.sh'), content: 'two' }, agent()));
+    expect(readFileSync(on('kept.sh'), 'utf8')).toBe('two');
+    expect(mode(on('kept.sh'))).toBe(0o750);
     expect(chowns).toEqual([]);
   });
 
   it('batch_files makes a move\'s destination directories 02770 with the group', async () => {
-    writeFileSync(join(ws, 'a.txt'), 'a');
-    await underUmask(mask, () => batchFilesTool.handler({ operation: 'move', pattern: 'a.txt', directory: ws, destination: join(ws, 'to', 'here') }, agent()));
-    expect(readFileSync(join(ws, 'to', 'here', 'a.txt'), 'utf8')).toBe('a');
-    expect(mode(join(ws, 'to'))).toBe(SIDECAR_DIR_MODE);
-    expect(mode(join(ws, 'to', 'here'))).toBe(SIDECAR_DIR_MODE);
+    writeFileSync(on('a.txt'), 'a');
+    await underUmask(mask, () => batchFilesTool.handler({ operation: 'move', pattern: 'a.txt', directory: at(), destination: at('to', 'here') }, agent()));
+    expect(readFileSync(on('to', 'here', 'a.txt'), 'utf8')).toBe('a');
+    expect(mode(on('to'))).toBe(SIDECAR_DIR_MODE);
+    expect(mode(on('to', 'here'))).toBe(SIDECAR_DIR_MODE);
     expect(chowns).toEqual([SHARED_GROUP, SHARED_GROUP]);
   });
 
   it('a changeset rollback makes a file the run deleted again 0660 with the group', async () => {
-    writeFileSync(join(ws, 'a.txt'), 'before');
-    const mgr = new ChangesetManager(ws, 'run');
-    mgr.backupBeforeWrite(join(ws, 'a.txt'));
-    rmSync(join(ws, 'a.txt'));
-    await underUmask(mask, () => mgr.rollbackAll());
-    expect(readFileSync(join(ws, 'a.txt'), 'utf8')).toBe('before');
-    expect(mode(join(ws, 'a.txt'))).toBe(SIDECAR_FILE_MODE);
-    expect(chowns).toEqual([SHARED_GROUP]);
-    mgr.cleanup();
+    writeFileSync(on('a.txt'), 'before');
+    const cs = workspaceChangeset('run');
+    try {
+      expect(cs.backupBeforeWrite(at('a.txt'))).toBe(true);
+      rmSync(on('a.txt'));
+      await underUmask(mask, () => cs.rollbackAll());
+      expect(readFileSync(on('a.txt'), 'utf8')).toBe('before');
+      expect(mode(on('a.txt'))).toBe(SIDECAR_FILE_MODE);
+      expect(chowns).toEqual([SHARED_GROUP]);
+    } finally {
+      cs.cleanup();
+    }
   });
 
   it('bulk apply makes new files 0660 in 02770 directories, and a pool file it replaces stays group-writable', async () => {
-    writeFileSync(join(ws, 'pool.txt'), 'before');
-    chmodSync(join(ws, 'pool.txt'), 0o644);
+    writeFileSync(on('pool.txt'), 'before');
+    chmodSync(on('pool.txt'), 0o644);
     const writer = anchoredWorkspaceWriter();
     await underUmask(mask, async () => {
-      await writer.write(join(ws, 'pool.txt'), { absent: false, value: 'after' });
-      await writer.write(join(ws, 'new/deep/n.txt'), { absent: false, value: 'n' });
+      await writer.write(at('pool.txt'), { absent: false, value: 'after' });
+      await writer.write(at('new/deep/n.txt'), { absent: false, value: 'n' });
     });
-    expect(readFileSync(join(ws, 'pool.txt'), 'utf8')).toBe('after');
-    expect(mode(join(ws, 'pool.txt'))).toBe(0o660);
-    expect(mode(join(ws, 'new', 'deep', 'n.txt'))).toBe(SIDECAR_FILE_MODE);
-    expect(mode(join(ws, 'new'))).toBe(SIDECAR_DIR_MODE);
-    expect(mode(join(ws, 'new', 'deep'))).toBe(SIDECAR_DIR_MODE);
+    expect(readFileSync(on('pool.txt'), 'utf8')).toBe('after');
+    expect(mode(on('pool.txt'))).toBe(0o660);
+    expect(mode(on('new', 'deep', 'n.txt'))).toBe(SIDECAR_FILE_MODE);
+    expect(mode(on('new'))).toBe(SIDECAR_DIR_MODE);
+    expect(mode(on('new', 'deep'))).toBe(SIDECAR_DIR_MODE);
     // The replacement, the two directories and the new file.
     expect(chowns).toEqual([SHARED_GROUP, SHARED_GROUP, SHARED_GROUP, SHARED_GROUP]);
   });
@@ -162,8 +195,9 @@ describe.each(UMASKS)('in sidecar mode under umask %o', (mask) => {
   it('a chat upload is 0660 in a 02770 directory with the group, so the shell can read it', async () => {
     const stored = await underUmask(mask, () => persistChatUploadInArea('Buchungen.csv', 'id\n1\n'));
     expect(stored).not.toBeNull();
-    expect(mode(stored!.abs)).toBe(SIDECAR_FILE_MODE);
-    expect(mode(join(ws, 'uploads'))).toBe(SIDECAR_DIR_MODE);
+    expect(readFileSync(on(stored!.rel), 'utf8')).toBe('id\n1\n');
+    expect(mode(on(stored!.rel))).toBe(SIDECAR_FILE_MODE);
+    expect(mode(on('uploads'))).toBe(SIDECAR_DIR_MODE);
     expect(chowns).toEqual([SHARED_GROUP, SHARED_GROUP]);
   });
 });
