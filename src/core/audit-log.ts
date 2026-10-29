@@ -17,7 +17,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { isOwnerPrincipal, type RequestPrincipal } from './request-principal.js';
-import { effectiveWriteMethod } from './outbound-write.js';
+import { effectiveWriteMethod, isReadMethod } from './outbound-write.js';
 import { oneLineForLog } from './profile-value-shape.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { currentPlanRun } from './plan-run-context.js';
@@ -354,7 +354,7 @@ export function delegatedRedirects(record: ((target: string) => void) | null): (
   if (record === null) return undefined;
   return (nextUrl, method, headers = {}) => {
     const acted = effectiveWriteMethod(method, headers, nextUrl);
-    if (acted !== 'GET' && acted !== 'HEAD') {
+    if (!isReadMethod(acted)) {
       throw new DelegatedHopRefused(`Blocked: a redirect a server would act on as a write (${acted ?? 'an override that is not a method'}) is not followed under delegated access. Nothing was sent to ${new URL(nextUrl).hostname}.`);
     }
     record(httpTarget(acted, nextUrl));

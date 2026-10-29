@@ -8,7 +8,7 @@
 
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants, isReviewedHeaderName } from '../tools/permission-guard.js';
-import { effectiveWriteMethod, isOutboundEffectWrite, writeMethodsNamed } from './outbound-write.js';
+import { effectiveWriteMethod, isOutboundEffectWrite, isReadMethod, writeMethodsNamed } from './outbound-write.js';
 import { maskSecretPatterns } from './secret-store.js';
 
 /** Start of the line that names a write an unattended run was not granted. */
@@ -186,7 +186,7 @@ export function headlessRefusalNote(toolName: string, input: unknown, afterUntru
     : {};
   const body = typeof req.body === 'string' ? req.body : undefined;
   const gated = effectiveWriteMethod(sent, headers, req.url, body);
-  if (gated === 'GET' || gated === 'HEAD') return '';
+  if (isReadMethod(gated)) return '';
   const shown = gated === null
     ? 'a write whose method or method override is not an HTTP method, to'
     : writeForShortNote(sent, gated, writeMethodsNamed(sent, headers, req.url, body));
