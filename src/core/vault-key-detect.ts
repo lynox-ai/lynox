@@ -63,6 +63,7 @@ function registeredColumns(store: KeylessStore): Array<readonly [string, string]
   return out;
 }
 
+// run-group-starter: resolves on the next turn; it only lets other work run between read steps and reports no spend.
 const yieldToLoop = (): Promise<void> => new Promise((resolve) => { setImmediate(resolve); });
 
 /**
@@ -88,6 +89,7 @@ export async function checkKeylessOverCiphertext(
           + `)`,
         );
         let after = Number.MIN_SAFE_INTEGER;
+        // run-group-starter: started once after listen at boot, outside any run; ends at the deadline at the latest, only reads and reports no spend.
         for (;;) {
           if (now() > deadline) return { state: 'unknown' };
           const row = step.get(after, stepRows) as { last: number | null; hit: number | null };
