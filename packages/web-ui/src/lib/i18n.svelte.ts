@@ -549,6 +549,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'activity.empty.cta':                    { de: '→ Chat',                        en: '→ Chat' },
 	'activity.empty.history.description':    { de: 'Hier erscheinen abgeschlossene Runs, sobald der Agent zum ersten Mal gelaufen ist.', en: 'Completed runs show up here once the agent has run at least once.' },
 	// Tool Toggles (T5 of deferred-batch)
+	// UX-031: bulk runs' switch above the tool list (wording ux U-053, the engine-database lock ux 29.10.).
+	'bulk.setting.title':          { de: 'Massenläufe', en: 'Bulk runs' },
+	'bulk.setting.description':    { de: 'Ein Massenlauf ändert viele Einträge auf einmal, zum Beispiel Produkttexte in Shopify. Du siehst vorher eine Vorschau und gibst ihn frei.', en: 'A bulk run changes many items at once, for example product texts in Shopify. You see a preview first and approve it.' },
+	'bulk.setting.switch':         { de: 'Massenläufe erlauben', en: 'Allow bulk runs' },
+	'bulk.setting.locked_pool':    { de: 'Auf dieser Instanz schaltet lynox Massenläufe frei. Schreib dazu an support@lynox.ai.', en: 'On this instance, lynox enables bulk runs for you. Write to support@lynox.ai.' },
+	'bulk.setting.locked_db':      { de: 'Massenläufe brauchen die Engine-Datenbank, und die liess sich beim Start dieser Instanz nicht öffnen.', en: 'Bulk runs need the engine database, and it could not be opened when this instance started.' },
+	'bulk.setting.locked_db_selfhost': { de: 'Den Grund nennt das Startprotokoll unter „EngineDb init failed“.', en: 'The startup log names the reason under “EngineDb init failed”.' },
+	'bulk.setting.locked_db_managed':  { de: 'Schreib dazu an support@lynox.ai.', en: 'Write to support@lynox.ai about it.' },
+	'bulk.setting.shopify_selfhost': { de: 'Für Shopify-Shops schaltest du zusätzlich das Lesen frei (LYNOX_FEATURE_SHOPIFY_BULK_READ).', en: 'For Shopify stores, also enable reading (LYNOX_FEATURE_SHOPIFY_BULK_READ).' },
+	'bulk.setting.shopify_managed':  { de: 'Für Shopify-Shops schreib an support@lynox.ai.', en: 'For Shopify stores, write to support@lynox.ai.' },
 	'tools.heading':       { de: 'Tool-Berechtigungen',                                                          en: 'Tool permissions' },
 	'tools.subtitle':      { de: 'Bestimmt, welche Tools dem Agenten zur Verfügung stehen. Deaktivierte Tools werden serverseitig aus der Registry ausgeblendet — ein prompt-injizierter Aufruf erreicht sie nicht.', en: 'Controls which tools the agent has access to. Disabled tools are hidden from the registry server-side — a prompt-injected call cannot reach them.' },
 	'tools.loading':       { de: 'Lädt …',                                                                       en: 'Loading …' },
