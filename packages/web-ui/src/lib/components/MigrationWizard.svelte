@@ -14,9 +14,10 @@
 		getProgress,
 		getVerification,
 		getDoneWorkspace,
+		getDoneSkipped,
 		getTargetUrl,
 	} from '../stores/migration.svelte.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, tf } from '../i18n.svelte.js';
 	import { migrationWorkspaceNotice } from '../backup-coverage.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 
@@ -27,6 +28,10 @@
 	const progress = $derived(getProgress());
 	const verification = $derived(getVerification());
 	const workspaceNotice = $derived(migrationWorkspaceNotice({ workspace: getDoneWorkspace() }, isManaged()));
+	// Files the export could not carry (row 1033, ux U-056): the count, the paths on request, and
+	// the same next step as for a workspace left out. At most this many paths are listed.
+	const SKIPPED_SHOWN = 50;
+	const skipped = $derived(getDoneSkipped());
 	// The tier picks the way out the workspace notice names; a failed read leaves the self-hosted one.
 	$effect(() => { void loadManagedStatus(); });
 	const targetUrl = $derived(getTargetUrl());
@@ -257,6 +262,20 @@
 				<p class="mt-1 text-xs text-text-muted">{t(workspaceNotice?.description ?? 'migration.success_desc')}</p>
 				{#if workspaceNotice}
 					<p data-testid="migration-workspace-omitted" class="mt-1 text-xs text-warning">{t(workspaceNotice.line)}</p>
+				{/if}
+				{#if skipped.length > 0}
+					<details data-testid="migration-skipped" class="mt-1 text-xs text-warning">
+						<summary class="cursor-pointer">{skipped.length === 1 ? t('migration.skipped_one') : tf('migration.skipped_many', { n: String(skipped.length) })}</summary>
+						<ul class="mt-1 space-y-0.5 break-all font-mono text-text-muted">
+							{#each skipped.slice(0, SKIPPED_SHOWN) as path, i (i)}<li>{path}</li>{/each}
+						</ul>
+						{#if skipped.length > SKIPPED_SHOWN}
+							<p class="mt-1 text-text-muted">{tf('migration.skipped_more', { m: String(skipped.length - SKIPPED_SHOWN) })}</p>
+						{/if}
+					</details>
+					{#if !workspaceNotice}
+						<p data-testid="migration-skipped-next" class="mt-1 text-xs text-warning">{t(isManaged() ? 'migration.workspace_omitted_managed' : 'migration.workspace_omitted_self')}</p>
+					{/if}
 				{/if}
 			</div>
 

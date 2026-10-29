@@ -2464,6 +2464,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'migration.success_desc_without_workspace': { de: 'Deine Daten sind jetzt auf deiner Managed-Instanz verfügbar, ausser den Dateien des Arbeitsbereichs.', en: 'Your data is now available on your managed instance, except for the workspace files.' },
 	'migration.workspace_omitted_managed': { de: 'Diese Dateien hat die Migration nicht übertragen. Für eine Kopie auf die neue Instanz schreib an support@lynox.ai.', en: 'The migration did not transfer these files. To have them copied to the new instance, write to support@lynox.ai.' },
 	'migration.workspace_omitted_self': { de: 'Diese Dateien hat die Migration nicht übertragen. Übertrage sie dort, wo du sie verwaltest.', en: 'The migration did not transfer these files. Move them where you manage them.' },
+	// Files the export could not carry (row 1033, ux U-056).
+	'migration.skipped_one': { de: '1 Datei wurde nicht übertragen (eine Verknüpfung oder ein Name, der sich nicht übertragen lässt).', en: '1 file was not transferred (a link, or a name that cannot be transferred).' },
+	'migration.skipped_many': { de: '{n} Dateien wurden nicht übertragen (Verknüpfungen oder Namen, die sich nicht übertragen lassen).', en: '{n} files were not transferred (links, or names that cannot be transferred).' },
+	'migration.skipped_more': { de: '… und {m} weitere', en: '… and {m} more' },
 	'migration.open_instance': { de: 'Instanz öffnen', en: 'Open Instance' },
 	'migration.error_preview': { de: 'Vorschau konnte nicht geladen werden.', en: 'Failed to load preview.' },
 	'migration.error_incomplete': { de: 'Migration unvollständig abgebrochen.', en: 'Migration ended unexpectedly.' },
