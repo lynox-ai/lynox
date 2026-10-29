@@ -22,6 +22,7 @@
 	import { installApiFetchInterceptor } from '../utils/api-fetch-interceptor.js';
 	import { installMandateRenewTimer } from '../utils/mandate-renew-timer.js';
 	import { startApprovalsNav, approvalsNavItem } from '../stores/approvals.svelte.js';
+	import { startPausedPlansNav, getPausedPlansBadge } from '../stores/paused-plans.svelte.js';
 	import type { Snippet } from 'svelte';
 
 	let { children, userSlot }: {
@@ -313,6 +314,8 @@
 		type?: 'threads';
 		/** A count shown beside the label (and as a dot on the collapsed rail). */
 		badge?: number | null;
+		/** What the count means, read out to a screen reader ({count}). */
+		badgeLabelKey?: string;
 	}
 
 	// Feature-flag gated nav entries. Fetched once on mount from the Engine.
@@ -320,6 +323,7 @@
 	// no dead link.
 	let inboxEnabled = $state(false);
 	let stopApprovalsNav: (() => void) | undefined;
+	let stopPausedPlansNav: (() => void) | undefined;
 
 	onMount(async () => {
 		// Catch any /api/* 401 globally so a Safari-PWA cookie eviction
@@ -332,6 +336,8 @@
 		// The approval queue's item shows when its count answers; the count is polled only while
 		// the latest answer names the owner's session.
 		stopApprovalsNav = startApprovalsNav();
+		// Plans waiting for the owner's takeover: a dot at "Automation" (ux UX-032).
+		stopPausedPlansNav = startPausedPlansNav();
 
 		// /inbox/counts returns 503 when the flag is off; treating ok=true as
 		// "enabled" mirrors the store's own probe (see inbox.svelte.ts).
@@ -359,12 +365,16 @@
 			// PRD-IA-V2 P2-PR-A: Activity is its own root (daily-frequency surface).
 			// Position 3 per PRD nav table — between Inbox and Hub.
 			{ href: '/app/activity', labelKey: 'nav.activity', exact: false, icon: 'clock' },
-			{ href: '/app/hub', labelKey: 'nav.automation', exact: false, icon: 'workflow' },
+			{ href: '/app/hub', labelKey: 'nav.automation', exact: false, icon: 'workflow', badge: getPausedPlansBadge(), badgeLabelKey: 'nav.paused_badge' },
 			{ href: '/app/intelligence', labelKey: 'nav.intelligence', exact: false, icon: 'brain' },
 			{ href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts' },
 		);
 		return items;
 	});
+
+	// The counts behind the menu button on a phone, where the navigation is folded away: the dot at
+	// "Automation" must be seen without the push (ux UX-032), so the button carries it too.
+	const foldedBadges = $derived(nav.filter((item) => typeof item.badge === 'number' && item.badge > 0));
 
 	// The Chat entry — its expanded thread list grows to fill the sidebar.
 	// nav[0] is always Chat (see the `nav` builder above); kept as a derived
@@ -509,6 +519,7 @@
 		stopVisibilityRefresh?.();
 		stopActiveRunsPoll?.();
 		stopApprovalsNav?.();
+		stopPausedPlansNav?.();
 		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
 		railMq?.removeEventListener('change', onRailMq);
 	});
@@ -606,7 +617,7 @@
 					{#if item.badge}
 						<span class="shrink-0 text-[10px] tabular-nums rounded px-1.5 py-0.5 bg-accent/15 text-accent-text {railExpanded ? '' : 'md:sr-only'}" data-nav-badge>
 							<span aria-hidden="true">{item.badge}</span>
-							<span class="sr-only">{tf('nav.approvals_badge', { count: String(item.badge) })}</span>
+							<span class="sr-only">{tf(item.badgeLabelKey ?? 'nav.approvals_badge', { count: String(item.badge) })}</span>
 						</span>
 					{/if}
 					{#if isExpandable(item) && navExpanded}
@@ -843,8 +854,13 @@
 			<header class="flex items-center justify-between h-12 px-4 border-b border-border bg-bg shrink-0">
 				<!-- Left: hamburger (mobile) + logo -->
 				<div class="flex items-center gap-3">
-					<button onclick={() => { sidebarOpen = true; langDropdownOpen = false; }} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label="Open menu">
-						<Icon name="hamburger" size="md" />
+					<button onclick={() => { sidebarOpen = true; langDropdownOpen = false; }} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label={[t('nav.open_menu'), ...foldedBadges.map((item) => tf(item.badgeLabelKey ?? 'nav.approvals_badge', { count: String(item.badge) }))].join('. ')}>
+						<span class="relative inline-flex">
+							<Icon name="hamburger" size="md" />
+							{#if foldedBadges.length > 0}
+								<span class="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-accent" aria-hidden="true" data-menu-badge></span>
+							{/if}
+						</span>
 					</button>
 					<!-- PRD-LIGHT-MODE PR 4 — two static <img>, CSS visibility-switch
 					     by [data-theme]. Avoids SSR/hydrate flicker that any reactive

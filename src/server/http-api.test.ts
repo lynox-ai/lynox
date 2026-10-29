@@ -1289,7 +1289,7 @@ describe('LynoxHTTPApi', () => {
       const origTm = engineRef['getTaskManager'];
       engineRef['getAuditLog'] = () => ({ record: (e: { principal: unknown }) => { rows.push(e); } });
       engineRef['getRunHistory'] = () => ({ getTask: () => undefined, deleteTask: () => false, deleteTrigger: () => true });
-      engineRef['getTaskManager'] = () => ({ deleteTodo: () => false, deleteSchedule: () => true });
+      engineRef['getTaskManager'] = () => ({ deleteTodo: () => false, deleteSchedule: () => true, getTrigger: () => undefined });
       try {
         const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
         const res = await fetch(`${baseUrl}/api/tasks/trg-9`, { method: 'DELETE', headers: { cookie: `lynox_session=${mandate}` } });
@@ -6094,6 +6094,34 @@ describe('LynoxHTTPApi', () => {
       expect(body['locks']).toEqual({});
     });
 
+    // On a pool tier no path reads a vault MISTRAL_API_KEY: the pool's key comes from the
+    // environment. Reporting Mistral as available from the vault alone would show a provider
+    // that does not run without the pool's key.
+    it.each([
+      ['managed', ['MISTRAL_API_KEY'], '', false],
+      ['managed_pro', ['MISTRAL_API_KEY'], '', false],
+      ['managed_max', ['MISTRAL_API_KEY'], '', false],
+      ['eu', ['MISTRAL_API_KEY'], '', false],
+      ['managed', [], 'pool-mistral-key', true],
+      ['hosted', ['MISTRAL_API_KEY'], '', true],
+      ['', ['MISTRAL_API_KEY'], '', true],
+    ] as const)('mistral_available on tier "%s" with vault %j and env "%s" is %s', async (tier, vault, env, available) => {
+      repayRateWindow();
+      vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      vi.stubEnv('MISTRAL_API_KEY', env);
+      mockSecretListNames.mockReturnValue([...vault]);
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const caps = (await res.json() as { capabilities: Record<string, unknown> }).capabilities;
+        expect(caps['mistral_available']).toBe(available);
+      } finally {
+        // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('MISTRAL_API_KEY', '');
+      }
+    });
+
     it('has_calendar follows the REGISTRY, so an instance with the calendar on reports it', async () => {
       // The direction the default mock cannot show. `has_calendar` was hard-coded `false`, so
       // every assertion about it passed while the probe told a calendar-enabled instance it had
@@ -9640,12 +9668,13 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('GET /api/triggers adds the two flags and nothing else to a row', async () => {
+    it('GET /api/triggers adds the two flags, and the pause\'s, and nothing else to a row', async () => {
       // Who started the run stays inside: any further field — a starter tag, an effect —
-      // would be a new disclosure on a list a mandate reads.
+      // would be a new disclosure on a list a mandate reads. `paused` is the plan pause's
+      // (`triggerForRoute`), on by default since the takeover is in the view.
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
-        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'running', 'stoppable', 'title']);
+        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'running', 'stoppable', 'title']);
       });
     });
 
@@ -12841,6 +12870,35 @@ describe('LynoxHTTPApi', () => {
           } finally {
             vi.unstubAllEnvs();
             vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        },
+      );
+
+      // The inbox classifier reads its key once, when the inbox bootstraps, and a write here would
+      // only reach it at the next restart. On an instance the control plane hosts that case cannot
+      // arise: neither a write nor a removal through this route reaches the key. It comes from the
+      // control plane's environment or from a migration import, and both take effect with a
+      // restart. If this route opens, the inbox key and its meter need a rebootstrap on the write.
+      it.each([['managed', 403], ['managed_pro', 403], ['managed_max', 403], ['hosted', 403], ['', 200]] as const)(
+        'PUT and DELETE /api/secrets/LYNOX_INBOX_MISTRAL_API_KEY in mode="%s" answer %s (self-host is the control)',
+        async (mode, status) => {
+          repayRateWindow();
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          vi.stubEnv('LYNOX_MANAGED_MODE', mode);
+          try {
+            const put = await jsonFetch('/api/secrets/LYNOX_INBOX_MISTRAL_API_KEY', {
+              method: 'PUT',
+              body: JSON.stringify({ value: 'user-inbox-key' }),
+            });
+            expect(put.status).toBe(status);
+            const del = await jsonFetch('/api/secrets/LYNOX_INBOX_MISTRAL_API_KEY', { method: 'DELETE' });
+            expect(del.status).toBe(status);
+            expect(mockSecretSet).toHaveBeenCalledTimes(status === 200 ? 1 : 0);
+            expect(mockSecretDelete).toHaveBeenCalledTimes(status === 200 ? 1 : 0);
+          } finally {
+            // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
+            vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', '');
+            vi.stubEnv('LYNOX_MANAGED_MODE', '');
           }
         },
       );
@@ -19466,6 +19524,8 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
     const history = (deleted: boolean): Record<string, unknown> => ({
       getTask: vi.fn().mockReturnValue(undefined), deleteTodo: vi.fn().mockReturnValue(false),
       deleteTask: vi.fn().mockReturnValue(false), deleteSchedule: vi.fn().mockReturnValue(deleted),
+      // The pause's refusal reads the trigger first (`_refusePaused`); none is paused here.
+      getTrigger: vi.fn().mockReturnValue(undefined),
     });
 
     it.each([
