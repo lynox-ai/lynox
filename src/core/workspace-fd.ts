@@ -344,7 +344,7 @@ export function ensureSubAnchorWithMode(anchor: WorkspaceAnchor, name: string, d
   const dir = walkDir(anchor, parts, { dirMode });
   try {
     const before = fstatSync(dir.fd).uid;
-    if (before !== owner) throw new DirStateError(`it belongs to uid ${before}, not to uid ${owner}`);
+    if (before !== owner) throw new DirStateError(`it belongs to uid ${before}, not to uid ${owner}; give it to uid ${owner} or remove it`);
     setMode(dir, dirMode, group);
     const after = fstatSync(dir.fd);
     if ((after.mode & 0o7777) !== dirMode || after.gid !== group) {

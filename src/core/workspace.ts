@@ -266,7 +266,7 @@ function ensureSidecarContextDir(root: SidecarRoot, workspaceDir: string): strin
   try {
     made = ensureSubAnchorWithMode(root.anchor, name, SIDECAR_DIR_MODE, SHARED_GROUP, owner);
   } catch (err) {
-    throw new WorkspaceRootError(`The context directory ${workspaceDir} cannot be made ready from fd 3 (${err instanceof Error ? err.message : String(err)}). Give it to uid ${owner} or remove it, then start again.`);
+    throw new WorkspaceRootError(`The context directory ${workspaceDir} cannot be made ready from fd 3 (${err instanceof Error ? err.message : String(err)}).`);
   }
   closeAnchor(made);
   return workspaceDir;

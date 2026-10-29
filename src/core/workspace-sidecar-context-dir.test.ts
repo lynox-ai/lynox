@@ -110,7 +110,7 @@ describe('the context directory in shell sidecar mode (W1)', () => {
     const geteuid = vi.spyOn(process, 'geteuid').mockReturnValue(4242);
     try {
       expect(() => ensureContextWorkspace(ctx('ctx1', `${WORKSPACE_LABEL}/ctx1`)))
-        .toThrow(/The context directory \/workspace\/ctx1 cannot be made ready from fd 3 \(it belongs to uid \d+, not to uid 4242\)/);
+        .toThrow(/The context directory \/workspace\/ctx1 cannot be made ready from fd 3 \(it belongs to uid \d+, not to uid 4242; give it to uid 4242 or remove it\)/);
     } finally {
       geteuid.mockRestore();
     }
