@@ -33,7 +33,7 @@ import { readBodyCapped, stripUntrustedSeparators, collapseToSingleLine } from '
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
-import { inquiryOptions } from './notification-router.js';
+import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
@@ -2860,6 +2860,10 @@ export class WorkerLoop {
       // the box carries the field names the question lists, never the values.
       const offBoxText = flattenPrompt(offBoxPrompt(rawQuestion));
       const offBoxQuestion = secretStore ? secretStore.maskAll(offBoxText) : offBoxText;
+      // Whether the question reached anyone goes onto the trigger and, through the engine as a
+      // workflow question's does, to the hooks: on a managed instance a push that reached nobody
+      // then mails the owner a fixed text that names neither the question nor the task.
+      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id));
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
         body: offBoxQuestion,
@@ -2871,6 +2875,8 @@ export class WorkerLoop {
         data: { threadId: session.sessionId, promptId },
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
+      }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
+        process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });
       try {
         const taskSignal = active?.controller.signal;
