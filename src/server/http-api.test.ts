@@ -18272,7 +18272,8 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         const owner = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
         expect(owner.status).toBe(200);
         expect(held()).toBe('cancelled');
-        expect(cancelRows()).toEqual([{ a: 'owner', t: `${PROFILE} ${recordId} owner` }]);
+        // The profile's opaque id, never its slug (the owner reads that back through the record id).
+        expect(cancelRows()).toEqual([{ a: 'owner', t: expect.stringMatching(new RegExp(`^apf_[0-9a-f]{16} ${recordId} owner$`)) }]);
         // Once cancelled it is no longer held, and an unknown id is not found.
         expect((await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER })).status).toBe(409);
         expect((await fetch(`${baseUrl}/api/connections/records/99999/cancel`, { method: 'POST', headers: OWNER })).status).toBe(404);

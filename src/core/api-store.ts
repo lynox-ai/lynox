@@ -2686,7 +2686,7 @@ export class ApiStore {
             const result = persist();
             if (!result.ok) throw new SaveRefused(result.reason);
             const cancelled = cancelHeldProviderRecords(conn.recordDb(), profile.id, new Date(), liftedGrant);
-            auditProviderCancels(this.auditLog, actor, profile.id, cancelled, 'lift');
+            auditProviderCancels(this.auditLog, conn.recordDb(), actor, cancelled, 'lift');
             return result;
           });
         } catch (err: unknown) {
@@ -2725,7 +2725,7 @@ export class ApiStore {
           const onlyGrant = actor.kind === 'owner' ? undefined : refused?.grant_id;
           if (actor.kind === 'owner' || onlyGrant !== undefined) {
             const cancelled = cancelHeldProviderRecords(this.connStore.recordDb(), profile.id, new Date(), onlyGrant);
-            auditProviderCancels(this.auditLog, actor, profile.id, cancelled, mintReason);
+            auditProviderCancels(this.auditLog, this.connStore.recordDb(), actor, cancelled, mintReason);
           }
         }
         return result;
@@ -2815,13 +2815,15 @@ export class ApiStore {
   }
 
   private _removeStored(id: string, apisDir: string | undefined, record: ConnectionRecordKind | undefined): boolean {
-    if (this.connStore) {
+    const conn = this.connStore;
+    if (conn) {
       const inMemory = this.unregister(id); // no apisDir → in-memory only, no file unlink
       // Kind-scoped so a cross-kind id collision (once mail/google/push land)
       // can never delete a neighbour's connection.
       // Only the owner starts an erasure (api_setup), so the owner is the actor of a supersede.
-      const inStore = record === undefined ? this.connStore.remove(id, 'api')
-        : this.connStore.removeApiWithRecord(id, record, new Date(), (ids) => { auditProviderCancels(this.auditLog, OWNER_PRINCIPAL, id, ids, 'owner_delete'); });
+      // The supersede's audit rows are written before the row goes, so they name its opaque id.
+      const inStore = record === undefined ? conn.remove(id, 'api')
+        : conn.removeApiWithRecord(id, record, new Date(), (ids) => { auditProviderCancels(this.auditLog, conn.recordDb(), OWNER_PRINCIPAL, ids, 'owner_delete'); });
       if (inMemory || inStore) return true;
       // A file the import could not read is deleted as a file: it holds the import open until it
       // is read or gone, and there is no row of it to remove.

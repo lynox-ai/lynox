@@ -12597,10 +12597,7 @@ export class LynoxHTTPApi {
       const handle = db.getDb();
       const outcome = handle.transaction(() => {
         const result = cancelProviderRecord(handle, id, new Date());
-        if (result === 'cancelled') {
-          const row = handle.prepare('SELECT connection_id FROM connection_records WHERE id = ?').get(id) as { connection_id: string };
-          auditProviderCancels(audit, by, row.connection_id, [id], 'owner');
-        }
+        if (result === 'cancelled') auditProviderCancels(audit, handle, by, [id], 'owner');
         return result;
       })();
       if (outcome === 'not_found') { errorResponse(res, 404, 'Record not found'); return; }

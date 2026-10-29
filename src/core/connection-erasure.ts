@@ -309,14 +309,21 @@ export function mayCancelProviderErasure(
  * The audit row of each cancelled provider erasure: who cancelled it and why. Written in the
  * cancel's transaction by its caller, so a cancel whose row cannot be written does not happen,
  * and neither does one without an audit log to write it to: that throws too. Ids and the reason
- * only.
+ * only: the profile is named by its opaque id (`connections.trail_id`), never by its slug, which
+ * the model chooses and which can name a client. The id is read here, in the cancel's transaction
+ * and before an owner's delete removes the row. A row without one is named `api`. The owner reads
+ * the slug back through the record id (`connection_records.connection_id`), also once the profile
+ * is deleted.
  */
-export function auditProviderCancels(audit: AuditLog | null, actor: RequestPrincipal, connectionId: string, recordIds: readonly number[], reason: ProviderCancelReason): void {
+export function auditProviderCancels(audit: AuditLog | null, db: Database.Database, actor: RequestPrincipal, recordIds: readonly number[], reason: ProviderCancelReason): void {
   if (recordIds.length === 0) return;
   if (audit === null) throw new Error('A provider erasure is not cancelled without an audit log to record it.');
+  const trailIdOf = db.prepare(`SELECT c.trail_id FROM connection_records r
+    LEFT JOIN connections c ON c.id = r.connection_id AND c.kind = 'api' WHERE r.id = ?`);
   for (const id of recordIds) {
+    const row = trailIdOf.get(id) as { trail_id: string | null } | undefined;
     audit.record({
-      principal: actor, action: 'connection.erasure.cancel', target: `${connectionId} ${id} ${reason}`,
+      principal: actor, action: 'connection.erasure.cancel', target: `${row?.trail_id ?? 'api'} ${id} ${reason}`,
       phase: 'done', correlationId: `connection-erasure-${id}`,
     });
   }
