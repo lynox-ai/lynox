@@ -224,6 +224,17 @@ describe('a mandate\'s memory_store: the derived entry is written under the mand
     expect(derivedRows(kl.log).find(r => r.phase === 'returned')!.target).toBe('knowledge new_entities=0 new_relations=0 new_subjects=0 dedup=1');
   });
 
+  it('a forged act: a site off the list and a ref not shaped like a row id are left out of the row', async () => {
+    publishMemoryStore({ namespace: 'knowledge', content: 'forged', actor: { principal: MANDATE, runId: 'run-1' },
+      trail: { site: 'memory_store#create x=1' as never, correlationId: 'not-a-row ref=planted' } });
+    publishMemoryStore({ namespace: 'knowledge', content: 'genuine', actor: { principal: MANDATE, runId: 'run-1' },
+      trail: { site: 'memory_store#create', correlationId: 'abcd1234-0000-4000-8000-000000000001' } });
+    await settle();
+    const attempts = derivedRows(kl.log!).filter(r => r.phase === 'attempt').map(r => r.target);
+    expect(attempts).toEqual(['knowledge', 'knowledge from=memory_store%23create ref=abcd1234-0000-4000-8000-000000000001']);
+    expect(kl.calls.map(c => c.content)).toEqual(['forged', 'genuine']);
+  });
+
   it('a move: naming the copy the successor is a step of the same derived write', async () => {
     publishMemoryStore({ namespace: 'methods', content: 'x line', replaces: { ids: ['old-1'] }, actor: { principal: MANDATE, runId: 'run-1' } });
     await settle();
@@ -462,10 +473,57 @@ function rawPublishes(sf: ts.SourceFile, channel: string): string[] {
   return out;
 }
 
+/**
+ * Every other way to reach the memory:store channel past the helper: `channel('lynox:memory:store')`,
+ * `channels['memoryStore']`, and any `channels.memoryStore` that is not a listener's `.subscribe(`
+ * — an alias (`const c = channels.memoryStore`) included, since it can publish raw later. Each
+ * finding is `<file>:<line> <form>`.
+ */
+function memoryStoreReach(sf: ts.SourceFile): string[] {
+  const out: string[] = [];
+  const at = (n: ts.Node, form: string): void => { out.push(`${rel(sf)}:${String(lineOf(sf, n))} ${form}`); };
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && n.arguments[0] !== undefined && ts.isStringLiteral(n.arguments[0]) && n.arguments[0].text === 'lynox:memory:store') {
+      const callee = ts.isIdentifier(n.expression) ? n.expression.text : ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : '';
+      if (callee === 'channel' || callee === 'tracingChannel') at(n, `${callee}('lynox:memory:store')`);
+    }
+    if (ts.isElementAccessExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'channels'
+      && ts.isStringLiteral(n.argumentExpression) && n.argumentExpression.text === 'memoryStore') at(n, "channels['memoryStore']");
+    if (ts.isPropertyAccessExpression(n) && n.name.text === 'memoryStore' && ts.isIdentifier(n.expression) && n.expression.text === 'channels') {
+      const up = n.parent;
+      const use = ts.isPropertyAccessExpression(up) && up.expression === n ? up.name.text : null;
+      const listener = use === 'subscribe' && Object.hasOwn(LISTENERS['memoryStore']!, rel(sf));
+      if (!listener) at(n, `channels.memoryStore${use !== null ? `.${use}` : ''}`);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
+
 describe('K1: every memory:store publish goes through publishMemoryStore', () => {
   it('no raw publish outside observability.ts', () => {
     const raw = SOURCES.filter(sf => rel(sf) !== 'core/observability.ts').flatMap(sf => rawPublishes(sf, 'memoryStore'));
     expect(raw).toEqual([]);
+  });
+
+  it('no other way to the channel outside observability.ts: by name, by key, by alias (listeners\' subscribe excepted)', () => {
+    expect(SOURCES.filter(sf => rel(sf) !== 'core/observability.ts').flatMap(memoryStoreReach)).toEqual([]);
+  });
+
+  it('the reach scan sees each form, and lets a listed listener subscribe (planted)', () => {
+    const planted = parse(join(SRC, 'core/planted.ts'), `
+      const a = channel('lynox:memory:store');
+      const b = channels['memoryStore'];
+      const c = channels.memoryStore;
+      let d; d = channels.memoryStore;
+      channels.memoryStore.subscribe(fn);
+      channel('lynox:datastore:insert'); channels.dataStoreInsert;
+    `);
+    expect(memoryStoreReach(planted).map(f => f.split(' ').slice(1).join(' '))).toEqual([
+      "channel('lynox:memory:store')", "channels['memoryStore']", 'channels.memoryStore', 'channels.memoryStore', 'channels.memoryStore.subscribe',
+    ]);
+    expect(memoryStoreReach(parse(join(SRC, 'core/engine-init.ts'), 'channels.memoryStore.subscribe(fn);'))).toEqual([]);
   });
 
   it('the six publishers use the helper (positive control), and the scan sees a raw one (planted)', () => {
@@ -572,10 +630,11 @@ describe('B1: the callers of KnowledgeLayer.store are a closed set', () => {
 /**
  * K3 / B5′: no write in the tools is left running after the handler (`void <x>.store…(` and the
  * other write verbs), unless it runs as `runOutsideCallSlot(() => withInstanceWriteAs(…))` — the
- * wrapper is what is checked, not a list of lines. The voids that write telemetry are free
+ * wrapper is what is checked, not a list of lines. A floating `<x>.<verb>…(…).catch(` with no
+ * `void` is the same thing left running, and is found too. The voids that write telemetry are free
  * functions, not a store's method; they are listed with their reason.
  */
-const WRITE_VERB = /^(store|write|update|delete|deactivate|append|insert|mark)/i;
+const WRITE_VERB = /^(store|write|update|delete|deactivate|append|insert|mark|retire|erase|create|set|upsert|link|merge)/i;
 interface VoidWrite { at: string; callee: string; wrapped: boolean }
 function voidWrites(sf: ts.SourceFile): VoidWrite[] {
   const out: VoidWrite[] = [];
@@ -585,7 +644,7 @@ function voidWrites(sf: ts.SourceFile): VoidWrite[] {
     while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
     if (!ts.isCallExpression(cur)) return undefined;
     const c = cur.expression;
-    if (ts.isPropertyAccessExpression(c) && ['catch', 'then', 'finally'].includes(c.name.text) && ts.isCallExpression(c.expression)) return innermost(c.expression);
+    if (ts.isPropertyAccessExpression(c) && ['catch', 'then', 'finally'].includes(c.name.text)) return innermost(c.expression);
     return cur;
   };
   /** Inside `runOutsideCallSlot(() => withInstanceWriteAs(…))` (the arrow may be async). */
@@ -598,9 +657,17 @@ function voidWrites(sf: ts.SourceFile): VoidWrite[] {
     }
     return false;
   };
+  /** A statement that is only `<call>.catch(…)` (or `.then`/`.finally`): a promise left floating. */
+  const floating = (n: ts.Node): ts.Expression | undefined => {
+    if (!ts.isExpressionStatement(n)) return undefined;
+    let e: ts.Expression = n.expression;
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    return ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && ['catch', 'then', 'finally'].includes(e.expression.name.text) ? e : undefined;
+  };
   const visit = (n: ts.Node): void => {
-    if (ts.isVoidExpression(n)) {
-      const call = innermost(n.expression);
+    const left = ts.isVoidExpression(n) ? n.expression : floating(n);
+    if (left !== undefined) {
+      const call = innermost(left);
       const callee = call === undefined ? undefined
         : ts.isPropertyAccessExpression(call.expression) ? call.expression.name.text
           : ts.isIdentifier(call.expression) ? call.expression.text : undefined;
@@ -648,9 +715,14 @@ describe('K3: no write left running after a tool\'s handler, outside a derived w
       void runOutsideCallSlot(() => kg.update());
       void appendTelemetry(x);
       void deps.streamHandler(e);
+      kg.retireForMove(p).catch(() => {});
+      (store.upsertThing(x)).then(() => 1);
+      kg.eraseAll(p);
+      void kg.mergeEntities(a, b); void kg.linkSubjects(a); void kg.setFlag(a); void kg.createX(a);
     `);
     expect(voidWrites(planted).map(v => `${v.callee}:${String(v.wrapped)}`)).toEqual([
       'updateMemoryText:false', 'storeThing:false', 'runOutsideCallSlot:true', 'runOutsideCallSlot:false', 'appendTelemetry:false',
+      'retireForMove:false', 'upsertThing:false', 'mergeEntities:false', 'linkSubjects:false', 'setFlag:false', 'createX:false',
     ]);
   });
 });
