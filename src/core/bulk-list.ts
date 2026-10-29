@@ -289,7 +289,7 @@ const PLACEHOLDER_RE = /\{\{|\{%|\$\{|<%|%%[\p{L}\p{N}_]+%%|\{\s*\$?[\p{L}\p{N}_
 export const PLACEHOLDER_REFUSAL =
   'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. ' +
   'Give the literal text; for a value that differs per target, use a judge where the form takes one. ' +
-  'If the user wants such braces as literal text, tell them in one sentence that a bulk run cannot write them as a fixed text.';
+  'If the user wants such braces as literal text, plan a judge whose rule gives that exact text, or tell the user in one sentence that a fixed text cannot hold them; never drop the braces without saying so.';
 /** Form shopify_media takes no judge: there is no way to a per-image text, and saying so saves the retry. */
 export const PLACEHOLDER_REFUSAL_MEDIA =
   'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. ' +
