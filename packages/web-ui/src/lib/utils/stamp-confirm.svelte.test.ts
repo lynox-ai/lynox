@@ -136,9 +136,9 @@ describe('the list of a confirmed plan (B3)', () => {
 		expect(listedNote({ lapsed: true, ended: false, entries: [entry('changed')] }, false)).toContain('gilt nicht mehr');
 		expect(listedNote({ lapsed: true, ended: true, entries: [entry('waits')] }, true)).toContain('mit „Übernehmen“');
 		// An end that did not pause the plan: no "Take over" to point to.
-		expect(listedNote({ lapsed: false, ended: true, ended_on: 'plan', entries: [entry('waits')] }, false)).toBe('Der Zugang dieser Person ist beendet. Der Plan läuft deshalb nicht. Lösch ihn und bitte lynox im Chat, ihn neu anzulegen. Der neue Plan läuft unter dir.');
+		expect(listedNote({ lapsed: false, ended: true, ended_on: 'plan', entries: [entry('waits')] }, false)).toBe('Der Zugang dieser Person ist beendet. Der Plan läuft deshalb nicht. Lösch ihn und beschreib lynox danach im Chat in eigenen Worten, was er tun soll. Der neue Plan läuft unter dir.');
 		// On the workflow's side, a new plan alone is not enough: the workflow needs copying too.
-		expect(listedNote({ lapsed: false, ended: true, ended_on: 'workflow', entries: [entry('waits')] }, false)).toContain('den Workflow als neuen anzulegen');
+		expect(listedNote({ lapsed: false, ended: true, ended_on: 'workflow', entries: [entry('waits')] }, false)).toContain('auch den Workflow unter Automation → Workflows');
 		// A paused plan offers "Take over", which covers both sides.
 		expect(listedNote({ lapsed: false, ended: true, ended_on: 'workflow', entries: [entry('waits')] }, true)).toContain('mit „Übernehmen“');
 	});
