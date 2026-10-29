@@ -58,6 +58,11 @@
   read, after the filters. The mark goes by route, so the helper opening the
   Tasks view or the cost history, or chat checking for a running run, is
   grouped too, and shows when the line is opened. The trail still records every read.
+- `api_setup` bootstrap now stops at the conversation's HTTP request limit,
+  which it already counted against. At the limit it fetches neither the docs
+  page nor the OpenAPI spec and says so. If the limit is reached after the docs
+  page, it reads no further linked sections and tells the model that the draft
+  may miss endpoints.
 - An engine started with `LYNOX_SHELL_EXEC_SOCKET` now also needs the
   workspace handed over on fd 3, and stops at start, naming the check, when it
   is missing. It also stops when the socket is set but blank (it used to fail

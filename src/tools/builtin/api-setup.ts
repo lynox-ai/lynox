@@ -941,6 +941,25 @@ function findLinkedSections(html: string, baseUrl: string): LinkedSection[] {
   return candidates.slice(0, LINKED_SECTION_MAX_COUNT).map(c => ({ url: c.url, anchor: c.anchor }));
 }
 
+/**
+ * Whether this conversation or run has used up its request budget (`MAX_REQUESTS_PER_SESSION`,
+ * shared with `http_request`). Each of api_setup's own fetches asks this before it goes out and
+ * charges `httpRequests` after: a fetch that only charged would go out past the limit (row 1005).
+ * `api-setup-request-limit.test.ts` holds every charge to a check.
+ */
+function requestLimitReached(agent: IAgent): boolean {
+  return agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION;
+}
+
+/**
+ * What the model reads when a bootstrap cannot fetch its page because the budget is spent (ux
+ * U-051, after U-010 for `fetch_token`). Nothing is stored yet, so the way on is to start the
+ * setup in a new chat; a bulk run is no way on for a setup.
+ */
+function bootstrapLimitMessage(what: 'the docs page' | 'the OpenAPI spec'): string {
+  return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it, so api_setup cannot fetch ${what}. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not start here and that they can start it in a new chat.`;
+}
+
 /** Fetch one linked docs section honouring the remaining body budget. Returns
  *  the empty string on any failure — sub-page reads are best-effort. */
 async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: number): Promise<string> {
@@ -1102,6 +1121,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     return 'Error: docs_url bootstrap requires the `api-setup-v2` feature, which is ON by default but has been disabled here (LYNOX_FEATURE_API_SETUP_V2=0). Remove that override to re-enable, or use `openapi_url` if the API has an OpenAPI 3.x spec.';
   }
 
+  if (requestLimitReached(agent)) return bootstrapLimitMessage('the docs page');
   emitBootstrapProgress(agent, 'fetching_docs');
   let docsText: string;
   let truncated: boolean;
@@ -1148,10 +1168,14 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   const linkedSections = findLinkedSections(docsText, docsUrl);
   const fetchedSections: Array<{ url: string; text: string }> = [];
   let remainingBudget = DOCS_BODY_MAX_BYTES - Buffer.byteLength(docsText, 'utf8');
+  // Sections the request budget left unread: the model is told, so it does not present a profile
+  // built from part of the docs as complete (ux U-051).
+  let sectionsCutByLimit = false;
   for (const section of linkedSections) {
     if (remainingBudget < LINKED_SECTION_MIN_BUDGET) break;
     // Stopped with the run: no further section is recorded or fetched.
     if (currentCallSignal()?.aborted === true) break;
+    if (requestLimitReached(agent)) { sectionsCutByLimit = true; break; }
     const text = await fetchLinkedSection(section.url, agent, remainingBudget);
     if (text) {
       fetchedSections.push({ url: section.url, text });
@@ -1267,6 +1291,9 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   const truncatedNote = truncated
     ? `\nDocs body was truncated at ${String(DOCS_BODY_MAX_BYTES)} bytes — verify rate limits and pricing before trusting this draft.`
     : '';
+  const limitNote = sectionsCutByLimit
+    ? `\nSome linked docs sections were not read: this conversation reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests. The profile is built from the sections read so far and may miss endpoints. When you present it, tell the user that in one sentence.`
+    : '';
   const linkedNote = fetchedSections.length > 0
     ? `\nIncluded ${String(fetchedSections.length)} linked section(s): ${fetchedSections.map(s => s.url).join(', ')}`
     : '';
@@ -1280,7 +1307,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   // dropped, the next steps) stay outside. The id here is a slug of the docs URL's host, the
   // model's own input.
   return compose([
-    engineText(`Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).${injectedNote}${truncatedNote}${apiHostCandidates.length > 0 ? `\n${String(apiHostCandidates.length)} other API host(s) seen on the docs page are listed in the block below; verify against an authoritative source before swapping base_url.` : ''}
+    engineText(`Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).${injectedNote}${truncatedNote}${limitNote}${apiHostCandidates.length > 0 ? `\n${String(apiHostCandidates.length)} other API host(s) seen on the docs page are listed in the block below; verify against an authoritative source before swapping base_url.` : ''}
 
 Review the draft, fill auth.vault_keys via ask_secret, then call action="create":`),
     renderFence('api_bootstrap_draft', `${summary}${linkedNote}${hostHintNote}
@@ -1853,6 +1880,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
       if (!input.openapi_url) {
         return 'Error: bootstrap requires either "openapi_url" (OpenAPI 3.x JSON spec, preferred) or "docs_url" (human-readable docs page; gated behind feature flag `api-setup-v2`). If neither is available, read the docs via web_research and build a profile manually with action "create".';
       }
+      if (requestLimitReached(agent)) return bootstrapLimitMessage('the OpenAPI spec');
       let spec: OpenApiDoc;
       try {
         const ac = new AbortController();
@@ -3070,7 +3098,7 @@ ${draftJson}
       // ceiling http_request enforces. It already increments httpRequests after a
       // successful fetch (below), so without this pre-check it could charge past
       // the limit rather than being bounded by it.
-      if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
+      if (requestLimitReached(agent)) {
         // ux U-010 for this step: no bulk run (it is no way on for a setup), and "continue",
         // because the profile is already stored and outlives this chat.
         return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.`;
