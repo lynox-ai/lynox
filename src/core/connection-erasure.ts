@@ -273,15 +273,17 @@ function writeProviderRecord(engineDb: Database.Database, connectionId: string, 
  * ({@link boundedEpoch}, the bounds the owner's notices use): a connection deleted with a closing
  * record and stored again under the same id begins a later epoch, and neither its reconnect nor its
  * erasure covers the earlier one, whose erasure still runs. A row whose epoch cannot be read (it
- * does not say where it starts) keeps the earlier behaviour and ends every one held under the id.
+ * does not say where it starts) ends none: a provider's erasure is only written while the epoch of
+ * its refused grant can be read, and a row does not lose its start, so one held then is an earlier
+ * connection's. It runs, and the sweep still keeps every grant the row stored now holds.
  */
 export function cancelHeldProviderRecords(engineDb: Database.Database, connectionId: string, now: Date, onlyGrant?: string): number[] {
   const epoch = onlyGrant === undefined ? boundedEpoch(engineDb, connectionId).map((e) => e.g) : [];
-  const grants = onlyGrant !== undefined ? [onlyGrant] : epoch.length > 0 ? epoch : undefined;
+  const grants = onlyGrant !== undefined ? [onlyGrant] : epoch;
   return (engineDb.prepare(`UPDATE connection_records SET history_state = 'cancelled', cancelled_at = ?
     WHERE connection_id = ? AND cause = 'provider_revoked' AND kind = 'erasure' AND history_state = 'pending' AND hold_until > ?
-    ${grants === undefined ? '' : 'AND revoked_grant IN (SELECT value FROM json_each(?))'} RETURNING id`)
-    .all(now.toISOString(), connectionId, now.toISOString(), ...(grants === undefined ? [] : [JSON.stringify(grants)])) as Array<{ id: number }>).map((r) => r.id);
+    AND revoked_grant IN (SELECT value FROM json_each(?)) RETURNING id`)
+    .all(now.toISOString(), connectionId, now.toISOString(), JSON.stringify(grants)) as Array<{ id: number }>).map((r) => r.id);
 }
 
 /** The owner's "the connection did not end" on one held provider erasure. */

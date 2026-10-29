@@ -298,11 +298,25 @@ describe('a profile stored again under the same id begins a later epoch, whose c
     expect(stateOf(a)).toBe('pending');
   });
 
-  it('a row that does not say where its epoch starts keeps the earlier behaviour: the owner\'s consent ends every one held', () => {
+  it('a row that does not say where its epoch starts ends none: the earlier connection\'s erasure stays held', () => {
     const a = earlierEpochHeld();
     db.getDb().prepare("UPDATE connections SET first_grant_id = NULL WHERE id = 'shop'").run();
     reconnectAs(OWNER_PRINCIPAL);
-    expect(stateOf(a)).toBe('cancelled');
+    expect(stateOf(a)).toBe('pending');
+    expect(cancelRows()).toEqual([]);
+  });
+
+  it('a refusal of a grant the boot minted inside the epoch is still the connection\'s: a later backfill does not cut it off', () => {
+    store.save(profile());
+    const reissue = (store as unknown as { _reissue(id: string, reason: string): boolean })._reissue.bind(store);
+    expect(reissue('shop', 'backfill')).toBe(true);
+    const b = grantOf();
+    markRevoked();
+    expect(reissue('shop', 'backfill')).toBe(true);
+    expect(grantOf()).not.toBe(b);
+    expect(stateOf(b)).toBe('pending');
+    reconnectAs(OWNER_PRINCIPAL);
+    expect(stateOf(b)).toBe('cancelled');
   });
 });
 
