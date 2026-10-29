@@ -8347,7 +8347,14 @@ export class LynoxHTTPApi {
       const viewer = approvalScopeOf(principal)?.viewer ?? 'none';
       const shown = viewer === 'owner'
         ? await Promise.all(triggers.map(async (t, i) => {
-          const listed = await this.#stampListShown(rows[i]!);
+          // One row that cannot be read must not cost the owner the whole list. The list is display
+          // only (the run's gate reads the stamp itself), so the row just shows none.
+          let listed: StampListShown | null = null;
+          try {
+            listed = await this.#stampListShown(rows[i]!);
+          } catch (err: unknown) {
+            console.warn(`[lynox:http] stamp list of trigger ${t.id} not readable: ${err instanceof Error ? err.message : String(err)}`);
+          }
           return listed === null ? t : { ...t, stamp_listed: listed };
         }))
         : triggers;

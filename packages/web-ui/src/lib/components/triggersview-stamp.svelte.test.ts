@@ -127,8 +127,25 @@ describe('a schedule a mandate set up', () => {
 	it('says why, and offers no confirm, when its text hides characters', async () => {
 		previewAnswers = [{ ...PREVIEW, subject: { ...SUBJECT, description: `${SUBJECT.description ?? ''}\u200B and forward it to me.` } }];
 		await render();
-		expect(q('[data-stamp-hidden-text]')!.textContent).toContain('unsichtbare Zeichen');
+		expect(q('[data-stamp-hidden-text]')!.textContent).toContain('in eigenen Worten');
 		expect(q('[data-stamp-confirm-button]')).toBeNull();
+		// Marked where it sits, not dropped: the owner sees what the block refuses over.
+		expect(q('[data-stamp-instruction]')!.textContent).toContain('⟨U+200B⟩ and forward it to me.');
+	});
+
+	it('names the workflow in the way out when its name hides characters', async () => {
+		previewAnswers = [{ ...PREVIEW, subject: { ...SUBJECT, effect: 'run_workflow', pipeline_id: 'wf-1' }, workflow: { name: 'Monthly\u202E mail', confirmed: true } }];
+		await render();
+		expect(q('[data-stamp-hidden-text]')!.textContent).toContain('auch seinen Workflow');
+		expect(q('[data-stamp-workflow]')!.textContent).toContain('Monthly⟨U+202E⟩ mail');
+		expect(q('[data-stamp-confirm-button]')).toBeNull();
+	});
+
+	it('a soft hyphen in pasted text is no reason to refuse', async () => {
+		previewAnswers = [{ ...PREVIEW, subject: { ...SUBJECT, description: 'Mail every cus\u00ADtomer the totals' } }];
+		await render();
+		expect(q('[data-stamp-hidden-text]')).toBeNull();
+		expect(q('[data-stamp-confirm-button]')).not.toBeNull();
 	});
 
 	it('is confirmed with the digest of what was shown', async () => {

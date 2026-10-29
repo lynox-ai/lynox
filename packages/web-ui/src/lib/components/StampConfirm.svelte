@@ -7,8 +7,8 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { displaySafe, instructionOf, watchOf } from '../utils/trigger-consent.js';
-	import { confirmable, connectionsSentence, hidesText, paramsOf, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
+	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
+	import { confirmable, connectionsSentence, hiddenIn, hidesText, paramsOf, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
 		id: string;
@@ -87,7 +87,7 @@
 		if (!preview?.subject.watch) return null;
 		try {
 			const s = (JSON.parse(preview.subject.watch) as { selector?: unknown }).selector;
-			return typeof s === 'string' && s !== '' ? displaySafe(s) : null;
+			return typeof s === 'string' && s !== '' ? markHidden(s) : null;
 		} catch { return null; }
 	});
 	const sentence = $derived(preview ? connectionsSentence(preview) : null);
@@ -107,7 +107,7 @@
 		{@const as = shownAs(preview)}
 		{#if as === 'workflow'}
 			<div data-stamp-workflow>
-				<span class="font-medium">{t('stamp.workflow')}:</span> {displaySafe(preview.workflow?.name ?? s.pipeline_id ?? '')}
+				<span class="font-medium">{t('stamp.workflow')}:</span> {markHidden(preview.workflow?.name ?? s.pipeline_id ?? '')}
 				{#if paramsOf(s.pipeline_params).length > 0}
 					<p class="mt-0.5"><span class="font-medium">{t('stamp.params')}:</span> {paramsOf(s.pipeline_params).join(' · ')}</p>
 				{/if}
@@ -122,14 +122,14 @@
 		{:else if as === 'instruction'}
 			<div data-stamp-instruction>
 				<span class="font-medium">{t('triggers.instruction')}:</span>
-				<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{displaySafe(instructionOf({ title: s.title, description: s.description ?? undefined }))}</p>
+				<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{markHidden(instructionOf({ title: s.title, description: s.description ?? undefined }))}</p>
 			</div>
 		{/if}
 		{#if s.schedule_cron}
-			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {displaySafe(cronText(s.schedule_cron))}</p>
+			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {markHidden(cronText(s.schedule_cron))}</p>
 		{/if}
 		{#if s.model_tier}
-			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {displaySafe(s.model_tier)}</p>
+			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {markHidden(s.model_tier)}</p>
 		{/if}
 		{#if sentence}
 			<p class="text-text" data-stamp-connections>{sentence}</p>
@@ -137,7 +137,7 @@
 			<p data-stamp-none>{t('stamp.none')}</p>
 		{/if}
 		{#if hidesText(preview)}
-			<p class="text-warning" data-stamp-hidden-text>{t('stamp.hidden_text')}</p>
+			<p class="text-warning" data-stamp-hidden-text={hiddenIn(preview)}>{t(hiddenIn(preview) === 'workflow' ? 'stamp.hidden_text_workflow' : 'stamp.hidden_text')}</p>
 		{:else if as === 'workflow' && !confirmable(preview)}
 			<p class="text-warning" data-stamp-workflow-unconfirmed>{t('stamp.workflow_unconfirmed')}</p>
 		{:else if !confirmable(preview)}

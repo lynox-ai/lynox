@@ -110,6 +110,17 @@ const FORGING_CHARS = /[\u00AD\u061C\u180E\u200B\u202A-\u202E\u2060-\u2064\u2066
 // eslint-disable-next-line no-control-regex -- removing them is the point
 const CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\u2029]/g;
 
+const MARKED = new RegExp(`${FORGING_CHARS.source}|${CONTROL_CHARS.source}`, 'gu');
+
+/**
+ * `displaySafe`, but each character it would take out is printed as its code point (`⟨U+202E⟩`)
+ * instead, so a reader sees WHERE text was hidden. A soft hyphen (U+00AD) is still dropped
+ * silently: pasted text carries it often, and it cannot hold a clause.
+ */
+export function markHidden(text: string): string {
+	return text.replace(MARKED, (c) => (c === '\u00AD' ? '' : `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`));
+}
+
 /**
  * What a person reads before they allow a run: strip what forges rather than
  * fills, keep everything that carries meaning.

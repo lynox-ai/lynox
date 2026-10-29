@@ -9700,6 +9700,33 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('GET /api/triggers keeps the other rows when one row\'s stamp list cannot be read', async () => {
+      const AT = '2026-10-08T00:00:00.000Z';
+      const history = {
+        getTriggerStampConnections: (id: string) => { if (id === 'trg-bad') throw new Error('row unreadable'); return { confirmedAt: AT, stampConnections: null }; },
+        getPlannedPipeline: () => undefined,
+        getWorkflowAuthorship: () => undefined,
+      };
+      const row = (id: string): Record<string, unknown> => ({ id, title: id, effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'M-EVA', confirmed_at: AT });
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const savedApi = ref['getApiStore'];
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [row('trg-bad'), row('trg-ok')] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const res = await jsonFetch('/api/triggers');
+          expect(res.status).toBe(200);
+          const { triggers } = (await res.json()) as Flags;
+          expect(triggers.map((t) => t.id)).toEqual(['trg-bad', 'trg-ok']);
+          expect(triggers[0]!['stamp_listed']).toBeUndefined();
+          expect(warn).toHaveBeenCalledWith(expect.stringContaining('trg-bad'));
+        });
+      } finally {
+        warn.mockRestore();
+        ref['getApiStore'] = savedApi;
+      }
+    });
+
     it('GET /api/triggers says on which side a member whose access ended sits', async () => {
       // The way out differs: a member on the workflow's side needs the workflow copied too.
       const ref = (api as unknown as { engine: Record<string, unknown> }).engine;

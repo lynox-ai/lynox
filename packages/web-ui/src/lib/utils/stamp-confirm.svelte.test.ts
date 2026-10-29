@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mandateNeedsOwnerStamp } from '../../../../../src/core/request-principal.js';
 import { setLocale, getLocale } from '../i18n.svelte.js';
-import { awaitsOwnerStamp, confirmable, connectionsSentence, hidesText, listedLine, listedNote, paramsOf, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
+import { awaitsOwnerStamp, confirmable, connectionsSentence, hiddenIn, hidesText, listedLine, listedNote, paramsOf, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
 
 const before = getLocale();
 afterEach(() => { setLocale(before); });
@@ -83,6 +83,12 @@ describe('what the preview shows', () => {
 		// Line breaks and tabs are an instruction's own layout, not hidden text.
 		expect(hidesText(preview({}, { description: 'One.\n\tTwo.' }))).toBe(false);
 		expect(confirmable(preview({}, { title: `Report${ZW}` }))).toBe(false);
+		// A soft hyphen is common in pasted text and cannot hold a clause.
+		expect(hidesText(preview({}, { description: 'Rech\u00ADnung' }))).toBe(false);
+		// In the workflow's name, the way out has to remove the workflow too.
+		expect(hiddenIn(preview({ workflow: { name: `W${TAG}`, confirmed: true } }, { title: `R${ZW}` }))).toBe('workflow');
+		expect(hiddenIn(preview({}, { pipeline_params: `{"to":"all${ZW}"}` }))).toBe('plan');
+		expect(hiddenIn(preview())).toBeNull();
 	});
 
 	it('names whose logins and which, with "account unknown" where the provider told nothing', () => {
@@ -98,10 +104,10 @@ describe('what the preview shows', () => {
 		expect(connectionsSentence(p)).toBe('This plan uses connections that eva@kanzlei.example connected with their own login: api.crm.example (eva@crm), shop.example (account unknown), mail.example (account unknown).');
 	});
 
-	it('removes what could forge the sentence from names the mandate chose', () => {
+	it('marks what could forge the sentence in names the mandate chose', () => {
 		setLocale('en');
 		const s = connectionsSentence(preview({ by: 'eva‮@x', connections: [{ id: 'a', profile: 'P', provider: 'a​b.example', account: 'x⁦y' }] }));
-		expect(s).toBe('This plan uses connections that eva@x connected with their own login: ab.example (xy).');
+		expect(s).toBe('This plan uses connections that eva⟨U+202E⟩@x connected with their own login: a⟨U+200B⟩b.example (x⟨U+2066⟩y).');
 	});
 
 	it('reads workflow values as name: value, and shows unreadable ones as they stand', () => {
@@ -120,7 +126,7 @@ describe('the list of a confirmed plan (B3)', () => {
 		expect(listedLine(entry('changed', null, null))).toBe('Verbindung entfernt (Konto unbekannt): geändert, nicht freigegeben');
 		expect(listedLine(entry('new', 'shop.example', ''))).toBe('shop.example (Konto unbekannt): neu, nicht freigegeben');
 		expect(listedLine(entry('waits'))).toBe('api.crm.example (eva@crm): Zugang beendet');
-		expect(listedLine(entry('listed', 'a\u202Eb', 'x\u200By'))).toBe('ab (xy): freigegeben');
+		expect(listedLine(entry('listed', 'a\u202Eb', 'x\u200By'))).toBe('a⟨U+202E⟩b (x⟨U+200B⟩y): freigegeben');
 	});
 	it('notes an ended access before a lapsed list, and that before an entry not allowed', () => {
 		setLocale('de');

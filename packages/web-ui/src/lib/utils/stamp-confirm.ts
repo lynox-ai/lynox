@@ -7,7 +7,7 @@
 // preview's `expect`: what the owner reads is what is stamped, or the engine answers 409 `changed`.
 
 import { t, tf } from '../i18n.svelte.js';
-import { displaySafe, watchOf } from './trigger-consent.js';
+import { markHidden, watchOf } from './trigger-consent.js';
 
 /** `GET /api/tasks/:id/stamp-preview` (owner only). */
 export interface StampPreview {
@@ -73,7 +73,7 @@ export function usesConnections(row: StampRow): boolean {
 
 /** A provider with the account, or "account unknown" (legal POS-069: the line never stays empty). */
 function connectionText(c: StampPreview['connections'][number]): string {
-	return `${displaySafe(c.provider)} (${c.account !== null && c.account !== '' ? displaySafe(c.account) : t('stamp.account_unknown')})`;
+	return `${markHidden(c.provider)} (${c.account !== null && c.account !== '' ? markHidden(c.account) : t('stamp.account_unknown')})`;
 }
 
 /**
@@ -83,7 +83,7 @@ function connectionText(c: StampPreview['connections'][number]): string {
 export function connectionsSentence(p: StampPreview): string | null {
 	if (p.connections.length === 0) return null;
 	return tf('stamp.connections', {
-		person: displaySafe(p.by ?? t('takeover.connection_someone')),
+		person: markHidden(p.by ?? t('takeover.connection_someone')),
 		connections: p.connections.map(connectionText).join(', '),
 	});
 }
@@ -93,10 +93,10 @@ export function paramsOf(raw: string | null): string[] {
 	if (raw === null || raw === '') return [];
 	try {
 		const parsed: unknown = JSON.parse(raw);
-		if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return [displaySafe(raw)];
-		return Object.entries(parsed as Record<string, unknown>).map(([k, v]) => `${displaySafe(k)}: ${displaySafe(typeof v === 'string' ? v : JSON.stringify(v) ?? '')}`);
+		if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return [markHidden(raw)];
+		return Object.entries(parsed as Record<string, unknown>).map(([k, v]) => `${markHidden(k)}: ${markHidden(typeof v === 'string' ? v : JSON.stringify(v) ?? '')}`);
 	} catch {
-		return [displaySafe(raw)];
+		return [markHidden(raw)];
 	}
 }
 
@@ -123,8 +123,8 @@ export interface StampListed {
 
 /** One entry of {@link StampListed} as the row says it: provider, account, and how it stands. */
 export function listedLine(e: StampListed['entries'][number]): string {
-	const provider = e.provider !== null ? displaySafe(e.provider) : t('stamp.state_removed');
-	const account = e.account !== null && e.account !== '' ? displaySafe(e.account) : t('stamp.account_unknown');
+	const provider = e.provider !== null ? markHidden(e.provider) : t('stamp.state_removed');
+	const account = e.account !== null && e.account !== '' ? markHidden(e.account) : t('stamp.account_unknown');
 	return `${provider} (${account}): ${t(`stamp.state_${e.state}`)}`;
 }
 
@@ -141,16 +141,25 @@ export function listedNote(l: StampListed, paused: boolean): string | null {
 	return null;
 }
 
+const hides = (x: string | null | undefined): boolean => typeof x === 'string' && markHidden(x) !== x.replace(/\u00AD/gu, '');
+
 /**
- * Whether any text the block shows had characters `displaySafe` takes out. The run hands the
+ * Where text the block shows hid characters (`markHidden` marks them), or null. The run hands the
  * title and description to the model as they are stored, so a clause hidden in invisible
  * characters would run although the owner never read it: such a plan is not offered a confirm.
+ * `workflow` when the workflow's name hides them: the model reads a workflow raw, so a new plan
+ * needs the workflow gone too, not just the plan.
  */
-export function hidesText(p: StampPreview): boolean {
+export function hiddenIn(p: StampPreview): 'plan' | 'workflow' | null {
+	if (hides(p.workflow?.name)) return 'workflow';
 	const s = p.subject;
-	const shown = [s.title, s.description, s.schedule_cron, s.watch, s.pipeline_id, s.pipeline_params, s.model_tier, p.by, p.workflow?.name ?? null,
+	const shown = [s.title, s.description, s.schedule_cron, s.watch, s.pipeline_id, s.pipeline_params, s.model_tier, p.by,
 		...p.connections.flatMap((c) => [c.provider, c.account])];
-	return shown.some((x) => typeof x === 'string' && displaySafe(x) !== x);
+	return shown.some(hides) ? 'plan' : null;
+}
+
+export function hidesText(p: StampPreview): boolean {
+	return hiddenIn(p) !== null;
 }
 
 /**
