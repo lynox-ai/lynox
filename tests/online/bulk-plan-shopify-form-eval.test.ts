@@ -99,6 +99,16 @@ function realBulkPlan(ledger: BulkLedger, plans: Plan[]): ToolEntry {
 
 const RECORDED = /^List dry run recorded/;
 
+/** Every bulk_plan call the model made, whether or not it reached the handler. */
+function bulkPlanUses(agent: Agent): number {
+  let n = 0;
+  for (const m of agent.getMessages()) {
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) continue;
+    for (const b of m.content as Array<{ type?: string; name?: string }>) if (b.type === 'tool_use' && b.name === 'bulk_plan') n++;
+  }
+  return n;
+}
+
 const table: string[] = [];
 const dirs: string[] = [];
 let flagBefore: string | undefined;
@@ -138,7 +148,11 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
   }
   const at = plans.findIndex((p) => RECORDED.test(p.answer));
   const recorded = at === -1 ? undefined : plans[at];
-  const calls = at === -1 ? plans.length : at + 1;
+  // Counted from the transcript, not the handler: a call the dispatch validator refuses (an unknown
+  // key, a wrong type) never reaches the handler but is a call all the same. The calls after the
+  // recorded one reached the handler (they got "another external dry run"), so they come off.
+  const attempts = bulkPlanUses(agent);
+  const calls = at === -1 ? attempts : attempts - (plans.length - at - 1);
   let why: string;
   let ok = false;
   if (recorded === undefined) why = plans.length === 0 ? 'no bulk_plan call' : `no plan recorded in ${String(plans.length)} calls`;
@@ -146,7 +160,7 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
   else if (calls > MAX_PLANS) why = `recorded right on call ${String(calls)}, more than ${String(MAX_PLANS)}`;
   else { ok = true; why = calls === 1 ? 'right on the first call' : `right on call ${String(calls)}`; }
   const dump = process.env['FORM_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok, calls, first: ok && calls === 1, plans })}\n`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok, calls, handled: plans.length, first: ok && calls === 1, plans })}\n`);
   table.push(`${provider}\t${c.label}\t#${String(i)}\t${ok ? 'PASS' : 'FAIL'}\t${why}`);
   expect(ok, why).toBe(true);
 }

@@ -144,7 +144,7 @@ function refusePlannerStartDomains(input: BulkPlanInput): void {
  *  the first fault, and the schema does not describe the form, so a model would learn the rules
  *  one refusal at a time. */
 const SHOPIFY_FORM_RULES: Record<string, string> = {
-  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after (or a judge's schema, without after) sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null. For the images of the products, use form shopify_media.`,
+  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.`,
   shopify_media: `Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only ${SHOPIFY_MEDIA_WRITABLE_FIELDS.join(', ')}, as text of at most ${String(SHOPIFY_ALT_MAX_CHARS)} characters or null. For product fields, use form shopify.`,
 };
 
@@ -166,12 +166,14 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
  *  that is not a woocommerce list, a source file that does not exist) says nothing about the store,
  *  and the schema does not describe the forms, so the hint names them. */
 function shopifyHostHint(input: BulkPlanInput): string {
-  if (input.target_system !== 'http' || input.target_host === undefined) return '';
+  if (input.target_system !== 'http' || typeof input.target_host !== 'string') return '';
+  // With the read off, both forms are refused: naming them would only cost another round.
+  if (!shopifyBulkReadEnabled()) return '';
   const host = canonicalHost(input.target_host);
   if (host === null || !isShopifyStoreHostName(host)) return '';
   const list = input.source_list;
   if (typeof list === 'object' && list !== null && isShopifyListForm((list as Record<string, unknown>)['form'])) return '';
-  return ' target_host is a Shopify store: plan it with source_list and form shopify (product fields) or shopify_media (image alt texts).';
+  return ' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields) or shopify_media (image alt texts).';
 }
 
 const SHOPIFY_READ_OFF = 'Reading a Shopify store in a bulk run is switched off on this instance.';

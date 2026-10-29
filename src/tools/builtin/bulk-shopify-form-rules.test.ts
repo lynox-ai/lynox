@@ -6,6 +6,7 @@ import { bulkPlanTool } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import { validateToolInput } from '../../core/tool-input-validator.js';
 import type { IAgent } from '../../types/index.js';
 
 /**
@@ -15,7 +16,7 @@ import type { IAgent } from '../../types/index.js';
  */
 const HOST = 'acme.myshopify.com';
 const FLAG = 'LYNOX_FEATURE_SHOPIFY_BULK_READ';
-const PRODUCT_RULES = 'Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after (or a judge\'s schema, without after) sets only title, seo_title, seo_description, each as text or null. For the images of the products, use form shopify_media.';
+const PRODUCT_RULES = 'Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after sets only title, seo_title, seo_description, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.';
 const IMAGE_RULES = 'Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only alt, as text of at most 512 characters or null. For product fields, use form shopify.';
 
 let dir: string;
@@ -76,7 +77,7 @@ describe('a refused bulk_plan in a Shopify form', () => {
   });
 
   it('a refused plan on a Shopify store in another form, or from a file, names the Shopify forms', async () => {
-    const HINT = ' target_host is a Shopify store: plan it with source_list and form shopify (product fields) or shopify_media (image alt texts).';
+    const HINT = ' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields) or shopify_media (image alt texts).';
     const woo = await plan({ source_list: { form: 'woocommerce', path: '/admin/api/2025-01/products.json', after: { title: 'x' } } });
     expect(woo.startsWith('Error: source_list.path is not a list of the form woocommerce.'), woo).toBe(true);
     expect(woo.endsWith(HINT), woo).toBe(true);
@@ -85,12 +86,23 @@ describe('a refused bulk_plan in a Shopify form', () => {
     expect(file.endsWith(HINT), file).toBe(true);
     // A Shopify form carries its rules instead, not both.
     expect(await plan({ write_method: 'PUT', source_list: { form: 'shopify', after: { title: 'x' } } })).not.toContain('target_host is a Shopify store');
+    // With the read off, both forms are refused anyway: no hint that points there.
+    vi.stubEnv(FLAG, '0');
+    expect(await plan({ source_file: 'products.json' })).not.toContain('target_host is a Shopify store');
   });
 
   it('a refused plan in another form gets no Shopify rules', async () => {
     const answer = await plan({ target_host: 'shop.example.com', source_list: { form: 'woocommerce', path: '/nope', after: { name: 'x' } } });
-    expect(answer).toMatch(/^Error: /);
-    expect(answer).not.toContain('Form shopify');
-    expect(answer).not.toContain('Shopify store');
+    // Exactly the refusal, nothing appended.
+    expect(answer).toBe('Error: source_list.path is not a list of the form woocommerce.');
+  });
+});
+
+describe('the bulk_plan schema', () => {
+  // The dispatch validator enforces `required` before the handler runs: a schema demanding
+  // source_list.after refused every judged list plan, which takes none.
+  it('lets a judged list plan without after through the dispatch validator', () => {
+    const judged = { target_system: 'http', target_host: HOST, source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } };
+    expect(validateToolInput(bulkPlanTool.definition.input_schema, judged)).toEqual({ ok: true, errors: [] });
   });
 });
