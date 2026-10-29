@@ -34,6 +34,7 @@ import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
 import { inquiryOptions, summarizeDelivery } from './notification-router.js';
+import { stripHidden } from './hidden-text.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
@@ -2239,10 +2240,10 @@ export class WorkerLoop {
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
           followUps: stopped
-            ? [{ label: 'Run again', task: task.description ?? task.title }]
+            ? [{ label: 'Run again', task: stripHidden(task.description ?? task.title) }]
             : [
-              { label: 'Retry', task: task.description ?? task.title },
-              { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${pushedMsg}` },
+              { label: 'Retry', task: stripHidden(task.description ?? task.title) },
+              { label: 'Explain', task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${pushedMsg}` },
             ],
         });
       }
@@ -3037,9 +3038,15 @@ export class WorkerLoop {
       }
     };
 
-    const base = task.description && task.description.trim() !== task.title.trim()
-      ? `Task: ${task.title}\n\n${task.description}`
-      : `Task: ${task.title}`;
+    // Without the characters that render as nothing (`hidden-text.ts`): the write paths refuse
+    // them now, but a plan confirmed before that still carries them, and a hidden clause in its
+    // text would reach the model as part of the task. Stripped, not refused, so a plan that holds
+    // a stray one from a paste keeps running on what its owner can see.
+    const title = stripHidden(task.title);
+    const description = task.description ? stripHidden(task.description) : task.description;
+    const base = description && description.trim() !== title.trim()
+      ? `Task: ${title}\n\n${description}`
+      : `Task: ${title}`;
     // §0 A10: the answer goes into the INPUT, named alongside the question it
     // answers. Without this the re-armed run asks the same thing again and parks
     // again — a loop on the wait's own period, which is a worse outcome than the
@@ -3201,8 +3208,8 @@ export class WorkerLoop {
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
         data: { threadId: session.sessionId },
         followUps: [
-          { label: 'Details', task: `Show me more details about: ${task.title}` },
-          { label: 'Run again', task: task.description ?? task.title },
+          { label: 'Details', task: `Show me more details about: ${stripHidden(task.title)}` },
+          { label: 'Run again', task: stripHidden(task.description ?? task.title) },
         ],
       });
     }

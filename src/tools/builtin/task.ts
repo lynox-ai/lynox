@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent, TaskPriority, TaskStatus, TriggerStatus, MemoryScopeRef } from '../../types/index.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
+import { findHiddenChar, hiddenCharRefusal } from '../../core/hidden-text.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-principal.js';
@@ -318,6 +319,12 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       ?? detectEmbeddedParams('title', input.title);
     if (embeddedErr) return embeddedErr;
 
+    // No character that renders as nothing (`hidden-text.ts`), on every task, firing or not: a
+    // plan copied from someone else's would bring its hidden instructions along, and the owner's
+    // own plan needs no stamp. The injection scan below cannot catch it, as it folds them away.
+    const hidden = findHiddenChar({ title: input.title, description: input.description, tags: input.tags, params: input.params });
+    if (hidden) return `Error: ${hiddenCharRefusal('task', hidden)}`;
+
     // `params` only reaches a workflow run. Silently dropping it would look like
     // a successful batch schedule that in fact re-targets nothing.
     if (input.params !== undefined && !input.workflow_id) {
@@ -559,6 +566,10 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
     const scopeFilter = agent.activeScopes && agent.activeScopes.length > 0
       ? agent.activeScopes
       : undefined;
+
+    // No character that renders as nothing in what this edit writes, as on create.
+    const hidden = findHiddenChar({ title: input.title, description: input.description, tags: input.tags });
+    if (hidden) return `Error: ${hiddenCharRefusal('task', hidden)}`;
 
     try {
       // The create path refuses a firing trigger whose title or description reads like an
