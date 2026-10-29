@@ -6971,7 +6971,9 @@ export class LynoxHTTPApi {
       // being hidden by tier checks (see PRD-SETTINGS-REFACTOR Principle 6).
       const secretStore = engine.getSecretStore();
       const secretNames = secretStore ? new Set(secretStore.listNames()) : new Set<string>();
-      const mistralAvailable = secretNames.has('MISTRAL_API_KEY') || !!process.env['MISTRAL_API_KEY'];
+      // On a pool tier the Mistral key is the pool's, from the environment. A vault
+      // `MISTRAL_API_KEY` there is the user's own and no path uses it, so it does not count.
+      const mistralAvailable = !!process.env['MISTRAL_API_KEY'] || (!isManagedTier && secretNames.has('MISTRAL_API_KEY'));
       const [transcribeMod, speakMod, limitsMod] = await Promise.all([
         import('../core/transcribe.js'),
         import('../core/speak.js'),

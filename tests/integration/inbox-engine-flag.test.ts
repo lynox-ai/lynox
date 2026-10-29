@@ -5,11 +5,25 @@
 // and skips it when off. Catches wiring drift that the in-process
 // bootstrap.test.ts cannot see (it never calls into engine.init).
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from '../../src/core/engine.js';
+
+// The options each real bootstrap was called with, so a test can read what the cold boot chose
+// for the classifier's key and meter. The bootstrap itself still runs.
+const bootCalls = vi.hoisted(() => [] as Array<{ mistralApiKey?: string; meteredHost?: unknown }>);
+vi.mock('../../src/integrations/inbox/bootstrap.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/integrations/inbox/bootstrap.js')>();
+  return {
+    ...actual,
+    bootstrapInbox: (opts: Parameters<typeof actual.bootstrapInbox>[0]) => {
+      bootCalls.push(opts);
+      return actual.bootstrapInbox(opts);
+    },
+  };
+});
 
 let tmp: string;
 let priorEnv: Record<string, string | undefined>;
@@ -25,10 +39,17 @@ const INBOX_ENV_VARS = [
   'LYNOX_INBOX_DISABLED_ACCOUNTS',
   'LYNOX_INBOX_PRIVACY_ACK',
   'LYNOX_INBOX_REQUIRE_PRIVACY_ACK',
+  'LYNOX_BILLING_TIER',
+  'LYNOX_MANAGED_MODE',
+  'MISTRAL_API_KEY',
+  'LYNOX_MANAGED_CONTROL_PLANE_URL',
+  'LYNOX_MANAGED_INSTANCE_ID',
+  'LYNOX_HTTP_SECRET',
 ];
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'lynox-inbox-flag-'));
+  bootCalls.length = 0;
   priorEnv = {};
   for (const k of INBOX_ENV_VARS) {
     priorEnv[k] = process.env[k];
@@ -120,5 +141,38 @@ describe('Engine boot — unified-inbox flag', () => {
     engine = new Engine({});
     await engine.init();
     expect(engine.getInboxRuntime()).not.toBeNull();
+  });
+
+  // The cold boot chooses the classifier's key and meter through the same method as the
+  // rebootstrap, but only the rebootstrap had a test for the meter. A cold boot that dropped it
+  // would run the pool's Mistral key without debiting the instance.
+  it('on a pool tier the cold boot gives the EU classifier the pool\'s key and debits the instance', async () => {
+    process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
+    process.env['LYNOX_INBOX_LLM_REGION'] = 'eu';
+    process.env['LYNOX_BILLING_TIER'] = 'managed';
+    process.env['MISTRAL_API_KEY'] = 'pool-mistral-key';
+    // A pool tier boots the managed hook, which needs these; nothing listens on the port, so its
+    // status sync fails and leaves the boot alone.
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'http://127.0.0.1:9';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-inbox-test';
+    process.env['LYNOX_HTTP_SECRET'] = 'inbox-test-secret';
+    engine = new Engine({});
+    await engine.init();
+    expect(engine.getInboxRuntime()).not.toBeNull();
+    expect(bootCalls).toHaveLength(1);
+    expect(bootCalls[0]!.mistralApiKey).toBe('pool-mistral-key');
+    expect(bootCalls[0]!.meteredHost).toBe(engine);
+  });
+
+  it('off a pool tier the cold boot debits nothing for the same key (control)', async () => {
+    process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
+    process.env['LYNOX_INBOX_LLM_REGION'] = 'eu';
+    process.env['MISTRAL_API_KEY'] = 'own-mistral-key';
+    engine = new Engine({});
+    await engine.init();
+    expect(engine.getInboxRuntime()).not.toBeNull();
+    expect(bootCalls).toHaveLength(1);
+    expect(bootCalls[0]!.mistralApiKey).toBe('own-mistral-key');
+    expect(bootCalls[0]!.meteredHost).toBeUndefined();
   });
 });
