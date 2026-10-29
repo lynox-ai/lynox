@@ -118,5 +118,7 @@ describe('the wiring of the bulk-runs switch', () => {
 		expect(COMPONENT).toContain('disabled={saving || view.lockedKey !== null}');
 		expect(COMPONENT).toContain('if (!view || view.lockedKey !== null || saving) return;');
 		expect(COMPONENT).toContain('aria-checked={view.on}');
+		// The lock's two sentences are one string with a space; a Svelte `{#if}` between them drops it.
+		expect(COMPONENT).toContain('`${t(view.lockedKey)} ${t(view.lockedNextKey)}`');
 	});
 });

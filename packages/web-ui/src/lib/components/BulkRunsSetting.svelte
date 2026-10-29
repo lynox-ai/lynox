@@ -69,7 +69,7 @@
 			</button>
 		</div>
 		{#if view.lockedKey}
-			<p id="bulk-runs-locked" class="text-xs text-text-muted">{t(view.lockedKey)}{#if view.lockedNextKey} {t(view.lockedNextKey)}{/if}</p>
+			<p id="bulk-runs-locked" class="text-xs text-text-muted">{view.lockedNextKey ? `${t(view.lockedKey)} ${t(view.lockedNextKey)}` : t(view.lockedKey)}</p>
 		{/if}
 		{#if view.shopifyKey}
 			<p class="text-xs text-text-muted" data-bulk-runs-shopify>{t(view.shopifyKey)}</p>
