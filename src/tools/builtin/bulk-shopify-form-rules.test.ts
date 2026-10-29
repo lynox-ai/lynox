@@ -7,7 +7,6 @@ import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { validateToolInput } from '../../core/tool-input-validator.js';
-import { PLACEHOLDER_REFUSAL, PLACEHOLDER_REFUSAL_MEDIA } from '../../core/bulk-list.js';
 import type { IAgent } from '../../types/index.js';
 
 /**
@@ -19,6 +18,11 @@ const HOST = 'acme.myshopify.com';
 const FLAG = 'LYNOX_FEATURE_SHOPIFY_BULK_READ';
 const PRODUCT_RULES = 'Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after sets only title, seo_title, seo_description, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.';
 const IMAGE_RULES = 'Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only alt, as text of at most 512 characters or null. For product fields, use form shopify.';
+
+// The placeholder refusals word for word: they are prompt surface, and the measured switch to a
+// judge (tests/online/bulk-plan-shopify-form-eval.test.ts, case s3) rests on this wording.
+const PLACEHOLDER_REFUSAL = 'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. Give the literal text; for a value that differs per target, use a judge where the form takes one.';
+const PLACEHOLDER_REFUSAL_MEDIA = 'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. Form shopify_media writes one alt text into every image and takes no judge: give that one text, without such braces.';
 
 let dir: string;
 let engineDb: EngineDb;
