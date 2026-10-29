@@ -55,6 +55,7 @@ import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
+import { legacyMemoryReason, type LegacyMemoryReason } from './memory-tool-set.js';
 import { compose, engineText, renderFence } from '../core/data-boundary.js';
 
 import {
@@ -440,6 +441,8 @@ export class Engine {
   /** Durable Knowledge Substrate (DK.1) — the user-owned Know store. Null unless
    *  `durable_memory_enabled` is on (+ engine.db present). */
   private _knowledgeStore: import('./knowledge-store.js').KnowledgeStore | null = null;
+  /** Read by the mandate lock; until the tools are registered it refuses, as `dk_off` would. */
+  private _legacyMemory: LegacyMemoryReason | null = 'dk_off';
   /** Onboarding Wave 1 — the server-side onboarding-flag store. Present whenever
    *  engine.db is (unconditional, NOT DK-gated); null only when engine.db failed to
    *  open (→ HTTP/flow layer fails open: onboarding counts as done, AC-1.7). */
@@ -1910,7 +1913,8 @@ export class Engine {
     // was carried as dormant. The CP default flipped ON (pro migration 0048), so it is now the
     // path every newly provisioned tenant takes. Falling back to the legacy tools here is not a
     // silent downgrade over the alternative — the alternative was silence with nothing working.
-    if (this.userConfig.durable_memory_enabled === true && this._knowledgeStore) {
+    this._legacyMemory = legacyMemoryReason(this.userConfig.durable_memory_enabled, this._knowledgeStore);
+    if (this._legacyMemory === null) {
       this.registry
         .register(rememberTool)
         .register(recallTool)
@@ -2824,6 +2828,8 @@ export class Engine {
   getKnowledgeLayer(): KnowledgeLayer | null { return this.knowledgeLayer; }
   /** Durable Knowledge Substrate (DK.1) store, or null when `durable_memory_enabled` is off. */
   getKnowledgeStore(): import('./knowledge-store.js').KnowledgeStore | null { return this._knowledgeStore; }
+  /** Why the legacy memory tools are registered, or `null` for the durable ones; set where they are registered. */
+  getLegacyMemoryReason(): LegacyMemoryReason | null { return this._legacyMemory; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }

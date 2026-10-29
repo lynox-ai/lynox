@@ -5557,7 +5557,7 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
   });
 
   describe('mandate tool lock (PRD customer-granted-operator-access D1)', () => {
-    // A mandate's agent gets only the tools on MANDATE_TOOL_SURFACE. The lock is read from
+    // A mandate's agent gets only the tools on MANDATE_TOOL_SURFACE, less the pattern writers. The lock is read from
     // `principal` at the three places `excludeTools` applies, so each place has its own
     // case: the list sent to the model, the list handed to children, the refusal at
     // execution. `plugin_reader` stands for any tool the allowlist does not name.

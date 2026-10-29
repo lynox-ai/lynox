@@ -5,7 +5,7 @@ import { channels } from '../../core/observability.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { rowStampOf } from '../../core/data-store.js';
-import { ifCounts, ifPositive, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
+import { ifCounts, ifRemovedIds, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 // DataStore accessed via agent.toolContext.dataStore
 
@@ -409,10 +409,10 @@ export const dataStoreDeleteTool: ToolEntry<DeleteInput> = {
 
     try {
       return withInstanceWrite(agent, { site: 'data_store_delete#delete', kind: 'delete', store: 'data_store', main: ['delete'] }, (w) => {
-        const deleted = w.run('delete', () => storeRef.deleteRecords({
+        const { deleted } = w.run('delete', () => storeRef.deleteRecordsReturningIds({
           collection: input.collection,
           filter: input.filter,
-        }), ifPositive);
+        }), ifRemovedIds, (v) => ({ noun: 'records', ids: v.ids }));
 
         if (deleted > 0) {
           channels.dataStoreInsert.publish({

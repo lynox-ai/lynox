@@ -1047,6 +1047,17 @@ export class DataStore {
     collection: string;
     filter: Record<string, unknown>;
   }): number {
+    return this.deleteRecordsReturningIds(params).deleted;
+  }
+
+  /**
+   * {@link deleteRecords}, naming what it removed: the `_id` of every deleted record, from the
+   * delete itself (`RETURNING`), so the ids are exactly the rows it took.
+   */
+  deleteRecordsReturningIds(params: {
+    collection: string;
+    filter: Record<string, unknown>;
+  }): { deleted: number; ids: number[] } {
     const { collection, filter } = params;
 
     const info = this._getCollectionMeta(collection);
@@ -1063,22 +1074,20 @@ export class DataStore {
       throw new Error('A filter is required for delete operations. Use dropCollection() to remove all records.');
     }
 
-    const countBefore = (this.db.prepare(`SELECT COUNT(*) as cnt FROM "${tableName}"`).get() as { cnt: number }).cnt;
-
-    this.db.prepare(`DELETE FROM "${tableName}"${whereClause}`).run(...whereParams);
-
-    const countAfter = (this.db.prepare(`SELECT COUNT(*) as cnt FROM "${tableName}"`).get() as { cnt: number }).cnt;
-    const deleted = countBefore - countAfter;
+    const rows = this.db.prepare(`DELETE FROM "${tableName}"${whereClause} RETURNING "_id"`).all(...whereParams) as Array<{ _id: number }>;
+    const ids = rows.map(r => r._id);
+    const deleted = ids.length;
 
     // Update meta
     if (deleted > 0) {
+      const countAfter = (this.db.prepare(`SELECT COUNT(*) as cnt FROM "${tableName}"`).get() as { cnt: number }).cnt;
       const now = new Date().toISOString();
       this.db.prepare(
         'UPDATE ds_collections SET record_count = ?, updated_at = ? WHERE name = ?',
       ).run(countAfter, now, collection);
     }
 
-    return deleted;
+    return { deleted, ids };
   }
 
   dropCollection(name: string): boolean {
