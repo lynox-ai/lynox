@@ -27,6 +27,7 @@ const { join } = await import('node:path');
 const { resetShellIsolationForTest, setShellIsolationForTest, WORKSPACE_LABEL } = await import('./shell-isolation.js');
 const { anchorFromFd, closeAnchor, openFds } = await import('./workspace-fd.js');
 const { ensureContextWorkspace, _resetCache } = await import('./workspace.js');
+const { WorkspaceRootError } = await import('./workspace-root.js');
 
 // The layout's values as literals: an expectation that imports the constant moves with it.
 const GROUP = 1002;
@@ -76,6 +77,8 @@ describe('the context directory in shell sidecar mode (W1)', () => {
 
   it('a failed group change stops the start, naming the directory and the call', () => {
     chownFails.on = true;
+    // The type the boot reports for a workspace it cannot use (`ensureContextWorkspace`'s contract).
+    expect(() => ensureContextWorkspace(ctx('ctx1', `${WORKSPACE_LABEL}/ctx1`))).toThrow(WorkspaceRootError);
     expect(() => ensureContextWorkspace(ctx('ctx1', `${WORKSPACE_LABEL}/ctx1`)))
       .toThrow(/The context directory \/workspace\/ctx1 cannot be made ready from fd 3 \(EPERM: operation not permitted, fchown\)/);
   });
