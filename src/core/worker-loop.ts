@@ -2315,8 +2315,10 @@ export class WorkerLoop {
     const { namedTarget, newCorrelationId } = await import('./audit-log.js');
     const { externalHostOf } = await import('./bulk-ledger.js');
     const trailTools = { namedTarget, newCorrelationId, externalHostOf };
-    // Read only for an external run, like the client: a local run writes no trail.
-    const auditLog = external ? this.engine.getAuditLog() : null;
+    // Read for every run a delegated session planned, inside the instance too (660b): its trail
+    // needs it, and a trail without a log refuses the call. The owner's own run writes none.
+    const delegated = ledger.getRunForApply(task.bulk_run_id)?.delegatedPlanner;
+    const auditLog = delegated !== null && delegated !== undefined && !isOwnerPrincipal(delegated) ? this.engine.getAuditLog() : null;
     let outcome: Awaited<ReturnType<typeof runBulkEffect>>;
     try {
       outcome = await runBulkEffect(task.bulk_run_id, effect, {
@@ -3799,6 +3801,11 @@ export class WorkerLoop {
  * what is read was chosen by whoever planned it. `null` for the owner's own run. A GraphQL
  * read is a `POST` to one endpoint for every product, so its row also names the form and the
  * value bound into it (`detail`).
+ *
+ * No row names a token host, because a run renews no OAuth token: its attach builds an agent from
+ * the stores alone, and `mayRenewOAuthUnattended` refuses it three times over — it has no
+ * `sessionCounters`, no `toolContext` and no `getAvailableTools` (`attachStoredCredential`, `http.ts`). A run that may
+ * renew needs a row for the exchange first (`bulk-preview.test.ts`, "a preview never renews").
  */
 export function bulkReadRecorder(
   run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'delegatedPlanner'>,
@@ -3827,7 +3834,9 @@ export function bulkReadRecorder(
  * the one who approved it (only the owner can approve). One row before the call, one after with
  * how many targets were written; the rows name the host, never what is written. The run renews
  * no OAuth token (its credential attach has no agent, so `mayRenewOAuthUnattended` says no), so
- * no other host is in play. `null` for the owner's own run and for a run inside the instance.
+ * no other host is in play. A run inside the instance (660b) writes the same pair, naming the
+ * store (`files`, `data_store`) instead of a host: a call writes many targets, so the row names
+ * none of them, and a table's name is content. `null` for the owner's own run only.
  */
 export function bulkRunTrail(
   run: import('./bulk-ledger.js').BulkRunForApply,
@@ -3840,8 +3849,11 @@ export function bulkRunTrail(
 ): import('./bulk-apply.js').BulkRunTrail | null {
   const planner = run.delegatedPlanner;
   const host = tools.externalHostOf(run.targetSystem);
-  if (planner === null || isOwnerPrincipal(planner) || host === null) return null;
-  const named: ReadonlyArray<readonly [string, string | number | undefined]> = [['host', host], ['approved_by', 'owner']];
+  if (planner === null || isOwnerPrincipal(planner)) return null;
+  // Not a writer the engine knows: no writer is built for it, so the run halts before this is
+  // asked (`bulkWriterFor`); were it asked, the row is written all the same.
+  const where: readonly [string, string] = host !== null ? ['host', host] : ['store', run.targetSystem === 'workspace' ? 'files' : run.targetSystem === 'data_store' ? 'data_store' : 'other'];
+  const named: ReadonlyArray<readonly [string, string | number | undefined]> = [where, ['approved_by', 'owner']];
   const action = run.kind === 'undo' ? 'bulk:undo' : 'bulk:apply';
   const correlationId = tools.newCorrelationId();
   const write = (phase: import('./audit-log.js').AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {

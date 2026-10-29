@@ -109,6 +109,18 @@ describe('each kind of entry', () => {
 		expect(text(li)).toContain('nach Zeitplan');
 	});
 
+	it('a workflow run from a chat is named a workflow run, not a plan\'s, and names no trigger (660b)', async () => {
+		await render([{
+			kind: 'plan', run: 'workflow', key: 'k2', trigger: null, startedBy: null, at: NOW, person: IDA, status: 'done',
+			writeSteps: 2, entries: [{ kind: 'step', action: 'mail_send', target: 'to=<address>', at: NOW, person: IDA, status: 'done' }],
+		}]);
+		const [li] = items();
+		expect(text(li)).toContain('Lauf eines Workflows');
+		expect(text(li)).not.toContain('Lauf eines Plans');
+		expect(text(li)).not.toContain('gestartet');
+		expect(text(li?.querySelector('[data-targets]'))).toBe('2 Schreibschritte');
+	});
+
 	it('a bulk run: windows, targets as a lower bound, and the planned halt', async () => {
 		await render([{
 			kind: 'bulk', runId: 'r1', action: 'bulk:apply', host: 'shop.example.invalid', at: NOW, person: IDA, status: 'halted',
@@ -128,6 +140,19 @@ describe('each kind of entry', () => {
 		}]);
 		expect(items()[0]?.querySelector('[data-note]')).toBeNull();
 		expect(text(items()[0]?.querySelector('[data-targets]'))).toBe('1 geschrieben, 0 fehlgeschlagen');
+	});
+
+	it('a bulk run inside the instance names its store in words, a run outside its host (660b)', async () => {
+		await render([
+			{ kind: 'bulk', runId: 'r1', action: 'bulk:apply', host: null, store: 'files', at: NOW, person: IDA, status: 'done', planned: false, windows: 1, targets: { written: 2, failed: 0, atLeast: false } },
+			{ kind: 'bulk', runId: 'r2', action: 'bulk:apply', host: null, store: 'data_store', at: NOW, person: IDA, status: 'done', planned: false, windows: 1, targets: { written: 2, failed: 0, atLeast: false } },
+			{ kind: 'bulk', runId: 'r3', action: 'bulk:apply', host: 'shop.example.invalid', store: null, at: NOW, person: IDA, status: 'done', planned: false, windows: 1, targets: { written: 2, failed: 0, atLeast: false } },
+		]);
+		const [files, rows, outside] = items();
+		expect(text(files)).toMatch(/bulk:apply\s*·\s*Dateien/);
+		expect(text(rows)).toMatch(/bulk:apply\s*·\s*Datenspeicher/);
+		expect(text(outside)).toMatch(/bulk:apply\s*·\s*shop\.example\.invalid/);
+		expect(text(outside)).not.toMatch(/Dateien|Datenspeicher/);
 	});
 
 	it('a read is named a read access, not a read that happened; another event by its own word', async () => {

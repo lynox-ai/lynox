@@ -1,5 +1,5 @@
 import { realpathSync, existsSync } from 'node:fs';
-import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint } from '../core/outbound-write.js';
+import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, isReadMethod } from '../core/outbound-write.js';
 import { isShopifyAdminHost } from '../core/shopify-host.js';
 import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyMediaListBody, shopifyTargetReadBody, shopifyWriteRequest, type ShopifyWrite } from '../core/shopify-graphql.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
@@ -739,7 +739,7 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // refused otherwise — never handed on to the checks below, so a refusal does not rest on
   // what `httpMethods` happens to hold.
   const shopify = SHOPIFY_GRANTS.get(contract);
-  if (shopify !== undefined && (typeof obj.url !== 'string' || (method !== 'GET' && method !== 'HEAD') || isGraphqlEndpoint(obj.url))) {
+  if (shopify !== undefined && (typeof obj.url !== 'string' || !isReadMethod(method) || isGraphqlEndpoint(obj.url))) {
     return grantsShopify(input, method, shopify);
   }
   if (!(contract.httpMethods ?? []).some(m => m.toUpperCase() === method)) return false;
@@ -747,7 +747,7 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // No other contract grants a write to a GraphQL endpoint: there a read and every mutation the
   // token can run are the same POST to the same path, and nothing here reads the document. Read
   // from the URL alone, so it holds for the callers that never pass a body.
-  if (method !== 'GET' && method !== 'HEAD' && isGraphqlEndpoint(obj.url)) return false;
+  if (!isReadMethod(method) && isGraphqlEndpoint(obj.url)) return false;
 
   let parsed: URL;
   try {
@@ -1013,7 +1013,7 @@ function mintShopify(contract: CapabilityContract, host: string, reads: readonly
   if (contract.origin !== 'reviewed') throw new Error('a Shopify read is only granted by a reviewed contract');
   if (!isShopifyAdminHost(host) || !isShopifyStoreHostName(host)) throw new Error('a Shopify read is only granted on a store host');
   if (contract.hostPatterns.length !== 1 || contract.hostPatterns[0] !== host) throw new Error('a Shopify read is only granted on the contract\'s one host');
-  if ((contract.httpMethods ?? []).some((m) => m.toUpperCase() !== 'GET' && m.toUpperCase() !== 'HEAD')) {
+  if ((contract.httpMethods ?? []).some((m) => !isReadMethod(m.toUpperCase()))) {
     throw new Error('a Shopify read is only granted by a contract that grants no write verb');
   }
   const endpoint = shopifyGraphqlEndpoint(host);
@@ -2110,7 +2110,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // unwarned, and this branch was the last place that still needed the schema enum to
     // make that unreachable. DELETE never arrives here in autonomous mode — the branch
     // above returns for it.
-    if (!['GET', 'HEAD'].includes(method) && autonomy === 'autonomous') {
+    if (!isReadMethod(method) && autonomy === 'autonomous') {
       return framed`⚠ ${system(toolName)}: HTTP ${system(method)} — write operation, needs your OK`;
     }
   }

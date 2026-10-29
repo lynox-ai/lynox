@@ -15,14 +15,24 @@
 import { singleLine } from './prompt-value.js';
 import { normalizeApprovalHost } from './untrusted-epoch.js';
 
-/** The two methods this engine reads with; everything else may change something. */
-function isRead(method: string): boolean {
+/**
+ * The two methods this engine reads with; everything else may change something. The one
+ * answer to "does this request only read?": every outbound gate calls it, and
+ * `tests/read-method-one-source.test.ts` lists each remaining line that compares a method with GET or HEAD
+ * with the other question it asks.
+ *
+ * An exact match, on purpose: no trim, no case fold. Each caller normalises the way its own
+ * question needs (the effective method, the upper-cased input, or the raw one the exfiltration
+ * check reads), and folding here would change what those callers decide. `null` and
+ * `undefined` (an override that is not a method, no method at all) are not reads.
+ */
+export function isReadMethod(method: string | null | undefined): method is 'GET' | 'HEAD' {
   return method === 'GET' || method === 'HEAD';
 }
 
 /** DELETE over every other write over the two reads. */
 function rank(method: string): number {
-  if (isRead(method)) return 0;
+  if (isReadMethod(method)) return 0;
   return method === 'DELETE' ? 2 : 1;
 }
 
@@ -42,6 +52,7 @@ function headerKey(raw: string): string {
  * What an override may say: a method name from the registered set (RFC 9110 and the WebDAV
  * family). A shape check is not enough — `my-secret-value` is a valid token — and a value
  * that passes is shown in the question and the refusals. Anything else is refused, never shown.
+ * Which of them only read is answered by `isReadMethod` above, never by this set.
  */
 const KNOWN_METHODS = new Set([
   'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT',
@@ -275,7 +286,7 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
     }
   } catch { /* an unparsable URL is refused before it is sent */ }
   // A GET or HEAD sends no body, so nothing in one can override it.
-  if (body !== undefined && !isRead(method.trim().toUpperCase())) {
+  if (body !== undefined && !isReadMethod(method.trim().toUpperCase())) {
     for (const reading of typeof body === 'string' ? [body] : body) {
       const fromBody = bodyOverrides(reading, headers);
       candidates.push(...fromBody.declared);
@@ -544,7 +555,7 @@ export const OUTBOUND_EFFECT_PATHS: readonly { readonly host: string; readonly s
 
 /** Whether a write to `url` with `method` is one the table names. A read never is. */
 export function isOutboundEffectWrite(url: string, method: string): boolean {
-  if (isRead(method.toUpperCase())) return false;
+  if (isReadMethod(method.toUpperCase())) return false;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return false; }
   const host = normalizeApprovalHost(parsed.hostname);

@@ -195,6 +195,34 @@ export const APPROVAL_CLAIM_STALE_MS = 15 * 60_000;
 export const APPROVAL_PURGE_AFTER_MS = 30 * 24 * 60 * 60_000;
 /** Attempts in all, the first included; then a provably-not-sent failure ends `failed`. */
 export const APPROVAL_MAX_ATTEMPTS = 3;
+
+/** Whether a stored result (plain JSON, or null) says a matching mail went out shortly before
+ *  one of the entry's attempts: its reason was `dedup_window`, or it already carried the mark. */
+export function approvalResultSawDedup(plain: string | null): boolean {
+  if (plain === null) return false;
+  let v: unknown;
+  try { v = JSON.parse(plain); } catch { return false; }
+  if (typeof v !== 'object' || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return o['reason'] === 'dedup_window' || o['dedupSeen'] === true;
+}
+
+/** Whether a stored result decrypted (non-null) and holds a JSON object. */
+function resultReadable(plain: string | null): boolean {
+  if (plain === null) return false;
+  try {
+    const v: unknown = JSON.parse(plain);
+    return typeof v === 'object' && v !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether the result an attempt stores is to carry the mark: the one before carried it or was
+ *  `dedup_window`, or this one is. */
+function dedupSeen(previous: string | null, result: unknown): boolean {
+  return approvalResultSawDedup(previous) || approvalResultSawDedup(JSON.stringify(result ?? null));
+}
 /** A body above this many bytes (UTF-8) is not filed (§4.5). */
 export const APPROVAL_MAX_BODY_BYTES = 64 * 1024;
 /** A payload above this many bytes as stored (JSON, UTF-8) is not filed: the body's limit leaves
@@ -790,10 +818,18 @@ export class ApprovalStore {
    *  the entry was not `executing`. */
   finish(id: string, outcome: FinishOutcome, result: unknown, now: number = Date.now()): ApprovalStatus | null {
     return this.db.transaction((): ApprovalStatus | null => {
-      const r = this.db.prepare('SELECT attempts FROM approval_entries WHERE id = ? AND status = \'executing\'')
-        .get(id) as { attempts: number } | undefined;
+      const r = this.db.prepare('SELECT attempts, result_json FROM approval_entries WHERE id = ? AND status = \'executing\'')
+        .get(id) as { attempts: number; result_json: string | null } | undefined;
       if (!r) return null;
-      const resultJson = this.storedResult(result);
+      // Each attempt's result replaces the last, so the reason is the last attempt's. That a matching
+      // mail went out shortly before an earlier attempt is kept beside it: a draft that met it is
+      // not loaded into a chat to be written again (`chat-context.ts`). A result before this one
+      // that cannot be read counts as one that met it.
+      const previous = r.result_json === null ? null : this.engine.tryDec(r.result_json);
+      const sawDedup = (r.result_json !== null && !resultReadable(previous)) || dedupSeen(previous, result);
+      const resultJson = this.storedResult(sawDedup
+        ? { ...(typeof result === 'object' && result !== null ? result : {}), dedupSeen: true }
+        : result);
       if (outcome === 'retry' && r.attempts < APPROVAL_MAX_ATTEMPTS) {
         this.db.prepare(
           `UPDATE approval_entries SET status = 'approved', claimed_at = NULL, held_reason = 'retry', held_at = ?, result_json = ?

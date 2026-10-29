@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type { EngineDb } from './engine-db.js';
 import type { UndoKind } from '../types/index.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
-import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
@@ -412,6 +412,32 @@ export const BULK_APPROVAL_MAX_MS = 24 * 60 * 60_000;
  *  approve. */
 export const BULK_MAX_PREVIEWED_RUNS = 10;
 
+/** The runs {@link BULK_MAX_PREVIEWED_RUNS} counts and a new planning may drop: unapproved apply
+ *  runs, previewed or still to be read, and ones replaced by another judged start. A run whose
+ *  judge was started holds paid verdicts: not dropped for a newer plan (PRD bulk-loop §3.1) — its
+ *  end is the owner's start of another one (superseded, which then joins this set) or the
+ *  retention sweep. "Started" is the limit being set, not spend above zero: a run whose first call
+ *  is in flight has spent nothing yet. */
+const PRUNABLE_RUNS = `kind = 'apply' AND (
+     (phase IN ('previewed','planned') AND NOT (judge_rule IS NOT NULL AND cost_cap_usd IS NOT NULL))
+     OR (phase = 'aborted' AND halt_reason = '${BULK_HALT_REASONS.superseded}'))`;
+
+/**
+ * A planning by someone other than the owner that the cap of unapproved runs refuses (660b): the
+ * runs over it are not its own to drop. `waiting` counts the previews waiting for the owner's
+ * approval, whoever planned them — a number, never which runs. The text is ux's (U-052); the model
+ * reads it.
+ */
+export class BulkPreviewCapError extends Error {
+  constructor(readonly waiting: number) {
+    super((waiting > 0
+      ? `${String(waiting)} previews are already waiting for approval. A new one is possible only once the owner approves some.`
+      : 'Too many bulk runs are being prepared on this instance right now. A new one is possible only once the owner starts or approves waiting runs, or plans a new one. Ask the owner.')
+      + ' Tell the user that in one sentence; do not try again in this run.');
+    this.name = 'BulkPreviewCapError';
+  }
+}
+
 /** How long a started, unapproved judged run is kept (PRD bulk-loop §3.1): its
  *  before-images were sent to a model and are held encrypted until the owner approves the run or
  *  this runs out. */
@@ -617,6 +643,24 @@ export function plannerHasEnded(
   }
   if (row.created_by === null || row.created_at <= BULK_OWNER_THREADS_SINCE) return true;
   return own.threadCreator(row.created_by) !== owner;
+}
+
+/**
+ * Whether no one can be shown as the planner of an approved run (660b): not the owner's tag, no
+ * mandate's tag (so no trail names anyone, {@link delegatedPlannerOf}), and not a run from before
+ * v31 that {@link plannerHasEnded} places in the owner's conversation. Such a run writes without a
+ * row whoever planned it, so it is not resumed. A mandate's run stays resumable even once its
+ * grant ended: it names its planner, and its approval was the owner's act. The conversations
+ * being unreadable counts against a run from before v31 only.
+ */
+export function plannerUnshown(
+  row: Pick<RunRow, 'principal' | 'mandate_id' | 'created_by' | 'created_at'>,
+  own: BulkOwnership,
+): boolean {
+  if (row.principal === principalTag(OWNER_PRINCIPAL)) return false;
+  if (row.principal !== null) return delegatedPlannerOf(row) === null;
+  if (!own.threadsKnown) return true;
+  return plannerHasEnded(row, own);
 }
 
 /** An external run as its preview effect reads it. Not model-facing. */
@@ -902,6 +946,7 @@ export class BulkLedger {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     db.transaction(() => {
+      const own = this.capRoomFor(params.principal);
       // Contained before the row it governs, in the same transaction (`containment.ts`).
       containRunFromThread(db, this.mirror, params.planningThread, id);
       insertRun.run(
@@ -928,7 +973,7 @@ export class BulkLedger {
           this.engineDb.enc(JSON.stringify(t.before)), this.engineDb.enc(JSON.stringify(t.after ?? null)), null,
         );
       });
-      this.pruneUnapproved();
+      this.pruneUnapproved(params.principal, own, id);
     })();
     return this.getStatus(id)!;
   }
@@ -941,25 +986,51 @@ export class BulkLedger {
   }
 
   /**
+   * Whether a new unapproved run of this planner fits under {@link BULK_MAX_PREVIEWED_RUNS}, asked
+   * in the planning's transaction before its run is inserted. The owner's planning always fits: it
+   * drops the oldest over the cap, whoever planned them, as before. Anyone else's (660b) may drop
+   * only runs of its own planner, so it throws {@link BulkPreviewCapError} when those are too few
+   * to make room — a preview cannot be discarded by hand, so dropping the owner's for it would
+   * leave the owner nothing to approve. Returns how many of its own the planning will drop.
+   */
+  private capRoomFor(principal: RequestPrincipal): number {
+    if (isOwnerPrincipal(principal)) return 0;
+    const db = this.engineDb.getDb();
+    const total = (db.prepare(`SELECT COUNT(*) AS n FROM bulk_runs WHERE ${PRUNABLE_RUNS}`).get() as { n: number }).n;
+    const over = total + 1 - BULK_MAX_PREVIEWED_RUNS;
+    if (over <= 0) return 0;
+    const [tag, mandateId] = planner(principal);
+    const own = (db.prepare(`SELECT COUNT(*) AS n FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND principal = ? AND mandate_id IS ?`)
+      .get(tag, mandateId) as { n: number }).n;
+    if (own >= over) return over;
+    // The runs that wait on the owner's approval, not the whole set the cap counts: that also
+    // holds runs still to be started and ones replaced by another start.
+    const waiting = (db.prepare(`SELECT COUNT(*) AS n FROM bulk_runs WHERE kind = 'apply' AND phase = 'previewed'`).get() as { n: number }).n;
+    throw new BulkPreviewCapError(waiting);
+  }
+
+  /**
    * Drop the oldest unapproved apply runs beyond {@link BULK_MAX_PREVIEWED_RUNS}:
    * previewed ones, and `planned` external ones whose preview is still reading. A dropped
    * planned run's preview trigger goes with it, in the caller's transaction (plan §6
    * Q3(b)); an effect already running finds no run on its next target and stops.
+   * The owner's planning drops over all planners; anyone else's drops `own` runs of its own
+   * planner, which {@link capRoomFor} counted before the new run was inserted (never that one).
    */
-  private pruneUnapproved(): void {
+  private pruneUnapproved(principal: RequestPrincipal, own = 0, newRun: string | null = null): void {
     const db = this.engineDb.getDb();
-    // A run whose judge was started holds paid verdicts: not dropped for a newer plan (PRD
-    // bulk-loop §3.1) — its end is the owner's start of another one (superseded, which then
-    // joins this set) or the retention sweep. "Started" is the limit being set, not spend
-    // above zero: a run whose first call is in flight has spent nothing yet.
-    const prunable = `kind = 'apply' AND (
-         (phase IN ('previewed','planned') AND NOT (judge_rule IS NOT NULL AND cost_cap_usd IS NOT NULL))
-         OR (phase = 'aborted' AND halt_reason = '${BULK_HALT_REASONS.superseded}'))`;
-    const doomed = db.prepare(
-      `SELECT id FROM bulk_runs WHERE ${prunable} AND id NOT IN (
-         SELECT id FROM bulk_runs WHERE ${prunable}
-         ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
-    ).all(BULK_MAX_PREVIEWED_RUNS) as { id: string }[];
+    const [tag, mandateId] = planner(principal);
+    const doomed = isOwnerPrincipal(principal)
+      ? db.prepare(
+        `SELECT id FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND id NOT IN (
+           SELECT id FROM bulk_runs WHERE ${PRUNABLE_RUNS}
+           ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+      ).all(BULK_MAX_PREVIEWED_RUNS) as { id: string }[]
+      : own <= 0 ? []
+      : db.prepare(
+        `SELECT id FROM bulk_runs WHERE ${PRUNABLE_RUNS} AND principal = ? AND mandate_id IS ? AND id IS NOT ?
+         ORDER BY created_at ASC, rowid ASC LIMIT ?`,
+      ).all(tag, mandateId, newRun, own) as { id: string }[];
     const triggers = new TriggerStore(this.engineDb);
     const drop = db.prepare('DELETE FROM bulk_runs WHERE id = ?');
     for (const { id } of doomed) {
@@ -1011,6 +1082,7 @@ export class BulkLedger {
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
       if (reading.n > 0) return false;
+      const own = this.capRoomFor(params.principal);
       containRunFromThread(db, this.mirror, params.planningThread, id);
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
@@ -1037,7 +1109,7 @@ export class BulkLedger {
         // `update` until the preview reads the target; `unread` in the status says so.
         insertTarget.run(id, seq, key, 'update', 'restorable', this.engineDb.enc(JSON.stringify(t.after)), null);
       });
-      this.pruneUnapproved();
+      this.pruneUnapproved(params.principal, own, id);
       return true;
     })();
     if (!recorded) return { ok: false, reason: 'external_in_progress' };
@@ -1075,6 +1147,7 @@ export class BulkLedger {
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
       if (reading.n > 0) return false;
+      const own = this.capRoomFor(params.principal);
       containRunFromThread(db, this.mirror, params.planningThread, id);
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
@@ -1089,7 +1162,7 @@ export class BulkLedger {
         ...planner(params.principal), this.engineDb.enc(sourceJson),
         ...this.judgeColumns(params.judge),
       );
-      this.pruneUnapproved();
+      this.pruneUnapproved(params.principal, own, id);
       return true;
     })();
     if (!recorded) return { ok: false, reason: 'external_in_progress' };
@@ -1274,6 +1347,13 @@ export class BulkLedger {
     if (!row || !plannerHasEnded(row, own)) return false;
     if (row.principal === null && !own.threadsKnown) return row.phase === 'planned' || row.phase === 'previewed';
     return this.endRun(runId);
+  }
+
+  /** Whether this run is refused a resume because no one can be shown as its planner ({@link plannerUnshown}).
+   *  Only a run a resume could move on: any other is `resume`'s own refusal to give. Ends nothing. */
+  resumeRefusedForPlanner(runId: string, own: BulkOwnership): boolean {
+    const row = this.runRow(runId);
+    return row !== undefined && (row.phase === 'approved' || row.phase === 'writing') && plannerUnshown(row, own);
   }
 
   /** Ends an unapproved run; its own phase guard is what keeps an approved run, the owner's act, as it is. */
@@ -1930,7 +2010,8 @@ export class BulkLedger {
    * "May write" means approved or writing and NOT halted. Two states are left out
    * on purpose, and each would look like a gap to a reader who does not know why:
    *  - A previewed undo holds nothing. No route discards a previewed run and the prune takes
-   *    only apply runs, so an undo that is never approved would hold its source for good.
+   *    only apply runs (and, planned by anyone but the owner, only that planner's own), so an
+   *    undo that is never approved would hold its source for good.
    *    The window it leaves closes at its approval: this check runs there, and `undo_stale`
    *    refuses a plan the source has written past.
    *  - A halted undo holds nothing either, for the same reason: it may never be resumed (an
@@ -2070,7 +2151,8 @@ export class BulkLedger {
           t.read?.id ?? null, t.read?.grantId ?? null,
         );
       });
-      this.pruneUnapproved();
+      // An undo is the owner's: the owner's rule, over all planners.
+      this.pruneUnapproved(OWNER_PRINCIPAL);
     })();
     return { ok: true, status: this.getStatus(id)! };
   }

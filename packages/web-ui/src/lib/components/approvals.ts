@@ -220,6 +220,85 @@ export function approvalNextStepKey(card: Pick<ApprovalCardData, 'status' | 'out
 	return viewer === 'owner' ? step : 'approvals.next.ask_owner';
 }
 
+/** The entry and outcome a chat note about an approved mail carries (core `render-projection.ts`). */
+export interface ApprovalNoteRef {
+	id: string;
+	outcome: string;
+}
+
+/** What a chat note about an approved mail shows: its sentence, the next step, and where its entry is. */
+export interface ApprovalNoteLines {
+	bodyKey: string;
+	nextKey: string | null;
+	href: string | null;
+	/** The entry whose draft a chat can load to write it again, or null: no button. */
+	rewriteId: string | null;
+}
+
+/**
+ * The reasons a failed entry's draft can be written again in a chat: the engine's list (core
+ * `approval-view.ts`, `APPROVAL_REWRITABLE_OUTCOMES`), each a reason given before the send began.
+ * The engine decides again when the chat asks; this only decides whether the note offers it.
+ */
+export const APPROVAL_REWRITABLE_OUTCOMES: readonly string[] = [
+	'account_not_configured', 'receive_only', 'account_changed', 'mandate_ended', 'invalid_recipients', 'rate_limit',
+	'cancelled', 'mail_unavailable', 'sending_address_unavailable', 'deadline_before_send', 'trail_unavailable',
+	'executor_error',
+];
+const REWRITABLE: ReadonlySet<string> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
+
+/** The page's path with one entry picked out: the "all" tab, that card marked. */
+export function approvalEntryHref(id: string): string {
+	return `/app/approvals?entry=${encodeURIComponent(id)}`;
+}
+
+/**
+ * Whether an outcome code reads right under the note's title: one the page has a sentence for,
+ * not the unrecorded `other`, not a decision (an entry the owner closed after it ended unclear is no
+ * longer "not sent"), and on a "not sent" note none of the codes that say the outcome is unclear.
+ */
+function noteOutcomeFits(status: 'failed' | 'unknown', outcome: string): boolean {
+	if (!SENTENCES.has(outcome) || outcome === 'other' || DECIDED_BY_OWNER.has(outcome)) return false;
+	return status === 'unknown' || !UNCLEAR.has(outcome);
+}
+
+/** The page's next step, except where it says "here" for the page: an unclear outcome's step, which
+ *  the chat words with the page's name. */
+function noteNextStepKey(card: { status: 'failed' | 'unknown'; outcome: string }, viewer: ApprovalViewer | null): string | null {
+	if (viewer === null) return null;
+	const step = approvalNextStepKey(card, viewer);
+	return step === 'approvals.next.unknown' ? 'chat.note.approval_unknown.next' : step;
+}
+
+/**
+ * The lines of a chat note about an approved mail that did not go out (`approval_failed`) or may
+ * have (`approval_unknown`), or null for any other note. The reason is the sentence the page shows
+ * for the same entry when the note was written, and the next step the page's, for the same viewer.
+ * A note whose reason does not fit its title (`noteOutcomeFits`) keeps its own sentence, which already
+ * says what to do. Without a viewer, no next step: whether it is the owner's or "ask the owner"
+ * depends on it. The note is written once; the entry may be closed or purged since, and the link
+ * then opens the page without a marked card.
+ */
+export function approvalNoteLines(code: string, ref: ApprovalNoteRef | undefined, viewer: ApprovalViewer | null): ApprovalNoteLines | null {
+	let status: 'failed' | 'unknown';
+	if (code === 'approval_failed') status = 'failed';
+	else if (code === 'approval_unknown') status = 'unknown';
+	else return null;
+	const own = `chat.note.${code}`;
+	if (ref === undefined) return { bodyKey: own, nextKey: null, href: null, rewriteId: null };
+	const href = approvalEntryHref(ref.id);
+	if (!noteOutcomeFits(status, ref.outcome)) return { bodyKey: own, nextKey: null, href, rewriteId: null };
+	const card = { status, outcome: ref.outcome };
+	return {
+		// The sentences of the codes that fit read the same for every viewer.
+		bodyKey: approvalOutcomeKey(card, 'none') ?? own,
+		nextKey: noteNextStepKey(card, viewer),
+		href,
+		// Only the owner's chat loads the draft of a mail that was not sent.
+		rewriteId: status === 'failed' && viewer === 'owner' && REWRITABLE.has(ref.outcome) ? ref.id : null,
+	};
+}
+
 /** The decide refusals the page has a sentence for; anything else reads as the general one. */
 export const APPROVAL_DECIDE_REFUSALS: readonly string[] = ['not_found', 'not_pending', 'not_unknown', 'expired', 'checksum', 'not_executable', 'mandate_ended'];
 const DECIDE_REFUSALS: ReadonlySet<string> = new Set(APPROVAL_DECIDE_REFUSALS);

@@ -43,6 +43,7 @@ import { InputRequiredError } from '../core/input-required.js';
 import { ChangesetManager } from '../core/changeset.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { currentRunGroup } from '../core/run-group.js';
+import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from '../core/chat-context.js';
 
 // === Mock dependencies ===
 
@@ -436,6 +437,10 @@ vi.mock('../core/config.js', async (importOriginal) => ({
   // The REAL bound check, like the escaper below: the write gate under test is
   // this function, and a stub would let the route and the loader disagree.
   admitBackgroundModel: (await importOriginal<typeof import('../core/config.js')>()).admitBackgroundModel,
+  // The REAL pool endpoint pairing: the managed write gate and the loader must decide alike.
+  poolEndpointFor: (await importOriginal<typeof import('../core/config.js')>()).poolEndpointFor,
+  POOL_MISTRAL_ENDPOINTS: (await importOriginal<typeof import('../core/config.js')>()).POOL_MISTRAL_ENDPOINTS,
+  POOL_ANTHROPIC_ENDPOINT: (await importOriginal<typeof import('../core/config.js')>()).POOL_ANTHROPIC_ENDPOINT,
   // Not a stub: the REAL escaper, so this suite tests the same rendering the
   // engine ships. A stub here would let the two sinks drift, which is the exact
   // failure this helper exists to prevent.
@@ -6083,6 +6088,34 @@ describe('LynoxHTTPApi', () => {
       expect(body['locks']).toEqual({});
     });
 
+    // On a pool tier no path reads a vault MISTRAL_API_KEY: the pool's key comes from the
+    // environment. Reporting Mistral as available from the vault alone would show a provider
+    // that does not run without the pool's key.
+    it.each([
+      ['managed', ['MISTRAL_API_KEY'], '', false],
+      ['managed_pro', ['MISTRAL_API_KEY'], '', false],
+      ['managed_max', ['MISTRAL_API_KEY'], '', false],
+      ['eu', ['MISTRAL_API_KEY'], '', false],
+      ['managed', [], 'pool-mistral-key', true],
+      ['hosted', ['MISTRAL_API_KEY'], '', true],
+      ['', ['MISTRAL_API_KEY'], '', true],
+    ] as const)('mistral_available on tier "%s" with vault %j and env "%s" is %s', async (tier, vault, env, available) => {
+      repayRateWindow();
+      vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      vi.stubEnv('MISTRAL_API_KEY', env);
+      mockSecretListNames.mockReturnValue([...vault]);
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const caps = (await res.json() as { capabilities: Record<string, unknown> }).capabilities;
+        expect(caps['mistral_available']).toBe(available);
+      } finally {
+        // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('MISTRAL_API_KEY', '');
+      }
+    });
+
     it('has_calendar follows the REGISTRY, so an instance with the calendar on reports it', async () => {
       // The direction the default mock cannot show. `has_calendar` was hard-coded `false`, so
       // every assertion about it passed while the probe told a calendar-enabled instance it had
@@ -10138,7 +10171,7 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.status).toBe('approved');
     });
 
-    it('hands a moved draft to the model before the owner\'s words, and a waiting one not at all', async () => {
+    it('hands a moved draft to the model before the owner\'s words, and for a waiting one only that it is not available', async () => {
       mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
       const taskOf = async (id: string): Promise<string> => {
         mockSessionRun.mockClear();
@@ -10148,7 +10181,11 @@ describe('LynoxHTTPApi', () => {
         return typeof call?.[0] === 'string' ? call[0] : '';
       };
       const waiting = filed();
-      expect(await taskOf(waiting)).toBe('change it');
+      // A draft that does not load is said to be missing, in the same words whatever the cause.
+      const missing = await taskOf(waiting);
+      expect(missing).toBe(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}change it`);
+      expect(missing).not.toContain('Hier der Bericht.');
+      expect(await taskOf('00000000-0000-4000-8000-000000000000')).toBe(missing);
       expect((await decide(waiting, { action: 'move_to_chat' })).status).toBe(200);
       const handed = await taskOf(waiting);
       expect(handed.startsWith(`[Loaded draft moved from the approval queue — entry: ${waiting}`)).toBe(true);
@@ -10559,6 +10596,64 @@ describe('LynoxHTTPApi', () => {
         const res = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' });
         expect(res.status).toBe(200);
         expect(new TriggerStore(bulkDb).getById(`bulk-preview-${id}`)).toBeDefined();
+      });
+    });
+
+    // 660b: an approved run no one can be shown to have planned would write without a row in the
+    // instance's trail, so it is not resumed. Its approval was the owner's act: it is not ended.
+    describe('resuming an approved run no one can be shown to have planned', () => {
+      /** An approved run, halted, stamped with the planner given (null: a run from before v31). */
+      const haltedRun = (principal: string | null, mandateId: string | null = null, createdBy = 't'): string => {
+        const id = bulkLedger.recordDryRun({
+          createdBy, principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem',
+          targets: [{ key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' }],
+        }).id;
+        const approved = bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)! });
+        if (!approved.ok) throw new Error(approved.reason);
+        bulkLedger.halt(id, BULK_HALT_REASONS.runUnrecorded);
+        bulkDb.getDb().prepare(`UPDATE bulk_runs SET principal = ?, mandate_id = ?, created_at = '2026-10-13 08:00:00' WHERE id = ?`).run(principal, mandateId, id);
+        return id;
+      };
+      const resume = (id: string) => jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+
+      it.each([
+        ['from before v31, in a conversation no one is recorded for', null],
+        ['with a planner tag that is neither the owner\'s nor a mandate\'s', 'member:someone@example.invalid'],
+      ] as const)('is refused %s, with the code the page words, and stays as it is', async (_what, principal) => {
+        const id = haltedRun(principal);
+        const res = await resume(id);
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'planner_unknown' });
+        expect(bulkLedger.getStatus(id)).toMatchObject({ phase: 'approved', haltReason: BULK_HALT_REASONS.runUnrecorded });
+      });
+
+      it('is refused from before v31 when the conversations cannot be read, even one the owner started', async () => {
+        bulkHolder.ownership = { isLive: () => false, threadCreator: () => 'owner', threadsKnown: false };
+        const res = await resume(haltedRun(null));
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'planner_unknown' });
+      });
+
+      it('a finished one gets the resume\'s own refusal, not this one', async () => {
+        const id = haltedRun(null);
+        bulkDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(id);
+        const res = await resume(id);
+        expect(res.status).toBe(409);
+        expect(await res.json()).not.toMatchObject({ code: 'planner_unknown' });
+      });
+
+      it('control: a run from before v31 in a conversation the owner started resumes', async () => {
+        bulkHolder.ownership = { isLive: () => false, threadCreator: (t) => (t === 't' ? 'owner' : undefined), threadsKnown: true };
+        expect((await resume(haltedRun(null))).status).toBe(200);
+      });
+
+      it('control: the owner\'s run resumes, also when the conversations cannot be read', async () => {
+        bulkHolder.ownership = { isLive: () => false, threadCreator: () => undefined, threadsKnown: false };
+        expect((await resume(haltedRun('owner'))).status).toBe(200);
+      });
+
+      it('control: a mandate\'s run resumes once its grant ended — it names its planner', async () => {
+        expect((await resume(haltedRun('mandate:helper@example.invalid', 'grant-1'))).status).toBe(200);
       });
     });
 
@@ -12773,6 +12868,35 @@ describe('LynoxHTTPApi', () => {
         },
       );
 
+      // The inbox classifier reads its key once, when the inbox bootstraps, and a write here would
+      // only reach it at the next restart. On an instance the control plane hosts that case cannot
+      // arise: neither a write nor a removal through this route reaches the key. It comes from the
+      // control plane's environment or from a migration import, and both take effect with a
+      // restart. If this route opens, the inbox key and its meter need a rebootstrap on the write.
+      it.each([['managed', 403], ['managed_pro', 403], ['managed_max', 403], ['hosted', 403], ['', 200]] as const)(
+        'PUT and DELETE /api/secrets/LYNOX_INBOX_MISTRAL_API_KEY in mode="%s" answer %s (self-host is the control)',
+        async (mode, status) => {
+          repayRateWindow();
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          vi.stubEnv('LYNOX_MANAGED_MODE', mode);
+          try {
+            const put = await jsonFetch('/api/secrets/LYNOX_INBOX_MISTRAL_API_KEY', {
+              method: 'PUT',
+              body: JSON.stringify({ value: 'user-inbox-key' }),
+            });
+            expect(put.status).toBe(status);
+            const del = await jsonFetch('/api/secrets/LYNOX_INBOX_MISTRAL_API_KEY', { method: 'DELETE' });
+            expect(del.status).toBe(status);
+            expect(mockSecretSet).toHaveBeenCalledTimes(status === 200 ? 1 : 0);
+            expect(mockSecretDelete).toHaveBeenCalledTimes(status === 200 ? 1 : 0);
+          } finally {
+            // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
+            vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', '');
+            vi.stubEnv('LYNOX_MANAGED_MODE', '');
+          }
+        },
+      );
+
       it('PUT /api/secrets/SMTP_PASSWORD accepts user-scope when LYNOX_MANAGED_MODE is unset', async () => {
         // Exotic but valid path: admin/user secret split WITHOUT managed
         // mode (a self-hoster who explicitly split the secret). The
@@ -13178,6 +13302,71 @@ describe('LynoxHTTPApi', () => {
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
         }
+      });
+
+      // A curated host is not enough: it must belong to the provider the save leaves in place,
+      // or the pool's key goes to the other vendor (the Anthropic key to Mistral, or back).
+      describe('PUT /api/config pairs api_base_url with the provider', () => {
+        const MISTRAL = 'https://api.mistral.ai/v1';
+        // This file shares ONE per-IP rate window; the requests below are paid back so a test
+        // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+        const rateCounts = (): Map<string, { count: number }> =>
+          (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+        let windowBefore = new Map<string, number>();
+        beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+        afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+        const put = async (body: Record<string, unknown>): Promise<{ status: number; error?: string }> => {
+          const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(body) });
+          const json = res.status === 200 ? {} : await res.json() as { error: string };
+          return { status: res.status, ...json };
+        };
+        const withStored = async (stored: Record<string, unknown>, run: () => Promise<void>): Promise<void> => {
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+          const { readUserConfig } = await import('../core/config.js');
+          const mocked = readUserConfig as unknown as { mockReturnValue: (v: unknown) => void };
+          mocked.mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', ...stored });
+          try {
+            await run();
+          } finally {
+            mocked.mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' });
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        };
+
+        it('refuses a Mistral URL while the provider stays Anthropic (or unset)', async () => {
+          for (const stored of [{ provider: 'anthropic' }, {}]) {
+            await withStored(stored, async () => {
+              const r = await put({ api_base_url: MISTRAL });
+              expect(r.status, JSON.stringify(stored)).toBe(403);
+              expect(r.error).toContain('does not belong to provider');
+            });
+          }
+        });
+
+        it('refuses the Anthropic URL while the provider stays the Mistral preset', async () => {
+          await withStored({ provider: 'openai', api_base_url: MISTRAL }, async () => {
+            const r = await put({ api_base_url: 'https://api.anthropic.com' });
+            expect(r.status).toBe(403);
+            expect(r.error).toContain("does not belong to provider 'openai'");
+          });
+        });
+
+        it('accepts the pairs that belong together, and a stored value sent back unchanged', async () => {
+          await withStored({ provider: 'anthropic' }, async () => {
+            expect((await put({ provider: 'openai', api_base_url: MISTRAL, openai_model_id: 'mistral-large-2512' })).status).toBe(200);
+            expect((await put({ api_base_url: 'https://api.anthropic.com' })).status).toBe(200);
+          });
+          await withStored({ provider: 'openai', api_base_url: MISTRAL }, async () => {
+            expect((await put({ api_base_url: 'https://api.mistral.ai' })).status).toBe(200);
+          });
+          // The Web UI sends every field back on each save; an unpaired value already in the
+          // file is not refused, the loader drops it.
+          await withStored({ provider: 'anthropic', api_base_url: MISTRAL }, async () => {
+            expect((await put({ provider: 'anthropic', api_base_url: MISTRAL })).status).toBe(200);
+          });
+        });
       });
 
       it('PUT /api/config pairs provider openai only with the exact curated Mistral URL, not a longer URL that starts with it', async () => {
@@ -14551,6 +14740,30 @@ describe('LynoxHTTPApi', () => {
       } finally {
         if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
         else delete process.env.ANTHROPIC_API_KEY;
+      }
+    });
+
+    // On a pool tier the stored Mistral key is the pool's. A probe naming another vendor's
+    // vetted host must not borrow it; off a pool tier the fallback is as before (control).
+    it.each([['managed', false], ['hosted', true]] as const)('a probe of another vendor\'s host on %s sends the stored Mistral key: %s', async (tier, sent) => {
+      const keep = { tier: process.env['LYNOX_BILLING_TIER'], mode: process.env['LYNOX_MANAGED_MODE'], mistral: process.env['MISTRAL_API_KEY'] };
+      process.env['LYNOX_BILLING_TIER'] = tier;
+      process.env['MISTRAL_API_KEY'] = 'sk-pool-mistral-probe';
+      // The probe goes out through the pinned transport; it records what would be sent.
+      const { setPinnedTransportForTests } = await import('../core/network-guard.js');
+      const outbound: string[] = [];
+      const restoreTransport = setPinnedTransportForTests(async (input) => {
+        outbound.push(`${input.hostname} ${new Headers(input.headers).get('authorization') ?? ''}`);
+        return new Response('{}', { status: 401 });
+      });
+      try {
+        await llmTestFetch({ provider: 'openai', base_url: 'https://api.anthropic.com' });
+        expect(outbound.some((h) => h.startsWith('api.anthropic.com ') && h.includes('sk-pool-mistral-probe'))).toBe(sent);
+      } finally {
+        restoreTransport();
+        for (const [name, v] of [['LYNOX_BILLING_TIER', keep.tier], ['LYNOX_MANAGED_MODE', keep.mode], ['MISTRAL_API_KEY', keep.mistral]] as const) {
+          if (v === undefined) delete process.env[name]; else process.env[name] = v;
+        }
       }
     });
 

@@ -212,7 +212,7 @@ describe('chat-context untrusted-data sweep', () => {
     if (!sent.ok) throw new Error(sent.reason);
     sendApprovalId = sent.id;
     store.decide(sendApprovalId, { action: 'reject', reason: 'moved_to_chat' }, 'owner');
-    approvals = { get: (id) => store.get(id), scope: { viewer: 'owner' } };
+    approvals = { get: (id) => store.get(id), scope: { viewer: 'owner' }, accountUidsStable: () => false, checksumMatches: (id) => store.checksumMatches(id) };
   });
   afterAll(() => {
     if (prevFlag === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];

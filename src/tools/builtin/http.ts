@@ -43,7 +43,7 @@ import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../.
 import { currentCallSignal, currentCallTwins, joinCallSignal, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
@@ -733,7 +733,7 @@ export function undoClassFor(method: string): 'restorable' | 'none' | null {
   // conservative answer for it is the gated one. So this list is "what this tool reads",
   // NOT "what cannot have an effect" — it does not claim to be complete, and adding a
   // method to the enum is a decision the schema test asks for by name.
-  if (m === 'GET' || m === 'HEAD') return null;
+  if (isReadMethod(m)) return null;
   if (m === 'PUT' || m === 'PATCH') return 'restorable';
   return 'none';
 }
@@ -778,8 +778,8 @@ export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock:
   const base = `HTTP request timed out after ${timeoutMs}ms${wallClock ? ' (wall clock)' : ''}`;
   const verb = method.toUpperCase();
   const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
-  if ((verb === 'GET' || verb === 'HEAD') && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
-  if (verb === 'GET' || verb === 'HEAD') return `${base}${read}`;
+  if (isReadMethod(verb) && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
+  if (isReadMethod(verb)) return `${base}${read}`;
   const landed = answeredStatus === undefined
     ? `The ${verb} may still have reached the server and taken effect`
     : `The ${verb} reached the server`;
@@ -796,8 +796,8 @@ export function httpStoppedMessage(method: string, answeredStatus?: string, carr
   const verb = method.toUpperCase();
   const base = `HTTP request stopped because the run was stopped`;
   const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
-  if ((verb === 'GET' || verb === 'HEAD') && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
-  if (verb === 'GET' || verb === 'HEAD') return `${base}${read}. It only reads, so it can simply be repeated.`;
+  if (isReadMethod(verb) && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
+  if (isReadMethod(verb)) return `${base}${read}. It only reads, so it can simply be repeated.`;
   const landed = answeredStatus === undefined
     ? `The ${verb} may already have reached the server and taken effect`
     : `The ${verb} reached the server`;
@@ -2942,14 +2942,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const headers = input.headers ?? {};
     const body = gateBodyReadings(input.body, headers);
     const method = effectiveWriteMethod(input.method ?? 'GET', headers, input.url, body) ?? 'OVERRIDE';
-    if (method === 'GET' || method === 'HEAD') return null;
+    if (isReadMethod(method)) return null;
     const named = method === 'OVERRIDE' ? [] : writeMethodsNamed(input.method ?? 'GET', headers, input.url, body);
     return named.length > 1 ? named.join('+') : method;
   },
   // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
   outwardRead: (input) => {
     const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
-    return method === 'GET' || method === 'HEAD' ? httpTarget(method, input.url) : null;
+    return isReadMethod(method) ? httpTarget(method, input.url) : null;
   },
   definition: {
     name: 'http_request',
@@ -2967,6 +2967,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       type: 'object' as const,
       properties: {
         url: { type: 'string', description: 'The URL to request' },
+        // The methods the model may ask for; which of them only read is answered by `isReadMethod` (core/outbound-write.ts), never by this list.
         method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'], description: 'HTTP method (default: GET)' },
         headers: { type: 'object', description: 'Request headers as key-value pairs' },
         // This string is in the STATIC PREFIX: it ships on every turn of every session
@@ -3286,8 +3287,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
     }
 
-    // GET-based exfiltration detection
-    if (method === 'GET' || method === 'HEAD') {
+    // GET-based exfiltration detection. On the method as the input names it, not the effective
+    // one: a GET carrying a write override is still sent as a GET with its URL.
+    if (isReadMethod(method)) {
       const exfilWarning = detectGetExfiltration(input.url);
       if (exfilWarning) {
         if (!agent.promptUser) {

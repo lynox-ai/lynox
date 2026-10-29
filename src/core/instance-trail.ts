@@ -286,7 +286,7 @@ function readSafely<V>(decode: InstanceDecoder<V>, v: V): InstanceStepNote {
 }
 
 /** A row id the engine chose: its own id shapes, or a store's positive integer key. */
-function isEngineRowId(id: string | number): boolean {
+export function isEngineRowId(id: string | number): boolean {
   return typeof id === 'number' ? Number.isSafeInteger(id) && id > 0 : ENGINE_ID.test(id);
 }
 

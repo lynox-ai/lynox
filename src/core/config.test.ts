@@ -1649,6 +1649,98 @@ describe('Config', () => {
     });
   });
 
+  // On a pool tier the key in the environment is the pool's; the endpoint a config file
+  // names must be the one that key belongs to, or the key goes to another vendor.
+  describe('an api_base_url from config.json on a pool tier', () => {
+    const MISTRAL = 'https://api.mistral.ai/v1';
+    const ANTHROPIC = 'https://api.anthropic.com';
+    const writeCfg = (cfg: Record<string, unknown>): void => {
+      const dir = join(fakeHome, '.lynox');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'config.json'), JSON.stringify(cfg));
+    };
+    // The client the engine builds from this config: its base URL is where the key goes.
+    const clientBase = async (cfg: { provider?: string | undefined; api_key?: string | undefined; api_base_url?: string | undefined; openai_model_id?: string | undefined }): Promise<string | undefined> => {
+      const { createLLMClient } = await import('./llm-client.js');
+      const client = createLLMClient({ provider: cfg.provider as 'anthropic' | 'openai' | undefined, apiKey: cfg.api_key ?? 'k', apiBaseURL: cfg.api_base_url, openaiModelId: cfg.openai_model_id });
+      return (client as unknown as { baseURL?: string }).baseURL;
+    };
+
+    it.each(['managed', 'managed_pro', 'managed_max'])('on %s, a Mistral URL beside the Anthropic provider is dropped: the pool key goes to Anthropic', async (tier) => {
+      process.env['LYNOX_BILLING_TIER'] = tier;
+      process.env['ANTHROPIC_API_KEY'] = 'sk-pool-ant';
+      for (const provider of ['anthropic', undefined]) {
+        writeCfg({ ...(provider ? { provider } : {}), api_base_url: MISTRAL });
+        const { loadConfig, reloadConfig } = await import('./config.js');
+        const cfg = (reloadConfig(), loadConfig());
+        expect(cfg.api_base_url, String(provider)).toBeUndefined();
+        expect(cfg.api_key).toBe('sk-pool-ant');
+        expect(await clientBase(cfg), String(provider)).toContain('api.anthropic.com');
+      }
+    });
+
+    it('on a pool tier, an Anthropic URL beside the Mistral preset becomes the Mistral endpoint: the pool Mistral key goes to Mistral', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'sk-pool-ant';
+      process.env['MISTRAL_API_KEY'] = 'sk-pool-mistral';
+      writeCfg({ provider: 'openai', api_base_url: ANTHROPIC });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      const cfg = (reloadConfig(), loadConfig());
+      expect(cfg.api_base_url).toBe(MISTRAL);
+      expect(cfg.api_key).toBe('sk-pool-mistral');
+      expect(await clientBase(cfg)).toContain('api.mistral.ai');
+    });
+
+    it('on a pool tier, a leftover ANTHROPIC_BASE_URL does not decide the host either', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'sk-pool-ant';
+      process.env['ANTHROPIC_BASE_URL'] = MISTRAL;
+      try {
+        const { loadConfig, reloadConfig } = await import('./config.js');
+        const cfg = (reloadConfig(), loadConfig());
+        expect(cfg.api_base_url).toBeUndefined();
+        expect(await clientBase(cfg)).toContain('api.anthropic.com');
+      } finally {
+        delete process.env['ANTHROPIC_BASE_URL'];
+      }
+    });
+
+    it('on a pool tier, any other host is dropped and an acceptance counts for nothing', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'sk-pool-ant';
+      writeCfg({ api_base_url: 'https://llm.example.com', accepted_custom_endpoints: [{ host: 'llm.example.com', accepted_at: '2026-10-01T00:00:00.000Z' }] });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      const cfg = (reloadConfig(), loadConfig());
+      expect(cfg.api_base_url).toBeUndefined();
+      expect(cfg.accepted_custom_endpoints).toBeUndefined();
+    });
+
+    it('on a pool tier, the curated pairs stay as written', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      for (const [cfgIn, expected] of [
+        [{ provider: 'openai', api_base_url: MISTRAL }, MISTRAL],
+        [{ provider: 'openai', api_base_url: 'https://api.mistral.ai' }, 'https://api.mistral.ai'],
+        [{ provider: 'anthropic', api_base_url: ANTHROPIC }, ANTHROPIC],
+        [{ provider: 'anthropic' }, undefined],
+      ] as const) {
+        writeCfg(cfgIn);
+        expect((reloadConfig(), loadConfig()).api_base_url, JSON.stringify(cfgIn)).toBe(expected);
+      }
+    });
+
+    it.each([['hosted'], ['no tier (self-host)']])('on %s the file decides, as before (control)', async (tier) => {
+      if (tier === 'hosted') process.env['LYNOX_BILLING_TIER'] = tier;
+      const accepted = [{ host: 'llm.example.com', accepted_at: '2026-10-01T00:00:00.000Z' }];
+      writeCfg({ api_base_url: 'https://llm.example.com', accepted_custom_endpoints: accepted });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      const cfg = (reloadConfig(), loadConfig());
+      expect(cfg.api_base_url).toBe('https://llm.example.com');
+      expect(cfg.accepted_custom_endpoints).toEqual(accepted);
+      expect(await clientBase(cfg)).toContain('llm.example.com');
+    });
+  });
+
   // ── Managed Mistral key promotion (replaces the retired eu-sovereign axis) ──
   // The CP/UI stages provider='openai' + the Mistral api_base_url; the managed
   // MISTRAL_API_KEY lives only in the environment, so loadConfig flows it into

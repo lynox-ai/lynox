@@ -52,14 +52,14 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
-import { loadConfig, describePinForDisplay, admitBackgroundModel } from '../core/config.js';
+import { loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js';
 import { eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
-import { resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
+import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
 import { bulkRunsSource } from '../core/bulk-switch.js';
 import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
 import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
@@ -387,6 +387,7 @@ function approvalChatReaderOf(
     get: (id) => store.get(id),
     scope: approvalScopeOf(principal),
     accountUidsStable: (accountId) => mail !== null && mail.registry.get(accountId)?.authType === 'imap',
+    checksumMatches: (id) => store.checksumMatches(id),
   };
 }
 
@@ -713,10 +714,7 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
 // curated set is { Anthropic, Mistral }. There is no path to actual OpenAI
 // or any other free-text endpoint on Managed.
 const MANAGED_CURATED_PROVIDERS = new Set<string>(['anthropic', 'openai']);
-const MANAGED_OPENAI_MISTRAL_HOSTS = new Set<string>([
-  'https://api.mistral.ai/v1',
-  'https://api.mistral.ai',
-]);
+const MANAGED_OPENAI_MISTRAL_HOSTS: ReadonlySet<string> = POOL_MISTRAL_ENDPOINTS;
 // Every api_base_url a managed tenant may set: the curated Mistral preset hosts
 // (for the openai-compat protocol slot) PLUS Anthropic's canonical host (the
 // Anthropic provider default — normally sent empty/unset). Any other non-empty
@@ -724,7 +722,7 @@ const MANAGED_OPENAI_MISTRAL_HOSTS = new Set<string>([
 // allowlist for EVERY provider, not just openai.
 const MANAGED_CURATED_HOSTS = new Set<string>([
   ...MANAGED_OPENAI_MISTRAL_HOSTS,
-  'https://api.anthropic.com',
+  POOL_ANTHROPIC_ENDPOINT,
 ]);
 
 function enforceManagedProviderConstraints(
@@ -734,6 +732,8 @@ function enforceManagedProviderConstraints(
   // (write-accept ⟺ load-keep ⟺ resolve): a slot naming a blocked model gets
   // an honest 403 here, never a 200 followed by a silent load-time reroute.
   blockedModelIds: readonly string[],
+  // The provider and endpoint the config file holds now, as `GET /api/config` returns them.
+  stored: { provider?: string | undefined; api_base_url?: string | undefined },
 ): string | null {
   // Effective curated HYBRID-SLOT hosts (model-presets W3): the Fireworks host
   // joins the allowlist for tier_set/tier_preset slots ONLY when the operator opts
@@ -770,6 +770,14 @@ function enforceManagedProviderConstraints(
     const baseUrl = update['api_base_url'];
     if (typeof baseUrl === 'string' && baseUrl.length > 0 && !MANAGED_CURATED_HOSTS.has(baseUrl)) {
       return `Managed instance: cannot set api_base_url to '${baseUrl}' — only the curated Anthropic/Mistral endpoints are allowed.`;
+    }
+    // The pair counts, not the host alone: a Mistral URL beside the Anthropic provider would
+    // send the pool's Anthropic key to Mistral, and the reverse. Checked against the provider
+    // the save leaves in place. A value resent as stored passes: the Web UI resends every field
+    // on each save, and the loader already drops an unpaired one (`poolEndpointFor`).
+    const provider = typeof update['provider'] === 'string' ? update['provider'] : stored.provider;
+    if (typeof baseUrl === 'string' && baseUrl.length > 0 && baseUrl !== stored.api_base_url && poolEndpointFor(provider, baseUrl) !== baseUrl) {
+      return `Managed instance: api_base_url '${baseUrl}' does not belong to provider '${provider ?? 'anthropic'}'.`;
     }
   }
   // 3. tier_set (hybrid routing) carries a per-slot api_base_url — the SAME
@@ -4269,7 +4277,8 @@ export class LynoxHTTPApi {
       // message — the reusable injection point, so any future "discuss this X"
       // entry passes the same shape and the server owns how each kind renders.
       // Best-effort: an unknown/foreign id yields no preamble and the chat still
-      // runs. Single-tenant container ⇒ the id is always the tenant's own; an
+      // runs — except an approval entry, whose chat is told its draft is not
+      // available (APPROVAL_DRAFT_UNAVAILABLE). Single-tenant container ⇒ the id is always the tenant's own; an
       // approval entry is the one kind also read by whose grant filed it.
       let contextPreamble = '';
       const rawCtx = b?.['context'];
@@ -4315,7 +4324,9 @@ export class LynoxHTTPApi {
           // draft's text, which keeps its lines and has a sentinel line escaped
           // instead — and the id fields are internally-generated (single-tenant). Keep in sync with the
           // web-ui stripLoadedContext() matcher (packages/web-ui now-marker.ts).
-          if (preamble) contextPreamble = closeLoadedContext(preamble);
+          // An approval draft that does not load is said to be missing, never passed over in silence.
+          const loaded = preamble ?? (ref.kind === 'approval' ? APPROVAL_DRAFT_UNAVAILABLE : null);
+          if (loaded) contextPreamble = closeLoadedContext(loaded);
         }
       }
       // Defense-in-depth: the client sanitises chat-over-bespoke framings, but
@@ -7001,7 +7012,9 @@ export class LynoxHTTPApi {
       // being hidden by tier checks (see PRD-SETTINGS-REFACTOR Principle 6).
       const secretStore = engine.getSecretStore();
       const secretNames = secretStore ? new Set(secretStore.listNames()) : new Set<string>();
-      const mistralAvailable = secretNames.has('MISTRAL_API_KEY') || !!process.env['MISTRAL_API_KEY'];
+      // On a pool tier the Mistral key is the pool's, from the environment. A vault
+      // `MISTRAL_API_KEY` there is the user's own and no path uses it, so it does not count.
+      const mistralAvailable = !!process.env['MISTRAL_API_KEY'] || (!isManagedTier && secretNames.has('MISTRAL_API_KEY'));
       const [transcribeMod, speakMod, limitsMod] = await Promise.all([
         import('../core/transcribe.js'),
         import('../core/speak.js'),
@@ -7471,7 +7484,8 @@ export class LynoxHTTPApi {
         // malformed save can't pollute downstream config-merge state. The
         // effective model blocklist (env-merged by loadConfig) rides along so
         // the gate can 403 a blocked tier_set/tier_preset model honestly.
-        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? []);
+        const storedConfig = readUserConfig();
+        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? [], { provider: storedConfig.provider, api_base_url: storedConfig.api_base_url });
         if (providerReason) {
           errorResponse(res, 403, providerReason);
           return;
@@ -9346,6 +9360,13 @@ export class LynoxHTTPApi {
       // not reach its host would only halt again on its first target.
       const reach = await bulkExternalReach(params['id']!, ledger);
       if (reach !== null) { errorResponse(res, 409, reach); return; }
+      // A run no one can be shown to have planned would write without a row in the instance's
+      // trail: it is not resumed (660b). It stays as it is; its approval was the owner's act.
+      // The text is ux's. No await between this and the resume.
+      if (ledger.resumeRefusedForPlanner(params['id']!, engine.getBulkOwnership())) {
+        errorResponse(res, 409, 'lynox cannot show who planned this run, so it does not continue it. Have it planned again in a chat.', 'planner_unknown');
+        return;
+      }
       const out = ledger.resume(params['id']!, { checksum, maxTargets: resumeMax });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));
@@ -9872,7 +9893,12 @@ export class LynoxHTTPApi {
       // LLM host. A free-text/unknown base_url with no typed key gets the pre-1.5.2
       // "API key required" — the user must supply it, never the shared pool key. A
       // body-supplied key is the caller's own credential and always passes through.
-      const apiKey = bodyKey || (mayFallBackToStoredKey(provider as LLMProvider, baseUrl)
+      // On a pool tier the stored key is the pool's, and a vetted host is not enough: it
+      // goes only to the endpoint that key belongs to (`poolEndpointFor`), never to another
+      // vendor's host the shared slot would otherwise be handed to.
+      const poolPaired = !requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))
+        || poolEndpointFor(provider, baseUrl || undefined) === (baseUrl || undefined);
+      const apiKey = bodyKey || (poolPaired && mayFallBackToStoredKey(provider as LLMProvider, baseUrl)
         ? (resolveProviderApiKey({
             provider: provider as LLMProvider,
             apiBaseURL: baseUrl || undefined,

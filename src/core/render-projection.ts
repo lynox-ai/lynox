@@ -102,6 +102,10 @@ export interface DisplayNoteMarker {
   /** Written by the engine for a stop whose completed prefix stayed in the
    *  model's context (run-stop.ts). Not rendered. */
   inContext?: true;
+  /** The approval entry a note about a mail the owner approved speaks of, and the outcome code
+   *  the approvals page shows for it (`approval-view.ts`), so the chat can name the reason and
+   *  lead to the entry. */
+  approval?: { id: string; outcome: string };
 }
 
 export interface RenderedMessage {
@@ -127,6 +131,23 @@ export function buildDisplayNoteContent(code: string, detail?: string, inContext
   return { [NOTE_KEY]: marker };
 }
 
+/** The content of a note about an approved mail: its code, and the entry and outcome it speaks of. */
+export function buildApprovalNoteContent(code: string, approval: { id: string; outcome: string }): Record<string, DisplayNoteMarker> {
+  return { [NOTE_KEY]: { code, approval: { id: approval.id, outcome: approval.outcome } } };
+}
+
+/** An entry id and an outcome code as the engine writes them; anything else on read is dropped. */
+const APPROVAL_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
+const APPROVAL_OUTCOME_RE = /^[a-z_]{1,40}$/;
+
+function parseApprovalRef(v: unknown): { id: string; outcome: string } | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const id = (v as Record<string, unknown>)['id'];
+  const outcome = (v as Record<string, unknown>)['outcome'];
+  return typeof id === 'string' && APPROVAL_ID_RE.test(id) && typeof outcome === 'string' && APPROVAL_OUTCOME_RE.test(outcome)
+    ? { id, outcome } : null;
+}
+
 /** Strip control chars + cap length for a failure-note detail embedded from a
  *  provider error body, which can echo attacker-influenced bytes (e.g. a
  *  fetched URL reflected in a 4xx). Done char-by-char to avoid a control-char
@@ -149,7 +170,10 @@ function parseDisplayNote(raw: string): DisplayNoteMarker | null {
         const code = (m as Record<string, unknown>)['code'];
         const detail = (m as Record<string, unknown>)['detail'];
         if (typeof code === 'string') {
-          return typeof detail === 'string' ? { code, detail } : { code };
+          const note: DisplayNoteMarker = typeof detail === 'string' ? { code, detail } : { code };
+          const approval = parseApprovalRef((m as Record<string, unknown>)['approval']);
+          if (approval !== null) note.approval = approval;
+          return note;
         }
       }
     }

@@ -61,6 +61,7 @@
 		getContainedOrigin,
 		getContainedPrefill,
 		planInNewChat,
+		newChat,
 		type FileAttachment,
 		type UsageInfo,
 		type ToolCallInfo,
@@ -74,6 +75,8 @@
 	import { formatCompactionDelta } from '../stores/compaction-result.js';
 	import { taskPreview } from '../stores/follow-ups.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
+	import { approvalNoteLines } from './approvals.js';
+	import { getApprovalsViewer } from '../stores/approvals.svelte.js';
 	import { originLineKeys, refusalOffersNewChat } from '../stores/contained-way-out.js';
 	import { formatCost } from '../format.js';
 	import { knowledgeCauseKey } from '../stores/knowledge-chip.js';
@@ -312,6 +315,14 @@
 		// effort overrides; the demo tenant runs on the cheap-tier defaults
 		// the CP provisioner injects.
 		void sendMessage(prompt); /* never rejects; a turn that cannot start is marked failed and reported */
+	}
+
+	/** A new chat on the draft of an approved mail that was not sent, as the approvals page opens
+	 *  one moved there. The engine loads it only for the owner and for a reason that proves nothing
+	 *  went out. The chat writes a new mail; the old entry stays as it ended. */
+	function rewriteApprovalInChat(id: string) {
+		newChat();
+		void sendMessage(t('chat.note.approval_rewrite_framing'), undefined, undefined, { context: { kind: 'approval', id } }); /* never rejects */
 	}
 
 	function sendOnboardingStep(idx: number, url?: string) {
@@ -2709,7 +2720,8 @@
 					     a small monospace line so the user can debug without it
 					     dominating the transcript. This row never enters the model's
 					     API context (filtered at resume hydration). -->
-					{@const noteKey = `chat.note.${msg.note.code}`}
+					{@const approvalLines = approvalNoteLines(msg.note.code, msg.note.approval, getApprovalsViewer())}
+					{@const noteKey = approvalLines?.bodyKey ?? `chat.note.${msg.note.code}`}
 					{@const noteBody = t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey)}
 					{@const titleKey = `chat.note.${msg.note.code}.title`}
 					{@const noteTitle = t(titleKey) === titleKey ? t('chat.note.title') : t(titleKey)}
@@ -2723,6 +2735,18 @@
 						<div class="min-w-0">
 							<div class="text-text-muted">{noteTitle}</div>
 							<div class="text-text-subtle">{noteBody}</div>
+							{#if approvalLines?.nextKey}
+								<div class="text-text-subtle" data-approval-next>{t(approvalLines.nextKey)}</div>
+							{/if}
+							{#if approvalLines?.href}
+								<a href={approvalLines.href} class="inline-flex min-h-6 items-center py-1 text-accent hover:underline" data-approval-entry>{t('chat.note.approval_view_entry')}</a>
+							{/if}
+							{#if approvalLines?.rewriteId}
+								{@const rewriteId = approvalLines.rewriteId}
+								<div>
+									<button type="button" class="mt-1 inline-flex min-h-6 items-center rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs text-text-muted hover:text-text" onclick={() => rewriteApprovalInChat(rewriteId)} data-approval-rewrite>{t('chat.note.approval_rewrite')}</button>
+								</div>
+							{/if}
 							{#if msg.note.detail}
 								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>
 							{/if}
