@@ -6,7 +6,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
-	import { awaitsStampRefusal, confirmOutcome, offersStamp, parseStampPreview, stepHeading, templateText, type StampPreview } from '../utils/workflow-stamp.js';
+	import { awaitsStampRefusal, confirmOutcome, offersStamp, parseStampPreview, stepHeading, templateText, visible, type StampPreview } from '../utils/workflow-stamp.js';
 
 	// The card actions show on hover only where there is room beside the name AND a pointer that
 	// hovers. Below `md` they sit under the name and stay visible, and on a device without hover
@@ -286,7 +286,9 @@
 			});
 			if (!res.ok) {
 				const msg = (await res.json().catch(() => null)) as { error?: string } | null;
-				if (awaitsStampRefusal(res.status, msg, wf.id)) {
+				// Only the owner stamps; a helper refused the same way is shown the refusal, not a view
+				// whose line asks them to confirm what they cannot.
+				if (viewer === 'owner' && awaitsStampRefusal(res.status, msg, wf.id)) {
 					// The way out of this refusal is the stamp itself: the steps open in place of the
 					// dialog, and the dialog comes back with what was typed once they are confirmed.
 					scheduleModalWf = null;
@@ -320,26 +322,33 @@
 	let stampResumesSchedule = $state<SavedWorkflow | null>(null);
 	// Bumped by every load, so a late answer for an earlier opening writes nothing.
 	let stampGeneration = 0;
+	// Bumped by every opening and closing, so a confirm answered after its view was closed (or
+	// replaced by another workflow's) acts on nothing.
+	let stampOpening = 0;
 
-	async function loadStampPreview(wf: SavedWorkflow): Promise<void> {
+	/** Loads the preview; true only when this load's preview is now the one on screen. */
+	async function loadStampPreview(wf: SavedWorkflow): Promise<boolean> {
 		const generation = ++stampGeneration;
 		stampLoading = true;
 		stampPreview = null;
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${encodeURIComponent(wf.id)}/stamp-preview`);
 			const body = res.ok ? await res.json().catch(() => null) : null;
-			if (generation !== stampGeneration) return;
+			if (generation !== stampGeneration) return false;
 			const preview = parseStampPreview(body);
-			if (!preview) { error = t('common.load_failed'); return; }
+			if (!preview) { error = t('common.load_failed'); return false; }
 			stampPreview = preview;
+			return true;
 		} catch {
 			if (generation === stampGeneration) error = t('common.load_failed');
 		} finally {
 			if (generation === stampGeneration) stampLoading = false;
 		}
+		return false;
 	}
 
 	function openStamp(wf: SavedWorkflow, line: 'awaits_at_schedule' | null = null): void {
+		stampOpening++;
 		error = '';
 		notice = '';
 		stampLine = line;
@@ -348,7 +357,9 @@
 	}
 
 	function closeStamp(): void {
+		stampOpening++;
 		stampGeneration++;
+		error = '';
 		stampWf = null;
 		stampPreview = null;
 		stampLine = null;
@@ -360,6 +371,7 @@
 		const wf = stampWf;
 		const shown = stampPreview;
 		if (!wf || !shown || stamping) return;
+		const opening = stampOpening;
 		stamping = true;
 		error = '';
 		try {
@@ -369,12 +381,12 @@
 				body: JSON.stringify({ expect: shown.expect }),
 			});
 			const body = (await res.json().catch(() => null)) as { code?: string } | null;
+			if (opening !== stampOpening) return;
 			const outcome = confirmOutcome(res.status, body?.code);
 			if (outcome.kind === 'changed') {
-				// The new version is loaded here, so the line above it is true: what is below is what
-				// a second click confirms.
-				stampLine = 'steps_changed';
-				await loadStampPreview(wf);
+				// The line says the new version is shown below, so it goes up only once it is.
+				stampLine = null;
+				if (await loadStampPreview(wf) && opening === stampOpening) stampLine = 'steps_changed';
 				return;
 			}
 			if (outcome.kind === 'failed') { error = t(outcome.key); return; }
@@ -382,11 +394,20 @@
 			closeStamp();
 			notice = t('workflow_library.stamp.stamped');
 			await loadWorkflows();
-			if (resume) scheduleModalWf = resume;
+			// The dialog comes back on the workflow as it is NOW, not the one the list held before
+			// the detour: its contract, asking steps and parameters are what the schedule consents
+			// to. Typed values carry over where the parameter still exists, and a grant preview taken
+			// before the stamp is dropped — it was computed against the old workflow.
+			const fresh = resume ? workflows.find((w) => w.id === resume.id) : undefined;
+			if (fresh) {
+				paramValues = Object.fromEntries((fresh.parameters ?? []).map((p) => [p.name, paramValues[p.name] ?? '']));
+				grantPreview = null;
+				scheduleModalWf = fresh;
+			}
 		} catch {
-			error = t('common.save_failed');
+			if (opening === stampOpening) error = t('common.save_failed');
 		} finally {
-			stamping = false;
+			if (opening === stampOpening) stamping = false;
 		}
 	}
 
@@ -902,7 +923,7 @@
 		data-testid="stamp-dialog"
 	>
 		<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
-			<h2 class="text-sm font-medium mb-1 break-words">{t('workflow_library.stamp.review')}: {stampWf.name}</h2>
+			<h2 class="text-sm font-medium mb-1 break-words">{t('workflow_library.stamp.review')}: {visible(stampWf.name)}</h2>
 			{#if stampLine === 'steps_changed'}
 				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.refused.steps_changed')}</p>
 			{:else if stampLine === 'awaits_at_schedule'}
@@ -918,16 +939,16 @@
 			{:else if stampPreview}
 				{@const p = stampPreview}
 				<dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs mb-3">
-					{#if p.mode}<dt class="text-text-subtle">{t('workflow_library.stamp.mode')}</dt><dd class="font-mono break-all">{p.mode}</dd>{/if}
-					{#if p.onFailure}<dt class="text-text-subtle">{t('workflow_library.stamp.on_failure')}</dt><dd class="font-mono break-all">{p.onFailure}</dd>{/if}
+					{#if p.mode}<dt class="text-text-subtle">{t('workflow_library.stamp.mode')}</dt><dd class="font-mono break-all">{visible(p.mode)}</dd>{/if}
+					{#if p.onFailure}<dt class="text-text-subtle">{t('workflow_library.stamp.on_failure')}</dt><dd class="font-mono break-all">{visible(p.onFailure)}</dd>{/if}
 					{#if p.limits !== null}<dt class="text-text-subtle">{t('workflow_library.stamp.limits')}</dt><dd class="font-mono whitespace-pre-wrap break-all">{templateText(p.limits)}</dd>{/if}
 				</dl>
 
 				{#if p.parameters.length > 0}
 					<p class="text-[10px] uppercase tracking-widest text-text-subtle mb-1">{t('workflow_library.params_title')}</p>
 					<ul class="mb-3 space-y-0.5 text-xs font-mono">
-						{#each p.parameters as param (param.name)}
-							<li class="break-all"><bdi>{param.name}</bdi>{param.required ? ' *' : ''}{param.default !== null ? ` = ${templateText(param.default)}` : ''}</li>
+						{#each p.parameters as param, i (i)}
+							<li class="break-all"><bdi>{visible(param.name)}</bdi>{param.required ? ' *' : ''}{param.default !== null ? ` = ${templateText(param.default)}` : ''}</li>
 						{/each}
 					</ul>
 				{/if}
@@ -936,15 +957,16 @@
 					<div class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 p-3 mb-3 text-xs">
 						<p class="font-medium mb-1 flex items-center gap-1"><Icon name="warning" size="xs" />{t('workflow_library.schedule_contract_title')}</p>
 						<ul class="space-y-0.5 text-text-subtle font-mono">
-							{#each p.contract as line (line)}
-								<li class="break-all">{line}</li>
+							<!-- Keyed by position: a cross product can list the same tuple twice. -->
+							{#each p.contract as line, i (i)}
+								<li class="break-all">{visible(line)}</li>
 							{/each}
 						</ul>
 					</div>
 				{/if}
 
 				<div class="space-y-2">
-					{#each p.steps as step (step.id)}
+					{#each p.steps as step, i (i)}
 						{@const h = stepHeading(step)}
 						<div data-testid="stamp-step" class="rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-3 py-2 text-xs">
 							<p class="font-mono text-text-subtle break-all">{h.id}</p>
@@ -953,21 +975,21 @@
 							     harmless task text can sit beside a recorded call to another host. -->
 							{#if step.tool}
 								<p class="text-[10px] uppercase tracking-widest text-text-subtle mt-2 mb-0.5">{t('workflow_library.stamp.call')}</p>
-								<p class="font-mono break-all">{step.tool}</p>
+								<p class="font-mono break-all">{visible(step.tool)}</p>
 								{#if templateText(step.inputTemplate) !== ''}
 									<pre class="mt-1 overflow-hidden whitespace-pre-wrap break-all rounded border border-border bg-bg px-2 py-1 font-mono">{templateText(step.inputTemplate)}</pre>
 								{/if}
 							{/if}
 							<p class="text-[10px] uppercase tracking-widest text-text-subtle mt-2 mb-0.5">{t('workflow.task')}</p>
-							<p class="whitespace-pre-wrap break-words">{step.task}</p>
+							<p class="whitespace-pre-wrap break-words">{visible(step.task)}</p>
 							{#if step.tools.length > 0}
-								<p class="mt-2"><span class="text-text-subtle">{t('workflow_library.stamp.tools')}:</span> <span class="font-mono break-all">{step.tools.join(', ')}</span></p>
+								<p class="mt-2"><span class="text-text-subtle">{t('workflow_library.stamp.tools')}:</span> <span class="font-mono break-all">{visible(step.tools.join(', '))}</span></p>
 							{/if}
 							{#if step.model}
-								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono break-all">{step.model}</span></p>
+								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono break-all">{visible(step.model)}</span></p>
 							{/if}
 							{#if step.inputFrom.length > 0}
-								<p class="mt-1"><span class="text-text-subtle">{t('workflow.depends_on')}:</span> <span class="font-mono break-all">{step.inputFrom.join(', ')}</span></p>
+								<p class="mt-1"><span class="text-text-subtle">{t('workflow.depends_on')}:</span> <span class="font-mono break-all">{visible(step.inputFrom.join(', '))}</span></p>
 							{/if}
 						</div>
 					{/each}

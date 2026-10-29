@@ -38,7 +38,8 @@ function preview(expect: string, task = 'Send the report'): Record<string, unkno
 	};
 }
 
-type Answer = { status: number; body: unknown };
+/** `wait`: the answer is held until it resolves, to put a step of the view between request and answer. */
+type Answer = { status: number; body: unknown; wait?: Promise<void> };
 /** One queue of answers per route; the last one repeats. */
 function serve(routes: Record<string, Answer[]>): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
@@ -49,6 +50,7 @@ function serve(routes: Record<string, Answer[]>): void {
 		const queue = routes[key];
 		if (!queue) return new Response('{}', { status: 404 });
 		const answer = queue.length > 1 ? queue.shift()! : queue[0]!;
+		if (answer.wait) await answer.wait;
 		return new Response(JSON.stringify(answer.body), { status: answer.status, headers: { 'Content-Type': 'application/json' } });
 	}));
 }
@@ -194,5 +196,91 @@ describe('a schedule refused because the workflow waits for the stamp', () => {
 		await click(byText('Bestätigen & planen'));
 		expect(q('stamp-dialog')).toBeNull();
 		expect(target.textContent).toContain('refused');
+	});
+});
+
+describe('what the refuter of the first version found', () => {
+	it('the schedule dialog comes back on the workflow as it is after the stamp, with the typed values kept', async () => {
+		const before = { ...WF, parameters: [{ name: 'month', description: '', type: 'text' }] };
+		const after = { ...before, parameters: [{ name: 'month', description: '', type: 'text' }, { name: 'region', description: '', type: 'text' }] };
+		await open('owner', before, {
+			'GET /workflows/library': [{ status: 200, body: { workflows: [before], viewer: 'owner' } }, { status: 200, body: { workflows: [after], viewer: 'owner' } }],
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 200, body: {} }],
+		});
+		await click(byText('Planen'));
+		const month = target.querySelector<HTMLInputElement>('[role="dialog"] input:not([placeholder])')!;
+		month.value = '2026-11';
+		month.dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+		await click(byText('Bestätigen & planen'));
+		await click(q('stamp-confirm'));
+		const fields = [...target.querySelectorAll<HTMLElement>('[role="dialog"] label span.font-medium')].map((e) => e.textContent?.trim());
+		expect(fields).toEqual(expect.arrayContaining(['month', 'region']));
+		const inputs = [...target.querySelectorAll<HTMLInputElement>('[role="dialog"] input:not([placeholder])')];
+		expect(inputs.map((i) => i.value)).toEqual(['2026-11', '']);
+	});
+
+	it('a failed reload after steps_changed does not claim the new version is shown', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }, { status: 500, body: {} }],
+			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		expect(q('stamp-line')).toBeNull();
+		expect(q('stamp-dialog')?.textContent).toContain('Laden fehlgeschlagen');
+		expect((q('stamp-confirm') as HTMLButtonElement).disabled).toBe(true);
+	});
+
+	it('a confirm answered after its view was closed acts on nothing — not on the next one opened', async () => {
+		let release!: () => void;
+		const held = new Promise<void>((r) => { release = r; });
+		const second = { ...WF, id: 'wf-2', name: 'Other' };
+		await open('owner', WF, {
+			'GET /workflows/library': [{ status: 200, body: { workflows: [WF, second], viewer: 'owner' } }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'GET /workflows/wf-2/stamp-preview': [{ status: 200, body: preview('d2') }],
+			'POST /workflows/wf-1/confirm': [{ status: 200, body: {}, wait: held }],
+		});
+		const reviews = [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-review"]')];
+		await click(reviews[0]!);
+		q('stamp-confirm')!.click();
+		await settle();
+		await click(byText('Abbrechen'));
+		await click([...target.querySelectorAll<HTMLElement>('[data-testid="stamp-review"]')][1]!);
+		release();
+		await settle();
+		expect(q('stamp-dialog')?.textContent).toContain('Other');
+		expect(target.textContent).not.toContain('Schritte bestätigt.');
+		expect((q('stamp-confirm') as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it('a helper refused with workflow_awaits_stamp sees the refusal, not a view asking them to confirm', async () => {
+		await open('mandate', WF, {
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1', error: 'waits for the owner' } }],
+		});
+		await click(byText('Planen'));
+		await click(byText('Bestätigen & planen'));
+		expect(q('stamp-dialog')).toBeNull();
+		expect(target.textContent).toContain('waits for the owner');
+		expect(calls.some((c) => c.path.endsWith('/stamp-preview'))).toBe(false);
+	});
+
+	it('closing the view after a failed load leaves no error on the page', async () => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 500, body: {} }] });
+		await click(q('stamp-review'));
+		await click(byText('Abbrechen'));
+		expect(target.textContent).not.toContain('Laden fehlgeschlagen');
+	});
+
+	it('prints a direction override in the recorded call instead of applying it', async () => {
+		const p = preview('d1');
+		(p['steps'] as Array<Record<string, unknown>>)[0]!['inputTemplate'] = { url: 'https://evil\u202Eelpmaxe.com/' };
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-step')?.textContent).toContain('evil<U+202E>elpmaxe');
+		expect(q('stamp-step')?.textContent).not.toContain('\u202E');
 	});
 });

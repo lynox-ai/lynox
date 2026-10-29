@@ -45,16 +45,26 @@ export interface StampPreview {
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-const strOrNull = (v: unknown): string | null => (typeof v === 'string' ? v : null);
-const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+/** Marks a value that is present but not of its type, so the whole preview is refused. */
+const BAD = Symbol('bad');
+/** Absent or null is "none"; a string is itself; anything else is BAD. */
+const optStr = (v: unknown): string | null | typeof BAD => (v === undefined || v === null ? null : typeof v === 'string' ? v : BAD);
+/** Absent or null is the empty list; an array of strings is itself; anything else, or any non-string entry, is BAD. */
+const optStrings = (v: unknown): string[] | typeof BAD => {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v) || v.some((x) => typeof x !== 'string')) return BAD;
+  return v as string[];
+};
 
 /**
  * The preview as the view may show it, or null for an answer that is not one.
  *
  * ⚠ Null on anything it cannot read whole, and null means "offer no stamp": a stamp sent with a
- * digest over a list the view did not render would confirm steps the owner was not shown. A step
- * it cannot read makes the whole preview unreadable for the same reason — dropping it would hide
- * exactly the step that differs.
+ * digest over a list the view did not render would confirm steps the owner was not shown. So a step
+ * it cannot read makes the whole preview unreadable — dropping it would hide exactly the step that
+ * differs — and so does a field that decides what runs (a step's call, its tools, the contract, a
+ * parameter) when it is present but not of its type: read leniently, it would be shown as "none".
+ * Only absent or null means none.
  */
 export function parseStampPreview(body: unknown): StampPreview | null {
   if (!isRecord(body) || typeof body['expect'] !== 'string' || body['expect'] === '') return null;
@@ -62,38 +72,52 @@ export function parseStampPreview(body: unknown): StampPreview | null {
   const steps: StampStep[] = [];
   for (const s of body['steps']) {
     if (!isRecord(s) || typeof s['id'] !== 'string' || typeof s['task'] !== 'string') return null;
-    steps.push({
-      id: s['id'],
-      task: s['task'],
-      tool: strOrNull(s['tool']),
-      inputTemplate: s['inputTemplate'] ?? null,
-      tools: strings(s['tools']),
-      model: strOrNull(s['model']),
-      inputFrom: strings(s['inputFrom']),
-    });
+    const tool = optStr(s['tool']);
+    const tools = optStrings(s['tools']);
+    const model = optStr(s['model']);
+    const inputFrom = optStrings(s['inputFrom']);
+    if (tool === BAD || tools === BAD || model === BAD || inputFrom === BAD) return null;
+    const inputTemplate = s['inputTemplate'] ?? null;
+    // A call's input without the call: the view prints the input under the tool, so it would vanish.
+    if (inputTemplate !== null && tool === null) return null;
+    steps.push({ id: s['id'], task: s['task'], tool, inputTemplate, tools, model, inputFrom });
   }
-  const contract = body['contract'];
-  if (contract !== null && contract !== undefined && !Array.isArray(contract)) return null;
-  const parameters = Array.isArray(body['parameters'])
-    ? body['parameters'].filter(isRecord).filter((p) => typeof p['name'] === 'string').map((p) => ({
-      name: p['name'] as string,
-      required: p['required'] === true,
-      default: p['default'] ?? null,
-    }))
-    : [];
+  const contract = body['contract'] === undefined || body['contract'] === null ? null : optStrings(body['contract']);
+  if (contract === BAD) return null;
+  const rawParams = body['parameters'] ?? [];
+  if (!Array.isArray(rawParams)) return null;
+  const parameters: StampParameter[] = [];
+  for (const p of rawParams) {
+    if (!isRecord(p) || typeof p['name'] !== 'string') return null;
+    parameters.push({ name: p['name'], required: p['required'] === true, default: p['default'] ?? null });
+  }
+  const mode = optStr(body['mode']);
+  const onFailure = optStr(body['onFailure']);
+  const stampedAt = optStr(body['stampedAt']);
+  if (mode === BAD || onFailure === BAD || stampedAt === BAD) return null;
   const changedBy = body['changedBy'];
   return {
     expect: body['expect'],
-    stampedAt: strOrNull(body['stampedAt']),
+    stampedAt,
     changedBy: changedBy === 'mandate' || changedBy === 'owner' ? changedBy : null,
     awaitsStamp: body['awaitsStamp'] === true,
-    mode: strOrNull(body['mode']),
+    mode,
     parameters,
-    onFailure: strOrNull(body['onFailure']),
+    onFailure,
     limits: body['limits'] ?? null,
-    contract: Array.isArray(contract) ? strings(contract) : null,
+    contract,
     steps,
   };
+}
+
+/**
+ * Characters that change how text reads without being seen — direction overrides and isolates,
+ * zero-width characters — printed as their code point instead. The view's threat is the helper who
+ * wrote the steps: a host written with U+202E reads reversed, so another host looks familiar.
+ */
+const HIDDEN = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+export function visible(text: string): string {
+  return text.replace(HIDDEN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 }
 
 /** How long the start of a step's task text runs in the step's heading (there is no step name). */
@@ -103,14 +127,13 @@ export const STEP_TASK_HEAD = 80;
 export function stepHeading(step: { id: string; task: string }): { id: string; head: string } {
   const flat = step.task.replace(/\s+/g, ' ').trim();
   const chars = Array.from(flat);
-  return { id: step.id, head: chars.length > STEP_TASK_HEAD ? `${chars.slice(0, STEP_TASK_HEAD).join('')}…` : flat };
+  return { id: visible(step.id), head: visible(chars.length > STEP_TASK_HEAD ? `${chars.slice(0, STEP_TASK_HEAD).join('')}…` : flat) };
 }
 
 /** A recorded step's input template as the view prints it: the literal call, nothing hidden. */
 export function templateText(template: unknown): string {
   if (template === null || template === undefined) return '';
-  if (typeof template === 'string') return template;
-  return JSON.stringify(template, null, 2);
+  return visible(typeof template === 'string' ? template : JSON.stringify(template, null, 2));
 }
 
 /** Whether the library offers the owner the stamp of this workflow. */

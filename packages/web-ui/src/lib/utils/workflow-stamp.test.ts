@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  STEP_TASK_HEAD, awaitsStampRefusal, confirmOutcome, offersStamp, parseStampPreview, stepHeading, templateText,
+  STEP_TASK_HEAD, awaitsStampRefusal, confirmOutcome, offersStamp, parseStampPreview, stepHeading, templateText, visible,
 } from './workflow-stamp.js';
 
 /** An answer of `GET /api/workflows/:id/stamp-preview` as the contract (242 r1) describes it. */
@@ -53,6 +53,48 @@ describe('parseStampPreview — what the view may show, or nothing', () => {
     expect(parseStampPreview(preview({ contract: { methods: ['POST'] } }))).toBeNull();
     expect(parseStampPreview(preview({ contract: null }))!.contract).toBeNull();
     expect(parseStampPreview(preview({ contract: undefined }))!.contract).toBeNull();
+  });
+});
+
+describe('parseStampPreview — a field that decides what runs is read whole or not at all', () => {
+  const step = (over: Record<string, unknown>): Record<string, unknown> => preview({ steps: [{ id: 'a', task: 't', tool: null, inputTemplate: null, tools: [], model: null, inputFrom: [], ...over }] });
+
+  it('refuses a step whose call, tools, model or inputs are present but not of their type', () => {
+    for (const over of [{ tool: 7 }, { tools: 'http_request' }, { tools: [{ name: 'http_request' }] }, { tools: ['web_search', 3] }, { model: {} }, { inputFrom: 'fetch' }]) {
+      expect(parseStampPreview(step(over)), JSON.stringify(over)).toBeNull();
+    }
+  });
+
+  it("refuses a call's input without the call, since the input is printed under the call", () => {
+    expect(parseStampPreview(step({ inputTemplate: { url: 'https://other.example/' } }))).toBeNull();
+  });
+
+  it('refuses a contract with an entry it cannot list, and parameters it cannot read', () => {
+    expect(parseStampPreview(preview({ contract: [{ method: 'POST' }] }))).toBeNull();
+    expect(parseStampPreview(preview({ contract: ['POST https://a.example/', 5] }))).toBeNull();
+    expect(parseStampPreview(preview({ parameters: [{ required: true }] }))).toBeNull();
+    expect(parseStampPreview(preview({ parameters: 'month' }))).toBeNull();
+    expect(parseStampPreview(preview({ mode: 1 }))).toBeNull();
+    expect(parseStampPreview(preview({ onFailure: false }))).toBeNull();
+  });
+
+  it('reads absent or null as none (twin of the refusals)', () => {
+    const p = parseStampPreview(preview({ parameters: undefined, contract: null, mode: null, onFailure: undefined, steps: [{ id: 'a', task: 't' }] }))!;
+    expect(p).not.toBeNull();
+    expect([p.parameters, p.contract, p.mode, p.onFailure, p.steps[0]!.tools, p.steps[0]!.tool]).toEqual([[], null, null, null, [], null]);
+  });
+});
+
+describe('visible — what changes how text reads is printed, not applied', () => {
+  it('prints direction overrides, isolates and zero-width characters as their code point', () => {
+    expect(visible('https://evil\u202Eelpmaxe.com/')).toBe('https://evil<U+202E>elpmaxe.com/');
+    expect(visible('a\u2066b\u200Bc\uFEFF')).toBe('a<U+2066>b<U+200B>c<U+FEFF>');
+    expect(visible('plain text — ok')).toBe('plain text — ok');
+  });
+
+  it('applies to the recorded call and the step heading', () => {
+    expect(templateText({ url: 'https://a\u202Eb/' })).toContain('<U+202E>');
+    expect(stepHeading({ id: 'x\u202E', task: 'send\u202E' })).toEqual({ id: 'x<U+202E>', head: 'send<U+202E>' });
   });
 });
 
