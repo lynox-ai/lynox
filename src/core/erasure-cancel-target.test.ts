@@ -106,4 +106,20 @@ describe('the audit row of a cancelled provider erasure names the opaque id, nev
     })();
     expect(cancelTargets()).toEqual([`api ${recordId} owner`]);
   });
+
+  it('a connection of another kind that took the id since is not named as the profile', () => {
+    store.save(profile());
+    markRevoked('fp-1');
+    const recordId = erasure.erasureRecords(db.getDb(), SLUG).find((r) => r.cause === 'provider_revoked')!.id;
+    // A closing delete leaves the provider's erasure held; another kind of connection takes the id.
+    expect(store.remove(SLUG, undefined, { record: 'closing' })).toBe(true);
+    const foreign = `apf_${'0'.repeat(16)}`;
+    db.getDb().prepare("INSERT INTO connections (id, kind, name, config_json, trail_id) VALUES (?, 'mail', 'Mail', '{}', ?)").run(SLUG, foreign);
+    const handle = db.getDb();
+    handle.transaction(() => {
+      expect(erasure.cancelProviderRecord(handle, recordId, new Date())).toBe('cancelled');
+      erasure.auditProviderCancels(new AuditLog(handle), handle, OWNER_PRINCIPAL, [recordId], 'owner');
+    })();
+    expect(cancelTargets()).toEqual([`api ${recordId} owner`]);
+  });
 });

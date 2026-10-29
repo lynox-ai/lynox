@@ -68,7 +68,7 @@ const providerRecords = (): readonly erasure.StoredConnectionRecord[] => erasure
 const stateOf = (grant: string): string | undefined => providerRecords().find((r) => r.revokedGrant === grant)?.historyState;
 interface AuditRow { actor_kind: string; actor_email: string | null; mandate_id: string | null; target: string; phase: string; correlation_id: string }
 const cancelRows = (): AuditRow[] => db.getDb().prepare("SELECT actor_kind, actor_email, mandate_id, target, phase, correlation_id FROM audit_log WHERE action = 'connection.erasure.cancel' ORDER BY id").all() as AuditRow[];
-/** The opaque id the audit rows name the profile by (660a-1c S-2), never its slug. */
+/** The opaque id the audit rows name the profile by, never its slug. */
 const trailOf = (): string => { const t = store.trailIdOf('shop'); expect(t).toMatch(/^apf_[0-9a-f]{16}$/); return t!; };
 const notices = (now: Date): readonly erasure.ProviderNotice[] => erasure.providerNotices(db.getDb(), now);
 
