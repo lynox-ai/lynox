@@ -742,6 +742,8 @@ const DOCS_EXTRACT_SCHEMA: ExtractSchema = {
       items: {
         type: 'object',
         properties: {
+          // The methods a profile documents for its endpoints: a description the model reads, not
+          // a gate. Whether a method only reads is answered by `isReadMethod` (core/outbound-write.ts).
           method: { type: 'string', enum: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'] as const },
           path: { type: 'string' },
           description: { type: 'string' },
