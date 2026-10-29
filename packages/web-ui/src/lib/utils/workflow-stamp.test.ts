@@ -93,6 +93,8 @@ describe('visible — what changes how text reads is printed, not applied', () =
     // Tag characters: invisible on screen, read by a model.
     expect(visible('send it\u{E0049}\u{E0067}')).toBe('send it<U+E0049><U+E0067>');
     expect(visible('Grüße 😀')).toBe('Grüße 😀');
+    // Supplementary variation selectors carry data as well.
+    expect(visible('ok\u{E0100}\u{E01EF}')).toBe('ok<U+E0100><U+E01EF>');
   });
 
   it('applies to the recorded call and the step heading', () => {

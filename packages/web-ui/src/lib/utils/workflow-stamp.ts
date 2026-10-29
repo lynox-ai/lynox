@@ -116,8 +116,9 @@ export function parseStampPreview(body: unknown): StampPreview | null {
  * wrote the steps: a host written with U+202E reads reversed, so another host looks familiar.
  */
 // Tag characters (U+E0000–E007F) are invisible when rendered but read by a model: text hidden in a
-// harmless task. Whole code points (`u`), so the astral range matches.
-const HIDDEN = /[\u034F\u061C\u115F\u1160\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFE00-\uFE0F\uFEFF\u{E0000}-\u{E007F}]/gu;
+// harmless task. Variation selectors (U+FE00–FE0F, U+E0100–E01EF) can carry data the same way.
+// Whole code points (`u`), so the astral ranges match.
+const HIDDEN = /[\u034F\u061C\u115F\u1160\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFE00-\uFE0F\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
 export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 }
