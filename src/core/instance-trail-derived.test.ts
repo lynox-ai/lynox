@@ -200,6 +200,17 @@ describe('a mandate\'s memory_store: the derived entry is written under the mand
     expect(slot.instanceRefused).toBeUndefined();
   });
 
+  it('withInstanceWriteAs inside a slot that is refused and belongs to the owner: neither is read, its row is written', () => {
+    // The subscriber leaves the slot first (`runOutsideCallSlot`); this holds the wrapper itself
+    // to the same rule, so neither guard stands in for the other.
+    let ran = false;
+    runInCallSlot({ instanceRefused: true, instanceTrail: 'exempt' }, () => {
+      withInstanceWriteAs({ principal: MANDATE, runId: 'run-1' }, kl.log!.log, { site: 'derived#memory', kind: 'create', store: 'knowledge' }, () => { ran = true; });
+    });
+    expect(ran).toBe(true);
+    expect(derivedRows(kl.log!).map(r => [r.phase, r.actor_kind])).toEqual([['attempt', 'mandate'], ['returned', 'mandate']]);
+  });
+
   it('the outcome row counts what is new, never names it: entities, relations, subjects, dedup', async () => {
     kl.result = stored({ created: { entities: 3, relations: 2, subjects: 1 } });
     publishMemoryStore({ namespace: 'knowledge', content: 'ACME renews in March', actor: { principal: MANDATE, runId: 'run-1' } });
