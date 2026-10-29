@@ -2930,6 +2930,45 @@ describe('WorkerLoop', () => {
     expect(manifest.context?.params).toEqual({ month: '2026-06' });
   });
 
+  // A schedule whose stored value holds a character that does not show stops running: the owner
+  // is told which value and what to do, at once, and the run is recorded as failed with the same
+  // words, so the schedule does not just fall silent.
+  it('a schedule whose stored value holds a hidden character tells its owner why it did not run and what to do', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    const template = baseTemplate({ id: 'hv-wf', confirmedAt: CONFIRMED, parameters: [{ name: 'month', description: '', type: 'string', source: 'user_input' }] });
+    const tm = makeTaskManager([makeTask({
+      id: 't-hidden-value', pipeline_id: 'hv-wf', effect: 'run_workflow', schedule_cron: '0 9 * * 1',
+      pipeline_params: JSON.stringify({ month: '2026-06\u{E0041}' }),
+    })]);
+    const router = makeNotificationRouter();
+    const engine = {
+      ...(makeEngine({ taskManager: tm }) as unknown as Record<string, unknown>),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getMemory: vi.fn(() => null),
+      getToolContext: vi.fn(() => ({ tools: [], containment: null })),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'hv-wf', manifest_json: JSON.stringify(template) })),
+        getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline('hv-wf', template as unknown as PlannedPipeline);
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.waitFor(() => expect(router.notify).toHaveBeenCalled());
+
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    const msg = vi.mocked(router.notify).mock.calls[0]![0];
+    expect(msg.body).toBe('Task failed: The value of parameter "month" holds a character that does not show as text. Enter the value again without it.');
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('t-hidden-value', expect.stringContaining('parameter "month" holds a character that does not show as text') as string, 'failed');
+  });
+
   it('B3: a failed scheduled run escalates to an unread thread with the run context', async () => {
     vi.useRealTimers();
     mockRunManifest.mockReset();
