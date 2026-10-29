@@ -70,6 +70,8 @@ function boot(dir: string, channelsOn = true): Proc {
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   const channels = { on: channelsOn };
   const notify = vi.fn().mockResolvedValue(undefined);

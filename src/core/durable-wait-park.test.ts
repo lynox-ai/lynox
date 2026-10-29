@@ -153,6 +153,8 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       getUserConfig: () => (opts?.maxToolResultChars !== undefined ? { max_tool_result_chars: opts.maxToolResultChars } : {}),
       workerRunModelOverride: () => ({}),
       escalateToUser: () => null,
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
 
     const router = {

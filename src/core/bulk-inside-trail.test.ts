@@ -106,6 +106,8 @@ async function tick(recorded: Recorded): Promise<void> {
     getAuditLog: recorded.getAuditLog,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
     getUserConfig: () => ({}),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
   await loop.tick();

@@ -113,6 +113,8 @@ async function tick(runId: string, hooks: unknown[] = []): Promise<{ records: st
     getHooks: () => hooks,
     getContext: () => null,
     client: {},
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   const router = {
     hasChannels: () => true,

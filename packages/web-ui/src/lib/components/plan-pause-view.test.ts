@@ -37,7 +37,9 @@ describe('a paused plan in the Triggers view', () => {
 
   it('the list carries `paused`, and the view labels it and shows no next run', () => {
     expect(ROUTE).toMatch(/\.\.\.triggerForRoute\(trigger, principal\)/);
-    expect(VIEW).toMatch(/\{#if trigger\.paused === true\}[\s\S]{0,300}?triggers\.paused_takeover/);
+    // `pausedOpen`: paused and not completed (641c-2; a completed plan keeps its pause, nothing is due).
+    expect(VIEW).toMatch(/\{#if pausedOpen\(trigger\)\}[\s\S]{0,300}?triggers\.paused_takeover/);
+    expect(VIEW).toContain("return trigger.paused === true && trigger.status !== 'completed';");
     expect(VIEW).toMatch(/\{#if trigger\.next_run_at[^}]*trigger\.paused !== true\}/);
     expect(I18N).toMatch(/'triggers\.paused_takeover': \{ de: 'Pausiert · Übernahme nötig', en: 'Paused · needs takeover' \}/);
   });

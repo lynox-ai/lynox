@@ -275,14 +275,30 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
  * A trigger as a route answers it, with its pause (`plan-pause.ts`) as the view may see it: the
  * stored columns never leave, off or on, since `paused_for` says when whose access ended. With the
  * pause on, `paused`, and for the owner only `paused_who`, the emails of the members whose end
- * paused it.
+ * paused it, and `paused_ended`, how and when each access ended: the view says it in full, where
+ * the push had to shorten the name.
  */
-export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for'> & { paused?: boolean; paused_who?: string[] } {
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
   const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, ...rest } = trigger;
   if (!planPauseOn()) return rest;
   const paused = isPaused(trigger);
   if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
-  return { ...rest, paused, paused_who: pausedForOf(pausedFor).entries.map((e) => e.email) };
+  const entries = pausedForOf(pausedFor).entries;
+  return {
+    ...rest,
+    paused,
+    paused_who: entries.map((e) => e.email),
+    paused_ended: entries.map((e) => ({ email: e.email, reason: e.reason, ends_at: new Date(e.endsAt * 1000).toISOString(), warned: e.warned === true })),
+  };
+}
+
+/** One ended access behind a paused plan, as the owner's view reads it. */
+export interface PausedEnded {
+  email: string;
+  reason: 'expired' | 'revoked';
+  ends_at: string;
+  /** Whether the advance notice before this end was sent (641c-2b); the view says when none was. */
+  warned: boolean;
 }
 
 /**
@@ -8282,7 +8298,20 @@ export class LynoxHTTPApi {
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
           };
         });
-      jsonResponse(res, 200, { triggers });
+      // `viewer` as in `/api/approvals`: the page offers the owner's controls (the takeover) only
+      // to the owner's session. The routes check it again; this is what the page shows.
+      jsonResponse(res, 200, { triggers, viewer: approvalScopeOf(principal)?.viewer ?? 'none' });
+    }, READS);
+
+    // How many plans wait for the owner's takeover, for the dot at "Automation": the pause is told
+    // by push only, and an owner without a push subscription would otherwise not see it. The
+    // owner only, as the number covers plans other helpers set up; a helper's own list still says
+    // which of the rows it reads are paused, without whose access ended.
+    this.addStatic('user', 'GET /api/triggers/paused-count', async (req, res) => {
+      const viewer = approvalScopeOf(this._principalOf(req))?.viewer ?? 'none';
+      const engineDb = engine.getEngineDb();
+      if (viewer !== 'owner' || engineDb === null) { jsonResponse(res, 200, { viewer, count: null }); return; }
+      jsonResponse(res, 200, { viewer, count: new TriggerStore(engineDb).countPausedOpen() });
     }, READS);
 
     this.addStatic('user', 'POST /api/tasks', async (_req, res, _params, body) => {
@@ -8717,13 +8746,16 @@ export class LynoxHTTPApi {
       if (out.kind === 'refused') { jsonResponse(res, 200, { refusal: out.refusal, message: TAKEOVER_REFUSALS[out.refusal].message }); return; }
       // The helper's connections as the stamp preview shows them: names, providers and account
       // labels, no grant. Each stops counting for the plan once it is taken over.
+      // `by`: whose connection it is, by address (the owner sees the helper's address there by
+      // design); the grant ids stay in the engine.
       const apiStore = engine.getApiStore();
-      const profiles = apiStore ? stampProfiles(out.preview.connections, apiStore) : [];
-      jsonResponse(res, 200, {
-        ...out.preview,
-        connections: profiles.map((p) => ({ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null })),
-        refusal: null,
+      const known = new Map((apiStore ? stampProfiles(out.preview.connections, apiStore) : []).map((p) => [p.id, p] as const));
+      const { connectionBy, ...preview } = out.preview;
+      const connections = out.preview.connections.flatMap((e, i) => {
+        const p = known.get(e.profile);
+        return p === undefined ? [] : [{ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null, by: connectionBy[i] ?? null }];
       });
+      jsonResponse(res, 200, { ...preview, connections, refusal: null });
     }, ownerOnly('see what taking over a plan would do')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/takeover', async (_req, res, params, body) => {

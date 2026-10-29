@@ -143,6 +143,22 @@ const memberOf = (b: Box, id: string): string | undefined => {
   return planMandate(planAuthorshipOf(t))?.principal.email;
 };
 
+describe('the preview says whose a stamped connection is', () => {
+  it('by the address of the grant the plan was paused for; a grant it does not know, as nobody', () => {
+    const b = box();
+    plan(b, 'p', { by: 'h@x.ch' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const { confirmed_at: at, paused_for: pf } = row(b, 'p') as { confirmed_at: string; paused_for: string };
+    const grant = (JSON.parse(pf) as Array<{ mandateId: string }>)[0]!.mandateId;
+    b.db.prepare('UPDATE triggers SET stamp_connections = ? WHERE id = ?').run(JSON.stringify({
+      at, wf: null, entries: [{ profile: 'pr-1', grant, binding: 'b' }, { profile: 'pr-2', grant: 'g-unknown', binding: 'b' }],
+    }), 'p');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && [p.preview.connections.map((c) => c.profile), p.preview.connectionBy]).toEqual([['pr-1', 'pr-2'], ['h@x.ch', null]]);
+  });
+});
+
 describe('a paused plan taken over has no mandate member and is the owner’s', () => {
   it('covers the trigger’s marks, clears the pause, stamps it for the owner and records it', () => {
     const b = box();
@@ -659,6 +675,8 @@ describe('its questions, its status and its next run', () => {
       if (c.stop) b.db.prepare("UPDATE triggers SET status = 'stopped', last_run_status = 'stopped', last_run_result = ? WHERE id = 'p'").run(ACCESS_ENDED_PAUSED_RESULT);
       const p = takeoverPreview(deps(b), 'p');
       expect([c.name, p.kind === 'preview' && p.preview.schedule]).toEqual([c.name, c.schedule]);
+      // The date the run was due, for T-6 in the view; none where the plan keeps its time.
+      expect([c.name, p.kind === 'preview' && p.preview.dueAt]).toEqual([c.name, c.after === null ? c.next : null]);
       take(b, 'p');
       expect([c.name, row(b, 'p')['next_run_at'], row(b, 'p')['status']]).toEqual([c.name, c.after, 'open']);
     }
