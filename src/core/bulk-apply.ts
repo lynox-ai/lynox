@@ -286,8 +286,10 @@ async function applyRunEffect(
       continue;
     }
     if (now() > deadline) {
-      // An atomic run must not stop half written: out of time, it rolls back instead.
-      if (run.atomic) return rollBack(ledger, writer, run, now, 'time');
+      // An atomic run must not stop half written: out of time, it rolls back instead. One that
+      // has written nothing is not half written — a rollback would only end it for good, so it
+      // halts like any run and can be resumed (as `endStopped` does for the owner's stop).
+      if (run.atomic && ledger.listAppliedDesc(runId).length > 0) return rollBack(ledger, writer, run, now, 'time');
       ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.timeBudget}.`) };
     }
