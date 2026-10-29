@@ -77,6 +77,10 @@ describe('F2: the workflow is taken over with the plan', () => {
 		const two = preview({ members: [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')], workflow: wf });
 		expect(texts(two)[0]).toBe('Nutzt den Workflow „Rechnungen“, den a@x.ch angelegt hat');
 		expect(kinds(two).slice(0, 2)).toEqual(['role', 'f2']);
+		// Another member with the same role keeps its line: F2 names one member.
+		const same = preview({ members: [wfMember(['workflow-edited'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')], workflow: wf });
+		expect(texts(same)[0]).toBe('Nutzt den Workflow „Rechnungen“, den b@x.ch geändert hat');
+		expect(kinds(same).slice(0, 2)).toEqual(['role', 'f2']);
 		// Not taken over: no F2, every role line stays.
 		expect(kinds(preview({ members: [wfMember(['workflow-created'])], workflow: { ...wf, takenOver: false } })).slice(0, 1)).toEqual(['role']);
 	});
@@ -136,6 +140,8 @@ describe('T-3: a helper\'s own connection', () => {
 	it('without an account says the service alone, and without an owner someone with access', () => {
 		const p = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'bexio', account: null, by: null }] });
 		expect(takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text.startsWith('Jemand mit Zugang hat bexio mit einem eigenen Konto verbunden. Nach')).toBe(true);
+		const empty = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'bexio', account: '', by: 'ida@x.ch' }] });
+		expect(takeoverLines(empty, fmt).find((l) => l.kind === 'connection')?.text.startsWith('ida@x.ch hat bexio mit einem eigenen Konto verbunden. Nach')).toBe(true);
 	});
 	it('leaves the account out when it is the helper\'s own address, already named (ux)', () => {
 		const p = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'Google Sheets', account: 'ida@x.ch', by: 'ida@x.ch' }] });
