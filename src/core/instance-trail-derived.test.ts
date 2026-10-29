@@ -474,26 +474,33 @@ function rawPublishes(sf: ts.SourceFile, channel: string): string[] {
 }
 
 /**
- * Every other way to reach the memory:store channel past the helper: `channel('lynox:memory:store')`,
- * `channels['memoryStore']`, and any `channels.memoryStore` that is not a listener's `.subscribe(`
- * — an alias (`const c = channels.memoryStore`) included, since it can publish raw later. Each
- * finding is `<file>:<line> <form>`.
+ * Every other way to reach the memory:store channel past the helper. Matched by NAME, not by the
+ * object it is read from, so a renamed import (`import { channels as ch }`, `obs.channels`) and a
+ * destructuring (`const { memoryStore } = channels`) are found as well: any `.memoryStore`, any
+ * `['memoryStore']`, any binding of that name, and the channel's name `lynox:memory:store` in any
+ * string or template literal. A listener's `.subscribe(` is the one use let through. Each finding
+ * is `<file>:<line> <form>`. What this cannot see: the name built at run time
+ * (`channel(NAME_CONST)` from a constant defined elsewhere, a concatenation) — a named limit.
  */
 function memoryStoreReach(sf: ts.SourceFile): string[] {
   const out: string[] = [];
   const at = (n: ts.Node, form: string): void => { out.push(`${rel(sf)}:${String(lineOf(sf, n))} ${form}`); };
+  const isName = (n: ts.Node | undefined): boolean => n !== undefined
+    && (ts.isIdentifier(n) || ts.isStringLiteral(n)) && n.text === 'memoryStore';
   const visit = (n: ts.Node): void => {
-    if (ts.isCallExpression(n) && n.arguments[0] !== undefined && ts.isStringLiteral(n.arguments[0]) && n.arguments[0].text === 'lynox:memory:store') {
-      const callee = ts.isIdentifier(n.expression) ? n.expression.text : ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : '';
-      if (callee === 'channel' || callee === 'tracingChannel') at(n, `${callee}('lynox:memory:store')`);
+    if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && n.text === 'lynox:memory:store') {
+      // A listed listener may name the channel it formats (a map key, a `case` label); it may not
+      // open it by that name, which is the way to publish past the helper.
+      const opens = ts.isCallExpression(n.parent) && n.parent.arguments.includes(n as ts.Expression);
+      if (opens || !Object.hasOwn(LISTENERS['memoryStore']!, rel(sf))) at(n, "'lynox:memory:store'");
     }
-    if (ts.isElementAccessExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'channels'
-      && ts.isStringLiteral(n.argumentExpression) && n.argumentExpression.text === 'memoryStore') at(n, "channels['memoryStore']");
-    if (ts.isPropertyAccessExpression(n) && n.name.text === 'memoryStore' && ts.isIdentifier(n.expression) && n.expression.text === 'channels') {
+    if (ts.isElementAccessExpression(n) && isName(n.argumentExpression)) at(n, "['memoryStore']");
+    if (ts.isBindingElement(n) && isName(n.propertyName ?? n.name)) at(n, '{ memoryStore }');
+    if (ts.isPropertyAccessExpression(n) && n.name.text === 'memoryStore') {
       const up = n.parent;
       const use = ts.isPropertyAccessExpression(up) && up.expression === n ? up.name.text : null;
       const listener = use === 'subscribe' && Object.hasOwn(LISTENERS['memoryStore']!, rel(sf));
-      if (!listener) at(n, `channels.memoryStore${use !== null ? `.${use}` : ''}`);
+      if (!listener) at(n, `.memoryStore${use !== null ? `.${use}` : ''}`);
     }
     ts.forEachChild(n, visit);
   };
@@ -507,7 +514,7 @@ describe('K1: every memory:store publish goes through publishMemoryStore', () =>
     expect(raw).toEqual([]);
   });
 
-  it('no other way to the channel outside observability.ts: by name, by key, by alias (listeners\' subscribe excepted)', () => {
+  it('no other way to the channel outside observability.ts: by name, by key, by alias, renamed or destructured (listeners\' subscribe excepted)', () => {
     expect(SOURCES.filter(sf => rel(sf) !== 'core/observability.ts').flatMap(memoryStoreReach)).toEqual([]);
   });
 
@@ -518,12 +525,25 @@ describe('K1: every memory:store publish goes through publishMemoryStore', () =>
       const c = channels.memoryStore;
       let d; d = channels.memoryStore;
       channels.memoryStore.subscribe(fn);
-      channel('lynox:datastore:insert'); channels.dataStoreInsert;
+      const e = obs.channels.memoryStore;
+      const f = ch.memoryStore;
+      const { memoryStore } = channels;
+      const { memoryStore: g } = obs.channels;
+      const h = tracingChannel(\`lynox:memory:store\`);
+      channel('lynox:datastore:insert'); channels.dataStoreInsert; const { dataStoreInsert } = channels;
     `);
     expect(memoryStoreReach(planted).map(f => f.split(' ').slice(1).join(' '))).toEqual([
-      "channel('lynox:memory:store')", "channels['memoryStore']", 'channels.memoryStore', 'channels.memoryStore', 'channels.memoryStore.subscribe',
+      "'lynox:memory:store'", "['memoryStore']", '.memoryStore', '.memoryStore', '.memoryStore.subscribe',
+      '.memoryStore', '.memoryStore', '{ memoryStore }', '{ memoryStore }', "'lynox:memory:store'",
     ]);
     expect(memoryStoreReach(parse(join(SRC, 'core/engine-init.ts'), 'channels.memoryStore.subscribe(fn);'))).toEqual([]);
+    // A listed listener may name the channel as a key or a label, but not open it by that name.
+    const listener = parse(join(SRC, 'core/debug-subscriber.ts'), `
+      const groups = { 'lynox:memory:store': 'memory' };
+      switch (name) { case 'lynox:memory:store': break; }
+      channel('lynox:memory:store').publish(x);
+    `);
+    expect(memoryStoreReach(listener).map(f => f.split(' ').slice(1).join(' '))).toEqual(["'lynox:memory:store'"]);
   });
 
   it('the six publishers use the helper (positive control), and the scan sees a raw one (planted)', () => {
@@ -633,8 +653,16 @@ describe('B1: the callers of KnowledgeLayer.store are a closed set', () => {
  * wrapper is what is checked, not a list of lines. A floating `<x>.<verb>…(…).catch(` with no
  * `void` is the same thing left running, and is found too. The voids that write telemetry are free
  * functions, not a store's method; they are listed with their reason.
+ *
+ * What it does NOT see, and does not claim to: a write left running without `void` and without a
+ * chained `.catch/.then/.finally` (a bare `kg.eraseAll(p);` statement), a promise assigned and never
+ * awaited, and a write scheduled through a timer. Those are left to review.
+ *
+ * The verb is the whole camelCase head of the callee (`setFlag`, `set`), never a prefix of a longer
+ * word (`settle`, `setup`); the timer functions, whose head is a write verb, are not writes.
  */
-const WRITE_VERB = /^(store|write|update|delete|deactivate|append|insert|mark|retire|erase|create|set|upsert|link|merge)/i;
+const WRITE_VERB = /^(store|write|update|delete|deactivate|append|insert|mark|retire|erase|create|set|upsert|link|merge)(?=$|[A-Z])/;
+const NOT_WRITES: ReadonlySet<string> = new Set(['setTimeout', 'setInterval', 'setImmediate']);
 interface VoidWrite { at: string; callee: string; wrapped: boolean }
 function voidWrites(sf: ts.SourceFile): VoidWrite[] {
   const out: VoidWrite[] = [];
@@ -671,7 +699,7 @@ function voidWrites(sf: ts.SourceFile): VoidWrite[] {
       const callee = call === undefined ? undefined
         : ts.isPropertyAccessExpression(call.expression) ? call.expression.name.text
           : ts.isIdentifier(call.expression) ? call.expression.text : undefined;
-      if (callee !== undefined && (WRITE_VERB.test(callee) || callee === 'runOutsideCallSlot')) {
+      if (callee !== undefined && ((WRITE_VERB.test(callee) && !NOT_WRITES.has(callee)) || callee === 'runOutsideCallSlot')) {
         const inner = callee === 'runOutsideCallSlot' ? call!.arguments[0] : call;
         const isWrapped = callee === 'runOutsideCallSlot'
           ? inner !== undefined && ts.isArrowFunction(inner) && ts.isCallExpression(inner.body) && ts.isIdentifier(inner.body.expression) && inner.body.expression.text === 'withInstanceWriteAs'
@@ -706,7 +734,7 @@ describe('K3: no write left running after a tool\'s handler, outside a derived w
     expect(Object.keys(TELEMETRY_VOIDS).filter(k => !seen.has(k))).toEqual([]);
   });
 
-  it('the scan sees a void write, through .catch and across lines, and the wrapper (planted)', () => {
+  it('the scan sees a void or chained write, through .catch and across lines, and the wrapper; not a bare call, not a timer (planted)', () => {
     const planted = parse(join(SRC, 'tools/builtin/planted.ts'), `
       void agent.toolContext.knowledgeLayer.updateMemoryText(a, b).catch(() => {});
       void
@@ -719,6 +747,7 @@ describe('K3: no write left running after a tool\'s handler, outside a derived w
       (store.upsertThing(x)).then(() => 1);
       kg.eraseAll(p);
       void kg.mergeEntities(a, b); void kg.linkSubjects(a); void kg.setFlag(a); void kg.createX(a);
+      void setTimeout(fn, 1); void settle(x); void kg.setup(); void kg.created(); void kg.storedCount();
     `);
     expect(voidWrites(planted).map(v => `${v.callee}:${String(v.wrapped)}`)).toEqual([
       'updateMemoryText:false', 'storeThing:false', 'runOutsideCallSlot:true', 'runOutsideCallSlot:false', 'appendTelemetry:false',
