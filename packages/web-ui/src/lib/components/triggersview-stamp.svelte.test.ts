@@ -116,6 +116,14 @@ describe('a schedule a mandate set up', () => {
 		expect(q('[data-stamp-schedule]')).not.toBeNull();
 	});
 
+	it('shows the schedule it stamps without what could forge it', async () => {
+		// A cron's fields are read with parseInt, so a bidi or TAG character inside one still runs.
+		previewAnswers = [{ ...PREVIEW, subject: { ...SUBJECT, schedule_cron: '0 3\u202E21\u202C * * *' } }];
+		await render();
+		const line = q('[data-stamp-schedule]')!.textContent!;
+		expect(line).not.toMatch(/[\u202A-\u202E\u2066-\u2069]/);
+	});
+
 	it('is confirmed with the digest of what was shown', async () => {
 		await render();
 		confirmButton()!.click();
@@ -263,6 +271,19 @@ describe('the list of a confirmed plan (B3)', () => {
 		expect(q('[data-stamp-note]')!.textContent).toContain('gilt nicht mehr');
 		expect(q('[data-trigger-check]')).not.toBeNull();
 	});
+	it('names "Take over" at an ended plan only when it is paused', async () => {
+		const ENDED = { lapsed: false, ended: true, ended_on: 'plan', entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'waits' }] };
+		rows = [{ ...CONFIRMED, stamp_listed: ENDED, paused: true }];
+		await render();
+		expect(q('[data-stamp-note]')!.textContent).toContain('„Übernehmen“');
+		unmount(component!);
+		component = undefined;
+		rows = [{ ...CONFIRMED, stamp_listed: ENDED }];
+		await render();
+		expect(q('[data-stamp-note]')!.textContent).not.toContain('Übernehmen');
+		expect(q('[data-stamp-note]')!.textContent).toContain('Lösch ihn');
+	});
+
 	it('not to a helper, and not at a plan that waits (its block says it)', async () => {
 		viewer = 'mandate';
 		rows = [{ ...CONFIRMED, stamp_listed: LISTED }];
