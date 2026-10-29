@@ -59,3 +59,24 @@ export function currentPlanOf(): RequestPrincipal | undefined {
 export function currentPlanStamp(): readonly StampEntry[] | null {
   return planRunStorage.getStore()?.stamp ?? null;
 }
+
+/**
+ * The run of a workflow someone other than the owner started in a chat (660b): its key in the
+ * instance log, held for its steps the way a plan's run holds `planRun`. Its own store, not the
+ * plan's: `runAsPlanOf` would also set `currentPlanOf`, which turns a mandate's own connections
+ * to the plan's rule (`planConnectionState`), and a workflow run in a chat is the mandate's own
+ * session, not a plan.
+ */
+const workflowRunStorage = new AsyncLocalStorage<{ readonly principal: string; readonly key: string }>();
+
+/** Run `fn` as the workflow run of `principal` whose rows carry `key` (the correlation id of its `workflow:run` pair). */
+export function runAsWorkflowRun<T>(principal: RequestPrincipal, key: string, fn: () => T): T {
+  return workflowRunStorage.run({ principal: principalTag(principal), key }, fn);
+}
+
+/** The key of the workflow run this code runs in, for a row written by `principal`; undefined
+ *  outside one, or for a row of anyone else. Read by `AuditLog.record` after {@link currentPlanRun}. */
+export function currentWorkflowRun(principal: RequestPrincipal): string | undefined {
+  const store = workflowRunStorage.getStore();
+  return store !== undefined && principalTag(principal) === store.principal ? store.key : undefined;
+}

@@ -171,6 +171,35 @@ describe('a plan run: its head and the rows keyed to it', () => {
     const plan = buildTrail(rows, quiet)[0] as TrailPlanRun;
     expect(plan).toMatchObject({ key: null, startedBy: 'hand', status: 'done', writeSteps: null, entries: [] });
   });
+
+  it('names a plan\'s run a plan\'s run', () => {
+    expect((buildTrail(run('success'), quiet)[0] as TrailPlanRun).run).toBe('plan');
+  });
+});
+
+describe('a workflow run from a chat: a run like a plan\'s, without a trigger (660b)', () => {
+  const wf = (end: string | null, inner: TrailRow[] = [], key = newCorrelationId()): TrailRow[] => {
+    const rows = [row({ action: 'workflow:run', phase: 'attempt', correlation_id: key, plan_run: key, target: 'workflow=wf-1 one_shot=no' }), ...inner.map((r) => ({ ...r, plan_run: key }))];
+    if (end !== null) rows.push(row({ action: 'workflow:run', phase: end === 'success' ? 'done' : 'failed', correlation_id: key, plan_run: key, target: `workflow=wf-1 one_shot=no outcome=${end}` }));
+    return rows;
+  };
+
+  it('puts its steps under it, as one run, and reads its end', () => {
+    const c = newCorrelationId();
+    const inner = [row({ action: 'http_request:POST', phase: 'attempt', correlation_id: c }), row({ action: 'http_request:POST', phase: 'returned', correlation_id: c })];
+    const entries = buildTrail(wf('success', inner), quiet);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ kind: 'plan', run: 'workflow', trigger: null, startedBy: null, status: 'done', writeSteps: 1 });
+    expect((entries[0] as TrailPlanRun).entries.map((e) => e.kind)).toEqual(['step']);
+    expect((buildTrail(wf('failed'), quiet)[0] as TrailPlanRun).status).toBe('failed');
+  });
+
+  it('has no status without its end row, and asks no source: it has no trigger to ask about', () => {
+    let asked = 0;
+    const src: TrailSources = { ...quiet, planRunRunning: () => { asked++; return true; } };
+    expect((buildTrail(wf(null), src)[0] as TrailPlanRun).status).toBeNull();
+    expect(asked).toBe(0);
+  });
 });
 
 describe('a step and its status', () => {
@@ -397,6 +426,26 @@ describe('readTrailPage: the rows the view shows, a page at a time', () => {
       // A run read from a cut page is the same entry as read whole.
       const whole = buildTrail(readTrailPage(db.getDb(), { limit: 50 }).rows, quiet);
       expect(buildTrail(top.rows, quiet)).toEqual(whole.filter((e) => e.id === `plan:${key}`));
+    });
+  });
+
+  it('keeps a workflow run\'s start and end before its inner steps past the bound, as a plan run\'s', () => {
+    withLog((db, log) => {
+      const key = newCorrelationId();
+      log.record({ principal: MANDATE, action: 'workflow:run', phase: 'attempt', correlationId: key, planRun: key, target: 'workflow=wf-1 one_shot=no' });
+      db.getDb().transaction(() => {
+        for (let i = 0; i < TRAIL_PAGE_MAX_ROWS + 5; i++) {
+          const c = newCorrelationId();
+          log.record({ principal: MANDATE, action: 'http_request:POST', phase: 'attempt', correlationId: c, planRun: key });
+          log.record({ principal: MANDATE, action: 'http_request:POST', phase: 'returned', correlationId: c, planRun: key });
+        }
+      })();
+      log.record({ principal: MANDATE, action: 'workflow:run', phase: 'done', correlationId: key, planRun: key, target: 'workflow=wf-1 one_shot=no outcome=success' });
+      const end = readTrailPage(db.getDb(), { limit: 1 }).rows.find((r) => r.phase === 'done' && r.action === 'workflow:run')!;
+      const page = readTrailPage(db.getDb(), { limit: 1, beforeId: end.id });
+      expect(page.complete).toBe(false);
+      expect(page.rows.filter((r) => r.action === 'workflow:run').map((r) => r.phase)).toEqual(['attempt', 'done']);
+      expect((buildTrail(page.rows, quiet, { complete: false }).find((e) => e.kind === 'plan') as TrailPlanRun).status).toBe('done');
     });
   });
 

@@ -61,6 +61,7 @@
 		getContainedOrigin,
 		getContainedPrefill,
 		planInNewChat,
+		newChat,
 		type FileAttachment,
 		type UsageInfo,
 		type ToolCallInfo,
@@ -314,6 +315,14 @@
 		// effort overrides; the demo tenant runs on the cheap-tier defaults
 		// the CP provisioner injects.
 		void sendMessage(prompt); /* never rejects; a turn that cannot start is marked failed and reported */
+	}
+
+	/** A new chat on the draft of an approved mail that was not sent, as the approvals page opens
+	 *  one moved there. The engine loads it only for the owner and for a reason that proves nothing
+	 *  went out. The chat writes a new mail; the old entry stays as it ended. */
+	function rewriteApprovalInChat(id: string) {
+		newChat();
+		void sendMessage(t('chat.note.approval_rewrite_framing'), undefined, undefined, { context: { kind: 'approval', id } }); /* never rejects */
 	}
 
 	function sendOnboardingStep(idx: number, url?: string) {
@@ -2731,6 +2740,12 @@
 							{/if}
 							{#if approvalLines?.href}
 								<a href={approvalLines.href} class="inline-flex min-h-6 items-center py-1 text-accent hover:underline" data-approval-entry>{t('chat.note.approval_view_entry')}</a>
+							{/if}
+							{#if approvalLines?.rewriteId}
+								{@const rewriteId = approvalLines.rewriteId}
+								<div>
+									<button type="button" class="mt-1 inline-flex min-h-6 items-center rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs text-text-muted hover:text-text" onclick={() => rewriteApprovalInChat(rewriteId)} data-approval-rewrite>{t('chat.note.approval_rewrite')}</button>
+								</div>
 							{/if}
 							{#if msg.note.detail}
 								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>

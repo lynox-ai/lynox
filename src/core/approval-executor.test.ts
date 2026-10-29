@@ -310,6 +310,21 @@ describe('what the executor checks again before it sends', () => {
     expect(notes.at(-1)!.content).toEqual({ _lynox_note: { code: 'approval_unknown', approval: { id, outcome: 'send_threw' } } });
   });
 
+  it('a throw that escapes the send\'s own handling after the send began also ends unknown, never retried', async () => {
+    // `failed` must mean nothing went out: an entry whose send began never ends `failed` or goes back
+    // to `approved`. Here the send's own catch throws too (reading the error throws once), so the
+    // throw reaches the outer guard while the send is marked as begun.
+    const id = approved(reply());
+    let reads = 0;
+    const hostile = { toString(): string { reads++; if (reads === 1) throw new Error('unreadable'); return 'late'; } };
+    provider.send.mockRejectedValueOnce(hostile);
+    expect(await executor().tick()).toEqual({ id, status: 'unknown' });
+    expect(reason(id)).toBe('send_threw');
+    advance(10 * 60_000);
+    expect(await executor().tick()).toBeNull();
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
   it('a mail_send whose provider fails ends unknown', async () => {
     const id = approved(send());
     provider.send.mockRejectedValueOnce(new Error('timeout'));

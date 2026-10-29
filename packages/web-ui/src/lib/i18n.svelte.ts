@@ -1133,6 +1133,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.note.approval_unknown.title': { de: 'Unklar, ob die Mail rausging', en: 'Unclear whether the email went out' },
 	'chat.note.approval_unknown.next': { de: 'Der Gesendet-Ordner zeigt das nicht sicher. Frag im Zweifel beim Empfänger nach, bevor du sie neu senden lässt. Schliesse den Eintrag danach unter „Wartet auf dich“ ab.', en: 'The Sent folder does not reliably show it. If in doubt, ask the recipient before you have it sent again. Then close the entry under “Waiting for you”.' },
 	'chat.note.approval_view_entry': { de: 'Unter „Wartet auf dich“ ansehen', en: 'View under “Waiting for you”' },
+	'chat.note.approval_rewrite': { de: 'Im Chat neu erstellen', en: 'Write it again in a chat' },
+	'chat.note.approval_rewrite_framing': { de: 'Ich möchte diese Mail neu erstellen.', en: 'I want to write this email again.' },
 	'chat.note.approval_unknown': { de: 'Beim Senden der Mail, die du freigegeben hast, ist etwas schiefgelaufen. Ob sie rausging, zeigt der Gesendet-Ordner nicht sicher; frag im Zweifel beim Empfänger nach, bevor du sie noch einmal schickst.', en: 'Something went wrong while sending the mail you approved. The Sent folder does not reliably show whether it went out; if in doubt, ask the recipient before you send it again.' },
 	'chat.note.input_required.title': { de: 'Wartet auf eine Antwort, die hier niemand geben kann', en: 'Needs an answer nobody here can give' },
 	'chat.note.input_required': { de: 'Der Agent hatte eine Frage, aber dieser Lauf hat keinen Weg, eine Person zu erreichen. Er hat deshalb aufgehört, statt ohne Antwort weiterzumachen.', en: 'The agent had a question, but this run has no way to reach a person, so it stopped rather than carry on without an answer.' },
@@ -1530,6 +1532,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.period_30d': { de: 'Letzte 30 Tage', en: 'Last 30 days' },
 	'access_trail.filter_partial': { de: 'Ältere Einträge sind noch nicht geladen, die Auswahl zeigt nur die geladenen. Mit „Ältere laden“ holst du sie dazu.', en: 'Older entries are not loaded yet, so the selection shows only the loaded ones. Use “Load older” to add them.' },
 	'access_trail.kind_plan': { de: 'Lauf eines Plans', en: 'Plan run' },
+	'access_trail.kind_workflow': { de: 'Lauf eines Workflows', en: 'Workflow run' },
 	'access_trail.kind_bulk': { de: 'Massenlauf', en: 'Bulk run' },
 	'access_trail.kind_step': { de: 'Schritt', en: 'Step' },
 	'access_trail.kind_read': { de: 'Lesezugriff', en: 'Read access' },
@@ -2229,6 +2232,9 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Managed broker card
 	'integrations.google_broker_connect': { de: 'Mit Google verbinden', en: 'Connect with Google' },
+	'integrations.google_workspace_admin_hint': { de: 'Nutzt du ein Google-Workspace-Konto deiner Firma, muss dessen Admin lynox womöglich zuerst freigeben.', en: 'Using a company Google Workspace account? Its admin may need to allow lynox first.' },
+	'integrations.google_switch_admin_hint': { de: 'Hat der Admin deiner Firma bisher nur deinen eigenen Client freigegeben, sperrt Google den Client von lynox, bis er auch diesen freigibt.', en: 'If your company\'s admin has approved only your own client so far, Google blocks lynox\'s client until they approve it too.' },
+	'integrations.google_workspace_admin_link': { de: 'Anleitung für den Admin (englisch)', en: 'Instructions for your admin' },
 	'integrations.google_broker_desc': { de: 'lynox fragt Kalender und die Dateien, die lynox für dich anlegt. Kein eigener Google-Cloud-Zugang nötig.', en: 'lynox asks for your calendar and the files lynox creates for you. No Google Cloud project of your own required.' },
 	'integrations.google_broker_unavailable': { de: 'Die verwaltete Google-Verbindung wird gerade eingerichtet — noch nicht verfügbar.', en: 'Managed Google connection is being set up — not available yet.' },
 	'integrations.google_advanced': { de: 'Erweitert — eigenen Google-Cloud-Client verwenden', en: 'Advanced — use your own Google Cloud client' },
