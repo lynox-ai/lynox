@@ -15,17 +15,6 @@ import { TIER_PRESETS, expandTierPreset, FIREWORKS_API_BASE, managedFireworksEna
 const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
 
-/**
- * Managed tier_set hardening — the PRD tenant-writable ship-blocker. For each
- * slot: keep ONLY an allowlisted provider (anthropic / mistral), STRIP the
- * user-supplied key/base_url, and source the CP env credentials for that
- * provider (base_url forced to the canonical MISTRAL_API_BASE — no host spoof).
- * An off-allowlist provider, or one whose CP key is absent, drops the slot (it
- * falls back to the base provider). This makes a managed tenant unable to point
- * a slot at an off-allowlist endpoint, inject a key/base_url, or name a provider
- * outside the curated set. Self-host (not cp_supplied) never runs this — its
- * slots legitimately carry their own keys.
- */
 /** The Mistral endpoints a pool tier's OpenAI-compatible provider may name. */
 export const POOL_MISTRAL_ENDPOINTS: ReadonlySet<string> = new Set([MISTRAL_API_BASE, 'https://api.mistral.ai']);
 /** The one explicit endpoint a pool tier's Anthropic provider may name; unset means the same. */
@@ -44,6 +33,17 @@ export function poolEndpointFor(provider: string | undefined, apiBaseUrl: string
   return undefined;
 }
 
+/**
+ * Managed tier_set hardening — the PRD tenant-writable ship-blocker. For each
+ * slot: keep ONLY an allowlisted provider (anthropic / mistral), STRIP the
+ * user-supplied key/base_url, and source the CP env credentials for that
+ * provider (base_url forced to the canonical MISTRAL_API_BASE — no host spoof).
+ * An off-allowlist provider, or one whose CP key is absent, drops the slot (it
+ * falls back to the base provider). This makes a managed tenant unable to point
+ * a slot at an off-allowlist endpoint, inject a key/base_url, or name a provider
+ * outside the curated set. Self-host (not cp_supplied) never runs this — its
+ * slots legitimately carry their own keys.
+ */
 export function applyManagedTierSetConstraints(tierSet: TierSet, blockedModelIds?: readonly string[]): TierSet {
   const out: TierSet = {};
   for (const tier of ['fast', 'balanced', 'deep'] as const) {
@@ -943,6 +943,21 @@ export function loadConfig(): LynoxUserConfig {
     merged.searxng_url = process.env['SEARXNG_URL'];
   }
 
+  // On a pool tier the key in the environment is the pool's, and the endpoint must be
+  // the one that key belongs to. A config file's `api_base_url` (or a leftover
+  // `LYNOX_API_BASE_URL`) survives the merge above (the control plane sets no endpoint), so a Mistral URL beside an Anthropic provider
+  // would send the pool's Anthropic key to Mistral, and the reverse. Only the pairs in
+  // `poolEndpointFor` count; an acceptance of a custom endpoint counts for nothing here.
+  // The Anthropic SDK reads `ANTHROPIC_BASE_URL` itself when no base URL is passed, so on a
+  // pool tier the variable goes too, or a leftover one would decide the host after all.
+  if (poolTier) {
+    delete process.env['ANTHROPIC_BASE_URL'];
+    delete merged.accepted_custom_endpoints;
+    const endpoint = poolEndpointFor(merged.provider, merged.api_base_url);
+    if (endpoint === undefined) delete merged.api_base_url;
+    else merged.api_base_url = endpoint;
+  }
+
   // Managed Mistral key promotion (replaces the retired eu-sovereign toggle).
   // When the active provider is the OpenAI-compatible Mistral endpoint — set
   // either by the managed control plane or by the user picking the Mistral
@@ -969,18 +984,6 @@ export function loadConfig(): LynoxUserConfig {
   // special-cased exactly ONE endpoint — Mistral — and left the rest holding the
   // Anthropic key. Generalise it: derive the key from the endpoint, for every
   // endpoint.
-  // On a pool tier the key in the environment is the pool's, and the endpoint must be
-  // the one that key belongs to. A config file's `api_base_url` survives the merge above
-  // (the control plane sets no endpoint), so a Mistral URL beside an Anthropic provider
-  // would send the pool's Anthropic key to Mistral, and the reverse. Only the pairs in
-  // `poolEndpointFor` count; an acceptance of a custom endpoint counts for nothing here.
-  if (poolTier) {
-    delete merged.accepted_custom_endpoints;
-    const endpoint = poolEndpointFor(merged.provider, merged.api_base_url);
-    if (endpoint === undefined) delete merged.api_base_url;
-    else merged.api_base_url = endpoint;
-  }
-
   if (merged.provider === 'openai') {
     // ONLY for an endpoint lynox pins by host. A host that fell through to the
     // generic tile must not be promoted from the shared slot — that is how a

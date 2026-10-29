@@ -9826,7 +9826,12 @@ export class LynoxHTTPApi {
       // LLM host. A free-text/unknown base_url with no typed key gets the pre-1.5.2
       // "API key required" — the user must supply it, never the shared pool key. A
       // body-supplied key is the caller's own credential and always passes through.
-      const apiKey = bodyKey || (mayFallBackToStoredKey(provider as LLMProvider, baseUrl)
+      // On a pool tier the stored key is the pool's, and a vetted host is not enough: it
+      // goes only to the endpoint that key belongs to (`poolEndpointFor`), never to another
+      // vendor's host the shared slot would otherwise be handed to.
+      const poolPaired = !requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))
+        || poolEndpointFor(provider, baseUrl || undefined) === (baseUrl || undefined);
+      const apiKey = bodyKey || (poolPaired && mayFallBackToStoredKey(provider as LLMProvider, baseUrl)
         ? (resolveProviderApiKey({
             provider: provider as LLMProvider,
             apiBaseURL: baseUrl || undefined,

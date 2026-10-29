@@ -1691,6 +1691,20 @@ describe('Config', () => {
       expect(await clientBase(cfg)).toContain('api.mistral.ai');
     });
 
+    it('on a pool tier, a leftover ANTHROPIC_BASE_URL does not decide the host either', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'sk-pool-ant';
+      process.env['ANTHROPIC_BASE_URL'] = MISTRAL;
+      try {
+        const { loadConfig, reloadConfig } = await import('./config.js');
+        const cfg = (reloadConfig(), loadConfig());
+        expect(cfg.api_base_url).toBeUndefined();
+        expect(await clientBase(cfg)).toContain('api.anthropic.com');
+      } finally {
+        delete process.env['ANTHROPIC_BASE_URL'];
+      }
+    });
+
     it('on a pool tier, any other host is dropped and an acceptance counts for nothing', async () => {
       process.env['LYNOX_BILLING_TIER'] = 'managed';
       process.env['ANTHROPIC_API_KEY'] = 'sk-pool-ant';
