@@ -47,19 +47,21 @@ describe('the Google card names the admin\'s approval before the connect', () =>
 		expect(hint).toBeGreaterThan(button);
 	});
 
-	it('the switch from the tenant\'s own client to lynox\'s says it in its own words, with the way back, inside its confirm', () => {
-		// The switch starts lynox's consent directly; it never passes the brokered card above. The tenant's
-		// own pair is deleted by then, so the sentence names "Advanced", which the brokered card offers.
+	it('the switch from the tenant\'s own client to lynox\'s says it in its own words, inside its confirm', () => {
+		// The switch starts lynox's consent directly; it never passes the brokered card above. The way back
+		// (the pair entered again under "Advanced") is the confirm's body; the next test holds it reachable.
 		const confirm = /\{#if switchConfirmOpen\}([\s\S]*?)\{\/if\}/.exec(CARD);
 		expect(confirm, 'the switch confirm is not where it was').not.toBeNull();
 		const inConfirm = confirm![1]!;
 		const hint = inConfirm.indexOf("{t('integrations.google_switch_admin_hint')}");
 		const link = inConfirm.indexOf("{t('integrations.google_workspace_admin_link')}");
-		const wayBack = inConfirm.indexOf("{t('integrations.google_switch_admin_way_back')}");
 		expect(hint).toBeGreaterThan(-1);
 		expect(link).toBeGreaterThan(hint);
-		expect(wayBack).toBeGreaterThan(link);
-		expect(wayBack).toBeLessThan(inConfirm.indexOf('onclick={confirmSwitchToManaged}'));
+		expect(link).toBeLessThan(inConfirm.indexOf('onclick={confirmSwitchToManaged}'));
+		// Its paragraphs in the text colour: the warning's orange on its tint is under 4.5:1 (ux U-057).
+		const paragraphs = [...inConfirm.matchAll(/<p class="([^"]*)"[^>]*>\s*\{t\('integrations\.(google_switch_confirm_body|google_grant_stays|google_switch_admin_hint)'\)\}/g)];
+		expect(paragraphs.map((m) => m[2])).toEqual(['google_switch_confirm_body', 'google_grant_stays', 'google_switch_admin_hint']);
+		for (const m of paragraphs) expect(m[1]!.split(/\s+/)).toEqual(['text-xs', 'text-text']);
 		// Each sentence in its one place.
 		expect(CARD.split("t('integrations.google_workspace_admin_hint')").length - 1).toBe(1);
 		expect(CARD.split("t('integrations.google_switch_admin_hint')").length - 1).toBe(1);
@@ -77,10 +79,6 @@ describe('the Google card names the admin\'s approval before the connect', () =>
 		expect(entry('integrations.google_switch_admin_hint')).toEqual({
 			de: 'Hat der Admin deiner Firma bisher nur deinen eigenen Client freigegeben, sperrt Google den Client von lynox, bis er auch diesen freigibt.',
 			en: 'If your company\\\'s admin has approved only your own client so far, Google blocks lynox\\\'s client until they approve it too.',
-		});
-		expect(entry('integrations.google_switch_admin_way_back')).toEqual({
-			de: 'Sperrt Google, trägst du deinen eigenen Client unter „Erweitert“ wieder ein.',
-			en: 'If Google blocks it, enter your own client again under “Advanced”.',
 		});
 	});
 
