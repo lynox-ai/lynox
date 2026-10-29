@@ -9289,7 +9289,7 @@ export class LynoxHTTPApi {
       // trail: it is not resumed (660b). It stays as it is; its approval was the owner's act.
       // The text is ux's. No await between this and the resume.
       if (ledger.resumeRefusedForPlanner(params['id']!, engine.getBulkOwnership())) {
-        errorResponse(res, 409, 'This run was planned before lynox recorded who plans a run. Since it cannot show who planned it, lynox does not continue it. Have it planned again in a chat.', 'planner_unknown');
+        errorResponse(res, 409, 'lynox cannot show who planned this run, so it does not continue it. Have it planned again in a chat.', 'planner_unknown');
         return;
       }
       const out = ledger.resume(params['id']!, { checksum, maxTargets: resumeMax });
