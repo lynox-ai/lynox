@@ -501,4 +501,30 @@ describe('contract r3: what the view adds', () => {
 		expect(q('stamp-role')?.textContent).toContain('nur lesen');
 		expect(q('stamp-role-read-only-allows')).toBeNull();
 	});
+
+	it('a step whose model neither it nor its role names shows the engine\'s default', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { model: null, role: null, roleGrant: null });
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-model-default')?.textContent).toContain('Modell: fast (Standard)');
+	});
+
+	it('no default model where the role names one', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { model: null, role: 'reviewer', roleGrant: { model: 'deep', effort: null, allowTools: null, denyTools: null, readOnly: false } });
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-model-default')).toBeNull();
+		expect(q('stamp-role-grant')?.textContent).toContain('Modell: deep');
+	});
+
+	it('no default model where the role is unknown, since the step stops', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { model: null, role: 'made-up', roleGrant: null });
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-role-unknown')).not.toBeNull();
+		expect(q('stamp-model-default')).toBeNull();
+	});
 });

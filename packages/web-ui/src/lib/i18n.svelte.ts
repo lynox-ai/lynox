@@ -2208,6 +2208,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.stamp.no_tools': { de: 'keine Werkzeuge', en: 'no tools' },
 	'workflow_library.stamp.role_read_only': { de: 'nur lesen', en: 'read only' },
 	'workflow_library.stamp.role_hint': { de: 'Welche Werkzeuge ein Schritt am Ende nutzen darf, ergibt sich beim Lauf aus Schritt und Rolle.', en: 'Which tools a step can finally use is worked out at run time from the step and its role.' },
+	'workflow_library.stamp.model_default': { de: 'fast (Standard)', en: 'fast (default)' },
 	'workflow_library.stamp.timeout_default': { de: '30 min (Standard)', en: '30 min (default)' },
 	'workflow_library.stamp.timeout_zero': { de: '0 s (bricht sofort ab)', en: '0 s (times out at once)' },
 	'workflow_library.stamp.effort': { de: 'Aufwand', en: 'Effort' },
