@@ -27,7 +27,12 @@ import { resolveProviderApiKey, migrateLegacyEndpointKey, poolSuppliesLLMKeys } 
 import { SecretVault } from './secret-vault.js';
 import { SecretStore } from './secret-store.js';
 import { setVaultApiKeyExists, anthropicKeyMayHoldApiKey } from './config.js';
-import { channels } from './observability.js';
+import { channels, type MemoryStoreMessage } from './observability.js';
+import type { AuditLog } from './audit-log.js';
+import { runOutsideCallSlot } from './call-connection.js';
+import { ifReturned, ifStored, InstanceWriteUnrecorded, withInstanceWriteAs, type InstanceTargetPairs } from './instance-trail.js';
+import { ALL_NAMESPACES } from '../types/index.js';
+import type { KnowledgeStoreResult } from '../types/index.js';
 import { configurePersistentBudget } from './session-budget.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
@@ -825,6 +830,23 @@ export async function initKnowledgeLayer(
 
 // ── Memory Store Subscription ───────────────────────────────────
 
+/**
+ * What the outcome row of a derived knowledge write says: how many entities, edges and subjects
+ * the store created, and whether it found the text already stored. Counts only — a name the
+ * extraction found is content.
+ */
+export function derivedStoreCounts(r: KnowledgeStoreResult): InstanceTargetPairs {
+  return [
+    ['new_entities', r.created.entities], ['new_relations', r.created.relations], ['new_subjects', r.created.subjects],
+    ['dedup', r.deduplicated ? 1 : undefined],
+  ];
+}
+
+/** A namespace as the trail may name it: one of the fixed ones, or `other`. */
+function namespaceLabel(ns: unknown): string {
+  return typeof ns === 'string' && (ALL_NAMESPACES as readonly string[]).includes(ns) ? ns : 'other';
+}
+
 export function setupMemoryStoreSubscription(
   knowledgeLayer: KnowledgeLayer | null,
   _embeddingProvider: EmbeddingProvider | null,
@@ -836,6 +858,12 @@ export function setupMemoryStoreSubscription(
    * extraction was out must not land after the switch's purge.
    */
   isThreadPrivate: (threadId: string) => boolean,
+  /**
+   * The log a mandate's derived write is recorded in (660a-3), read per message: the engine
+   * builds it after this subscription. Absent, a mandate's derived write is refused, the owner's
+   * runs as before.
+   */
+  auditLogOf?: (() => AuditLog | null | undefined) | undefined,
 ): void {
   if (!knowledgeLayer) return;
 
@@ -843,20 +871,15 @@ export function setupMemoryStoreSubscription(
   const activeEmbeddings = new Set<Promise<void>>();
 
   channels.memoryStore.subscribe((msg: unknown) => {
-    const data = msg as {
-      namespace: string; content: string;
-      scopeType?: string | undefined; scopeId?: string | undefined;
-      sourceThreadId?: string | undefined;
-      // Wave 1: publishers carry EVIDENCE. `sourceRunId` is captured by value at the
-      // publish call site (§1.1 — the engine-level subscription cannot read a session's
-      // run), `sourceChannel` + `sourceUntrusted` are the derivation inputs (§1.2/§3).
-      sourceRunId?: string | undefined;
-      sourceChannel?: string | undefined; sourceUntrusted?: boolean | undefined;
-      sourceToolName?: string | undefined;
-      // A move (`memory_promote`): the ids of the original, retired at the source scope
-      // when the move ran. Once this copy is stored it is named as their successor.
-      replaces?: { ids: string[] } | undefined;
-    };
+    // Wave 1: publishers carry EVIDENCE. `sourceRunId` is captured by value at the publish call
+    // site (§1.1 — the engine-level subscription cannot read a session's run), `sourceChannel` +
+    // `sourceUntrusted` are the derivation inputs (§1.2/§3). A move (`memory_promote`) carries
+    // `replaces`: the ids of the original, retired at the source scope when the move ran; once
+    // this copy is stored it is named as their successor. `actor` and `trail` say who acts and
+    // which act this follows from (660a-3). Typed as possibly missing: a raw publish (a test, a
+    // publisher the source scan has not met yet) reaches this subscriber all the same.
+    const data = msg as Omit<MemoryStoreMessage, 'actor'> & { actor?: MemoryStoreMessage['actor'] | undefined };
+    const actor = data.actor ?? null;
 
     const run = async (): Promise<void> => {
       if (activeEmbeddings.size >= MAX_EMBEDDING_CONCURRENCY) {
@@ -871,37 +894,64 @@ export function setupMemoryStoreSubscription(
         : undefined;
       if (cancelled?.()) return;
 
+      const scope: MemoryScopeRef = data.scopeType && data.scopeId
+        ? { type: data.scopeType as MemoryScopeType, id: data.scopeId }
+        : { type: 'context', id: contextId };
+      const store = (): Promise<KnowledgeStoreResult> => knowledgeLayer.store(
+        data.content,
+        data.namespace as MemoryNamespace,
+        scope,
+        {
+          // §1.1: the run id rides the message (captured by value at publish time),
+          // not an engine-level getter that would always be null here.
+          sourceRunId: data.sourceRunId,
+          sourceThreadId: data.sourceThreadId,
+          // §1.3: the tier is DERIVED at the store boundary from this evidence — the
+          // subscriber no longer forwards a self-declared tier. A publisher that omits
+          // a channel floors to external_unverified (rule 5), not a silent agent_inferred.
+          sourceChannel: data.sourceChannel,
+          sourceUntrusted: data.sourceUntrusted,
+          sourceToolName: data.sourceToolName,
+          cancelled,
+        },
+      );
+      const moveFailed = (err: unknown): void => {
+        process.stderr.write(`[lynox:embedding] Failed to link a moved memory to its copy in ${data.namespace}: ${processErrorText(err)}\n`);
+      };
+
       const embedTask = (async () => {
         try {
-          const scope: MemoryScopeRef = data.scopeType && data.scopeId
-            ? { type: data.scopeType as MemoryScopeType, id: data.scopeId }
-            : { type: 'context', id: contextId };
-          const result = await knowledgeLayer.store(
-            data.content,
-            data.namespace as MemoryNamespace,
-            scope,
-            {
-              // §1.1: the run id rides the message (captured by value at publish time),
-              // not an engine-level getter that would always be null here.
-              sourceRunId: data.sourceRunId,
-              sourceThreadId: data.sourceThreadId,
-              // §1.3: the tier is DERIVED at the store boundary from this evidence — the
-              // subscriber no longer forwards a self-declared tier. A publisher that omits
-              // a channel floors to external_unverified (rule 5), not a silent agent_inferred.
-              sourceChannel: data.sourceChannel,
-              sourceUntrusted: data.sourceUntrusted,
-              sourceToolName: data.sourceToolName,
-              cancelled,
-            },
-          );
-          if (data.replaces && result.memoryId) {
-            try {
-              knowledgeLayer.markMoved(data.replaces.ids, result.memoryId);
-            } catch (err: unknown) {
-              process.stderr.write(`[lynox:embedding] Failed to link a moved memory to its copy in ${data.namespace}: ${processErrorText(err)}\n`);
+          if (actor === null) {
+            // No actor on the message: the entry is written as before, not refused (the cut's
+            // decision), and the gap is said where an operator sees it. The source scan keeps
+            // this the exception: every publisher in the engine names its actor.
+            process.stderr.write(`[lynox:trail] derived knowledge write without an actor (${namespaceLabel(data.namespace)})\n`);
+            const result = await store();
+            if (data.replaces && result.memoryId) {
+              try { knowledgeLayer.markMoved(data.replaces.ids, result.memoryId); } catch (err: unknown) { moveFailed(err); }
             }
+            return;
           }
+          // The row comes before `store`'s first change, and a row that cannot be written keeps
+          // `store` from running. Its own trail, from the actor on the message: the call that
+          // published is done or answers for itself, and this runs outside its slot (below).
+          const trail = data.trail;
+          await withInstanceWriteAs(actor, auditLogOf?.() ?? null, {
+            site: 'derived#memory', kind: 'create', store: 'knowledge',
+            target: () => [['from', trail?.site], ['ref', trail?.correlationId]], main: ['store'],
+          }, async (w) => {
+            const result = await w.run('store', () => store(), ifStored);
+            w.counts(derivedStoreCounts(result));
+            if (data.replaces && result.memoryId) {
+              // The same block: naming the copy the successor is part of the move's derived write.
+              try { w.run('moved', () => knowledgeLayer.markMoved(data.replaces!.ids, result.memoryId), ifReturned); } catch (err: unknown) { moveFailed(err); }
+            }
+          });
         } catch (err: unknown) {
+          if (err instanceof InstanceWriteUnrecorded) {
+            process.stderr.write(`[lynox:trail] derived knowledge write refused: its row could not be written (${namespaceLabel(data.namespace)})\n`);
+            return;
+          }
           process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${getErrorMessage(err)}\n`);
         }
       })();
@@ -910,7 +960,10 @@ export function setupMemoryStoreSubscription(
       void embedTask.finally(() => { activeEmbeddings.delete(embedTask); });
     };
 
-    void run();
+    // `diagnostics_channel` calls this synchronously inside the publisher's call slot, and
+    // `run` reaches `store` (and the row before it) before its first await. Outside the slot,
+    // a refused derived row cannot poison the publishing call, whose own entry has landed.
+    runOutsideCallSlot(() => { void run(); });
   });
 }
 

@@ -14,16 +14,18 @@ function makeKg(overrides: Partial<Pick<IKnowledgeLayer, 'eraseByPattern' | 'dea
   } as unknown as IKnowledgeLayer;
 }
 
-vi.mock('../../core/observability.js', () => ({
-  channels: {
+vi.mock('../../core/observability.js', () => {
+  const channels = {
     memoryStore: { publish: vi.fn() },
     // B1 KG-backed tests need these channels — they are checked by the
     // production KnowledgeLayer / AgentMemoryDb store path. hasSubscribers
     // is read in a hot path, so it must be a plain false for the no-op tests.
     knowledgeGraph: { publish: vi.fn(), hasSubscribers: false },
     knowledgeEntity: { publish: vi.fn(), hasSubscribers: false },
-  },
-}));
+  };
+  // The tools publish through the typed helper (660a-3); it is the channel's publish.
+  return { channels, publishMemoryStore: (msg: unknown) => channels.memoryStore.publish(msg) };
+});
 
 function makeAgent(memory: IAgent['memory'] = null): IAgent {
   return {
@@ -77,6 +79,8 @@ describe('memoryStoreTool', () => {
       // A clean write (no untrusted signal) is now an explicit `false`, not absent —
       // the tool derives it from the full write-trust union, which floors to false.
       sourceUntrusted: false,
+      // Who acts, read from the agent at the publish (660a-3); the owner's act has no row.
+      actor: { principal: OWNER_PRINCIPAL, runId: undefined },
     });
   });
 
@@ -924,6 +928,7 @@ describe('memoryPromoteTool', () => {
       scopeId: 'proj1',
       sourceChannel: 'agent',
       sourceUntrusted: false,
+      actor: { principal: OWNER_PRINCIPAL, runId: undefined },
     });
   });
 
