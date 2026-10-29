@@ -118,6 +118,14 @@ function watchWithoutBaseline(raw: string | undefined): string | null {
   }
 }
 
+/**
+ * Effects whose run can use a connection: an agent run and a workflow run. A backup, a notice or a
+ * bulk effect never reads one, so a stamp of theirs lists none and the owner is shown none.
+ */
+export function stampUsesConnections(effect: string): boolean {
+  return effect === 'run_agent' || effect === 'run_workflow';
+}
+
 /** The column value for a stamp written at `at`. */
 export function encodeStamp(at: string, wf: string | null, entries: readonly StampEntry[]): string {
   return JSON.stringify({ at, wf, entries } satisfies StoredStamp);
@@ -171,6 +179,12 @@ export interface StampListShown {
   readonly lapsed: boolean;
   /** The access of the mandate the plan acts for has ended: nothing of it runs, whatever is listed. */
   readonly ended: boolean;
+  /**
+   * Where a member whose access ended sits, for the way out the view names: `workflow` when it
+   * created or changed the plan's workflow (a new plan needs a copy of the workflow too), `plan`
+   * when only the schedule is its, null when none ended. Set by the route, which reads both sides.
+   */
+  readonly ended_on?: 'plan' | 'workflow' | null;
   readonly entries: readonly { readonly provider: string | null; readonly account: string | null; readonly state: StampEntryState }[];
 }
 
@@ -204,7 +218,8 @@ export function stampListState(
     // An ended mandate makes every connection it made wait (`connectionWaits`); one removed since
     // is said as removed, which the note above the list (`ended`) does not hide.
     if (p !== undefined && connectionWaits(p, ends)) return shown(e.profile, 'waits');
-    const listed = now.some((n) => n.profile === e.profile && n.grant === e.grant && n.binding === e.binding);
+    // A lapsed list gives the run nothing (`stampFromRow` is null), so no entry of it is allowed.
+    const listed = !lapsed && now.some((n) => n.profile === e.profile && n.grant === e.grant && n.binding === e.binding);
     return shown(e.profile, listed ? 'listed' : 'changed');
   });
   for (const n of now) {
@@ -222,9 +237,9 @@ export function stampListState(
 export async function planOfTrigger(
   task: TriggerRecord,
   runHistory: RunHistory | null,
-): Promise<ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: string | null; workflowName: string | null }> {
+): Promise<ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: string | null; workflowName: string | null; workflowMember: RequestPrincipal | undefined }> {
   const fromTrigger = planMandate(planAuthorshipOf(task));
-  const only = (unreadable: boolean): ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: null; workflowName: null } => ({ ...planMembers(fromTrigger, undefined), unreadable, workflowConfirmedAt: null, workflowName: null });
+  const only = (unreadable: boolean): ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: null; workflowName: null; workflowMember: undefined } => ({ ...planMembers(fromTrigger, undefined), unreadable, workflowConfirmedAt: null, workflowName: null, workflowMember: undefined });
   if (task.effect !== 'run_workflow' || !task.pipeline_id) return only(false);
   try {
     const { getPipeline } = await import('../tools/builtin/pipeline.js');
@@ -234,7 +249,7 @@ export async function planOfTrigger(
     const a = runHistory?.getWorkflowAuthorship(planned.id);
     if (a === undefined) return only(true);
     const fromWorkflow = planMandate(planAuthorshipOfWorkflow(a));
-    return { ...planMembers(fromTrigger, fromWorkflow), unreadable: false, workflowConfirmedAt: planned.confirmedAt ?? null, workflowName: planned.name };
+    return { ...planMembers(fromTrigger, fromWorkflow), unreadable: false, workflowConfirmedAt: planned.confirmedAt ?? null, workflowName: planned.name, workflowMember: fromWorkflow?.principal };
   } catch {
     return only(true);
   }

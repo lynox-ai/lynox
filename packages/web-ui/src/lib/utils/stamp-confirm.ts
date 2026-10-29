@@ -116,6 +116,8 @@ export function shownAs(p: StampPreview): 'workflow' | 'watch' | 'unreadable_wat
 export interface StampListed {
 	lapsed: boolean;
 	ended: boolean;
+	/** Where the member whose access ended sits: its workflow side needs a copy of the workflow too. */
+	ended_on?: 'plan' | 'workflow' | null;
 	entries: { provider: string | null; account: string | null; state: 'listed' | 'changed' | 'waits' | 'new' }[];
 }
 
@@ -128,10 +130,12 @@ export function listedLine(e: StampListed['entries'][number]): string {
 
 /**
  * The note below the list, or none: an ended access first (nothing runs, and a new stamp would not
- * change that), then a list that no longer holds, then an entry the plan may not use.
+ * change that), then a list that no longer holds, then an entry the plan may not use. The ended
+ * note names "Take over" only at a paused plan: an end the engine cannot prove does not pause it,
+ * and then there is no such button (`plan-pause.ts`).
  */
-export function listedNote(l: StampListed): string | null {
-	if (l.ended) return t('stamp.ended');
+export function listedNote(l: StampListed, paused: boolean): string | null {
+	if (l.ended) return t(paused ? 'stamp.ended' : l.ended_on === 'workflow' ? 'stamp.ended_unpaused_workflow' : 'stamp.ended_unpaused');
 	if (l.lapsed) return t('stamp.lapsed');
 	if (l.entries.some((e) => e.state === 'changed' || e.state === 'new')) return t('stamp.not_listed');
 	return null;

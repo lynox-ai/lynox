@@ -48,7 +48,7 @@ describe('stampable and usesConnections', () => {
 		expect(stampable({ effect: 'bulk_write' })).toBe(false);
 	});
 	it('offers the check only where a run can use a connection', () => {
-		expect(['run_agent', 'run_workflow', 'backup', 'reminder', undefined].map((effect) => usesConnections({ effect }))).toEqual([true, true, false, false, false]);
+		expect(['run_agent', 'run_workflow', 'backup', 'notify', 'bulk_apply', undefined].map((effect) => usesConnections({ effect }))).toEqual([true, true, false, false, false, false]);
 	});
 });
 
@@ -108,10 +108,16 @@ describe('the list of a confirmed plan (B3)', () => {
 	});
 	it('notes an ended access before a lapsed list, and that before an entry not allowed', () => {
 		setLocale('de');
-		expect(listedNote({ lapsed: false, ended: false, entries: [entry('listed')] })).toBeNull();
-		expect(listedNote({ lapsed: false, ended: false, entries: [entry('listed'), entry('new')] })).toContain('nur freigegebene');
-		expect(listedNote({ lapsed: false, ended: false, entries: [entry('changed')] })).toContain('nur freigegebene');
-		expect(listedNote({ lapsed: true, ended: false, entries: [entry('changed')] })).toContain('gilt nicht mehr');
-		expect(listedNote({ lapsed: true, ended: true, entries: [entry('waits')] })).toContain('Zugang dieser Person ist beendet');
+		expect(listedNote({ lapsed: false, ended: false, entries: [entry('listed')] }, false)).toBeNull();
+		expect(listedNote({ lapsed: false, ended: false, entries: [entry('listed'), entry('new')] }, false)).toContain('nur freigegebene');
+		expect(listedNote({ lapsed: false, ended: false, entries: [entry('changed')] }, false)).toContain('nur freigegebene');
+		expect(listedNote({ lapsed: true, ended: false, entries: [entry('changed')] }, false)).toContain('gilt nicht mehr');
+		expect(listedNote({ lapsed: true, ended: true, entries: [entry('waits')] }, true)).toContain('mit „Übernehmen“');
+		// An end that did not pause the plan: no "Take over" to point to.
+		expect(listedNote({ lapsed: false, ended: true, ended_on: 'plan', entries: [entry('waits')] }, false)).toBe('Der Zugang dieser Person ist beendet. Der Plan läuft deshalb nicht. Lösch ihn und bitte lynox im Chat, ihn neu anzulegen. Der neue Plan läuft unter dir.');
+		// On the workflow's side, a new plan alone is not enough: the workflow needs copying too.
+		expect(listedNote({ lapsed: false, ended: true, ended_on: 'workflow', entries: [entry('waits')] }, false)).toContain('den Workflow als neuen anzulegen');
+		// A paused plan offers "Take over", which covers both sides.
+		expect(listedNote({ lapsed: false, ended: true, ended_on: 'workflow', entries: [entry('waits')] }, true)).toContain('mit „Übernehmen“');
 	});
 });

@@ -126,7 +126,7 @@
 			</div>
 		{/if}
 		{#if s.schedule_cron}
-			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {cronText(s.schedule_cron)}</p>
+			<p data-stamp-schedule><span class="font-medium">{t('stamp.schedule')}:</span> {displaySafe(cronText(s.schedule_cron))}</p>
 		{/if}
 		{#if s.model_tier}
 			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {displaySafe(s.model_tier)}</p>

@@ -33,7 +33,7 @@ import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfiles, stampSubject, type StampListShown } from '../core/plan-stamp.js';
+import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
@@ -2315,7 +2315,7 @@ export class LynoxHTTPApi {
   }> {
     const engine = this.engine;
     const apiStore = engine?.getApiStore();
-    if (!engine || !apiStore || trigger.effect.startsWith('bulk_')) return { listed: null, by: null, workflow: null };
+    if (!engine || !apiStore || !stampUsesConnections(trigger.effect)) return { listed: null, by: null, workflow: null };
     const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
     const workflow = trigger.effect === 'run_workflow'
       ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null }
@@ -2337,12 +2337,19 @@ export class LynoxHTTPApi {
     const engine = this.engine;
     const apiStore = engine?.getApiStore();
     const history = engine?.getRunHistory();
-    if (!engine || !apiStore || !history || !trigger.confirmed_at || trigger.effect.startsWith('bulk_')) return null;
+    if (!engine || !apiStore || !history || !trigger.confirmed_at || !stampUsesConnections(trigger.effect)) return null;
     const plan = await planOfTrigger(trigger, history);
     if (plan.unreadable || plan.of === undefined) return null;
     const row = history.getTriggerStampConnections(trigger.id);
     if (row === undefined) return null;
-    return stampListState(row.stampConnections, row.confirmedAt, plan.workflowConfirmedAt, plan.of, apiStore, engine.getMandateEnds() ?? null);
+    const ends = engine.getMandateEnds() ?? null;
+    const shown = stampListState(row.stampConnections, row.confirmedAt, plan.workflowConfirmedAt, plan.of, apiStore, ends);
+    if (shown === null) return null;
+    // The run is refused when ANY member ended (the worker's gate), not only the one it acts for.
+    const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
+    const endedOn = plan.workflowMember !== undefined && principalHasEnded(plan.workflowMember, isLive) ? 'workflow'
+      : plan.members.some((m) => principalHasEnded(m, isLive)) ? 'plan' : null;
+    return { ...shown, ended: shown.ended || endedOn !== null, ended_on: endedOn };
   }
 
   private _principalOf(req: IncomingMessage): RequestPrincipal {
@@ -8735,8 +8742,9 @@ export class LynoxHTTPApi {
       const apiStore = engine.getApiStore();
       const profiles = apiStore ? stampProfiles(entries, apiStore) : [];
       // `subject` is what `expect` is the digest of, field for field: the view shows the schedule
-      // from here, not from the list it polls, so the owner confirms what they read. The mandate
-      // ids stay on the engine (`by` says whom the plan acts for); the digest still holds them.
+      // from here, not from the list it polls, so the owner confirms what they read. The preview
+      // adds no mandate id of its own (`by` says whom the plan acts for); the digest holds them.
+      // (The list row carries the ids already, `triggerForRoute`; the preview does not repeat them.)
       const { created_mandate_id: _created, mandate_editor_id: _editor, ...subject } = stampSubject(trigger, listed?.wf ?? null);
       jsonResponse(res, 200, {
         expect: stampExpect(trigger, listed?.wf ?? null, entries),

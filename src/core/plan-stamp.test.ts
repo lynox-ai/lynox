@@ -183,6 +183,9 @@ describe('stampListState: what the owner\'s list of a confirmed plan shows (B3)'
     expect(stampListState(stamped([p], WF), AT, '2026-10-09T00:00:00.000Z', EVA, store(p), live)!.lapsed).toBe(true);
     expect(stampListState(stamped([p], WF), AT, null, EVA, store(p), live)!.lapsed).toBe(true);
     expect(stampListState(stamped([p], WF), AT, WF, EVA, store(p), live)!.lapsed).toBe(false);
+    // And a lapsed list allows none of its entries: the run reads no list at all.
+    expect(stampListState(stamped([p]), '2026-10-09T00:00:00.000Z', null, EVA, store(p), live)!.entries.map((e) => e.state)).toEqual(['changed']);
+    expect(runAsPlanOf(EVA, () => planConnectionState(p), stampFromRow(stamped([p]), '2026-10-09T00:00:00.000Z', null))).toBe('unlisted');
     // A changed entry alone does not lapse the list.
     expect(stampListState(stamped([p]), AT, null, EVA, store(crm({ oauth_grant: { ...G, grant_id: 'grant-2' } as OAuthGrantRecord })), live)!.lapsed).toBe(false);
   });
