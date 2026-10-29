@@ -638,6 +638,7 @@ describe("the owner's advance warning (641c-2b)", () => {
   const iso = (s: number): string => new Date(s * 1000).toISOString();
 
   it('goes out once the end is less than a day away, not before, not once it has passed, never for a revoke', () => {
+    expect(ADVANCE_WARNING_S).toBe(24 * 60 * 60);
     const b = box();
     plan(b, 'p', { by: 'h@x.ch' });
     ending(b, NOW + ADVANCE_WARNING_S);
@@ -668,6 +669,18 @@ describe("the owner's advance warning (641c-2b)", () => {
     expect(first.find((w) => w.keys.length === 2)!.message.body).toContain('Then 2 plans in which they created');
     expect(claimAdvanceWarnings(b.db, NOW + 60)).toEqual([]);
     expect(warnedRows(b).map((r) => r.trigger_id)).toEqual(['a', 'c', 'o']);
+  });
+
+  it('a sweep with nothing new to claim writes nothing: no claiming statement is even prepared', () => {
+    const b = box();
+    plan(b, 'p', { by: 'h@x.ch' });
+    ending(b, NOW + H);
+    expect(claimAdvanceWarnings(b.db, NOW)).toHaveLength(1);
+    const prepared: string[] = [];
+    const prepare = b.db.prepare.bind(b.db);
+    vi.spyOn(b.db, 'prepare').mockImplementation(((sql: string) => { prepared.push(sql); return prepare(sql); }) as typeof b.db.prepare);
+    expect(claimAdvanceWarnings(b.db, NOW + 60)).toEqual([]);
+    expect(prepared.filter((q) => q.startsWith('INSERT'))).toEqual([]);
   });
 
   it('a plan that joins after the warning gets its own, as one more plan; those named before are not named again', () => {
@@ -864,6 +877,9 @@ describe('the advance warning under a forced race', () => {
       login(moved.c, 'h@x.ch', NOW + 40 * H, NOW);
     }), NOW);
     expect(none).toEqual([]);
+
+    const revoked = two();
+    expect(claimAdvanceWarnings(raced(revoked.a, () => { revoked.c.ends.revoke('g-h@x.ch', NOW); }), NOW)).toEqual([]);
   });
 });
 
