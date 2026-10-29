@@ -275,7 +275,7 @@ function writeProviderRecord(engineDb: Database.Database, connectionId: string, 
  * erasure covers the earlier one, whose erasure still runs. A row whose epoch cannot be read (it
  * does not say where it starts) ends none: a provider's erasure is only written while the epoch of
  * its refused grant can be read, and a row does not lose its start, so one held then is an earlier
- * connection's. It runs, and the sweep still keeps every grant the row stored now holds.
+ * connection's, and it runs.
  */
 export function cancelHeldProviderRecords(engineDb: Database.Database, connectionId: string, now: Date, onlyGrant?: string): number[] {
   const epoch = onlyGrant === undefined ? boundedEpoch(engineDb, connectionId).map((e) => e.g) : [];
