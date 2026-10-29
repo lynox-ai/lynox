@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -10,12 +10,15 @@ import { tmpdir } from 'node:os';
  * membership no test runner has.
  */
 const chowns = vi.hoisted(() => [] as number[]);
+const chownFails = vi.hoisted(() => ({ on: false }));
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>();
   return {
     ...real,
     fchownSync: (fd: number, uid: number, gid: number): void => {
       chowns.push(gid);
+      // An engine that is not in the group: chown to it is EPERM.
+      if (chownFails.on) throw Object.assign(new Error('EPERM: operation not permitted, fchown'), { code: 'EPERM' });
       real.fchownSync(fd, uid, process.getgid!());
     },
   };
@@ -55,6 +58,7 @@ beforeEach(() => {
   ws = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-sidecar-modes-')));
   setTenantWorkspace(ws);
   chowns.length = 0;
+  chownFails.on = false;
 });
 
 afterEach(() => {
@@ -94,6 +98,19 @@ describe.each(UMASKS)('in sidecar mode under umask %o', (mask) => {
     expect(mode(join(ws, 'deep', 'new.txt'))).toBe(SIDECAR_FILE_MODE);
     expect(mode(join(ws, 'deep'))).toBe(SIDECAR_DIR_MODE);
     expect(chowns).toEqual([SHARED_GROUP, SHARED_GROUP]);
+  });
+
+  it('a failed group change leaves no file or directory behind, so a retry does not write a private one', async () => {
+    chownFails.on = true;
+    await expect(underUmask(mask, () => writeFileTool.handler({ path: join(ws, 'deep', 'new.txt'), content: 'n' }, agent()))).rejects.toThrow(/EPERM/);
+    expect(existsSync(join(ws, 'deep'))).toBe(false);
+    mkdirSync(join(ws, 'there'));
+    await expect(underUmask(mask, () => writeFileTool.handler({ path: join(ws, 'there', 'new.txt'), content: 'n' }, agent()))).rejects.toThrow(/EPERM/);
+    expect(existsSync(join(ws, 'there', 'new.txt'))).toBe(false);
+    // The control: with the group change working, the same writes land.
+    chownFails.on = false;
+    await underUmask(mask, () => writeFileTool.handler({ path: join(ws, 'deep', 'new.txt'), content: 'n' }, agent()));
+    expect(mode(join(ws, 'deep'))).toBe(SIDECAR_DIR_MODE);
   });
 
   it('write_file over an existing file writes in place and changes neither mode nor group', async () => {

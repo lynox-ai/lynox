@@ -143,8 +143,9 @@ export function deleteAreaFile(t: AreaTarget): void {
 
 /**
  * {@link persistChatUpload} with isolation: stored through the area's open directory, private as
- * before (0600 in 0700 directories) and atomically (temp file, fsync, rename). Null when it cannot
- * be written, so the caller falls back to inlining the upload, as before.
+ * before (0600 in 0700 directories) and atomically (temp file, fsync, rename). In sidecar mode the
+ * shell must read it, so it takes the sidecar's modes and group instead (`workspace-write-modes.ts`).
+ * Null when it cannot be written, so the caller falls back to inlining the upload, as before.
  */
 export function persistChatUploadInArea(fileName: string, text: string): { rel: string; abs: string } | null {
   let t: AreaTarget | null;

@@ -250,6 +250,13 @@ function walkDir(anchor: DirHandle, parts: readonly string[], create?: { dirMode
           try {
             setMode(next, create.dirMode, create.group);
           } catch (modeErr) {
+            // A directory left with mkdir's 0700 would never get its mode or group: the next call
+            // finds it and does not count it as made. Removed again, if it is still the one made
+            // here and still empty.
+            try {
+              const ino = fstatSync(next.fd).ino;
+              if (lstatOrNull(cur, name)?.ino === ino) rmdirSync(at(cur, name));
+            } catch { /* no longer empty, or gone */ }
             closeSync(next.fd);
             throw modeErr;
           }
@@ -531,6 +538,13 @@ export function openWrite(anchor: WorkspaceAnchor, rel: string, opts: OpenWriteO
       if (created && opts.group !== undefined) fchownSync(fd, -1, opts.group);
       if (created && opts.createMode !== undefined) fchmodSync(fd, opts.createMode);
     } catch (err) {
+      // A file made here and left 0600 would be written later as it is, since it then exists:
+      // removed again, if the name still holds the file made here.
+      if (created) {
+        try {
+          if (lstatOrNull(dir, leaf)?.ino === fstatSync(fd).ino) unlinkSync(at(dir, leaf));
+        } catch { /* already gone */ }
+      }
       closeSync(fd);
       throw err;
     }

@@ -2,9 +2,9 @@
  * The modes and the group of what the engine creates in the context directory when the shell runs
  * in the sidecar. The engine and every pool uid meet only in group `SHARED_GROUP`, so a file the
  * engine writes must be group-readable and -writable for `bash` to use it, and the other way
- * round. Decided in the shell sidecar layout document (pro `docs/internal/prd/shell-sidecar-layout.md`,
- * A2): files `0o660`, directories `0o2770` (set-group-ID, no sticky bit), group `SHARED_GROUP`,
- * fixed rather than taken from the umask, which the image does not set.
+ * round. The shell sidecar layout fixes them: files `0o660`, directories `0o2770` (set-group-ID,
+ * no sticky bit), group `SHARED_GROUP`, rather than taking them from the umask, which the image
+ * does not set.
  *
  * Outside sidecar mode every caller keeps the modes it used before; this module answers `null`.
  */
