@@ -295,6 +295,35 @@ describe('the confirmation', () => {
 		expect(previews).toBe(before);
 		expect((document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!).disabled).toBe(false);
 	});
+	it('a re-fetch after a changed refusal that answers once another dialog is open writes nothing there', async () => {
+		rows = [PAUSED, { ...PAUSED, id: 'p2', title: 'Monatsabschluss' }];
+		takeoverAnswers = [{ status: 409, body: { error: 'changed', code: 'changed' } }];
+		let release: (() => void) | null = null;
+		let p1Previews = 0;
+		const inner = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (String(url).endsWith('/p1/takeover-preview') && ++p1Previews === 2) {
+				await new Promise<void>((r) => { release = r; });
+				return json(200, { ...PREVIEW, expect: 'digest-p1-new' });
+			}
+			return inner(url, init);
+		}));
+		await render();
+		const buttons = target.querySelectorAll<HTMLButtonElement>('[data-trigger-takeover]');
+		buttons[0]!.click();
+		await settle();
+		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
+		await settle();
+		// A's re-fetch is in flight; the owner leaves and opens B.
+		window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+		await settle();
+		buttons[1]!.click();
+		await settle();
+		release!();
+		await settle();
+		expect(document.querySelector('[data-takeover-note]')).toBeNull();
+		expect(document.querySelector('[data-takeover-confirm]')).not.toBeNull();
+	});
 	it('a plan that changed is shown again, with the line above it, and not taken over unseen', async () => {
 		takeoverAnswers = [{ status: 409, body: { error: 'changed', code: 'changed' } }];
 		await render();
