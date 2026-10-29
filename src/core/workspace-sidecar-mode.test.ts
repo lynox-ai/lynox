@@ -9,7 +9,7 @@ import { _resetWorkspaceAccess, leaseWorkspaceFor, workspaceAccess } from './wor
 import { closeWorkspaceBase, workspaceBase } from './workspace-rel.js';
 import { _resetCache, setTenantWorkspace } from './workspace.js';
 import { workspaceChangeset } from './changeset.js';
-import { reachWorkspace } from '../tools/builtin/fs.js';
+import { reachWorkspace, writeFileTool } from '../tools/builtin/fs.js';
 
 /**
  * In shell sidecar mode the workspace is the fd the entrypoint hands over, and `/workspace` is only
@@ -100,10 +100,13 @@ describe('the workspace in shell sidecar mode (D3)', () => {
     expect(() => workspaceBase()).toThrow(/must be a directory below \/workspace/);
   });
 
-  it('without a context workspace the file tools are refused, not sent to a path by name', () => {
+  it('without a context workspace the file tools are refused, not sent to a path by name', async () => {
     setTenantWorkspace(null);
     expect(() => workspaceBase()).toThrow(/no context workspace is set/);
     expect(() => reachWorkspace('/workspace/ctx1/a.txt')).toThrow(/no context workspace is set/);
+    // Without isolation write_file would confine the path to the root by name.
+    await expect(writeFileTool.handler({ path: 'note.txt', content: 'x' }, { sessionCounters: { httpRequests: 0, writeBytes: 0 } } as never))
+      .rejects.toThrow(/no context workspace is set/);
   });
 
   it('old workspace paths map onto the label without reading `<data>/workspace`', () => {

@@ -4,6 +4,7 @@ import { resolve, dirname, basename, join } from 'node:path';
 import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
+import { shellIsolation } from './shell-isolation.js';
 import { ensureWorkspaceContextDir, getWorkspaceRoot, resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin } from './workspace-root.js';
 
 let _cachedDir: string | null | undefined;
@@ -29,9 +30,13 @@ export function clearTenantWorkspace(): void {
   _tenantOverride = null;
 }
 
-/** Whether workspace isolation is active. */
+/**
+ * Whether workspace isolation is active. Always in shell sidecar mode: the paths taken without
+ * isolation reach the workspace root by name, and there they must not (D3). The isolated path
+ * refuses instead when no context workspace is set (`workspaceBase`).
+ */
 export function isWorkspaceActive(): boolean {
-  return getWorkspaceDir() !== null;
+  return getWorkspaceDir() !== null || shellIsolation().kind === 'sidecar';
 }
 
 /** Working directory: workspace dir if active, else process.cwd(). */
