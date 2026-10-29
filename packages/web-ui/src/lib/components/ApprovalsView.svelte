@@ -2,6 +2,7 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { getApprovalsViewer, setApprovalsOff, setApprovalsPending } from '../stores/approvals.svelte.js';
 	import { newChat, resumeThread, sendMessage } from '../stores/chat.svelte.js';
 	import ApprovalCard from './ApprovalCard.svelte';
@@ -10,7 +11,17 @@
 		type ApprovalCardData, type ApprovalList,
 	} from './approvals.js';
 
+	/** The entry a chat note leads to (`?entry=`): shown on the "all" tab, where a closed one is, and marked. */
+	const focusedId = $derived($page.url.searchParams.get('entry'));
 	let view = $state<'open' | 'all'>('open');
+	/** The entry last scrolled to, so a later read of the list does not move the page again. Each time
+	 *  an entry is asked for, also the same one again after the page was opened without one, it is
+	 *  scrolled to anew. */
+	let scrolledTo: string | null = null;
+	// Each new entry asked for opens the "all" tab, also when the page is already on screen.
+	$effect.pre(() => {
+		if (focusedId !== null) { view = 'all'; scrolledTo = null; }
+	});
 	let list = $state<ApprovalList | null>(null);
 	let loading = $state(false);
 	let loadFailed = $state(false);
@@ -152,6 +163,15 @@
 
 	// Reads the list for the tab on screen, again whenever the tab changes.
 	$effect(() => { void load(view); });
+
+	// Brings the entry a chat note led to into view, once its card is on the page.
+	$effect(() => {
+		if (focusedId === null || scrolledTo === focusedId || list === null) return;
+		const el = document.querySelector('[data-entry-focused]');
+		if (el === null) return;
+		scrolledTo = focusedId;
+		el.scrollIntoView({ block: 'center' });
+	});
 </script>
 
 <div class="mx-auto w-full max-w-3xl px-4 py-6 space-y-4">
@@ -195,7 +215,13 @@
 				{/if}
 				<div class="space-y-3">
 					{#each list.entries as card (card.id)}
-						<ApprovalCard {card} viewer={list.viewer ?? 'none'} busy={deciding !== null} onDecide={(c, a) => { void decide(c, a); }} onMoveToChat={(c) => { void moveToChat(c); }} onReopenChat={(c) => { void reopenChat(c); }} />
+						{#if card.id === focusedId}
+							<div class="rounded-[var(--radius-md)] ring-2 ring-accent/60" data-entry-focused>
+								<ApprovalCard {card} viewer={list.viewer ?? 'none'} busy={deciding !== null} onDecide={(c, a) => { void decide(c, a); }} onMoveToChat={(c) => { void moveToChat(c); }} onReopenChat={(c) => { void reopenChat(c); }} />
+							</div>
+						{:else}
+							<ApprovalCard {card} viewer={list.viewer ?? 'none'} busy={deciding !== null} onDecide={(c, a) => { void decide(c, a); }} onMoveToChat={(c) => { void moveToChat(c); }} onReopenChat={(c) => { void reopenChat(c); }} />
+						{/if}
 					{/each}
 				</div>
 			{/if}

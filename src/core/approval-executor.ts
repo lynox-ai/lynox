@@ -25,7 +25,8 @@ import { newCorrelationId } from './audit-log.js';
 import { APPROVAL_CLAIM_STALE_MS, APPROVAL_RETRY_DELAY_MS, type ApprovalEntry, type ApprovalKind, type ApprovalStatus, type ApprovalStore, type FinishOutcome } from './approval-store.js';
 import { principalOfPrompt } from './prompt-store.js';
 import { isMandateTag, isOwnerPrincipal, principalHasEnded, type RequestPrincipal } from './request-principal.js';
-import { buildDisplayNoteContent } from './render-projection.js';
+import { approvalOutcome } from './approval-view.js';
+import { buildApprovalNoteContent } from './render-projection.js';
 import type { ThreadStore } from './thread-store.js';
 import type { MailContext } from '../integrations/mail/context.js';
 import type { MailAddress } from '../integrations/mail/provider.js';
@@ -267,8 +268,12 @@ export class ApprovalExecutor {
     const code = status === 'done' ? 'approval_sent' : status === 'unknown' ? 'approval_unknown' : 'approval_failed';
     try {
       if (threads.getThread(threadId) === undefined) return;
+      // The outcome as the approvals page reads it from the stored entry, so the chat names the
+      // same reason as the page it leads to.
+      const stored = this.deps.store.get(entry.id);
+      const outcome = (stored !== null ? approvalOutcome(stored) : null) ?? 'other';
       const count = threads.getMessageCount(threadId);
-      threads.appendDisplayNotes(threadId, [{ role: 'assistant', content: buildDisplayNoteContent(code) }], threads.getNextSeq(threadId));
+      threads.appendDisplayNotes(threadId, [{ role: 'assistant', content: buildApprovalNoteContent(code, { id: entry.id, outcome }) }], threads.getNextSeq(threadId));
       threads.updateThread(threadId, { message_count: count + 1 });
     } catch { /* the note is a courtesy; the entry's status is the record */ }
   }

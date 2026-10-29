@@ -74,6 +74,8 @@
 	import { formatCompactionDelta } from '../stores/compaction-result.js';
 	import { taskPreview } from '../stores/follow-ups.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
+	import { approvalNoteLines } from './approvals.js';
+	import { getApprovalsViewer } from '../stores/approvals.svelte.js';
 	import { originLineKeys, refusalOffersNewChat } from '../stores/contained-way-out.js';
 	import { formatCost } from '../format.js';
 	import { knowledgeCauseKey } from '../stores/knowledge-chip.js';
@@ -2709,7 +2711,8 @@
 					     a small monospace line so the user can debug without it
 					     dominating the transcript. This row never enters the model's
 					     API context (filtered at resume hydration). -->
-					{@const noteKey = `chat.note.${msg.note.code}`}
+					{@const approvalLines = approvalNoteLines(msg.note.code, msg.note.approval, getApprovalsViewer())}
+					{@const noteKey = approvalLines?.bodyKey ?? `chat.note.${msg.note.code}`}
 					{@const noteBody = t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey)}
 					{@const titleKey = `chat.note.${msg.note.code}.title`}
 					{@const noteTitle = t(titleKey) === titleKey ? t('chat.note.title') : t(titleKey)}
@@ -2723,6 +2726,12 @@
 						<div class="min-w-0">
 							<div class="text-text-muted">{noteTitle}</div>
 							<div class="text-text-subtle">{noteBody}</div>
+							{#if approvalLines?.nextKey}
+								<div class="text-text-subtle" data-approval-next>{t(approvalLines.nextKey)}</div>
+							{/if}
+							{#if approvalLines?.href}
+								<a href={approvalLines.href} class="inline-flex min-h-6 items-center py-1 text-accent hover:underline" data-approval-entry>{t('chat.note.approval_view_entry')}</a>
+							{/if}
 							{#if msg.note.detail}
 								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>
 							{/if}
