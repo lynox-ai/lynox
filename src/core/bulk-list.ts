@@ -248,7 +248,7 @@ function parseShopifyMediaListSource(host: string, input: Record<string, unknown
   for (const key of ['path', 'filters', 'id_field']) {
     if (input[key] !== undefined) throw new BulkSourceError(`source_list.${key} is not given for form shopify_media: it reads the images of the store's products.`);
   }
-  const checked = checkAfter(input['after'], 'id', scan);
+  const checked = checkAfter(input['after'], 'id', scan, PLACEHOLDER_REFUSAL_MEDIA);
   if (!Object.keys(checked).every((k) => SHOPIFY_MEDIA_WRITABLE_FIELDS.includes(k))) {
     throw new BulkSourceError(`source_list.after may only set: ${SHOPIFY_MEDIA_WRITABLE_FIELDS.join(', ')}.`);
   }
@@ -262,7 +262,7 @@ function parseShopifyMediaListSource(host: string, input: Record<string, unknown
 
 /** A list's after-state, checked: a non-empty object of scalars, not the id field, within the
  *  byte cap, and nothing the egress scan takes for a credential. */
-function checkAfter(after: unknown, idField: string, scan: (text: string) => string | null): ExternalImage {
+function checkAfter(after: unknown, idField: string, scan: (text: string) => string | null, placeholderRefusal = PLACEHOLDER_REFUSAL): ExternalImage {
   if (!isPlainObject(after) || Object.keys(after).length === 0) throw new BulkSourceError('source_list.after must be a non-empty object of the fields to set.');
   if (!Object.values(after).every(isScalar)) throw new BulkSourceError('source_list.after may only hold text, numbers, true/false or null.');
   // A run that rewrote the field it identifies its targets by could not check that the
@@ -271,21 +271,28 @@ function checkAfter(after: unknown, idField: string, scan: (text: string) => str
   const afterText = JSON.stringify(after);
   if (Buffer.byteLength(afterText, 'utf8') > BULK_MAX_TARGET_BYTES) throw new BulkSourceError('source_list.after is too large.');
   if (scan(afterText) !== null) throw new BulkSourceError('source_list.after holds something that looks like a credential.');
-  if (Object.values(after).some((v) => typeof v === 'string' && PLACEHOLDER_RE.test(v))) throw new BulkSourceError(PLACEHOLDER_REFUSAL);
+  if (Object.values(after).some((v) => typeof v === 'string' && PLACEHOLDER_RE.test(v))) throw new BulkSourceError(placeholderRefusal);
   return after as ExternalImage;
 }
 
 /**
- * A placeholder in a list's after-state: `{{ … }}`, `{% … %}`, `${ … }`, `<% … %>` or `{name}`.
+ * A placeholder in a list's after-state: `{{ … }}`, `{% … %}`, `${ … }`, `<% … %>`, `%%name%%` or
+ * `{name}` (also `{$name}`, `{0}`, `{Größe}`, `{product-name}`, `{product name}`).
  * Nothing fills it in: the after-state is written as it stands into every target, so a model that
  * meant "each product's own name" would write the placeholder itself into the whole store. Refused
  * on the syntax, not on a guess at the intent — a text that really holds such braces is rare in a
  * field written to every target, and a judge can still write it.
  */
-const PLACEHOLDER_RE = /\{\{|\{%|\$\{|<%|\{\s*[A-Za-z_][\w.]*\s*\}/;
+// No `\s*` before the closing brace: the name may hold spaces, and two runs that both take them
+// would backtrack quadratically on a long unclosed brace.
+const PLACEHOLDER_RE = /\{\{|\{%|\$\{|<%|%%[\p{L}\p{N}_]+%%|\{\s*\$?[\p{L}\p{N}_][\p{L}\p{N}_. -]*\}/u;
 export const PLACEHOLDER_REFUSAL =
   'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. ' +
   'Give the literal text; for a value that differs per target, use a judge where the form takes one.';
+/** Form shopify_media takes no judge: there is no way to a per-image text, and saying so saves the retry. */
+export const PLACEHOLDER_REFUSAL_MEDIA =
+  'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. ' +
+  'Form shopify_media writes one alt text into every image and takes no judge: give that one text, without such braces.';
 
 /**
  * The address of one page. Built here, in a fixed order — filters by name, then the form's

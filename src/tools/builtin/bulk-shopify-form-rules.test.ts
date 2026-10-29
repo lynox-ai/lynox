@@ -7,7 +7,7 @@ import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { validateToolInput } from '../../core/tool-input-validator.js';
-import { PLACEHOLDER_REFUSAL } from '../../core/bulk-list.js';
+import { PLACEHOLDER_REFUSAL, PLACEHOLDER_REFUSAL_MEDIA } from '../../core/bulk-list.js';
 import type { IAgent } from '../../types/index.js';
 
 /**
@@ -105,13 +105,26 @@ describe('a placeholder in a list\'s after', () => {
     ['shopify', { title: '{{ truncate(name, 60) }}' }],
     ['shopify', { seo_title: '{{ truncate(title, 60) | lower }}' }],
     ['shopify', { seo_description: '{title} | Bergladen' }],
-    ['shopify', { seo_title: 'Buy ${product.title} now' }],
+    ['shopify', { seo_title: 'Buy ${a + b} now' }],
+    ['shopify', { seo_title: '%%title%% %%sep%% Shop' }],
+    ['shopify', { seo_title: '{Größe} – Shop' }],
+    ['shopify', { seo_title: '{product-name} | Shop' }],
+    ['shopify', { seo_title: '{ product name } | Shop' }],
+    ['shopify', { seo_title: '{0} | Shop' }],
+    ['shopify', { seo_title: '{$title} | Shop' }],
+    ['shopify', { title: 'Fixed', seo_title: null, seo_description: '{{ description }}' }],
     ['shopify', { seo_title: '{% if x %}a{% endif %}' }],
     ['shopify', { seo_title: '<%= title %>' }],
-    ['shopify_media', { alt: '{{ product.title }}' }],
   ])('in form %s, %j is refused and nothing is recorded', async (form, after) => {
     const answer = await plan({ source_list: { form, after } });
     expect(answer.startsWith(`Error: ${PLACEHOLDER_REFUSAL}`), answer).toBe(true);
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+  });
+
+  it('in form shopify_media, says that no judge can write such a text', async () => {
+    const answer = await plan({ source_list: { form: 'shopify_media', after: { alt: '{{ product.title }}' } } });
+    expect(answer.startsWith(`Error: ${PLACEHOLDER_REFUSAL_MEDIA}`), answer).toBe(true);
+    expect(answer).not.toContain('use a judge');
     expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
   });
 
@@ -121,7 +134,8 @@ describe('a placeholder in a list\'s after', () => {
   });
 
   it('a literal text with braces that name nothing, and a judged plan, are recorded', async () => {
-    expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'Sale {50%} – {} – }{' } } })).toMatch(/^List dry run recorded/);
+    expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'Sale {50%} – {} – }{ – 100% – $10 – [NEU]' } } })).toMatch(/^List dry run recorded/);
+    expect(await plan({ target_host: 'shop.example.com', source_list: { form: 'woocommerce', path: '/wp-json/wc/v3/products', after: { name: 'Sale {50%}' } } })).toMatch(/^List dry run recorded|^Another external dry run/);
     expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } })).toMatch(/^List dry run recorded|^Another external dry run/);
   });
 });
