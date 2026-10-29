@@ -3801,6 +3801,11 @@ export class WorkerLoop {
  * what is read was chosen by whoever planned it. `null` for the owner's own run. A GraphQL
  * read is a `POST` to one endpoint for every product, so its row also names the form and the
  * value bound into it (`detail`).
+ *
+ * No row names a token host, because a run renews no OAuth token: its attach builds an agent from
+ * the stores alone, and `mayRenewOAuthUnattended` refuses it twice over — it has no
+ * `sessionCounters` and no `toolContext` (`attachStoredCredential`, `http.ts`). A run that may
+ * renew needs a row for the exchange first (`bulk-preview.test.ts`, "a preview never renews").
  */
 export function bulkReadRecorder(
   run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'delegatedPlanner'>,
