@@ -10596,6 +10596,14 @@ describe('LynoxHTTPApi', () => {
         expect(await res.json()).toMatchObject({ code: 'planner_unknown' });
       });
 
+      it('a finished one gets the resume\'s own refusal, not this one', async () => {
+        const id = haltedRun(null);
+        bulkDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(id);
+        const res = await resume(id);
+        expect(res.status).toBe(409);
+        expect(await res.json()).not.toMatchObject({ code: 'planner_unknown' });
+      });
+
       it('control: a run from before v31 in a conversation the owner started resumes', async () => {
         bulkHolder.ownership = { isLive: () => false, threadCreator: (t) => (t === 't' ? 'owner' : undefined), threadsKnown: true };
         expect((await resume(haltedRun(null))).status).toBe(200);

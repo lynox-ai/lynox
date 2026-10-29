@@ -164,13 +164,27 @@ describe('whose run cannot be shown to have a planner', () => {
 
   it('the ledger asks it of the run as stored, and ends nothing', () => {
     const id = dryRun(OWNER_PRINCIPAL);
-    const phase = row(id).phase;
+    const approved = ledger.approve(id, { checksum: ledger.computeChecksum(id)! });
+    if (!approved.ok) throw new Error(approved.reason);
     expect(ledger.resumeRefusedForPlanner(id, ownership())).toBe(false);
     engineDb.getDb().prepare(`UPDATE bulk_runs SET principal = NULL, created_at = ? WHERE id = ?`).run(NEW, id);
     expect(ledger.resumeRefusedForPlanner(id, ownership())).toBe(true);
     expect(ledger.resumeRefusedForPlanner(id, ownerThread())).toBe(false);
-    expect(row(id)).toMatchObject({ phase, halt_reason: null });
+    expect(row(id)).toMatchObject({ phase: 'approved', halt_reason: null });
     expect(ledger.resumeRefusedForPlanner('no-such-run', ownership())).toBe(false);
+  });
+
+  it('asks it only of a run a resume could move on: another phase is the resume\'s own refusal', () => {
+    const id = dryRun(OWNER_PRINCIPAL);
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET principal = NULL, created_at = ? WHERE id = ?`).run(NEW, id);
+    for (const phase of ['previewed', 'done', 'aborted', 'undone']) {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET phase = ? WHERE id = ?').run(phase, id);
+      expect(ledger.resumeRefusedForPlanner(id, ownership()), phase).toBe(false);
+    }
+    for (const phase of ['approved', 'writing']) {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET phase = ? WHERE id = ?').run(phase, id);
+      expect(ledger.resumeRefusedForPlanner(id, ownership()), phase).toBe(true);
+    }
   });
 });
 

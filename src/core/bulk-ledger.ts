@@ -1294,10 +1294,11 @@ export class BulkLedger {
     return this.endRun(runId);
   }
 
-  /** Whether this run is refused a resume because no one can be shown as its planner ({@link plannerUnshown}). Ends nothing. */
+  /** Whether this run is refused a resume because no one can be shown as its planner ({@link plannerUnshown}).
+   *  Only a run a resume could move on: any other is `resume`'s own refusal to give. Ends nothing. */
   resumeRefusedForPlanner(runId: string, own: BulkOwnership): boolean {
     const row = this.runRow(runId);
-    return row !== undefined && plannerUnshown(row, own);
+    return row !== undefined && (row.phase === 'approved' || row.phase === 'writing') && plannerUnshown(row, own);
   }
 
   /** Ends an unapproved run; its own phase guard is what keeps an approved run, the owner's act, as it is. */
