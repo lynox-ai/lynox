@@ -462,7 +462,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     // Last before it leaves, so the row stands for a request that is sent.
-    if ((isReadMethod(gated) || (graphql !== undefined && graphql.writes !== true)) && deps.recordRead !== null && !deps.recordRead(url, graphql?.detail)) return { kind: 'unrecorded' };
+    if ((isReadMethod(method) || (graphql !== undefined && graphql.writes !== true)) && deps.recordRead !== null && !deps.recordRead(url, graphql?.detail)) return { kind: 'unrecorded' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
     carried.push(connection);
     onSend?.();
@@ -481,7 +481,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
       // The body streams after the headers: a reset or a timeout there is a failed read
       // like one before them, never an exception out of the effect.
       try {
-        const read = await readResponse(res, now(), method === 'GET' || graphql !== undefined, maxBytes);
+        const read = await readResponse(res, now(), isReadMethod(method) || graphql !== undefined, maxBytes);
         if (graphql === undefined) return read;
         const answer = graphqlAnswer(read, res.headers.get('retry-after'), now());
         return graphql.writes === true ? graphqlWriteAnswer(answer) : answer;

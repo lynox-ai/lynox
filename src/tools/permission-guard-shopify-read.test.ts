@@ -112,6 +112,20 @@ describe('withShopifyRead — what it refuses', () => {
     }
   });
 
+  // The grant decides every request that is not a read on its own: a method list that grows
+  // after minting (the copy shares the caller's array) does not open a write elsewhere.
+  it('decides a write itself, whatever its method list holds later', () => {
+    const methods = ['GET'];
+    const open: CapabilityContract = { ...base, httpMethods: methods, pathPatterns: ['/admin/products'] };
+    const grant = withShopifyRead(open, HOST, { phase: 'read', targets: [P1] });
+    const write = { method: 'POST', url: `https://${HOST}/admin/products`, headers: JSON_TYPE, body: '{}' };
+    expect(contractGrants('http_request', write, grant)).toBe(false);
+    methods.push('POST');
+    expect(contractGrants('http_request', write, grant)).toBe(false);
+    // The same widened list on a contract without the grant does grant it: the refusal above is the grant's.
+    expect(contractGrants('http_request', write, open)).toBe(true);
+  });
+
   it('a contract without the grant, a stored copy included, grants none of it', () => {
     expect(post({ ...base, httpMethods: ['POST'], pathPatterns: ['/admin/api/2026-10/graphql.json'] }, READ_P1)).toBe(false);
     expect(post(JSON.parse(JSON.stringify(preview)) as CapabilityContract, READ_P1)).toBe(false);

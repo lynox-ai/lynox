@@ -778,8 +778,8 @@ export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock:
   const base = `HTTP request timed out after ${timeoutMs}ms${wallClock ? ' (wall clock)' : ''}`;
   const verb = method.toUpperCase();
   const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
-  if ((verb === 'GET' || verb === 'HEAD') && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
-  if (verb === 'GET' || verb === 'HEAD') return `${base}${read}`;
+  if (isReadMethod(verb) && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
+  if (isReadMethod(verb)) return `${base}${read}`;
   const landed = answeredStatus === undefined
     ? `The ${verb} may still have reached the server and taken effect`
     : `The ${verb} reached the server`;
@@ -796,8 +796,8 @@ export function httpStoppedMessage(method: string, answeredStatus?: string, carr
   const verb = method.toUpperCase();
   const base = `HTTP request stopped because the run was stopped`;
   const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
-  if ((verb === 'GET' || verb === 'HEAD') && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
-  if (verb === 'GET' || verb === 'HEAD') return `${base}${read}. It only reads, so it can simply be repeated.`;
+  if (isReadMethod(verb) && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
+  if (isReadMethod(verb)) return `${base}${read}. It only reads, so it can simply be repeated.`;
   const landed = answeredStatus === undefined
     ? `The ${verb} may already have reached the server and taken effect`
     : `The ${verb} reached the server`;

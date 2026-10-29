@@ -16,6 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { isReadMethod } from '../src/core/outbound-write.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -27,38 +28,33 @@ const COMPARES = new RegExp(
 // A line holding both names is a set of them, whatever builds it (`['GET', 'HEAD'].includes`, `new Set`).
 const BOTH = /['"`](?:GET|get)['"`].*['"`](?:HEAD|head)['"`]|['"`](?:HEAD|head)['"`].*['"`](?:GET|get)['"`]/;
 
-/** Source with its comments removed and string contents kept, line numbers unchanged. */
+/**
+ * Source with its comments blanked, line numbers unchanged. The comments are the ones the
+ * TypeScript parser finds around each token, so a quote inside a regex literal or a `//` inside a
+ * string is read as the parser reads it — a hand-written scanner got both wrong and hid lines.
+ */
 function withoutComments(src: string): string {
-  let out = '';
-  let quote: string | null = null;
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i]!;
-    const next = src[i + 1];
-    if (quote !== null) {
-      out += c;
-      if (c === '\\') { out += next ?? ''; i++; continue; }
-      if (c === quote) quote = null;
-      continue;
+  const file = ts.createSourceFile('scan.ts', src, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const comments = new Map<number, number>();
+  const visit = (node: ts.Node): void => {
+    for (const r of [...ts.getLeadingCommentRanges(src, node.pos) ?? [], ...ts.getTrailingCommentRanges(src, node.end) ?? []]) {
+      comments.set(r.pos, r.end);
     }
-    if (c === '/' && next === '/') {
-      while (i < src.length && src[i] !== '\n') i++;
-      i--;
-      continue;
-    }
-    if (c === '/' && next === '*') {
-      i += 2;
-      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) { if (src[i] === '\n') out += '\n'; i++; }
-      i++;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === '`') quote = c;
-    out += c;
+    for (const child of node.getChildren(file)) visit(child);
+  };
+  visit(file);
+  const chars = [...src];
+  for (const [pos, end] of comments) {
+    for (let i = pos; i < end; i++) if (chars[i] !== '\n') chars[i] = ' ';
   }
-  return out;
+  return chars.join('');
 }
 
 /** The lines of `src` that compare a method with GET or HEAD, trimmed and with runs of space collapsed. */
 export function methodComparisons(src: string): string[] {
+  // Blanking comments only removes text, so a file with no candidate line has none after it
+  // either; only the files that have one are parsed.
+  if (!src.split('\n').some((line) => COMPARES.test(line) || BOTH.test(line))) return [];
   return withoutComments(src).split('\n')
     .filter((line) => COMPARES.test(line) || BOTH.test(line))
     .map((line) => line.trim().replace(/\s+/g, ' '));
@@ -76,7 +72,6 @@ function sourceFiles(dir: string, found: string[] = []): string[] {
 // The questions a listed line asks instead.
 const SOURCE = 'the one answer itself';
 const OVERRIDE_NAMES = 'the method names an override may carry, not which of them read';
-const REPEATABLE = 'whether a stopped or timed-out call may simply be repeated; the same set today, but a different question';
 const FETCH_BODY = 'whether a body may go out: fetch refuses one on GET and HEAD, whatever the gates decided';
 const REDIRECT = 'how a redirect rewrites the method (RFC 9110); HEAD keeps its method where GET is rewritten';
 const BULK_WIRE = 'what a bulk run puts on the wire for the method it sends; the gates read the acted method through isReadMethod';
@@ -92,7 +87,6 @@ const LISTED: ReadonlyArray<readonly [string, string, number, string]> = [
   ["src/core/bulk-external.ts", CONTRACT_SHAPE, 1, "const writes = contract.httpMethods.filter((m) => m !== 'GET');"],
   ["src/core/bulk-external.ts", BULK_WIRE, 1, "const payload = graphql !== undefined ? graphql.body : method !== 'GET' ? JSON.stringify(body) : undefined;"],
   ["src/core/bulk-external.ts", BULK_WIRE, 1, "if (method !== 'GET') headers['content-type'] = 'application/json';"],
-  ["src/core/bulk-external.ts", BULK_WIRE, 1, "const read = await readResponse(res, now(), method === 'GET' || graphql !== undefined, maxBytes);"],
   ["src/core/bulk-ledger.ts", CONTRACT_SHAPE, 1, "const writes = methods.filter((m) => m !== 'GET');"],
   ["src/core/network-guard.ts", REDIRECT, 1, "if (response.status === 303 && method !== 'GET' && method !== 'HEAD') {"],
   ["src/core/network-guard.ts", REDIRECT, 1, "} else if ((response.status === 301 || response.status === 302) && method !== 'GET' && method !== 'HEAD') {"],
@@ -119,9 +113,6 @@ const LISTED: ReadonlyArray<readonly [string, string, number, string]> = [
   ["src/tools/builtin/http.ts", REDIRECT, 1, "if (status === 303) return method !== 'GET' && method !== 'HEAD';"],
   ["src/tools/builtin/http.ts", REDIRECT, 1, "return (status === 301 || status === 302) && method !== 'GET' && method !== 'HEAD';"],
   ["src/tools/builtin/http.ts", REDIRECT, 1, "...(method === 'GET' ? { carried: true as const } : {}),"],
-  ["src/tools/builtin/http.ts", REPEATABLE, 2, "if ((verb === 'GET' || verb === 'HEAD') && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;"],
-  ["src/tools/builtin/http.ts", REPEATABLE, 1, "if (verb === 'GET' || verb === 'HEAD') return `${base}${read}`;"],
-  ["src/tools/builtin/http.ts", REPEATABLE, 1, "if (verb === 'GET' || verb === 'HEAD') return `${base}${read}. It only reads, so it can simply be repeated.`;"],
   ["src/tools/builtin/http.ts", VOCABULARY, 1, "method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'], description: 'HTTP method (default: GET)' },"],
   ["src/tools/builtin/http.ts", FETCH_BODY, 1, "typeof input.body === 'string' && method !== 'GET' && method !== 'HEAD'"],
   ["src/tools/builtin/http.ts", FETCH_BODY, 1, "const bodyGoesOut = typeof sentBody === 'string' && sentBody !== '' && method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD';"],
@@ -162,17 +153,19 @@ describe('the read set is written once', () => {
       "switch (m) { case 'GET': break; }",
       "const READ = /^(?:GET|HEAD)$/;",
       "if (method.toLowerCase() === 'get') {}",
+      // A quote inside a regex literal and a `//` inside a string, on the same line as the check.
+      "const PATH = /^[a-z'/]*$/; if (url.startsWith('https://') && method !== 'GET') return null;",
     ]) {
       expect(methodComparisons(line), line).toHaveLength(1);
     }
   });
 
   it('does not count a comment, or a method that is only sent', () => {
-    expect(methodComparisons("// if (m === 'GET' || m === 'HEAD')\n/* method !== 'GET' */")).toEqual([]);
+    expect(methodComparisons("// if (m === 'GET' || m === 'HEAD')\n/* method !== 'GET' */\nconst n = 1; // m === 'HEAD'")).toEqual([]);
     expect(methodComparisons("await fetch(url, { method: 'GET' });\nconst url = 'http://x/?a=//b'; const m = 'GET';")).toEqual([]);
   });
 
-  it('every comparison in the source is a listed one, as often as listed', () => {
+  it('every comparison in the source is a listed one, as often as listed', { timeout: 60_000 }, () => {
     const found = new Map<string, number>();
     for (const path of sourceFiles(join(ROOT, 'src'))) {
       const file = relative(ROOT, path);
