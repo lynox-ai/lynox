@@ -306,6 +306,8 @@ export const BULK_HALT_REASONS = {
   atomicRollbackIncomplete: 'a target of an atomic run could not be written, and rolling back the ones written before it did not complete',
   atomicStoppedRolledBack: 'the owner stopped an atomic run; the targets written before the stop were rolled back',
   atomicStoppedRollbackIncomplete: 'the owner stopped an atomic run, and rolling back the targets written before the stop did not complete',
+  atomicTimeRolledBack: 'an atomic run used up its time budget; the targets written before were rolled back',
+  atomicTimeRollbackIncomplete: 'an atomic run used up its time budget, and rolling back the targets written before did not complete',
   unavailable: 'the target system is not available',
   credential: 'the access credential for this host cannot be attached',
   unauthorized: 'the host did not accept the stored credential',
@@ -543,6 +545,11 @@ export interface PreviewTarget {
   markupChanges?: FieldMarkupChange[] | undefined;
   /** The owner took this target out of the write before approving (`deselectTarget`). */
   deselected: boolean;
+  /** This run wrote the target: recorded as applied, and not found already as planned. */
+  written: boolean;
+  /** A rollback or an undo took this run's write back (`undone_at`). After a rollback that did
+   *  not complete, a target that is `written` and not `undone` is one lynox left as it was. */
+  undone: boolean;
 }
 
 interface RunRow {
@@ -1437,12 +1444,14 @@ export class BulkLedger {
    */
   getPreview(runId: string, opts: { offset?: number | undefined; limit?: number | undefined } = {}): PreviewTarget[] {
     const rows = this.engineDb.getDb().prepare(
-      `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at FROM bulk_targets
-       WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
+      // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test.
+      `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
+         (applied_at IS NOT NULL AND found_unsent = 0 AND ${WRITING_SQL}) AS written, undone_at IS NOT NULL AS undone
+       FROM bulk_targets WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
-      deselected_at: string | null;
+      deselected_at: string | null; written: number; undone: number;
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
@@ -1473,7 +1482,7 @@ export class BulkLedger {
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
-        error: r.error, deselected: r.deselected_at !== null,
+        error: r.error, deselected: r.deselected_at !== null, written: r.written === 1, undone: r.undone === 1,
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
       };
