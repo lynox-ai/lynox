@@ -622,6 +622,7 @@
 							{/if}
 							{#if viewer === 'owner' && !held(trigger) && trigger.stamp_listed}
 								{@const listed = trigger.stamp_listed}
+								{@const note = listedNote(listed, trigger.paused === true)}
 								<div class="mt-2 text-xs text-text-muted" data-stamp-listed>
 									<span class="font-medium">{t('stamp.listed_heading')}:</span>
 									<ul class="mt-0.5">
@@ -629,7 +630,6 @@
 											<li data-stamp-entry={entry.state}>{listedLine(entry)}</li>
 										{/each}
 									</ul>
-									{@const note = listedNote(listed, trigger.paused === true)}
 									{#if note}
 										<p class="mt-0.5 text-warning" data-stamp-note>{note}</p>
 									{/if}
