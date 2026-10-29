@@ -8,6 +8,7 @@ import { ensureWorkspaceRoot, resolveWorkspaceRoot, translateLegacyWorkspacePath
 import { _resetWorkspaceAccess, leaseWorkspaceFor, workspaceAccess } from './workspace-access.js';
 import { closeWorkspaceBase, workspaceBase } from './workspace-rel.js';
 import { _resetCache, setTenantWorkspace } from './workspace.js';
+import { workspaceChangeset } from './changeset.js';
 
 /**
  * In shell sidecar mode the workspace is the fd the entrypoint hands over, and `/workspace` is only
@@ -105,6 +106,23 @@ describe('the workspace in shell sidecar mode (D3)', () => {
     const root = resolveWorkspaceRoot();
     expect(workspaceLegacyPending(root)).toBe(false);
     expect(translateLegacyWorkspacePath(join(data, 'workspace', 'ctx1', 'a.txt'), root)).toBe(`${WORKSPACE_LABEL}/ctx1/a.txt`);
+  });
+
+  it('a run\'s changes are saved, shown and rolled back through fd 3, keyed on the label', () => {
+    writeFileSync(join(tree, 'ctx1', 'a.txt'), 'v1\n');
+    const cs = workspaceChangeset('run-1');
+    try {
+      const shown = `${WORKSPACE_LABEL}/ctx1/a.txt`;
+      expect(cs.backupBeforeWrite(shown)).toBe(true);
+      writeFileAt(workspaceBase()!.anchor, 'a.txt', 'v2\n', { fileMode: 0o600 });
+      cs.recordWritten(shown);
+      const [change] = cs.getChanges();
+      expect(change).toMatchObject({ file: 'a.txt', absolutePath: shown, status: 'modified', originalContent: 'v1\n' });
+      expect(cs.rollbackAll()).toEqual([]);
+      expect(readFileSync(join(tree, 'ctx1', 'a.txt'), 'utf8')).toBe('v1\n');
+    } finally {
+      cs.cleanup();
+    }
   });
 });
 
