@@ -880,6 +880,12 @@ describe('the advance warning under a forced race', () => {
 
     const revoked = two();
     expect(claimAdvanceWarnings(raced(revoked.a, () => { revoked.c.ends.revoke('g-h@x.ch', NOW); }), NOW)).toEqual([]);
+    // Disabled or completed in between: the claim reads the plan again and leaves it out.
+    for (const change of ["UPDATE triggers SET enabled = 0 WHERE id = 'p'", "UPDATE triggers SET status = 'completed' WHERE id = 'p'"]) {
+      const t = two();
+      const w = claimAdvanceWarnings(raced(t.a, () => { t.c.db.prepare(change).run(); }), NOW);
+      expect(w.map((x) => x.keys.map((k) => k.triggerId)), change).toEqual([['q']]);
+    }
   });
 });
 
