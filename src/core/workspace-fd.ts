@@ -340,7 +340,8 @@ export class DirStateError extends Error {
 export function ensureSubAnchorWithMode(anchor: WorkspaceAnchor, name: string, dirMode: number, group: number, owner: number): WorkspaceAnchor {
   const parts = splitRel(name);
   if (parts.length !== 1) throw new WorkspaceAccessError('BAD_PATH', `a sub-anchor is one component, got ${JSON.stringify(name)}`);
-  const dir = walkDir(anchor, parts, { dirMode, group });
+  // A new directory gets its mode from the walk; group and mode are set below for new and old alike.
+  const dir = walkDir(anchor, parts, { dirMode });
   try {
     const before = fstatSync(dir.fd).uid;
     if (before !== owner) throw new DirStateError(`it belongs to uid ${before}, not to uid ${owner}`);
