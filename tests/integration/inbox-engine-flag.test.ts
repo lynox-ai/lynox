@@ -175,4 +175,13 @@ describe('Engine boot — unified-inbox flag', () => {
     expect(bootCalls[0]!.mistralApiKey).toBe('own-mistral-key');
     expect(bootCalls[0]!.meteredHost).toBeUndefined();
   });
+
+  it('off a pool tier the cold boot debits nothing for the US classifier either (control)', async () => {
+    process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
+    engine = new Engine({});
+    await engine.init();
+    expect(engine.getInboxRuntime()).not.toBeNull();
+    expect(bootCalls).toHaveLength(1);
+    expect(bootCalls[0]!.meteredHost).toBeUndefined();
+  });
 });

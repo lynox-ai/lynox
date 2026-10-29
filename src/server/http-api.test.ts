@@ -6093,6 +6093,8 @@ describe('LynoxHTTPApi', () => {
     it.each([
       ['managed', ['MISTRAL_API_KEY'], '', false],
       ['managed_pro', ['MISTRAL_API_KEY'], '', false],
+      ['managed_max', ['MISTRAL_API_KEY'], '', false],
+      ['eu', ['MISTRAL_API_KEY'], '', false],
       ['managed', [], 'pool-mistral-key', true],
       ['hosted', ['MISTRAL_API_KEY'], '', true],
       ['', ['MISTRAL_API_KEY'], '', true],
@@ -12862,9 +12864,9 @@ describe('LynoxHTTPApi', () => {
 
       // The inbox classifier reads its key once, when the inbox bootstraps, and a write here would
       // only reach it at the next restart. On an instance the control plane hosts that case cannot
-      // arise: the key comes from the control plane's environment, and neither a write nor a
-      // removal through this route reaches it. If either opens, the inbox key and its meter need
-      // a rebootstrap on the write as well.
+      // arise: neither a write nor a removal through this route reaches the key. It comes from the
+      // control plane's environment or from a migration import, and both take effect with a
+      // restart. If this route opens, the inbox key and its meter need a rebootstrap on the write.
       it.each([['managed', 403], ['managed_pro', 403], ['managed_max', 403], ['hosted', 403], ['', 200]] as const)(
         'PUT and DELETE /api/secrets/LYNOX_INBOX_MISTRAL_API_KEY in mode="%s" answer %s (self-host is the control)',
         async (mode, status) => {
@@ -12882,8 +12884,9 @@ describe('LynoxHTTPApi', () => {
             expect(mockSecretSet).toHaveBeenCalledTimes(status === 200 ? 1 : 0);
             expect(mockSecretDelete).toHaveBeenCalledTimes(status === 200 ? 1 : 0);
           } finally {
-            vi.unstubAllEnvs();
-            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+            // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
+            vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', '');
+            vi.stubEnv('LYNOX_MANAGED_MODE', '');
           }
         },
       );
