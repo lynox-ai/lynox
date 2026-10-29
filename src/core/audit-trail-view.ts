@@ -90,6 +90,43 @@ export interface TrailEvent {
   readonly phase: string;
   readonly at: string;
   readonly person: TrailPerson;
+  /** A read on a route the web UI polls by itself (`INTERFACE_POLLS`); the view groups these. */
+  readonly auto?: true | undefined;
+}
+
+/**
+ * The routes the web UI polls by itself, without the person doing anything, by the action
+ * `_recordedMandateRead` writes for them (`GET <route template>`). A helper's open tab leaves about
+ * 23 reads a minute on them (row 1034), and the owner's view groups them so the person's own steps stay
+ * findable. The trail itself keeps every row (D15).
+ *
+ * Decided here, from the route the engine dispatched, never from a mark the client sends. Listed
+ * are only routes without a path parameter, whose answer holds no session's messages (the task list
+ * does carry its tasks' titles and descriptions): a route that takes an id (`pending-prompt`) is
+ * not listed. Grouping is by route, not by query (the row does not record these queries, and D15
+ * stays as it is), so where the person opens the same route on purpose, that read is grouped too
+ * (the Tasks view, the cost history, chat's own check for a running run); opening the group shows
+ * it. A poll missing here is shown ungrouped, as before. `audit-trail-interface-polls.test.ts`
+ * holds this list against the pollers in the web UI.
+ */
+export const INTERFACE_POLLS: ReadonlySet<string> = new Set([
+  // threads.svelte.ts every 4 s (the nav's live-run marks), StatusBar.svelte every 30 s.
+  'GET /api/runs/active',
+  // StatusBar.svelte every 30 s.
+  'GET /api/providers/status',
+  // StatusBar.svelte every 30 s (`days=1`). Also the history views (`days=30`, `days=14`):
+  // „faltet auch das selbst geöffnete Fenster; aufklappbar sichtbar; kein Session-Inhalt“
+  // (sec-infra, 2026-10-28).
+  'GET /api/history/cost/daily',
+  // StatusBar.svelte every 30 s (`status=in_progress`). Also the Tasks view:
+  // „faltet auch das selbst geöffnete Fenster; aufklappbar sichtbar; kein Session-Inhalt“
+  // (sec-infra, 2026-10-28).
+  'GET /api/tasks',
+]);
+
+/** Whether a row is a read on a route the web UI polls by itself. Writes and steps never are. */
+export function isInterfacePoll(row: Pick<TrailRow, 'phase' | 'action'>): boolean {
+  return row.phase === 'read' && INTERFACE_POLLS.has(row.action);
 }
 
 /** Targets a run wrote and failed: summed over its windows, a lower bound when one did not say. */
@@ -312,7 +349,10 @@ function stepsOf(rows: readonly TrailRow[], src: TrailSources, sends: ReadonlyMa
         ...(judged.decidedBy !== undefined ? { decidedBy: judged.decidedBy } : {}),
       });
     } else {
-      out.push({ kind: 'event', id: `event:${String(r.id)}`, action: r.action, target: r.target, phase: r.phase, at: r.ts, person: personOf(r) });
+      out.push({
+        kind: 'event', id: `event:${String(r.id)}`, action: r.action, target: r.target, phase: r.phase, at: r.ts, person: personOf(r),
+        ...(isInterfacePoll(r) ? { auto: true as const } : {}),
+      });
     }
   }
   return out;
