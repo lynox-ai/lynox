@@ -407,11 +407,13 @@
 			if (outcome.kind === 'failed') { error = t(outcome.key); return; }
 			const resume = stampResumesSchedule;
 			closeStamp();
+			const after = stampOpening;
 			notice = t('workflow_library.stamp.stamped');
 			const listed = await loadWorkflows();
-			// No other view can open meanwhile: while the list reloads, its cards (and their buttons)
-			// are not rendered.
-			if (!resume) return;
+			// Another view opened meanwhile is the one on screen now, and the dialog stays shut. The
+			// cards are hidden while a list loads, but a rename or delete answered meanwhile reloads
+			// the list too and can bring them back before this reload ends.
+			if (after !== stampOpening || !resume) return;
 			// The dialog comes back on the workflow as it is NOW, not the one the list held before
 			// the detour: its contract, asking steps and parameters are what the schedule consents
 			// to. Typed values carry over where the parameter still exists, and a grant preview taken

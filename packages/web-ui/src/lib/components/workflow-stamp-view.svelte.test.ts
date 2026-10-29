@@ -307,4 +307,37 @@ describe('what the refuter of the fixes found', () => {
 		expect(target.textContent).toContain('Öffne „Planen“ noch einmal');
 	});
 
+
+	it('a view opened while the stamped list reloads keeps the screen, and the schedule dialog stays shut', async () => {
+		let releasePatch!: () => void;
+		let releaseList!: () => void;
+		const patchHeld = new Promise<void>((r) => { releasePatch = r; });
+		const listHeld = new Promise<void>((r) => { releaseList = r; });
+		const second = { ...WF, id: 'wf-2', name: 'Other' };
+		const both = { status: 200, body: { workflows: [WF, second], viewer: 'owner' } };
+		await open('owner', WF, {
+			// The page's load; the stamp's reload, held; the rename's reload, answered at once.
+			'GET /workflows/library': [both, { ...both, wait: listHeld }, both],
+			'PATCH /workflows/wf-2': [{ status: 200, body: {}, wait: patchHeld }],
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'GET /workflows/wf-2/stamp-preview': [{ status: 200, body: preview('d2') }],
+			'POST /workflows/wf-1/confirm': [{ status: 200, body: {} }],
+		});
+		// A slow rename of the second workflow is under way.
+		await click([...target.querySelectorAll<HTMLElement>('button')].filter((b) => b.textContent?.trim() === 'Umbenennen')[1]!);
+		await click(byText('Speichern'));
+		// The first one is scheduled, refused, stamped; its reload stays in flight.
+		await click(byText('Planen'));
+		await click(byText('Bestätigen & planen'));
+		await click(q('stamp-confirm'));
+		// The rename answers and reloads the list: the cards are back, and the second view opens.
+		releasePatch();
+		await settle();
+		await click([...target.querySelectorAll<HTMLElement>('[data-testid="stamp-review"]')][1]!);
+		releaseList();
+		await settle();
+		expect(q('stamp-dialog')?.textContent).toContain('Other');
+		expect(byText('Bestätigen & planen')).toBeNull();
+	});
 });
