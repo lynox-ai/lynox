@@ -1032,27 +1032,33 @@
 							<p class="whitespace-pre-wrap break-words">{visible(step.task)}</p>
 							{#if step.role}
 								<!-- First: a role can change the tools and the model below at run time. -->
-								<p class="mt-2" data-testid="stamp-role"><span class="text-text-subtle">{t('workflow_library.stamp.role')}:</span> <span class="font-mono break-all">{visible(step.role)}</span>{#if step.roleGrant?.readOnly} <span class="ml-1 rounded-[var(--radius-sm)] border border-border px-1 text-text-subtle">{t('workflow_library.stamp.role_read_only')}</span>{/if}</p>
 								{#if step.roleGrant}
 									{@const g = step.roleGrant}
-									<div data-testid="stamp-role-grant">
+									<!-- What the role sets, under one heading: no line claims to be what the run takes. -->
+									<p class="mt-2" data-testid="stamp-role"><span class="text-text-subtle">{t('workflow_library.stamp.role_heading')}</span> <span class="font-mono break-all">{visible(step.role)}</span>{#if g.readOnly} <span class="ml-1 rounded-[var(--radius-sm)] border border-border px-1 text-text-subtle">{t('workflow_library.stamp.role_read_only')}</span>{/if}</p>
+									<div data-testid="stamp-role-grant" class="ml-3">
 										<!-- The step's own value wins at run time; the role's applies only where the step sets none. -->
-										{#if g.model && !step.model}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_model')}:</span> <span class="font-mono break-all">{visible(g.model)}</span></p>{/if}
-										{#if g.effort && !step.effort}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_effort')}:</span> <span class="font-mono">{g.effort}</span></p>{/if}
+										{#if g.model && !step.model}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono break-all">{visible(g.model)}</span></p>{/if}
+										{#if g.effort && !step.effort}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.effort')}:</span> <span class="font-mono">{g.effort}</span></p>{/if}
 										{#if g.allowTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_allows')}:</span> {#if g.allowTools.length === 0}<span>{t('workflow_library.stamp.no_tools')}</span>{:else}<span class="font-mono break-all">{visible(g.allowTools.join(', '))}</span>{/if}</p>{/if}
 										{#if g.denyTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_blocks')}:</span> {#if g.denyTools.length === 0}<span>{t('workflow_library.stamp.no_tools')}</span>{:else}<span class="font-mono break-all">{visible(g.denyTools.join(', '))}</span>{/if}</p>{/if}
+										{#if g.readOnly && g.allowTools !== null && g.allowTools.length > 0}<p class="mt-1 text-text-subtle" data-testid="stamp-role-read-only-allows">{t('workflow_library.stamp.role_read_only_allows')}</p>{/if}
 									</div>
+									<p class="mt-1 text-text-subtle" data-testid="stamp-role-hint">{t('workflow_library.stamp.role_hint')}</p>
 								{:else}
-									<!-- A role the engine does not know: the step stops at run time. -->
+									<p class="mt-2" data-testid="stamp-role"><span class="text-text-subtle">{t('workflow_library.stamp.role')}:</span> <span class="font-mono break-all">{visible(step.role)}</span></p>
+									<!-- A role the engine does not know: the step stops at run time, so no hint on how its tools are worked out. -->
 									<p class="mt-1 text-warning" data-testid="stamp-role-unknown">{t('workflow_library.stamp.role_unknown')}</p>
 								{/if}
-								<p class="mt-1 text-text-subtle">{t('workflow_library.stamp.role_hint')}</p>
 							{/if}
 							{#if step.tools.length > 0}
 								<p class="mt-2"><span class="text-text-subtle">{t('workflow_library.stamp.tools')}:</span> <span class="font-mono break-all">{visible(step.tools.join(', '))}</span></p>
 							{/if}
 							{#if step.model}
 								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono break-all">{visible(step.model)}</span></p>
+							{:else if !step.roleGrant?.model && !(step.role && !step.roleGrant)}
+								<!-- Neither the step nor its role names a model: the engine runs it on fast. An unknown role stops the step, so no model is claimed. -->
+								<p class="mt-1" data-testid="stamp-model-default"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono">{t('workflow_library.stamp.model_default')}</span></p>
 							{/if}
 							{#if step.effort}
 								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.effort')}:</span> <span class="font-mono">{step.effort}</span></p>
@@ -1060,9 +1066,8 @@
 							{#if step.thinking}
 								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.thinking')}:</span> <span class="font-mono">{step.thinking}</span></p>
 							{/if}
-							{#if step.timeoutMs !== null}
-								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.timeout')}:</span> <span class="font-mono">{step.timeoutMs === 0 ? t('workflow_library.stamp.timeout_zero') : timeoutText(step.timeoutMs)}</span></p>
-							{/if}
+							<!-- No limit set means the engine's default, which is a limit all the same. -->
+							<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.timeout')}:</span> <span class="font-mono">{step.timeoutMs === null ? t('workflow_library.stamp.timeout_default') : step.timeoutMs === 0 ? t('workflow_library.stamp.timeout_zero') : timeoutText(step.timeoutMs)}</span></p>
 							{#if step.inputFrom.length > 0}
 								<p class="mt-1"><span class="text-text-subtle">{t('workflow.depends_on')}:</span> <span class="font-mono break-all">{visible(step.inputFrom.join(', '))}</span></p>
 							{/if}
