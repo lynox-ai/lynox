@@ -52,7 +52,7 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
-import { loadConfig, describePinForDisplay, admitBackgroundModel } from '../core/config.js';
+import { loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
@@ -697,10 +697,7 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
 // curated set is { Anthropic, Mistral }. There is no path to actual OpenAI
 // or any other free-text endpoint on Managed.
 const MANAGED_CURATED_PROVIDERS = new Set<string>(['anthropic', 'openai']);
-const MANAGED_OPENAI_MISTRAL_HOSTS = new Set<string>([
-  'https://api.mistral.ai/v1',
-  'https://api.mistral.ai',
-]);
+const MANAGED_OPENAI_MISTRAL_HOSTS: ReadonlySet<string> = POOL_MISTRAL_ENDPOINTS;
 // Every api_base_url a managed tenant may set: the curated Mistral preset hosts
 // (for the openai-compat protocol slot) PLUS Anthropic's canonical host (the
 // Anthropic provider default — normally sent empty/unset). Any other non-empty
@@ -708,7 +705,7 @@ const MANAGED_OPENAI_MISTRAL_HOSTS = new Set<string>([
 // allowlist for EVERY provider, not just openai.
 const MANAGED_CURATED_HOSTS = new Set<string>([
   ...MANAGED_OPENAI_MISTRAL_HOSTS,
-  'https://api.anthropic.com',
+  POOL_ANTHROPIC_ENDPOINT,
 ]);
 
 function enforceManagedProviderConstraints(
@@ -718,6 +715,8 @@ function enforceManagedProviderConstraints(
   // (write-accept ⟺ load-keep ⟺ resolve): a slot naming a blocked model gets
   // an honest 403 here, never a 200 followed by a silent load-time reroute.
   blockedModelIds: readonly string[],
+  // The provider and endpoint the config file holds now, as `GET /api/config` returns them.
+  stored: { provider?: string | undefined; api_base_url?: string | undefined },
 ): string | null {
   // Effective curated HYBRID-SLOT hosts (model-presets W3): the Fireworks host
   // joins the allowlist for tier_set/tier_preset slots ONLY when the operator opts
@@ -754,6 +753,14 @@ function enforceManagedProviderConstraints(
     const baseUrl = update['api_base_url'];
     if (typeof baseUrl === 'string' && baseUrl.length > 0 && !MANAGED_CURATED_HOSTS.has(baseUrl)) {
       return `Managed instance: cannot set api_base_url to '${baseUrl}' — only the curated Anthropic/Mistral endpoints are allowed.`;
+    }
+    // The pair counts, not the host alone: a Mistral URL beside the Anthropic provider would
+    // send the pool's Anthropic key to Mistral, and the reverse. Checked against the provider
+    // the save leaves in place. A value resent as stored passes: the Web UI resends every field
+    // on each save, and the loader already drops an unpaired one (`poolEndpointFor`).
+    const provider = typeof update['provider'] === 'string' ? update['provider'] : stored.provider;
+    if (typeof baseUrl === 'string' && baseUrl.length > 0 && baseUrl !== stored.api_base_url && poolEndpointFor(provider, baseUrl) !== baseUrl) {
+      return `Managed instance: api_base_url '${baseUrl}' does not belong to provider '${provider ?? 'anthropic'}'.`;
     }
   }
   // 3. tier_set (hybrid routing) carries a per-slot api_base_url — the SAME
@@ -7434,7 +7441,8 @@ export class LynoxHTTPApi {
         // malformed save can't pollute downstream config-merge state. The
         // effective model blocklist (env-merged by loadConfig) rides along so
         // the gate can 403 a blocked tier_set/tier_preset model honestly.
-        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? []);
+        const storedConfig = readUserConfig();
+        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? [], { provider: storedConfig.provider, api_base_url: storedConfig.api_base_url });
         if (providerReason) {
           errorResponse(res, 403, providerReason);
           return;
