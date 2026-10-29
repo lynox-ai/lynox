@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  STEP_TASK_HEAD, awaitsStampRefusal, confirmOutcome, offersStamp, parseStampPreview, stepHeading, templateText, visible,
+  STEP_TASK_HEAD, awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, onceTriggersLine, parseStampPreview, stepHeading, templateText, timeoutText, visible,
 } from './workflow-stamp.js';
 
 /** An answer of `GET /api/workflows/:id/stamp-preview` as the contract (242 r1) describes it. */
@@ -82,6 +82,57 @@ describe('parseStampPreview — a field that decides what runs is read whole or 
     const p = parseStampPreview(preview({ parameters: undefined, contract: null, mode: null, onFailure: undefined, steps: [{ id: 'a', task: 't' }] }))!;
     expect(p).not.toBeNull();
     expect([p.parameters, p.contract, p.mode, p.onFailure, p.steps[0]!.tools, p.steps[0]!.tool]).toEqual([[], null, null, null, [], null]);
+  });
+});
+
+describe('parseStampPreview — role, effort, thinking and time limit (contract r3)', () => {
+  const step = (over: Record<string, unknown>): Record<string, unknown> => preview({ steps: [{ id: 'a', task: 't', ...over }] });
+
+  it('reads them when set, and as none when absent or null', () => {
+    const p = parseStampPreview(step({ role: 'researcher', effort: 'high', thinking: 'adaptive', timeoutMs: 90_000 }))!;
+    expect(p.steps[0]).toMatchObject({ role: 'researcher', effort: 'high', thinking: 'adaptive', timeoutMs: 90_000 });
+    const q = parseStampPreview(step({ role: null, effort: null, thinking: null, timeoutMs: null }))!;
+    expect(q.steps[0]).toMatchObject({ role: null, effort: null, thinking: null, timeoutMs: null });
+    expect(parseStampPreview(step({}))!.steps[0]).toMatchObject({ role: null, effort: null, thinking: null, timeoutMs: null });
+  });
+
+  it('refuses a value it cannot show truthfully: a role must not vanish while still being stamped', () => {
+    for (const over of [{ role: 3 }, { effort: 'huge' }, { effort: 2 }, { thinking: true }, { thinking: 'on' }, { timeoutMs: '90s' }, { timeoutMs: -1 }, { timeoutMs: Number.NaN }]) {
+      expect(parseStampPreview(step(over)), JSON.stringify(over)).toBeNull();
+    }
+  });
+
+  it('reads a workflow with no steps: it runs nothing, and can be stamped', () => {
+    expect(parseStampPreview(preview({ steps: [] }))!.steps).toEqual([]);
+  });
+});
+
+describe('timeoutText — a time limit in seconds or minutes, never raw milliseconds', () => {
+  it('rounds up to whole seconds below a minute, and shows minutes above', () => {
+    expect([timeoutText(500), timeoutText(30_000), timeoutText(59_001), timeoutText(60_000), timeoutText(150_000)])
+      .toEqual(['1 s', '30 s', '1 min', '1 min', '2 min 30 s']);
+  });
+});
+
+describe('onceTriggersLine — plans that run only once stay off after the stamp', () => {
+  it('names one, or many, and says nothing for none', () => {
+    expect(onceTriggersLine(1)).toEqual({ key: 'workflow_library.stamp.once_one', n: 1 });
+    expect(onceTriggersLine(3)).toEqual({ key: 'workflow_library.stamp.once_many', n: 3 });
+    expect(onceTriggersLine(0)).toBeNull();
+  });
+
+  it('words it as a condition when the engine does not count', () => {
+    for (const v of [undefined, null, '2', 1.5, -1]) {
+      expect(onceTriggersLine(v), String(v)).toEqual({ key: 'workflow_library.stamp.once_unknown', n: 0 });
+    }
+  });
+});
+
+describe("awaitsLineKey — the owner's own change reads differently", () => {
+  it('words the line by who changed the workflow', () => {
+    expect(awaitsLineKey('owner')).toBe('workflow_library.stamp.awaits_at_schedule_own');
+    expect(awaitsLineKey('mandate')).toBe('workflow_library.stamp.awaits_at_schedule');
+    expect(awaitsLineKey(null)).toBe('workflow_library.stamp.awaits_at_schedule');
   });
 });
 

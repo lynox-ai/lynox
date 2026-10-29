@@ -1,6 +1,7 @@
 /**
- * The owner's stamp of a workflow a mandate built or changed (register 242 (c)): what the
- * library shows, and what the answers of the two stamp routes mean.
+ * The owner's stamp of a workflow that waits for it — one a mandate built or changed, or the owner's
+ * own whose steps changed since the last stamp (register 242 (c), contract r3): what the library
+ * shows, and what the answers of the two stamp routes mean.
  *
  * `GET /api/workflows/:id/stamp-preview` says what would run and returns the digest of exactly
  * that (`expect`). `POST /api/workflows/:id/confirm` takes the digest back and stamps only if the
@@ -22,7 +23,17 @@ export interface StampStep {
   tools: string[];
   model: string | null;
   inputFrom: string[];
+  /** A role can change the step's tools and model at run time, so it is shown by name. */
+  role: string | null;
+  effort: StampEffort | null;
+  thinking: StampThinking | null;
+  timeoutMs: number | null;
 }
+
+export const STAMP_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type StampEffort = (typeof STAMP_EFFORTS)[number];
+export const STAMP_THINKING = ['enabled', 'adaptive', 'disabled'] as const;
+export type StampThinking = (typeof STAMP_THINKING)[number];
 
 export interface StampParameter {
   name: string;
@@ -49,6 +60,12 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 const BAD = Symbol('bad');
 /** Absent or null is "none"; a string is itself; anything else is BAD. */
 const optStr = (v: unknown): string | null | typeof BAD => (v === undefined || v === null ? null : typeof v === 'string' ? v : BAD);
+/** Absent or null is none; one of `values` is itself; anything else is BAD. */
+const optOneOf = <T extends string>(v: unknown, values: readonly T[]): T | null | typeof BAD =>
+  v === undefined || v === null ? null : typeof v === 'string' && (values as readonly string[]).includes(v) ? (v as T) : BAD;
+/** Absent or null is none; a finite, non-negative number is itself; anything else is BAD. */
+const optMs = (v: unknown): number | null | typeof BAD =>
+  v === undefined || v === null ? null : typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : BAD;
 /** Absent or null is the empty list; an array of strings is itself; anything else, or any non-string entry, is BAD. */
 const optStrings = (v: unknown): string[] | typeof BAD => {
   if (v === undefined || v === null) return [];
@@ -76,11 +93,16 @@ export function parseStampPreview(body: unknown): StampPreview | null {
     const tools = optStrings(s['tools']);
     const model = optStr(s['model']);
     const inputFrom = optStrings(s['inputFrom']);
+    const role = optStr(s['role']);
+    const effort = optOneOf(s['effort'], STAMP_EFFORTS);
+    const thinking = optOneOf(s['thinking'], STAMP_THINKING);
+    const timeoutMs = optMs(s['timeoutMs']);
     if (tool === BAD || tools === BAD || model === BAD || inputFrom === BAD) return null;
+    if (role === BAD || effort === BAD || thinking === BAD || timeoutMs === BAD) return null;
     const inputTemplate = s['inputTemplate'] ?? null;
     // A call's input without the call: the view prints the input under the tool, so it would vanish.
     if (inputTemplate !== null && tool === null) return null;
-    steps.push({ id: s['id'], task: s['task'], tool, inputTemplate, tools, model, inputFrom });
+    steps.push({ id: s['id'], task: s['task'], tool, inputTemplate, tools, model, inputFrom, role, effort, thinking, timeoutMs });
   }
   const contract = body['contract'] === undefined || body['contract'] === null ? null : optStrings(body['contract']);
   if (contract === BAD) return null;
@@ -156,6 +178,34 @@ export type ConfirmOutcome =
  * Only a 2xx stamps. `steps_changed` is the one refusal with a way forward inside the view; every
  * other answer, including a 409 with another code or none, is a failure — never read as "stamped".
  */
+/** A step's time limit as a person reads it: seconds below a minute, minutes (and seconds) above. */
+export function timeoutText(ms: number): string {
+  const s = Math.ceil(ms / 1000);
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  return s % 60 === 0 ? `${m} min` : `${m} min ${s % 60} s`;
+}
+
+/**
+ * The line after a stamp about plans that run only once. The engine switches such a plan off
+ * when it fires while the workflow waits, and leaves it off: someone has to switch it on again.
+ * `disabledOnce` is how many there are; an engine that does not count sends none, and the line
+ * is then worded as a condition, since there may be no such plan at all.
+ */
+export function onceTriggersLine(disabledOnce: unknown): { key: string; n: number } | null {
+  if (disabledOnce === undefined || disabledOnce === null) return { key: 'workflow_library.stamp.once_unknown', n: 0 };
+  if (typeof disabledOnce !== 'number' || !Number.isInteger(disabledOnce) || disabledOnce < 0) {
+    return { key: 'workflow_library.stamp.once_unknown', n: 0 };
+  }
+  if (disabledOnce === 0) return null;
+  return { key: disabledOnce === 1 ? 'workflow_library.stamp.once_one' : 'workflow_library.stamp.once_many', n: disabledOnce };
+}
+
+/** Which line a schedule refused for the stamp shows: the owner's own change reads differently. */
+export function awaitsLineKey(changedBy: StampPreview['changedBy']): string {
+  return changedBy === 'owner' ? 'workflow_library.stamp.awaits_at_schedule_own' : 'workflow_library.stamp.awaits_at_schedule';
+}
+
 export function confirmOutcome(status: number, code: string | undefined): ConfirmOutcome {
   if (status >= 200 && status < 300) return { kind: 'stamped' };
   if (status === 409 && code === 'steps_changed') return { kind: 'changed' };

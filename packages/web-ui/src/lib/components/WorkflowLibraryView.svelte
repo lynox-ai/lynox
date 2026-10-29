@@ -6,7 +6,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
-	import { awaitsStampRefusal, confirmOutcome, offersStamp, parseStampPreview, stepHeading, templateText, visible, type StampPreview } from '../utils/workflow-stamp.js';
+	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, onceTriggersLine, parseStampPreview, stepHeading, templateText, timeoutText, visible, type StampPreview } from '../utils/workflow-stamp.js';
 
 	// The card actions show on hover only where there is room beside the name AND a pointer that
 	// hovers. Below `md` they sit under the name and stay visible, and on a device without hover
@@ -395,7 +395,7 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ expect: shown.expect }),
 			});
-			const body = (await res.json().catch(() => null)) as { code?: string } | null;
+			const body = (await res.json().catch(() => null)) as { code?: string; disabledOnce?: unknown } | null;
 			if (opening !== stampOpening) return;
 			const outcome = confirmOutcome(res.status, body?.code);
 			if (outcome.kind === 'changed') {
@@ -408,7 +408,12 @@
 			const resume = stampResumesSchedule;
 			closeStamp();
 			const after = stampOpening;
-			notice = t('workflow_library.stamp.stamped');
+			// Plans that run only once and fired while the workflow waited stay off: say so, and where
+			// to switch them on, or the notice promises more than the stamp did.
+			const once = onceTriggersLine(body?.disabledOnce);
+			notice = once
+				? `${t('workflow_library.stamp.stamped')} ${tf(once.key, { n: String(once.n) })}`
+				: t('workflow_library.stamp.stamped');
 			const listed = await loadWorkflows();
 			// Another view opened meanwhile is the one on screen now, and the dialog stays shut. The
 			// cards are hidden while a list loads, but a rename or delete answered meanwhile reloads
@@ -950,8 +955,9 @@
 			<h2 class="text-sm font-medium mb-1 break-words">{t('workflow_library.stamp.review')}: {visible(stampWf.name)}</h2>
 			{#if stampLine === 'steps_changed'}
 				<p bind:this={stampChangedLine} role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.refused.steps_changed')}</p>
-			{:else if stampLine === 'awaits_at_schedule'}
-				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.awaits_at_schedule')}</p>
+			{:else if stampLine === 'awaits_at_schedule' && stampPreview}
+				<!-- Worded by who changed it, which only the preview says: the line waits for it. -->
+				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t(awaitsLineKey(stampPreview.changedBy))}</p>
 			{/if}
 			{#if error}
 				<p class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3">{error}</p>
@@ -1006,11 +1012,24 @@
 							{/if}
 							<p class="text-[10px] uppercase tracking-widest text-text-subtle mt-2 mb-0.5">{t('workflow.task')}</p>
 							<p class="whitespace-pre-wrap break-words">{visible(step.task)}</p>
+							{#if step.role}
+								<!-- First: a role can change the tools and the model below at run time. -->
+								<p class="mt-2" data-testid="stamp-role"><span class="text-text-subtle">{t('workflow_library.stamp.role')}:</span> <span class="font-mono break-all">{visible(step.role)}</span></p>
+							{/if}
 							{#if step.tools.length > 0}
 								<p class="mt-2"><span class="text-text-subtle">{t('workflow_library.stamp.tools')}:</span> <span class="font-mono break-all">{visible(step.tools.join(', '))}</span></p>
 							{/if}
 							{#if step.model}
 								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono break-all">{visible(step.model)}</span></p>
+							{/if}
+							{#if step.effort}
+								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.effort')}:</span> <span class="font-mono">{step.effort}</span></p>
+							{/if}
+							{#if step.thinking}
+								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.thinking')}:</span> <span class="font-mono">{step.thinking}</span></p>
+							{/if}
+							{#if step.timeoutMs !== null}
+								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.timeout')}:</span> <span class="font-mono">{timeoutText(step.timeoutMs)}</span></p>
 							{/if}
 							{#if step.inputFrom.length > 0}
 								<p class="mt-1"><span class="text-text-subtle">{t('workflow.depends_on')}:</span> <span class="font-mono break-all">{visible(step.inputFrom.join(', '))}</span></p>
