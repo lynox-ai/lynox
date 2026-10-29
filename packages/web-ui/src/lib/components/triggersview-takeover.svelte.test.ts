@@ -111,6 +111,10 @@ describe('the button at a paused plan', () => {
 		await render();
 		expect(button()?.textContent?.trim()).toBe('Übernehmen');
 	});
+	it('ends the row of controls, where the hidden ones hold their place (ux)', async () => {
+		await render();
+		expect(button()?.parentElement?.lastElementChild).toBe(button());
+	});
 	it('not for a helper, not at a bulk run, not at a plan that is not paused', async () => {
 		viewer = 'mandate';
 		await render();

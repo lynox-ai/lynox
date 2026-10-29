@@ -2066,6 +2066,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'takeover.notice.revoked_one': { de: 'Der Zugang von {name} wurde widerrufen. Am Plan „{plan}“ hat {name} etwas angelegt oder geändert, er ist darum pausiert. Übernimm ihn, wenn er weiterlaufen soll.', en: '{name}\'s access was revoked. {name} created or changed something in the plan “{plan}”, so it is paused. Take it over if it should keep running.' },
 	'takeover.notice.no_advance': { de: 'Eine Vorwarnung gab es nicht.', en: 'There was no advance notice.' },
 	'nav.paused_badge': { de: 'Pausierte Pläne: {count}', en: 'Paused plans: {count}' },
+	'nav.open_menu': { de: 'Menü öffnen', en: 'Open menu' },
 	'approvals.setup.set_up_by_taken_over_you': { de: 'Eingerichtet von {name}, von dir übernommen', en: 'Set up by {name}, taken over by you' },
 	'approvals.setup.changed_by_taken_over_you': { de: 'Geändert von {name}, von dir übernommen', en: 'Changed by {name}, taken over by you' },
 	'approvals.setup.set_up_by_taken_over_owner': { de: 'Eingerichtet von {name}, vom Inhaber übernommen', en: 'Set up by {name}, taken over by the owner' },

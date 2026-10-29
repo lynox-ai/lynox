@@ -854,7 +854,7 @@
 			<header class="flex items-center justify-between h-12 px-4 border-b border-border bg-bg shrink-0">
 				<!-- Left: hamburger (mobile) + logo -->
 				<div class="flex items-center gap-3">
-					<button onclick={() => { sidebarOpen = true; langDropdownOpen = false; }} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label={['Open menu', ...foldedBadges.map((item) => tf(item.badgeLabelKey ?? 'nav.approvals_badge', { count: String(item.badge) }))].join('. ')}>
+					<button onclick={() => { sidebarOpen = true; langDropdownOpen = false; }} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label={[t('nav.open_menu'), ...foldedBadges.map((item) => tf(item.badgeLabelKey ?? 'nav.approvals_badge', { count: String(item.badge) }))].join('. ')}>
 						<span class="relative inline-flex">
 							<Icon name="hamburger" size="md" />
 							{#if foldedBadges.length > 0}

@@ -124,7 +124,8 @@ function memberChangeLines(p: TakeoverPreview): TakeoverLine[] {
 
 /**
  * T-3: a connection a helper made with their own account no longer counts once the owner takes over.
- * The account follows in brackets, unless it is the helper's own address, already named (ux).
+ * The account follows in brackets, unless it is the helper's own address, already named (ux); an
+ * address is compared without case.
  */
 function connectionLines(p: TakeoverPreview): TakeoverLine[] {
 	return p.connections.map((c) => ({
@@ -132,7 +133,7 @@ function connectionLines(p: TakeoverPreview): TakeoverLine[] {
 		text: tf('takeover.connection', {
 			name: c.by ?? t('takeover.connection_someone'),
 			provider: c.provider,
-			account: c.account !== null && c.account !== '' && c.account !== c.by ? ` (${c.account})` : '',
+			account: c.account !== null && c.account !== '' && c.account.toLowerCase() !== c.by?.toLowerCase() ? ` (${c.account})` : '',
 		}),
 	}));
 }

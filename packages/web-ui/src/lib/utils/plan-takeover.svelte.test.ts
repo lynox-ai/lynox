@@ -146,6 +146,8 @@ describe('T-3: a helper\'s own connection', () => {
 	it('leaves the account out when it is the helper\'s own address, already named (ux)', () => {
 		const p = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'Google Sheets', account: 'ida@x.ch', by: 'ida@x.ch' }] });
 		expect(takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text.startsWith('ida@x.ch hat Google Sheets mit einem eigenen Konto verbunden. Nach')).toBe(true);
+		const cased = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'Google Sheets', account: 'Ida@X.ch', by: 'ida@x.ch' }] });
+		expect(takeoverLines(cased, fmt).find((l) => l.kind === 'connection')?.text.startsWith('ida@x.ch hat Google Sheets mit einem eigenen Konto verbunden. Nach')).toBe(true);
 		setLocale('en');
 		const unknown = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'Google Sheets', account: 'ida@x.ch', by: null }] });
 		expect(takeoverLines(unknown, fmt).find((l) => l.kind === 'connection')?.text.startsWith('Someone with access connected Google Sheets with an account of their own (ida@x.ch). After')).toBe(true);
