@@ -2173,7 +2173,8 @@ export class Agent implements IAgent {
             model: this.model,
             untrusted: turnUntrusted,
             reason: 'trail_unavailable',
-            runId: this.currentRunId,
+            // The run the refused row would have named: the actor's, held at the end of the turn.
+            runId: actor.runId,
           });
           continue;
         }

@@ -162,11 +162,13 @@ describe('E1: each recovered fact under its own capture#durable row', () => {
   it('fail-closed: a log that refuses the row → no write, counted as trail_unavailable', async () => {
     const log = testAuditLog();
     sdk.reply = factsReply(['Petra Meier ist bei Veltamare die Ansprechperson für Bestellungen.']);
-    const { inner, write } = dkAgent(MANDATE, failingNth(log, 'capture#durable', 1));
+    const { agent, inner, write } = dkAgent(MANDATE, failingNth(log, 'capture#durable', 1));
     inner._captureAtTurnEnd(ANSWER);
+    // The line names the run the refused row would have: the turn's, not whatever runs next.
+    agent.currentRunId = 'run-2';
     await Promise.all(inner._pendingMemory);
     expect(write).not.toHaveBeenCalled();
-    expect(telemetry.lines.filter(l => l['event'] === 'capture_suppressed').map(l => l['reason'])).toEqual(['trail_unavailable']);
+    expect(telemetry.lines.filter(l => l['event'] === 'capture_suppressed').map(l => [l['reason'], l['runId']])).toEqual([['trail_unavailable', 'run-1']]);
   });
 
   it('B6: three facts, the log refuses the second row → facts 1 and 3 written, 2 not, one trail_unavailable', async () => {
@@ -254,13 +256,15 @@ describe('E2: maybeUpdate writes each namespace under its own capture#extract ro
     const mem = memory();
     const append = mem.append.bind(mem);
     vi.spyOn(mem, 'append').mockImplementation(async (ns, text) => {
-      if (ns === 'methods') throw new Error('disk gone');
+      // An fs error names the scope's path, and a user scope's directory carries a chosen id.
+      if (ns === 'methods') throw Object.assign(new Error("ENOSPC: no space left, open '/data/scopes/user-PLANTED-ID/methods.md'"), { code: 'ENOSPC' });
       return append(ns, text);
     });
     await mem.maybeUpdate(LONG, 1, 't-1', 'run-1', undefined, { principal: MANDATE, runId: 'run-1' }, log.log);
     expect(await mem.load('knowledge')).toContain('Veltamare orders quarterly');
     expect(extraction.map(e => e.status)).toEqual(['error']);
-    expect(stderrText()).toContain('[lynox:memory] auto extraction for methods failed: disk gone');
+    expect(stderrText()).toContain('[lynox:memory] auto extraction for methods failed: ENOSPC');
+    expect(stderrText()).not.toContain('PLANTED-ID');
   });
 
   it('the owner: written and published, no row', async () => {

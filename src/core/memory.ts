@@ -198,6 +198,14 @@ export async function exportMemoryDir(baseDir: string): Promise<MemoryDirExport>
   return { scopes, mayBeIncomplete };
 }
 
+/** What a failure is, without its message: `code` when it has one (`ENOSPC`), else its name. */
+function errorKind(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,40}$/.test(code)) return code;
+  const name = err instanceof Error ? err.name : '';
+  return /^[A-Za-z]{1,40}$/.test(name) ? name : 'error';
+}
+
 export class Memory implements IMemory {
   private client: Anthropic;
   private readonly cache = new Map<string, string>();
@@ -755,7 +763,9 @@ export class Memory implements IMemory {
           process.stderr.write(`[lynox:trail] auto extraction for ${ns} refused: its row could not be written\n`);
           return;
         }
-        process.stderr.write(`[lynox:memory] auto extraction for ${ns} failed: ${getErrorMessage(r.reason)}\n`);
+        // The code or the name, never the message: an fs error's message carries the scope's
+        // path, and a user scope's directory is named after a user-chosen id.
+        process.stderr.write(`[lynox:memory] auto extraction for ${ns} failed: ${errorKind(r.reason)}\n`);
         failure ??= { reason: r.reason };
       });
       // A real failure reports as it did before the split; a refusal alone is no error.

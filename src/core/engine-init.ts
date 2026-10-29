@@ -32,6 +32,7 @@ import type { AuditLog } from './audit-log.js';
 import { runOutsideCallSlot } from './call-connection.js';
 import { ifReturned, ifStored, InstanceWriteUnrecorded, withInstanceWriteAs, type InstanceTargetPairs } from './instance-trail.js';
 import { ALL_NAMESPACES } from '../types/index.js';
+import { INSTANCE_WRITE_SITES } from './mandate-tool-lock.js';
 import type { KnowledgeStoreResult } from '../types/index.js';
 import { configurePersistentBudget } from './session-budget.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
@@ -842,6 +843,22 @@ export function derivedStoreCounts(r: KnowledgeStoreResult): InstanceTargetPairs
   ];
 }
 
+/** The shape `newCorrelationId()` gives a row's correlation id: a lowercase uuid. */
+const CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The act a derived row names, as far as it can be believed: the message comes off a process-wide
+ * channel anyone in the process can publish on, untyped at the subscriber. A site that is not on
+ * `INSTANCE_WRITE_SITES`, or a ref not shaped like a correlation id, is dropped — the row is still
+ * written, without that pair, rather than carrying a value a publisher made up.
+ */
+export function derivedActPairs(trail: unknown): InstanceTargetPairs {
+  const t = (typeof trail === 'object' && trail !== null ? trail : {}) as { site?: unknown; correlationId?: unknown };
+  const site = typeof t.site === 'string' && (INSTANCE_WRITE_SITES as readonly string[]).includes(t.site) ? t.site : undefined;
+  const ref = typeof t.correlationId === 'string' && CORRELATION_ID.test(t.correlationId) ? t.correlationId : undefined;
+  return [['from', site], ['ref', ref]];
+}
+
 /** A namespace as the trail may name it: one of the fixed ones, or `other`. */
 function namespaceLabel(ns: unknown): string {
   return typeof ns === 'string' && (ALL_NAMESPACES as readonly string[]).includes(ns) ? ns : 'other';
@@ -938,7 +955,7 @@ export function setupMemoryStoreSubscription(
           const trail = data.trail;
           await withInstanceWriteAs(actor, auditLogOf?.() ?? null, {
             site: 'derived#memory', kind: 'create', store: 'knowledge',
-            target: () => [['from', trail?.site], ['ref', trail?.correlationId]], main: ['store'],
+            target: () => derivedActPairs(trail), main: ['store'],
           }, async (w) => {
             const result = await w.run('store', () => store(), ifStored);
             w.counts(derivedStoreCounts(result));

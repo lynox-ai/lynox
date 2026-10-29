@@ -969,8 +969,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     createdAt: string | undefined,
     threadAnchorSubjectId: string | null,
     /**
-     * Counted into once the transaction has committed: the subjects it minted. Not its edges:
-     * this mirror re-asserts the edges the legacy write above already inserted and counted.
+     * Counted into once the transaction has committed: the subjects it minted. Not its edges.
+     * Before the cutover the count of new edges is the legacy write's: every row it inserts into
+     * agent-memory.db `relations`. The `relationships` this mirror upserts in engine.db, new ones
+     * included, are not counted, so `new_relations` there says what the legacy graph gained.
      */
     created: KnowledgeCreatedCounts,
   ): void {
