@@ -15,7 +15,7 @@
 
 import { getApiBase } from '../config.svelte.js';
 import { addToast } from './toast.svelte.js';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 import { migrationWorkspaceNotice } from '../backup-coverage.js';
 
 // ── Types ──
@@ -262,6 +262,9 @@ function handleSSEEvent(event: string, data: Record<string, unknown>): void {
 				// files stayed behind (ux U-046).
 				const omitted = migrationWorkspaceNotice(result, false);
 				if (omitted) addToast(t(omitted.toast), 'info', 8000);
+				// Files the export could not carry: not the green toast either (row 1033, ux U-056).
+				else if (doneSkipped.length === 1) addToast(t('migration.success_skipped_one'), 'info', 8000);
+				else if (doneSkipped.length > 1) addToast(tf('migration.success_skipped_many', { n: String(doneSkipped.length) }), 'info', 8000);
 				else addToast(t('migration.success'), 'success', 5000);
 			} else {
 				error = t('migration.error_restore');

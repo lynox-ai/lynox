@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { t, tf, setLocale, getLocale } from '../i18n.svelte.js';
-import { reset, setTarget, startMigration, getStep } from '../stores/migration.svelte.js';
+import { reset, setTarget, startMigration, getStep, getDoneSkipped } from '../stores/migration.svelte.js';
 import { getToasts, dismissToast } from '../stores/toast.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
@@ -73,6 +73,7 @@ const summary = (): string | undefined => skippedBlock()?.querySelector('summary
 const paths = (): string[] => [...(skippedBlock()?.querySelectorAll('li') ?? [])].map((li) => li.textContent ?? '');
 const nextLine = (): string | undefined => target.querySelector('[data-testid="migration-skipped-next"]')?.textContent?.trim();
 const omittedLine = (): string | undefined => target.querySelector('[data-testid="migration-workspace-omitted"]')?.textContent?.trim();
+const toasts = (): Array<[string, string]> => getToasts().map((toast) => [toast.type, toast.message]);
 
 describe('files the migration could not transfer', () => {
 	const initialLocale = getLocale();
@@ -82,6 +83,7 @@ describe('files the migration could not transfer', () => {
 		await migrate();
 		expect(skippedBlock()).toBeNull();
 		expect(nextLine()).toBeUndefined();
+		expect(toasts()).toEqual([['success', t('migration.success')]]);
 	});
 
 	it('one file: the singular, its path, and the next step', async () => {
@@ -92,6 +94,8 @@ describe('files the migration could not transfer', () => {
 		expect(nextLine()).toBe(t('migration.workspace_omitted_self'));
 		// Closed until asked: the count is what the step says first.
 		expect(skippedBlock()?.open).toBe(false);
+		// Not the green toast: it is read and dismissed with the files left behind (as in U-046).
+		expect(toasts()).toEqual([['info', t('migration.success_skipped_one')]]);
 	});
 
 	it('three files: the count, and every path', async () => {
@@ -99,6 +103,14 @@ describe('files the migration could not transfer', () => {
 		await migrate();
 		expect(summary()).toBe(tf('migration.skipped_many', { n: '3' }));
 		expect(paths()).toEqual(['workspace/a', 'workspace/b', 'workspace/c']);
+		expect(toasts()).toEqual([['info', tf('migration.success_skipped_many', { n: '3' })]]);
+	});
+
+	it('exactly 50: every path, and no "more" line', async () => {
+		done = { ...done, skipped: Array.from({ length: 50 }, (_, i) => `workspace/f${String(i)}`) };
+		await migrate();
+		expect(paths()).toHaveLength(50);
+		expect(skippedBlock()?.textContent).not.toContain(tf('migration.skipped_more', { m: '0' }));
 	});
 
 	it('more than 50: the full count, 50 paths, and how many more', async () => {
@@ -116,18 +128,40 @@ describe('files the migration could not transfer', () => {
 		expect(omittedLine()).toBe(t('migration.workspace_omitted_self'));
 		expect(nextLine()).toBeUndefined();
 		expect(summary()).toBe(t('migration.skipped_one'));
+		// The workspace notice's toast, from U-046.
+		expect(toasts()).toEqual([['info', t('migration.success_without_workspace')]]);
+	});
+
+	it('shows a bidi control in a name instead of letting it reverse the path', async () => {
+		done = { ...done, skipped: ['workspace/inv\u202Egnp.exe'] };
+		await migrate();
+		expect(paths()).toEqual(['workspace/inv\\u{202E}gnp.exe']);
 	});
 
 	it('a second migration in the same wizard does not keep the first one\'s list', async () => {
 		done = { ...done, skipped: ['workspace/a'] };
 		await migrate();
 		expect(paths()).toEqual(['workspace/a']);
-		done = { success: true, verification: VERIFICATION };
+		// The second one fails, so no `done` of its own clears the list: starting it must.
+		done = { success: false };
 		setTarget('https://target.example.com', 'a'.repeat(64));
 		await startMigration();
 		await settle();
-		expect(getStep()).toBe('done');
-		expect(skippedBlock()).toBeNull();
+		expect(getStep()).toBe('error');
+		expect(getDoneSkipped()).toEqual([]);
+	});
+
+	it('reset clears the list', async () => {
+		done = { ...done, skipped: ['workspace/a'] };
+		await migrate();
+		reset();
+		expect(getDoneSkipped()).toEqual([]);
+	});
+
+	it('keeps only the names of a list that holds other values too', async () => {
+		done = { ...done, skipped: ['workspace/a', 7, null, 'workspace/b'] };
+		await migrate();
+		expect(paths()).toEqual(['workspace/a', 'workspace/b']);
 	});
 
 	it('ignores a `skipped` that is not a list of names', async () => {
@@ -146,12 +180,16 @@ describe('files the migration could not transfer', () => {
 
 	it('the texts, word for word (ux U-056)', () => {
 		setLocale('de');
-		expect(t('migration.skipped_one')).toBe('1 Datei wurde nicht übertragen (eine Verknüpfung oder ein Name, der sich nicht übertragen lässt).');
-		expect(tf('migration.skipped_many', { n: '3' })).toBe('3 Dateien wurden nicht übertragen (Verknüpfungen oder Namen, die sich nicht übertragen lassen).');
+		expect(t('migration.skipped_one')).toBe('1 Datei wurde nicht übertragen. Verknüpfungen, Sonderdateien und manche Namen lassen sich nicht übertragen.');
+		expect(tf('migration.skipped_many', { n: '3' })).toBe('3 Dateien wurden nicht übertragen. Verknüpfungen, Sonderdateien und manche Namen lassen sich nicht übertragen.');
 		expect(tf('migration.skipped_more', { m: '3' })).toBe('… und 3 weitere');
+		expect(t('migration.success_skipped_one')).toBe('Migration abgeschlossen. 1 Datei wurde nicht übertragen.');
+		expect(tf('migration.success_skipped_many', { n: '3' })).toBe('Migration abgeschlossen. 3 Dateien wurden nicht übertragen.');
 		setLocale('en');
-		expect(t('migration.skipped_one')).toBe('1 file was not transferred (a link, or a name that cannot be transferred).');
-		expect(tf('migration.skipped_many', { n: '3' })).toBe('3 files were not transferred (links, or names that cannot be transferred).');
+		expect(t('migration.skipped_one')).toBe('1 file was not transferred. Links, special files and some names cannot be transferred.');
+		expect(tf('migration.skipped_many', { n: '3' })).toBe('3 files were not transferred. Links, special files and some names cannot be transferred.');
 		expect(tf('migration.skipped_more', { m: '3' })).toBe('… and 3 more');
+		expect(t('migration.success_skipped_one')).toBe('Migration complete. 1 file was not transferred.');
+		expect(tf('migration.success_skipped_many', { n: '3' })).toBe('Migration complete. 3 files were not transferred.');
 	});
 });

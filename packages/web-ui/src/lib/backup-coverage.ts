@@ -61,6 +61,15 @@ export function backupCoverageNotice(backup: BackupCoverageFields, managed: bool
 	};
 }
 
+/**
+ * A path the migration could not transfer, as the done step lists it: bidi controls shown as
+ * `\u{202E}` instead of taking effect, so a name cannot read reversed (ux U-056). The names come
+ * from the source instance's file system.
+ */
+export function visibleSkippedPath(path: string): string {
+	return path.replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, (c) => `\\u{${c.codePointAt(0)!.toString(16).toUpperCase()}}`);
+}
+
 /** What the migration's done step says, from its `done` event. `null` when the workspace went along. */
 export function migrationWorkspaceNotice(done: { workspace?: unknown }, managed: boolean): { description: string; line: string; toast: string } | null {
 	if (done.workspace !== OMITTED_SIDECAR) return null;

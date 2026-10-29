@@ -18,7 +18,7 @@
 		getTargetUrl,
 	} from '../stores/migration.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
-	import { migrationWorkspaceNotice } from '../backup-coverage.js';
+	import { migrationWorkspaceNotice, visibleSkippedPath } from '../backup-coverage.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 
 	const step = $derived(getStep());
@@ -267,7 +267,7 @@
 					<details data-testid="migration-skipped" class="mt-1 text-xs text-warning">
 						<summary class="cursor-pointer">{skipped.length === 1 ? t('migration.skipped_one') : tf('migration.skipped_many', { n: String(skipped.length) })}</summary>
 						<ul class="mt-1 space-y-0.5 break-all font-mono text-text-muted">
-							{#each skipped.slice(0, SKIPPED_SHOWN) as path, i (i)}<li>{path}</li>{/each}
+							{#each skipped.slice(0, SKIPPED_SHOWN) as path, i (i)}<li>{visibleSkippedPath(path)}</li>{/each}
 						</ul>
 						{#if skipped.length > SKIPPED_SHOWN}
 							<p class="mt-1 text-text-muted">{tf('migration.skipped_more', { m: String(skipped.length - SKIPPED_SHOWN) })}</p>

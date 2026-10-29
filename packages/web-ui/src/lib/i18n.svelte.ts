@@ -2465,8 +2465,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'migration.workspace_omitted_managed': { de: 'Diese Dateien hat die Migration nicht übertragen. Für eine Kopie auf die neue Instanz schreib an support@lynox.ai.', en: 'The migration did not transfer these files. To have them copied to the new instance, write to support@lynox.ai.' },
 	'migration.workspace_omitted_self': { de: 'Diese Dateien hat die Migration nicht übertragen. Übertrage sie dort, wo du sie verwaltest.', en: 'The migration did not transfer these files. Move them where you manage them.' },
 	// Files the export could not carry (row 1033, ux U-056).
-	'migration.skipped_one': { de: '1 Datei wurde nicht übertragen (eine Verknüpfung oder ein Name, der sich nicht übertragen lässt).', en: '1 file was not transferred (a link, or a name that cannot be transferred).' },
-	'migration.skipped_many': { de: '{n} Dateien wurden nicht übertragen (Verknüpfungen oder Namen, die sich nicht übertragen lassen).', en: '{n} files were not transferred (links, or names that cannot be transferred).' },
+	'migration.skipped_one': { de: '1 Datei wurde nicht übertragen. Verknüpfungen, Sonderdateien und manche Namen lassen sich nicht übertragen.', en: '1 file was not transferred. Links, special files and some names cannot be transferred.' },
+	'migration.skipped_many': { de: '{n} Dateien wurden nicht übertragen. Verknüpfungen, Sonderdateien und manche Namen lassen sich nicht übertragen.', en: '{n} files were not transferred. Links, special files and some names cannot be transferred.' },
+	'migration.success_skipped_one': { de: 'Migration abgeschlossen. 1 Datei wurde nicht übertragen.', en: 'Migration complete. 1 file was not transferred.' },
+	'migration.success_skipped_many': { de: 'Migration abgeschlossen. {n} Dateien wurden nicht übertragen.', en: 'Migration complete. {n} files were not transferred.' },
 	'migration.skipped_more': { de: '… und {m} weitere', en: '… and {m} more' },
 	'migration.open_instance': { de: 'Instanz öffnen', en: 'Open Instance' },
 	'migration.error_preview': { de: 'Vorschau konnte nicht geladen werden.', en: 'Failed to load preview.' },
