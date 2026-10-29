@@ -493,11 +493,16 @@ export function bulkRollbackText(run: Pick<BulkRun, 'phase' | 'haltKey'>, i18n: 
 	return { cause: i18n.t(`bulk.halt.${key}`), incomplete };
 }
 
+/** Whether an atomic run's rollback did not complete, so the page has targets to mark. The page
+ *  then loads every target: a mark on a page the owner never opens would not be seen. */
+export function bulkRollbackIncomplete(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
+	return run.phase === 'aborted' && run.haltKey !== null && BULK_ROLLBACK_INCOMPLETE.has(run.haltKey);
+}
+
 /** Whether the page marks this target: the run's rollback did not complete, and this is a
  *  target it wrote and did not take back. */
 export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
-	return run.phase === 'aborted' && run.haltKey !== null && BULK_ROLLBACK_INCOMPLETE.has(run.haltKey)
-		&& target.written === true && target.undone !== true;
+	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
 
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;

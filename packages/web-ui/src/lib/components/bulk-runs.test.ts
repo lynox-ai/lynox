@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackLeft, bulkRollbackText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkInvalidText, bulkSkippedHead,
 } from './bulk-runs.js';
@@ -298,9 +298,14 @@ describe('going on from a run that halted', () => {
 				expect(said!.cause, `${lang} ${haltKey}`).not.toMatch(/bulk\.|\{/);
 				expect(said!.cause, `${lang} ${haltKey}`).not.toBe(BULK_HALT_REASONS[haltKey as keyof typeof BULK_HALT_REASONS]);
 				expect(said!.incomplete, haltKey).toBe(haltKey.endsWith('Incomplete'));
+				// A run out of time says so first, or an incomplete rollback reads like a failed write.
+				const lead = lang === 'de' ? 'Die Zeit für diesen Lauf ist abgelaufen. ' : 'The time for this run ran out. ';
+				expect(said!.cause.startsWith(lead), `${lang} ${haltKey}`).toBe(haltKey.startsWith('atomicTime'));
+				// No rolled-back run can be started again, only planned again: none promises a restart.
+				expect(said!.cause, `${lang} ${haltKey}`).not.toMatch(/neu starten|start the run again/);
 			}
 		}
-		// The words ux decided (U-007, U-061), one of each kind.
+		// The words decided for the page, one of each kind.
 		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicRollbackIncomplete' }, DE)!.cause)
 			.toBe('lynox konnte nicht alles zurücknehmen. Bei den markierten Zielen hat lynox die Änderung nicht zurückgenommen. Prüf sie und korrigiere sie falls nötig von Hand.');
 		expect(bulkRollbackText({ phase: 'aborted', haltKey: 'atomicTimeRollbackIncomplete' }, EN)!.cause)
@@ -336,6 +341,7 @@ describe('going on from a run that halted', () => {
 			expect(bulkRollbackLeft({ phase: 'aborted', haltKey }, { written: true, undone: false }), haltKey).toBe(false);
 		}
 		expect(bulkRollbackLeft({ phase: 'writing', haltKey: 'atomicRollbackIncomplete' }, { written: true, undone: false })).toBe(false);
+		expect(ATOMIC.filter((haltKey) => bulkRollbackIncomplete({ phase: 'aborted', haltKey }))).toEqual(ATOMIC.filter((k) => k.endsWith('Incomplete')));
 	});
 
 	it('says the same about targets an earlier send left unclear on every halt, a finished run and every size', () => {

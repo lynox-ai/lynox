@@ -229,6 +229,16 @@ describe('an atomic run that rolled back', () => {
 		expect(buttonByText(t('bulk.undo.prepare'))).toBeUndefined();
 	});
 
+	it('loads every target of a run whose rollback left one, so a mark past the first page is seen', async () => {
+		run = { ...aborted('atomicStoppedRollbackIncomplete'), total: 9, changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 } };
+		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false,
+			written: true, undone: i !== 7,
+		}));
+		await render();
+		expect(marked()).toEqual(['gid://shopify/Product/8']);
+	});
+
 	it('marks nothing after a rollback that completed', async () => {
 		run = aborted('atomicTimeRolledBack');
 		targets = ROLLED.map((x) => ({ ...x }));
