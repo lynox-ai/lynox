@@ -130,6 +130,19 @@ describe('each kind of entry', () => {
 		expect(text(items()[0]?.querySelector('[data-targets]'))).toBe('1 geschrieben, 0 fehlgeschlagen');
 	});
 
+	it('a bulk run inside the instance names its store in words, a run outside its host (660b)', async () => {
+		await render([
+			{ kind: 'bulk', runId: 'r1', action: 'bulk:apply', host: null, store: 'files', at: NOW, person: IDA, status: 'done', planned: false, windows: 1, targets: { written: 2, failed: 0, atLeast: false } },
+			{ kind: 'bulk', runId: 'r2', action: 'bulk:apply', host: null, store: 'data_store', at: NOW, person: IDA, status: 'done', planned: false, windows: 1, targets: { written: 2, failed: 0, atLeast: false } },
+			{ kind: 'bulk', runId: 'r3', action: 'bulk:apply', host: 'shop.example.invalid', store: null, at: NOW, person: IDA, status: 'done', planned: false, windows: 1, targets: { written: 2, failed: 0, atLeast: false } },
+		]);
+		const [files, rows, outside] = items();
+		expect(text(files)).toMatch(/bulk:apply\s*·\s*Dateien/);
+		expect(text(rows)).toMatch(/bulk:apply\s*·\s*Datenspeicher/);
+		expect(text(outside)).toMatch(/bulk:apply\s*·\s*shop\.example\.invalid/);
+		expect(text(outside)).not.toMatch(/Dateien|Datenspeicher/);
+	});
+
 	it('a read is named a read access, not a read that happened; another event by its own word', async () => {
 		await render([
 			{ kind: 'event', action: 'GET /api/threads/:id', target: '/api/threads/t-1', phase: 'read', at: NOW, person: IDA },

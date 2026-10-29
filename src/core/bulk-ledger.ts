@@ -619,6 +619,24 @@ export function plannerHasEnded(
   return own.threadCreator(row.created_by) !== owner;
 }
 
+/**
+ * Whether no one can be shown as the planner of an approved run (660b): not the owner's tag, no
+ * mandate's tag (so no trail names anyone, {@link delegatedPlannerOf}), and not a run from before
+ * v31 that {@link plannerHasEnded} places in the owner's conversation. Such a run writes without a
+ * row whoever planned it, so it is not resumed. A mandate's run stays resumable even once its
+ * grant ended: it names its planner, and its approval was the owner's act. The conversations
+ * being unreadable counts against a run from before v31 only.
+ */
+export function plannerUnshown(
+  row: Pick<RunRow, 'principal' | 'mandate_id' | 'created_by' | 'created_at'>,
+  own: BulkOwnership,
+): boolean {
+  if (row.principal === principalTag(OWNER_PRINCIPAL)) return false;
+  if (row.principal !== null) return delegatedPlannerOf(row) === null;
+  if (!own.threadsKnown) return true;
+  return plannerHasEnded(row, own);
+}
+
 /** An external run as its preview effect reads it. Not model-facing. */
 export interface BulkRunForPreview {
   id: string;
@@ -1274,6 +1292,13 @@ export class BulkLedger {
     if (!row || !plannerHasEnded(row, own)) return false;
     if (row.principal === null && !own.threadsKnown) return row.phase === 'planned' || row.phase === 'previewed';
     return this.endRun(runId);
+  }
+
+  /** Whether this run is refused a resume because no one can be shown as its planner ({@link plannerUnshown}).
+   *  Only a run a resume could move on: any other is `resume`'s own refusal to give. Ends nothing. */
+  resumeRefusedForPlanner(runId: string, own: BulkOwnership): boolean {
+    const row = this.runRow(runId);
+    return row !== undefined && (row.phase === 'approved' || row.phase === 'writing') && plannerUnshown(row, own);
   }
 
   /** Ends an unapproved run; its own phase guard is what keeps an approved run, the owner's act, as it is. */

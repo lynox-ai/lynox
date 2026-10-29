@@ -134,8 +134,9 @@
 		busy = false;
 	}
 
-	const refusalOf = (r: { ok: boolean; body: { error?: string } }): string | null =>
-		r.ok ? null : (r.body.error ?? t('common.load_failed'));
+	// A run no one can be shown to have planned is refused a resume by its code, worded here.
+	const refusalOf = (r: { ok: boolean; body: { error?: string; code?: string } }): string | null =>
+		r.ok ? null : r.body.code === 'planner_unknown' ? t('bulk.resume.refused.planner_unknown') : (r.body.error ?? t('common.load_failed'));
 
 	function approve(oneFirst: boolean): Promise<void> {
 		return act(async () => {
