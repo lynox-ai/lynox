@@ -9,6 +9,7 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS, isPathWithin } from '../core/workspace.js';
 import { proveBashCommand, BASH_OBSERVE_EVENT, type BashProof } from './bash-allowlist.js';
 import { shellIsolation } from '../core/shell-isolation.js';
+import { namesSidecarLabel } from '../core/workspace-root.js';
 import { channels } from '../core/observability.js';
 import { globToRegex } from '../core/glob.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
@@ -568,6 +569,8 @@ const SENSITIVE_PATHS: RegExp[] = [
 
 function resolveRealPath(filePath: string): string {
   const resolved = resolve(filePath);
+  // In shell sidecar mode a workspace path is judged by its spelling, not looked up by name (D3).
+  if (namesSidecarLabel(resolved)) return resolved;
   if (existsSync(resolved)) {
     return realpathSync(resolved);
   }

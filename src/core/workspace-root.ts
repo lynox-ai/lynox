@@ -1,6 +1,6 @@
 import { accessSync, constants, readdirSync, realpathSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ensureDirSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
 import { mountIdOf, mountIdOfDir } from './workspace-fd.js';
@@ -181,6 +181,16 @@ function refuseUnsafeRoot(real: string): void {
       'Use the default (unset it) or a directory outside the data directory.',
     );
   }
+}
+
+/**
+ * Whether `path` is the sidecar's label or a path below it, in shell sidecar mode. Such a path is
+ * never looked up by name: the engine's image may hold a `/workspace` of its own, and an answer
+ * from it would be about another directory (D3). Decided on the string alone.
+ */
+export function namesSidecarLabel(path: string): boolean {
+  const isolation = shellIsolation();
+  return isolation.kind === 'sidecar' && isPathWithin(resolve(path), isolation.root.label);
 }
 
 /** The root's path (see `resolveWorkspaceRoot`). */

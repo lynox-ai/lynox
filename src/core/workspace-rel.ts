@@ -5,7 +5,7 @@ import { getWorkspaceDir } from './workspace.js';
 import { workspaceAccess, type WorkspaceAccess } from './workspace-access.js';
 import { closeAnchor, openAnchor, openSubAnchor, splitRel, type WorkspaceAnchor } from './workspace-fd.js';
 import { shellIsolation } from './shell-isolation.js';
-import { resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin, unsafeRoot, WorkspaceRootError } from './workspace-root.js';
+import { namesSidecarLabel, resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin, unsafeRoot, WorkspaceRootError } from './workspace-root.js';
 
 /**
  * The model-facing half of the workspace's fd access: a path a tool receives is mapped onto a
@@ -39,6 +39,7 @@ export class WorkspacePathRefused extends Error {
 }
 
 function realOr(path: string): string {
+  if (namesSidecarLabel(path)) return path;
   try { return realpathSync(path); } catch { return path; }
 }
 
