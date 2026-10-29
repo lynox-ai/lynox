@@ -70,8 +70,10 @@
 - The done step of a migration now names the workspace files the export
   could not transfer (links, special files, names that cannot be
   transferred). It shows the count, the paths on request (up to 50, then how
-  many more), and the same next step as for a workspace left out. Its toast
-  says so too, instead of the green "completed". A bidi control in a name is
+  many more), and where to move them: support on a managed instance, the
+  owner's own storage otherwise. The description no longer says all data
+  arrived, and the toast says so too, instead of the green "completed". A bidi
+  control in a name is
   shown as `\u{202E}` instead of reversing the path. The export already
   reported these files in its `done` event; the web UI did not show them.
 - An engine started with `LYNOX_SHELL_EXEC_SOCKET` now also needs the

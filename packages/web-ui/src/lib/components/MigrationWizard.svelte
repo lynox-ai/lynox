@@ -264,7 +264,7 @@
 		<div class="rounded-[var(--radius-md)] border border-success/30 bg-success/5">
 			<div class="border-b border-success/20 px-4 py-3">
 				<h2 class="text-sm font-medium text-success">{t('migration.success')}</h2>
-				<p class="mt-1 text-xs text-text-muted">{t(workspaceNotice?.description ?? (skipped.length > 0 ? 'migration.success_desc_skipped' : 'migration.success_desc'))}</p>
+				<p class="mt-1 text-xs text-text-muted">{t(workspaceNotice?.description ?? (skipped.length === 0 ? 'migration.success_desc' : skipped.length === 1 ? 'migration.success_desc_skipped_one' : 'migration.success_desc_skipped_many'))}</p>
 				{#if workspaceNotice}
 					<p data-testid="migration-workspace-omitted" class="mt-1 text-xs text-warning">{t(workspaceNotice.line)}</p>
 				{/if}

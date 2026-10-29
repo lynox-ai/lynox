@@ -97,9 +97,11 @@ describe('files the migration could not transfer', () => {
 		expect(paths()).toEqual(['workspace/link-to-home']);
 		expect(nextLine()).toBe(t('migration.skipped_next_self_one'));
 		// Not "your data is available" without the exception.
-		expect(description()).toBe(t('migration.success_desc_skipped'));
+		expect(description()).toBe(t('migration.success_desc_skipped_one'));
 		// Closed until asked: the count is what the step says first.
 		expect(skippedBlock()?.open).toBe(false);
+		// The next step stays visible while the list is closed.
+		expect(target.querySelector('[data-testid="migration-skipped-next"]')?.closest('details')).toBeNull();
 		// Not the green toast: it is read and dismissed with the files left behind (as in U-046).
 		expect(toasts()).toEqual([['info', t('migration.success_skipped_one')]]);
 	});
@@ -111,6 +113,7 @@ describe('files the migration could not transfer', () => {
 		expect(summary()).toBe(tf('migration.skipped_many', { n: '3' }));
 		expect(paths()).toEqual(['workspace/a', 'workspace/b', 'workspace/c']);
 		expect(nextLine()).toBe(t('migration.skipped_next_self_many'));
+		expect(description()).toBe(t('migration.success_desc_skipped_many'));
 		expect(toasts()).toEqual([['info', tf('migration.success_skipped_many', { n: '3' })]]);
 	});
 
@@ -204,7 +207,8 @@ describe('files the migration could not transfer', () => {
 		expect(tf('migration.skipped_more', { m: '3' })).toBe('… und 3 weitere');
 		expect(t('migration.success_skipped_one')).toBe('Migration abgeschlossen. 1 Datei wurde nicht übertragen.');
 		expect(tf('migration.success_skipped_many', { n: '3' })).toBe('Migration abgeschlossen. 3 Dateien wurden nicht übertragen.');
-		expect(t('migration.success_desc_skipped')).toBe('Deine Daten sind jetzt auf deiner Managed-Instanz verfügbar, ausser den Dateien unten.');
+		expect(t('migration.success_desc_skipped_one')).toBe('Deine Daten sind jetzt auf deiner Managed-Instanz verfügbar, ausser der Datei unten.');
+		expect(t('migration.success_desc_skipped_many')).toBe('Deine Daten sind jetzt auf deiner Managed-Instanz verfügbar, ausser den Dateien unten.');
 		expect(t('migration.skipped_next_managed_one')).toBe('Für eine Kopie auf die neue Instanz schreib an support@lynox.ai.');
 		expect(t('migration.skipped_next_managed_many')).toBe('Für eine Kopie auf die neue Instanz schreib an support@lynox.ai.');
 		expect(t('migration.skipped_next_self_one')).toBe('Übertrage sie dort, wo du sie verwaltest.');
@@ -215,7 +219,8 @@ describe('files the migration could not transfer', () => {
 		expect(tf('migration.skipped_more', { m: '3' })).toBe('… and 3 more');
 		expect(t('migration.success_skipped_one')).toBe('Migration complete. 1 file was not transferred.');
 		expect(tf('migration.success_skipped_many', { n: '3' })).toBe('Migration complete. 3 files were not transferred.');
-		expect(t('migration.success_desc_skipped')).toBe('Your data is now available on your managed instance, except for the files below.');
+		expect(t('migration.success_desc_skipped_one')).toBe('Your data is now available on your managed instance, except for the file below.');
+		expect(t('migration.success_desc_skipped_many')).toBe('Your data is now available on your managed instance, except for the files below.');
 		expect(t('migration.skipped_next_managed_one')).toBe('To have it copied to the new instance, write to support@lynox.ai.');
 		expect(t('migration.skipped_next_managed_many')).toBe('To have them copied to the new instance, write to support@lynox.ai.');
 		expect(t('migration.skipped_next_self_one')).toBe('Move it where you manage it.');
