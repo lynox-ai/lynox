@@ -352,20 +352,22 @@ describe('contract r3: what the view adds', () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
 		const step = q('stamp-step')?.textContent ?? '';
-		expect(q('stamp-role')?.textContent).toContain('researcher');
+		expect(q('stamp-role')?.textContent).toContain('Angaben der Rolle researcher');
 		expect(step).toContain('Aufwand: high');
 		expect(step).toContain('Nachdenken: adaptive');
 		expect(step).toContain('Zeitlimit: 2 min 30 s');
 		// What the role grants: the step's own tools are not all a run gets.
 		const grant = q('stamp-role-grant')?.textContent ?? '';
-		expect(grant).toContain('Modell (Rolle): deep');
+		expect(grant).toContain('Modell: deep');
 		// The step sets its own effort, which wins: the role's is not shown as if it applied.
-		expect(grant).not.toContain('Aufwand (Rolle)');
-		expect(grant).toContain('Erlaubt die Rolle: web_search');
-		expect(grant).toContain('Sperrt die Rolle: http_request');
-		expect(q('stamp-role')?.textContent).toContain('Rolle: nur lesen');
+		expect(grant).not.toContain('Aufwand');
+		expect(grant).toContain('Erlaubt: web_search');
+		expect(grant).toContain('Sperrt: http_request');
+		expect(q('stamp-role')?.textContent).toContain('nur lesen');
+		// Read only with an allow list: the list does not all apply, and the view says so.
+		expect(q('stamp-role-read-only-allows')?.textContent).toContain('gelten von den erlaubten Werkzeugen nur die lesenden');
 		expect(step).toContain('Werkzeuge des Schritts:');
-		expect(step).toContain('ergibt sich beim Lauf aus Schritt und Rolle');
+		expect(q('stamp-role-hint')?.textContent).toContain('ergibt sich beim Lauf aus Schritt und Rolle');
 	});
 
 	it('a schedule refused for the owner\'s own changed steps says so, not that someone else changed them', async () => {
@@ -452,7 +454,7 @@ describe('contract r3: what the view adds', () => {
 		});
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
-		expect(q('stamp-role-grant')?.textContent).toContain('Erlaubt die Rolle: keine Werkzeuge');
+		expect(q('stamp-role-grant')?.textContent).toContain('Erlaubt: keine Werkzeuge');
 		// In plain type: in mono it would read as a tool of that name.
 		expect([...q('stamp-role-grant')!.querySelectorAll('.font-mono')].some((e) => e.textContent?.includes('keine Werkzeuge'))).toBe(false);
 	});
@@ -466,8 +468,8 @@ describe('contract r3: what the view adds', () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
 		const grant = q('stamp-role-grant')?.textContent ?? '';
-		expect(grant).not.toContain('Modell (Rolle)');
-		expect(grant).toContain('Aufwand (Rolle): max');
+		expect(grant).not.toContain('Modell');
+		expect(grant).toContain('Aufwand: max');
 	});
 
 	it('a role the engine does not know says the step stops', async () => {
@@ -476,5 +478,27 @@ describe('contract r3: what the view adds', () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
 		expect(q('stamp-role-unknown')?.textContent).toContain('Diese Rolle gibt es auf dieser Instanz nicht');
+		expect(q('stamp-role')?.textContent).toContain('Rolle: made-up');
+		// The step stops, so no sentence on how its tools are worked out at run time.
+		expect(q('stamp-role-hint')).toBeNull();
+	});
+
+	it('a step without a time limit shows the engine\'s default, not nothing', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { timeoutMs: null });
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-step')?.textContent).toContain('Zeitlimit: 30 min (Standard)');
+	});
+
+	it('read only without an allow list adds no sentence about allowed tools', async () => {
+		const p = preview('d1');
+		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, {
+			role: 'reviewer', roleGrant: { model: null, effort: null, allowTools: null, denyTools: null, readOnly: true },
+		});
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
+		await click(q('stamp-review'));
+		expect(q('stamp-role')?.textContent).toContain('nur lesen');
+		expect(q('stamp-role-read-only-allows')).toBeNull();
 	});
 });
