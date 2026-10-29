@@ -6,7 +6,8 @@ const before = getLocale();
 beforeEach(() => setLocale('de'));
 afterEach(() => setLocale(before));
 
-const fmt = (iso: string): string => `[${iso.slice(0, 10)}]`;
+// Total, so a date where none belongs shows in the text (`[null]`) instead of throwing.
+const fmt = (iso: string | null): string => `[${String(iso).slice(0, 10)}]`;
 
 function preview(over: Partial<TakeoverPreview> = {}): TakeoverPreview {
 	return {
@@ -55,6 +56,12 @@ describe('F2: the workflow is taken over with the plan', () => {
 		const p = preview({ members: [wfMember(['workflow-created', 'workflow-edited'])], workflow: wf, alsoReleased: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }] });
 		expect(takeoverLines(p, fmt).find((l) => l.kind === 'f2')?.text).toBe(
 			'Dieser Plan nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow. Dann laufen auch diese Pläne wieder: A, B.',
+		);
+	});
+	it('with two members, it names the one who changed the workflow, not the one who created it', () => {
+		const p = preview({ members: [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')], workflow: wf });
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'f2')?.text).toBe(
+			'Dieser Plan nutzt den Workflow „Rechnungen“, den b@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow.',
 		);
 	});
 	it('without plans released, the last sentence goes', () => {

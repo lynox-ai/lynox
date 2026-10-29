@@ -379,6 +379,10 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ expect: preview.expect }),
 			});
+			const body = res.ok ? {} : await res.json().then((b: { code?: string; error?: string }) => b).catch(() => ({} as { code?: string; error?: string }));
+			const managed = res.status === 503 ? await isHosted() : false;
+			// One check, after the last await of the answer: a dialog closed or opened for another plan
+			// since is not this answer's.
 			if (!currentPreview(n, trigger)) {
 				if (res.ok) { addToast(t('takeover.done'), 'success'); refreshPausedPlans(); }
 				await loadTriggers(true);
@@ -391,14 +395,15 @@
 				await loadTriggers(true);
 				return;
 			}
-			const body = await res.json().then((b: { code?: string; error?: string }) => b).catch(() => ({} as { code?: string; error?: string }));
 			const code = body.code ?? '';
-			const managed = res.status === 503 ? await isHosted() : false;
-			if (!currentPreview(n, trigger)) return;
 			const text = refusalText(code, { workflow: preview.workflow?.name ?? null, managed, fallback: body.error ?? t('takeover.load_failed') });
 			if (code === 'changed') {
-				// What changed is shown, with the line above it; the owner decides again.
-				await fetchPreview(trigger);
+				// What changed is shown, with the line above it; the owner decides again. The re-fetch
+				// is the dialog's request now; closed or replaced meanwhile, nothing is written.
+				const refetch = fetchPreview(trigger);
+				const m = previewRequest;
+				await refetch;
+				if (!currentPreview(m, trigger)) return;
 				takeoverNote = text;
 				// The button that had focus left with the old preview; focus goes back to Cancel.
 				takeoverCancel?.focus();
@@ -642,7 +647,8 @@
 	{/if}
 </div>
 
-<!-- Escape closes the dialog wherever focus is, also after a re-fetch took the focused button. -->
+<!-- Escape closes the dialog while focus is in it or nowhere (a re-fetch can take the focused
+     button); focus in an overlay above it, such as the command palette, keeps Escape for that. -->
 <svelte:window onkeydown={(e) => { if (takeoverFor !== null && e.key === 'Escape' && escapeIsOurs()) closeTakeover(); }} />
 {#if takeoverFor !== null}
 	<div

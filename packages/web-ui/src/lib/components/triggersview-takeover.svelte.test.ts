@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { setLocale, getLocale } from '../i18n.svelte.js';
+import { startPausedPlansNav } from '../stores/paused-plans.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -30,6 +31,8 @@ let preview: Record<string, unknown> = {};
 /** What the next POST …/takeover answers, in order. */
 let takeoverAnswers: Array<{ status: number; body: Record<string, unknown> }> = [];
 let previews = 0;
+let listLoads = 0;
+let countReads = 0;
 const posts: unknown[] = [];
 const before = getLocale();
 
@@ -53,10 +56,13 @@ beforeEach(() => {
 	preview = PREVIEW;
 	takeoverAnswers = [];
 	previews = 0;
+	listLoads = 0;
+	countReads = 0;
 	posts.length = 0;
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
-		if (u.endsWith('/triggers')) return json(200, { triggers: rows, viewer });
+		if (u.endsWith('/triggers')) { listLoads++; return json(200, { triggers: rows, viewer }); }
+		if (u.endsWith('/triggers/paused-count')) { countReads++; return json(200, { viewer: 'owner', count: 1 }); }
 		if (u.endsWith('/takeover-preview')) { previews++; return json(200, preview); }
 		if (u.endsWith('/takeover')) {
 			posts.push(JSON.parse(String(init?.body)));
@@ -138,11 +144,23 @@ describe('the notice of an ended access', () => {
 		expect(notice).toContain('Für ida@treuhand-mueller-partner.ch war ein Zugang bis zum 31.10.2026 eingetragen.');
 		expect(notice.endsWith('Eine Vorwarnung gab es nicht.')).toBe(true);
 	});
-	it('is not shown to a helper', async () => {
+	it('is not shown to a helper, even if an answer carried the data', async () => {
 		viewer = 'mandate';
-		rows = [{ ...PAUSED, paused_who: undefined, paused_ended: undefined }];
+		// The engine sends `paused_ended` to the owner only; the view does not lean on that alone.
+		rows = [PAUSED];
 		await render();
 		expect(target.querySelector('[data-paused-notice]')).toBeNull();
+	});
+	it('names the day the access ended in UTC, as the push does', async () => {
+		const tz = process.env['TZ'];
+		process.env['TZ'] = 'America/New_York';
+		try {
+			rows = [{ ...PAUSED, paused_ended: [{ email: 'ida@x.ch', reason: 'expired', ends_at: '2026-10-31T02:00:00.000Z', warned: false }] }];
+			await render();
+			expect(target.querySelector('[data-paused-notice]')?.textContent).toContain('bis zum 31.10.2026');
+		} finally {
+			if (tz === undefined) delete process.env['TZ']; else process.env['TZ'] = tz;
+		}
 	});
 });
 
@@ -158,13 +176,45 @@ describe('the confirmation', () => {
 		expect(dialog()).toBeNull();
 		expect(posts).toEqual([]);
 	});
-	it('takes over with the preview\'s digest', async () => {
+	it('takes over with the preview\'s digest, and the dot asks again', async () => {
+		const stopDot = startPausedPlansNav(60_000);
+		await settle();
+		const dotReads = countReads;
 		await render();
 		await open();
 		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
 		await settle();
 		expect(posts).toEqual([{ expect: 'digest-1' }]);
 		expect(dialog()).toBeNull();
+		expect(countReads).toBe(dotReads + 1);
+		stopDot();
+	});
+	it('a takeover that succeeds after its dialog was closed leaves the next dialog open', async () => {
+		rows = [PAUSED, { ...PAUSED, id: 'p2', title: 'Monatsabschluss' }];
+		let release: (() => void) | null = null;
+		const inner = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (String(url).endsWith('/p1/takeover')) {
+				posts.push(JSON.parse(String(init?.body)));
+				await new Promise<void>((r) => { release = r; });
+				return json(200, { ...PAUSED, paused: false });
+			}
+			return inner(url, init);
+		}));
+		await render();
+		const buttons = target.querySelectorAll<HTMLButtonElement>('[data-trigger-takeover]');
+		buttons[0]!.click();
+		await settle();
+		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
+		await settle();
+		window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+		await settle();
+		buttons[1]!.click();
+		await settle();
+		release!();
+		await settle();
+		expect(dialog()).not.toBeNull();
+		expect(document.querySelector('[data-takeover-confirm]')).not.toBeNull();
 	});
 	it('Escape closes from the window too, and focus goes back to the button that opened it', async () => {
 		await render();
@@ -250,7 +300,9 @@ describe('the confirmation', () => {
 		await render();
 		await open();
 		preview = { ...PREVIEW, expect: 'digest-2' };
-		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
+		const confirm = document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!;
+		confirm.focus();
+		confirm.click();
 		await settle();
 		expect(previews).toBe(2);
 		expect(document.querySelector('[data-takeover-note]')?.textContent).toBe('Der Plan hat sich geändert, während du ihn angesehen hast. Unten steht der neue Stand. Prüf ihn und übernimm ihn dann.');
@@ -289,10 +341,12 @@ describe('the confirmation', () => {
 		expect(document.querySelector('[data-takeover-confirm]')).not.toBeNull();
 	});
 
-	it('a preview that refuses offers no takeover', async () => {
+	it('a preview that refuses offers no takeover, and the list is loaded again', async () => {
 		preview = { refusal: 'nothing_to_take_over', message: 'x' };
 		await render();
+		const before = listLoads;
 		await open();
+		expect(listLoads).toBe(before + 1);
 		expect(document.querySelector('[data-takeover-confirm]')).toBeNull();
 		expect(document.querySelector('[data-takeover-note]')?.textContent).toBe('Dieser Plan muss nicht mehr übernommen werden. Die Liste ist aktualisiert.');
 	});

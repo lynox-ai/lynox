@@ -50,6 +50,18 @@ describe('the paused-plans dot', () => {
 		expect([reads, getPausedPlansBadge()]).toEqual([1, null]);
 	});
 
+	it('a session that turns out to be a helper\'s, after an owner\'s answer, stops asking', async () => {
+		answer = { status: 200, body: { viewer: 'owner', count: 1 } };
+		stop = startPausedPlansNav(1000);
+		await settle();
+		answer = { status: 200, body: { viewer: 'mandate', count: null } };
+		vi.advanceTimersByTime(1000);
+		await settle();
+		vi.advanceTimersByTime(5000);
+		await settle();
+		expect([reads, getPausedPlansBadge()]).toEqual([2, null]);
+	});
+
 	it('a hidden tab is not asked on the poll', async () => {
 		answer = { status: 200, body: { viewer: 'owner', count: 2 } };
 		stop = startPausedPlansNav(1000);
