@@ -22,6 +22,7 @@ import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.j
 import { describeTurnUntrusted } from '../core/untrusted-signals.js';
 import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
 import { ConversationGrants } from '../core/conversation-grants.js';
+import { escapeHiddenInJson } from '../core/hidden-text.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
@@ -1098,7 +1099,9 @@ export function buildReplayInstruction(
   const lines = [
     'Execute exactly this tool call and return its result. Do not add, omit, rename, or reinterpret any argument, and do not call any other tool first or instead.',
     `Tool: ${tool}`,
-    `Input (JSON): ${JSON.stringify(inputTemplate)}`,
+    // A character that renders as nothing is written as its escape: the same JSON to the tool,
+    // and no instruction the model reads but nobody sees (an imported workflow's arguments).
+    `Input (JSON): ${escapeHiddenInJson(JSON.stringify(inputTemplate))}`,
   ];
   const trimmed = description?.trim();
   if (trimmed) {

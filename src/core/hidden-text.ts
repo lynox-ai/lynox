@@ -52,6 +52,27 @@ export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   return null;
 }
 
+/** Why a run's bound values may not run, or `null`. The same class as the save, so a value the
+ *  save took (an emoji, a Persian word, a line break) runs too. A name takes no in-place character. */
+export function hiddenInRunValues(params: Readonly<Record<string, unknown>>): string | null {
+  for (const [name, value] of Object.entries(params)) {
+    if (hiddenCharIndexes(name, { inPlace: false }).length > 0) return 'A parameter name holds a character that does not show as text. Rename the parameter in the workflow.';
+    if (findHiddenChar(value) !== null) return `The value of parameter "${name}" holds a character that does not show as text. Enter the value again without it.`;
+  }
+  return null;
+}
+
+/** `json` (as `JSON.stringify` writes it) with every hidden character written as a `\uXXXX` escape:
+ *  the same JSON to whoever parses it, and visible to a model that reads it. */
+export function escapeHiddenInJson(json: string): string {
+  const at = hiddenCharIndexes(json, { inPlace: false });
+  if (at.length === 0) return json;
+  const escape = new Set(at);
+  return Array.from(json).map((c, i) => escape.has(i)
+    ? [...Array(c.length).keys()].map((k) => `\\u${c.charCodeAt(k).toString(16).toUpperCase().padStart(4, '0')}`).join('')
+    : c).join('');
+}
+
 /** `text` without its hidden characters, for text that was stored before the write paths refused them. */
 export function stripHidden(text: string): string {
   const at = hiddenCharIndexes(text);

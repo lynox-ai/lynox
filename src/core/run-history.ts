@@ -3335,11 +3335,12 @@ export class RunHistory {
     // re-targetable param is rejected before it can be persisted + scheduled.
     // No contract → no-op, so existing playbooks are unaffected.
     // The text a run hands the model as its instruction (name, goal, each step's task, the
-    // parameters) carries no character that renders as nothing (`hidden-text.ts`): a workflow
+    // parameters) carries no character that renders as nothing outside the places real text puts
+    // one (`hidden-text.ts`, `hidden-chars.ts`): a workflow
     // copied from someone else's would bring its hidden instructions along. Only tools save here,
     // so a refusal reaches the model that wrote it. Not read: a step's `input_template`, which is
     // a tool's arguments as a session captured them (scraped text may hold such a character, and
-    // the model saving it cannot rewrite them), and `reasoning`, the capture's own record, which
+    // the model saving it cannot rewrite them; a run shows them escaped, `runtime-adapter.ts`), and `reasoning`, the capture's own record, which
     // never reaches a run's model.
     const hidden = findHiddenChar({
       name: planned.name,
