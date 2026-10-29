@@ -2243,7 +2243,7 @@ export class WorkerLoop {
             ? [{ label: 'Run again', task: stripHidden(task.description ?? task.title) }]
             : [
               { label: 'Retry', task: stripHidden(task.description ?? task.title) },
-              { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${pushedMsg}` },
+              { label: 'Explain', task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${pushedMsg}` },
             ],
         });
       }
@@ -3208,7 +3208,7 @@ export class WorkerLoop {
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
         data: { threadId: session.sessionId },
         followUps: [
-          { label: 'Details', task: `Show me more details about: ${task.title}` },
+          { label: 'Details', task: `Show me more details about: ${stripHidden(task.title)}` },
           { label: 'Run again', task: stripHidden(task.description ?? task.title) },
         ],
       });
