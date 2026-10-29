@@ -8,6 +8,8 @@ export interface BulkRunsConfig {
 	on: boolean;
 	source: 'config' | 'control-plane';
 	allowed: boolean;
+	/** Whether the engine database opened at boot. Absent on an engine older than the field. */
+	db?: boolean;
 	shopify: boolean;
 }
 
@@ -28,6 +30,7 @@ function isBulkRunsConfig(v: unknown): v is BulkRunsConfig {
 	return typeof r['on'] === 'boolean'
 		&& (r['source'] === 'config' || r['source'] === 'control-plane')
 		&& typeof r['allowed'] === 'boolean'
+		&& (r['db'] === undefined || typeof r['db'] === 'boolean')
 		&& typeof r['shopify'] === 'boolean';
 }
 
@@ -44,9 +47,12 @@ export function bulkRunsView(config: unknown): BulkRunsView | null {
 	const managed = typeof c['managed'] === 'string' && c['managed'] !== '';
 	// Locked only where turning bulk runs on would not take effect. Turning them off is always
 	// the owner's, but a locked switch is already off: without `allowed` no ledger runs.
+	// A missing engine database locks it on every tier, a pool tier lynox opened included; only
+	// with the database there is a pool tier's lock lynox's. An engine without `db` reads as before.
+	const noDb = bulk.db === false || (bulk.db === undefined && bulk.source === 'config');
 	const lockedKey = bulk.allowed
 		? null
-		: bulk.source === 'control-plane' ? 'bulk.setting.locked_pool' : 'bulk.setting.locked_db';
+		: noDb ? 'bulk.setting.locked_db' : 'bulk.setting.locked_pool';
 	// No engine database means it failed to open at boot (`EngineDb init failed`), not a setting.
 	const lockedNextKey = lockedKey === 'bulk.setting.locked_db'
 		? (managed ? 'bulk.setting.locked_db_managed' : 'bulk.setting.locked_db_selfhost')

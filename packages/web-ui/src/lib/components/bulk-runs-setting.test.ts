@@ -23,7 +23,7 @@ function entry(key: string): { de: string; en: string } | null {
 	return de && en ? { de: de[1]!, en: en[1]! } : null;
 }
 
-const bulk = (b: { on: boolean; source: 'config' | 'control-plane'; allowed: boolean; shopify: boolean }, managed?: string): unknown =>
+const bulk = (b: { on: boolean; source: 'config' | 'control-plane'; allowed: boolean; db?: boolean; shopify: boolean }, managed?: string): unknown =>
 	managed === undefined ? { bulk_runs: b } : { bulk_runs: b, managed };
 
 describe('what the bulk-runs switch shows', () => {
@@ -42,6 +42,17 @@ describe('what the bulk-runs switch shows', () => {
 	it('on a pool tier lynox did not open, it is locked and names support', () => {
 		expect(bulkRunsView(bulk({ on: false, source: 'control-plane', allowed: false, shopify: false }, 'managed')))
 			.toEqual({ on: false, lockedKey: 'bulk.setting.locked_pool', lockedNextKey: null, shopifyKey: null });
+	});
+
+	it('a pool tier lynox opened whose engine database failed names the database, not the tier', () => {
+		expect(bulkRunsView(bulk({ on: false, source: 'control-plane', allowed: false, db: false, shopify: true }, 'managed')))
+			.toEqual({ on: false, lockedKey: 'bulk.setting.locked_db', lockedNextKey: 'bulk.setting.locked_db_managed', shopifyKey: null });
+		// With the database there, a pool tier's lock is lynox's.
+		expect(bulkRunsView(bulk({ on: false, source: 'control-plane', allowed: false, db: true, shopify: false }, 'managed'))?.lockedKey)
+			.toBe('bulk.setting.locked_pool');
+		// A self-hosted lock with `db` reported true would be the tier's too; the engine never sends it.
+		expect(bulkRunsView(bulk({ on: false, source: 'config', allowed: false, db: false, shopify: false }))?.lockedKey)
+			.toBe('bulk.setting.locked_db');
 	});
 
 	it('without an engine database it is locked, with the next step per kind of instance', () => {
@@ -66,7 +77,7 @@ describe('what the bulk-runs switch shows', () => {
 	it('an answer without a readable bulk_runs shows no section', () => {
 		for (const config of [null, 'x', {}, { bulk_runs: null }, { bulk_runs: { on: 'yes', source: 'config', allowed: true, shopify: true } },
 			{ bulk_runs: { on: true, source: 'owner', allowed: true, shopify: true } }, { bulk_runs: { on: true, source: 'config', shopify: true } },
-			{ bulk_runs: { on: true, source: 'config', allowed: true } }]) {
+			{ bulk_runs: { on: true, source: 'config', allowed: true } }, { bulk_runs: { on: true, source: 'config', allowed: true, db: 'no', shopify: true } }]) {
 			expect(bulkRunsView(config)).toBeNull();
 		}
 	});
@@ -75,22 +86,25 @@ describe('what the bulk-runs switch shows', () => {
 		const at = HTTP_API.indexOf("redacted['bulk_runs'] = {");
 		expect(at).toBeGreaterThan(-1);
 		const block = HTTP_API.slice(at, HTTP_API.indexOf('};', at));
-		for (const field of ['on:', 'source,', 'allowed:', 'shopify:']) expect(block).toContain(field);
+		for (const field of ['on:', 'source,', 'allowed:', 'db,', 'shopify:']) expect(block).toContain(field);
 		expect(HTTP_API).toContain("redacted['managed'] = ");
 	});
 });
 
 describe('the texts of the bulk-runs switch', () => {
-	it('match ux U-053 and the engine-database wording', () => {
-		expect(entry('bulk.setting.title')).toEqual({ de: 'Massenläufe', en: 'Bulk runs' });
-		expect(entry('bulk.setting.switch')).toEqual({ de: 'Massenläufe erlauben', en: 'Allow bulk runs' });
-		expect(entry('bulk.setting.description')?.de).toBe('Ein Massenlauf ändert viele Einträge auf einmal, zum Beispiel Produkttexte in Shopify. Du siehst vorher eine Vorschau und gibst ihn frei.');
-		expect(entry('bulk.setting.locked_pool')?.de).toBe('Auf dieser Instanz schaltet lynox Massenläufe frei. Schreib dazu an support@lynox.ai.');
-		expect(entry('bulk.setting.locked_db')?.de).toBe('Massenläufe brauchen die Engine-Datenbank, und die liess sich beim Start dieser Instanz nicht öffnen.');
-		expect(entry('bulk.setting.locked_db_selfhost')?.en).toBe('The startup log names the reason under “EngineDb init failed”.');
-		expect(entry('bulk.setting.locked_db_managed')?.de).toBe('Schreib dazu an support@lynox.ai.');
-		expect(entry('bulk.setting.shopify_selfhost')?.de).toBe('Für Shopify-Shops schaltest du zusätzlich das Lesen frei (LYNOX_FEATURE_SHOPIFY_BULK_READ).');
-		expect(entry('bulk.setting.shopify_managed')?.en).toBe('For Shopify stores, write to support@lynox.ai.');
+	it('match ux U-053 and the engine-database wording, in both languages', () => {
+		const texts: Record<string, { de: string; en: string }> = {
+			'bulk.setting.title': { de: 'Massenläufe', en: 'Bulk runs' },
+			'bulk.setting.switch': { de: 'Massenläufe erlauben', en: 'Allow bulk runs' },
+			'bulk.setting.description': { de: 'Ein Massenlauf ändert viele Einträge auf einmal, zum Beispiel Produkttexte in Shopify. Du siehst vorher eine Vorschau und gibst ihn frei.', en: 'A bulk run changes many items at once, for example product texts in Shopify. You see a preview first and approve it.' },
+			'bulk.setting.locked_pool': { de: 'Auf dieser Instanz schaltet lynox Massenläufe frei. Schreib dazu an support@lynox.ai.', en: 'On this instance, lynox enables bulk runs for you. Write to support@lynox.ai.' },
+			'bulk.setting.locked_db': { de: 'Massenläufe brauchen die Engine-Datenbank, und die liess sich beim Start dieser Instanz nicht öffnen.', en: 'Bulk runs need the engine database, and it could not be opened when this instance started.' },
+			'bulk.setting.locked_db_selfhost': { de: 'Den Grund nennt das Startprotokoll unter „EngineDb init failed“.', en: 'The startup log names the reason under “EngineDb init failed”.' },
+			'bulk.setting.locked_db_managed': { de: 'Schreib dazu an support@lynox.ai.', en: 'Write to support@lynox.ai about it.' },
+			'bulk.setting.shopify_selfhost': { de: 'Für Shopify-Shops schaltest du zusätzlich das Lesen frei (LYNOX_FEATURE_SHOPIFY_BULK_READ).', en: 'For Shopify stores, also enable reading (LYNOX_FEATURE_SHOPIFY_BULK_READ).' },
+			'bulk.setting.shopify_managed': { de: 'Für Shopify-Shops schreib an support@lynox.ai.', en: 'For Shopify stores, write to support@lynox.ai.' },
+		};
+		for (const [key, want] of Object.entries(texts)) expect(entry(key), key).toEqual(want);
 	});
 
 	it('every key the view can return has both languages', () => {
@@ -115,7 +129,9 @@ describe('the wiring of the bulk-runs switch', () => {
 	it('it writes bulk_runs_enabled, reads the config again after every save, and locks where it must', () => {
 		expect(COMPONENT).toContain('JSON.stringify({ bulk_runs_enabled: next })');
 		expect(COMPONENT).toMatch(/finally \{[\s\S]*?await load\(\);[\s\S]*?\}/);
-		expect(COMPONENT).toContain('disabled={saving || view.lockedKey !== null}');
+		expect(COMPONENT).toContain('disabled={view.lockedKey !== null}');
+		// While saving it stays focusable (a disabled button drops keyboard focus); `toggle` refuses.
+		expect(COMPONENT).toContain('aria-disabled={saving}');
 		expect(COMPONENT).toContain('if (!view || view.lockedKey !== null || saving) return;');
 		expect(COMPONENT).toContain('aria-checked={view.on}');
 		// The lock's two sentences are one string with a space; a Svelte `{#if}` between them drops it.

@@ -61,9 +61,10 @@
 				aria-checked={view.on}
 				aria-labelledby="bulk-runs-switch-label"
 				aria-describedby={view.lockedKey ? 'bulk-runs-locked' : undefined}
-				disabled={saving || view.lockedKey !== null}
+				disabled={view.lockedKey !== null}
+				aria-disabled={saving}
 				onclick={() => void toggle()}
-				class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed {view.on ? 'bg-accent' : 'bg-border'}"
+				class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed aria-disabled:cursor-wait {view.on ? 'bg-accent' : 'bg-border'}"
 			>
 				<span class="inline-block h-5 w-5 transform rounded-full bg-bg shadow transition-transform {view.on ? 'translate-x-5' : 'translate-x-0.5'}"></span>
 			</button>

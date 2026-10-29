@@ -7037,14 +7037,17 @@ export class LynoxHTTPApi {
       // Bulk runs as the engine runs them right now, and who decides (`core/bulk-switch.ts`):
       // on a managed pool tier the control plane opens them per instance and the owner can only
       // turn them off; elsewhere the config alone decides. `allowed` is whether turning them ON
-      // here would take effect, so the settings page can grey the switch with its reason.
+      // here would take effect, so the settings page can grey the switch; `db` tells its two
+      // reasons apart (no engine database, or a pool tier lynox has not opened them on).
       {
         const { isFeatureEnabled } = await import('../core/features.js');
         const source = bulkRunsSource(tier ?? undefined);
+        const db = engine.getEngineDb() !== null;
         redacted['bulk_runs'] = {
           on: engine.getBulkLedger() !== null,
           source,
-          allowed: engine.getEngineDb() !== null && (source === 'config' || isFeatureEnabled('bulk-runs')),
+          allowed: db && (source === 'config' || isFeatureEnabled('bulk-runs')),
+          db,
           // Whether a bulk run may read a Shopify store: the second half of what a chat opened from
           // a read-only one may promise (`chat-context.ts › storeChangeByBulkRun`).
           shopify: shopifyBulkReadEnabled(),
