@@ -272,9 +272,10 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products. Not for the Shopify forms.' },
             filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status); values are 1–64 letters, digits, - or _.' },
             id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },
-            after: { type: 'object', description: 'The fields to set on every listed element (text, number, true/false or null); not the id field.' },
+            after: { type: 'object', description: 'The fields to set on every listed element (text, number, true/false or null); not the id field. Not with judge.' },
           },
-          required: ['after'],
+          // Not required: a run with judge takes no after (`planList` refuses one), and a schema that
+          // demanded it sent every judged list plan into that refusal.
         },
         atomic: { type: 'boolean', description: 'Write all targets or none (default false: targets are independent).' },
         judge: {
