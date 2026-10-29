@@ -87,20 +87,24 @@ const getJson = async (url: string, cookie?: string): Promise<{ status: number; 
   return { status: res.status, body: JSON.parse(text) as Record<string, unknown>, text };
 };
 
-/** The check runs after listen without being awaited; wait until the health route reflects it. */
-async function settled(base: string, want: 'ok' | 'degraded'): Promise<Record<string, unknown>> {
+/**
+ * The check runs after listen without being awaited; wait until the health route reflects it.
+ * Returns the last status seen, so the test body asserts it.
+ */
+async function settled(base: string, want: 'ok' | 'degraded'): Promise<unknown> {
+  let status: unknown;
   for (let i = 0; i < 100; i++) {
-    const r = await getJson(`${base}/api/health`);
-    if (r.body['status'] === want) return r.body;
+    status = (await getJson(`${base}/api/health`)).body['status'];
+    if (status === want) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error(`health never said ${want}`);
+  return status;
 }
 
 describe('a keyless boot over encrypted data', () => {
   it('sets degraded on both health routes, one word, with HTTP 200', async () => {
     const { base } = await boot(dataDir(true));
-    await settled(base, 'degraded');
+    expect(await settled(base, 'degraded')).toBe('degraded');
     for (const path of ['/health', '/api/health']) {
       const r = await getJson(`${base}${path}`);
       expect(r.status).toBe(200);
@@ -111,7 +115,7 @@ describe('a keyless boot over encrypted data', () => {
 
   it('shows the owner the field on the polled route and on the vault route', async () => {
     const { base } = await boot(dataDir(true));
-    await settled(base, 'degraded');
+    expect(await settled(base, 'degraded')).toBe('degraded');
     const { owner } = await cookies();
     const providers = await getJson(`${base}/api/providers/status`, owner);
     expect(providers.status).toBe(200);
@@ -123,8 +127,10 @@ describe('a keyless boot over encrypted data', () => {
   }, 60_000);
 
   it('gives a mandate 200 on both routes, without the field', async () => {
+    // A mandate is refused before any handler while durable knowledge is off.
+    vi.stubEnv('LYNOX_DURABLE_MEMORY_ENABLED', 'true');
     const { base } = await boot(dataDir(true));
-    await settled(base, 'degraded');
+    expect(await settled(base, 'degraded')).toBe('degraded');
     const { mandate } = await cookies();
     const providers = await getJson(`${base}/api/providers/status`, mandate);
     expect(providers.status).toBe(200);
@@ -174,7 +180,7 @@ describe('a keyless boot over encrypted data', () => {
     const old = before.prepare(`SELECT content FROM memory_blocks WHERE id = 'playbook'`).get() as { content: string };
     before.close();
     const { base, api } = await boot(dir);
-    await settled(base, 'degraded');
+    expect(await settled(base, 'degraded')).toBe('degraded');
     const engine = (api as unknown as { engine: Engine | null }).engine;
     const engineDb = engine?.getEngineDb() ?? null;
     if (engineDb === null) throw new Error('fixture: no engine.db after boot');
@@ -194,7 +200,7 @@ describe('a keyless boot over encrypted data', () => {
   it('mints no key and writes no key file', async () => {
     const dir = dataDir(true);
     const { base } = await boot(dir);
-    await settled(base, 'degraded');
+    expect(await settled(base, 'degraded')).toBe('degraded');
     expect(process.env['LYNOX_VAULT_KEY']).toBeUndefined();
     expect(readdirSync(join(dir, 'data'))).not.toContain('vault.key');
   }, 60_000);

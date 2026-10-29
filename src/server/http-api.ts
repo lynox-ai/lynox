@@ -3391,11 +3391,19 @@ export class LynoxHTTPApi {
    */
   private async _checkKeyless(): Promise<void> {
     if (process.env['LYNOX_VAULT_KEY']) return;
-    const engineDb = this.engine?.getEngineDb() ?? null;
-    const history = this.engine?.getRunHistory() ?? null;
+    const engine = this.engine;
     const stores: Array<{ name: KeylessStore; db: import('better-sqlite3').Database }> = [];
-    if (engineDb) stores.push({ name: 'engine.db', db: engineDb.getDb() });
-    if (history) stores.push({ name: 'history.db', db: history.getDb() });
+    // Runs unawaited after listen, so getting a connection must not reject. The production getters
+    // return a field and do not throw (a closed handle fails later, in the check, as `unknown`);
+    // an engine stand-in without them skips that store only, and the other is still checked.
+    const reach = (name: KeylessStore, get: () => { getDb(): import('better-sqlite3').Database } | null | undefined): void => {
+      try {
+        const store = get();
+        if (store) stores.push({ name, db: store.getDb() });
+      } catch { /* not reachable: not checked */ }
+    };
+    reach('engine.db', () => engine?.getEngineDb());
+    reach('history.db', () => engine?.getRunHistory());
     if (stores.length === 0) return;
     const found = await checkKeylessOverCiphertext(stores);
     if (found === null || this._stopping) return;
@@ -3404,7 +3412,7 @@ export class LynoxHTTPApi {
     this.healthCache = null;
     process.stderr.write(found.state === 'unknown'
       ? '⚠ No vault key is set, and whether the stores already hold encrypted values could not be checked. If they do, new data in them is being stored unencrypted.\n'
-      : `⚠ No vault key is set, but ${found.stores.join(' and ')} already hold encrypted values. New data in them is being stored unencrypted. Restore LYNOX_VAULT_KEY (env, ~/.lynox/.env or vault.key in the data dir).\n`);
+      : `⚠ No vault key is set, but ${found.stores.join(' and ')} already ${found.stores.length === 1 ? 'holds' : 'hold'} encrypted values. New data in them is being stored unencrypted. Restore LYNOX_VAULT_KEY (env, ~/.lynox/.env or vault.key in the data dir).\n`);
   }
 
   /** The keyless state for the owner's status field; absent for anyone else and when nothing was found. */
