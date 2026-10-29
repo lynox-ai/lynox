@@ -3,7 +3,9 @@ import type { IMemory, MemoryNamespace, MemoryScopeRef } from '../types/index.js
 import { ALL_NAMESPACES } from '../types/index.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
-import { channels } from './observability.js';
+import { channels, publishMemoryStore } from './observability.js';
+import type { AuditLog } from './audit-log.js';
+import { ifTrue, InstanceWriteUnrecorded, withInstanceWriteAs, type InstanceActor } from './instance-trail.js';
 import { classifyScope } from './scope-classifier.js';
 import * as fs from 'node:fs/promises';
 import { mkdirSync, rmSync } from 'node:fs';
@@ -580,7 +582,7 @@ export class Memory implements IMemory {
     return true;
   }
 
-  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined): Promise<void> {
+  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined, actor?: InstanceActor | undefined, auditLog?: AuditLog | null | undefined): Promise<void> {
     try {
       if (!finalAnswer || finalAnswer.length < 50) return;
 
@@ -701,39 +703,66 @@ export class Memory implements IMemory {
       if (cancelled?.()) return;
 
       const useAutoScope = this._autoScope && this._activeScopes.length > 1;
-
-      // Scope classification: synchronous heuristic (no API call)
-      if (useAutoScope) {
-        await Promise.all(
-          entries.map(async ([ns, text]) => {
-            const classification = classifyScope(text, ns, this._activeScopes);
-            await this.appendScoped(ns as MemoryNamespace, text, classification.scope);
-            channels.memoryStore.publish({
-              namespace: ns,
-              content: text,
-              scopeType: classification.scope.type,
-              scopeId: classification.scope.id,
-              sourceThreadId,
-              sourceRunId,
-              // Auto-extraction from the agent's own final answer — the `agent` channel
-              // (Wave 1.3 derives agent_inferred from it). The turn is clean by construction:
-              // the extraction call is gated off on an untrusted turn (Wave 1.5 abstinence).
-              sourceChannel: 'agent',
-            });
-          }),
-        );
-      } else {
-        await Promise.all(
-          entries.map(async ([ns, text]) => {
-            await this.append(ns as MemoryNamespace, text);
-            // Auto-extraction (no tool call) → `agent` channel → agent_inferred (Wave 1.3).
-            channels.memoryStore.publish({ namespace: ns, content: text, sourceThreadId, sourceRunId, sourceChannel: 'agent' });
-          }),
-        );
+      if (actor === undefined) {
+        // No actor handed in: written as before, unrecorded, and said. The agent always hands
+        // one; this is a caller outside the turn (a test, a later caller that forgot it).
+        process.stderr.write('[lynox:trail] auto extraction without an actor: written without a row\n');
       }
 
-      if (channels.memoryExtraction.hasSubscribers) {
-        channels.memoryExtraction.publish({ status: 'success', entries: entries.length });
+      // One namespace = one write = one row (`capture#extract`, 660a-3): the row before its
+      // append, under the actor the turn held, `auto=1` because no tool call made it. A
+      // namespace whose row cannot be written is not written; the others are.
+      const writeNamespace = async ([ns, text]: [string, string]): Promise<void> => {
+        // Scope classification: synchronous heuristic (no API call)
+        const scope = useAutoScope ? classifyScope(text, ns, this._activeScopes).scope : undefined;
+        const append = (): Promise<boolean | void> => (scope ? this.appendScoped(ns as MemoryNamespace, text, scope) : this.append(ns as MemoryNamespace, text));
+        if (actor === undefined) {
+          await append();
+          // Auto-extraction (no tool call) → `agent` channel → agent_inferred (Wave 1.3).
+          publishMemoryStore({ namespace: ns, content: text, ...(scope ? { scopeType: scope.type, scopeId: scope.id } : {}), sourceThreadId, sourceRunId, sourceChannel: 'agent', actor: null });
+          return;
+        }
+        await withInstanceWriteAs(actor, auditLog, {
+          site: 'capture#extract', kind: 'create', store: 'memory',
+          target: () => [['ns', ns], ['auto', 1]], main: ['append'],
+        }, async (w) => {
+          await w.run('append', () => append(), ifTrue);
+          publishMemoryStore({
+            namespace: ns,
+            content: text,
+            ...(scope ? { scopeType: scope.type, scopeId: scope.id } : {}),
+            sourceThreadId,
+            sourceRunId,
+            // Auto-extraction from the agent's own final answer — the `agent` channel
+            // (Wave 1.3 derives agent_inferred from it). The turn is clean by construction:
+            // the extraction call is gated off on an untrusted turn (Wave 1.5 abstinence).
+            sourceChannel: 'agent',
+            // The subscriber's derived row names this row as its act.
+            actor,
+            trail: w.correlationId === undefined ? undefined : { site: 'capture#extract', correlationId: w.correlationId },
+          });
+        });
+      };
+      // Settled one by one: a refused namespace must not keep the others from landing, nor
+      // turn the extraction into an error when every write that ran succeeded.
+      const settled = await Promise.allSettled(entries.map(writeNamespace));
+      let failure: { readonly reason: unknown } | undefined;
+      let landed = 0;
+      settled.forEach((r, i) => {
+        if (r.status === 'fulfilled') { landed++; return; }
+        const ns = entries[i]![0];
+        if (r.reason instanceof InstanceWriteUnrecorded) {
+          process.stderr.write(`[lynox:trail] auto extraction for ${ns} refused: its row could not be written\n`);
+          return;
+        }
+        process.stderr.write(`[lynox:memory] auto extraction for ${ns} failed: ${getErrorMessage(r.reason)}\n`);
+        failure ??= { reason: r.reason };
+      });
+      // A real failure reports as it did before the split; a refusal alone is no error.
+      if (failure !== undefined) throw failure.reason;
+
+      if (landed > 0 && channels.memoryExtraction.hasSubscribers) {
+        channels.memoryExtraction.publish({ status: 'success', entries: landed });
       }
     } catch (err: unknown) {
       if (channels.memoryExtraction.hasSubscribers) {
