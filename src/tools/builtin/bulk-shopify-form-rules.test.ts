@@ -19,6 +19,11 @@ const FLAG = 'LYNOX_FEATURE_SHOPIFY_BULK_READ';
 const PRODUCT_RULES = 'Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after sets only title, seo_title, seo_description, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.';
 const IMAGE_RULES = 'Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only alt, as text of at most 512 characters or null. For product fields, use form shopify.';
 
+// The placeholder refusals word for word: they are prompt surface, and the measured switch to a
+// judge (tests/online/bulk-plan-shopify-form-eval.test.ts, case s3) rests on this wording.
+const PLACEHOLDER_REFUSAL = 'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. Give the literal text; for a value that differs per target, use a judge where the form takes one. If the user wants such braces as literal text, plan a judge whose rule gives that exact text, or tell the user in one sentence that a fixed text cannot hold them; never drop the braces without saying so.';
+const PLACEHOLDER_REFUSAL_MEDIA = 'source_list.after holds a placeholder such as {{name}} or {title}: a list\'s after is written as it stands into every target, and nothing fills it in. Form shopify_media writes one alt text into every image and takes no judge: give that one text, without such braces. If the user wanted a different alt text per image, or braces as literal text, tell them in one sentence that this run cannot do that.';
+
 let dir: string;
 let engineDb: EngineDb;
 let ledger: BulkLedger;
@@ -95,6 +100,47 @@ describe('a refused bulk_plan in a Shopify form', () => {
     const answer = await plan({ target_host: 'shop.example.com', source_list: { form: 'woocommerce', path: '/nope', after: { name: 'x' } } });
     // Exactly the refusal, nothing appended.
     expect(answer).toBe('Error: source_list.path is not a list of the form woocommerce.');
+  });
+});
+
+describe('a placeholder in a list\'s after', () => {
+  // The after-state is written as it stands into every target: a placeholder would land verbatim.
+  it.each([
+    ['shopify', { title: '{{ truncate(name, 60) }}' }],
+    ['shopify', { seo_title: '{{ truncate(title, 60) | lower }}' }],
+    ['shopify', { seo_description: '{title} | Bergladen' }],
+    ['shopify', { seo_title: 'Buy ${a + b} now' }],
+    ['shopify', { seo_title: '%%title%% %%sep%% Shop' }],
+    ['shopify', { seo_title: '{Größe} – Shop' }],
+    ['shopify', { seo_title: '{product-name} | Shop' }],
+    ['shopify', { seo_title: '{ product name } | Shop' }],
+    ['shopify', { seo_title: '{0} | Shop' }],
+    ['shopify', { seo_title: '{$title} | Shop' }],
+    ['shopify', { title: 'Fixed', seo_title: null, seo_description: '{{ description }}' }],
+    ['shopify', { seo_title: '{% if x %}a{% endif %}' }],
+    ['shopify', { seo_title: '<%= title %>' }],
+  ])('in form %s, %j is refused and nothing is recorded', async (form, after) => {
+    const answer = await plan({ source_list: { form, after } });
+    expect(answer.startsWith(`Error: ${PLACEHOLDER_REFUSAL}`), answer).toBe(true);
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+  });
+
+  it('in form shopify_media, says that no judge can write such a text', async () => {
+    const answer = await plan({ source_list: { form: 'shopify_media', after: { alt: '{{ product.title }}' } } });
+    expect(answer.startsWith(`Error: ${PLACEHOLDER_REFUSAL_MEDIA}`), answer).toBe(true);
+    expect(answer).not.toContain('use a judge');
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+  });
+
+  it('in another form too', async () => {
+    const answer = await plan({ target_host: 'shop.example.com', source_list: { form: 'woocommerce', path: '/wp-json/wc/v3/products', after: { name: '{{name}} – Sale' } } });
+    expect(answer).toBe(`Error: ${PLACEHOLDER_REFUSAL}`);
+  });
+
+  it('a literal text with braces that name nothing, and a judged plan, are recorded', async () => {
+    expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'Sale {50%} – {} – }{ – 100% – $10 – [NEU]' } } })).toMatch(/^List dry run recorded/);
+    expect(await plan({ target_host: 'shop.example.com', source_list: { form: 'woocommerce', path: '/wp-json/wc/v3/products', after: { name: 'Sale {50%}' } } })).toMatch(/^List dry run recorded|^Another external dry run/);
+    expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } })).toMatch(/^List dry run recorded|^Another external dry run/);
   });
 });
 
