@@ -33,7 +33,7 @@ import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles, stampSubject } from '../core/plan-stamp.js';
+import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfiles, stampSubject, type StampListShown } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
@@ -2326,6 +2326,23 @@ export class LynoxHTTPApi {
       by: plan.of.email,
       workflow,
     };
+  }
+
+  /**
+   * B3 for one row of the owner's list: null unless the plan is confirmed, acts for a mandate,
+   * and has something to show ({@link stampListState}). Read with the workflow confirmation the
+   * run reads (`planOfTrigger`), so an entry shown as listed is one the run may use.
+   */
+  async #stampListShown(trigger: TriggerRecord): Promise<StampListShown | null> {
+    const engine = this.engine;
+    const apiStore = engine?.getApiStore();
+    const history = engine?.getRunHistory();
+    if (!engine || !apiStore || !history || !trigger.confirmed_at || trigger.effect.startsWith('bulk_')) return null;
+    const plan = await planOfTrigger(trigger, history);
+    if (plan.unreadable || plan.of === undefined) return null;
+    const row = history.getTriggerStampConnections(trigger.id);
+    if (row === undefined) return null;
+    return stampListState(row.stampConnections, row.confirmedAt, plan.workflowConfirmedAt, plan.of, apiStore, engine.getMandateEnds() ?? null);
   }
 
   private _principalOf(req: IncomingMessage): RequestPrincipal {
@@ -8303,9 +8320,10 @@ export class LynoxHTTPApi {
       const principal = this._principalOf(req);
       // `paused` is no status value: it reads `paused_at` (`plan-pause.ts`).
       const pausedFilter = (status as string | undefined) === 'paused';
-      const triggers = (pausedFilter
+      const rows = pausedFilter
         ? taskManager.listTriggers({ paused: true })
-        : taskManager.listTriggers(status ? { status } : undefined))
+        : taskManager.listTriggers(status ? { status } : undefined);
+      const triggers = rows
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
           const visible = starter !== undefined && mayStopRun(principal, starter, loop?.runningPlanTag(trigger.id));
@@ -8315,9 +8333,18 @@ export class LynoxHTTPApi {
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
           };
         });
+      // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
+      // owner only: the connections are a helper's, and only the owner decides on them.
+      const viewer = approvalScopeOf(principal)?.viewer ?? 'none';
+      const shown = viewer === 'owner'
+        ? await Promise.all(triggers.map(async (t, i) => {
+          const listed = await this.#stampListShown(rows[i]!);
+          return listed === null ? t : { ...t, stamp_listed: listed };
+        }))
+        : triggers;
       // `viewer` as in `/api/approvals`: the page offers the owner's controls (the takeover) only
       // to the owner's session. The routes check it again; this is what the page shows.
-      jsonResponse(res, 200, { triggers, viewer: approvalScopeOf(principal)?.viewer ?? 'none' });
+      jsonResponse(res, 200, { triggers: shown, viewer });
     }, READS);
 
     // How many plans wait for the owner's takeover, for the dot at "Automation": the pause is told

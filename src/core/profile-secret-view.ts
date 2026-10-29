@@ -1082,8 +1082,8 @@ export function memberConnectionRefusal(
   // a plan's run acting for anyone else reaches it no more than any other reader.
   if (inPlan !== 'no-plan') {
     const ownPlan = own && memberConnectionReader(profile, reader, mode, ends);
-    if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`;
-    if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`;
+    if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${OWNER_DECIDES}`;
+    if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${OWNER_DECIDES}`;
     return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session.`;
   }
   // The same person under a later access: the connection was made under the earlier one.
@@ -1138,6 +1138,13 @@ function planMayUse(profile: ApiProfile): boolean {
   const state = planConnectionState(profile);
   return state === 'no-plan' || state === 'listed';
 }
+
+/**
+ * The end of a plan's refusal of a connection it may not use: who decides, and where the owner
+ * does it (641 4b ii-c-min, ux U-058). The model reads it and passes it on, so it names the
+ * place in both languages the owner's screen may be in: what it says is what the owner finds.
+ */
+export const OWNER_DECIDES = 'Tell the owner: only the owner decides which connections a plan may use, and they can allow it under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
 
 export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
   const presetId = profile.auth?.oauth?.preset_id;

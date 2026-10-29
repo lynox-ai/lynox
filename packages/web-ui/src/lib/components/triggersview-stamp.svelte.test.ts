@@ -252,3 +252,27 @@ describe('"Check connections" on a confirmed schedule', () => {
 		expect(check()).toBeNull();
 	});
 });
+
+describe('the list of a confirmed plan (B3)', () => {
+	const CONFIRMED = { ...HELD, confirmed_at: '2026-10-01T00:00:00.000Z', edited_by: 'owner' };
+	const LISTED = { lapsed: true, ended: false, entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'changed' }] };
+	it('shows the owner each entry and what it needs, beside "Check connections"', async () => {
+		rows = [{ ...CONFIRMED, stamp_listed: LISTED }];
+		await render();
+		expect(q('[data-stamp-entry="changed"]')!.textContent).toBe('api.crm.example (eva@crm): geändert, nicht freigegeben');
+		expect(q('[data-stamp-note]')!.textContent).toContain('gilt nicht mehr');
+		expect(q('[data-trigger-check]')).not.toBeNull();
+	});
+	it('not to a helper, and not at a plan that waits (its block says it)', async () => {
+		viewer = 'mandate';
+		rows = [{ ...CONFIRMED, stamp_listed: LISTED }];
+		await render();
+		expect(q('[data-stamp-listed]')).toBeNull();
+		unmount(component!);
+		component = undefined;
+		viewer = 'owner';
+		rows = [{ ...HELD, stamp_listed: LISTED }];
+		await render();
+		expect(q('[data-stamp-listed]')).toBeNull();
+	});
+});

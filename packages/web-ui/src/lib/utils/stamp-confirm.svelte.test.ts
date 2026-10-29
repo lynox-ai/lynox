@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mandateNeedsOwnerStamp } from '../../../../../src/core/request-principal.js';
 import { setLocale, getLocale } from '../i18n.svelte.js';
-import { awaitsOwnerStamp, confirmable, connectionsSentence, paramsOf, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
+import { awaitsOwnerStamp, confirmable, connectionsSentence, listedLine, listedNote, paramsOf, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
 
 const before = getLocale();
 afterEach(() => { setLocale(before); });
@@ -93,5 +93,25 @@ describe('what the preview shows', () => {
 		expect(paramsOf(JSON.stringify({ to: 'all customers', n: 3 }))).toEqual(['to: all customers', 'n: 3']);
 		expect(paramsOf('not json')).toEqual(['not json']);
 		expect(paramsOf('[1,2]')).toEqual(['[1,2]']);
+	});
+});
+
+describe('the list of a confirmed plan (B3)', () => {
+	const entry = (state: 'listed' | 'changed' | 'waits' | 'new', provider: string | null = 'api.crm.example', account: string | null = 'eva@crm') => ({ provider, account, state });
+	it('says each entry with its provider, account and state', () => {
+		setLocale('de');
+		expect(listedLine(entry('listed'))).toBe('api.crm.example (eva@crm): freigegeben');
+		expect(listedLine(entry('changed', null, null))).toBe('Verbindung entfernt (Konto unbekannt): geändert, nicht freigegeben');
+		expect(listedLine(entry('new', 'shop.example', ''))).toBe('shop.example (Konto unbekannt): neu, nicht freigegeben');
+		expect(listedLine(entry('waits'))).toBe('api.crm.example (eva@crm): Zugang beendet');
+		expect(listedLine(entry('listed', 'a\u202Eb', 'x\u200By'))).toBe('ab (xy): freigegeben');
+	});
+	it('notes an ended access before a lapsed list, and that before an entry not allowed', () => {
+		setLocale('de');
+		expect(listedNote({ lapsed: false, ended: false, entries: [entry('listed')] })).toBeNull();
+		expect(listedNote({ lapsed: false, ended: false, entries: [entry('listed'), entry('new')] })).toContain('nur freigegebene');
+		expect(listedNote({ lapsed: false, ended: false, entries: [entry('changed')] })).toContain('nur freigegebene');
+		expect(listedNote({ lapsed: true, ended: false, entries: [entry('changed')] })).toContain('gilt nicht mehr');
+		expect(listedNote({ lapsed: true, ended: true, entries: [entry('waits')] })).toContain('Zugang dieser Person ist beendet');
 	});
 });

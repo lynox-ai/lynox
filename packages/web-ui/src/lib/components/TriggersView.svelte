@@ -10,7 +10,7 @@
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
-	import { awaitsOwnerStamp, stampable, usesConnections } from '../utils/stamp-confirm.js';
+	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
@@ -42,6 +42,8 @@
 		// schedule a mandate set up or last changed waits for the owner's stamp (`awaitsOwnerStamp`).
 		created_by?: string;
 		edited_by?: string;
+		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).
+		stamp_listed?: StampListed | null;
 		// Whether the last escalation of this trigger (a failed scheduled run, a watch
 		// finding) reached anyone — see `escalationNotice`.
 		last_escalation_at?: string;
@@ -615,6 +617,20 @@
 												<p class="mt-0.5" data-consent-cadence>{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>
 											{/if}
 										</div>
+									{/if}
+								</div>
+							{/if}
+							{#if viewer === 'owner' && !held(trigger) && trigger.stamp_listed}
+								{@const listed = trigger.stamp_listed}
+								<div class="mt-2 text-xs text-text-muted" data-stamp-listed>
+									<span class="font-medium">{t('stamp.listed_heading')}:</span>
+									<ul class="mt-0.5">
+										{#each listed.entries as entry}
+											<li data-stamp-entry={entry.state}>{listedLine(entry)}</li>
+										{/each}
+									</ul>
+									{#if listedNote(listed)}
+										<p class="mt-0.5 text-warning" data-stamp-note>{listedNote(listed)}</p>
 									{/if}
 								</div>
 							{/if}

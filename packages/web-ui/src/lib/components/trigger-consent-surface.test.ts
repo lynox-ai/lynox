@@ -69,8 +69,8 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		expect(SCRIPT).toContain(
 			"import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
 		);
-		expect(SCRIPT).toContain("import { awaitsOwnerStamp, stampable, usesConnections } from '../utils/stamp-confirm.js';");
-		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'showsInstruction', 'showsWatchTarget', 'watchOf', 'awaitsOwnerStamp', 'stampable', 'usesConnections']) {
+		expect(SCRIPT).toContain("import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';");
+		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'showsInstruction', 'showsWatchTarget', 'watchOf', 'awaitsOwnerStamp', 'listedLine', 'listedNote', 'stampable', 'usesConnections']) {
 			expect(SCRIPT, name).not.toMatch(new RegExp(`function\\s+${name}|${name}\\s*=`));
 		}
 		// Who waits is the two tested rules together, nothing besides: an agent run nobody confirmed,

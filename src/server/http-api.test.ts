@@ -9662,6 +9662,40 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('GET /api/triggers tells the owner what the stamp of a confirmed plan lists, and a helper nothing', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const MID = 'M-EVA';
+      const crm = {
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'd', created_by: 'mandate:eva@kanzlei.example',
+        auth: { type: 'oauth2', vault_keys: [], oauth: { token_url: 'https://api.crm.example/oauth/token', client_id_key: 'CRM_CLIENT_ID' } },
+        oauth_grant: { connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: MID, grant_id: 'grant-1', account: { label: 'eva@crm', source: 'userinfo' } },
+      };
+      const AT = '2026-10-08T00:00:00.000Z';
+      const row = { id: 'trg-eva', title: 't', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: MID, confirmed_at: AT, created_at: AT };
+      ref['getApiStore'] = () => ({ knownProfiles: () => [crm] });
+      ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
+      const { bindingOf } = await import('../core/profile-secret-view.js');
+      const raw = JSON.stringify({ at: AT, wf: null, entries: [{ profile: 'crm-api', grant: 'grant-1', binding: bindingOf(crm as never) }] });
+      const history = { getTriggerStampConnections: (id: string) => (id === 'trg-eva' ? { confirmedAt: AT, stampConnections: raw } : undefined) };
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [row, { id: 'trg-own', title: 'o', effect: 'run_agent', created_by: 'owner', confirmed_at: AT }] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          expect(triggers.find((t) => t.id === 'trg-eva')!['stamp_listed']).toEqual({ lapsed: false, ended: false, entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'listed' }] });
+          // The owner's own plan acts for no mandate: nothing to list, no field.
+          expect(triggers.find((t) => t.id === 'trg-own')).not.toHaveProperty('stamp_listed');
+          expect(JSON.stringify(triggers)).not.toContain('grant-1');
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@kanzlei.example', mandateId: MID }) as RequestPrincipal);
+          const helper = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          for (const t of helper.triggers) expect(t).not.toHaveProperty('stamp_listed');
+        });
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+        ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+      }
+    });
+
     it('GET /api/triggers adds the two flags, and the pause\'s, and nothing else to a row', async () => {
       // Who started the run stays inside: any further field — a starter tag, an effect —
       // would be a new disclosure on a list a mandate reads. `paused` is the plan pause's

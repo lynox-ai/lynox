@@ -112,6 +112,31 @@ export function shownAs(p: StampPreview): 'workflow' | 'watch' | 'unreadable_wat
 	return 'instruction';
 }
 
+/** B3: what the owner's stamp of a confirmed plan lists (`GET /api/triggers`, owner only). */
+export interface StampListed {
+	lapsed: boolean;
+	ended: boolean;
+	entries: { provider: string | null; account: string | null; state: 'listed' | 'changed' | 'waits' | 'new' }[];
+}
+
+/** One entry of {@link StampListed} as the row says it: provider, account, and how it stands. */
+export function listedLine(e: StampListed['entries'][number]): string {
+	const provider = e.provider !== null ? displaySafe(e.provider) : t('stamp.state_removed');
+	const account = e.account !== null && e.account !== '' ? displaySafe(e.account) : t('stamp.account_unknown');
+	return `${provider} (${account}): ${t(`stamp.state_${e.state}`)}`;
+}
+
+/**
+ * The note below the list, or none: an ended access first (nothing runs, and a new stamp would not
+ * change that), then a list that no longer holds, then an entry the plan may not use.
+ */
+export function listedNote(l: StampListed): string | null {
+	if (l.ended) return t('stamp.ended');
+	if (l.lapsed) return t('stamp.lapsed');
+	if (l.entries.some((e) => e.state === 'changed' || e.state === 'new')) return t('stamp.not_listed');
+	return null;
+}
+
 /**
  * Whether a confirm may be offered on this preview: not on a watch whose page cannot be shown, and
  * a workflow schedule only on a confirmed workflow (an unconfirmed one switches it off at its run).

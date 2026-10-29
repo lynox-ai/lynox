@@ -3,7 +3,7 @@ import type { ApiProfile, ApiStore } from './api-store.js';
 import { isMandateConnection } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import type { StampEntry } from './plan-run-context.js';
-import { bindingOf, memberConnectionReader } from './profile-secret-view.js';
+import { bindingOf, connectionShown, connectionWaits, memberConnectionReader } from './profile-secret-view.js';
 import { planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, type RequestPrincipal } from './request-principal.js';
 import type { RunHistory } from './run-history.js';
 import type { TriggerRecord } from '../types/index.js';
@@ -129,7 +129,15 @@ export function encodeStamp(at: string, wf: string | null, entries: readonly Sta
  * schedule, with the confirmation the workflow carries now (`workflowConfirmedAt`).
  */
 export function stampFromRow(raw: string | null, confirmedAt: string | null, workflowConfirmedAt: string | null): readonly StampEntry[] | null {
-  if (raw === null || confirmedAt === null) return null;
+  if (confirmedAt === null) return null;
+  const stored = storedOf(raw);
+  if (stored === null || stored.at !== confirmedAt || stored.wf !== workflowConfirmedAt) return null;
+  return stored.entries.length > 0 ? stored.entries : null;
+}
+
+/** The column read as it was written, whichever stamp it went with; null when it is not well formed. */
+function storedOf(raw: string | null): StoredStamp | null {
+  if (raw === null) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -138,7 +146,7 @@ export function stampFromRow(raw: string | null, confirmedAt: string | null, wor
   }
   if (parsed === null || typeof parsed !== 'object') return null;
   const s = parsed as Partial<Record<keyof StoredStamp, unknown>>;
-  if (s.at !== confirmedAt || s.wf !== workflowConfirmedAt || !Array.isArray(s.entries)) return null;
+  if (typeof s.at !== 'string' || (s.wf !== null && typeof s.wf !== 'string') || !Array.isArray(s.entries)) return null;
   const entries: StampEntry[] = [];
   for (const e of s.entries as unknown[]) {
     if (e === null || typeof e !== 'object') return null;
@@ -146,7 +154,61 @@ export function stampFromRow(raw: string | null, confirmedAt: string | null, wor
     if (typeof profile !== 'string' || typeof grant !== 'string' || typeof binding !== 'string') return null;
     entries.push({ profile, grant, binding });
   }
-  return entries.length > 0 ? entries : null;
+  return { at: s.at, wf: s.wf, entries };
+}
+
+/**
+ * How one connection of a confirmed plan stands (641 4b (ii-a), B3): `listed` — the stamp lists it
+ * and a run may use it; `changed` — the stamp lists it under another grant or destination, or the
+ * connection is gone; `waits` — the mandate whose connection it is has no live access; `new` — the
+ * mandate connected it since, and the stamp does not list it.
+ */
+export type StampEntryState = 'listed' | 'changed' | 'waits' | 'new';
+
+/** What the owner's list of a confirmed plan shows: no grant, no binding, no mandate id. */
+export interface StampListShown {
+  /** The whole list no longer holds: the trigger or its workflow was stamped again since. */
+  readonly lapsed: boolean;
+  /** The access of the mandate the plan acts for has ended: nothing of it runs, whatever is listed. */
+  readonly ended: boolean;
+  readonly entries: readonly { readonly provider: string | null; readonly account: string | null; readonly state: StampEntryState }[];
+}
+
+/**
+ * {@link StampListShown} for a confirmed plan acting for `planOf`: the stored list (`raw`) against
+ * what a stamp would list now ({@link stampEntriesFor}, the function a stamp writes with), so a
+ * listed entry is exactly one a run may use. Null when there is nothing to show: no entry stored
+ * and none new.
+ */
+export function stampListState(
+  raw: string | null,
+  confirmedAt: string | null,
+  workflowConfirmedAt: string | null,
+  planOf: RequestPrincipal,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
+  ends: Pick<MandateEnds, 'isLive'> | null,
+): StampListShown | null {
+  const stored = storedOf(raw);
+  const storedEntries = stored?.entries ?? [];
+  const lapsed = storedEntries.length > 0 && stampFromRow(raw, confirmedAt, workflowConfirmedAt) === null;
+  const mandateId = planOf.kind === 'mandate' ? planOf.mandateId : undefined;
+  const ended = mandateId === undefined || ends === null || !ends.isLive(mandateId);
+  const now = stampEntriesFor(planOf, apiStore, ends);
+  const byId = new Map(apiStore.knownProfiles().map((p) => [p.id, p] as const));
+  const shown = (id: string, state: StampEntryState): StampListShown['entries'][number] => {
+    const p = byId.get(id);
+    return { provider: p ? connectionShown(p).provider : null, account: p?.oauth_grant?.account?.label ?? null, state };
+  };
+  const entries = storedEntries.map((e) => {
+    const p = byId.get(e.profile);
+    if (ended || (p !== undefined && connectionWaits(p, ends))) return shown(e.profile, 'waits');
+    const listed = now.some((n) => n.profile === e.profile && n.grant === e.grant && n.binding === e.binding);
+    return shown(e.profile, listed ? 'listed' : 'changed');
+  });
+  for (const n of now) {
+    if (!storedEntries.some((e) => e.profile === n.profile)) entries.push(shown(n.profile, 'new'));
+  }
+  return entries.length === 0 ? null : { lapsed, ended, entries };
 }
 
 /**
