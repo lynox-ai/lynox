@@ -1359,6 +1359,27 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect(ledger.getStatus(runId)!.phase).toBe('aborted');
   });
 
+  it('an atomic run out of time before its first write halts, and a resume writes every target', async () => {
+    const { runId, initial } = recordMemoryRun(5, { atomic: true });
+    approve(runId);
+    const { writer, state } = memory(initial);
+    let t = Date.now();
+    // Out of time before the first target: nothing is written, so nothing is half written. The
+    // clock jumps after its first two reads (the approval's expiry, then the run's deadline), so
+    // the deadline check in front of the first target already finds the time gone.
+    let reads = 0;
+    const late = (): number => (++reads > 2 ? t + 10 * 60 * 60_000 : t);
+    const first = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer, late));
+    expect(first.status).toBe('halted');
+    expect(ledger.getStatus(runId)!.phase).not.toBe('aborted');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.timeBudget);
+    expect([...state.values()]).toEqual(Object.values(initial));
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+    t = Date.now();
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer, () => t))).status).toBe('done');
+    expect(ledger.getStatus(runId)!.applied).toBe(5);
+  });
+
   // The undo of an atomic run is atomic too. When IT rolls back, the source's targets
   // stand again — they must not stay marked undone, or the source could never be undone.
   it('an atomic undo that rolls back leaves the source undoable', async () => {
