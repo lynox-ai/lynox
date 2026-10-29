@@ -421,6 +421,10 @@ describe('contract r3: what the view adds', () => {
 		await click(byText('Planen'));
 		await click(byText('Bestätigen & planen'));
 		expect(q('stamp-line')?.textContent).toContain('Sie liessen sich gerade nicht laden');
+		// The line says it; the dialog does not repeat it, nor introduce steps it cannot show.
+		const dialog = q('stamp-dialog')?.textContent ?? '';
+		expect(dialog).not.toContain('Laden fehlgeschlagen');
+		expect(dialog).not.toContain('Das läuft, wenn ein Plan');
 	});
 
 	it('a workflow without steps says so, and can be stamped', async () => {
@@ -449,6 +453,8 @@ describe('contract r3: what the view adds', () => {
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
 		expect(q('stamp-role-grant')?.textContent).toContain('Erlaubt die Rolle: keine Werkzeuge');
+		// In plain type: in mono it would read as a tool of that name.
+		expect([...q('stamp-role-grant')!.querySelectorAll('.font-mono')].some((e) => e.textContent?.includes('keine Werkzeuge'))).toBe(false);
 	});
 
 	it('shows the role\'s model and effort only where the step sets none: the step\'s own value wins', async () => {
@@ -469,6 +475,6 @@ describe('contract r3: what the view adds', () => {
 		Object.assign((p['steps'] as Array<Record<string, unknown>>)[0]!, { role: 'made-up', roleGrant: null });
 		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: p }] });
 		await click(q('stamp-review'));
-		expect(q('stamp-role-unknown')?.textContent).toContain('Unbekannte Rolle');
+		expect(q('stamp-role-unknown')?.textContent).toContain('Diese Rolle gibt es auf dieser Instanz nicht');
 	});
 });

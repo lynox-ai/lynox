@@ -2194,7 +2194,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.stamp.role_effort': { de: 'Aufwand (Rolle)', en: 'Effort (role)' },
 	'workflow_library.stamp.role_allows': { de: 'Erlaubt die Rolle', en: 'Role allows' },
 	'workflow_library.stamp.role_blocks': { de: 'Sperrt die Rolle', en: 'Role blocks' },
-	'workflow_library.stamp.role_unknown': { de: 'Unbekannte Rolle: Dieser Schritt bricht beim Lauf ab.', en: 'Unknown role: this step stops when it runs.' },
+	'workflow_library.stamp.role_unknown': { de: 'Diese Rolle gibt es auf dieser Instanz nicht. Der Schritt bricht beim Lauf ab. Lass den Workflow im Chat anpassen.', en: 'This role does not exist on this instance. The step stops with an error when it runs. Have the workflow adjusted in a chat.' },
 	'workflow_library.stamp.no_tools': { de: 'keine Werkzeuge', en: 'no tools' },
 	'workflow_library.stamp.role_read_only': { de: 'Rolle: nur lesen', en: 'Role: read only' },
 	'workflow_library.stamp.role_hint': { de: 'Welche Werkzeuge ein Schritt am Ende nutzen darf, ergibt sich beim Lauf aus Schritt und Rolle.', en: 'Which tools a step can finally use is worked out at run time from the step and its role.' },

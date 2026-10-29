@@ -970,10 +970,14 @@
 				<!-- The preview did not load, so who changed it is unknown: the line says why, not who. -->
 				<p role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.awaits_at_schedule_unloaded')}</p>
 			{/if}
-			{#if error}
+			<!-- The schedule's line for a preview that did not load already says it did not load. -->
+			{#if error && !(stampLine === 'awaits_at_schedule' && !stampPreview && !stampLoading)}
 				<p class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3">{error}</p>
 			{/if}
-			<p class="text-xs text-text-subtle mb-3">{t('workflow_library.stamp.intro')}</p>
+			<!-- "This is what runs" only above something that runs: without a preview it introduces nothing. -->
+			{#if stampPreview}
+				<p class="text-xs text-text-subtle mb-3">{t('workflow_library.stamp.intro')}</p>
+			{/if}
 
 			{#if stampLoading}
 				<p class="text-text-subtle text-sm">{t('common.loading')}</p>
@@ -1035,8 +1039,8 @@
 										<!-- The step's own value wins at run time; the role's applies only where the step sets none. -->
 										{#if g.model && !step.model}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_model')}:</span> <span class="font-mono break-all">{visible(g.model)}</span></p>{/if}
 										{#if g.effort && !step.effort}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_effort')}:</span> <span class="font-mono">{g.effort}</span></p>{/if}
-										{#if g.allowTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_allows')}:</span> <span class="font-mono break-all">{g.allowTools.length === 0 ? t('workflow_library.stamp.no_tools') : visible(g.allowTools.join(', '))}</span></p>{/if}
-										{#if g.denyTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_blocks')}:</span> <span class="font-mono break-all">{g.denyTools.length === 0 ? t('workflow_library.stamp.no_tools') : visible(g.denyTools.join(', '))}</span></p>{/if}
+										{#if g.allowTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_allows')}:</span> {#if g.allowTools.length === 0}<span>{t('workflow_library.stamp.no_tools')}</span>{:else}<span class="font-mono break-all">{visible(g.allowTools.join(', '))}</span>{/if}</p>{/if}
+										{#if g.denyTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_blocks')}:</span> {#if g.denyTools.length === 0}<span>{t('workflow_library.stamp.no_tools')}</span>{:else}<span class="font-mono break-all">{visible(g.denyTools.join(', '))}</span>{/if}</p>{/if}
 									</div>
 								{:else}
 									<!-- A role the engine does not know: the step stops at run time. -->
