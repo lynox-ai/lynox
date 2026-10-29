@@ -55,7 +55,7 @@ const OBVIOUSLY_FAKE: RegExp[] = [
                                         // anchored on `.invalid` so a real domain cannot slip through
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,       // ISO timestamps
   /^0\.0\.0-test$/,                  // fake version
-  /^(?:ok|hosted|managed|managed_pro|managed_max|balanced|deep|fast|stripe-billing|openai|balance|none|unfunded|mandate)$/, // contract literals (vocab + shapes + http)
+  /^(?:ok|hosted|managed|managed_pro|managed_max|balanced|deep|fast|stripe-billing|openai|balance|none|unfunded|mandate|on)$/, // contract literals (vocab + shapes + http)
 ];
 // A 40-hex SHA is fake iff it is blatantly low-entropy: ≤4 distinct chars.
 function isObviouslyFakeSha(s: string): boolean {

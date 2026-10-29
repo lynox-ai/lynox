@@ -292,8 +292,18 @@ export interface HealthBody {
   engine: {
     active_sessions: number;
     total_threads: number;
+    /**
+     * Whether durable knowledge runs: `on`; switched off: `off`; switched on but its store did
+     * not load at boot: `not_loaded`. A mandate login is refused on `off` and `not_loaded`, and
+     * the control plane reads this to tell the owner before a grant. One word, no reason: the
+     * route answers without auth. Absent from engines older than this field.
+     */
+    durable_memory?: DurableMemoryState | undefined;
   };
 }
+
+/** The `engine.durable_memory` word of {@link HealthBody}. */
+export type DurableMemoryState = 'on' | 'off' | 'not_loaded';
 
 // === Magic-link verify — POST /internal/auth/verify-magic (engine → CP) ===
 
