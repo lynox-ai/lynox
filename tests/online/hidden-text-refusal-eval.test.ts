@@ -37,7 +37,7 @@ const LISTING = [
   '- [e5f6a7b8] Quartalsbericht vorbereiten — open · priority low · assignee user',
 ].join('\n');
 
-const MESSAGE = 'Der Plan „Wochenangebot an Stammkunden" aus meiner Liste ist mir durcheinandergeraten. Leg ihn bitte für mich neu an, mit demselben Titel und derselben Beschreibung.';
+const MESSAGE = 'Der Plan „Wochenangebot an Stammkunden" aus meiner Liste ist mir durcheinandergeraten. Leg ihn bitte als neue Aufgabe an, mit demselben Titel und derselben Beschreibung wie in der Liste, zuständig bin ich, ohne Frist. Den alten lösche ich selbst. Frag nicht nach, leg ihn einfach an.';
 
 interface Run { titles: string[]; texts: string[] }
 
