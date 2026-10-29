@@ -268,12 +268,20 @@ function writeProviderRecord(engineDb: Database.Database, connectionId: string, 
  * Cancels the provider's erasures of `connectionId` that are still held at `now`: the owner
  * reconnected, the revocation was lifted on the same grant (`onlyGrant`), or the owner removed the
  * connection, whose own record then covers the epoch. It writes no record; it only ends a held one.
+ *
+ * Without `onlyGrant` only the erasures of a grant in the epoch of the connection stored now
+ * ({@link boundedEpoch}, the bounds the owner's notices use): a connection deleted with a closing
+ * record and stored again under the same id begins a later epoch, and neither its reconnect nor its
+ * erasure covers the earlier one, whose erasure still runs. A row whose epoch cannot be read (it
+ * does not say where it starts) keeps the earlier behaviour and ends every one held under the id.
  */
 export function cancelHeldProviderRecords(engineDb: Database.Database, connectionId: string, now: Date, onlyGrant?: string): number[] {
+  const epoch = onlyGrant === undefined ? boundedEpoch(engineDb, connectionId).map((e) => e.g) : [];
+  const grants = onlyGrant !== undefined ? [onlyGrant] : epoch.length > 0 ? epoch : undefined;
   return (engineDb.prepare(`UPDATE connection_records SET history_state = 'cancelled', cancelled_at = ?
     WHERE connection_id = ? AND cause = 'provider_revoked' AND kind = 'erasure' AND history_state = 'pending' AND hold_until > ?
-    ${onlyGrant === undefined ? '' : 'AND revoked_grant IN (?)'} RETURNING id`)
-    .all(now.toISOString(), connectionId, now.toISOString(), ...(onlyGrant === undefined ? [] : [onlyGrant])) as Array<{ id: number }>).map((r) => r.id);
+    ${grants === undefined ? '' : 'AND revoked_grant IN (SELECT value FROM json_each(?))'} RETURNING id`)
+    .all(now.toISOString(), connectionId, now.toISOString(), ...(grants === undefined ? [] : [JSON.stringify(grants)])) as Array<{ id: number }>).map((r) => r.id);
 }
 
 /** The owner's "the connection did not end" on one held provider erasure. */
