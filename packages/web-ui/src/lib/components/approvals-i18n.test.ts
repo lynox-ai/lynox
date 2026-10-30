@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { APPROVAL_DECIDE_REFUSALS, APPROVAL_OUTCOME_SENTENCES, approvalNextStepKey, approvalOutcomeKey, type ApprovalStatus, type ApprovalViewer } from './approvals.js';
+import { APPROVAL_DECIDE_REFUSALS, APPROVAL_OUTCOME_SENTENCES, approvalNextStepKey, approvalOutcomeKey, approvalSetupKind, type ApprovalSetupLine, type ApprovalStatus, type ApprovalViewer } from './approvals.js';
 
 /**
  * Every key the approval queue's page asks for exists in both languages.
@@ -53,7 +53,7 @@ function usedKeys(): string[] {
 	const built = [
 		...STATUSES.map((s) => `approvals.status.${s}`),
 		...HELD.map((h) => `approvals.held.${h}`),
-		...SETUP.map((s) => `approvals.setup.${s}`),
+		...SETUP.flatMap((s) => VIEWERS.flatMap((v) => [false, true].map((takenOver) => `approvals.setup.${approvalSetupKind({ kind: s as ApprovalSetupLine['kind'], takenOver }, v)}`))),
 		...APPROVAL_DECIDE_REFUSALS.map((c) => `approvals.error.${c}`),
 		...outcomeKeys(),
 	];
@@ -84,8 +84,10 @@ describe('the page\'s sources', () => {
 
 	it('the shell renders the badge it is given: a count beside the label, a dot on the collapsed rail', () => {
 		const shell = read('./AppShell.svelte');
+		// The approvals' item reads out its own sentence: it names no other label (the paused plans' does).
+		expect(read('../stores/approvals.svelte.ts')).not.toContain('badgeLabelKey');
 		expect(shell).toMatch(/\{#if item\.badge && !railExpanded\}\s*<span class="[^"]*rounded-full[^"]*" aria-hidden="true"><\/span>\s*\{\/if\}/);
-		expect(shell).toMatch(/\{#if item\.badge\}\s*<span [^>]*data-nav-badge>\s*<span aria-hidden="true">\{item\.badge\}<\/span>\s*<span class="sr-only">\{tf\('nav\.approvals_badge', \{ count: String\(item\.badge\) \}\)\}<\/span>\s*<\/span>\s*\{\/if\}/);
+		expect(shell).toMatch(/\{#if item\.badge\}\s*<span [^>]*data-nav-badge>\s*<span aria-hidden="true">\{item\.badge\}<\/span>\s*<span class="sr-only">\{tf\(item\.badgeLabelKey \?\? 'nav\.approvals_badge', \{ count: String\(item\.badge\) \}\)\}<\/span>\s*<\/span>\s*\{\/if\}/);
 	});
 
 	it('the palette offers the item only while the queue is on', () => {
@@ -114,7 +116,19 @@ describe('the approval queue speaks both languages', () => {
 		expect(read('./approvals.ts')).toContain('`approvals.error.${code}`');
 		expect(read('./ApprovalCard.svelte')).toContain('`approvals.status.${card.status}`');
 		expect(read('./ApprovalCard.svelte')).toContain('`approvals.held.${card.held}`');
-		expect(read('./ApprovalCard.svelte')).toContain('`approvals.setup.${line.kind}`');
+		expect(read('./ApprovalCard.svelte')).toContain('`approvals.setup.${approvalSetupKind(line, viewer)}`');
+	});
+
+	it('after a takeover a setup line keeps the helper and says who took it over (ux U-039)', () => {
+		const text = (kind: ApprovalSetupLine['kind'], takenOver: boolean, viewer: ApprovalViewer) => entry(`approvals.setup.${approvalSetupKind({ kind, takenOver }, viewer)}`);
+		expect(text('set_up_by', true, 'owner')).toEqual({ de: 'Eingerichtet von {name}, von dir übernommen', en: 'Set up by {name}, taken over by you' });
+		expect(text('last_changed_by', true, 'owner')).toEqual({ de: 'Geändert von {name}, von dir übernommen', en: 'Changed by {name}, taken over by you' });
+		expect(text('set_up_by', true, 'mandate')).toEqual({ de: 'Eingerichtet von {name}, vom Inhaber übernommen', en: 'Set up by {name}, taken over by the owner' });
+		expect(text('last_changed_by', true, 'mandate')).toEqual({ de: 'Geändert von {name}, vom Inhaber übernommen', en: 'Changed by {name}, taken over by the owner' });
+		// Not taken over: the lines as before, "Geändert" without "zuletzt".
+		expect(text('set_up_by', false, 'owner')).toEqual({ de: 'Eingerichtet von {name}', en: 'Set up by {name}' });
+		expect(text('last_changed_by', false, 'mandate')).toEqual({ de: 'Geändert von {name}', en: 'Changed by {name}' });
+		expect(approvalSetupKind({ kind: 'test_run_by', takenOver: true }, 'owner')).toBe('test_run_by');
 	});
 
 	it('the Reply-To sentence is exactly the reviewed one, both placeholders in both languages', () => {
@@ -138,6 +152,34 @@ describe('the approval queue speaks both languages', () => {
 		expect(label).toBeDefined();
 		expect(read('./approvals.ts')).toContain(`export const UNNAMED_MANDATE = '${label!}';`);
 		expect(entry('approvals.unnamed_mandate')).not.toBeNull();
+	});
+
+	it('the receive-only step names the settings path by the labels the navigation shows', () => {
+		const step = entry('approvals.next.receive_only');
+		const label = (key: string): { de: string; en: string } => entry(key) ?? { de: `missing ${key}`, en: `missing ${key}` };
+		const [settings, channels, mail] = ['nav.settings', 'settings.channels', 'settings.channels.mail'].map(label);
+		expect(step?.de).toContain(`${settings!.de} › ${channels!.de} › ${mail!.de}`);
+		expect(step?.en).toContain(`${settings!.en} › ${channels!.en} › ${mail!.en}`);
+	});
+
+	it('no text gives the Sent folder as proof that a mail did or did not go out', () => {
+		// For an IMAP/SMTP account the copy there is filed only after a send succeeds, and only as a
+		// best effort: a mail can be out with no copy. Every text that names the folder says so, in
+		// the same language.
+		const rows = I18N.split('\n').filter((l) => /^\t'[\w.]+':\s*\{/.test(l));
+		const naming: Array<{ key: string; lang: 'de' | 'en'; text: string }> = [];
+		for (const row of rows) {
+			const key = /^\t'([\w.]+)'/.exec(row)![1]!;
+			const de = /\bde:\s*'((?:[^'\\]|\\.)*)'/.exec(row)?.[1] ?? '';
+			const en = /\ben:\s*'((?:[^'\\]|\\.)*)'/.exec(row)?.[1] ?? '';
+			if (/Gesendet-Ordner/.test(de)) naming.push({ key, lang: 'de', text: de });
+			if (/Sent folder/i.test(en)) naming.push({ key, lang: 'en', text: en });
+		}
+		// The check reaches the texts it is about: both languages of the close question name the folder.
+		expect(naming.filter((n) => n.key === 'approvals.close_question').map((n) => n.lang).sort()).toEqual(['de', 'en']);
+		for (const n of naming) {
+			expect(n.text, `${n.key} (${n.lang})`).toMatch(n.lang === 'de' ? /nicht sicher/ : /not reliably/);
+		}
 	});
 
 	it('nothing offers to approve or send everything at once', () => {

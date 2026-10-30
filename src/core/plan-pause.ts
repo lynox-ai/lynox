@@ -22,12 +22,13 @@ import { MANDATE_TAG_PREFIX, planMandate, planMembers } from './request-principa
 import { processErrorText } from './error-egress.js';
 
 /**
- * Off until the owner's takeover exists: a pause without a way out would leave plans standing with no
- * explanation, worse than main. Not an environment switch: the release decides it, not the tenant.
- * It is turned on in the same change that registers `POST /api/triggers/:id/takeover`, and a test
- * holds the two together (`src/server/plan-pause-http.test.ts`).
+ * On since the owner can take a plan over from the view (641c-2): a pause without a way out would
+ * leave plans standing with no explanation, worse than main. Not an environment switch: the
+ * release decides it, not the tenant. Two tests hold the switch to its way out: the takeover route
+ * is registered (`src/server/plan-pause-http.test.ts`), and the view shows the button at a paused
+ * plan (`packages/web-ui/src/lib/components/triggersview-takeover.svelte.test.ts`).
  */
-export const PLAN_PAUSE_DEFAULT = false;
+export const PLAN_PAUSE_DEFAULT = true;
 let planPause = PLAN_PAUSE_DEFAULT;
 
 export function planPauseOn(): boolean {
@@ -43,6 +44,13 @@ export function setPlanPauseForTests(on: boolean): () => void {
 
 /** The SQL function `TriggerStore` registers, so the term in `ACCEPTS_SQL` reads the switch. */
 export const PLAN_PAUSE_SQL_FN = 'lynox_plan_pause';
+
+/** What a run that did not start because a mandate its plan depends on has ended reads as. */
+export const PLAN_ENDED_RESULT = 'This schedule, or the workflow it runs, was set up or changed by someone whose access has ended, so it does not run.';
+/** What a run reads as that was stopped part-way because its plan's access ended. */
+export const ACCESS_ENDED_RESULT = 'Stopped part-way because the access of someone who set up or changed this plan ended.';
+/** The same, for a plan the stop paused. */
+export const ACCESS_ENDED_PAUSED_RESULT = `${ACCESS_ENDED_RESULT} The plan is paused until the owner takes it over.`;
 
 /** What a mandate did to a plan; one member can have done more than one. */
 export type PauseRole = 'created' | 'edited' | 'workflow-created' | 'workflow-edited';
@@ -113,25 +121,40 @@ export interface PausePlanRow {
   readonly mandate_edited_at: string | null;
   readonly target_workflow_id: string | null;
   readonly paused_at: number | null;
+  readonly covered_created_by: string | null;
+  readonly covered_created_id: string | null;
+  readonly covered_created_at: string | null;
+  readonly covered_edited_by: string | null;
+  readonly covered_edited_id: string | null;
+  readonly covered_edited_at: string | null;
 }
 
-const PAUSE_PLAN_COLS = `id, effect, status, confirmed_at, created_by, edited_by, created_mandate_id, created_at,
-  mandate_editor, mandate_editor_id, mandate_edited_at, target_workflow_id, paused_at`;
+/** The covered marks of a side (`plan-takeover.ts`), read with its authorship. */
+export const COVER_COLS = 'covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at';
+
+export const PAUSE_PLAN_COLS = `id, effect, status, confirmed_at, created_by, edited_by, created_mandate_id, created_at,
+  mandate_editor, mandate_editor_id, mandate_edited_at, target_workflow_id, paused_at, ${COVER_COLS}`;
 
 /** A workflow's authorship columns, read by its exact id. */
-interface WorkflowAuthorRow {
+export interface WorkflowAuthorRow {
   created_by: string | null;
   created_mandate_id: string | null;
   created_at: string | null;
   mandate_editor: string | null;
   mandate_editor_id: string | null;
   mandate_edited_at: string | null;
+  covered_created_by: string | null;
+  covered_created_id: string | null;
+  covered_created_at: string | null;
+  covered_edited_by: string | null;
+  covered_edited_id: string | null;
+  covered_edited_at: string | null;
 }
 
 /** A workflow's authorship by its exact id: never the prefix match of `getPipeline`. Throws when it cannot be read. */
-function workflowAuthorOf(db: Database.Database, id: string): WorkflowAuthorRow | undefined {
+export function workflowAuthorOf(db: Database.Database, id: string): WorkflowAuthorRow | undefined {
   return db.prepare(
-    'SELECT created_by, created_mandate_id, created_at, mandate_editor, mandate_editor_id, mandate_edited_at FROM workflows WHERE id = ?',
+    `SELECT created_by, created_mandate_id, created_at, mandate_editor, mandate_editor_id, mandate_edited_at, ${COVER_COLS} FROM workflows WHERE id = ?`,
   ).get(id) as WorkflowAuthorRow | undefined;
 }
 
@@ -218,7 +241,8 @@ export function pausedForEntries(
 
 /**
  * Pauses the plan and records who ended, in one inner transaction: `paused_at` only if it is not
- * set yet (the first pause keeps its time and its due run), `pause_noticed_at` cleared with it so
+ * set yet (the first pause keeps its time and its due run), with `paused_db_at` beside it in the
+ * database's clock, the one the mandate marks are written in (`plan-takeover.ts` compares the two), `pause_noticed_at` cleared with it so
  * a second pause of the same plan is told again, and `paused_for` merged by mandate id, so a second
  * ended member is added rather than skipped. A `paused_for` that cannot be read is replaced and
  * said on stderr: the pause holds either way. Writes nothing that pushes; the worker tick tells the
@@ -229,7 +253,7 @@ export function pausedForEntries(
 export function writePause(db: Database.Database, id: string, entries: readonly PausedFor[], nowS: number = nowSeconds()): boolean {
   return db.transaction((): boolean => {
     const fresh = db.prepare(
-      'UPDATE triggers SET paused_at = ?, paused_due_at = next_run_at, pause_noticed_at = NULL WHERE id = ? AND paused_at IS NULL',
+      "UPDATE triggers SET paused_at = ?, paused_db_at = unixepoch('now'), paused_due_at = next_run_at, pause_noticed_at = NULL WHERE id = ? AND paused_at IS NULL",
     ).run(nowS, id).changes > 0;
     const stored = db.prepare('SELECT paused_for FROM triggers WHERE id = ?').get(id) as { paused_for: string | null } | undefined;
     if (stored === undefined) return false;
@@ -247,9 +271,9 @@ export function writePause(db: Database.Database, id: string, entries: readonly 
 /**
  * What the model reads for a paused plan (`task_list`, `triggerDetailLine`). Not "recreate": a new
  * plan on the same workflow pauses again for as long as the ended mandate is that workflow's member.
- * The takeover drops everything from "takeover is not available yet".
+ * The takeover is the owner's, at the plan in the view (`plan-takeover.ts`); no tool reaches it.
  */
-export const PAUSED_MODEL_TEXT = "paused until the owner takes it over (the helper's access ended or was not renewed in time; takeover is not available yet, the owner can delete the plan)";
+export const PAUSED_MODEL_TEXT = "paused until the owner takes it over (the helper's access ended or was not renewed in time)";
 
 /** Whether a plan is paused now: the switch is on and the row says so. */
 export function isPaused(t: { readonly paused_at?: number | null | undefined }): boolean {
@@ -290,12 +314,13 @@ export interface PauseSweepDeps {
  * that extends an ended grant. Each plan is its own inner transaction under its own `try`: in a
  * sweep, a plan that cannot be read or written is said on stderr with its id and tried again on the
  * next sweep, and the others go on. A workflow whose authorship cannot be read counts as not ended
- * there; the gate refuses it as a failure with a retry, as on main.
+ * there; the gate refuses its run as a failure, as on main (a one-shot without a retry left ends
+ * `failed`).
  *
  * In the login (`onlyMandate`) there is no next sweep: once the extension commits the end is no
- * longer proven, and the plan would run as the helper again. So there a plan that cannot be read or
+ * longer proven, and the plan would run as the helper again. So there a plan that cannot be
  * written throws, and the login fails with it, as when its transaction fails; the next login tries
- * again.
+ * again. A plan whose workflow cannot be read is decided there on the schedule's own marks.
  */
 export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
   const paused: string[] = [];
@@ -316,10 +341,19 @@ export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
     try {
       membership = rowPlanMembers(row, (id) => workflowAuthorOf(db, id));
     } catch (err: unknown) {
-      if (deps.onlyMandate !== undefined) throw new Error(`plan ${row.id}: who set up its workflow could not be read, the login is refused: ${processErrorText(err)}`);
-      skipped.push(row.id);
-      process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, not paused: ${processErrorText(err)}\n`);
-      continue;
+      if (deps.onlyMandate === undefined) {
+        // A sweep tries again on its next run.
+        skipped.push(row.id);
+        process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, not paused: ${processErrorText(err)}\n`);
+        continue;
+      }
+      // The login has no next sweep, and refusing it for one row would lock every helper out. The
+      // schedule's own marks are read without the workflow, so a plan this mandate set up or
+      // changed still pauses before the extension commits; only a member it has through the
+      // workflow alone is not seen. Such a plan does not run while its workflow cannot be read
+      // (the gate refuses it before dispatch), and the owner sees it unreadable at the takeover.
+      membership = rowPlanMembers(row, () => undefined);
+      process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, paused on the schedule's own marks only: ${processErrorText(err)}\n`);
     }
     const members = deps.onlyMandate === undefined
       ? membership.members
@@ -411,19 +445,33 @@ function dateOf(s: number): string {
  * created or changed something" counts a plan through its workflow as well.
  */
 export function pauseNotice(entry: PausedFor, count: number): NotificationMessage {
+  // Until the advance notice exists, an expiry says that there was none: without it the notice
+  // would read as if one had come. A revocation never has one, so it is not said there.
+  const noAdvance = ADVANCE_NOTICE_ON ? '' : ' There was no advance notice.';
   const body = (name: string): string => entry.reason === 'revoked'
     ? (count === 1
       ? `${name}'s access was revoked. A plan in which they created or changed something is paused. It runs again only once you take it over.`
       : `${name}'s access was revoked. ${String(count)} plans in which they created or changed something are paused. The plans run again only once you take them over.`)
     : (count === 1
-      ? `${name} had access until ${dateOf(entry.endsAt)}. A plan in which they created or changed something is paused. It runs again only once you take it over, even if the access has since been extended.`
-      : `${name} had access until ${dateOf(entry.endsAt)}. ${String(count)} plans in which they created or changed something are paused. The plans run again only once you take them over, even if the access has since been extended.`);
+      ? `${name} had access until ${dateOf(entry.endsAt)}. A plan in which they created or changed something is paused. It runs again only once you take it over, even if the access has since been extended.${noAdvance}`
+      : `${name} had access until ${dateOf(entry.endsAt)}. ${String(count)} plans in which they created or changed something are paused. The plans run again only once you take them over, even if the access has since been extended.${noAdvance}`);
   return {
     title: count === 1 ? '⏸ A plan is paused' : `⏸ ${String(count)} plans are paused`,
     body: fitName(entry.email, body),
     priority: 'high',
+    // The owner's devices only: the notice names a helper and how their access ended, which no
+    // other helper is told (the list keeps `paused_who` to the owner too).
+    audience: 'owner',
+    // A tap opens the paused plans (`sw.js`), where the notice stands in full, name and all.
+    data: Object.freeze({ pausedPlans: '1' }),
   };
 }
+
+/**
+ * Whether the owner is warned before a grant's known end (641c-2b). Off until that warning is
+ * built; while it is off, the expiry notice says there was no advance notice.
+ */
+export const ADVANCE_NOTICE_ON = false;
 
 /**
  * The longest body a push carries: `web-push-channel.ts` cuts there, as `REMINDER_BODY_MAX` says.

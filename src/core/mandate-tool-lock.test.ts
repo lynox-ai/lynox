@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
-import { MANDATE_OUTWARD_READERS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
+import { TOOL_WRITE_SITES, MANDATE_INSIDE_NON_WRITERS, MANDATE_INSIDE_WRITERS, MANDATE_OUTWARD_READERS, MANDATE_PATTERN_WRITE_TOOLS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
 import type { MailRegistry } from '../integrations/mail/tools/registry.js';
 import type { SearchProvider } from '../integrations/search/search-provider.js';
 import type { ToolEntry } from '../types/index.js';
@@ -26,9 +26,24 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { LynoxConfig } from '../types/index.js';
 
 describe('toolLockFor', () => {
-  it('locks a mandate to the surface and leaves the owner unlocked', () => {
-    expect(toolLockFor({ kind: 'mandate', email: 'setup@example.org' })).toBe(MANDATE_TOOL_SURFACE);
+  it('locks a mandate to the surface without the pattern writers and leaves the owner unlocked', () => {
+    const lock = toolLockFor({ kind: 'mandate', email: 'setup@example.org' });
+    const pattern = Object.keys(MANDATE_PATTERN_WRITE_TOOLS);
+    expect([...lock!].sort()).toEqual([...MANDATE_TOOL_SURFACE].filter(n => !pattern.includes(n)).sort());
     expect(toolLockFor(OWNER_PRINCIPAL)).toBeNull();
+  });
+
+  // 660a-2: the sign-in refuses a mandate on an engine with the legacy memory, but its plan
+  // runs later under the mandate — the lock is the one place every turn of it passes.
+  it('holds back the three pattern writers from a mandate, though they stay on the surface', () => {
+    const lock = toolLockFor({ kind: 'mandate', email: 'setup@example.org' })!;
+    expect(Object.keys(MANDATE_PATTERN_WRITE_TOOLS).sort()).toEqual(['memory_delete', 'memory_promote', 'memory_update']);
+    for (const name of ['memory_delete', 'memory_update', 'memory_promote']) {
+      expect(lock.has(name), name).toBe(false);
+      expect(MANDATE_TOOL_SURFACE.has(name), name).toBe(true);
+    }
+    // control: the other memory tools stay
+    for (const name of ['memory_store', 'memory_recall', 'memory_list']) expect(lock.has(name), name).toBe(true);
   });
 
   it('withholds what D1 names: the shell and every tool that reads or writes the process filesystem', () => {
@@ -40,6 +55,15 @@ describe('toolLockFor', () => {
 
   it('places no tool on both lists', () => {
     for (const name of Object.keys(MANDATE_WITHHELD_TOOLS)) expect(MANDATE_TOOL_SURFACE.has(name), name).toBe(false);
+  });
+
+  // The focus override holds for every session of the instance, the owner's included,
+  // so a mandate does not get the tool; the owner keeps it (no lock).
+  it('withholds memory_focus from a mandate, with its reason, and leaves it to the owner', () => {
+    expect(MANDATE_TOOL_SURFACE.has('memory_focus')).toBe(false);
+    expect(toolLockFor({ kind: 'mandate', email: 'setup@example.org' })?.has('memory_focus')).toBe(false);
+    expect(MANDATE_WITHHELD_TOOLS['memory_focus']).toBe('sets the knowledge focus for every session of the instance');
+    expect(toolLockFor(OWNER_PRINCIPAL)).toBeNull();
   });
 });
 
@@ -146,6 +170,23 @@ describe('Engine boot — every tool a mandate may use is placed for what it rea
     const all = await surfaceTools();
     const phantom = [...MANDATE_TOOL_SURFACE].filter(n => !all.has(n));
     expect(phantom, 'a name on the surface must be a tool this engine builds').toEqual([]);
+  });
+
+  // What a mandate's tools write INSIDE the instance is a closed classification too.
+  // Every tool on the surface is placed exactly once, every
+  // placed name is a real tool, and every writer has a write site (and every site a writer).
+  it('places every tool on the surface as writing inside or not, exactly once, a non-writer with its reason', async () => {
+    const all = await surfaceTools();
+    const nonWriters = Object.keys(MANDATE_INSIDE_NON_WRITERS);
+    const both = [...MANDATE_INSIDE_WRITERS].filter(n => Object.hasOwn(MANDATE_INSIDE_NON_WRITERS, n));
+    expect(both, 'a tool on both lists').toEqual([]);
+    expect([...new Set([...MANDATE_INSIDE_WRITERS, ...nonWriters])].sort()).toEqual([...MANDATE_TOOL_SURFACE].sort());
+    for (const n of [...MANDATE_INSIDE_WRITERS, ...nonWriters]) expect(all.has(n), `${n} is a tool this engine builds`).toBe(true);
+    for (const n of nonWriters) expect(MANDATE_INSIDE_NON_WRITERS[n]!.length, n).toBeGreaterThan(10);
+    // The tools' sites only: a derived site (`capture#…`, `derived#…`) belongs to no tool.
+    const siteTools = new Set(TOOL_WRITE_SITES.map(s => s.slice(0, s.indexOf('#'))));
+    expect([...MANDATE_INSIDE_WRITERS].filter(n => !siteTools.has(n)), 'a writer without a write site').toEqual([]);
+    expect([...siteTools].filter(n => !MANDATE_INSIDE_WRITERS.has(n)), 'a write site of a tool that is no writer').toEqual([]);
   });
 
   it('declares outwardRead on exactly the tools placed as reading outside', async () => {

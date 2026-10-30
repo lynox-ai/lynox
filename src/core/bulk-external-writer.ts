@@ -27,7 +27,7 @@ export function externalRunWriter(run: BulkRunForApply, ledger: Pick<BulkLedger,
     const host = externalHostOf(run.targetSystem);
     const endpoint = host === null ? null : shopifyGraphqlEndpoint(host);
     const client = endpoint === null ? null : clientFor(run, undefined, undefined, shopifyApply);
-    return client && endpoint ? externalWriter(client, { io: shopifyTargetIo(client, endpoint) }) : null;
+    return client && endpoint ? externalWriter(client, { io: shopifyTargetIo(client, endpoint, shopifyApply.form) }) : null;
   }
   const client = clientFor(run);
   const contract = parseBulkContract(run.contractJson);

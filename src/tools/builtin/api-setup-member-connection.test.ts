@@ -10,6 +10,7 @@ import { runCollectingMemberNotes } from '../../core/member-connection-notes.js'
 import { sharedRefreshRefusal } from '../../core/profile-secret-view.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 // What the owner's session may do with a connection a member made with their own login:
 // not save over it while the member's access lasts (P3), refine it (F6), and not renew its
@@ -94,6 +95,8 @@ function agentWith(store: ApiStore, principal: RequestPrincipal, live: readonly 
     sessionCounters: { httpRequests: 0 },
     promptUser: async () => 'Allow',
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       vaultNameBindings: bindingsAsMigrated(store),
       apiStore: store,
       mandateEnds: { isLive: (id: string) => live.includes(id) },
@@ -240,6 +243,13 @@ describe('fetch_token in the member\'s run after a provider\'s refusal', () => {
       expect(record.historyState, reply).toBe('cancelled');
       expect(db.getDb().prepare("SELECT actor_kind AS a, actor_email AS e, mandate_id AS m FROM audit_log WHERE action = 'connection.erasure.cancel'").all())
         .toEqual([{ a: 'mandate', e: 'setup@example.org', m: 'M-1' }]);
+      // The row names the profile by its opaque id, not by the slug the model chose; the owner
+      // reads the slug back through the record id.
+      const trail = store.trailIdOf('crm-api');
+      expect(trail).toMatch(/^apf_[0-9a-f]{16}$/);
+      expect(db.getDb().prepare("SELECT target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all())
+        .toEqual([{ t: `${trail} ${record.id} lift` }]);
+      expect(db.getDb().prepare('SELECT connection_id AS c FROM connection_records WHERE id = ?').get(record.id)).toEqual({ c: 'crm-api' });
     } finally {
       restore();
       db.close();

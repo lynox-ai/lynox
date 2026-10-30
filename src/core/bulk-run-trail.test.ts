@@ -72,10 +72,31 @@ describe('bulkRunTrail', () => {
     expect(() => t.end('done', 1, 0, false)).not.toThrow();
   });
 
-  it('is none for the owner\'s run, a run with no planner and a run inside the instance', () => {
-    expect(bulkRunTrail(run({ delegatedPlanner: null }), log() as never, tools)).toBeNull();
-    expect(bulkRunTrail(run({ delegatedPlanner: OWNER_PRINCIPAL }), log() as never, tools)).toBeNull();
-    expect(bulkRunTrail(run({ targetSystem: 'workspace' }), log() as never, tools)).toBeNull();
-    expect(bulkRunTrail(run({ targetSystem: 'datastore:x' }), log() as never, tools)).toBeNull();
+  it('is none for the owner\'s run and a run with no planner, inside the instance as outside', () => {
+    for (const targetSystem of ['http:shop.example.com', 'workspace', 'data_store']) {
+      expect(bulkRunTrail(run({ targetSystem, delegatedPlanner: null }), log() as never, tools)).toBeNull();
+      expect(bulkRunTrail(run({ targetSystem, delegatedPlanner: OWNER_PRINCIPAL }), log() as never, tools)).toBeNull();
+    }
+  });
+
+  // 660b: a run inside the instance a delegated session planned writes the same pair, naming the
+  // store and never a target: not a path, not the collection's name.
+  it.each([
+    ['workspace', null, 'files'], ['data_store', 'secret_prices', 'data_store'],
+  ] as const)('writes a row before and after for a delegated session\'s run on %s, naming the store as %s', (targetSystem, targetCollection, store) => {
+    const l = log();
+    const t = bulkRunTrail(run({ targetSystem, targetCollection }), l as never, tools)!;
+    t.begin();
+    t.end('done', 2, 0, false);
+    expect(l.rows.map((r) => [r.principal, r.action, r.target, r.phase, r.runId])).toEqual([
+      [HELPER, 'bulk:apply', `store=${store} approved_by=owner`, 'attempt', 'run-1'],
+      [HELPER, 'bulk:apply', `store=${store} approved_by=owner outcome=done written=2 failed=0`, 'done', 'run-1'],
+    ]);
+    expect(l.rows.some((r) => (r.target ?? '').includes('secret_prices'))).toBe(false);
+  });
+
+  it('throws from the row before for a run inside the instance too', () => {
+    expect(() => bulkRunTrail(run({ targetSystem: 'workspace' }), null, tools)!.begin()).toThrow();
+    expect(() => bulkRunTrail(run({ targetSystem: 'data_store' }), null, tools)!.begin()).toThrow();
   });
 });

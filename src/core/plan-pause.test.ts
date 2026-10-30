@@ -7,7 +7,7 @@ import { EngineDb } from './engine-db.js';
 import { TaskManager } from './task-manager.js';
 import { MandateEnds } from './mandate-ends.js';
 import { TriggerStore } from './trigger-store.js';
-import { PAUSE_NOTICE_BODY_MAX, pauseNotice, type PausedFor } from './plan-pause.js';
+import { ADVANCE_NOTICE_ON, PAUSE_NOTICE_BODY_MAX, pauseNotice, type PausedFor } from './plan-pause.js';
 import {
   claimPauseNotices, pauseEndedPlans, pausedForOf, planEndedMembers, rowPlanMembers, setPlanPauseForTests,
   writePause, PLAN_PAUSE_DEFAULT, type PausePlanRow,
@@ -109,10 +109,10 @@ describe('the SQL function the store reads the switch through', () => {
 });
 
 describe('the switch', () => {
-  it('is off by default, and off it pauses nothing and reads no pause', () => {
-    expect(PLAN_PAUSE_DEFAULT).toBe(false);
+  it('is on by default (641c-2: the takeover is in the view), and off it pauses nothing and reads no pause', () => {
+    expect(PLAN_PAUSE_DEFAULT).toBe(true);
     restore();
-    restore = () => undefined;
+    restore = setPlanPauseForTests(false);
     const b = box();
     plan(b, 'p', { by: 'h@x.ch' });
     login(b, 'h@x.ch', NOW - H, NOW - 2 * H);
@@ -408,20 +408,28 @@ describe('the login that extends an ended grant', () => {
     vi.useRealTimers();
   });
 
-  it('a workflow whose authorship cannot be read fails the login too, where the sweep would skip it', () => {
+  it('a plan whose workflow cannot be read does not refuse the login: the login goes through, a plan of the mandate’s own schedule pauses, one it has only through the workflow does not, and stderr names both', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(NOW * 1000);
     const b = box();
     listen(b);
     workflow(b, 'wf', { email: 'h@x.ch', grant: 'g-h@x.ch' });
     plan(b, 'via-wf', { effect: 'run_workflow', workflow: 'wf' });
+    plan(b, 'own-on-wf', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'wf' });
+    plan(b, 'own', { by: 'h@x.ch' });
     login(b, 'h@x.ch', NOW - H, NOW - 2 * H);
     b.db.exec('ALTER TABLE workflows RENAME COLUMN mandate_edited_at TO gone');
-    expect(() => login(b, 'h@x.ch', NOW + H, NOW - 10)).toThrow('plan via-wf: who set up its workflow could not be read, the login is refused');
-    expect(b.ends.endOf('g-h@x.ch')).toBe(NOW - H);
-    b.db.exec('ALTER TABLE workflows RENAME COLUMN gone TO mandate_edited_at');
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     login(b, 'h@x.ch', NOW + H, NOW - 10);
-    expect(col(b, 'via-wf').paused_at).toBe(NOW);
+    const lines = err.mock.calls.map((c) => String(c[0]));
+    err.mockRestore();
+    b.db.exec('ALTER TABLE workflows RENAME COLUMN gone TO mandate_edited_at');
+    expect(b.ends.endOf('g-h@x.ch')).toBe(NOW + H);
+    expect(col(b, 'own').paused_at).toBe(NOW);
+    expect(col(b, 'own-on-wf').paused_at).toBe(NOW);
+    expect(col(b, 'via-wf').paused_at).toBeNull();
+    expect(lines.filter((l) => l.includes("who set up its workflow could not be read, paused on the schedule's own marks only")).map((l) => l.slice(0, 22)))
+      .toEqual(['[lynox] plan via-wf: w', '[lynox] plan own-on-wf']);
     vi.useRealTimers();
   });
 
@@ -505,16 +513,38 @@ describe("the owner's notice", () => {
   const ended = (email: string, reason: 'expired' | 'revoked'): PausedFor =>
     ({ mandateId: 'g', email, reason, endsAt: Date.UTC(2026, 9, 31) / 1000, roles: ['created'], closedPrompt: false });
   const EXTENDED = 'even if the access has since been extended.';
+  const NO_ADVANCE = 'There was no advance notice.';
 
   it('the four wordings, exactly', () => {
     expect([1, 3].map((c) => pauseNotice(ended('h@x.ch', 'expired'), c).body)).toEqual([
-      'h@x.ch had access until 2026-10-31. A plan in which they created or changed something is paused. It runs again only once you take it over, even if the access has since been extended.',
-      'h@x.ch had access until 2026-10-31. 3 plans in which they created or changed something are paused. The plans run again only once you take them over, even if the access has since been extended.',
+      'h@x.ch had access until 2026-10-31. A plan in which they created or changed something is paused. It runs again only once you take it over, even if the access has since been extended. There was no advance notice.',
+      'h@x.ch had access until 2026-10-31. 3 plans in which they created or changed something are paused. The plans run again only once you take them over, even if the access has since been extended. There was no advance notice.',
     ]);
     expect([1, 3].map((c) => pauseNotice(ended('h@x.ch', 'revoked'), c).body)).toEqual([
       "h@x.ch's access was revoked. A plan in which they created or changed something is paused. It runs again only once you take it over.",
       "h@x.ch's access was revoked. 3 plans in which they created or changed something are paused. The plans run again only once you take them over.",
     ]);
+  });
+
+  it('until the advance notice exists, an expiry says there was none, and a revocation does not', () => {
+    // 641c-2b turns the switch on with the advance notice; then the sentence goes.
+    expect(ADVANCE_NOTICE_ON).toBe(false);
+    for (const count of [1, 3]) {
+      expect(pauseNotice(ended('h@x.ch', 'expired'), count).body.endsWith(NO_ADVANCE)).toBe(true);
+      expect(pauseNotice(ended('h@x.ch', 'revoked'), count).body).not.toContain('advance notice');
+    }
+  });
+
+  it('a tap on the notice opens the paused plans, for either reason', () => {
+    for (const reason of ['expired', 'revoked'] as const) {
+      expect(pauseNotice(ended('h@x.ch', reason), 2).data).toEqual({ pausedPlans: '1' });
+    }
+  });
+
+  it('goes to the owner\'s devices only: it names a helper and how their access ended', () => {
+    for (const reason of ['expired', 'revoked'] as const) {
+      for (const count of [1, 3]) expect(pauseNotice(ended('h@x.ch', reason), count).audience).toBe('owner');
+    }
   });
 
   it('a long name gives way with "…", and no sentence is cut', () => {
@@ -526,27 +556,30 @@ describe("the owner's notice", () => {
         // Cut only where the full name does not fit, and then to the bound exactly.
         if (body.startsWith(long)) expect(body).not.toContain('…');
         else expect([body.length, /^a+…/.test(body)]).toEqual([PAUSE_NOTICE_BODY_MAX, true]);
-        expect(body.endsWith(reason === 'expired' ? EXTENDED : 'take it over.') || body.endsWith('take them over.')).toBe(true);
+        expect(body.endsWith(reason === 'expired' ? NO_ADVANCE : 'take it over.') || body.endsWith('take them over.')).toBe(true);
         if (reason === 'expired') expect(body).toContain(EXTENDED);
       }
     }
     // The expiry with a long name is the case that is cut.
     expect(pauseNotice(ended(long, 'expired'), 12).body).toMatch(/^a+… had access until/);
-    // A name that fits is not touched.
-    const fits = pauseNotice(ended(`${'b'.repeat(40)}@x.ch`, 'expired'), 12).body;
-    expect(fits).toContain(`${'b'.repeat(40)}@x.ch had access until`);
+    // A name that fits is not touched. Until the advance notice exists, its sentence leaves an
+    // expiry of 2–99 plans 24 characters of name: 24 fit, 25 give way.
+    const fits = pauseNotice(ended(`${'b'.repeat(19)}@x.ch`, 'expired'), 12).body;
+    expect(fits).toContain(`${'b'.repeat(19)}@x.ch had access until`);
     expect(fits).not.toContain('…');
+    expect(pauseNotice(ended(`${'b'.repeat(20)}@x.ch`, 'expired'), 12).body).toContain('…');
   });
 });
 
 describe('the migration', () => {
   it('v57 adds the four pause columns, NULL on every existing row', () => {
     const b = box();
-    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(58);
+    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(63);
     const cols = (b.db.prepare('PRAGMA table_info(triggers)').all() as Array<{ name: string; dflt_value: unknown }>)
       .filter((c) => c.name.startsWith('pause'));
+    // `paused_db_at` is v60's (the takeover's clock), not v57's.
     expect(cols.map((c) => [c.name, c.dflt_value])).toEqual([
-      ['paused_at', null], ['paused_due_at', null], ['paused_for', null], ['pause_noticed_at', null],
+      ['paused_at', null], ['paused_due_at', null], ['paused_for', null], ['pause_noticed_at', null], ['paused_db_at', null],
     ]);
   });
 });

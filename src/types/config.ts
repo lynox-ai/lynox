@@ -234,6 +234,8 @@ export interface ChangesetManagerLike {
   /** `false` when nothing could be saved because the workspace could not be reached: then do not
    *  write. Any other result (also none) lets the write go ahead. */
   backupBeforeWrite(filePath: string): boolean | void;
+  /** Whether the last `backupBeforeWrite` returned `false` because the file is too large to save. */
+  readonly refusedTooLarge?: boolean;
   /** After a write returned: which file the run left at the path. A manager without it records
    *  nothing, and its rollback decides alone. */
   recordWritten?(filePath: string): void;
@@ -246,11 +248,16 @@ export interface ChangesetWriter {
   readonly active: true;
   /** False when nothing could be saved: then do not write. */
   backupBeforeWrite(filePath: string): boolean;
+  /** Whether the last `backupBeforeWrite` returned false because the file is too large to save. */
+  readonly refusedTooLarge: boolean;
   /** After a write returned: which file the run left at the path. */
   recordWritten(filePath: string): void;
   /** Whether nothing is backed up yet. */
   isEmpty(): boolean;
 }
+
+/** Max chars of a single tool result before the agent cuts it to its start (`max_tool_result_chars`). */
+export const DEFAULT_MAX_TOOL_RESULT_CHARS = 80_000;
 
 // === 4.7 Beta Headers ===
 

@@ -59,6 +59,23 @@ export const APPROVAL_OUTCOMES = [
 export type ApprovalOutcome = (typeof APPROVAL_OUTCOMES)[number];
 const OUTCOME_SET: ReadonlySet<string> = new Set(APPROVAL_OUTCOMES);
 
+/**
+ * The reasons a `failed` entry's draft may be loaded into the owner's chat to write it again. Each
+ * is given before the provider is called: a send that threw or timed out ends `unknown`
+ * (`approval-executor.ts`). The reason stored is the last attempt's; an entry that met
+ * `dedup_window` on an earlier attempt is marked and not loaded either (`approvalResultSawDedup`).
+ * Left out, though nothing went out either: `checksum` and
+ * `not_executable` (the content is not what was filed, or is gone), `secret_in_body` (the body
+ * holds something like a credential, which would reach the model), `dedup_window` (a matching
+ * mail to the same people went out shortly before), `queued` (queued elsewhere, it may still go
+ * out), and `other`. A list, not exclusions: a reason added later loads nothing until named here.
+ */
+export const APPROVAL_REWRITABLE_OUTCOMES: readonly ApprovalOutcome[] = [
+  'account_not_configured', 'receive_only', 'account_changed', 'mandate_ended', 'invalid_recipients', 'rate_limit',
+  'cancelled', 'mail_unavailable', 'sending_address_unavailable', 'deadline_before_send', 'trail_unavailable',
+  'executor_error',
+];
+
 const DECIDED_OUTCOME: ReadonlyMap<string, ApprovalOutcome> = new Map([
   ['owner', 'discarded'],
   ['moved_to_chat', 'moved_to_chat'],
@@ -162,6 +179,9 @@ export interface SetupMarks {
   /** The last mandate that changed it, and its grant id. */
   mandateEditor: string | null;
   mandateEditorId: string | null;
+  /** Whether the owner took the creator's or the editor's mark over (`plan-takeover.ts`). */
+  creatorCovered: boolean;
+  editorCovered: boolean;
 }
 
 /**
@@ -172,15 +192,17 @@ export interface SetupMarks {
 export interface SetupLine {
   kind: 'set_up_by' | 'last_changed_by' | 'test_run_by';
   name: string;
+  /** The owner took this mark over: the same line, said with "taken over" (never a second line). */
+  takenOver: boolean;
 }
 
-interface Mark { kind: 'set_up_by' | 'last_changed_by'; tag: string; mandateId: string | null }
+interface Mark { kind: 'set_up_by' | 'last_changed_by'; tag: string; mandateId: string | null; takenOver: boolean }
 
 function marksOf(m: SetupMarks | undefined): Mark[] {
   if (m === undefined) return [];
   const out: Mark[] = [];
-  if (isMandateTag(m.createdBy)) out.push({ kind: 'set_up_by', tag: m.createdBy!, mandateId: m.createdMandateId });
-  if (isMandateTag(m.mandateEditor)) out.push({ kind: 'last_changed_by', tag: m.mandateEditor!, mandateId: m.mandateEditorId });
+  if (isMandateTag(m.createdBy)) out.push({ kind: 'set_up_by', tag: m.createdBy!, mandateId: m.createdMandateId, takenOver: m.creatorCovered });
+  if (isMandateTag(m.mandateEditor)) out.push({ kind: 'last_changed_by', tag: m.mandateEditor!, mandateId: m.mandateEditorId, takenOver: m.editorCovered });
   return out;
 }
 
@@ -202,20 +224,20 @@ export function setupLines(
   const marks = [...marksOf(trigger), ...marksOf(workflow)];
   const lines: SetupLine[] = [];
   const seen = new Set<string>();
-  const add = (kind: SetupLine['kind'], mandateId: string | null, tag: string | null): void => {
+  const add = (kind: SetupLine['kind'], mandateId: string | null, tag: string | null, takenOver: boolean): void => {
     const key = `${kind}\u0000${mandateId ?? `tag:${tag ?? ''}`}`;
     if (seen.has(key)) return;
     seen.add(key);
-    lines.push({ kind, name: nameOf(mandateId, tag) });
+    lines.push({ kind, name: nameOf(mandateId, tag), takenOver });
   };
   const forMandate = entry.mandateId !== null || isMandateTag(entry.createdBy);
   const own = (m: Mark): boolean => entry.mandateId !== null && m.mandateId === entry.mandateId;
   if (forMandate) {
     const matching = marks.filter(own);
-    if (matching.length === 0) add('test_run_by', entry.mandateId, entry.createdBy);
-    for (const m of matching) add(m.kind, entry.mandateId, entry.createdBy);
+    if (matching.length === 0) add('test_run_by', entry.mandateId, entry.createdBy, false);
+    for (const m of matching) add(m.kind, entry.mandateId, entry.createdBy, m.takenOver);
   }
-  for (const m of marks) if (!own(m)) add(m.kind, m.mandateId, m.tag);
+  for (const m of marks) if (!own(m)) add(m.kind, m.mandateId, m.tag, m.takenOver);
   return lines;
 }
 
@@ -286,6 +308,8 @@ export interface ApprovalCard {
   origin: { source: ApprovalSource; triggerId: string; runId: string; threadId?: string | undefined; eventId?: string | undefined } | null;
   outcome: ApprovalOutcome | null;
   setup: SetupLine[];
+  /** The thread "Im Chat ändern" continues, or null for a new chat. The owner's only. */
+  chatThreadId: string | null;
 }
 
 export interface ApprovalCardSources {
@@ -296,6 +320,8 @@ export interface ApprovalCardSources {
   /** The trail's name for a grant; which grants the card may name by it is the scope's to say. */
   displayNameOf: DisplayNameOf;
   now: number;
+  /** Who opened a thread and whether it is contained, or undefined when there is no such thread. */
+  threadOf?: ((threadId: string) => { createdBy: string | null; contained: boolean } | undefined) | undefined;
 }
 
 const copyAddresses = (list: ReadonlyArray<StoredAddress>): StoredAddress[] =>
@@ -318,6 +344,26 @@ function cardMail(entry: ApprovalEntry): ApprovalCardMail | null {
     };
   }
   return { ...common, bcc: copyAddresses(f.payload.bcc) };
+}
+
+/**
+ * The thread "Im Chat ändern" continues: the run's own thread, when the run was a task's in a
+ * thread the owner opened and the owner filed the entry. Everything else opens a new chat — a
+ * workflow run has no thread, and continuing a mandate's thread would put the owner's turn into
+ * a conversation the mandate's run had, foreign content included. A contained thread may not
+ * send mail, so changing the draft there could not end in a send: a new chat. A thread that is
+ * gone, or a reader that cannot say who opened it, also means a new chat.
+ */
+export function approvalChatThread(
+  entry: Pick<ApprovalEntry, 'origin' | 'mandateId' | 'createdBy'>,
+  threadOf: ApprovalCardSources['threadOf'],
+): string | null {
+  const o = entry.origin;
+  if (o === null || o.source !== 'task' || o.threadId === undefined || o.threadId === '') return null;
+  if (entry.mandateId !== null || isMandateTag(entry.createdBy)) return null;
+  const thread = threadOf?.(o.threadId);
+  if (thread === undefined || isMandateTag(thread.createdBy) || thread.contained) return null;
+  return o.threadId;
 }
 
 /** The card for one entry, as the scope may see it. */
@@ -350,5 +396,6 @@ export function approvalCard(entry: ApprovalEntry, src: ApprovalCardSources): Ap
     },
     outcome: approvalOutcome(entry),
     setup: setupLines(entry, src.trigger, src.workflow, mandateNamer(src.scope, src.displayNameOf)),
+    chatThreadId: src.scope.viewer === 'owner' ? approvalChatThread(entry, src.threadOf) : null,
   };
 }

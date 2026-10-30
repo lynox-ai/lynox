@@ -1,13 +1,15 @@
 import { realpathSync, existsSync } from 'node:fs';
-import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint } from '../core/outbound-write.js';
+import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, isReadMethod } from '../core/outbound-write.js';
 import { isShopifyAdminHost } from '../core/shopify-host.js';
-import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyProductReadBody, shopifyWriteRequest, type ShopifyWrite } from '../core/shopify-graphql.js';
+import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyMediaListBody, shopifyTargetReadBody, shopifyWriteRequest, type ShopifyWrite } from '../core/shopify-graphql.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS, isPathWithin } from '../core/workspace.js';
-import { proveBashCommand, BASH_OBSERVE_EVENT } from './bash-allowlist.js';
+import { proveBashCommand, BASH_OBSERVE_EVENT, type BashProof } from './bash-allowlist.js';
+import { shellIsolation } from '../core/shell-isolation.js';
+import { namesSidecarLabel } from '../core/workspace-root.js';
 import { channels } from '../core/observability.js';
 import { globToRegex } from '../core/glob.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
@@ -567,6 +569,8 @@ const SENSITIVE_PATHS: RegExp[] = [
 
 function resolveRealPath(filePath: string): string {
   const resolved = resolve(filePath);
+  // In shell sidecar mode a workspace path is judged by its spelling, not looked up by name (D3).
+  if (namesSidecarLabel(resolved)) return resolved;
   if (existsSync(resolved)) {
     return realpathSync(resolved);
   }
@@ -683,12 +687,16 @@ function observeBashProof(toolName: string, input: unknown, autonomy: AutonomyLe
   if (!channels.securityFlagged.hasSubscribers) return;
   if (!input || typeof input !== 'object' || !('command' in input)) return;
   const command = String((input as { command: unknown }).command);
-  const proof = proveBashCommand(command, {
-    cwd: getWorkspaceCwd(),
-    home: process.env['HOME'],
-    readRoots: READ_ONLY_ROOTS,
-    isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)),
-  });
+  // In shell sidecar mode the proof would resolve the command's paths here, by name, in a tree
+  // the command never runs in: not proven, and nothing is looked up (PRD shell-sidecar-activation D3).
+  const proof: BashProof = shellIsolation().kind === 'sidecar'
+    ? { proven: false, reason: 'sidecar', program: 'other' }
+    : proveBashCommand(command, {
+      cwd: getWorkspaceCwd(),
+      home: process.env['HOME'],
+      readRoots: READ_ONLY_ROOTS,
+      isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)),
+    });
   const current = !warning ? 'free' : warning.includes('[BLOCKED') ? 'blocked' : 'asks';
   channels.securityFlagged.publish({
     event_type: BASH_OBSERVE_EVENT,
@@ -739,7 +747,7 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // refused otherwise — never handed on to the checks below, so a refusal does not rest on
   // what `httpMethods` happens to hold.
   const shopify = SHOPIFY_GRANTS.get(contract);
-  if (shopify !== undefined && (typeof obj.url !== 'string' || (method !== 'GET' && method !== 'HEAD') || isGraphqlEndpoint(obj.url))) {
+  if (shopify !== undefined && (typeof obj.url !== 'string' || !isReadMethod(method) || isGraphqlEndpoint(obj.url))) {
     return grantsShopify(input, method, shopify);
   }
   if (!(contract.httpMethods ?? []).some(m => m.toUpperCase() === method)) return false;
@@ -747,7 +755,7 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // No other contract grants a write to a GraphQL endpoint: there a read and every mutation the
   // token can run are the same POST to the same path, and nothing here reads the document. Read
   // from the URL alone, so it holds for the callers that never pass a body.
-  if (method !== 'GET' && method !== 'HEAD' && isGraphqlEndpoint(obj.url)) return false;
+  if (!isReadMethod(method) && isGraphqlEndpoint(obj.url)) return false;
 
   let parsed: URL;
   try {
@@ -945,28 +953,33 @@ const SHOPIFY_GRANTS = new WeakMap<CapabilityContract, ShopifyGrant>();
 
 /** Which read a contract is minted for. The phase is the form: each grant holds one form's bodies only. */
 export type ShopifyReadPhase =
-  | { readonly phase: 'list'; readonly afterId: number }
+  /** `form` names which list: the products (the default) or their images. */
+  | { readonly phase: 'list'; readonly afterId: number; readonly form?: 'shopify_products_list' | 'shopify_media_list' }
+  /** Each target is read by the document its GID's type names: a product's or an image's. */
   | { readonly phase: 'read'; readonly targets: readonly string[] };
 
 /**
  * A reviewed contract that also admits a bulk run's Shopify GraphQL reads on `host`: a `POST`
  * to the pinned endpoint whose body is, byte for byte, one the
- * engine builds here from its own documents — the list page after `afterId` in the list phase,
- * one product's read per target GID in the preview. Nothing else reaches that endpoint under
+ * engine builds here from its own documents — the list page after `afterId` in the list phase
+ * (of products, or of their images), one read per target GID in the preview (a product's or an
+ * image's, by the GID's type). Nothing else reaches that endpoint under
  * it, no `GET` included. The documents and variables are built here, never taken from the
  * caller: it names a phase, a host and the ledger's values, and a value that does not fit
  * (a host that is not exactly a store host, a cursor that is not a safe integer, a key that is
- * not a product GID) throws. So does a contract that grants a write verb: a run whose contract
+ * neither a product's nor an image's GID) throws. So does a contract that grants a write verb: a run whose contract
  * names one is read everywhere else as a run that writes (`writeMethodOf`, the probe), and a
  * contract whose hosts are not exactly `host`: the grant's host is the contract's own. The
  * returned contract is a frozen copy; only it carries the grant, and copying it again (as
  * `withListQuery` does) drops the grant.
  */
 export function withShopifyRead(contract: CapabilityContract, host: string, read: ShopifyReadPhase): CapabilityContract {
-  const bodies = read.phase === 'list' ? [shopifyListBody(read.afterId)] : read.targets.map(shopifyProductReadBody);
+  const bodies = read.phase === 'list'
+    ? [read.form === 'shopify_media_list' ? shopifyMediaListBody(read.afterId) : shopifyListBody(read.afterId)]
+    : read.targets.map(shopifyTargetReadBody);
   if (bodies.some((b) => b === null)) {
     mintShopify(contract, host, [], []);
-    throw new Error('a Shopify read is only granted for a safe cursor and product GIDs');
+    throw new Error('a Shopify read is only granted for a safe cursor and product or image GIDs');
   }
   return mintShopify(contract, host, bodies as string[], []);
 }
@@ -982,17 +995,17 @@ export interface ShopifyApplyPhase {
  * admits its reads: each target's read (the apply reads a target before and after it writes) and,
  * for each target, the one write of the after-state the ledger holds for it — built here from the
  * form's document, byte for byte, never taken from the caller. So the write binds the target and
- * its value both: a product outside `writes`, or another value for one inside, builds another
+ * its value both: a target outside `writes`, or another value for one inside, builds another
  * body and is refused. Minted only where an approved run is applied (`worker-loop.ts`), from that
  * run's ledger rows; the same checks on the contract as for a read, and the same throw for a
  * value that does not fit.
  */
 export function withShopifyApply(contract: CapabilityContract, host: string, apply: ShopifyApplyPhase): CapabilityContract {
-  const reads = apply.reads.map(shopifyProductReadBody);
+  const reads = apply.reads.map(shopifyTargetReadBody);
   const writes = apply.writes.map(shopifyWriteRequest);
   if (reads.some((b) => b === null) || writes.some((b) => b === null)) {
     mintShopify(contract, host, [], []);
-    throw new Error('a Shopify write is only granted for product GIDs and after-states its form can write');
+    throw new Error('a Shopify write is only granted for product or image GIDs and after-states their form can write');
   }
   return mintShopify(contract, host, reads as string[], writes as string[]);
 }
@@ -1008,7 +1021,7 @@ function mintShopify(contract: CapabilityContract, host: string, reads: readonly
   if (contract.origin !== 'reviewed') throw new Error('a Shopify read is only granted by a reviewed contract');
   if (!isShopifyAdminHost(host) || !isShopifyStoreHostName(host)) throw new Error('a Shopify read is only granted on a store host');
   if (contract.hostPatterns.length !== 1 || contract.hostPatterns[0] !== host) throw new Error('a Shopify read is only granted on the contract\'s one host');
-  if ((contract.httpMethods ?? []).some((m) => m.toUpperCase() !== 'GET' && m.toUpperCase() !== 'HEAD')) {
+  if ((contract.httpMethods ?? []).some((m) => !isReadMethod(m.toUpperCase()))) {
     throw new Error('a Shopify read is only granted by a contract that grants no write verb');
   }
   const endpoint = shopifyGraphqlEndpoint(host);
@@ -2105,7 +2118,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // unwarned, and this branch was the last place that still needed the schema enum to
     // make that unreachable. DELETE never arrives here in autonomous mode — the branch
     // above returns for it.
-    if (!['GET', 'HEAD'].includes(method) && autonomy === 'autonomous') {
+    if (!isReadMethod(method) && autonomy === 'autonomous') {
       return framed`⚠ ${system(toolName)}: HTTP ${system(method)} — write operation, needs your OK`;
     }
   }

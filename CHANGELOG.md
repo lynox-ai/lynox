@@ -4,6 +4,11 @@
 
 ### Upgrade notes
 
+- A control plane may now emit `LYNOX_FEATURE_SHOPIFY_BULK_READ`, per instance
+  and never fleet-wide. It reads or writes a store only where bulk runs are open
+  on that instance.
+  Self-hosted instances are unchanged: the variable is still off by default
+  and turned on in the instance's own environment.
 - `PUT /api/config` can turn `bulk_runs_enabled` on again where the owner
   holds the config (self-host and the tiers that bring their own model key).
   This takes back the 2.17.0 note that it answers 403 for that. Bulk runs still
@@ -39,6 +44,38 @@
   at the manifest and, on the decrypted bundles, before the engine shuts down;
   a migration export leaves the workspace out and names that in its `done`
   event. Without the sidecar nothing changes.
+- `GET /api/backups` gives each backup a `provenance` (`verified`, `none`,
+  `mismatch`, `no-key`), the same check a restore makes. The backup list in
+  the web UI uses it to say whether a backup holds the workspace files: one
+  made in sidecar mode says it does not, and one whose origin cannot be shown
+  says that this cannot be confirmed, so a removed record does not make a
+  backup look complete. The done step of a migration that left the workspace
+  out says so too.
+- `GET /api/access-trail` marks a helper's read with `auto: true` when it is
+  on a route the web UI polls by itself (the engine's fixed list of four
+  status routes, such as `GET /api/runs/active`). The owner's view groups
+  consecutive marked reads of one person into one line that opens to each
+  read, after the filters. The mark goes by route, so the helper opening the
+  Tasks view or the cost history, or chat checking for a running run, is
+  grouped too, and shows when the line is opened. The trail still records every read.
+- `api_setup` now stops at the conversation's HTTP request limit, which
+  `http_request` shares. Its own fetches (docs page, linked sections, OpenAPI
+  spec, the `fetch_token` POST) used to count only after an answer arrived and
+  never checked. Now each reserves its request before it goes out. A fetch
+  that fails after it was sent stays counted, and parallel `api_setup` calls
+  cannot all use the last request. At the limit, bootstrap fetches neither the docs page
+  nor the OpenAPI spec and says so. If the limit is reached after the docs
+  page, it reads no further linked sections and tells the model that the draft
+  may miss endpoints.
+- The done step of a migration now names the workspace files the export
+  could not transfer (links, special files, names that cannot be
+  transferred). It shows the count, the paths on request (up to 50, then how
+  many more), and where to move them: support on a managed instance, the
+  owner's own storage otherwise. The description no longer says all data
+  arrived, and the toast says so too, instead of the green "completed". A bidi
+  control in a name is
+  shown as `\u{202E}` instead of reversing the path. The export already
+  reported these files in its `done` event; the web UI did not show them.
 - An engine started with `LYNOX_SHELL_EXEC_SOCKET` now also needs the
   workspace handed over on fd 3, and stops at start, naming the check, when it
   is missing. It also stops when the socket is set but blank (it used to fail
@@ -54,6 +91,12 @@
   one product as its probe first. Turning the switch off also halts an
   approved run before its next write; an undo still runs. The switch stays
   off by default. No schema change.
+- The fast slot of the Fireworks presets `efficient` and `balanced` moves to
+  DeepSeek v4.1 Flash 1017 (`accounts/fireworks/models/deepseek-v4p1-flash-1017`),
+  the provider's update of DeepSeek v4.1 Flash, at the same price ($0.30 input,
+  $0.006 cached, $1.20 output per 1M tokens). It is now the first model of the
+  Fireworks tile in the tier pickers. The older id stays registered and
+  selectable, so a slot that names it keeps it.
 
 ## 2.17.0 — 2026-10-23
 

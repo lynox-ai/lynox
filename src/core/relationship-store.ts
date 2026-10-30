@@ -35,6 +35,20 @@ export interface RelationshipRow {
 
 const KEPT = sourceKeptSql('r');
 
+/** What {@link RelationshipStore.createRelationship} takes. */
+export interface RelationshipParams {
+  id?: string | undefined;
+  fromSubjectId: string;
+  toSubjectId: string;
+  kind: string;
+  description?: string | undefined;
+  sourceMemoryId?: string | undefined;
+  confidence?: number | undefined;
+  since?: string | undefined;
+  until?: string | undefined;
+  notes?: string | undefined;
+}
+
 export class RelationshipStore {
   private readonly db: Database.Database;
 
@@ -57,18 +71,16 @@ export class RelationshipStore {
    * - a re-assert without a source (CRM) makes a sourced edge sourceless, with the
    *   re-assert's own description: the memory no longer decides whether it shows.
    */
-  createRelationship(params: {
-    id?: string | undefined;
-    fromSubjectId: string;
-    toSubjectId: string;
-    kind: string;
-    description?: string | undefined;
-    sourceMemoryId?: string | undefined;
-    confidence?: number | undefined;
-    since?: string | undefined;
-    until?: string | undefined;
-    notes?: string | undefined;
-  }): string {
+  createRelationship(params: RelationshipParams): string {
+    return this.createRelationshipReporting(params).id;
+  }
+
+  /**
+   * {@link createRelationship}, saying whether the edge is new: `created` is true only when
+   * this call inserted it, false when it re-asserted an edge of the same triple. A derived
+   * write's outcome row counts new edges by it (660a-3); a re-assert is no new edge.
+   */
+  createRelationshipReporting(params: RelationshipParams): { id: string; created: boolean } {
     const existing = this.db.prepare(`
       SELECT id, source_memory_id FROM relationships
       WHERE from_subject_id = ? AND to_subject_id = ? AND kind = ?
@@ -95,7 +107,7 @@ export class RelationshipStore {
         description, prev === null ? null : next, params.confidence ?? null,
         params.since ?? null, params.until ?? null, params.notes ?? null, existing.id,
       );
-      return existing.id;
+      return { id: existing.id, created: false };
     }
 
     const id = params.id ?? randomUUID();
@@ -108,7 +120,7 @@ export class RelationshipStore {
       params.description ?? '', params.sourceMemoryId ?? null,
       params.confidence ?? 1.0, params.since ?? null, params.until ?? null, params.notes ?? null,
     );
-    return id;
+    return { id, created: true };
   }
 
   /** Whether an edge of this triple exists, whatever its source's state. */

@@ -1526,6 +1526,57 @@ const MIGRATIONS: string[] = [
   // version and on every run started without one; the approval checksum names it only where set.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
    ALTER TABLE bulk_runs ADD COLUMN start_domains TEXT;`,
+
+  // v59 (PRD shopify-preset §20.2 item 4): a target the owner takes out of a previewed run before
+  // approving it. It keeps its after-state and is not written; the ledger's one definition of a
+  // writing target excludes it. NULL for every existing target: nothing is deselected.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
+   ALTER TABLE bulk_targets ADD COLUMN deselected_at TEXT;`,
+
+  // v60: the owner's takeover of a paused plan (`plan-takeover.ts`). Each side of a plan — a
+  // trigger, a workflow — keeps the mandate marks the owner took over, as the mark stood:
+  // (tag, grant id, time) for the creator and for the last mandate editor. A mark equal to its
+  // covered copy is no member (`planMandate`); a new mandate edit clears the editor's copy in
+  // the same statement, so it is a member again. `covered_at` is when (unix seconds), for display.
+  // `paused_db_at` is the pause in the database's own clock (`unixepoch('now')`), the clock the
+  // marks are written in, so the takeover can tell a mark made after the pause (`plan-takeover.ts`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (60);
+   ALTER TABLE triggers ADD COLUMN paused_db_at INTEGER;
+   ALTER TABLE triggers ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_at INTEGER;
+   ALTER TABLE workflows ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_at INTEGER;`,
+  // v61: the webhook drain's columns. `attempt_id` names the
+  // run a `running` event belongs to, so the outcome of a run whose attempt was superseded
+  // writes nothing. `reported_at` is set once a dropped or failed event was reported to the owner,
+  // `unknown_reported_at` once a `running` event left behind by a lost process was reported as
+  // of unknown outcome — each is reported once.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (61);
+   ALTER TABLE inbound_events ADD COLUMN attempt_id TEXT;
+   ALTER TABLE inbound_events ADD COLUMN reported_at TEXT;
+   ALTER TABLE inbound_events ADD COLUMN unknown_reported_at TEXT;`,
+  // v62: the index the drain's sweeps read by, state and age across all triggers each tick. Its
+  // own migration, so that a database that already ran the one before it gets it too.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (62);
+   CREATE INDEX IF NOT EXISTS idx_inbound_events_state_received ON inbound_events(state, received_at);`,
+  // v63 (660a-1c S-2): an opaque id for each API profile, `apf_` and 16 hex, that a mandate's row
+  // in the instance trail names instead of the slug the model chose (which can carry a name). Only
+  // `kind = 'api'` rows get one; the boot fills any a row is still missing (`fillApiTrailIds`).
+  // `randomblob` is enough: the id is a label with no secret value.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (63);
+   ALTER TABLE connections ADD COLUMN trail_id TEXT;
+   UPDATE connections SET trail_id = 'apf_' || lower(hex(randomblob(8))) WHERE trail_id IS NULL AND kind = 'api';
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_trail_id ON connections(trail_id);`,
 ];
 
 export interface EngineDbOptions {

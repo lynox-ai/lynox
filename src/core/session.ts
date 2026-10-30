@@ -30,7 +30,7 @@ import { effectiveContextWindow, profileNamed } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } from './agent.js';
 import { isInputRequired } from './input-required.js';
 import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
@@ -156,6 +156,7 @@ const DEFAULT_COMPACTION_MODEL: ModelTier = 'fast';
  */
 export function classifyRunFailure(err: unknown): { noteCode: string; report: boolean } {
   if (isInputRequired(err)) return { noteCode: 'input_required', report: false };
+  if (err instanceof ThinkingOnlyLoopError) return { noteCode: 'thinking_loop', report: true };
   if (err instanceof ContinuationLoopError) return { noteCode: 'continuation_loop', report: true };
   if (err instanceof ToolLoopBreakError) return { noteCode: 'tool_loop_break', report: true };
   if (err instanceof RunAbortedError) return { noteCode: 'run_interrupted', report: true };
@@ -1428,7 +1429,9 @@ export class Session {
               total_cost_usd: rollupCost,
             });
           }
-          if (startMessageCount === 0) {
+          // An internal run (a summary in a session of its own) has no user words to title, and
+          // its prompt is another thread's history: it would go to a second model call.
+          if (startMessageCount === 0 && !agent.isInternalRun) {
             // Derive the title from the user's OWN words, not the engine framing:
             // a context-opened chat (💬 mail-reply / fix / workflow-edit) carries a
             // `[Loaded …]\n[/loaded-context]\n\n` preamble on its first message that

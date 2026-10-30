@@ -3,15 +3,19 @@
 	import { visibleText } from '../visible-text.js';
 	import {
 		approvalActionable, approvalClosable, approvalNeedsSecondClick, approvalNextStepKey, approvalOutcomeKey,
-		approvalSendable, approvalSetupName,
+		approvalReopensInChat, approvalSendable, approvalSetupKind, approvalSetupName,
 		type ApprovalAddress, type ApprovalCardData, type ApprovalViewer,
 	} from './approvals.js';
 
-	let { card, viewer, busy = false, onDecide }: {
+	let { card, viewer, busy = false, onDecide, onMoveToChat, onReopenChat }: {
 		card: ApprovalCardData;
 		viewer: ApprovalViewer;
 		busy?: boolean;
 		onDecide: (card: ApprovalCardData, action: 'approve' | 'reject' | 'clear_unknown') => void;
+		/** Moves the mail to chat to change it; without it, the card offers no such action. */
+		onMoveToChat?: ((card: ApprovalCardData) => void) | undefined;
+		/** Opens the chat on a draft moved there before, deciding nothing. */
+		onReopenChat?: ((card: ApprovalCardData) => void) | undefined;
 	} = $props();
 
 	/** The second click's step, open only for a mail that needs one. */
@@ -26,6 +30,10 @@
 	const actionable = $derived(approvalActionable(card));
 	const sendable = $derived(approvalSendable(card));
 	const mail = $derived(card.mail);
+	/** Changing in chat is offered beside the card's actions, so only where it has them (a waiting
+	 *  entry the owner may decide on), and only with a draft to load. */
+	const movable = $derived(onMoveToChat !== undefined && mail !== null);
+	const reopenable = $derived(onReopenChat !== undefined && approvalReopensInChat(card));
 	const recipientCount = $derived(
 		mail === null ? 0 : new Set([...mail.to, ...mail.cc, ...mail.bcc].map((a) => a.address.trim().toLowerCase())).size,
 	);
@@ -54,12 +62,18 @@
 	{#each list as a, i (i)}{separator(i)}<span class="inline-block max-w-full" data-recipient>{#if a.name !== undefined && a.name !== ''}<span class="text-text-muted" data-address-name>{visibleText(a.name)}</span> &lt;{/if}<span class="font-medium text-text" data-address>{visibleText(a.address, ADDRESS)}</span>{#if a.name !== undefined && a.name !== ''}&gt;{/if}</span>{/each}
 {/snippet}
 
+{#snippet moveToChat()}
+	{#if movable}
+		<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onMoveToChat?.(card)} data-action="move-to-chat">{t('approvals.move_to_chat')}</button>
+	{/if}
+{/snippet}
+
 <article class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-3" data-approval-id={card.id}>
 	<header class="flex flex-wrap items-baseline gap-2">
 		<h2 class="text-sm font-medium text-text min-w-0 break-words flex-1">
 			{mail !== null ? visibleText(mail.subject) : t('approvals.mail_gone')}
 		</h2>
-		<span class="text-[10px] rounded px-1.5 py-0.5 bg-bg-muted text-text-muted" data-status={card.status}>{t(`approvals.status.${card.status}`)}</span>
+		<span class="text-[10px] rounded px-1.5 py-0.5 bg-bg-muted text-text-muted" data-status={card.status}>{t(card.status === 'rejected' && card.outcome === 'moved_to_chat' ? 'approvals.status.moved_to_chat' : `approvals.status.${card.status}`)}</span>
 		{#if card.held !== null}
 			<span class="text-[10px] rounded px-1.5 py-0.5 bg-bg-muted text-text-muted">{t(`approvals.held.${card.held}`)}</span>
 		{/if}
@@ -81,7 +95,7 @@
 	</p>
 
 	{#each card.setup as line}
-		<p class="text-xs text-text-muted" data-setup={line.kind}>{tf(`approvals.setup.${line.kind}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>
+		<p class="text-xs text-text-muted" data-setup={line.kind}>{tf(`approvals.setup.${approvalSetupKind(line, viewer)}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>
 	{/each}
 
 	{#if card.massSend}
@@ -128,6 +142,7 @@
 		<div class="flex flex-wrap items-center gap-2">
 			<p class="text-xs text-text-subtle flex-1 min-w-[12rem]" data-note="not-executable">{t('approvals.not_executable_note')}</p>
 			<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onDecide(card, 'reject')} data-action="discard">{t('approvals.discard')}</button>
+			{@render moveToChat()}
 		</div>
 	{:else if actionable}
 		{#if confirming}
@@ -140,6 +155,7 @@
 			<div class="flex flex-wrap gap-2">
 				<button type="button" class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50" disabled={busy} onclick={send} data-action="send">{t('approvals.send')}</button>
 				<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onDecide(card, 'reject')} data-action="discard">{t('approvals.discard')}</button>
+				{@render moveToChat()}
 			</div>
 		{/if}
 	{:else if closable}
@@ -156,6 +172,10 @@
 		{/if}
 	{:else if card.status === 'pending' && card.checksum === undefined}
 		<p class="text-xs text-text-subtle" data-note="read-only">{t('approvals.read_only')}</p>
+	{:else if reopenable}
+		<div class="flex flex-wrap gap-2">
+			<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onReopenChat?.(card)} data-action="reopen-chat">{t('approvals.open_in_chat')}</button>
+		</div>
 	{/if}
 </article>
 

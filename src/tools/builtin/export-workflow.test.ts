@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { exportWorkflowTool } from './export-workflow.js';
 import { LYNOX_WORKFLOW_INFO_STRING } from '../../core/workflow-portable.js';
-import { _resetPipelineStore } from './pipeline.js';
+import { _resetPipelineStore, getPipelineStore } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
@@ -85,6 +85,19 @@ describe('export_workflow', () => {
     try { engine.close(); } catch { /* already closed */ }
     history.close();
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('writes a character that renders as nothing as its escape: the same JSON, and none of them in what the model reads', async () => {
+    // Saved before the write paths refused them (the save refuses them now, so the row is put in
+    // the store directly): a tag-spelled clause after a step's visible task and the name.
+    const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const planned = makePlanned({ id: 'wf-hid', name: `Monthly Report${hidden}`, steps: [{ id: 's1', task: `Fetch spend${hidden}`, tool: 'http_request', input_template: { method: 'GET', url: 'https://api.example.com/spend' } }] });
+    getPipelineStore().set('wf-hid', planned);
+    const out = await exportWorkflowTool.handler({ workflow_id: 'wf-hid' }, makeAgent(history));
+    expect(out).toContain('✓ Exported "Monthly Report"');
+    expect(out).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+    const parsed = JSON.parse(extractBlock(out)) as PortableWorkflow;
+    expect(parsed.workflow.steps[0]?.task).toBe(`Fetch spend${hidden}`);
   });
 
   it('emits a valid, parseable share block for a saved workflow', async () => {

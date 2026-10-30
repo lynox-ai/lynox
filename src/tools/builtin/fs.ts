@@ -1,14 +1,17 @@
-import { openSync, closeSync, fstatSync, ftruncateSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
+import { openSync, closeSync, constants, fstatSync, ftruncateSync, readSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getWorkspaceDir, isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
-import { getWorkspaceRoot } from '../../core/workspace-root.js';
+import { getWorkspaceRoot, namesSidecarLabel } from '../../core/workspace-root.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { processUmask, toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
-import { openRead, openWrite, WorkspaceAccessError, type WorkspaceAnchor } from '../../core/workspace-fd.js';
+import { sidecarWriteModes } from '../../core/workspace-write-modes.js';
+import {
+  FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, openWrite, readFdCapped, WorkspaceAccessError, type WorkspaceAnchor,
+} from '../../core/workspace-fd.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -24,7 +27,26 @@ const MAX_WRITE_BYTES_PER_SESSION = 100 * 1024 * 1024; // 100MB
 // Soft-cap: truncate + nudge toward spawn_agent collector. Hard-cap: refuse.
 // Without these one multi-MB read could consume the main agent's context.
 const READ_FILE_SOFT_CAP_BYTES = 256 * 1024;
-const READ_FILE_HARD_CAP_BYTES = 5 * 1024 * 1024;
+const READ_FILE_HARD_CAP_BYTES = FILE_TOOL_READ_CAP_BYTES;
+
+/**
+ * The way out of a refusal for a file over {@link FILE_TOOL_READ_CAP_BYTES}, by what was refused
+ * and whether this agent has bash (the `creator` role has not):
+ * - `replace` (write_file under the review): a new file, which needs nothing saved.
+ * - `change` (edit_file, a batch_files transform): under the review, the changed content goes to a
+ *   new file by bash and the original stays (a change by bash in place would not be in the review);
+ *   without the review, bash changes it in place. Without bash, the user downloads and changes it.
+ * Never a split: a CSV or log the user changes should stay one file (ux U-036).
+ */
+export function oversizeWayOut(agent: Pick<IAgent, 'getAvailableTools'>, kind: 'replace' | 'change', reviewed: boolean): string {
+  if (kind === 'replace') return 'Write the new content to a new file instead and tell the user its name; the old file stays as it was.';
+  if (!agent.getAvailableTools().some((t) => t.definition.name === 'bash')) {
+    return 'There is no bash here: tell the user the file is too large for the file tools, that they can download it under Artifacts › Files and change it outside lynox.';
+  }
+  return reviewed
+    ? 'Write the changed content to a new file with bash instead (for example `sed \'…\' file > file.new`), tell the user its name, and that the original stays as it was.'
+    : 'Change it with bash instead (for example sed for a line).';
+}
 
 interface ReadFileInput {
   path: string;
@@ -138,7 +160,7 @@ function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
     return { kind: 'anchored', anchor: base.anchor, rel: mapped.rel, shown: mapped.shown };
   }
   const real = validatePath(mapped.abs, operation);
-  const wsReal = existsSync(base.ws) ? realpathSync(base.ws) : base.ws;
+  const wsReal = !namesSidecarLabel(base.ws) && existsSync(base.ws) ? realpathSync(base.ws) : base.ws;
   if (isPathWithin(real, base.ws) || isPathWithin(real, wsReal)) {
     throw new Error(`${raw} reaches the workspace through a link. Name the file by its path in the workspace (${base.ws}).`);
   }
@@ -208,14 +230,19 @@ export function anchoredError(shown: string, err: unknown): Error {
  * at the file is refused, not written through. A file with more than one link is refused: the
  * other name may be outside the workspace. The check sees the links as they are after the open;
  * that nobody links in a file they could not read and write themselves is the kernel's rule
- * (`fs.protected_hardlinks`). With `create`, a missing file (and missing directories) are made
+ * (`fs.protected_hardlinks`), which the sidecar start requires (`shell-isolation.ts`). With `create`, a missing file (and missing directories) are made
  * with the modes a write by name gives them: 0666 and 0777 less the umask.
  */
 export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonly rel: string; readonly shown: string }, data: string | Uint8Array, create: boolean): void {
   let fd: number;
   try {
-    const umask = create ? processUmask() : 0;
-    ({ fd } = openWrite(target.anchor, target.rel, create ? { createMode: 0o666 & ~umask, dirMode: 0o777 & ~umask } : {}));
+    // In sidecar mode the shell's pool must read and write what is created here: the modes and
+    // group of the layout document, not the umask (`workspace-write-modes.ts`).
+    const sidecar = create ? sidecarWriteModes() : null;
+    const umask = create && sidecar === null ? processUmask() : 0;
+    ({ fd } = openWrite(target.anchor, target.rel, !create ? {}
+      : sidecar !== null ? { createMode: sidecar.fileMode, dirMode: sidecar.dirMode, group: sidecar.group }
+      : { createMode: 0o666 & ~umask, dirMode: 0o777 & ~umask }));
   } catch (err) {
     throw anchoredError(target.shown, err);
   }
@@ -243,6 +270,14 @@ export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonl
  *  the agent shows before a write (agent.ts): it reads the file the write would
  *  change, so it resolves the path exactly as write_file and edit_file do. */
 export function resolveWritablePath(rawPath: string): string {
+  // In shell sidecar mode a path in the context workspace is reached through its open directory
+  // (the diff preview maps it there), so it is handed on by its workspace spelling, not resolved
+  // by name. Any other path below the label is refused by `validatePath` (D3).
+  const ws = getWorkspaceDir();
+  if (ws !== null && namesSidecarLabel(ws)) {
+    const mapped = toWorkspaceRel(rawPath, ws);
+    if (mapped.kind === 'inside') return mapped.shown;
+  }
   if (isWorkspaceActive()) {
     return validatePath(resolve(rawPath), 'write');
   }
@@ -475,9 +510,8 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       }
       const realPath = target.kind === 'anchored' ? target.shown : target.path;
       // In the workspace the read and the write both go through its open directory.
-      let original: string;
+      let fd: number;
       if (target.kind === 'anchored') {
-        let fd: number;
         try {
           fd = openRead(target.anchor, target.rel);
         } catch (err) {
@@ -486,21 +520,37 @@ export const editFileTool: ToolEntry<EditFileInput> = {
           }
           throw anchoredError(target.shown, err);
         }
-        try {
-          // Before anything is compared: whether old_string matches would tell the content of a
-          // file read_file refuses.
-          if (fstatSync(fd).nlink > 1) {
-            throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not edit such a file.`);
-          }
-          original = readFileSync(fd, 'utf-8');
-        } finally {
-          closeSync(fd);
-        }
       } else {
-        if (!existsSync(realPath)) {
-          throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+        try {
+          // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
+          fd = openSync(realPath, constants.O_RDONLY | constants.O_NONBLOCK);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+          }
+          throw err;
         }
-        original = readFileSync(realPath, 'utf-8');
+      }
+      let original: string;
+      try {
+        const st = fstatSync(fd);
+        // Before anything is compared: whether old_string matches would tell the content of a
+        // file read_file refuses.
+        if (target.kind === 'anchored' && st.nlink > 1) {
+          throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not edit such a file.`);
+        }
+        if (!st.isFile()) throw new Error(`${realPath} is not a regular file; edit_file edits only regular files.`);
+        original = readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, realPath).toString('utf-8');
+      } catch (err) {
+        if (isReadLimit(err)) {
+          const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
+          throw new Error(
+            `${realPath} is larger than ${capMb} MB, too large for edit_file; nothing was changed. ${oversizeWayOut(agent, 'change', agent.changeset !== undefined)}`,
+          );
+        }
+        throw err;
+      } finally {
+        closeSync(fd);
       }
       const segments = original.split(input.old_string);
       const matches = segments.length - 1;

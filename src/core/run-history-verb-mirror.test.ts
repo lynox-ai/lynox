@@ -116,8 +116,9 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
   it('markPipelineExecuted drops the one-shot def from the engine.db library', () => {
     const { history, engine, reader } = make();
     history.insertPlannedPipeline(planned({ template: false }), null);
-    history.markPipelineExecuted('wf-1');
+    expect(history.markPipelineExecuted('wf-1'), 'says it removed the one-shot (660b: definition=removed)').toBe(true);
     expect(reader.get('wf-1')).toBeUndefined();
+    expect(history.markPipelineExecuted('wf-1'), 'and says no when there was nothing to remove').toBe(false);
     engine.close();
     history.close();
   });
@@ -842,7 +843,7 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     // ran six other test files and found this only through a review. The roster above is
     // the reason to keep it that way: it is a list of what the schema IS, maintained
     // because the number beside it refuses to be wrong.
-    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(69);
+    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     // v45 landed the relocated metrics table:
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'").get())
       .toEqual({ name: 'metrics' });

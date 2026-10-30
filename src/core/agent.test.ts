@@ -569,7 +569,7 @@ describe('Agent', () => {
       });
       const result = await agent.send('Question');
       expect(result).toBe('The answer is 42');
-      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined, expect.any(Function));
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null);
       // The fifth argument is read when the extraction RETURNS, so it must follow the agent's
       // flag after the call, not report the value it had when the call was made.
       const cancelled = memory.maybeUpdate.mock.calls[0]?.[4] as () => boolean;
@@ -646,9 +646,12 @@ describe('Agent', () => {
       // exhausted and the turn still produced nothing visible. Exactly 11
       // queued: the initial turn + maxContinuations(10) continuations — over-
       // queuing would leak into the next test (clearAllMocks keeps the queue).
+      // Two empty turns in a row stop the run (ThinkingOnlyLoopError, 996), so the empty turns
+      // alternate with turns cut off inside a tool call (no text either; the call is discarded,
+      // which is not a thinking-only turn). The last one is empty.
       for (let i = 0; i < 11; i++) {
         mockProcess.mockResolvedValueOnce({
-          content: [],
+          content: i % 2 === 0 ? [] : [{ type: 'tool_use', id: `tu_cut_${String(i)}`, name: 'write_file', input: {} }],
           stop_reason: 'max_tokens',
           usage: { input_tokens: 100, output_tokens: 16_000 },
         });
@@ -881,7 +884,7 @@ describe('Agent', () => {
 
       // The end_turn path passes the turn text to maybeUpdate; the endsTurn path
       // must do the same (only the tool-count differs — one tool ran this turn).
-      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', expect.any(Number), undefined, undefined, expect.any(Function));
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', expect.any(Number), undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null);
     });
 
     it('a non-endsTurn tool still continues the loop (contrast)', async () => {
@@ -1173,7 +1176,7 @@ describe('Agent', () => {
       const viaGuard = makeMemory();
       const b = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], memory: viaGuard, costGuard: { maxBudgetUSD: 100, maxIterations: 2 } });
       expect(await b.send('go')).toContain('Response stopped');
-      expect(viaGuard.maybeUpdate).toHaveBeenCalledWith('Let me check.', expect.any(Number), undefined, undefined, expect.any(Function));
+      expect(viaGuard.maybeUpdate).toHaveBeenCalledWith('Let me check.', expect.any(Number), undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null);
     });
 
     it('safeToolNames: allowlist, dedupe, order, cap at 8', () => {
@@ -5557,7 +5560,7 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
   });
 
   describe('mandate tool lock (PRD customer-granted-operator-access D1)', () => {
-    // A mandate's agent gets only the tools on MANDATE_TOOL_SURFACE. The lock is read from
+    // A mandate's agent gets only the tools on MANDATE_TOOL_SURFACE, less the pattern writers. The lock is read from
     // `principal` at the three places `excludeTools` applies, so each place has its own
     // case: the list sent to the model, the list handed to children, the refusal at
     // execution. `plugin_reader` stands for any tool the allowlist does not name.
@@ -7637,7 +7640,8 @@ describe('a write with the review on', () => {
     expect(view.isEmpty()).toBe(false);
     expect(changeset.backupBeforeWrite).toHaveBeenLastCalledWith('/w/a.txt');
     expect(changeset.recordWritten).toHaveBeenLastCalledWith('/w/b.txt');
-    expect(Object.keys(view).sort()).toEqual(['active', 'backupBeforeWrite', 'isEmpty', 'recordWritten']);
+    expect(view.refusedTooLarge, 'a manager that cannot say has refused nothing as too large').toBe(false);
+    expect(Object.keys(view).sort()).toEqual(['active', 'backupBeforeWrite', 'isEmpty', 'recordWritten', 'refusedTooLarge']);
   });
 
   it('hands no review to the tools when it is off', () => {

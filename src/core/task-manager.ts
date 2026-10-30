@@ -13,6 +13,7 @@ import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVeri
 import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
 import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
+import { stripHidden } from './hidden-text.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -744,10 +745,13 @@ export class TaskManager {
     if (lynoxTasks.length > 0) counts.push(`${lynoxTasks.length} assigned to you`);
     parts.push(counts.join(', ') + '.');
 
+    // Every session reads this, the unattended run of a plan too, and a plan's text may have been
+    // written by someone else: without the characters that render as nothing (`hidden-text.ts`).
+    // The model's write tools refuse them, but a plan saved before, or through another path, carries them.
     for (const t of summary.overdue) {
-      const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${t.scope_id})`;
-      const assignee = t.assignee ? ` [${t.assignee}]` : '';
-      parts.push(`Overdue: "${t.title}"${scope}, due ${t.due_date}, ${t.priority.toUpperCase()}${assignee}`);
+      const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${stripHidden(t.scope_id)})`;
+      const assignee = t.assignee ? ` [${stripHidden(t.assignee)}]` : '';
+      parts.push(`Overdue: "${stripHidden(t.title)}"${scope}, due ${t.due_date}, ${t.priority.toUpperCase()}${assignee}`);
     }
 
     // Highlight tasks assigned to lynox that aren't already shown as overdue
@@ -760,7 +764,7 @@ export class TaskManager {
         // scheduled fire instead when present.
         // A paused plan says so instead of a next run that will not come (`plan-pause.ts`).
         const next = isPaused(t) ? `, ${PAUSED_MODEL_TEXT}` : t.next_run_at ? `, next run ${t.next_run_at}` : '';
-        parts.push(`  - "${t.title}" [${t.status}]${next}`);
+        parts.push(`  - "${stripHidden(t.title)}" [${t.status}]${next}`);
       }
     }
 
@@ -1089,7 +1093,11 @@ export class TaskManager {
     // run, no retry. A one-shot recorded `completed` or `failed` would never fire after the
     // owner stamps it. (The wait sweep, outside any run, decides on the row and records a
     // proposal's expired test question through the same scope.)
-    if (isHandRunOf(task.id) || opts?.keepSchedule === true) {
+    // A webhook trigger is the same case for another reason: its work comes from the events its
+    // provider sends, one ledger row each. It has no cron, so
+    // the branches below would read it as a one-shot and set it `completed` or `failed` — and a
+    // trigger in either state accepts no further delivery.
+    if (isHandRunOf(task.id) || task.source === 'webhook' || opts?.keepSchedule === true) {
       this.history.updateTriggerRunResult(id, {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,

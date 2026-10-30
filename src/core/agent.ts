@@ -28,7 +28,7 @@ import type {
   CacheProfile,
 } from '../types/index.js';
 import { headlessRefusalNote } from './write-notes.js';
-import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
+import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile, DEFAULT_MAX_TOOL_RESULT_CHARS } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -40,7 +40,7 @@ import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import type { CaptureSuppressedReason } from './capture-telemetry.js';
-import { chatIsContained, containedCallAllowed, CONTAINED_CALL_REFUSAL } from './containment.js';
+import { chatIsContained, containedCallRefusal } from './containment.js';
 import { isDangerousDetailed, pathFieldsRead } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
@@ -78,14 +78,14 @@ import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { applyRunStops, completedPrefixEnd, loopBreakDetail, withRunStop, type RunStop } from './run-stop.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
-import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT } from './render-projection.js';
+import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT, THINKING_ONLY_CONTINUATION_PROMPT } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
-import { readFileSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
+import { openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
-import { openRead } from './workspace-fd.js';
-import { resolveWritablePath } from '../tools/builtin/fs.js';
+import { FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, readFdCapped } from './workspace-fd.js';
+import { oversizeWayOut, resolveWritablePath } from '../tools/builtin/fs.js';
 import { resolve } from 'node:path';
 import type {
   BetaMessageParam,
@@ -127,6 +127,7 @@ import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, httpTarget, newCorrelationId
 import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
+import { ifNotDeduped, instanceTrailFor, InstanceWriteUnrecorded, withInstanceWriteAs, type InstanceActor } from './instance-trail.js';
 import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 /** What the `secret:` destination check decides for a call (`Agent._secretVerdict`). */
@@ -282,6 +283,9 @@ function stableStringify(value: unknown): string {
  * the link's target. With isolation, a file in the context workspace is read through its open
  * directory, one component at a time without following a link, and a file with a second name
  * shows nothing, as read_file reads neither.
+ *
+ * A file over {@link FILE_TOOL_READ_CAP_BYTES} is not read whole: that throws the `LIMIT`
+ * error, so the caller can say why there is no preview instead of showing the file as new.
  */
 export function readForDiffPreview(path: string): string {
   let fd: number | undefined;
@@ -291,13 +295,14 @@ export function readForDiffPreview(path: string): string {
     if (base !== null && mapped !== null && mapped.kind === 'inside') {
       fd = openRead(base.anchor, mapped.rel);
       if (fstatSync(fd).nlink > 1) return '';
-      return readFileSync(fd, 'utf-8');
+    } else {
+      // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      if (!fstatSync(fd).isFile()) return '';
     }
-    // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    if (!fstatSync(fd).isFile()) return '';
-    return readFileSync(fd, 'utf-8');
-  } catch {
+    return readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, path).toString('utf-8');
+  } catch (err) {
+    if (isReadLimit(err)) throw err;
     return ''; // absent, unreadable, or a symlink — the preview shows a new file
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -378,6 +383,20 @@ export class ContinuationLoopError extends RunAbortedError {
     super('Run stopped: truncated-response continuations repeated without progress');
     this.name = 'ContinuationLoopError';
     this.loopPrefix = loopPrefix;
+  }
+}
+
+/**
+ * Two truncated turns in a row that held only thinking, with no tool dispatched between them.
+ * The second cannot build on the first: the first's thinking was stripped from the history. So
+ * this is a loop with certainty, not a likely one, and the run stops instead of spending the
+ * remaining continuations on the same reasoning.
+ */
+export class ThinkingOnlyLoopError extends ContinuationLoopError {
+  constructor() {
+    super('');
+    this.message = 'Run stopped: two truncated turns in a row held only thinking, with no answer and no tool call';
+    this.name = 'ThinkingOnlyLoopError';
   }
 }
 
@@ -742,6 +761,7 @@ export class Agent implements IAgent {
     return (this._changesetView ??= Object.freeze({
       active: true,
       backupBeforeWrite: (filePath: string): boolean => manager.backupBeforeWrite(filePath) !== false,
+      get refusedTooLarge(): boolean { return manager.refusedTooLarge === true; },
       recordWritten: (filePath: string): void => manager.recordWritten?.(filePath),
       // A manager that cannot say counts as holding something: a move is refused rather than
       // made where the review might restore over it.
@@ -756,13 +776,15 @@ export class Agent implements IAgent {
   private _continuationLoopPrefix = '';
   private _continuationLoopCount = 0;
   private _continuationToolCount = 0;
+  /** Truncated thinking-only turns in a row with no tool dispatched — see the max_tokens branch in _loop. */
+  private _thinkingOnlyStreak = 0;
   private readonly maxContinuations: number;
   private static readonly MAX_RETRIES = 3;
   private static readonly ABSOLUTE_MAX_ITERATIONS = 500;
   private static RETRY_BASE_MS = 2000;
 
   /** Default max chars for a single tool result before truncation. Configurable via `max_tool_result_chars`. */
-  private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = 80_000;
+  private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = DEFAULT_MAX_TOOL_RESULT_CHARS;
   private messages: BetaMessageParam[] = [];
   /** Persisted high-water-mark BY IDENTITY: how many leading entries of the
    *  CURRENT `this.messages` buffer are already durable on disk. The persist
@@ -1956,7 +1978,12 @@ export class Agent implements IAgent {
    * is exactly why it is closed by construction instead of by assertion. `knowledge.ts` derives
    * once for the same reason.
    */
-  private async _captureFallback(text: string, turnUntrusted: boolean, turnCause: UntrustedCause): Promise<void> {
+  /**
+   * `actor` is PASSED IN as well, for the same reason: who the turn ran for is read once, at the
+   * end of the turn (`_captureAtTurnEnd`), and every fact's row names it (660a-3). The session
+   * sets the agent's principal per run, and this pass can still be out when it does.
+   */
+  private async _captureFallback(text: string, turnUntrusted: boolean, turnCause: UntrustedCause, actor: InstanceActor): Promise<void> {
     // `_sawRememberCall` — do not second-guess a model that already did the work.
     // Same shape as the follow-up guard: the fallback recovers, it never duplicates.
     //
@@ -2129,16 +2156,44 @@ export class Agent implements IAgent {
         // yielded a fact gated for review while labelled as released.
         const { routing, untrusted: factUntrusted } =
           routeCapturedFact(turnUntrusted, attributionOverride, fact.source);
-        const result = ks.write({
-          text: fact.text,
-          ...(fact.subject !== undefined ? { subjectName: fact.subject } : {}),
-          sourceChannel: 'agent',
-          sourceUntrusted: factUntrusted,
-          // A step or sub-agent has no thread of its own; the chat it runs for is where the
-          // private-mode purge looks (see `chatThreadOf` in tools/builtin/private-thread.ts).
-          sourceThreadId: this.currentThreadId ?? this.originThreadId,
-          sourceRunId: this.currentRunId,
-        });
+        // One row per fact (660a-3, `capture#durable`): written before the write, under the actor
+        // the turn held, `auto=1` because no tool call made it. A fact whose row cannot be
+        // written is not written; the facts after it still are, each under its own row.
+        let result: ReturnType<typeof ks.write>;
+        try {
+          result = withInstanceWriteAs(actor, this.toolContext?.auditLog ?? null, {
+            site: 'capture#durable', kind: 'create', store: 'knowledge', target: () => [['auto', 1]], main: ['write'],
+          }, (w) => {
+            const written = w.run('write', () => ks.write({
+              text: fact.text,
+              ...(fact.subject !== undefined ? { subjectName: fact.subject } : {}),
+              sourceChannel: 'agent',
+              sourceUntrusted: factUntrusted,
+              // A step or sub-agent has no thread of its own; the chat it runs for is where the
+              // private-mode purge looks (see `chatThreadOf` in tools/builtin/private-thread.ts).
+              sourceThreadId: this.currentThreadId ?? this.originThreadId,
+              sourceRunId: this.currentRunId,
+            }), ifNotDeduped);
+            w.created('write', written.id);
+            return written;
+          });
+        } catch (err) {
+          // Its own branch, before the pass-wide catch below: a refused row costs this fact, not
+          // the pass, and it is counted rather than swallowed — "nothing captured" and "nothing
+          // could be recorded" must not read alike in the report.
+          if (!(err instanceof InstanceWriteUnrecorded)) throw err;
+          void appendCaptureTelemetry(this._durableMemoryEnabled, {
+            ts: Date.now(),
+            event: 'capture_suppressed',
+            thread: undefined,
+            model: this.model,
+            untrusted: turnUntrusted,
+            reason: 'trail_unavailable',
+            // The run the refused row would have named: the actor's, held at the end of the turn.
+            runId: actor.runId,
+          });
+          continue;
+        }
         // The SAME two emits the `remember` tool makes. Without them the fire-rate
         // report keeps dividing a numerator that only the tool writes by a
         // denominator this hook writes — so the feature would land and the measured
@@ -2299,6 +2354,9 @@ export class Agent implements IAgent {
     // Derived beside the boolean, from the same signals at the same moment, and handed to the
     // pass rather than re-read there. See `_captureFallback`.
     const turnCause = describeTurnUntrusted(this);
+    // Who the turn ran for, held as a value from here on (660a-3): both writes below run after
+    // the turn, and the session sets `principal` again for the next run.
+    const actor: InstanceActor = { principal: this.principal, runId: this.currentRunId };
     if (this._durableMemoryEnabled) {
       void appendCaptureTelemetry(true, {
         ts: Date.now(),
@@ -2338,7 +2396,7 @@ export class Agent implements IAgent {
       // appeared on the NEXT turn's line or nowhere; and `costGuard` never saw the
       // spend for its own run. The turn already drains this list in its `finally`,
       // for exactly the reason it exists — an orphaned stream.
-      this._pendingMemory.push(this._captureFallback(text, turnUntrusted, turnCause));
+      this._pendingMemory.push(this._captureFallback(text, turnUntrusted, turnCause, actor));
       return;
     }
     // Recorded on BOTH branches, because a numerator without a denominator answers
@@ -2362,6 +2420,7 @@ export class Agent implements IAgent {
       safeText, this._loopToolCount, this.currentThreadId ?? this.originThreadId, this.currentRunId,
       // Read when the extraction returns, not now: see the same re-read on the durable path.
       () => this._captureStoodDown(),
+      actor, this.toolContext?.auditLog ?? null,
     ));
   }
 
@@ -2567,6 +2626,7 @@ export class Agent implements IAgent {
     this._continuationLoopPrefix = '';
     this._continuationLoopCount = 0;
     this._continuationToolCount = 0;
+    this._thinkingOnlyStreak = 0;
     this._loopToolCount = 0;
     this._repeatGuard.reset();
     this._sawUntrustedData = false;
@@ -2665,6 +2725,13 @@ export class Agent implements IAgent {
       // model does not take it up again. The ORIGINAL error is rethrown (loopKey).
       if (err instanceof ToolLoopBreakError
         && this._keepCompletedPrefix(userTurn, { code: 'tool_loop_break', detail: loopBreakDetail(err.loopKey) })) {
+        throw err;
+      }
+      // The same for a thinking loop: it typically comes after real tool work (a large fetch,
+      // then the evaluation), and the note asks the user to go on in smaller steps — which needs
+      // the question and the fetched data still in the context.
+      if (err instanceof ThinkingOnlyLoopError
+        && this._keepCompletedPrefix(userTurn, { code: 'thinking_loop' })) {
         throw err;
       }
       this.messages.length = Math.min(snapshot, this.messages.length);
@@ -2911,6 +2978,16 @@ export class Agent implements IAgent {
         // exists for (the whole budget went to extended thinking) — it is NOT
         // loop evidence and must not count. Only a NON-EMPTY identical prefix
         // repeating with zero dispatched tools is the stuck shape.
+        // A turn that held only thinking (no text, no tool call) is the exception above — but
+        // only once. Its thinking is stripped from the history, so a second one in a row cannot
+        // build on the first: the model restarts the same reasoning and is cut off again (996).
+        // A tool dispatched in between is progress and starts the count over.
+        // Decided on what stays in the history: a turn whose kept blocks are all blank text
+        // left the model nothing. A server tool's blocks (web search, tool search) or a
+        // redacted thinking block stay, so such a turn is not thinking-only.
+        const thinkingOnly = contentForHistory.every((b) => b.type === 'text' && b.text.trim().length === 0);
+        if (!thinkingOnly || toolsDelta > 0) this._thinkingOnlyStreak = 0;
+        if (thinkingOnly && ++this._thinkingOnlyStreak >= 2) throw new ThinkingOnlyLoopError();
         if (prefix.trim().length === 0) {
           this._continuationLoopPrefix = '';
           this._continuationLoopCount = 0;
@@ -2926,7 +3003,7 @@ export class Agent implements IAgent {
           if (this.onStream) {
             await this.onStream({ type: 'continuation', iteration: this.continuationCount, max: this.maxContinuations, agent: this.name });
           }
-          this.messages.push({ role: 'user', content: MAX_TOKENS_CONTINUATION_PROMPT });
+          this.messages.push({ role: 'user', content: thinkingOnly ? THINKING_ONLY_CONTINUATION_PROMPT : MAX_TOKENS_CONTINUATION_PROMPT });
           return this._loop();
         }
         // Continuation cap exhausted — surface a clear notice rather than an
@@ -4579,11 +4656,16 @@ export class Agent implements IAgent {
     // user is never asked about a call that would not run. The tenant tools stay advertised;
     // only the provider-side web_search drops out of the list (`_callAPI`), so the cached prefix
     // changes once, on the first call after the chat becomes contained.
-    if (chatIsContained(this) && !containedCallAllowed(tc.name, tc.input)) {
+    const containedRefusal = chatIsContained(this) ? containedCallRefusal(tc.name, tc.input) : null;
+    if (containedRefusal !== null) {
+      // Streamed with its reason, so the chat's view can offer the way out under it.
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: tc.name, result: containedRefusal.text, agent: this.name, toolUseId: tc.id, isError: true, contained: containedRefusal.reason });
+      }
       return {
         type: 'tool_result',
         tool_use_id: tc.id,
-        content: annotateNonRetryable(CONTAINED_CALL_REFUSAL),
+        content: annotateNonRetryable(containedRefusal.text),
         is_error: true,
       };
     }
@@ -4638,8 +4720,13 @@ export class Agent implements IAgent {
             process.stderr.write(`\n${renderDiffHunks(existing, updated)}`);
           }
         }
-      } catch {
-        // Diff preview is best-effort — never block the tool
+      } catch (err) {
+        // Diff preview is best-effort — never block the tool. A file too large to read whole
+        // gets a line instead, so the prompt below is not read as a write to a new file.
+        if (isReadLimit(err)) {
+          const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
+          process.stderr.write(`\nNo diff preview: ${String((tc.input as { path?: unknown }).path)} is larger than ${capMb} MB.\n`);
+        }
       }
     }
 
@@ -4898,10 +4985,13 @@ export class Agent implements IAgent {
       if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolve(reviewed)) === false) {
         // Nothing could be saved for the review: the write would be in neither the review nor
         // the rollback, and nothing would say so.
+        const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
         return {
           type: 'tool_result',
           tool_use_id: tc.id,
-          content: `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
+          content: this.changesetManager.refusedTooLarge === true
+            ? `Blocked: ${tc.name} did not run. The file is larger than ${capMb} MB, too large to save for the review, so the change could not be undone. Nothing was written. Do not repeat this call. ${oversizeWayOut(this, tc.name === 'write_file' ? 'replace' : 'change', true)}`
+            : `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
           is_error: true,
         };
       }
@@ -4928,7 +5018,9 @@ export class Agent implements IAgent {
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
     let trailWatched = false;
     // This call's own slot for the connection the engine resolves (call-connection.ts).
-    const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1, ...(filingCall ? { filing: true } : {}) };
+    // Who makes this call's writes inside the instance is fixed here, with the slot, from the
+    // same sources as the outward trail above (`instance-trail.ts`).
+    const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1, ...(filingCall ? { filing: true } : {}), instanceTrail: instanceTrailFor(this, tc.name) };
     // A stop of the run reaches the call: a handler that passes `currentCallSignal()` to its
     // I/O ends it now instead of at its own limit. The call is still awaited — a handler that
     // does not listen runs to its end, and its result is what it did.
@@ -4988,6 +5080,9 @@ export class Agent implements IAgent {
         result = err.agentVisibleResult;
         softFailureReason = err.reason;
       }
+      // A write inside the instance was refused for want of its row: the handler may have turned
+      // the throw into a result of its own, which must not read as if the entry were made.
+      if (callSlot.instanceRefused === true) throw new InstanceWriteUnrecorded();
       // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
       if (mutatesFile && this.changesetManager?.active) {
         const written = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
@@ -5127,7 +5222,12 @@ export class Agent implements IAgent {
       // A handler that passed the call's signal on and was stopped throws the platform's bare
       // "This operation was aborted", which reads as "did not happen". It gets the stop's own
       // sentence; a handler that wrote its own (http_request, bash) keeps that.
-      const cause = callSlot.stoppedByRun === true && thrown.name === 'AbortError' ? new Error(toolStoppedMessage(tc.name)) : thrown;
+      const stopped = callSlot.stoppedByRun === true && thrown.name === 'AbortError';
+      // A call whose write inside the instance was refused says so, whatever the handler threw
+      // after it (`instance-trail.ts`). After the stop's sentence (the ternary below takes it
+      // first) and a question nobody can answer, which keep theirs.
+      const entryRefused = askedNobody === undefined && callSlot.instanceRefused === true;
+      const cause = stopped ? new Error(toolStoppedMessage(tc.name)) : entryRefused ? new InstanceWriteUnrecorded() : thrown;
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : maskEngineEnvSecrets(cause.message);
       const message = annotateNonRetryable(rawMessage);
       // The LEDGER copy is a different string from the MODEL copy, deliberately.

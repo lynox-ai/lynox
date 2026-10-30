@@ -11,7 +11,7 @@ import { TaskManager } from './task-manager.js';
 import { maskSecretsAndPatterns } from './secret-store.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
-import type { NotificationRouter, DeliverySummary } from './notification-router.js';
+import type { DeliverySummary, NotificationRouter } from './notification-router.js';
 
 /**
  * THE PARK, driven through the real wiring (PRD-DURABLE-WAIT-STATE §0, wave 2).
@@ -153,11 +153,10 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       getUserConfig: () => (opts?.maxToolResultChars !== undefined ? { max_tool_result_chars: opts.maxToolResultChars } : {}),
       workerRunModelOverride: () => ({}),
       escalateToUser: () => null,
-      // A task's question takes its reporter from here before it pushes. The router mock resolves
-      // `undefined`, not a report, so `summarizeDelivery` throws and the question's `.catch` logs
-      // it: the reporter this returns never runs here. The path is tested in
-      // worker-loop-task-ask-hooks.test.ts.
+      // A task's question hands its delivery here; no hooks on this engine.
       escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
 
     const router = {

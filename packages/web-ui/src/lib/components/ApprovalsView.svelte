@@ -1,14 +1,27 @@
 <script lang="ts">
 	import { t, tf } from '../i18n.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { getApprovalsViewer, setApprovalsOff, setApprovalsPending } from '../stores/approvals.svelte.js';
+	import { newChat, resumeThread, sendMessage } from '../stores/chat.svelte.js';
 	import ApprovalCard from './ApprovalCard.svelte';
 	import {
-		approvalCutNotice, approvalDecideErrorKey, approvalRefusalReloads, approvalRetentionKey,
+		approvalCutNotice, approvalDecideErrorKey, approvalRefusalReloads, approvalRetentionKey, moveApprovalToChat, openApprovalChat,
 		type ApprovalCardData, type ApprovalList,
 	} from './approvals.js';
 
+	/** The entry a chat note leads to (`?entry=`): shown on the "all" tab, where a closed one is, and marked. */
+	const focusedId = $derived($page.url.searchParams.get('entry'));
 	let view = $state<'open' | 'all'>('open');
+	/** The entry last scrolled to, so a later read of the list does not move the page again. Each time
+	 *  an entry is asked for, also the same one again after the page was opened without one, it is
+	 *  scrolled to anew. */
+	let scrolledTo: string | null = null;
+	// Each new entry asked for opens the "all" tab, also when the page is already on screen.
+	$effect.pre(() => {
+		if (focusedId !== null) { view = 'all'; scrolledTo = null; }
+	});
 	let list = $state<ApprovalList | null>(null);
 	let loading = $state(false);
 	let loadFailed = $state(false);
@@ -63,32 +76,84 @@
 		approve: 'approvals.sent', reject: 'approvals.discarded', clear_unknown: 'approvals.closed',
 	};
 
+	function post(id: string, body: Record<string, unknown>): Promise<Response> {
+		return fetch(`${getApiBase()}/approvals/${encodeURIComponent(id)}/decide`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+		});
+	}
+
+	async function refusalCode(res: Response): Promise<unknown> {
+		try { return ((await res.json()) as { code?: unknown }).code; } catch { return undefined; }
+	}
+
+	/** The queue was turned off (a 404 with no code). A mail that is gone answers 404 too, with
+	 *  its own code, and keeps its sentence. */
+	const turnedOff = (status: number, code: unknown): boolean => status === 404 && code === undefined;
+
+	async function refused(status: number, code: unknown): Promise<void> {
+		// Turned off: the list read says so instead of an error.
+		if (turnedOff(status, code)) { await load(); return; }
+		notice = { text: t(approvalDecideErrorKey(code)), kind: 'error' };
+		if (approvalRefusalReloads(code)) await load();
+	}
+
 	async function decide(card: ApprovalCardData, action: 'approve' | 'reject' | 'clear_unknown'): Promise<void> {
 		if (deciding !== null) return;
 		deciding = card.id;
 		notice = null;
 		try {
-			const body = action === 'approve' ? { action, checksum: card.checksum } : { action };
-			const res = await fetch(`${getApiBase()}/approvals/${encodeURIComponent(card.id)}/decide`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(body),
-			});
+			const res = await post(card.id, action === 'approve' ? { action, checksum: card.checksum } : { action });
 			if (res.ok) {
 				notice = { text: t(DONE[action]), kind: 'ok' };
 				await load();
 				return;
 			}
-			let code: unknown;
-			try { code = ((await res.json()) as { code?: unknown }).code; } catch { code = undefined; }
-			if (res.status === 404 && code === undefined) {
-				// The queue was turned off (a 404 with no code): the list read says so instead of an
-				// error. A mail that is gone answers 404 too, with its own code, and keeps its sentence.
-				await load();
-				return;
-			}
-			notice = { text: t(approvalDecideErrorKey(code)), kind: 'error' };
-			if (approvalRefusalReloads(code)) await load();
+			await refused(res.status, await refusalCode(res));
+		} catch {
+			notice = { text: t('approvals.error.other'), kind: 'error' };
+		} finally {
+			deciding = null;
+		}
+	}
+
+	const chatSteps = {
+		newChat,
+		resumeThread,
+		send: (framing: string, context: { kind: 'approval'; id: string }): void => { void sendMessage(framing, undefined, undefined, { context }); },
+		goto: (path: string): Promise<void> => goto(path),
+	};
+
+	async function moveToChat(card: ApprovalCardData): Promise<void> {
+		if (deciding !== null) return;
+		deciding = card.id;
+		notice = null;
+		try {
+			let status = 0;
+			const out = await moveApprovalToChat(card, t('approvals.chat_framing'), {
+				...chatSteps,
+				decide: async (id) => {
+					const res = await post(id, { action: 'move_to_chat' });
+					status = res.status;
+					return res.ok ? { ok: true } : { ok: false, code: await refusalCode(res) };
+				},
+			});
+			if (!out.ok) await refused(status, out.code);
+		} catch {
+			notice = { text: t('approvals.error.other'), kind: 'error' };
+		} finally {
+			deciding = null;
+		}
+	}
+
+	async function reopenChat(card: ApprovalCardData): Promise<void> {
+		// Held like a decision, so a second click does not load the draft into a second chat.
+		if (deciding !== null) return;
+		deciding = card.id;
+		notice = null;
+		try {
+			await openApprovalChat(card, t('approvals.chat_framing'), chatSteps);
 		} catch {
 			notice = { text: t('approvals.error.other'), kind: 'error' };
 		} finally {
@@ -98,6 +163,15 @@
 
 	// Reads the list for the tab on screen, again whenever the tab changes.
 	$effect(() => { void load(view); });
+
+	// Brings the entry a chat note led to into view, once its card is on the page.
+	$effect(() => {
+		if (focusedId === null || scrolledTo === focusedId || list === null) return;
+		const el = document.querySelector('[data-entry-focused]');
+		if (el === null) return;
+		scrolledTo = focusedId;
+		el.scrollIntoView({ block: 'center' });
+	});
 </script>
 
 <div class="mx-auto w-full max-w-3xl px-4 py-6 space-y-4">
@@ -141,7 +215,13 @@
 				{/if}
 				<div class="space-y-3">
 					{#each list.entries as card (card.id)}
-						<ApprovalCard {card} viewer={list.viewer ?? 'none'} busy={deciding !== null} onDecide={(c, a) => { void decide(c, a); }} />
+						{#if card.id === focusedId}
+							<div class="rounded-[var(--radius-md)] ring-2 ring-accent/60" data-entry-focused>
+								<ApprovalCard {card} viewer={list.viewer ?? 'none'} busy={deciding !== null} onDecide={(c, a) => { void decide(c, a); }} onMoveToChat={(c) => { void moveToChat(c); }} onReopenChat={(c) => { void reopenChat(c); }} />
+							</div>
+						{:else}
+							<ApprovalCard {card} viewer={list.viewer ?? 'none'} busy={deciding !== null} onDecide={(c, a) => { void decide(c, a); }} onMoveToChat={(c) => { void moveToChat(c); }} onReopenChat={(c) => { void reopenChat(c); }} />
+						{/if}
 					{/each}
 				</div>
 			{/if}

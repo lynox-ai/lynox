@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import { cancelHeldProviderRecords, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
@@ -41,6 +42,12 @@ export interface ConnectionRow {
    * has none: a later grant on the same row never moves where its epoch starts.
    */
   firstGrantId?: string | null | undefined;
+  /**
+   * The opaque id a mandate's row in the instance trail names an API profile by (`apf_` + 16 hex),
+   * for an INSERT of a `kind = 'api'` row only; another kind gets none. Omitted, the INSERT makes a
+   * fresh one. An update never changes an id the row already has, and gives one to a row without.
+   */
+  trailId?: string | undefined;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;
 }
@@ -67,6 +74,11 @@ function parseVaultKeys(raw: string): string[] {
   } catch {
     return [];
   }
+}
+
+/** A fresh opaque id for an API profile: `apf_` and 16 hex, a label with no secret value. */
+export function newApiTrailId(): string {
+  return `apf_${randomBytes(8).toString('hex')}`;
 }
 
 export class ConnectionStore {
@@ -102,8 +114,8 @@ export class ConnectionStore {
       `SELECT 1 FROM connection_grants WHERE ? = grant_id AND connection_id = ? AND kind = 'api' AND reason IN (${EPOCH_START_SQL})`,
     ).get(given, row.id) !== undefined ? given : null;
     this.db.prepare(`
-      INSERT INTO connections (id, kind, name, subject_id, direction, config_json, vault_keys, status, first_grant_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, kind, name, subject_id, direction, config_json, vault_keys, status, first_grant_id, trail_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         kind = excluded.kind,
         name = excluded.name,
@@ -118,6 +130,7 @@ export class ConnectionStore {
           WHEN NOT EXISTS (SELECT 1 FROM connection_grants p WHERE p.connection_id = connections.id AND p.kind = 'api'
             AND ${currentGrantSql('connections.config_json')} = p.grant_id) THEN excluded.first_grant_id
           END,
+        trail_id = COALESCE(connections.trail_id, excluded.trail_id),
         updated_at = datetime('now')
     `).run(
       row.id,
@@ -129,7 +142,30 @@ export class ConnectionStore {
       JSON.stringify(row.vaultKeys),
       row.status,
       first,
+      row.kind === 'api' ? row.trailId ?? newApiTrailId() : null,
     );
+  }
+
+  /** The opaque id of the API profile `slug`, or undefined. Only `kind = 'api'`: another kind's
+   *  row under the same id is never named as the profile. */
+  trailIdOf(slug: string): string | undefined {
+    const row = this.db.prepare("SELECT trail_id FROM connections WHERE id = ? AND kind = 'api'").get(slug) as { trail_id: string | null } | undefined;
+    return row?.trail_id ?? undefined;
+  }
+
+  /** The slug of the API profile with the opaque id `trailId`, or undefined once it is deleted. */
+  slugOfTrailId(trailId: string): string | undefined {
+    const row = this.db.prepare("SELECT id FROM connections WHERE trail_id = ? AND kind = 'api'").get(trailId) as { id: string } | undefined;
+    return row?.id;
+  }
+
+  /**
+   * Gives every API profile row without an opaque id one; the boot runs it each time. The migration
+   * runs once, and a row an older binary writes after a pin back would otherwise stay without.
+   * Returns how many it filled.
+   */
+  fillApiTrailIds(): number {
+    return this.db.prepare("UPDATE connections SET trail_id = 'apf_' || lower(hex(randomblob(8))) WHERE trail_id IS NULL AND kind = 'api'").run().changes;
   }
 
   /**

@@ -107,6 +107,9 @@ export interface BackupManifest {
  */
 export type BackupProvenance = 'verified' | 'none' | 'mismatch' | 'no-key';
 
+/** A backup as `listBackups` (and `GET /api/backups`) shows it. */
+export type BackupListEntry = BackupManifest & { backup_id: string; provenance: BackupProvenance };
+
 export interface RestoreOptions {
   /**
    * Restore although the backup's origin is not shown. Every restore path needs a way to say this
@@ -756,11 +759,16 @@ export class BackupManager {
 
   // ── List ──
 
-  listBackups(): Array<BackupManifest & { backup_id: string }> {
+  /**
+   * Every backup's manifest, newest first, with its `provenance`: the same check a restore makes,
+   * so the list can say whether a backup's `coverage` (or its absence) is shown at all. An unsigned
+   * manifest's `coverage` is whatever its writer put there.
+   */
+  listBackups(): BackupListEntry[] {
     if (!existsSync(this.backupDir)) return [];
 
     const entries = readdirSync(this.backupDir, { withFileTypes: true });
-    const manifests: Array<BackupManifest & { backup_id: string }> = [];
+    const manifests: BackupListEntry[] = [];
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -769,7 +777,7 @@ export class BackupManager {
       if (!existsSync(manifestPath)) continue;
       try {
         const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
-        manifests.push({ ...manifest, backup_id: entry.name });
+        manifests.push({ ...manifest, backup_id: entry.name, provenance: this.provenanceOf(manifest) });
       } catch {
         // Skip corrupt manifests
       }

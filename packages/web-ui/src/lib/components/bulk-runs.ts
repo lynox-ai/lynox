@@ -50,6 +50,8 @@ export interface BulkRun {
 	resumeOpen: number;
 	/** Of those, the most the next pass may write to under the approved maximum. */
 	resumeTries: number;
+	/** Writing targets the owner took out before approving; not counted in `changes`. */
+	deselected: number;
 }
 
 export interface BulkRunDetailData extends BulkRun {
@@ -394,6 +396,12 @@ export interface BulkTarget {
 	change: BulkChange;
 	diff: TargetDiff;
 	error: string | null;
+	/** The owner took it out of the write before approving. */
+	deselected: boolean;
+	/** This run wrote it (not found already as planned). Optional: an older engine sends neither. */
+	written?: boolean | undefined;
+	/** A rollback or an undo took this run's write back. */
+	undone?: boolean | undefined;
 }
 
 /** The external host of a run's target system, or null for a local run. */
@@ -460,10 +468,41 @@ export function bulkWaitsForStart(run: Pick<BulkRun, 'phase' | 'haltKey'>): bool
 }
 
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo
- *  would take back, and is not at its probe (that has its own way back). */
-export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe'>): boolean {
+ *  would take back, and is not at its probe (that has its own way back). An atomic run is taken
+ *  back whole or not at all, so only once it finished: the engine refuses any other
+ *  (`atomic_partial`), and one that aborted has already rolled back what it could. */
+export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe' | 'atomic'>): boolean {
 	if (run.kind !== 'apply' || run.undoable <= 0 || bulkAtProbe(run)) return false;
+	if (run.atomic) return run.phase === 'done';
 	return run.phase === 'done' || run.phase === 'aborted' || (run.phase === 'writing' && run.haltReason !== null);
+}
+
+/** The halts that end an atomic run in a rollback, each with its own sentence on the page
+ *  (`bulk.halt.<key>`). The incomplete ones name targets, which the page marks. */
+const BULK_ROLLED_BACK = new Set(['atomicRolledBack', 'atomicStoppedRolledBack', 'atomicTimeRolledBack']);
+const BULK_ROLLBACK_INCOMPLETE = new Set(['atomicRollbackIncomplete', 'atomicStoppedRollbackIncomplete', 'atomicTimeRollbackIncomplete']);
+
+/** The page's own sentence for an atomic run that rolled back, and whether the rollback left
+ *  targets to mark. Null for any other run: it keeps the other sentences or the engine's reason.
+ *  A rolled-back run offers no way on: it is aborted, so neither writing on nor an undo applies. */
+export function bulkRollbackText(run: Pick<BulkRun, 'phase' | 'haltKey'>, i18n: BulkI18n): { cause: string; incomplete: boolean } | null {
+	const key = run.haltKey;
+	if (run.phase !== 'aborted' || key === null) return null;
+	const incomplete = BULK_ROLLBACK_INCOMPLETE.has(key);
+	if (!incomplete && !BULK_ROLLED_BACK.has(key)) return null;
+	return { cause: i18n.t(`bulk.halt.${key}`), incomplete };
+}
+
+/** Whether an atomic run's rollback did not complete, so the page has targets to mark. The page
+ *  then loads every target: a mark on a page the owner never opens would not be seen. */
+export function bulkRollbackIncomplete(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
+	return run.phase === 'aborted' && run.haltKey !== null && BULK_ROLLBACK_INCOMPLETE.has(run.haltKey);
+}
+
+/** Whether the page marks this target: the run's rollback did not complete, and this is a
+ *  target it wrote and did not take back. */
+export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
+	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
 
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;
@@ -475,6 +514,61 @@ export function bulkStep(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | '
 	if (bulkAtProbe(run)) return 3;
 	if (run.phase === 'approved' || run.phase === 'writing') return 4;
 	return 5;
+}
+
+/** The sentence of each reason a Shopify run leaves a target out for (core `BulkInvalidReason`),
+ *  as the i18n key under `bulk.invalid.`. Reasons that read the same share a key. */
+const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
+	not_found: 'not_found', redirect: 'redirect', not_json: 'not_json', read_failed: 'read_failed', bad_url: 'bad_url',
+	secret_in_target: 'secret_in_target', secret_in_after: 'secret_in_after', secret_in_before: 'secret_in_before',
+	mail_api: 'mail_api', field_missing: 'field_missing',
+	before_not_object: 'shape', after_not_object: 'shape', field_not_scalar: 'shape',
+	list_item_no_id: 'list_item', list_item_bad_id: 'list_item', list_item_not_object: 'list_item', list_item_outside_list: 'list_item',
+	list_item_mismatch: 'list_item_mismatch',
+	list_item_truncated: 'list_item_truncated',
+	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
+	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char',
+};
+/** The refusals of taking a target out or putting it back that the owner's page words by
+ *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
+export const BULK_DESELECT_REFUSALS: readonly string[] = ['atomic_undo', 'not_writing', 'not_taken_out'];
+/** Sentences a managed instance follows with a way to support; a self-hosted one has none to name. */
+const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
+	not_json: 'bulk.invalid.persists_support', read_failed: 'bulk.invalid.persists_support', shape: 'bulk.invalid.many_support',
+};
+
+/** What the owner reads under a target lynox leaves out: on a Shopify run what is wrong, that
+ *  lynox does not change it, and the next step; elsewhere the reason by its code and the step
+ *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
+export function bulkInvalidText(reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n): string {
+	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
+	if (key === undefined) return i18n.tf('bulk.invalid.other', { code: bulkVisibleText(reason) });
+	const support = BULK_INVALID_SUPPORT[key];
+	const text = i18n.t(`bulk.invalid.${key}`);
+	return support !== undefined && managed !== false ? `${text} ${i18n.t(support)}` : text;
+}
+
+/** The line above a preview's targets: how many lynox leaves out and the owner took out, and
+ *  whether anything is left to approve. `nothing` disables the approval: the engine would
+ *  refuse it (`nothing_to_apply`), and a button that only fails after the click says less. */
+export function bulkSkippedHead(
+	run: Pick<BulkRun, 'changes' | 'deselected' | 'judge'>,
+	shopify: boolean,
+	i18n: BulkI18n,
+): { text: string | null; nothing: boolean } {
+	const n = run.changes.invalid;
+	const m = run.deselected;
+	const noun = shopify ? 'products' : 'targets';
+	const judged = n > 0 && run.judge !== null ? ` ${i18n.t(shopify ? 'bulk.skipped.judged' : 'bulk.skipped.judged_targets')}` : '';
+	if (bulkWriting(run) === 0) {
+		// "All" holds only where every target is one lynox leaves out.
+		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(`bulk.nothing.all_skipped_${noun}`, { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
+		return { text: text + judged, nothing: true };
+	}
+	if (n > 0 && m > 0) return { text: i18n.tf(`bulk.skipped.both_${noun}`, { n: String(n), m: String(m) }) + judged, nothing: false };
+	if (n > 0) return { text: i18n.tf(`bulk.skipped.${noun}`, { n: String(n) }) + judged, nothing: false };
+	if (m > 0) return { text: i18n.tf('bulk.skipped.taken_out', { m: String(m) }), nothing: false };
+	return { text: null, nothing: false };
 }
 
 /** A value of a target as the preview shows it: text as it is, anything else as JSON. */

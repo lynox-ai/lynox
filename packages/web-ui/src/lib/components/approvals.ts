@@ -24,6 +24,8 @@ export type ApprovalStatus = 'pending' | 'approved' | 'executing' | 'done' | 're
 export interface ApprovalSetupLine {
 	kind: 'set_up_by' | 'last_changed_by' | 'test_run_by';
 	name: string;
+	/** The owner took the plan over since (641c): the helper's mark stays, and the line says so. */
+	takenOver?: boolean | undefined;
 }
 
 export interface ApprovalCardData {
@@ -49,6 +51,8 @@ export interface ApprovalCardData {
 	origin: { source: 'workflow' | 'task'; triggerId: string; runId: string; threadId?: string | undefined; eventId?: string | undefined } | null;
 	outcome: string | null;
 	setup: ApprovalSetupLine[];
+	/** The thread a change in chat continues; null (or absent, from an older engine) opens a new chat. */
+	chatThreadId?: string | null | undefined;
 }
 
 /** Whose session reads the list: the owner decides; a mandate, or a session the engine names no
@@ -101,6 +105,64 @@ export function approvalSendable(card: ApprovalCardData): boolean {
 	return approvalActionable(card) && card.executable === true;
 }
 
+/** What moving an entry to chat needs from the page: the decision and the chat store. */
+export interface ApprovalChatSteps {
+	/** Posts `move_to_chat`; a refusal carries the server's code. */
+	decide: (id: string) => Promise<{ ok: true } | { ok: false; code: unknown }>;
+	newChat: () => void;
+	resumeThread: (threadId: string) => Promise<void>;
+	send: (framing: string, context: { kind: 'approval'; id: string }) => void;
+	goto: (path: string) => Promise<void>;
+}
+
+/**
+ * Opens the chat on an entry's draft: the run's thread only where the engine names it
+ * (`chatThreadId`: a task the owner filed in a thread the owner opened, not contained), else a new
+ * chat — a workflow run has no thread, and a mandate's thread is the mandate's conversation, not
+ * the owner's. The engine loads the draft only once the entry was moved to chat.
+ */
+export async function openApprovalChat(
+	card: Pick<ApprovalCardData, 'id' | 'chatThreadId'>,
+	framing: string,
+	steps: Omit<ApprovalChatSteps, 'decide'>,
+): Promise<void> {
+	const context = { kind: 'approval' as const, id: card.id };
+	const thread = typeof card.chatThreadId === 'string' && card.chatThreadId !== '' ? card.chatThreadId : null;
+	if (thread !== null) {
+		await steps.goto('/app');
+		await steps.resumeThread(thread);
+		steps.send(framing, context);
+	} else {
+		steps.newChat();
+		steps.send(framing, context);
+		await steps.goto('/app');
+	}
+}
+
+/**
+ * Moves an entry to chat. The decision comes first: once it is `moved_to_chat` the card can no
+ * longer send it, and only then does the chat load it — the engine loads no draft that still
+ * waits, so the chat and the card never both send. A refused decision opens no chat.
+ */
+export async function moveApprovalToChat(
+	card: Pick<ApprovalCardData, 'id' | 'chatThreadId'>,
+	framing: string,
+	steps: ApprovalChatSteps,
+): Promise<{ ok: true } | { ok: false; code: unknown }> {
+	const decided = await steps.decide(card.id);
+	if (!decided.ok) return decided;
+	await openApprovalChat(card, framing, steps);
+	return { ok: true };
+}
+
+/** Whether the card offers to open its draft in chat again: an entry the owner moved there, on
+ *  the owner's card (the one the engine hands the checksum to), with a draft to load. It decides
+ *  nothing; it is the way back when the first chat turn did not go through. */
+export function approvalReopensInChat(card: ApprovalCardData): boolean {
+	return card.status === 'rejected' && card.outcome === 'moved_to_chat'
+		&& typeof card.checksum === 'string' && card.checksum !== '' && card.mail !== null;
+}
+
 /** Whether sending takes a second click: a mass send, or a reply to someone the original did
  *  not name. Every other mail goes with one. */
 export function approvalNeedsSecondClick(card: Pick<ApprovalCardData, 'massSend' | 'recipientDiffers'>): boolean {
@@ -144,16 +206,97 @@ export function approvalOutcomeKey(card: Pick<ApprovalCardData, 'status' | 'outc
 
 /** The codes whose next step is a sentence of their own; every other mail that failed or expired
  *  gets the general one, to write it again in a chat. */
-const NEXT_STEP: ReadonlySet<string> = new Set(['account_not_configured', 'receive_only', 'invalid_recipients', 'secret_in_body', 'rate_limit']);
+const NEXT_STEP: ReadonlySet<string> = new Set(['account_not_configured', 'receive_only', 'invalid_recipients', 'secret_in_body', 'rate_limit', 'checksum', 'account_changed']);
 
-/** The i18n key for what the owner can do next, or null. Only the owner gets one: a mandate's
- *  session can neither close an entry nor write the owner's mail again. Every status that has a
- *  step also has an outcome sentence, which the step follows. */
+/** The i18n key for what can be done next, or null. Every step is the owner's: a mandate's session
+ *  can neither close an entry nor write the owner's mail again, so where the owner has a step,
+ *  every other session is told to ask the owner instead of being left without one. Every status
+ *  that has a step also has an outcome sentence, which the step follows. */
 export function approvalNextStepKey(card: Pick<ApprovalCardData, 'status' | 'outcome'>, viewer: ApprovalViewer): string | null {
-	if (viewer !== 'owner') return null;
-	if (card.status === 'unknown') return 'approvals.next.unknown';
-	if (card.status !== 'failed' && card.status !== 'expired') return null;
-	return card.outcome !== null && NEXT_STEP.has(card.outcome) ? `approvals.next.${card.outcome}` : 'approvals.next.recreate';
+	let step: string;
+	if (card.status === 'unknown') step = 'approvals.next.unknown';
+	else if (card.status !== 'failed' && card.status !== 'expired') return null;
+	else step = card.outcome !== null && NEXT_STEP.has(card.outcome) ? `approvals.next.${card.outcome}` : 'approvals.next.recreate';
+	return viewer === 'owner' ? step : 'approvals.next.ask_owner';
+}
+
+/** The entry and outcome a chat note about an approved mail carries (core `render-projection.ts`). */
+export interface ApprovalNoteRef {
+	id: string;
+	outcome: string;
+}
+
+/** What a chat note about an approved mail shows: its sentence, the next step, and where its entry is. */
+export interface ApprovalNoteLines {
+	bodyKey: string;
+	nextKey: string | null;
+	href: string | null;
+	/** The entry whose draft a chat can load to write it again, or null: no button. */
+	rewriteId: string | null;
+}
+
+/**
+ * The reasons a failed entry's draft can be written again in a chat: the engine's list (core
+ * `approval-view.ts`, `APPROVAL_REWRITABLE_OUTCOMES`), each a reason given before the send began.
+ * The engine decides again when the chat asks; this only decides whether the note offers it.
+ */
+export const APPROVAL_REWRITABLE_OUTCOMES: readonly string[] = [
+	'account_not_configured', 'receive_only', 'account_changed', 'mandate_ended', 'invalid_recipients', 'rate_limit',
+	'cancelled', 'mail_unavailable', 'sending_address_unavailable', 'deadline_before_send', 'trail_unavailable',
+	'executor_error',
+];
+const REWRITABLE: ReadonlySet<string> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
+
+/** The page's path with one entry picked out: the "all" tab, that card marked. */
+export function approvalEntryHref(id: string): string {
+	return `/app/approvals?entry=${encodeURIComponent(id)}`;
+}
+
+/**
+ * Whether an outcome code reads right under the note's title: one the page has a sentence for,
+ * not the unrecorded `other`, not a decision (an entry the owner closed after it ended unclear is no
+ * longer "not sent"), and on a "not sent" note none of the codes that say the outcome is unclear.
+ */
+function noteOutcomeFits(status: 'failed' | 'unknown', outcome: string): boolean {
+	if (!SENTENCES.has(outcome) || outcome === 'other' || DECIDED_BY_OWNER.has(outcome)) return false;
+	return status === 'unknown' || !UNCLEAR.has(outcome);
+}
+
+/** The page's next step, except where it says "here" for the page: an unclear outcome's step, which
+ *  the chat words with the page's name. */
+function noteNextStepKey(card: { status: 'failed' | 'unknown'; outcome: string }, viewer: ApprovalViewer | null): string | null {
+	if (viewer === null) return null;
+	const step = approvalNextStepKey(card, viewer);
+	return step === 'approvals.next.unknown' ? 'chat.note.approval_unknown.next' : step;
+}
+
+/**
+ * The lines of a chat note about an approved mail that did not go out (`approval_failed`) or may
+ * have (`approval_unknown`), or null for any other note. The reason is the sentence the page shows
+ * for the same entry when the note was written, and the next step the page's, for the same viewer.
+ * A note whose reason does not fit its title (`noteOutcomeFits`) keeps its own sentence, which already
+ * says what to do. Without a viewer, no next step: whether it is the owner's or "ask the owner"
+ * depends on it. The note is written once; the entry may be closed or purged since, and the link
+ * then opens the page without a marked card.
+ */
+export function approvalNoteLines(code: string, ref: ApprovalNoteRef | undefined, viewer: ApprovalViewer | null): ApprovalNoteLines | null {
+	let status: 'failed' | 'unknown';
+	if (code === 'approval_failed') status = 'failed';
+	else if (code === 'approval_unknown') status = 'unknown';
+	else return null;
+	const own = `chat.note.${code}`;
+	if (ref === undefined) return { bodyKey: own, nextKey: null, href: null, rewriteId: null };
+	const href = approvalEntryHref(ref.id);
+	if (!noteOutcomeFits(status, ref.outcome)) return { bodyKey: own, nextKey: null, href, rewriteId: null };
+	const card = { status, outcome: ref.outcome };
+	return {
+		// The sentences of the codes that fit read the same for every viewer.
+		bodyKey: approvalOutcomeKey(card, 'none') ?? own,
+		nextKey: noteNextStepKey(card, viewer),
+		href,
+		// Only the owner's chat loads the draft of a mail that was not sent.
+		rewriteId: status === 'failed' && viewer === 'owner' && REWRITABLE.has(ref.outcome) ? ref.id : null,
+	};
 }
 
 /** The decide refusals the page has a sentence for; anything else reads as the general one. */
@@ -168,6 +311,17 @@ export function approvalDecideErrorKey(code: unknown): string {
 /** Whether a refusal means the list the owner decided from is stale and is read again. */
 export function approvalRefusalReloads(code: unknown): boolean {
 	return code === 'checksum' || code === 'not_pending' || code === 'not_unknown' || code === 'expired' || code === 'mandate_ended' || code === 'not_found';
+}
+
+/**
+ * Which sentence a setup line is (the key under `approvals.setup.`). After a takeover the line
+ * keeps the helper's name and adds who took it over: "by you" to the owner, "by the owner" to
+ * anyone else (ux U-039). A test run is no mark, so it has no taken-over form.
+ */
+export function approvalSetupKind(line: Pick<ApprovalSetupLine, 'kind' | 'takenOver'>, viewer: ApprovalViewer): string {
+	if (line.takenOver !== true || line.kind === 'test_run_by') return line.kind;
+	const what = line.kind === 'set_up_by' ? 'set_up_by' : 'changed_by';
+	return `${what}_taken_over_${viewer === 'owner' ? 'you' : 'owner'}`;
 }
 
 /** A setup line's name, with the engine's neutral label translated. */

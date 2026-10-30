@@ -131,4 +131,13 @@ describe('memory and artifact writes from a contained chat (real engine)', () =>
     const other = await open('run-free');
     expect(containment.isContained({ threadId: other })).toBe(false);
   }, 60_000);
+
+  it('a chat opened from a contained one (context contained-origin) is not contained by the marker', async () => {
+    const containment = engine().getToolContext().containment!;
+    const created = await call('POST', '/api/sessions', {});
+    const { sessionId } = JSON.parse(created.text) as { sessionId: string };
+    await call('POST', `/api/sessions/${sessionId}/run`, { task: 'improve the descriptions', context: { kind: 'contained-origin', id: 't-contained' } });
+    expect(containment.isContained({ threadId: 't-contained' })).toBe(true);
+    expect(containment.isContained({ threadId: sessionId })).toBe(false);
+  }, 60_000);
 });

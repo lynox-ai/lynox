@@ -28,7 +28,7 @@ import { PromptStore } from './prompt-store.js';
 import { TaskManager } from './task-manager.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
-import type { NotificationRouter, DeliverySummary } from './notification-router.js';
+import type { DeliverySummary, NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/index.js';
 import { stopHandleOf, keepsQuestionForNextProcess } from './worker-loop.js';
 import type { ActiveTask } from './worker-loop.js';
@@ -248,14 +248,13 @@ function makeHarness(opts?: {
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
-    // A task's question takes its reporter from here before it pushes. The router mocks resolve
-    // `undefined`, not a report, so `summarizeDelivery` throws and the question's `.catch` logs
-    // it: the reporter this returns never runs here. The path is tested in
-    // worker-loop-task-ask-hooks.test.ts.
+    // A task's question hands its delivery here; no hooks on this engine.
     escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
     // A failed run's push asks whether its thread is contained; no store here, as on an
     // instance that never connected one.
     getToolContext: () => ({ containment: null }),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
 
   // ⚠ `hasChannels` decides whether the loop even composes a notification, so a
@@ -738,6 +737,7 @@ function makeClassHarness(opts: {
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => { escalations++; return null; },
+    escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
     getPromptStore: () => null,
     getSecretStore: () => null,
     getDataStore: () => null,
@@ -754,6 +754,8 @@ function makeClassHarness(opts: {
       sessions.push(1);
       return { run: () => hold('unexpected'), abort: () => { /* noop */ }, _recreateAgent: () => { /* noop */ } } as unknown as Session;
     },
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
 
   const router = {

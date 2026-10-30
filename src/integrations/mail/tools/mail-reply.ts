@@ -319,6 +319,9 @@ ${bodyPreview}`;
     originalThreadKey,
     ...(origMessageId ? { originalMessageId: origMessageId } : {}),
     originalFolderUid: `${original.envelope.folder}:${String(original.envelope.uid)}`,
+    // The provider the original was fetched through, resolved from whatever the call named: the
+    // uid above is this mailbox's.
+    readAccountId: readProvider.accountId,
     original: {
       from: original.envelope.from.map(a => a.address).join(', '),
       to: original.envelope.to.map(a => a.address),

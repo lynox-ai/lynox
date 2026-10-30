@@ -3,8 +3,10 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { pickBackupConfig, fetchBackupConfig, requestRestore, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
+	import { backupCoverageNotice, type BackupCoverageFields } from '../backup-coverage.js';
+	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 
-	interface Backup { backup_id: string; version: string; created_at: string; encrypted: boolean; files: { path: string; size_bytes: number }[]; checksum: string; }
+	interface Backup extends BackupCoverageFields { backup_id: string; version: string; created_at: string; encrypted: boolean; files: { path: string; size_bytes: number }[]; checksum: string; }
 
 	type Config = BackupConfigFields;
 
@@ -138,7 +140,7 @@
 		return `${(bytes / 1048576).toFixed(1)} MB`;
 	}
 
-	$effect(() => { void loadBackups(); /* catches and sets its error */ void loadConfig(); /* never rejects; a failed read hides the settings and shows an error */ });
+	$effect(() => { void loadBackups(); /* catches and sets its error */ void loadConfig(); /* never rejects; a failed read hides the settings and shows an error */ void loadManagedStatus(); /* never rejects; picks the way out a coverage notice names */ });
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
 	const cardClass = 'rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4';
@@ -166,6 +168,7 @@
 	{:else}
 		<div class="space-y-2 mb-8">
 			{#each backups as backup}
+				{@const coverage = backupCoverageNotice(backup, isManaged())}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
 					<div class="flex items-center justify-between">
 						<span class="text-sm font-mono">{new Date(backup.created_at).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
@@ -173,9 +176,15 @@
 							{#if backup.encrypted}
 								<span class="text-xs rounded-[var(--radius-sm)] bg-success/15 text-success px-1.5 py-0.5">{t('backups.encrypted')}</span>
 							{/if}
+							{#if coverage}
+								<span data-testid="backup-coverage-badge" class="text-xs rounded-[var(--radius-sm)] px-1.5 py-0.5 {coverage.tone === 'warning' ? 'bg-warning/15 text-warning' : 'bg-border text-text-muted'}">{t(coverage.badge)}</span>
+							{/if}
 							<span class="text-xs text-text-muted">{backup.files.length} {t('backups.files')}</span>
 						</div>
 					</div>
+					{#if coverage}
+						<p data-testid="backup-coverage-line" class="mt-1.5 text-xs {coverage.tone === 'warning' ? 'text-warning' : 'text-text-muted'}">{coverage.lines.map((key) => t(key)).join(' ')}</p>
+					{/if}
 					<div class="flex items-center justify-between mt-1.5">
 						<div class="flex gap-2 text-xs text-text-subtle">
 							<span>v{backup.version}</span>

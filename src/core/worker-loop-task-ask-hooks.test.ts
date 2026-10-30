@@ -101,6 +101,7 @@ async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutco
     getDueTriggers: vi.fn(() => [TASK]),
     getExpiredWaitingTriggers: vi.fn(() => []),
     getWaitingTriggers: vi.fn(() => []),
+    getAwaitingConsentUnreminded: vi.fn(() => []),
     endWait: vi.fn(() => false),
     claimLease: vi.fn(() => 'claimed'),
     renewLease: vi.fn(() => true),
@@ -124,13 +125,14 @@ async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutco
     createSession: vi.fn(() => session as unknown as Session),
     getThreadStore: vi.fn(() => ({ isDeleted: () => false })),
     getPromptStore: vi.fn(() => promptStore),
-    getRunHistory: vi.fn(() => null),
+    getRunHistory: vi.fn(() => history),
     getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
     escalationReporter: o.reporter,
     getSecretStore: vi.fn(() => null),
     getMandateEnds: vi.fn(() => ({ isLive: () => true })),
     getAuditLog: vi.fn(() => ({ record: vi.fn() })),
     getToolContext: vi.fn(() => ({ containment: null })),
+    getEngineDb: vi.fn(() => null),
   } as unknown as Engine;
   const notified: NotificationMessage[] = [];
   const router = {
