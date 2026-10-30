@@ -43,14 +43,21 @@ let mockRecordedToolCalls = 0;
 /** Why each constructed child says its `send()` ended (null = clean end_turn). */
 let mockLastStop: import('../../core/agent.js').SendStop | null = null;
 
-const { MockRunAbortedError } = vi.hoisted(() => ({
-  MockRunAbortedError: class RunAbortedError extends Error {
+const { MockRunAbortedError, MockContinuationLoopError } = vi.hoisted(() => {
+  class RunAbortedError extends Error {
     constructor(message = 'Run interrupted before completion') {
       super(message);
       this.name = 'RunAbortedError';
     }
-  },
-}));
+  }
+  class ContinuationLoopError extends RunAbortedError {
+    constructor(prefix: string) {
+      super(prefix);
+      this.name = 'ContinuationLoopError';
+    }
+  }
+  return { MockRunAbortedError: RunAbortedError, MockContinuationLoopError: ContinuationLoopError };
+});
 
 vi.mock('../../core/agent.js', () => ({
   Agent: vi.fn().mockImplementation(function (this: MockedAgentShape, config: {
@@ -103,10 +110,12 @@ vi.mock('../../core/agent.js', () => ({
       this.name = 'ToolLoopBreakError';
     }
   },
-  ContinuationLoopError: class ContinuationLoopError extends MockRunAbortedError {
-    constructor(prefix: string) {
-      super(prefix);
-      this.name = 'ContinuationLoopError';
+  ContinuationLoopError: MockContinuationLoopError,
+  // A continuation loop, as in agent.ts: the guard that names it must ask for it first.
+  ThinkingOnlyLoopError: class ThinkingOnlyLoopError extends MockContinuationLoopError {
+    constructor() {
+      super('Run stopped: two truncated turns in a row held only thinking');
+      this.name = 'ThinkingOnlyLoopError';
     }
   },
 }));
@@ -5419,6 +5428,28 @@ describe('spawn_agent tool', () => {
       expect(arg.status).toBe('aborted');
       expect(arg.errorText).toBeUndefined(); // an intentional interruption is not an error to store
       expect(arg.stopReason).toBe('aborted');
+    });
+
+    it('a child a loop guard stopped is recorded aborted with the guard as the reason and its message as the error', async () => {
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } = await import('../../core/agent.js');
+      const cases: Array<[Error, string]> = [
+        [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
+        [new ContinuationLoopError('prefix'), 'continuation_loop'],
+        [new ThinkingOnlyLoopError(), 'thinking_loop'],
+      ];
+      for (const [err, reason] of cases) {
+        const updateRun = vi.fn();
+        const parentToolContext = {
+          sessionCounters: testCounters,
+          runHistory: { insertRun: vi.fn().mockReturnValue('run-guard-1'), updateRun },
+        } as unknown as import('../../core/tool-context.js').ToolContext;
+        mockSend.mockRejectedValueOnce(err);
+        const agent = makeAgent({ currentRunId: 'parent-guard', toolContext: parentToolContext });
+        await expect(spawnAgentTool.handler({ agents: [{ name: 'looping', task: 'x' }] }, agent)).rejects.toThrow();
+        const update = updateRun.mock.calls.find((c) => (c[1] as { status?: string }).status === 'aborted');
+        expect(update, reason).toBeDefined();
+        expect(update![1]).toEqual(expect.objectContaining({ status: 'aborted', stopReason: reason, errorText: err.message }));
+      }
     });
 
     it('marks a failed section FAILED with the formatted error while a sibling still succeeds', async () => {
