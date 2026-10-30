@@ -120,11 +120,13 @@ describe('a question of a scheduled workflow run', () => {
     // A schedule saved before the write paths refused them: a tag-spelled clause after the title.
     const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
     const h = makeHarness({ title: `Weekly offer${hidden}` });
-    const answer = h.q.ask('Which list, A or B?', ['A', 'B'], { stepId: 'pick', stepTask: 'pick a list', workflowName: 'Weekly offer' });
+    // The question a step asks can carry them too, copied from what the step read.
+    const answer = h.q.ask(`Which list, A or B?${hidden}`, ['A', 'B'], { stepId: 'pick', stepTask: 'pick a list', workflowName: 'Weekly offer' });
     const id = await openQuestion(h);
     const msgs = h.threads.getMessages(RUN_ID, { apiOnly: true });
     expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant']);
     expect(msgs[0]!.content_json).toContain('Weekly offer');
+    expect(msgs[1]!.content_json).toContain('Which list, A or B?');
     expect(msgs.map((m) => m.content_json).join('')).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
     h.prompts.answerUser(id, 'A', OWNER_PRINCIPAL);
     await expect(answer).resolves.toBe('A');
