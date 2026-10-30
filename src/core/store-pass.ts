@@ -92,7 +92,7 @@ function resolveEscapes(text: string): string {
   for (let round = 0; round < 8; round++) {
     const next = current.replace(UNICODE_ESCAPE, (_, braced: string | undefined, plain: string | undefined) => {
       const code = Number.parseInt(braced ?? plain ?? '', 16);
-      return code <= 0x10ffff ? String.fromCodePoint(code) : '�';
+      return code <= 0x10ffff ? String.fromCodePoint(code) : '\uFFFD';
     });
     if (next === current) return current;
     current = next;
@@ -101,8 +101,8 @@ function resolveEscapes(text: string): string {
 }
 
 /**
- * Whether `text` names an access token (`accessToken`, `access_token`, any case), as it is or with
- * its escapes resolved. A GraphQL field name has no escapes, and an alias or a fragment carries it
+ * Whether `text` names an access token (`accessToken`, `access_token`, any case), with its escapes
+ * resolved. A GraphQL field name has no escapes, and an alias or a fragment carries it
  * as written, so a document that selects a token field names it here. The response is not read:
  * a token the store returns under another name is not seen.
  */
@@ -117,8 +117,8 @@ function asksPersisted(text: string): boolean {
 
 /**
  * Why a credential request's query or headers may not go out, or `null`. The query is read as
- * the store decodes it, names and values; a body sent compressed or in a charset other than UTF-8 is refused, because the
- * body check reads it as UTF-8 text.
+ * the store decodes it, names and values. A body sent compressed or in a charset other than
+ * UTF-8 is refused, because the body check reads it as UTF-8 text.
  */
 function credentialRequestRefusal(url: URL, headers: Record<string, string>): string | null {
   if (url.search !== '') {
