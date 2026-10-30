@@ -95,7 +95,8 @@ import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
-import { WORKFLOW_ENDED_REFUSAL, workflowRunsAs } from '../orchestrator/run-source.js';
+import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orchestrator/run-source.js';
+import { runAsPlanOf } from '../core/plan-run-context.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
@@ -7977,7 +7978,7 @@ export class LynoxHTTPApi {
       // rather than headless-running arbitrary imported bash. (Resolve via
       // getPipeline so a prefix id + the post-confirm cache eviction are handled;
       // a not-found id falls through to runGuardedSavedWorkflow's 404.)
-      const { getPipeline } = await import('../tools/builtin/pipeline.js');
+      const { getPipeline, workflowRunTrail, WORKFLOW_RUN_UNRECORDED_RESULT } = await import('../tools/builtin/pipeline.js');
       const plannedForRun = getPipeline(params['id']!, history);
       // A workflow that asks its owner runs only on its schedule (PRD 3b-2 §4.3): this route has
       // no question channel, so a run started here would reach a question step with nobody to ask.
@@ -8214,9 +8215,18 @@ export class LynoxHTTPApi {
         // request owns a claim. An earlier shape handed `undefined` for the whole object when
         // there was none, which would have dropped `origin` for every keyless call: the
         // cheapest way to lose a security decision is to make it the sibling of an optional one.
-        result = await runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
+        // A mandate's workflow runs as that mandate (decision A), and as a plan's run, not as
+        // that person's own session: under `runAsPlanOf` with no stamp, so the mandate's own
+        // connections read as unlisted and are refused (`planConnectionState`), and under a
+        // recorded run of its own (the `workflow:run` pair), whose key every row of its steps
+        // carries. A start that cannot be recorded does not run. The owner's run has neither.
+        const trail = workflowRunTrail(runAs, engine.getAuditLog() ?? null, { workflowId: claimWorkflowId, oneShot: false, retry: false });
+        const run = (): ReturnType<typeof runGuardedSavedWorkflow> => runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
           origin: { kind: 'library', by: this._authOrigin.get(_req) ?? 'unknown' },
           principal: runAs,
+          // Asked on the workflow as the runner reads it: an edit after this route looked at it
+          // must not run under the principal it decided (`libraryRunCheck`).
+          checkWorkflow: libraryRunCheck(runAs, (id) => history.getWorkflowAuthorship(id)),
           ...(ownedRunId === undefined ? {} : {
             runId: ownedRunId,
             // The stamp that turns "nothing spent" into "spent". `runManifest` fires it before
@@ -8238,6 +8248,21 @@ export class LynoxHTTPApi {
             hooks: { onRunStart: () => { history.markWorkflowRunStarted(ownedRunId); } },
           }),
         });
+        let begun = trail === null;
+        if (trail !== null) { try { trail.begin(); begun = true; } catch { /* answered below */ } }
+        if (!begun) {
+          result = { ok: false, error: WORKFLOW_RUN_UNRECORDED_RESULT };
+        } else if (trail === null) {
+          result = await run();
+        } else {
+          let outcome: 'success' | 'failed' = 'failed';
+          try {
+            result = await runAsPlanOf(runAs, run, null, trail.key);
+            if (result.ok && result.status === 'completed') outcome = 'success';
+          } finally {
+            trail.end(outcome, false);
+          }
+        }
       } finally {
         // Release ONLY what spent nothing, and let SQL decide it: the method's WHERE
         // carries `run_id = ? AND started_at IS NULL`, so a read-then-delete here would

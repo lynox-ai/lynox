@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { RunHistory } from '../core/run-history.js';
 import { EngineDb } from '../core/engine-db.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
-import { workflowRunsAs } from './run-source.js';
+import { LIBRARY_RUN_AUTHOR_CHANGED, LIBRARY_RUN_UNCONFIRMED, libraryRunCheck, workflowRunsAs } from './run-source.js';
 
 const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'grant-eva' };
 
@@ -66,6 +66,24 @@ describe('whom a library run of a saved workflow is for', () => {
     save('wf-eva', EVA);
     save('wf-copy', OWNER_PRINCIPAL, 'wf-eva');
     expect(runsAs('wf-copy')).toMatchObject({ kind: 'mandate', email: EVA.kind === 'mandate' ? EVA.email : '' });
+  });
+
+  describe('the check the Run button hands the runner, on the workflow as the runner reads it', () => {
+    const CONFIRMED = '2026-10-01T00:00:00.000Z';
+    it('passes the workflow the route decided on', () => {
+      save('wf-eva', EVA);
+      expect(libraryRunCheck(EVA, (id) => history.getWorkflowAuthorship(id))({ id: 'wf-eva', confirmedAt: CONFIRMED })).toBeNull();
+    });
+    it('refuses it once a mandate changed the owner\'s workflow in between, which would otherwise run as the owner', () => {
+      save('wf-own', OWNER_PRINCIPAL);
+      const check = libraryRunCheck(OWNER_PRINCIPAL, (id) => history.getWorkflowAuthorship(id));
+      save('wf-own', EVA, undefined, 'post it elsewhere');
+      expect(check({ id: 'wf-own', confirmedAt: CONFIRMED })).toBe(LIBRARY_RUN_AUTHOR_CHANGED);
+    });
+    it('refuses a read that is no longer confirmed', () => {
+      save('wf-eva', EVA);
+      expect(libraryRunCheck(EVA, (id) => history.getWorkflowAuthorship(id))({ id: 'wf-eva' })).toBe(LIBRARY_RUN_UNCONFIRMED);
+    });
   });
 
   it('no authorship row reads as the owner here; the runner refuses that run as unreadable', () => {

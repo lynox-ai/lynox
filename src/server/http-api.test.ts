@@ -505,11 +505,17 @@ vi.mock('../integrations/push/web-push-channel.js', () => ({
 const mockRunSavedWorkflow = vi.fn();
 const mockForgetPipeline = vi.fn();
 const mockGetPipeline = vi.fn();
-vi.mock('../tools/builtin/pipeline.js', () => ({
-  runSavedWorkflow: mockRunSavedWorkflow,
-  forgetPipeline: mockForgetPipeline,
-  getPipeline: mockGetPipeline,
-}));
+// The run record of a mandate's run (1055) is the real one: the rows it writes are what its tests read.
+vi.mock('../tools/builtin/pipeline.js', async (importActual) => {
+  const actual = await importActual<typeof import('../tools/builtin/pipeline.js')>();
+  return {
+    runSavedWorkflow: mockRunSavedWorkflow,
+    forgetPipeline: mockForgetPipeline,
+    getPipeline: mockGetPipeline,
+    workflowRunTrail: actual.workflowRunTrail,
+    WORKFLOW_RUN_UNRECORDED_RESULT: actual.WORKFLOW_RUN_UNRECORDED_RESULT,
+  };
+});
 
 // Partial mocks for the voice facades: spread the real module so the
 // capabilities endpoint keeps every export it reads (getActiveSpeakProvider,
@@ -11707,6 +11713,60 @@ describe('LynoxHTTPApi', () => {
         expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
       });
 
+      it('runs it as a plan\'s run with no stamp, so the mandate\'s own connections stay unlisted', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const { currentPlanOf, currentPlanStamp } = await import('../core/plan-run-context.js');
+        let seen: { planOf: unknown; stamp: unknown } | undefined;
+        mockRunSavedWorkflow.mockImplementation(async () => { seen = { planOf: currentPlanOf(), stamp: currentPlanStamp() }; return { ok: true, runId: 'run-1', status: 'completed' }; });
+        expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
+        expect(seen).toEqual({ planOf: expect.objectContaining({ kind: 'mandate', email: 'eva@kanzlei.example' }), stamp: null });
+      });
+
+      it('CONTROL: the owner\'s own workflow runs outside any plan', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: null, createdMandateId: null });
+        const { currentPlanOf } = await import('../core/plan-run-context.js');
+        let planOf: unknown = 'unset';
+        mockRunSavedWorkflow.mockImplementation(async () => { planOf = currentPlanOf(); return { ok: true, runId: 'run-1', status: 'completed' }; });
+        expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
+        expect(planOf).toBeUndefined();
+      });
+
+      it('records the mandate\'s run in the instance log, a start and an end under one key', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const record = vi.fn();
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record });
+        try {
+          expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
+        } finally { engineRef()['getAuditLog'] = origLog; }
+        const rows = record.mock.calls.map((c) => c[0] as { principal: { kind: string }; action: string; phase: string; correlationId: string });
+        const runRows = rows.filter((r) => r.action === 'workflow:run');
+        expect(runRows.map((r) => [r.principal.kind, r.phase])).toEqual([['mandate', 'attempt'], ['mandate', 'done']]);
+        expect(runRows[0]!.correlationId).toBe(runRows[1]!.correlationId);
+      });
+
+      it('does not run the mandate\'s workflow when its start cannot be recorded', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => null;
+        try {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          expect(res.status).toBe(400);
+          expect(((await res.json()) as { error: string }).error).toContain('cannot be recorded');
+        } finally { engineRef()['getAuditLog'] = origLog; }
+        expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+      });
+
+      it('hands the runner the check of the workflow as it reads it', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
+        const check = runtimeOf()['checkWorkflow'] as (p: { id: string; confirmedAt?: string }) => string | null;
+        expect(check({ id: 'wf-1', confirmedAt: '2026-10-01T00:00:00Z' })).toBeNull();
+        // Someone else's edit after the route looked: the runner's read names another author.
+        mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: null, createdMandateId: null });
+        expect(check({ id: 'wf-1', confirmedAt: '2026-10-01T00:00:00Z' })).toContain('changed by someone else');
+      });
+
       it('lists whom each workflow runs as for the owner, and whether that person\'s access ended', async () => {
         mockHistoryGetPlannedPipelines.mockReturnValue([
           { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },
@@ -11720,6 +11780,27 @@ describe('LynoxHTTPApi', () => {
         expect(body.workflows.find((w) => w.id === 'wf-o')).not.toHaveProperty('runs_as');
         mockHistoryGetWorkflowAuthorship.mockReset();
         mockHistoryGetPlannedPipelines.mockReturnValue([]);
+      });
+
+      it('lists no one\'s email to a mandate reading the library', async () => {
+        mockHistoryGetPlannedPipelines.mockReturnValue([
+          { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },
+        ]);
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+        const cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+        try {
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'ida@kanzlei.example', mandateId: MID }));
+          const asMandate = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+          expect(asMandate.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('runs_as');
+          // Twin on the same machinery: the owner gets it.
+          api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+          const asOwner = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+          expect(asOwner.workflows.find((w) => w.id === 'wf-m')).toHaveProperty('runs_as');
+        } finally {
+          api.setPrincipalResolverForTesting(cookieResolver);
+          mockHistoryGetPlannedPipelines.mockReturnValue([]);
+        }
       });
     });
 
