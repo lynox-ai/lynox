@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent, TaskPriority, TaskStatus, TriggerStatus, MemoryScopeRef } from '../../types/index.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
-import { findHiddenChar, hiddenCharRefusal } from '../../core/hidden-text.js';
+import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidden-text.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-principal.js';
@@ -71,7 +71,10 @@ const UNSAFE_IN_LINE = /[\x00-\x1f\x7f\u0085\u2028\u2029]/g;
 const FIELD_SEPARATOR = ' · ';
 
 /** Flatten anything that could end a line or forge a field. */
-const clean = (v: string): string => v.replace(UNSAFE_IN_LINE, ' ');
+// Also without the characters that render as nothing (`hidden-text.ts`): a stored field can carry
+// text someone else wrote, and this line is read by the model.
+// Line ends first, so each still reads as a space and not as nothing.
+const clean = (v: string): string => stripHidden(v.replace(UNSAFE_IN_LINE, ' '));
 
 /** Cut at a CODEPOINT boundary. `slice` counts UTF-16 units, so a provider whose
  *  error text puts an emoji across the limit leaves a lone surrogate in the
@@ -229,11 +232,14 @@ function formatTaskLine(
   // rather than concatenated on.
   suffix = '',
 ): string {
-  const scope = t.scope_type === 'context' && !t.scope_id ? '' : ` (${t.scope_type}:${t.scope_id})`;
+  // Title, assignee and scope as stored, without the characters that render as nothing
+  // (`hidden-text.ts`): the model's write tools refuse them, but a plan saved before, or through
+  // another path, carries them.
+  const scope = t.scope_type === 'context' && !t.scope_id ? '' : ` (${t.scope_type}:${stripHidden(t.scope_id)})`;
   const due = t.due_date ? ` — due ${t.due_date}` : '';
-  const assign = t.assignee ? ` @${t.assignee}` : '';
+  const assign = t.assignee ? ` @${stripHidden(t.assignee)}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
-  return `${prio}${t.id} ${t.title}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine(t)}`;
+  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine(t)}`;
 }
 
 // Catches an LLM output failure mode where the model emits an escaped close-quote
@@ -322,7 +328,10 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
     // No character that renders as nothing (`hidden-text.ts`), on every task, firing or not: a
     // plan copied from someone else's would bring its hidden instructions along, and the owner's
     // own plan needs no stamp. The injection scan below cannot catch it, as it folds them away.
-    const hidden = findHiddenChar({ title: input.title, description: input.description, tags: input.tags, params: input.params });
+    const hidden = findHiddenChar({
+      title: input.title, description: input.description, tags: input.tags, params: input.params,
+      assignee: input.assignee, scope: input.scope, watch_url: input.watch_url,
+    });
     if (hidden) return `Error: ${hiddenCharRefusal('task', hidden)}`;
 
     // `params` only reaches a workflow run. Silently dropping it would look like
@@ -568,7 +577,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       : undefined;
 
     // No character that renders as nothing in what this edit writes, as on create.
-    const hidden = findHiddenChar({ title: input.title, description: input.description, tags: input.tags });
+    const hidden = findHiddenChar({ title: input.title, description: input.description, tags: input.tags, assignee: input.assignee });
     if (hidden) return `Error: ${hiddenCharRefusal('task', hidden)}`;
 
     try {

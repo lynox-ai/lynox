@@ -482,6 +482,29 @@ describe('WorkerLoop', () => {
     expect(analysisSession._recreateAgent).not.toHaveBeenCalled();
   });
 
+  it('executeWatch hands the analysis model the stored URL without the characters that render as nothing', async () => {
+    vi.useRealTimers();
+    const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn() } as unknown as TaskManager;
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      createSession: vi.fn(() => analysisSession),
+      escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+    // Saved before task_create refused it: a tag-spelled clause after the visible URL.
+    const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
+    await fire(makeTask({ id: 't-hid', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: `https://x.test/${hidden}`, interval_minutes: 60 }) }));
+    const prompt = String(vi.mocked(analysisSession.run).mock.calls[0]![0]);
+    expect(prompt).toContain('You are monitoring https://x.test/ for changes');
+    expect(prompt).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+  });
+
   it('executeWatch records on the trigger whether its finding reached anyone', async () => {
     vi.useRealTimers();
     const analysisSession = { run: vi.fn().mockResolvedValue('Price changed.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
@@ -1916,6 +1939,27 @@ describe('WorkerLoop', () => {
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, providerBody, 'failed');
   });
 
+  it('a contained run refused with a fixed text pushes that text, and not what the message names', async () => {
+    const { FixedTextError } = await import('./error-egress.js');
+    const { HIDDEN_RUN_VALUE_FIXED } = await import('./hidden-text.js');
+    // The message names a stored parameter; the fixed text is lynox's own.
+    const err = new FixedTextError('The value of parameter "order_1042_jane" holds a character that does not show as text. Enter the value again without it.', HIDDEN_RUN_VALUE_FIXED);
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const engine = makeEngine({ taskManager: tm, session: makeSession(err), containment: { isContained: () => true } });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { body: string; followUps?: { task: string }[] };
+    expect(msg.body).toBe(`Task failed: ${HIDDEN_RUN_VALUE_FIXED}`);
+    for (const text of [msg.body, ...(msg.followUps ?? []).map((f) => f.task)]) expect(text).not.toContain('order_1042_jane');
+    // The run's record on the instance keeps the full text.
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, err.message, 'failed');
+  });
+
   it('a contained run that timed out keeps the timeout text lynox wrote, not the error it carries', async () => {
     const timeout = Object.assign(new Error('OpenAI-compatible API error 504: order #1042'), { name: 'TimeoutError' });
     const task = makeTask();
@@ -1950,6 +1994,24 @@ describe('WorkerLoop', () => {
     const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { body: string; followUps?: { task: string }[] };
     expect(msg.body).toBe(`Task failed: ${providerBody}`);
     expect(msg.followUps?.[1]?.task).toContain('order #1042');
+  });
+
+  it('the Explain chip, which becomes the owner\'s turn when tapped, carries the error without the characters that render as nothing', async () => {
+    // A runner error can quote a stored step id or workflow name; this one carries a tag-spelled clause.
+    const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const engine = makeEngine({ taskManager: tm, session: makeSession(new Error(`Step "fetch${hidden}" failed`)), containment: { isContained: () => false } });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { followUps?: { label: string; task: string }[] };
+    const explain = msg.followUps?.find((f) => f.label === 'Explain')?.task ?? '';
+    expect(explain).toContain('Error: Step "fetch" failed');
+    expect(explain).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
   });
 
   it('on an instance that holds an exact connection, a thread that is not contained keeps its text', async () => {
@@ -2539,6 +2601,85 @@ describe('WorkerLoop', () => {
       (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
         .executePipeline(task, ...NO_STOP()),
     ).rejects.toThrow(/not a saved workflow/i);
+  });
+
+  it('executePipeline refuses a bound value with a hidden character with a fixed text beside the full one', async () => {
+    vi.useRealTimers();
+    const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const task = makeTask({ id: 'pipe-task-hidden', pipeline_id: 'pipeline-hidden', effect: 'run_workflow', pipeline_params: JSON.stringify({ who: `regulars${hidden}` }) });
+    const planned = JSON.stringify({
+      id: 'pipeline-hidden', name: 'Weekly offer', goal: 'send the offer',
+      steps: [{ id: 's1', task: 'send the offer to {{who}}' }],
+      reasoning: 'plan', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z', parameters: [{ name: 'who', description: 'who gets it' }],
+    });
+    const engine = {
+      getTaskManager: vi.fn(() => makeTaskManager()),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getSecretStore: vi.fn(() => null),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })),
+      getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-hidden', manifest_json: planned })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const { _resetPipelineStore } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    const { FixedTextError } = await import('./error-egress.js');
+    const { HIDDEN_RUN_VALUE_FIXED } = await import('./hidden-text.js');
+
+    const thrown = await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+      .executePipeline(task, ...NO_STOP()).then(() => null, (e: unknown) => e);
+    expect(thrown).toBeInstanceOf(FixedTextError);
+    expect((thrown as InstanceType<typeof FixedTextError>).fixedText).toBe(HIDDEN_RUN_VALUE_FIXED);
+    expect((thrown as Error).message).toMatch(/parameter "who"/);
+  });
+
+  it('executePipeline refuses a parameter name with a hidden character with the name\'s own fixed text', async () => {
+    vi.useRealTimers();
+    // The save takes a ZWNJ between letters in a parameter; a run reads names strictly.
+    const task = makeTask({ id: 'pipe-task-hidden-name', pipeline_id: 'pipeline-hidden-name', effect: 'run_workflow', pipeline_params: JSON.stringify({ 'w\u200Cho': 'regulars' }) });
+    const planned = JSON.stringify({
+      id: 'pipeline-hidden-name', name: 'Weekly offer', goal: 'send the offer',
+      steps: [{ id: 's1', task: 'send the offer to {{w\u200Cho}}' }],
+      reasoning: 'plan', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z', parameters: [{ name: 'w\u200Cho', description: 'who gets it' }],
+    });
+    const engine = {
+      getTaskManager: vi.fn(() => makeTaskManager()),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getSecretStore: vi.fn(() => null),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })),
+      getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-hidden-name', manifest_json: planned })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const { _resetPipelineStore } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    const { FixedTextError } = await import('./error-egress.js');
+    const { HIDDEN_RUN_NAME_REFUSAL } = await import('./hidden-text.js');
+
+    const thrown = await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+      .executePipeline(task, ...NO_STOP()).then(() => null, (e: unknown) => e);
+    expect(thrown).toBeInstanceOf(FixedTextError);
+    expect((thrown as InstanceType<typeof FixedTextError>).fixedText).toBe(HIDDEN_RUN_NAME_REFUSAL);
   });
 
   // T1-5 acceptance test — the actual headline bug:

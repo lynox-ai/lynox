@@ -8,7 +8,7 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
-import { errorText, errorTextReduced, processErrorText } from './error-egress.js';
+import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isFeatureEnabled } from './features.js';
@@ -2243,7 +2243,7 @@ export class WorkerLoop {
             ? [{ label: 'Run again', task: stripHidden(task.description ?? task.title) }]
             : [
               { label: 'Retry', task: stripHidden(task.description ?? task.title) },
-              { label: 'Explain', task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${pushedMsg}` },
+              { label: 'Explain', task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${stripHidden(pushedMsg)}` },
             ],
         });
       }
@@ -3038,8 +3038,8 @@ export class WorkerLoop {
       }
     };
 
-    // Without the characters that render as nothing (`hidden-text.ts`): the write paths refuse
-    // them now, but a plan confirmed before that still carries them, and a hidden clause in its
+    // Without the characters that render as nothing (`hidden-text.ts`): the model's write tools
+    // refuse them, but a plan confirmed before, or saved through another path, carries them, and a hidden clause in its
     // text would reach the model as part of the task. Stripped, not refused, so a plan that holds
     // a stray one from a paste keeps running on what its owner can see.
     const title = stripHidden(task.title);
@@ -3434,7 +3434,10 @@ export class WorkerLoop {
       // Surface conversion / validation / not-found / not-template errors as
       // typed throws so the existing executeTask catch routes them through
       // Bugsink + recordTaskRun like any other task failure.
-      throw new Error(result.error ?? `Pipeline ${task.pipeline_id} execution failed`);
+      // A refusal that names stored text carries its fixed wording too: a push from a contained
+      // instance then says why the run did not start, not only that it failed.
+      const message = result.error ?? `Pipeline ${task.pipeline_id} execution failed`;
+      throw result.fixedError !== undefined ? new FixedTextError(message, result.fixedError) : new Error(message);
     }
 
     // What the owner must read even when every step completed: a write the run was
@@ -3762,9 +3765,11 @@ export class WorkerLoop {
     const contentForPrompt = currentSignal.length > WATCH_CONTENT_CHARS
       ? currentSignal.slice(0, WATCH_CONTENT_CHARS) + ' […truncated]'
       : currentSignal;
+    // The URL as stored, without the characters that render as nothing (`hidden-text.ts`): the
+    // model's write tool refuses them, but a watch saved before, or through another path, carries them.
     const analysisPrompt = isFirstRun
-      ? `You are monitoring ${config.url} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
-      : `You are monitoring ${config.url} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
+      ? `You are monitoring ${stripHidden(config.url)} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
+      : `You are monitoring ${stripHidden(config.url)} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
 
     // noTools: this turn embeds up to 8 KB of the WATCHED PAGE — content the
     // user did not author and an attacker may control (a monitored forum, a
