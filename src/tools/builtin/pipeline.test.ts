@@ -2792,6 +2792,36 @@ describe('the run row of a stored workflow run from a chat', () => {
     expect(outside.recs).toHaveLength(2);
   });
 
+  // A plan's run is an autonomous worker session, and inside it no row names a removed one-shot
+  // (the test above). What keeps that from happening is the first-run gate: a one-shot is never
+  // stamped `confirmedAt` (scheduling and a reviewed grant stamp only a saved workflow, an import
+  // clears it), so a plan of someone you let in cannot run, and so cannot remove, a one-shot.
+  it('refuses a one-shot inside the plan of someone you let in, before it is run or removed', async () => {
+    const { runAsPlanOf } = await import('../../core/plan-run-context.js');
+    const inPlan = agentAs(HELPER);
+    (inPlan.agent as unknown as Record<string, unknown>)['autonomy'] = 'autonomous';
+    const id = seed();
+    const result = await runAsPlanOf(HELPER, () => runWorkflowTool.handler({ workflow_id: id }, inPlan.agent), null, 'plan-key');
+    expect(result).toContain('first-run confirmation');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    expect(inPlan.marked, 'the one-shot is not marked run, so its definition stays').not.toHaveBeenCalled();
+    expect(getPipeline(id)?.executed).toBe(false);
+    // Control: a stamp is the only thing between the plan and the removal. With one (no product
+    // path writes it on a one-shot), the same call runs the one-shot and removes it.
+    _resetPipelineStore();
+    const stamped = agentAs(HELPER);
+    (stamped.agent as unknown as Record<string, unknown>)['autonomy'] = 'autonomous';
+    storePipeline(WF, {
+      id: WF, name: 'wf', goal: 'g', steps: [{ id: 'one', task: 'do one thing' }], reasoning: 'r', estimatedCost: 0.01,
+      createdAt: new Date().toISOString(), executed: false, executionMode: 'orchestrated', template: false, mode: 'autonomous',
+      confirmedAt: '2026-10-30T00:00:00.000Z',
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runAsPlanOf(HELPER, () => runWorkflowTool.handler({ workflow_id: WF }, stamped.agent), null, 'plan-key');
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    expect(stamped.marked).toHaveBeenCalledWith(WF);
+  });
+
   it('gives a retry its own pair', async () => {
     const { agent, recs } = agentAs(HELPER);
     const id = seed({ template: true });
