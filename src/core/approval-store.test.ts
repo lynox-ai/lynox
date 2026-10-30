@@ -114,7 +114,7 @@ describe('approval_entries migration (v48)', () => {
       { type: 'table', name: 'approval_entries' },
       { type: 'trigger', name: 'approval_entries_written_once' },
     ]);
-    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(63);
+    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(64);
   });
 
   it('migrates an existing v47 database with data in it, leaves that data alone, and does not run twice', () => {
@@ -137,7 +137,7 @@ describe('approval_entries migration (v48)', () => {
 
     const migrated = new EngineDb(path, 'test-vault-key');
     const m = migrated.getDb();
-    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(63);
+    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(64);
     // v51, v57 and v60 add empty columns to the rows, v61 the drain's columns to the events: the data itself is left alone.
     expect(m.prepare('SELECT * FROM triggers ORDER BY id').all()).toEqual((before.triggers as object[]).map((r) => ({
       ...r, stamp_connections: null, paused_at: null, paused_due_at: null, paused_for: null, pause_noticed_at: null,

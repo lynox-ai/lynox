@@ -870,6 +870,7 @@ describe('the ledger\'s moves', () => {
 
   it('gets the index on a database that ran the drain columns before it existed', () => {
     const db = engineDb.getDb();
+    // Every later version goes too: the migrations run from the highest one recorded.
     db.exec('DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62;');
     engineDb.close();
     engineDb = new EngineDb(join(dir, 'engine.db'));

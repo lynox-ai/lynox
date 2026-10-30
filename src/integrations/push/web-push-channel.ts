@@ -188,6 +188,13 @@ class PushSubscriptionStore {
 // Channel
 // ---------------------------------------------------------------------------
 
+/**
+ * A message without `taskId` gets a tag of its own. A shown notification is replaced by the next one
+ * with its tag (`sw.js`), and messages sent in the same tick share a `Date.now()`, so the count
+ * keeps two of them from replacing each other while both are reported delivered.
+ */
+let untaggedSends = 0;
+
 export class WebPushNotificationChannel implements NotificationChannel {
   readonly name = 'web-push';
   private readonly store: PushSubscriptionStore;
@@ -331,7 +338,7 @@ export class WebPushNotificationChannel implements NotificationChannel {
         : reachable;
     if (subscriptions.length === 0) return { sent: 0, sentToOwner: 0, failed: 0, cleaned: 0 };
 
-    const tag = msg.taskId ?? `lynox-${Date.now()}`;
+    const tag = msg.taskId ?? `lynox-${Date.now()}-${String(++untaggedSends)}`;
     const payload: PushPayload = {
       title: msg.title.slice(0, 64),
       body: msg.body.slice(0, 240),
