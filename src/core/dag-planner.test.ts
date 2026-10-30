@@ -517,6 +517,67 @@ describe('planDAG — a planning call aborted at its timeout', () => {
   });
 });
 
+describe('planDAG — a planning call stopped with its tool call', () => {
+  // `signal` is the calling tool's signal. It aborts the request like the timeout, and the
+  // call is booked the same way, but it throws instead of returning `null`: the caller ends as
+  // stopped instead of going on without a plan.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCurrentMessage = { usage: { input_tokens: 900 } };
+  });
+  afterEach(() => {
+    mockCurrentMessage = undefined;
+  });
+
+  const rejectOnAbort = (_params: unknown, opt?: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+    opt?.signal?.addEventListener('abort', () => reject(new Error('Request was aborted.')));
+  });
+
+  it('a stop mid-call aborts the request, throws an AbortError, and books the upper bound', async () => {
+    mockCreate.mockImplementationOnce(rejectOnAbort);
+    const call = new AbortController();
+    const onSpend = vi.fn();
+    const onAbortedSpend = vi.fn();
+    const before = abortedCallCounts().notBilled['dag-planner'] ?? 0;
+
+    const pending = planDAG('build the app', { onSpend, onAbortedSpend, signal: call.signal });
+    await vi.waitFor(() => { expect(mockCreate).toHaveBeenCalledOnce(); });
+    call.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError', message: 'plan_task was stopped before a plan was made' });
+    const [, opt] = mockCreate.mock.calls[0]! as [unknown, { signal: AbortSignal }];
+    expect(opt.signal.aborted, 'the stop reached the request').toBe(true);
+    expect(onAbortedSpend).toHaveBeenCalledOnce();
+    expect(onSpend, 'no reply, nothing for the tenant debit').not.toHaveBeenCalled();
+    expect(abortedCallCounts().notBilled['dag-planner']).toBe(before + 1);
+  });
+
+  it('a stop before the call sends nothing and books nothing', async () => {
+    const call = new AbortController();
+    call.abort();
+    const onAbortedSpend = vi.fn();
+
+    await expect(planDAG('build the app', { onAbortedSpend, signal: call.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(onAbortedSpend).not.toHaveBeenCalled();
+  });
+
+  it('a failure while the call signal is live still means no plan, not a stop', async () => {
+    mockCreate.mockRejectedValueOnce(new Error('Internal Server Error'));
+    const call = new AbortController();
+
+    expect(await planDAG('build the app', { signal: call.signal })).toBeNull();
+  });
+
+  it('a call signal that never fires leaves the reply as it was', async () => {
+    mockCreate.mockResolvedValueOnce(makeToolUseResponse({ steps: [{ id: 'a', task: 'do a', tools: [] }], reasoning: 'r', estimated_cost_usd: 0 }));
+    const call = new AbortController();
+
+    const result = await planDAG('build the app', { signal: call.signal });
+    expect(result?.steps).toEqual([{ id: 'a', task: 'do a', tools: [] }]);
+  });
+});
+
 describe('estimatePipelineCost', () => {
   it('returns correct structure with steps array and totalCostUsd', () => {
     const steps: InlinePipelineStep[] = [

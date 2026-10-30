@@ -336,7 +336,7 @@ describe('Agent Loop Integration', () => {
     const result = await agent.send('What is the meaning of life?');
 
     expect(result).toBe('The answer is 42');
-    expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined, expect.any(Function));
+    expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null);
   });
 
   // -- 7. maxIterations boundary --

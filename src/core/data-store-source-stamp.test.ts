@@ -11,6 +11,7 @@ import { dataStoreInsertTool } from '../tools/builtin/data-store.js';
 import { contactsSaveTool } from '../tools/builtin/contacts.js';
 import { dataStoreWriter } from './bulk-apply.js';
 import type { IAgent } from '../types/index.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 /**
  * The DataStore's source stamp (PRD connection-attribution A5, the columns): what a write
@@ -314,7 +315,7 @@ describe('DataStore source stamp', () => {
       const toolContext = createToolContext({});
       toolContext.dataStore = ds;
       toolContext.crm = new CRM(ds);
-      return { toolContext, conversationGrants: grants, currentRunId: runId } as unknown as IAgent;
+      return { principal: OWNER_PRINCIPAL, toolContext, conversationGrants: grants, currentRunId: runId } as unknown as IAgent;
     };
 
     it('data_store_insert writes the conversation\'s set and the run id', async () => {

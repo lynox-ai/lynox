@@ -112,6 +112,20 @@ describe('withShopifyRead — what it refuses', () => {
     }
   });
 
+  // The grant decides every request that is not a read on its own: a method list that grows
+  // after minting (the copy shares the caller's array) does not open a write elsewhere.
+  it('decides a write itself, whatever its method list holds later', () => {
+    const methods = ['GET'];
+    const open: CapabilityContract = { ...base, httpMethods: methods, pathPatterns: ['/admin/products'] };
+    const grant = withShopifyRead(open, HOST, { phase: 'read', targets: [P1] });
+    const write = { method: 'POST', url: `https://${HOST}/admin/products`, headers: JSON_TYPE, body: '{}' };
+    expect(contractGrants('http_request', write, grant)).toBe(false);
+    methods.push('POST');
+    expect(contractGrants('http_request', write, grant)).toBe(false);
+    // The same widened list on a contract without the grant does grant it: the refusal above is the grant's.
+    expect(contractGrants('http_request', write, open)).toBe(true);
+  });
+
   it('a contract without the grant, a stored copy included, grants none of it', () => {
     expect(post({ ...base, httpMethods: ['POST'], pathPatterns: ['/admin/api/2026-10/graphql.json'] }, READ_P1)).toBe(false);
     expect(post(JSON.parse(JSON.stringify(preview)) as CapabilityContract, READ_P1)).toBe(false);
@@ -127,8 +141,8 @@ describe('withShopifyRead — what it mints from', () => {
     }
     expect(() => withShopifyRead(base, HOST, { phase: 'list', afterId: Number.MAX_SAFE_INTEGER + 2 })).toThrow(/safe cursor/);
     expect(() => withShopifyRead(base, HOST, { phase: 'list', afterId: -1 })).toThrow(/safe cursor/);
-    expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: [P1, 'gid://shopify/Collection/1'] })).toThrow(/product GIDs/);
-    expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: ['gid://shopify/Product/99999999999999999'] })).toThrow(/product GIDs/);
+    expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: [P1, 'gid://shopify/Collection/1'] })).toThrow(/product or image GIDs/);
+    expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: ['gid://shopify/Product/99999999999999999'] })).toThrow(/product or image GIDs/);
   });
 
   it('only on the contract\'s one host', () => {
@@ -139,13 +153,33 @@ describe('withShopifyRead — what it mints from', () => {
   });
 });
 
+/**
+ * Whether every spread in `doc` is an inline type condition on its one root field: the whole
+ * document is `query(…) { root(…) { ... on Type { fields } } }`. A fragment definition and a
+ * named spread (`...Name`) are refused: they bring a second, separately written selection into a
+ * document that is compared byte for byte (PRD shopify-preset §16.3 item 3).
+ */
+function spreadsAllowed(doc: string): boolean {
+  if (!doc.includes('...')) return true;
+  if (/\bfragment\b/.test(doc)) return false;
+  return /^query\([^(){}]*\) \{ \w+\([^(){}]*\) \{ \.\.\. on [A-Z]\w* \{ [\w ]+ \} \} \}$/.test(doc);
+}
+
 describe('the read documents', () => {
   it('each holds one query operation, no fragment, and no word that writes', () => {
     for (const doc of Object.values(SHOPIFY_READ_DOCUMENTS)) {
       expect(doc.startsWith('query(')).toBe(true);
       expect(doc.match(/\bquery\s*\(/g)).toHaveLength(1);
       expect(doc).not.toMatch(/\b(?:mutation|subscription|fragment)\b/i);
-      expect(doc).not.toContain('...');
+      expect(spreadsAllowed(doc), doc).toBe(true);
     }
+  });
+
+  it('allows a spread only as an inline type condition on the one root field', () => {
+    expect(spreadsAllowed('query($id: ID!) { node(id: $id) { ... on MediaImage { id alt } } }')).toBe(true);
+    expect(spreadsAllowed('query($id: ID!) { node(id: $id) { ...Img } } fragment Img on MediaImage { id alt }')).toBe(false);
+    expect(spreadsAllowed('query($id: ID!) { node(id: $id) { ...Img } }')).toBe(false);
+    expect(spreadsAllowed('query($id: ID!) { node(id: $id) { id ... on MediaImage { alt } } }')).toBe(false);
+    expect(spreadsAllowed('query($id: ID!) { product(id: $id) { media(first: 1) { nodes { ... on MediaImage { id } } } } }')).toBe(false);
   });
 });

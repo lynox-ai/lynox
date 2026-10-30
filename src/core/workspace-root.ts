@@ -1,8 +1,10 @@
-import { accessSync, closeSync, constants, openSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { accessSync, constants, readdirSync, realpathSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ensureDirSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
+import { mountIdOf, mountIdOfDir } from './workspace-fd.js';
+import { shellIsolation, WORKSPACE_LABEL } from './shell-isolation.js';
 
 /**
  * The workspace root: the directory that holds one directory per context (`<root>/<ctx.id>`,
@@ -21,9 +23,13 @@ import { getLynoxDir } from './config.js';
  * Backup, migration and the Art. 17 erasure reach the root through its anchor
  * (`workspace-access.ts`), so an external root is covered by all three. The anchor refuses the
  * roots the erasure must never empty (see `workspaceAccess`).
+ *
+ * In shell sidecar mode the root is the label `/workspace`, a name for showing that is never
+ * opened: the engine reaches the tree only through the fd the entrypoint handed over (PRD
+ * shell-sidecar-activation D3). Nothing here touches the filesystem in that mode.
  */
 
-export type WorkspaceRootMode = 'default' | 'external';
+export type WorkspaceRootMode = 'default' | 'external' | 'sidecar';
 
 export interface WorkspaceRoot {
   readonly path: string;
@@ -129,6 +135,7 @@ function classify(named: Stats, byName: string): WorkspaceRootMode {
  * (`allowExternal: false` refuses any external root; a test seam.)
  */
 export function resolveWorkspaceRoot(opts: { allowExternal?: boolean } = {}): WorkspaceRoot {
+  if (shellIsolation().kind === 'sidecar') return { path: WORKSPACE_LABEL, mode: 'sidecar' };
   const byName = defaultWorkspaceRootPath();
   const raw = process.env['LYNOX_WORKSPACE_ROOT'];
   if (raw === undefined || raw === '') return { path: byName, mode: 'default' };
@@ -176,6 +183,16 @@ function refuseUnsafeRoot(real: string): void {
   }
 }
 
+/**
+ * Whether `path` is the sidecar's label or a path below it, in shell sidecar mode. Such a path is
+ * never looked up by name: the engine's image may hold a `/workspace` of its own, and an answer
+ * from it would be about another directory (D3). Decided on the string alone.
+ */
+export function namesSidecarLabel(path: string): boolean {
+  const isolation = shellIsolation();
+  return isolation.kind === 'sidecar' && isPathWithin(resolve(path), isolation.root.label);
+}
+
 /** The root's path (see `resolveWorkspaceRoot`). */
 export function getWorkspaceRoot(): string {
   return resolveWorkspaceRoot().path;
@@ -188,6 +205,8 @@ export function getWorkspaceRoot(): string {
  */
 export function ensureWorkspaceRoot(): WorkspaceRoot {
   const root = resolveWorkspaceRoot();
+  // The sidecar's root is fd 3, checked at start (D2); its label is not a directory here.
+  if (root.mode === 'sidecar') return root;
   if (root.mode === 'default') {
     try {
       ensureDirSync(root.path);
@@ -230,30 +249,21 @@ function assertUsableDir(path: string, what: string, mode: number): void {
   }
 }
 
-/** The Linux mount id of a directory, from `/proc/self/fdinfo`; null where that cannot be read. */
-function mountIdOfDir(path: string): number | null {
-  let fd: number;
-  try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY);
-  } catch {
-    return null;
-  }
-  try {
-    const m = /^mnt_id:\s*(\d+)$/m.exec(readFileSync(`/proc/self/fdinfo/${String(fd)}`, 'utf8'));
-    return m ? Number(m[1]) : null;
-  } catch {
-    return null;
-  } finally {
-    closeSync(fd);
-  }
-}
-
 /**
  * Whether the root is a mount point of its own: its mount id differs from its parent's. Not the
  * device number, which is the same for two Docker named volumes on one filesystem. null where the
  * mount id cannot be read (no `/proc`, e.g. macOS).
  */
 export function workspaceRootIsMount(rootPath: string): boolean | null {
+  // In shell sidecar mode the label is not looked at: fd 3 against the data directory's mount, as
+  // start check (c) compares them (D3).
+  const isolation = shellIsolation();
+  if (isolation.kind === 'sidecar') {
+    const own = mountIdOf(isolation.root.anchor.fd);
+    const data = mountIdOfDir(getLynoxDir());
+    if (own === null || data === null) return null;
+    return own !== data;
+  }
   let real: string;
   try { real = realpathSync(rootPath); } catch { return null; }
   const own = mountIdOfDir(real);
@@ -268,7 +278,9 @@ export function workspaceRootIsMount(rootPath: string): boolean | null {
  * `<data>/workspace` IS the root.
  */
 export function workspaceLegacyPending(root: WorkspaceRoot): boolean {
-  if (root.mode === 'default') return false;
+  // Default: `<data>/workspace` IS the root. Sidecar: nothing is read by name, and check (i)
+  // found `<data>/workspace` absent at start.
+  if (root.mode !== 'external') return false;
   try {
     return readdirSync(defaultWorkspaceRootPath()).length > 0;
   } catch (err) {

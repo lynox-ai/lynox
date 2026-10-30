@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
-import { ArtifactPlaceholderError } from '../../core/artifact-store.js';
+import { ArtifactPlaceholderError, isArtifactId } from '../../core/artifact-store.js';
+import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface ArtifactSaveInput {
   title: string;
@@ -59,47 +60,55 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       );
     }
 
-    const artifact = store.save({
-      title: input.title,
-      content: input.content,
-      ...(input.type ? { type: input.type } : {}),
-      ...(input.description ? { description: input.description } : {}),
-      ...(input.id ? { id: input.id } : {}),
-    });
+    return withInstanceWrite(agent, {
+      site: 'artifact_save#save', kind: () => (isArtifactId(input.id) ? 'save' : 'create'), store: 'artifacts',
+      target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined]],
+      main: ['save'],
+    }, (w) => {
+      const artifact = w.run('save', () => store.save({
+        title: input.title,
+        content: input.content,
+        ...(input.type ? { type: input.type } : {}),
+        ...(input.description ? { description: input.description } : {}),
+        ...(input.id ? { id: input.id } : {}),
+      }), ifReturned);
+      // Only an id the store chose: one passed in is the model's.
+      if (!input.id && !artifact.overwrite) w.created('save', artifact.id);
 
-    const action = input.id ? 'Updated' : 'Saved';
-    const path = store.pathFor(artifact.id);
-    const lines = [
-      `${action} artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).`,
-      `File: ${path}`,
-    ];
+      const action = input.id ? 'Updated' : 'Saved';
+      const path = store.pathFor(artifact.id);
+      const lines = [
+        `${action} artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).`,
+        `File: ${path}`,
+      ];
 
-    // Make an overwrite VISIBLE (it replaced existing content) and recoverable,
-    // instead of silently clobbering a good version (2026-06-04).
-    const ow = artifact.overwrite;
-    if (ow) {
-      const kb = (n: number): string => `${(n / 1024).toFixed(1)} KB`;
-      const pct = ow.previousBytes > 0
-        ? ` (${ow.newBytes >= ow.previousBytes ? '+' : ''}${Math.round((ow.newBytes - ow.previousBytes) / ow.previousBytes * 100)}%)`
-        : '';
-      lines.push(
-        `Replaced v${ow.previousVersion}: ${kb(ow.previousBytes)} → ${kb(ow.newBytes)}${pct}.` +
-        (ow.backupPath ? ` Previous version backed up to ${ow.backupPath} — read_file it to recover.` : ''),
-      );
-      if (ow.significant) {
+      // Make an overwrite VISIBLE (it replaced existing content) and recoverable,
+      // instead of silently clobbering a good version (2026-06-04).
+      const ow = artifact.overwrite;
+      if (ow) {
+        const kb = (n: number): string => `${(n / 1024).toFixed(1)} KB`;
+        const pct = ow.previousBytes > 0
+          ? ` (${ow.newBytes >= ow.previousBytes ? '+' : ''}${Math.round((ow.newBytes - ow.previousBytes) / ow.previousBytes * 100)}%)`
+          : '';
         lines.push(
-          `⚠ Large rewrite — the new content is less than half the previous size. ` +
-          `If you meant to make a targeted change rather than replace the whole document, ` +
-          `recover from the backup above and apply a find/replace edit instead.`,
+          `Replaced v${ow.previousVersion}: ${kb(ow.previousBytes)} → ${kb(ow.newBytes)}${pct}.` +
+          (ow.backupPath ? ` Previous version backed up to ${ow.backupPath} — read_file it to recover.` : ''),
         );
+        if (ow.significant) {
+          lines.push(
+            `⚠ Large rewrite — the new content is less than half the previous size. ` +
+            `If you meant to make a targeted change rather than replace the whole document, ` +
+            `recover from the backup above and apply a find/replace edit instead.`,
+          );
+        }
       }
-    }
 
-    lines.push(
-      `To revise it, read_file this path and apply a targeted edit (find/replace) instead of ` +
-      `re-sending the whole document — the gallery picks up the change automatically.`,
-    );
-    return lines.join('\n');
+      lines.push(
+        `To revise it, read_file this path and apply a targeted edit (find/replace) instead of ` +
+        `re-sending the whole document — the gallery picks up the change automatically.`,
+      );
+      return lines.join('\n');
+    });
   },
 };
 
@@ -147,8 +156,10 @@ export const artifactDeleteTool: ToolEntry<ArtifactDeleteInput> = {
     const store = agent.toolContext.artifactStore;
     if (!store) return 'Artifact store not available.';
 
-    const deleted = store.delete(input.id);
-    return deleted ? `Deleted artifact ${input.id}.` : `Artifact ${input.id} not found.`;
+    return withInstanceWrite(agent, { site: 'artifact_delete#delete', kind: 'delete', store: 'artifacts', target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined]], main: ['delete'] }, (w) => {
+      const deleted = w.run('delete', () => store.delete(input.id), ifTrue);
+      return deleted ? `Deleted artifact ${input.id}.` : `Artifact ${input.id} not found.`;
+    });
   },
 };
 
@@ -211,7 +222,11 @@ export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
     if (!store) return 'Artifact store not available.';
     let restored: ReturnType<typeof store.restore>;
     try {
-      restored = store.restore(input.id, input.version);
+      restored = withInstanceWrite(agent, {
+        site: 'artifact_restore#change', kind: 'change', store: 'artifacts',
+        target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined], ['version', Number.isInteger(input.version) ? input.version : undefined]],
+        main: ['restore'],
+      }, (w) => w.run('restore', () => store.restore(input.id, input.version), ifNonNull));
     } catch (err) {
       if (!(err instanceof ArtifactPlaceholderError)) throw err;
       return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;

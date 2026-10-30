@@ -22,6 +22,7 @@ import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.j
 import { describeTurnUntrusted } from '../core/untrusted-signals.js';
 import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
 import { ConversationGrants } from '../core/conversation-grants.js';
+import { escapeHiddenInJson } from '../core/hidden-text.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
@@ -1098,7 +1099,9 @@ export function buildReplayInstruction(
   const lines = [
     'Execute exactly this tool call and return its result. Do not add, omit, rename, or reinterpret any argument, and do not call any other tool first or instead.',
     `Tool: ${tool}`,
-    `Input (JSON): ${JSON.stringify(inputTemplate)}`,
+    // A character that renders as nothing is written as its escape: the same JSON to the tool,
+    // and no instruction the model reads but nobody sees (an imported workflow's arguments).
+    `Input (JSON): ${escapeHiddenInJson(JSON.stringify(inputTemplate))}`,
   ];
   const trimmed = description?.trim();
   if (trimmed) {
@@ -1234,7 +1237,10 @@ export async function spawnInline(
   // parent lacks for any other reason (the owner turned it off, a role of an enclosing step
   // bounds it, a flag leaves it unregistered) is dropped as before. A role's grant is a ceiling,
   // not a request, so a withheld tool in it narrows the step as it narrows the mandate's own
-  // agents (`collector` lists `read_file` among nine).
+  // agents (`collector` lists `read_file` among nine). The pattern writers the lock also holds
+  // back (`MANDATE_PATTERN_WRITE_TOOLS`) are dropped, not refused: they are registered only beside
+  // the legacy memory, so on the engines a mandate signs in to the step names a tool that is not
+  // there, and the planners still offer `memory_update` for steps.
   const lock = principal !== undefined ? toolLockFor(principal) : null;
   if (lock !== null) {
     const named = [...(step.tools ?? []), ...(step.tool !== undefined ? [step.tool] : [])];

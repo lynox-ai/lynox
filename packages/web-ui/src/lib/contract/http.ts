@@ -84,17 +84,35 @@ export interface ProviderIncidentRequest {
 // === Escalation notice — POST /internal/usage/:instanceId/escalation (engine → CP) ===
 
 /**
- * The engine tells the control plane that an escalation (a scheduled workflow
- * failed, or a watch found something) reached nobody: its push answered
- * `not_delivered` or `no_channel`. The CP may then mail the instance's owner
- * from a lynox sender, with a fixed text.
+ * What reached nobody, one fixed mail text each:
+ *  - `'escalation'` — a scheduled workflow failed, or a watch found something.
+ *  - `'question'`   — a scheduled run (a task or a workflow) asked its owner a
+ *    question and waits for the answer.
+ *
+ * Read by the control plane to accept a notice and pick its text. A control
+ * plane that predates a kind answers it with 400, and then no mail goes out at
+ * all; the engine cannot tell, so a new kind is deployed on the control plane
+ * before any engine sends it.
+ */
+export const ESCALATION_NOTICE_KINDS = ['escalation', 'question'] as const;
+export type EscalationNoticeKind = typeof ESCALATION_NOTICE_KINDS[number];
+
+/** Whether a parsed body field is a notice kind this contract knows. */
+export function isEscalationNoticeKind(value: unknown): value is EscalationNoticeKind {
+  return typeof value === 'string' && (ESCALATION_NOTICE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * The engine tells the control plane that a notice reached nobody: its push
+ * answered `not_delivered` or `no_channel`. The CP may then mail the
+ * instance's owner from a lynox sender, with the fixed text for its `kind`.
  *
  * A class signal and nothing else: no schedule id, no title, no text from the
- * run. The CP's mail says that a notification did not arrive and where to look;
- * what happened stays in the instance.
+ * run, and never the question. The CP's mail says that a notification did not
+ * arrive and where to look; what happened stays in the instance.
  */
 export interface EscalationNoticeRequest {
-  kind: 'escalation';
+  kind: EscalationNoticeKind;
 }
 
 // === Usage status — GET /internal/usage/:instanceId/status (engine ← CP) ===
@@ -292,8 +310,18 @@ export interface HealthBody {
   engine: {
     active_sessions: number;
     total_threads: number;
+    /**
+     * Whether durable knowledge runs: `on`; switched off: `off`; switched on but its store did
+     * not load at boot: `not_loaded`. A mandate login is refused on `off` and `not_loaded`, and
+     * the control plane reads this to tell the owner before a grant. One word, no reason: the
+     * route answers without auth. Absent from engines older than this field.
+     */
+    durable_memory?: DurableMemoryState | undefined;
   };
 }
+
+/** The `engine.durable_memory` word of {@link HealthBody}. */
+export type DurableMemoryState = 'on' | 'off' | 'not_loaded';
 
 // === Magic-link verify — POST /internal/auth/verify-magic (engine → CP) ===
 

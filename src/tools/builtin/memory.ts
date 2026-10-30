@@ -1,6 +1,7 @@
 import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef } from '../../types/index.js';
 import { ALL_NAMESPACES } from '../../types/index.js';
-import { channels } from '../../core/observability.js';
+import { publishMemoryStore } from '../../core/observability.js';
+import { runOutsideCallSlot } from '../../core/call-connection.js';
 import { DATE_PREFIX_RE } from '../../core/memory-facade.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTION } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
@@ -8,6 +9,28 @@ import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 import { chatThreadOf, privateThreadRefusal } from './private-thread.js';
 import { containedRefusal } from '../../core/containment.js';
+import { ifChanged, ifNonEmptyList, ifPositive, ifTrue, InstanceWriteUnrecorded, withInstanceWrite, withInstanceWriteAs, type InstanceActor, type InstanceTargetPairs } from '../../core/instance-trail.js';
+
+/** A memory row's target: the namespace when it is one of the fixed ones, and the scope's type
+ *  only — a scope's id can be a name (`user:<name>`). */
+function memoryTarget(namespace: unknown, ...scopes: Array<readonly [string, MemoryScopeRef | null | undefined]>): InstanceTargetPairs {
+  const ns = typeof namespace === 'string' && (ALL_NAMESPACES as readonly string[]).includes(namespace) ? namespace : 'other';
+  return [['ns', ns], ...scopes.map(([name, ref]) => [name, ref?.type] as const)];
+}
+
+/**
+ * Who acts in the derived writes a handler leaves behind (660a-3), read now, while the handler
+ * runs for its call: the subscriber of `memory:store` and a write left running cannot read it
+ * later, the agent may by then run for someone else.
+ */
+function actorOf(agent: IAgent): InstanceActor {
+  return { principal: agent.principal, runId: agent.currentRunId };
+}
+
+/** The act a derived write follows from: its site and row. Absent for the owner, who has none. */
+function trailOf(site: 'memory_store#create' | 'memory_update#fallback' | 'memory_promote#move', correlationId: string | undefined): { site: typeof site; correlationId: string } | undefined {
+  return correlationId === undefined ? undefined : { site, correlationId };
+}
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
 
@@ -292,15 +315,18 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
       threadId: agent.currentThreadId,
       runId: agent.currentRunId,
     });
-    if (scopeRef) {
-      await agent.memory.appendScoped(input.namespace, input.content, scopeRef);
-      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
-      return `Stored in ${input.namespace} (scope: ${input.scope}). Entities and relationships are extracted automatically for future cross-referencing.`;
-    }
+    const memory = agent.memory;
+    return withInstanceWrite(agent, { site: 'memory_store#create', kind: 'create', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['append'] }, async (w) => {
+      if (scopeRef) {
+        await w.run('append', () => memory.appendScoped(input.namespace, input.content, scopeRef), ifTrue);
+        publishMemoryStore({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted, actor: actorOf(agent), trail: trailOf('memory_store#create', w.correlationId) });
+        return `Stored in ${input.namespace} (scope: ${input.scope}). Entities and relationships are extracted automatically for future cross-referencing.`;
+      }
 
-    await agent.memory.append(input.namespace, input.content);
-    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
-    return `Stored in ${input.namespace}. Entities and relationships are extracted automatically for future cross-referencing.`;
+      await w.run('append', () => memory.append(input.namespace, input.content), ifTrue);
+      publishMemoryStore({ namespace: input.namespace, content: input.content, sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted, actor: actorOf(agent), trail: trailOf('memory_store#create', w.correlationId) });
+      return `Stored in ${input.namespace}. Entities and relationships are extracted automatically for future cross-referencing.`;
+    });
   },
 };
 
@@ -424,36 +450,39 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
     }
 
     const scopeSuffix = input.scope ? ` (scope: ${input.scope})` : '';
-    const flatCount = scopeRef
-      ? await agent.memory.deleteScoped(input.namespace, input.pattern, scopeRef)
-      : await agent.memory.delete(input.namespace, input.pattern);
+    const memory = agent.memory;
+    return withInstanceWrite(agent, { site: 'memory_delete#delete', kind: 'delete', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['flat'] }, async (w) => {
+      const flatCount = await w.run('flat', () => (scopeRef
+        ? memory.deleteScoped(input.namespace, input.pattern, scopeRef)
+        : memory.delete(input.namespace, input.pattern)), ifPositive);
 
-    // This is the agent's CURATION path ("remove outdated information"), so it SOFT-
-    // deactivates the knowledge-graph twins (is_active = 0, recoverable) — deliberately
-    // NOT the hard erase. Hard, physical erasure (GDPR Art. 17, irreversible) is a
-    // human-gated action behind the UI confirm dialog (MemoryFacade.delete); routing an
-    // agent-callable tool there would make one prompt-injected call an irreversible
-    // namespace wipe. Run UNCONDITIONALLY (not gated on the flat-file count) so a
-    // document-ingest row with no flat-file twin is deactivated too; awaited + surfaced
-    // so a failed reap does not report a clean success (§0.1 loud contract).
-    const kg = agent.toolContext.knowledgeLayer;
-    if (!kg) {
-      return flatCount > 0
-        ? `Removed ${flatCount} line(s) matching "${input.pattern}" from ${input.namespace}${scopeSuffix}.`
-        : `No lines matching "${input.pattern}" found in ${input.namespace}${scopeSuffix}.`;
-    }
-    try {
-      const deactivated = await kg.deactivateByPattern(input.pattern, input.namespace);
-      // Prefer the flat-file line count (what the agent sees in memory_list), but fall
-      // back to the KG count so a document-ingest row (0 flat-file lines, live KG rows)
-      // is not falsely reported as "nothing found".
-      const total = flatCount > 0 ? flatCount : deactivated;
-      return total > 0
-        ? `Removed ${total} entr${total === 1 ? 'y' : 'ies'} matching "${input.pattern}" from ${input.namespace}${scopeSuffix}.`
-        : `No entries matching "${input.pattern}" found in ${input.namespace}${scopeSuffix}.`;
-    } catch {
-      return `Removed "${input.pattern}" from ${input.namespace}${scopeSuffix}, but the recall mirror could not be updated — it may still surface until it is reconciled. This has been logged.`;
-    }
+      // This is the agent's CURATION path ("remove outdated information"), so it SOFT-
+      // deactivates the knowledge-graph twins (is_active = 0, recoverable) — deliberately
+      // NOT the hard erase. Hard, physical erasure (GDPR Art. 17, irreversible) is a
+      // human-gated action behind the UI confirm dialog (MemoryFacade.delete); routing an
+      // agent-callable tool there would make one prompt-injected call an irreversible
+      // namespace wipe. Run UNCONDITIONALLY (not gated on the flat-file count) so a
+      // document-ingest row with no flat-file twin is deactivated too; awaited + surfaced
+      // so a failed reap does not report a clean success (§0.1 loud contract).
+      const kg = agent.toolContext.knowledgeLayer;
+      if (!kg) {
+        return flatCount > 0
+          ? `Removed ${flatCount} line(s) matching "${input.pattern}" from ${input.namespace}${scopeSuffix}.`
+          : `No lines matching "${input.pattern}" found in ${input.namespace}${scopeSuffix}.`;
+      }
+      try {
+        const deactivated = await w.run('kg', () => kg.deactivateByPattern(input.pattern, input.namespace), ifPositive);
+        // Prefer the flat-file line count (what the agent sees in memory_list), but fall
+        // back to the KG count so a document-ingest row (0 flat-file lines, live KG rows)
+        // is not falsely reported as "nothing found".
+        const total = flatCount > 0 ? flatCount : deactivated;
+        return total > 0
+          ? `Removed ${total} entr${total === 1 ? 'y' : 'ies'} matching "${input.pattern}" from ${input.namespace}${scopeSuffix}.`
+          : `No entries matching "${input.pattern}" found in ${input.namespace}${scopeSuffix}.`;
+      } catch {
+        return `Removed "${input.pattern}" from ${input.namespace}${scopeSuffix}, but the recall mirror could not be updated — it may still surface until it is reconciled. This has been logged.`;
+      }
+    });
   },
 };
 
@@ -501,37 +530,64 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
 
     // Try the exact substring path first (pre-#529 behaviour). When that
     // succeeds, KG mirror sync runs as before.
-    const exactOk = scopeRef
-      ? await agent.memory.updateScoped(input.namespace, input.old_content, input.new_content, scopeRef)
-      : await agent.memory.update(input.namespace, input.old_content, input.new_content);
+    const memory = agent.memory;
+    const exact = await withInstanceWrite(agent, { site: 'memory_update#exact', kind: 'change', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['update'] }, async (w) => {
+      const exactOk = await w.run('update', () => (scopeRef
+        ? memory.updateScoped(input.namespace, input.old_content, input.new_content, scopeRef)
+        : memory.update(input.namespace, input.old_content, input.new_content)), ifTrue);
 
-    if (exactOk) {
-      // Mirror to KG so entity re-extraction picks up the corrected text — but NOT on a
-      // turn that read external content. `updateMemoryText` re-extracts entities into the
-      // trusted subject graph; on an untrusted turn (deriveTurnUntrusted) that would launder
-      // attacker-influenced `new_content` into the KG untainted. The flat-file line is already
-      // updated above (it edits content the user can already see); the trust-sensitive KG
-      // re-extraction is skipped — the KG keeps its prior extraction until a clean-turn edit.
-      if (agent.toolContext.knowledgeLayer && !deriveTurnUntrusted(agent)) {
-        const defaultScope: MemoryScopeRef = scopeRef
-          ?? agent.activeScopes?.[0]
-          ?? { type: 'context', id: '' };
-        void agent.toolContext.knowledgeLayer.updateMemoryText(
-          input.old_content, input.new_content, input.namespace, defaultScope,
-        ).catch(() => {});
+      if (exactOk) {
+        // Mirror to KG so entity re-extraction picks up the corrected text — but NOT on a
+        // turn that read external content. `updateMemoryText` re-extracts entities into the
+        // trusted subject graph; on an untrusted turn (deriveTurnUntrusted) that would launder
+        // attacker-influenced `new_content` into the KG untainted. The flat-file line is already
+        // updated above (it edits content the user can already see); the trust-sensitive KG
+        // re-extraction is skipped — the KG keeps its prior extraction until a clean-turn edit.
+        const kg = agent.toolContext.knowledgeLayer;
+        if (kg && !deriveTurnUntrusted(agent)) {
+          const defaultScope: MemoryScopeRef = scopeRef
+            ?? agent.activeScopes?.[0]
+            ?? { type: 'context', id: '' };
+          // Left running, not awaited: it embeds, passes the credit gate and re-extracts by
+          // model, none of which belongs in this call's time or slot. So it is a derived write
+          // with its own row (660a-3), its actor and its log read now, before the call returns,
+          // and outside the call's slot, so a refused row poisons nothing the call answers. A
+          // row that cannot be written keeps it from running; the call's own row stands.
+          const actor = actorOf(agent);
+          const auditLog = agent.toolContext.auditLog;
+          const ref = w.correlationId;
+          void runOutsideCallSlot(async () => withInstanceWriteAs(actor, auditLog, {
+            site: 'derived#memory_update', kind: 'change', store: 'knowledge',
+            target: () => [['from', 'memory_update#exact'], ['ref', ref]], main: ['update'],
+          }, async (dw) => {
+            const r = await dw.run('update', () => (kg.updateMemoryTextReporting
+              ? kg.updateMemoryTextReporting(input.old_content, input.new_content, input.namespace, defaultScope)
+              : kg.updateMemoryText(input.old_content, input.new_content, input.namespace, defaultScope).then(changed => ({ changed, created: undefined }))), ifChanged);
+            dw.counts([
+              ['changed', r.changed ? 1 : 0],
+              ['new_entities', r.created?.entities], ['new_relations', r.created?.relations], ['new_subjects', r.created?.subjects],
+            ]);
+          })).catch((err: unknown) => {
+            // The re-extraction's own failure stays swallowed as before; a refused row is said.
+            if (err instanceof InstanceWriteUnrecorded) process.stderr.write('[lynox:trail] derived knowledge write refused: its row could not be written (memory_update)\n');
+          });
+        }
+        return scopeRef
+          ? `Updated content in ${input.namespace} namespace (scope: ${input.scope}).`
+          : `Updated content in ${input.namespace} namespace.`;
       }
-      return scopeRef
-        ? `Updated content in ${input.namespace} namespace (scope: ${input.scope}).`
-        : `Updated content in ${input.namespace} namespace.`;
-    }
+      // Nothing matched exactly: nothing changed here, the fallback below decides.
+      return null;
+    });
+    if (exact !== null) return exact;
 
     // === Fallback: [SUPERSEDED YYYY-MM-DD] marker ===
     // Pre-#529 returned "not found" here and the new knowledge was lost.
     // Now we mark the closest matching prior lines and append the new content
     // as a fresh line — the agent is never silently dropping data.
     const content = scopeRef
-      ? await agent.memory.loadScoped(input.namespace, scopeRef)
-      : await agent.memory.load(input.namespace);
+      ? await memory.loadScoped(input.namespace, scopeRef)
+      : await memory.load(input.namespace);
 
     const today = new Date().toISOString().slice(0, 10);
     const supersededMarker = `[SUPERSEDED ${today}] `;
@@ -554,49 +610,52 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     // so we use deleteScoped({exact:true}) + appendScoped to swap each line
     // in place. The exact:true option (kept from T2-M1) is critical here so
     // substring matches don't bulk-delete unrelated lines.
-    if (scopeRef) {
-      for (const { originalLine, markedLine } of linesToRewrite) {
-        await agent.memory.deleteScoped(
-          input.namespace, originalLine, scopeRef, { exact: true },
-        );
-        await agent.memory.appendScoped(input.namespace, markedLine, scopeRef);
+    return withInstanceWrite(agent, { site: 'memory_update#fallback', kind: 'change', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['new'] }, async (w) => {
+      if (scopeRef) {
+        for (const { originalLine, markedLine } of linesToRewrite) {
+          await w.run('mark', () => memory.deleteScoped(
+            input.namespace, originalLine, scopeRef, { exact: true },
+          ), ifPositive);
+          await w.run('mark', () => memory.appendScoped(input.namespace, markedLine, scopeRef), ifTrue);
+        }
+        await w.run('new', () => memory.appendScoped(input.namespace, input.new_content, scopeRef), ifTrue);
+      } else {
+        // Unscoped path: IMemory.delete has no {exact} option, so we use
+        // substring delete. The originalLine is a full line so substring
+        // collision is unlikely; if it happens, the duplicate marker on the
+        // re-append still records the intent.
+        for (const { originalLine, markedLine } of linesToRewrite) {
+          await w.run('mark', () => memory.delete(input.namespace, originalLine), ifPositive);
+          await w.run('mark', () => memory.append(input.namespace, markedLine), ifTrue);
+        }
+        await w.run('new', () => memory.append(input.namespace, input.new_content), ifTrue);
       }
-      await agent.memory.appendScoped(input.namespace, input.new_content, scopeRef);
-    } else {
-      // Unscoped path: IMemory.delete has no {exact} option, so we use
-      // substring delete. The originalLine is a full line so substring
-      // collision is unlikely; if it happens, the duplicate marker on the
-      // re-append still records the intent.
-      for (const { originalLine, markedLine } of linesToRewrite) {
-        await agent.memory.delete(input.namespace, originalLine);
-        await agent.memory.append(input.namespace, markedLine);
+
+      // Mirror new content to KG via the same channel store uses — the
+      // subscription in engine-init.ts will pick this up and create the
+      // KG row + entity extraction.
+      if (agent.toolContext.knowledgeLayer) {
+        const defaultScope: MemoryScopeRef = scopeRef
+          ?? agent.activeScopes?.[0]
+          ?? { type: 'context', id: '' };
+        publishMemoryStore({
+          namespace: input.namespace,
+          content: input.new_content,
+          scopeType: defaultScope.type,
+          scopeId: defaultScope.id,
+          sourceThreadId: chatThreadOf(agent),
+          // Wave 0.6: force-floored — no agent-declared provenance (PRD §2.8).
+          // Write-trust derived from the FULL union, not the bare marker (deriveTurnUntrusted).
+          sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
+          actor: actorOf(agent), trail: trailOf('memory_update#fallback', w.correlationId),
+        });
       }
-      await agent.memory.append(input.namespace, input.new_content);
-    }
 
-    // Mirror new content to KG via the same channel store uses — the
-    // subscription in engine-init.ts will pick this up and create the
-    // KG row + entity extraction.
-    if (agent.toolContext.knowledgeLayer) {
-      const defaultScope: MemoryScopeRef = scopeRef
-        ?? agent.activeScopes?.[0]
-        ?? { type: 'context', id: '' };
-      channels.memoryStore.publish({
-        namespace: input.namespace,
-        content: input.new_content,
-        scopeType: defaultScope.type,
-        scopeId: defaultScope.id,
-        sourceThreadId: chatThreadOf(agent),
-        // Wave 0.6: force-floored — no agent-declared provenance (PRD §2.8).
-        // Write-trust derived from the FULL union, not the bare marker (deriveTurnUntrusted).
-        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
-      });
-    }
-
-    if (marked > 0) {
-      return `Superseded ${marked} memor${marked === 1 ? 'y' : 'ies'} and added new content to ${input.namespace}${scopeRef ? ` (scope: ${input.scope})` : ''}.`;
-    }
-    return `Appended new content to ${input.namespace}${scopeRef ? ` (scope: ${input.scope})` : ''} (no prior memory matched the old_content pattern).`;
+      if (marked > 0) {
+        return `Superseded ${marked} memor${marked === 1 ? 'y' : 'ies'} and added new content to ${input.namespace}${scopeRef ? ` (scope: ${input.scope})` : ''}.`;
+      }
+      return `Appended new content to ${input.namespace}${scopeRef ? ` (scope: ${input.scope})` : ''} (no prior memory matched the old_content pattern).`;
+    });
   },
 };
 
@@ -778,34 +837,46 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
 
     const matchedLine = lines[matchIdx]!;
 
-    // Copy to target scope
-    await agent.memory.appendScoped(input.namespace, matchedLine, toRef);
-    channels.memoryStore.publish({
-      namespace: input.namespace,
-      content: matchedLine,
-      scopeType: toRef.type,
-      scopeId: toRef.id,
-      sourceThreadId: chatThreadOf(agent),
-      // Promotion moves an existing line across scopes. The original tier
-      // isn't available from the flat-file line without a KG lookup, so the
-      // re-embedded copy lands at the conservative default — never falsely
-      // elevated to tool_verified. Write-trust from the FULL union (deriveTurnUntrusted),
-      // not the bare marker — a promote on an external-content turn quarantines.
-      sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
+    const memory = agent.memory;
+    return withInstanceWrite(agent, { site: 'memory_promote#move', kind: 'move', store: 'memory', target: () => memoryTarget(input.namespace, ['from', fromRef], ['to', toRef]), main: ['append', 'delete'] }, async (w) => {
+      // Copy to target scope.
+      await w.run('append', () => memory.appendScoped(input.namespace, matchedLine, toRef), ifTrue);
+
+      // Remove from source scope. Delete EXACTLY the one line we
+      // promoted (`{exact:true}`), NOT every line containing content_pattern — a
+      // substring delete erased sibling lines that were never promoted (silent data
+      // loss; the tool copies ONE match but used to delete ALL).
+      await w.run('delete', () => memory.deleteScoped(input.namespace, matchedLine, fromRef, { exact: true }), ifPositive);
+
+      // Retire the KG twin of the original at the source scope, matched by the line's body
+      // (date prefix stripped to match the stored statement text). A move, not a removal:
+      // its ids ride the copy's store, which names the copy as their successor.
+      const matchedBody = matchedLine.replace(DATE_PREFIX_RE, '').trim();
+      let movedIds: string[] = [];
+      const knowledge = agent.toolContext.knowledgeLayer;
+      if (knowledge && matchedBody) {
+        // Not a main step: a twin retired proves a write, but not the move itself. The catch is
+        // outside the step, so a rejection is noted as thrown: the rows may be retired already
+        // when the graph mirror throws.
+        movedIds = await w.run('retire', () => knowledge.retireForMove(matchedBody, input.namespace, fromRef), ifNonEmptyList).catch((): string[] => []);
+      }
+      publishMemoryStore({
+        namespace: input.namespace,
+        content: matchedLine,
+        scopeType: toRef.type,
+        scopeId: toRef.id,
+        sourceThreadId: chatThreadOf(agent),
+        // Promotion moves an existing line across scopes. The original tier
+        // isn't available from the flat-file line without a KG lookup, so the
+        // re-embedded copy lands at the conservative default — never falsely
+        // elevated to tool_verified. Write-trust from the FULL union (deriveTurnUntrusted),
+        // not the bare marker — a promote on an external-content turn quarantines.
+        sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
+        ...(movedIds.length > 0 ? { replaces: { ids: movedIds } } : {}),
+        actor: actorOf(agent), trail: trailOf('memory_promote#move', w.correlationId),
+      });
+
+      return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n"${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}"`;
     });
-
-    // Remove from source scope + sync graph. Delete EXACTLY the one line we
-    // promoted (`{exact:true}`), NOT every line containing content_pattern — a
-    // substring delete erased sibling lines that were never promoted (silent data
-    // loss; the tool copies ONE match but used to delete ALL). The KG twin is
-    // deactivated by the promoted line's body (date prefix stripped to match the
-    // stored statement text), same single-line scope.
-    await agent.memory.deleteScoped(input.namespace, matchedLine, fromRef, { exact: true });
-    const matchedBody = matchedLine.replace(DATE_PREFIX_RE, '').trim();
-    if (agent.toolContext.knowledgeLayer && matchedBody) {
-      void agent.toolContext.knowledgeLayer.deactivateByPattern(matchedBody, input.namespace).catch(() => {});
-    }
-
-    return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n"${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}"`;
   },
 };

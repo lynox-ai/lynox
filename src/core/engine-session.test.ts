@@ -95,6 +95,7 @@ vi.mock('./agent.js', () => {
     RunAbortedError: MockRunAbortedError,
     ToolLoopBreakError: MockToolLoopBreakError,
     ContinuationLoopError: MockContinuationLoopError,
+    ThinkingOnlyLoopError: class MockThinkingOnlyLoopError extends MockContinuationLoopError {},
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;
@@ -458,7 +459,8 @@ vi.mock('./run-history.js', () => ({
     this.sweepStuckRuns = vi.fn().mockReturnValue(0);
     // @ts-expect-error mock constructor
     this.getDb = vi.fn().mockReturnValue({
-      prepare: vi.fn().mockReturnValue({ run: vi.fn(), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
+      // `run` answers as better-sqlite3 does: a write's RunResult.
+      prepare: vi.fn().mockReturnValue({ run: vi.fn().mockReturnValue({ changes: 1, lastInsertRowid: 0 }), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
       exec: vi.fn(),
       transaction: vi.fn().mockImplementation((fn: unknown) => fn),
     });
@@ -3623,6 +3625,29 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(groupOf(after, 'run-a')).toBe('run-a');
       expect(groupOf(after, 'helper-a')).toBe('run-a');
       expect((title()![2] as Ctx).runGroupId).toBe('run-a');
+    });
+
+    // A summary of another thread runs as an internal run in a session of its own. Its prompt is
+    // that thread's history, so it gets no title, and no second model call for one.
+    it('an internal run in a fresh session gets no title (control: a first user turn does)', async () => {
+      const { engine } = await createEngineAndSession();
+      stubTitleStream(engine);
+      const summary = engine.createSession();
+      const llmTitle = vi.spyOn(Object.getPrototypeOf(summary) as { _generateLLMTitle: () => Promise<void> }, '_generateLLMTitle');
+      const updates = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      mockSend.mockResolvedValueOnce('summary text');
+      // The run completes, so it reached the point where a first turn is titled.
+      expect(await summary.run('Summarize this conversation concisely.\n\nuser: the price of Bergtee', { noTools: true, internal: true })).toBe('summary text');
+      expect(llmTitle).not.toHaveBeenCalled();
+      // Nor a title derived from its prompt.
+      expect(updates.mock.calls.some(([id, u]) => id === summary.sessionId && 'title' in (u as object))).toBe(false);
+      updates.mockRestore();
+      const chat = engine.createSession();
+      mockSend.mockResolvedValueOnce('ok');
+      await chat.run('Plan the Q3 budget');
+      expect(llmTitle).toHaveBeenCalledTimes(1);
+      expect(llmTitle.mock.calls[0]?.[0]).toBe('Plan the Q3 budget');
+      llmTitle.mockRestore();
     });
 
     it('two runs are two groups, also when the second is started from inside the first', async () => {

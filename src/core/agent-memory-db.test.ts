@@ -580,6 +580,49 @@ describe('AgentMemoryDb', () => {
       expect(db.getEntity(collection)).not.toBeNull();
       expect(db.getEntity(extracted)).not.toBeNull();
     });
+
+    it('removes the relations sourced from a deleted memory, and keeps those of a superseded one', () => {
+      // `relations.source_memory_id` has no foreign key: without the reap the relation of a
+      // deleted memory stays, its description (text derived from that memory) included, and
+      // points at an id nothing resolves.
+      const alice = db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'g' });
+      const acme = db.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+      const bob = db.createEntity({ canonicalName: 'Bob', entityType: 'person', scopeType: 'global', scopeId: 'g' });
+      const deleted = db.createMemory({ text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      const superseded = db.createMemory({ text: 'Bob joined Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 0, 1] });
+      const live = db.createMemory({ text: 'Alice knows Bob', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      // Mentions from the surviving memory keep all three entities out of the orphan reap,
+      // so a relation that disappears here went because of its source, not its endpoints.
+      for (const e of [alice, acme, bob]) db.createMention(live, e);
+      db.createRelation(alice, acme, 'works_for', 'Alice works at Acme', deleted);
+      db.createRelation(bob, acme, 'member_of', 'Bob joined Acme', superseded);
+      db.createRelation(alice, bob, 'knows', 'Alice knows Bob', live);
+      db.createRelation(acme, bob, 'employs', 'Acme employs Bob', '');
+      expect(db.deactivateMemoriesByPattern('works at Acme')).toEqual([deleted]);
+      db.supersedMemory(superseded, live);
+
+      db.gc(false);
+
+      const rels = db.listAllRelations().map(r => r.relation_type).sort();
+      expect(rels).toEqual(['employs', 'knows', 'member_of']);
+      expect(db.getMemory(deleted)).toBeNull();
+      expect(db.getMemory(superseded)).toBeNull();
+    });
+
+    it('reaps the relations and deletes the memories in one transaction: a later failure keeps both', () => {
+      const alice = db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'g' });
+      const acme = db.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+      const deleted = db.createMemory({ text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      db.createRelation(alice, acme, 'works_for', 'Alice works at Acme', deleted);
+      db.deactivateMemoriesByPattern('works at Acme');
+      // The memory delete, the last step, fails: the relation must not be gone without it.
+      db['db'].exec("CREATE TRIGGER fail_memory_delete BEFORE DELETE ON memories BEGIN SELECT RAISE(ABORT, 'forced'); END;");
+
+      expect(() => db.gc(false)).toThrow('forced');
+      // Read from the table: the readers hide a relation whose source was deleted, and the row is what the reap removes.
+      expect((db['db'].prepare('SELECT relation_type FROM relations').all() as Array<{ relation_type: string }>).map(r => r.relation_type)).toEqual(['works_for']);
+      expect(db.getMemory(deleted)).not.toBeNull();
+    });
   });
 
   // ── Confidence Evolution ──────────────────────────────────────

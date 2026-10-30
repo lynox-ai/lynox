@@ -133,6 +133,21 @@ describe('a webhook trigger', () => {
     expect(store.getDue('2099-01-01T00:00:00.000Z').map((t) => t.id)).not.toContain(trigger.id);
   });
 
+  // A run records only what happened. Read as a one-shot, the first run would set the
+  // trigger `completed` (or `failed`), and from then on it accepts no delivery.
+  it.each([
+    ['success', 'success'], ['failure', 'failed'], ['timeout', 'timeout'], ['interruption', 'interrupted'],
+  ] as const)('records a run\'s %s without touching status, next run or retries', (_label, status) => {
+    const { trigger } = tm.createWebhookTrigger({ title: 'Orders', pipelineId: 'wf-orders', verifier: 'shared-token', confirmedAt: NOW });
+    engine.getDb().prepare('UPDATE triggers SET max_retries = 3 WHERE id = ?').run(trigger.id);
+    const before = tm.getTrigger(trigger.id)!;
+    expect(tm.recordTaskRun(trigger.id, 'ran', status)).toBe(false);
+    const after = tm.getTrigger(trigger.id)!;
+    expect([after.status, after.next_run_at, after.retry_count, after.last_run_status, after.last_run_result])
+      .toEqual([before.status, before.next_run_at, before.retry_count, status, 'ran']);
+    expect(store.getDue('2099-01-01T00:00:00.000Z').map((t) => t.id)).not.toContain(trigger.id);
+  });
+
   it('takes no row over: an id that exists is refused, and that row stays as it was', () => {
     const other = tm.create({ title: 'Daily report', pipelineId: 'wf-orders', scheduleCron: '0 9 * * *', createdBy: `${MANDATE_TAG_PREFIX}eva@kanzlei.example` }) as { id: string };
     const row = (): unknown => engine.getDb().prepare('SELECT * FROM triggers WHERE id = ?').get(other.id);

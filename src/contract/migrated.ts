@@ -130,6 +130,9 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   // either side is how the two would drift apart.
   { name: 'ProviderIncidentRequest', contractFile: 'http.ts', twinPattern: typeTwin('ProviderIncidentRequest') },
   { name: 'EscalationNoticeRequest', contractFile: 'http.ts', twinPattern: typeTwin('EscalationNoticeRequest') },
+  { name: 'ESCALATION_NOTICE_KINDS', contractFile: 'http.ts', twinPattern: valueTwin('ESCALATION_NOTICE_KINDS') },
+  { name: 'EscalationNoticeKind', contractFile: 'http.ts', twinPattern: typeTwin('EscalationNoticeKind') },
+  { name: 'isEscalationNoticeKind', contractFile: 'http.ts', twinPattern: valueTwin('isEscalationNoticeKind') },
   { name: 'OAuthRefreshRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshRequest') },
   { name: 'OAuthRefreshResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshResponse') },
   { name: 'OAuthRevokeRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRevokeRequest') },

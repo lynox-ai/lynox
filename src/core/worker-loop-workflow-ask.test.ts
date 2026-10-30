@@ -173,6 +173,7 @@ function makeHarness(o?: {
     getMandateEnds: () => ({ isLive: () => true }),
     getAuditLog: () => ({ record: () => {} }),
     getApprovalStore: () => APPROVAL_STORE,
+    getEngineDb: () => null,
   } as unknown as Engine;
   const notified: NotificationMessage[] = [];
   const router = {
