@@ -207,6 +207,20 @@ describe('buildInboxRunner — fail-closed dead-letter', () => {
     expect(payloadJson['dead_letter']).toBe(true);
     expect(payloadJson['error_message']).toBe('rate_limited');
   });
+
+  it('the dead-letter item records the prefilter rule its mail met', async () => {
+    const llm: LLMCaller = vi.fn(async () => { throw new Error('rate_limited'); });
+    const queue = buildInboxRunner({ state: inbox, llm, policy: { retryOnce: false } });
+    queue.enqueue(payload({
+      envelope: {
+        fromAddress: 'noreply@billing.example', fromName: undefined, subject: 'Rechnung', mailDate: undefined,
+        snippet: undefined, messageId: undefined, inReplyTo: undefined, prefilterRule: 'automated_sender',
+      },
+    }));
+    await waitFor(() => inbox.listItems().length === 1);
+    await queue.drain();
+    expect(mail.getConnection().prepare('SELECT prefilter_rule AS r FROM inbox_items').get()).toEqual({ r: 'automated_sender' });
+  });
 });
 
 describe('scrubErrorMessage', () => {

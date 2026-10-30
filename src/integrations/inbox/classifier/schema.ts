@@ -86,8 +86,8 @@ export function parseClassifierResponse(raw: string): ClassifierVerdict {
     return failClosed('reason_over_length');
   }
   if (bucket === 'noise') {
-    // PRD: noise must be dropped at the prefilter; if the model insists, we
-    // route to requires_user rather than silently swallow the mail.
+    // `noise` is no bucket an item can have; if the model insists, we route
+    // to requires_user rather than silently swallow the mail.
     return failClosed('noise_bucket_returned', reason);
   }
   if (confidence < REQUIRES_USER_THRESHOLD && bucket !== 'requires_user') {
