@@ -1216,6 +1216,25 @@ describe('the write verb and the one-target probe', () => {
     }
   });
 
+  it('a run whose only send the host clearly refused is still told to write one, and writing on writes it', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      ledger.markSent(runId, 0);
+      ledger.markRefused(runId, 0);
+      expect(ledger.probeBlockFor(runId)?.step).toBe('write_one');
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1']);
+      expect(ledger.probeKey(runId)).toBe(url(1));
+    } finally {
+      restore();
+    }
+  });
+
   it('runs past its cap over targets that already hold their value, sending them no write', async () => {
     const s = shop();
     const restore = serve(s);
