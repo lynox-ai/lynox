@@ -42,6 +42,14 @@ const REPEATS = Number(args['repeats'] ?? 1);
 if (!DATA_DIR) { console.error('need --data-dir (the engine\'s LYNOX_DATA_DIR)'); process.exit(2); }
 
 const fx = JSON.parse(readFileSync(join(HERE, 'capture-fitness-fixtures.json'), 'utf8'));
+// `--shapes N4-run-instruction,S5-standing-rule` runs only those, for an A/B on one change. A
+// name that matches no shape stops the run: silently running fewer shapes reads as a pass.
+if (args['shapes']) {
+  const want = args['shapes'].split(',');
+  const unknown = want.filter((id) => !fx.shapes.some((s) => s.id === id));
+  if (unknown.length > 0) { console.error(`unknown shape(s): ${unknown.join(', ')}`); process.exit(2); }
+  fx.shapes = fx.shapes.filter((s) => want.includes(s.id));
+}
 // Per-RUN identity. The store dedups an active write against the same SUBJECT, so fixed
 // entity names meet the previous run's active rows: the case still counts as a capture (the
 // tool was called) but stops becoming knowledge — it deflates the line below labelled "the
