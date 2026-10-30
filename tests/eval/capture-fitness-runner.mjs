@@ -97,6 +97,7 @@ async function runOne(text) {
   // timeout keeps running in the engine, and its late write landed after the next case's
   // starting line count — scored as that case's capture. The session id is the thread id.
   const threadId = randomUUID();
+  const started = Date.now();
   const s = await fetch(`${BASE}/api/sessions`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId }),
   }).then(r => r.json());
@@ -109,11 +110,17 @@ async function runOne(text) {
   const reader = res.body.getReader();
   for (;;) { const { done } = await reader.read(); if (done) break; }
   await new Promise(r => setTimeout(r, 1200));   // the sink append is fire-and-forget
-  const fresh = sinkLines().map(l => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(e => e !== null && e.thread === threadId);
+  const ended = Date.now();
+  const all = sinkLines().map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(e => e !== null);
+  const fresh = all.filter(e => e.thread === threadId);
   // No event for the thread means the match failed, not that the model stayed silent — and
   // silent is the PASS on a negative shape, so it must not be the default.
-  if (fresh.length === 0) throw new Error(`no telemetry for thread ${s.sessionId}`);
+  if (fresh.length === 0) throw new Error(`no telemetry for thread ${threadId}`);
+  // A `remember` made by a spawned sub-agent carries no thread. Cases run one after another, so
+  // within this case's window it is this case's — unless an earlier case timed out and is still
+  // running. Counting it errs toward a MISS on a negative shape, never toward a silent pass.
+  const orphans = all.filter(e => e.event === 'remember_invoked' && !e.thread && e.ts >= started && e.ts <= ended);
+  fresh.push(...orphans);
   const writes = fresh.filter(e => e.event === 'remember_invoked');
   return {
     eligible: fresh.some(e => e.event === 'capture_eligible'),
