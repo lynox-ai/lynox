@@ -27,14 +27,26 @@ let store: Store;
 let thread: Record<string, unknown>;
 /** The stream of the next `/run`. */
 let run: ReturnType<typeof sseStream>;
+/** Holds the next `/threads/t1` read until it settles, when set. */
+let threadHold: Promise<void> | null;
 
 beforeEach(async () => {
 	vi.stubGlobal('navigator', { onLine: true });
 	vi.resetModules();
 	store = await import('./chat.svelte.js');
 	thread = { id: 't1', skip_extraction: 1, contained: false };
-	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+	threadHold = null;
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
+		// The private-mode switch: refused because the chat only reads.
+		if (url.endsWith('/threads/t1') && init?.method === 'PATCH') return json({ error: 'x', code: 'contained' }, 409);
+		if (url.endsWith('/threads/t1') && threadHold) {
+			const said = { ...thread };
+			const hold = threadHold;
+			threadHold = null;
+			await hold;
+			return json({ thread: said });
+		}
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
 		if (url.endsWith('/sessions/t1/run')) return new Response(run.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		if (url.endsWith('/threads/t1')) return json({ thread: { ...thread } });
@@ -116,6 +128,45 @@ describe('a run that contains the chat: the line under its answer, read at the r
 		await settle();
 		expect(store.getThreadContained()).toBe(true);
 		expect(store.getThreadContainedUnknown()).toBeNull();
+	});
+
+	it('a run that starts before the previous run end was read gets no line of its own', async () => {
+		thread.contained = true;
+		let release!: () => void;
+		threadHold = new Promise<void>((r) => { release = r; });
+		// The first run ends; whether it contained the chat is still on its way…
+		await turn();
+		// …while the next run starts…
+		run = sseStream();
+		const sent = store.sendMessage('and the refunds');
+		await settle();
+		// …and only then the answer lands: the chat was contained before the second run.
+		release();
+		await settle();
+		run.send('text', { text: 'here are the refunds', agent: 'lynox' });
+		run.send('done', { agent: 'lynox' });
+		run.close();
+		await sent;
+		await settle();
+		expect(answers().map((a) => a.containedNotice === true)).toEqual([true, false]);
+	});
+
+	it('a lock that lands while an older read is in flight is not taken back by that read', async () => {
+		await turn();
+		expect(store.getThreadContained()).toBe(false);
+		let release!: () => void;
+		threadHold = new Promise<void>((r) => { release = r; });
+		// A read starts and is told "not contained"…
+		const reconcile = store.reconcileThread();
+		await settle();
+		// …the switch's refusal locks the chat meanwhile…
+		await store.toggleSkipExtraction();
+		expect(store.getThreadContained()).toBe(true);
+		// …and the older answer arrives after it.
+		release();
+		await reconcile;
+		await settle();
+		expect(store.getThreadContained()).toBe(true);
 	});
 
 	it('a recorded containment is not taken back by a later read', async () => {

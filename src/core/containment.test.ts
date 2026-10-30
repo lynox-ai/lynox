@@ -168,12 +168,18 @@ describe('threadStates tells a record from a failed read', () => {
     expect(sorted(new Containment(throwingDb, null).threadStates(['t2']).unknown)).toEqual(['t2']);
   });
 
-  it('a history copy whose read throws leaves engine.db to answer: a recorded thread stays known', () => {
+  it('a history copy whose read throws: a thread engine.db records stays known, any other is unknown', () => {
     containment.contain({ kind: 'thread', id: 't1' }, { kind: 'api', connectionId: 'shop-acme' });
     const throwingMirror = { has: () => { throw new Error('x'); }, threadIds: () => { throw new Error('x'); } };
     const s = new Containment(engineDb.getDb(), throwingMirror as never).threadStates(['t1', 't2']);
     expect(sorted(s.contained)).toEqual(['t1']);
-    expect(sorted(s.unknown)).toEqual([]);
+    expect(sorted(s.unknown)).toEqual(['t2']);
+    // Enforced as contained, as isContained has it.
+    const c = new Containment(engineDb.getDb(), throwingMirror as never);
+    expect(c.containedThreadIds(['t2']).has('t2')).toBe(true);
+    expect(c.isContained({ threadId: 't2' })).toBe(true);
+    // No engine.db and an unreadable copy: unknown on a self-hosted instance too.
+    expect(sorted(new Containment(null, throwingMirror as never).threadStates(['t2']).unknown)).toEqual(['t2']);
   });
 
   it('no engine.db: unknown on a provisioned instance, clear elsewhere', () => {

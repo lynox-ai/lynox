@@ -3273,14 +3273,18 @@ async function refreshThreadContained(opts: { afterRun?: boolean; answer?: ChatM
 	// Checked again after the body: the user may have switched chats while it arrived.
 	if (sessionId !== sid || !data?.thread) return;
 	if (data.thread.contained !== true) {
-		// What the engine reads now: a failed check taken back. (A record never ends, so a chat
-		// read as recorded is not asked again above.)
-		threadContained = false;
-		threadContainedUnknown = null;
+		// Only a failed check is taken back, as it stands now: a lock that landed meanwhile (the
+		// switch's refusal, another read) is newer than this answer.
+		if (threadContainedUnknown !== null) {
+			threadContained = false;
+			threadContainedUnknown = null;
+		}
 		return;
 	}
 	threadContained = true;
 	threadContainedUnknown = readContainedUnknown(data.thread.contained_unknown);
+	// A run of this chat already going began with the chat contained, as it is now known.
+	if (threadContainedUnknown === null && isStreaming) containedAtRunStart = true;
 	// A record that could not be read says nothing about this run: no line under its answer.
 	if (threadContainedUnknown !== null) return;
 	// The run that just ended made this chat read-only: say so in the history, once, under its
