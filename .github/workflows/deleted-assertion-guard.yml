@@ -1,0 +1,120 @@
+name: deleted-assertion-guard
+
+# ⭐ WHY `pull_request` AND NOT `push`. The guard needs two commits, and this event names both.
+# ⚠ `base.sha` is NOT "the commit the pull request started from" — an earlier version of this
+# comment said so and it is wrong: it is the base branch's tip as of the pull request's last event
+# (measured: a pull request opened in August carries a `base.sha` dated five weeks later). That is
+# harmless HERE only because the script re-derives `merge-base` from it, which lands on the true fork
+# point either way. A push event gives nothing comparable: `github.event.before` is the previous
+# commit on the BRANCH, so on a branch with several commits it would compare against the wrong point
+# and report a deletion an earlier commit of the same branch had already made.
+#
+# ⛔ IT REPORTS, IT DOES NOT GATE — and the mapping is the opposite of the obvious one:
+#   exit 0 + a `VERDICT clean` line → pass   nothing to report
+#   exit 1 + a `VERDICT report` line → PASS   there IS something to report; a warning, never red
+#   exit 2                           → FAIL   it could not look
+#   any other code, or any code WITHOUT its verdict line → FAIL, because that is a crash and not
+#   a judgement. **Exit 2 is the only exit code this job turns red on.**
+# What is gated is the instrument's HEALTH, not its judgement. The reason: the check compares the
+# NUMBER of test cases per file, which is a narrower proxy than the property — deleting two cases
+# while adding three keeps the number up and escapes. A proxy may inform a person; it may not stop
+# a merge. And a check that silently stops looking still reads as coverage, which is why ill health
+# is the one thing that goes red.
+#
+# ⚠ An earlier version had this backwards and it blocked on a finding. It also mapped an uncaught
+# crash — node's default exit of 1 — onto "a deleted assertion still holds", announcing a finding
+# nobody had measured.
+
+on:
+  pull_request:
+    # ⚠ A FILTER, not the candidate set. The candidate set comes from the runner's own file list at
+    # run time (`vitest list`); this only decides whether the job starts at all. Kept wide on
+    # purpose: a path filter that tried to mirror the runner's include patterns would be a second,
+    # drifting copy of them.
+    paths:
+      - '**/*.test.ts'
+      - '**/*.spec.ts'
+      - '**/*.test.tsx'
+      - '**/*.spec.tsx'
+      - 'scripts/deleted-assertion-guard.mjs'
+      - '.github/workflows/deleted-assertion-guard.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deleted-assertion-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  deleted-assertion-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # fetch-depth 0: the guard reads the BASE version of a file with `git show <base>:<path>`,
+      # which a shallow clone does not have.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+        with:
+          fetch-depth: 0
+          # `head.sha`, deliberately — NOT `head.ref`. A ref is a name an author chooses and is
+          # the documented injection surface; a sha is the commit this run was triggered for.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6.0.0
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v4.2.0
+
+      - run: pnpm install --frozen-lockfile
+
+      # The guard refuses to run on a dirty tree. `pnpm install` can touch the lockfile on a
+      # mismatch, so the state is asserted here rather than discovered as an exit 2 later.
+      # Named for what it does: it WARNS. An earlier version called itself "Assert", echoed a
+      # warning and continued — and told the reader the guard "will exit 2 and not block", which is
+      # the opposite of the truth two screens down, where exit 2 is the ONLY thing that blocks.
+      - name: Warn early if the tree is dirty, since the guard writes into it
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::warning::tracked changes after install; the guard will refuse with exit 2, which fails this job"
+            git status --porcelain | head -20
+          fi
+
+      - name: Run the old test files against the new source
+        # ⛔ The two SHAs go through `env:` and NOT into the command line. They are 40-hex values
+        # that GitHub produces, so interpolating them would in fact be safe — but the safety would
+        # rest on a claim about the field's FORMAT, and a later edit that swaps in `head.ref` or a
+        # title inherits the shape without inheriting the argument. `env:` is safe by structure.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # ⛔ `|| CODE=$?`, and NOT a bare call followed by `CODE=$?`. GitHub invokes a `run:`
+          # block as `bash -e {0}`, so `-e` is already on before the first line of this script
+          # executes and `set -uo pipefail` does not turn it off. Measured: with a bare call the
+          # step ABORTS the moment the script exits non-zero — the `case` below never runs, no
+          # warning is printed, and the job goes RED on a finding. That is the exact polarity this
+          # design forbids, dressed in a mapping that looks like it governs the step and does not.
+          # A command on the left of `||` is exempt from `-e` regardless of who set it.
+          #
+          # ⛔ AND THE ARMS REQUIRE A VERDICT LINE, because an exit code alone cannot tell a verdict
+          # from a crash. node exits 1 for a module-load failure too — a missing file, a syntax
+          # error, a bad import — and this script is in the `paths:` above, so a pull request that
+          # DELETES it triggered the job, node exited 1 with no output, and the run announced a
+          # finding nobody had measured. No try/catch inside the script can catch that: it is not
+          # running yet. So the code path that reaches a conclusion prints the verdict, and an exit
+          # code arriving without one is ill health.
+          set -uo pipefail
+          OUT="${RUNNER_TEMP:-/tmp}/deleted-assertion-guard-$$.out"
+          CODE=0
+          node scripts/deleted-assertion-guard.mjs "$BASE_SHA" "$HEAD_SHA" > "$OUT" 2>&1 || CODE=$?
+          cat "$OUT"
+          case "$CODE" in
+            0) grep -q 'VERDICT clean' "$OUT" || { echo "::error::guard: exit 0 without a verdict line — the run did not reach a conclusion"; exit 1; }
+               echo "guard: nothing to report" ;;
+            1) grep -q 'VERDICT report' "$OUT" || { echo "::error::guard: exit 1 without a verdict line — this is a crash wearing a finding's exit code"; exit 1; }
+               echo "::warning::guard: test cases that still pass no longer run — see the lines above. ADVISORY, nothing is blocked."; exit 0 ;;
+            2) echo "::error::guard: could not check. The instrument's health is what this job gates."; exit 1 ;;
+            *) echo "::error::guard: unexpected exit $CODE — treated as ill health"; exit 1 ;;
+          esac
