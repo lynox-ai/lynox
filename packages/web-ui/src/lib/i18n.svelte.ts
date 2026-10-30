@@ -210,6 +210,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'voice.tts_voice_hint': { de: 'Die gewählte Stimme wird für jede Sprache verwendet.',             en: 'The chosen voice is used for every language.' },
 	'voice.default':       { de: 'Standard',                                                         en: 'Default' },
 	'voice.unavailable':   { de: 'nicht verfügbar',                                                  en: 'unavailable' },
+	// ux U-074: an instance connected to a Shopify store sends no text to a speech service.
+	'voice.tts_off_shopify': { de: 'Auf Instanzen mit Shopify-Anbindung schickt lynox keinen Text an einen Sprachdienst. Vorlesen ist hier deshalb aus.', en: 'On instances connected to Shopify, lynox sends no text to a speech service, so reading aloud is off here.' },
+	'voice.stt_local_shopify': { de: 'Diktieren läuft hier mit whisper.cpp auf der Instanz selbst; das Audio geht an keinen Sprachdienst. Das Transkript geht danach wie eine getippte Nachricht an das Modell.', en: 'Dictation runs here with whisper.cpp on the instance itself; the audio goes to no speech service. The transcript then goes to the model like a typed message.' },
+	'voice.stt_off_shopify': { de: 'Auf Instanzen mit Shopify-Anbindung schickt lynox kein Audio an einen Sprachdienst. Diktieren ginge hier nur mit einer Spracherkennung auf der Instanz selbst, und die ist hier nicht eingerichtet.', en: 'On instances connected to Shopify, lynox sends no audio to a speech service. Dictation would need speech recognition on the instance itself, which is not set up here.' },
 	'voice.env_override':  { de: 'Vom Server überschrieben:',                                        en: 'Overridden by server:' },
 	'voice.managed_locked': { de: 'Auf Managed-Instanzen von lynox verwaltet — die Sprachverarbeitung läuft über Mistral (EU). Kommt ein weiterer Anbieter dazu, wird dieses Feld wieder wählbar.', en: 'Managed by lynox on managed instances — voice runs on Mistral (EU). This becomes selectable again if a second provider is added.' },
 	'voice.loading':       { de: 'Lädt …',                                                           en: 'Loading …' },

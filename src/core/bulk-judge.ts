@@ -39,6 +39,7 @@ import type { MeteredGateResult } from './metered-request.js';
 import { getProviderDescriptor, isMistralHost, modelCapability, type LLMProvider, type LynoxUserConfig, type ModelTier } from '../types/index.js';
 import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
 import { clientForTierSnapshot } from './llm-client.js';
+import { providerListApplies, refusedSnapshotClass } from './contained-providers.js';
 
 export interface BulkJudgeOutcome {
   /** `pending`: the judge waits (a provider's 429 or 5xx, a stopped tick) and is due again at
@@ -202,6 +203,12 @@ function judgeModelPick(
   const slot = resolveTierModel(resolved, provider);
   const axis = judgeAxisOf(slot, uc.api_base_url);
   if (axis === null) return null;
+  // On an instance connected to a Shopify store the judge runs only at a provider on the list
+  // (`contained-providers.ts`): otherwise no model can judge, and the run says so before it starts.
+  // The base URL is the one the judge's client uses (`clientForTierSnapshot`): the instance's own
+  // only where the slot reuses the instance's client, the slot's own everywhere else.
+  const reusesAmbient = slot.apiBaseURL === undefined && slot.apiKey === undefined && slot.provider === provider;
+  if (providerListApplies() && refusedSnapshotClass(reusesAmbient ? { ...slot, apiBaseURL: uc.api_base_url } : slot) !== null) return null;
   const modelId = JUDGE_MODELS[axis];
   try {
     resolveRunModel({

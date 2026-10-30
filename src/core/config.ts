@@ -11,6 +11,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
 import { pinnedVaultSlotForEndpoint } from './llm/catalog.js';
 import { TIER_PRESETS, expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from './tier-presets.js';
+import { providerListApplies, refusedProfileClass } from './contained-providers.js';
 
 const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
@@ -632,6 +633,16 @@ export function loadConfig(): LynoxUserConfig {
       }
     } catch {
       // ignore malformed LYNOX_MODEL_PROFILES_JSON — boot without rather than crash
+    }
+  }
+  // On an instance connected to a Shopify store, a profile whose provider is not on the list
+  // (`contained-providers.ts` — the control plane's Mistral `worker` and `fallback`) is dropped
+  // here, so the worker runs on the main provider through the guard below instead of every
+  // background task being refused, and spawn(profile) does not offer a profile loaded here that
+  // could not run. A profile reaching a client another way is still refused when it sends.
+  if (merged.model_profiles && providerListApplies()) {
+    for (const [name, profile] of Object.entries(merged.model_profiles)) {
+      if (refusedProfileClass(profile) !== null) delete merged.model_profiles[name];
     }
   }
   // Guard a dangling worker_profile: if LYNOX_WORKER_PROFILE names a profile that

@@ -4069,6 +4069,11 @@ export class LynoxHTTPApi {
     // up to 60s stale, and a seed for a provider whose name is not the one
     // being printed would suppress that provider's own slot.
     const seen = new Set<string>([this.providerStatusCache?.identityKey ?? '']);
+    // On an instance connected to a Shopify store a provider off the list is never reached, so
+    // the footer does not name it as a fallback or a tier slot (`contained-providers.ts`). The
+    // primary is named as configured, refused or not.
+    const { providerListApplies, refusedSnapshotClass } = await import('../core/contained-providers.js');
+    const listApplies = providerListApplies();
 
     // At most ONE run query for the whole response, and only if something
     // actually needs it. `getRecentRuns` is `SELECT * FROM runs … LIMIT 50`
@@ -4113,6 +4118,7 @@ export class LynoxHTTPApi {
         // identify as that endpoint — otherwise it appears as a phantom second
         // provider next to the primary it actually IS.
         const baseUrl = slot.api_base_url ?? cfg.api_base_url;
+        if (listApplies && refusedSnapshotClass({ provider, apiBaseURL: baseUrl }) !== null) continue;
         push(providerIdentity(provider, baseUrl), (id) => id === modelId);
       }
     }
@@ -4120,7 +4126,7 @@ export class LynoxHTTPApi {
     // Mistral is reachable WITHOUT a tier_set slot too: standard mode keeps it
     // as the engine-level fallback/worker whenever MISTRAL_API_KEY is set. The
     // `seen` set suppresses it when Mistral is already listed.
-    if (process.env['MISTRAL_API_KEY']?.length) {
+    if (process.env['MISTRAL_API_KEY']?.length && !listApplies) {
       push(providerIdentity('mistral'), (id) => id.toLowerCase().startsWith('mistral'));
     }
 
@@ -9996,6 +10002,22 @@ export class LynoxHTTPApi {
       }
       const bodyKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
       const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
+      // On an instance connected to a Shopify store a probe goes only where a model request may
+      // go (`contained-providers.ts`): a typed key is the user's, and another endpoint is refused
+      // before anything is sent. An empty key is the stored one, which on a pool tier is the pool's.
+      {
+        const { providerListApplies, refusedProviderClass, PROVIDER_NOT_ON_LIST_REFUSAL } = await import('../core/contained-providers.js');
+        if (providerListApplies()) {
+          const wire = provider === 'vertex' ? 'vertex' : provider === 'openai' ? 'openai' : 'anthropic';
+          // The `anthropic` probe goes to api.anthropic.com whatever base is typed; `custom` is
+          // refused by its provider before its base is read.
+          const target = wire === 'anthropic' ? undefined : baseUrl;
+          if (refusedProviderClass({ wire, provider, baseURL: target, apiKey: bodyKey }) !== null) {
+            errorResponse(res, 200, PROVIDER_NOT_ON_LIST_REFUSAL);
+            return;
+          }
+        }
+      }
       // Vault fallback: when the user already saved the key earlier and now
       // hits "test connection" without re-typing, the form posts an empty body
       // key. Pre-1.5.2 the endpoint 400'd "API key required" even though the
@@ -10112,21 +10134,26 @@ export class LynoxHTTPApi {
         import('../core/speak.js'),
       ]);
       const { readUserConfig } = await import('../core/config.js');
+      const { providerListApplies } = await import('../core/contained-providers.js');
       const sttProvider = transcribeMod.getActiveTranscribeProvider();
       const ttsProvider = speakMod.getActiveSpeakProvider();
       const userConfig = readUserConfig();
+      // On an instance connected to a Shopify store no text goes to a speech service: the
+      // Mistral options are not available and the settings say why (`speech_service_off`).
+      const speechServiceOff = providerListApplies();
 
       // Provider lists for the Settings picker. `available` reflects whether
       // the prerequisite (API key / local binary) is present; disabled options
       // still appear so users see which choices exist on upgrade.
+      // `auto` is a choice only where it resolves to something: with the switch on, only to whisper.cpp.
       const sttProviders = [
-        { id: 'auto',    name: 'Auto',                            available: true },
-        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: transcribeMod.mistralVoxtralProvider.isAvailable },
+        { id: 'auto',    name: 'Auto',                            available: !speechServiceOff || transcribeMod.hasTranscribeProvider() },
+        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: !speechServiceOff && transcribeMod.mistralVoxtralProvider.isAvailable },
         { id: 'whisper', name: 'whisper.cpp (local)',             available: transcribeMod.whisperCppProvider.isAvailable },
       ];
       const ttsProviders = [
-        { id: 'auto',    name: 'Auto',                            available: true },
-        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: speakMod.mistralVoxtralTtsProvider.isAvailable },
+        { id: 'auto',    name: 'Auto',                            available: !speechServiceOff },
+        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: !speechServiceOff && speakMod.mistralVoxtralTtsProvider.isAvailable },
       ];
 
       // Env-var overrides — when set, the Settings selector should display
@@ -10139,7 +10166,9 @@ export class LynoxHTTPApi {
       // Wrapped in try/catch as a belt + suspenders; listMistralVoices itself
       // already handles its own errors but we never want /voice/info to 5xx.
       let voices: Awaited<ReturnType<typeof speakMod.listMistralVoices>> = [];
-      try { voices = await speakMod.listMistralVoices(); } catch { /* keep empty */ }
+      if (!speechServiceOff) {
+        try { voices = await speakMod.listMistralVoices(); } catch { /* keep empty */ }
+      }
 
       // Whether the tenant may CHANGE the provider, decided by the same set the
       // write gate enforces (MANAGED_USER_WRITABLE_CONFIG) rather than by the UI
@@ -10153,6 +10182,7 @@ export class LynoxHTTPApi {
         !MANAGED_USER_WRITABLE_CONFIG.has(field);
 
       jsonResponse(res, 200, {
+        speech_service_off: speechServiceOff,
         stt: {
           available: transcribeMod.hasTranscribeProvider(),
           provider: sttProvider?.name ?? null,
@@ -10333,14 +10363,20 @@ export class LynoxHTTPApi {
     // ── Transcription (streaming via SSE) ──
     this.addStatic('user', 'POST /api/transcribe', async (_req, res, _params, body) => {
       const {
-        HAS_WHISPER,
+        hasTranscribeProvider,
         transcribeWithStream,
         extractSessionContext,
         getActiveTranscribeProvider,
         VOXTRAL_USD_PER_MIN,
       } = await import('../core/transcribe.js');
-      if (!HAS_WHISPER) {
-        errorResponse(res, 503, 'Transcription not available (set MISTRAL_API_KEY or install whisper.cpp + ffmpeg)');
+      // Asked per request, not the boot-time `HAS_WHISPER`: on an instance connected to a
+      // Shopify store a Mistral key does not make transcription available (`contained-providers.ts`).
+      if (!hasTranscribeProvider()) {
+        const { providerListApplies } = await import('../core/contained-providers.js');
+        errorResponse(res, 503, providerListApplies()
+          // ux U-074: a Mistral key does not help here, so the text does not suggest one.
+          ? 'On instances connected to Shopify, lynox sends no audio to a speech service, and speech recognition on the instance itself is not set up here.'
+          : 'Transcription not available (set MISTRAL_API_KEY or install whisper.cpp + ffmpeg)');
         return;
       }
       const b = body as Record<string, unknown> | null;
