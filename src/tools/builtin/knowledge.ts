@@ -73,7 +73,10 @@ export const rememberTool: ToolEntry<RememberInput> = {
       'Record a durable business fact, decision, or standing preference so it persists across sessions. ' +
       'Link it to the client / company / project by name via `subject` so it resurfaces when that subject is in focus. ' +
       'Use when you LEARN something durable — NOT for one-off computation, deadlines (use task_create), or ' +
-      'structured/quantitative data (use data_store_insert). Record it before you finish the turn.',
+      'structured/quantitative data (use data_store_insert). Also NOT for instructions about the job you are doing now ' +
+      '(what this text, run or batch must contain or leave out, its length, its keywords), even when phrased as binding: ' +
+      'they describe the task, not the business. Record such a rule only when the operator says it applies from now on. ' +
+      'Record a durable fact before you finish the turn.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,

@@ -76,4 +76,35 @@ describe('presetNotFollowed on a store host', () => {
   it('still names bexio for its own host', () => {
     expect(presetNotFollowed({ base_url: 'https://api.bexio.com', auth: { type: 'bearer' } })?.id).toBe('bexio');
   });
+
+  // Once the exchange is on, a profile on a store is the store preset's or nothing.
+  const claimed = (base_url: string, auth?: { type: string; oauth?: { preset_id?: string } }) =>
+    presetNotFollowed({ base_url, ...(auth === undefined ? {} : { auth }) }, OAUTH_PRESETS, { storesClaimed: true })?.id;
+
+  it.each([
+    ['a pasted token', 'https://my-store.myshopify.com/admin/api/2025-10', { type: 'bearer' }],
+    ['a header of its own', 'https://my-store.myshopify.com', { type: 'header' }],
+    ['no auth', 'https://my-store.myshopify.com', undefined],
+    ['another provider\'s id', 'https://my-store.myshopify.com', { type: 'oauth2', oauth: { preset_id: 'bexio' } }],
+    ['the host with a root dot', 'https://my-store.myshopify.com./admin', { type: 'bearer' }],
+    ['the host in capitals', 'https://MY-STORE.MYSHOPIFY.COM/admin', { type: 'bearer' }],
+  ] as const)('with storesClaimed, holds %s on a store to shopify', (_label, base_url, auth) => {
+    expect(claimed(base_url, auth)).toBe('shopify');
+  });
+
+  it.each([
+    ['the profile that goes through shopify', 'https://my-store.myshopify.com', { type: 'oauth2', oauth: { preset_id: 'shopify' } }],
+    // Hosts the template cannot build from a parameter the preset accepts.
+    ['the apex', 'https://myshopify.com', { type: 'bearer' }],
+    ['a store name with a dot', 'https://a.b.myshopify.com', { type: 'bearer' }],
+    ['a store name that starts with a hyphen', 'https://-x.myshopify.com', { type: 'bearer' }],
+    ['a host that only ends like a store', 'https://evilmyshopify.com', { type: 'bearer' }],
+    ['a host no provider claims', 'https://api.crm.example', { type: 'bearer' }],
+  ] as const)('with storesClaimed, holds nothing for %s', (_label, base_url, auth) => {
+    expect(claimed(base_url, auth)).toBeUndefined();
+  });
+
+  it('with storesClaimed, still names bexio for its own host', () => {
+    expect(claimed('https://api.bexio.com', { type: 'bearer' })).toBe('bexio');
+  });
 });

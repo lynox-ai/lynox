@@ -23,8 +23,10 @@ describe('private-mode switch text', () => {
 
 	it('is what the switch shows, as tooltip and as label, in both states', () => {
 		const shell = readFileSync(fileURLToPath(new URL('./AppShell.svelte', import.meta.url)), 'utf8');
-		expect(shell).toContain("aria-label={headerContained ? t('threads.contained_locked') : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}");
-		expect(shell).toContain("title={headerContained ? t('threads.contained_locked') : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}");
+		expect(shell).toContain("aria-label={headerContained ? headerContainedText : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}");
+		expect(shell).toContain("title={headerContained ? headerContainedText : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}");
+		// The locked text says what the engine could tell: read store data, or could not check.
+		expect(shell).toMatch(/const headerContainedText = \$derived\(\s*containedTextKeys\('locked', getThreadContained\(\)\s*\? getThreadContainedUnknown\(\)\s*: readContainedUnknown\(getThreads\(\)\.find\(\(thr\) => thr\.id === getSessionId\(\)\)\?\.contained_unknown\)\)\.map\(\(k\) => t\(k\)\)\.join\(' '\),\s*\);/);
 	});
 });
 
@@ -42,7 +44,7 @@ describe('the switch of a contained chat (read data through a store connection)'
 	});
 
 	it('the list badge names it', () => {
-		expect(shell).toContain("aria-label={thread.contained ? t('threads.contained_badge') : t('threads.private')}");
+		expect(shell).toContain("aria-label={thread.contained ? t(containedTextKeys('badge', readContainedUnknown(thread.contained_unknown))[0]!) : t('threads.private')}");
 		expect(shell).toContain('{#if thread.is_favorite || thread.skip_extraction || thread.contained}');
 	});
 

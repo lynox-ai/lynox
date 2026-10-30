@@ -11,7 +11,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -344,10 +344,20 @@ export function connectedAccountProfiles(url: string, apiStore: NonNullable<Tool
 }
 
 /** The built-in provider whose API host `url` is on (`apiHosts`), whatever profiles exist: the
- *  same predicate a profile is held to when it is saved (`presetNotFollowed`), asked for a
+ *  same predicate a profile is held to when it is saved (`providerNotFollowed`), asked for a
  *  request that follows no provider. */
 function hostClaimant(url: string): OAuthPreset | undefined {
-  return presetNotFollowed({ base_url: url });
+  return providerNotFollowed({ base_url: url });
+}
+
+/**
+ * {@link presetNotFollowed} as the engine asks it: a store host counts as the store provider's
+ * while the store exchange is switched on ({@link shopifyExchangeSwitchOn}), read at each call.
+ * The one reading for the save (`api_setup`) and the request, so the two cannot disagree.
+ */
+export function providerNotFollowed(profile: Parameters<typeof presetNotFollowed>[0]): OAuthPreset | undefined {
+  // `undefined`, not `OAUTH_PRESETS`: the register stays the predicate's own default, as every caller had it before.
+  return presetNotFollowed(profile, undefined, { storesClaimed: shopifyExchangeSwitchOn() });
 }
 
 /** Every profile on `url`'s host, as {@link presetProfilesOnHost} finds them, with or without a preset. */
@@ -2120,7 +2130,7 @@ async function attachEngineManagedAuth(
   try { new URL(url); } catch { parsed = false; } // invalid URL — assertHostPolicy reports it downstream
   if (write && parsed && apiStore) {
     for (const p of profilesOnHost(url, apiStore)) {
-      const provider = presetNotFollowed(p);
+      const provider = providerNotFollowed(p);
       if (provider) { astray = { profile: p, provider }; break; }
     }
   }
@@ -2234,7 +2244,12 @@ async function attachEngineManagedAuth(
     if (memberRefusal !== null) return { refusal: memberRefusal };
     // Before the revoked-grant check and the renewal: a request this refuses reads nothing.
     const offGrant = slotOffGrant([accessTokenKey(profile.id)]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
+    if (offGrant !== undefined) {
+      // A store's own connection asked for a path its token does not go to: said as that, since the
+      // general text below ("to its base_url") is true of the host and wrong about the path.
+      const store = storePathRefusal(profile, url);
+      return { refusal: store ?? slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
+    }
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
     // token and send the model to fetch_token, which cannot help. Only while the
@@ -2801,6 +2816,22 @@ function slotReachRefusal(profileId: string, name: string, hostname: string, cli
   return `Error: api_profile "${profileId}" would send ${shapedForLog(name, DERIVED_NAME_SHAPE, 80)} to ${hostname}, but that vault name holds an OAuth token that goes only to where its own connection points (an access token to its base_url, a refresh token only to its token endpoint), or more than one profile claims it. Nothing was sent. Give this profile a credential of its own with api_setup action="update", or send the request through the profile that holds the connection.`;
 }
 
+/**
+ * A store connection's request to a path outside its provider's API (`apiPathPrefix`), written
+ * plainly or with an encoded slash or backslash: `null` for any other profile or path. Asked after
+ * the attach refused a store profile whose base is off its store, so the host is the store's. The
+ * path is not repeated; the model wrote it and knows it.
+ */
+function storePathRefusal(profile: ApiProfile, url: string): string | null {
+  const preset = OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '');
+  const prefix = preset?.apiPathPrefix;
+  if (preset === undefined || prefix === undefined) return null;
+  let path: string;
+  try { path = new URL(url).pathname; } catch { return null; }
+  if (path.startsWith(prefix) && !/%(2f|5c)/i.test(path)) return null;
+  return `Error: api_profile "${profile.id}" is the connection of a ${preset.label} store, and its token goes only to the store's API: paths under ${prefix}, with no encoded slash or backslash (%2F, %5C) in the path. This request goes to another path on the store, so nothing was sent. Other paths there are served by others than the store's API (an app's pages under /apps/, for example), and lynox does not send the store's token to them. Do not retry it, and do not set a credential yourself; make the request to the API path for what you need.`;
+}
+
 /** Shared wording — the same refusal for basic and bearer/header. */
 function protectedKeyRefusal(profileId: string, keys: string): string {
   return `Error: api_profile "${profileId}" names protected secret(s) ${keys} as its credentials. Those belong to the platform or hold the tenant's own provider key, and are never attached to an outbound request. Use a credential the user supplied for this API.`;
@@ -3140,7 +3171,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // nowhere to keep a profile.
       const wayOut = !toolContext?.apiStore
         ? 'This run has no api_profile store, so it cannot write there.'
-        : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
+        : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}"${presetParamsForModel(claimant) === '' ? '' : ` and auth.oauth.preset_params ${presetParamsForModel(claimant)}`}, then connect it with api_setup action "connect".`;
       blockedVerbatim(`Blocked: ${writeShown} to ${service()} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
     }
     // A write to a connected account is shown with everything the request puts on the wire, as
