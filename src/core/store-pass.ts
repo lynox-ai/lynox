@@ -12,6 +12,8 @@
  *  - the path is under `/admin/` and carries no `%` and no `;`: an encoded `/`, `\` or `.`,
  *    a double encoding (`%252e`) or a matrix segment (`/admin/..;/apps/`) is something a server
  *    in front of the store could route to another path;
+ *  - for a credential pass, the path has the shape of an Admin API call
+ *    ({@link credentialPathRefusal}) and stays out of the store's OAuth endpoints;
  *  - no header re-targets the request (`Host`, `X-Original-URL`, `X-Forwarded-*`, …), on a
  *    read as on a write;
  *  - exactly one header of the credential set is sent, it is the pass's header, and its
@@ -48,6 +50,27 @@ export const STORE_PASS_PATH_PREFIX = '/admin/';
 
 /** The token endpoint: the one path an exchange pass reaches. */
 export const STORE_EXCHANGE_PATH = '/admin/oauth/access_token';
+
+/** The one path under `/admin/oauth/` a credential pass reaches: the read of the token's own scopes. */
+export const STORE_SCOPES_PATH = '/admin/oauth/access_scopes.json';
+
+/**
+ * Why a credential pass may not reach `path`, or `null` when it may. An allowlist of the path's
+ * shape, not a refusal of one prefix: non-empty segments of lowercase letters, digits, `_`, `-`
+ * and `.` under `/admin/`, none of which starts with `oauth`, or exactly {@link STORE_SCOPES_PATH}.
+ *
+ * A refusal of `/admin/oauth/` alone did not hold: `/admin//oauth/access_token` keeps both
+ * slashes in `URL.pathname`, and `/admin/OAuth/…` passes a case-sensitive compare. Here a repeated
+ * slash and a capital are refused rather than folded, so how the store reads them does not
+ * matter. Admin API paths are lowercase; a segment starting with `oauth` is refused anywhere, so
+ * neither a versioned spelling nor `oauth.json` reaches the token endpoint.
+ */
+export function credentialPathRefusal(path: string): string | null {
+  if (path === STORE_SCOPES_PATH) return null;
+  if (!/^\/admin(?:\/[a-z0-9_.-]+)+$/.test(path)) return 'the request is not for the Admin API';
+  if (path.split('/').some((segment) => segment.startsWith('oauth'))) return 'a store pass does not reach the store\'s OAuth endpoints';
+  return null;
+}
 
 const DIGEST_KEY = randomBytes(32);
 const minted = new WeakSet<object>();
@@ -141,6 +164,8 @@ export function storePassRefusal(url: URL, headers: Record<string, string>, pass
     if (method.toUpperCase() !== 'POST') return 'an exchange pass sends only the token exchange';
   } else {
     if (!path.startsWith(STORE_PASS_PATH_PREFIX)) return 'the request is not for the Admin API';
+    const refused = credentialPathRefusal(path);
+    if (refused !== null) return refused;
   }
   if (path.includes('%') || path.includes(';')) return 'the path carries an encoded character or a matrix segment';
   // `Host` is one of them: `fetchPinned` sets it itself, after this check.
