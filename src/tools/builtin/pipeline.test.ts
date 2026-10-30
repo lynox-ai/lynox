@@ -1514,7 +1514,7 @@ describe('runSavedWorkflow', () => {
       const id = seedSavedWorkflow({ mode: 'interactive', steps: [{ id: 'pick', task: 'ask_user which list' }] });
       mockRunManifest.mockResolvedValueOnce(makeRunState());
       const ask = async (): Promise<string> => 'B';
-      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, {
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL,
         parentPrompt: { parentAskUserPrompt: ask }, questionWait: { unanswered: false, pausedMs: (): number => 0 }, approvalFiling: filing,
       });
       const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
@@ -1540,7 +1540,7 @@ describe('runSavedWorkflow', () => {
       const id = seedSavedWorkflow({ mode: 'interactive', steps: [{ id: 'pick', task: 'ask_user which list' }] });
       mockRunManifest.mockResolvedValueOnce(makeRunState());
       // A caller that passed `parentPromptUser` too still hands on only the channel.
-      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, {
+      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL,
         parentPrompt: { ...channel, parentPromptUser: async () => 'Allow' }, questionWait: wait,
       });
       expect(result.ok).toBe(true);
@@ -1554,7 +1554,7 @@ describe('runSavedWorkflow', () => {
       ['ask_user beside ask_secret', 'ask_user which list, then ask_secret for the key'],
     ])('still refuses an interactive workflow that uses %s', async (_label, task) => {
       const id = seedSavedWorkflow({ mode: 'interactive', steps: [{ id: 'k', task }] });
-      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { parentPrompt: channel, questionWait: wait });
+      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL, parentPrompt: channel, questionWait: wait });
       expect(result.ok).toBe(false);
       expect(result.error).toMatch(/interactive/);
       expect(mockRunManifest).not.toHaveBeenCalled();
@@ -1563,7 +1563,7 @@ describe('runSavedWorkflow', () => {
     it('an autonomous workflow gets no channel even when one is handed in', async () => {
       const id = seedSavedWorkflow();
       mockRunManifest.mockResolvedValueOnce(makeRunState());
-      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { parentPrompt: channel, questionWait: wait });
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL, parentPrompt: channel, questionWait: wait });
       const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
       expect(ctx['parentPrompt']).toBeUndefined();
       expect(ctx['questionWait']).toBeUndefined();
@@ -1579,7 +1579,7 @@ describe('runSavedWorkflow', () => {
   it('quotes a stored step id in a refusal before the run without the characters that render as nothing', async () => {
     const id = seedSavedWorkflow();
     mockRunManifest.mockRejectedValueOnce(new Error(`Step "fetch${String.fromCodePoint(0x200B)}" declares unknown tool(s): gone`));
-    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL });
     expect(result.error).toBe('Workflow execution failed: Step "fetch" declares unknown tool(s): gone');
   });
 
