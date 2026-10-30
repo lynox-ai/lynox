@@ -23,6 +23,8 @@ import { WorkflowStore, type ContentMigrationCounts, type WorkflowAuthorship, ty
 import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
+import { HISTORY_MARKERS_DDL } from './history-markers.js';
+import { findHiddenChar, hiddenCharRefusal } from './hidden-text.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
@@ -1614,6 +1616,12 @@ const MIGRATIONS: string[] = [
    ALTER TABLE run_tool_calls ADD COLUMN lift_entry TEXT CHECK (lift_entry IN ('v1'));
    ALTER TABLE run_tool_calls ADD COLUMN filing TEXT CHECK (filing IN ('queued', 'not-queued'));
    ALTER TABLE run_tool_calls ADD COLUMN approval_id TEXT;`,
+  // v70: history.db's copies of the two engine.db markers that must outlive engine.db
+  // (`history-markers.ts`, cut S3-E): `contained_threads` (the thread rows of `contained`) and
+  // `exact_marker_mirror` (the exact marker, with the instance it was set for). Written once,
+  // never changed. Not in HISTORY_KEPT_ON_ERASURE: the owner's erasure empties them with the
+  // threads. No backfill here: the boot copies what engine.db holds (`ContainmentMirror.syncFrom`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (70);${HISTORY_MARKERS_DDL}`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -3326,6 +3334,21 @@ export class RunHistory {
     // through here, so a contract-governed workflow with an unconstrained
     // re-targetable param is rejected before it can be persisted + scheduled.
     // No contract → no-op, so existing playbooks are unaffected.
+    // The text a run hands the model as its instruction (name, goal, each step's task, the
+    // parameters) carries no character that renders as nothing outside the places real text puts
+    // one (`hidden-text.ts`, `hidden-chars.ts`): a workflow
+    // copied from someone else's would bring its hidden instructions along. Only tools save here,
+    // so a refusal reaches the model that wrote it. Not read: a step's `input_template`, which is
+    // a tool's arguments as a session captured them (scraped text may hold such a character, and
+    // the model saving it cannot rewrite them; a run shows them escaped, `runtime-adapter.ts`), and `reasoning`, the capture's own record, which
+    // never reaches a run's model.
+    const hidden = findHiddenChar({
+      name: planned.name,
+      goal: planned.goal,
+      steps: planned.steps.map((s) => ({ task: s.task })),
+      parameters: (planned as { parameters?: unknown }).parameters,
+    });
+    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
     // S3f write-cutover: write the workflow definition DIRECTLY to engine.db. The
@@ -3443,11 +3466,12 @@ export class RunHistory {
     return this._requireWorkflowStore().remove(id);
   }
 
-  markPipelineExecuted(id: string): void {
+  /** Whether the definition was removed: its run row says so (660b). */
+  markPipelineExecuted(id: string): boolean {
     // A one-shot that executed leaves the DEFINITION set (only non-templates reach
     // markPipelineExecuted). Drop its engine.db def row so the library no longer
     // lists it. The Run itself is a separate pipeline_runs SPINE row (D6).
-    this._requireWorkflowStore().dropExecuted(id);
+    return this._requireWorkflowStore().dropExecuted(id);
   }
 
   insertTask(params: {
@@ -3678,6 +3702,7 @@ export class RunHistory {
     scopeId?: string | undefined;
     status?: string | undefined;
     taskType?: string | undefined;
+    paused?: boolean | undefined;
     limit?: number | undefined;
   }): TriggerRecord[] {
     return this._triggerStore?.listFiltered(opts) ?? [];

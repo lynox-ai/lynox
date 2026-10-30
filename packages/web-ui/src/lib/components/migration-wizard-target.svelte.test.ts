@@ -98,7 +98,8 @@ describe('a target reaches the wizard only through the form', () => {
 		expect(getTargetUrl()).toBe('');
 		expect(getMigrationToken()).toBe('');
 		expect(getStep()).toBe('preview');
-		expect(calls().filter((c) => !c.endsWith('/migration/preview'))).toEqual([]);
+		// Besides the preview, only the tier is read (the done step names the way out by it).
+		expect(calls().filter((c) => !c.endsWith('/migration/preview') && c !== 'GET /api/config')).toEqual([]);
 	});
 
 	it('starts the export once the form is filled and start is pressed', async () => {

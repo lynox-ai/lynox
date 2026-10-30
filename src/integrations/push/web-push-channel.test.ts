@@ -74,6 +74,30 @@ describe('WebPushNotificationChannel — msg.data passthrough', () => {
 	});
 });
 
+describe('WebPushNotificationChannel — tag', () => {
+	it('gives two untagged messages sent in the same millisecond tags of their own, so neither replaces the other', async () => {
+		const now = vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+		try {
+			await Promise.all([
+				channel.send({ title: 'a', body: 'a', priority: 'normal' }),
+				channel.send({ title: 'b', body: 'b', priority: 'normal' }),
+			]);
+		} finally {
+			now.mockRestore();
+		}
+		const tags = (webPush.sendNotification as ReturnType<typeof vi.fn>).mock.calls
+			.map((call) => (JSON.parse(call[1] as string) as { tag: string }).tag);
+		expect(tags).toHaveLength(2);
+		expect(new Set(tags).size).toBe(2);
+	});
+
+	it('keeps a caller\'s taskId as the tag', async () => {
+		await channel.send({ title: 'a', body: 'a', priority: 'normal', taskId: 'lynox-approval-queue' });
+		const payload = JSON.parse((webPush.sendNotification as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string) as { tag: string };
+		expect(payload.tag).toBe('lynox-approval-queue');
+	});
+});
+
 describe('WebPushNotificationChannel — outcome', () => {
 	it('reports delivered when a subscription accepted the push', async () => {
 		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('delivered');
@@ -249,6 +273,71 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(ch.addedBy('https://push.example/eva')).toEqual({ created_by: 'mandate:eva@example.invalid' });
 		live.delete('TEST-MANDATE-1');
 		expect(ch.subscriptionCount(mandate('eva@example.invalid', 'TEST-MANDATE-2'))).toBe(0);
+	});
+
+	// A message for one side (the owner's and the mandates' sentences about a mail waiting for the
+	// owner's approval) reaches that side's devices only, and a device of the other
+	// side cannot make it count as delivered.
+	it('sends an owner message to the owner\'s devices only', async () => {
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'owner' })).toBe('delivered');
+		expect(sendCalls()).toEqual(['https://push.example/abc']);
+		// The same message without an audience still reaches both, so the audience is what decides.
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		await ch.send({ title: 't', body: 'b', priority: 'normal' });
+		expect(sendCalls().sort()).toEqual(['https://push.example/abc', 'https://push.example/eva']);
+	});
+
+	it('sends a mandates message to its live grant\'s devices only, and none after the grant ended', async () => {
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-1' })).toBe('delivered');
+		expect(sendCalls()).toEqual(['https://push.example/eva']);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		live.delete('TEST-MANDATE-1');
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-1' })).toBe('failed');
+		expect(sendCalls()).toEqual([]);
+	});
+
+	// A sentence about one grant's entry reaches that grant's devices only; a mandates' message that
+	// names no grant reaches none, so leaving the grant out cannot widen it to every mandate.
+	it('sends a mandates message to the named grant\'s devices only, and to none without a grant', async () => {
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		ch.subscribe('https://push.example/max', 'k', 'a', mandate('max@example.invalid', 'TEST-MANDATE-2'));
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-2' })).toBe('delivered');
+		expect(sendCalls()).toEqual(['https://push.example/max']);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates' })).toBe('failed');
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-9' })).toBe('failed');
+		expect(sendCalls()).toEqual([]);
+		// Control: the same message without a side still reaches every device.
+		await ch.send({ title: 't', body: 'b', priority: 'normal' });
+		expect(sendCalls().sort()).toEqual(['https://push.example/abc', 'https://push.example/eva', 'https://push.example/max']);
+	});
+
+	// A side narrows what `onlyFor` allows and never widens it.
+	it('keeps a side within `onlyFor`: one mandate\'s own for the mandates\' side, nothing of the owner\'s', async () => {
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		ch.subscribe('https://push.example/max', 'k', 'a', mandate('max@example.invalid', 'TEST-MANDATE-2'));
+		await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-1' }, EVA);
+		expect(sendCalls()).toEqual(['https://push.example/eva']);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		// A grant named on the message cannot reach past `onlyFor`.
+		expect((await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-2' }, EVA)).sent).toBe(0);
+		expect(sendCalls()).toEqual([]);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		expect((await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'owner' }, EVA)).sent).toBe(0);
+		expect(sendCalls()).toEqual([]);
+	});
+
+	it('does not count an owner message as delivered when only a mandate\'s device exists', async () => {
+		ch.unsubscribe('https://push.example/abc');
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'owner' })).toBe('failed');
+		expect(sendCalls()).toEqual([]);
+		// Without an audience, the mandate's device is reached, but only as someone other than the owner.
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal' })).toBe('reached_others');
+		// The mandates' side counts its own: reaching the mandate is its delivery.
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates', mandateId: 'TEST-MANDATE-1' })).toBe('delivered');
 	});
 
 	it('counts and sends for a mandate only its own', async () => {

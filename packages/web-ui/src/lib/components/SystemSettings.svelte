@@ -20,6 +20,8 @@
 	let saving = $state(false);
 
 	let vaultConfigured = $state(false);
+	// The owner-only keyless field (see StatusBar); absent for a mandate and when nothing was found.
+	let vaultKeyState = $state<'missing_over_encrypted_data' | 'unknown' | null>(null);
 	let vaultRevealed = $state(false);
 	let vaultKey = $state<string | null>(null);
 
@@ -39,8 +41,9 @@
 			};
 			managed = cpSuppliesLLMKey(body.managed);
 			if (vaultRes.ok) {
-				const vaultBody = (await vaultRes.json()) as { configured: boolean };
+				const vaultBody = (await vaultRes.json()) as { configured: boolean; vault_key?: unknown };
 				vaultConfigured = vaultBody.configured;
+				vaultKeyState = vaultBody.vault_key === 'missing_over_encrypted_data' || vaultBody.vault_key === 'unknown' ? vaultBody.vault_key : null;
 			}
 			loaded = true;
 		} catch (e) {
@@ -109,7 +112,11 @@
 		<section class="border-t border-border pt-6 space-y-2">
 			<h2 class="text-lg font-medium">{t('system.vault_heading')}</h2>
 			<p class="text-xs text-text-muted">{t('system.vault_subtitle')}</p>
-			{#if !vaultConfigured}
+			{#if vaultKeyState !== null}
+				<!-- "generates one on first save" is not true here: a key existed, and the data it wrote is still there. -->
+				<p role="alert" class="text-sm text-warning">{t(vaultKeyState === 'unknown' ? 'status.vault_key_unknown' : 'status.vault_key_missing')}</p>
+				<p class="text-sm text-text-muted">{t('system.vault_key_missing_hint')}</p>
+			{:else if !vaultConfigured}
 				<p class="text-sm italic text-text-muted">{t('system.vault_not_configured')}</p>
 			{:else if vaultRevealed && vaultKey}
 				<pre class="font-mono text-xs px-2 py-1 bg-bg-muted rounded select-all overflow-x-auto">{vaultKey}</pre>

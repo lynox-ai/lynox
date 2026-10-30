@@ -9,6 +9,7 @@ import { ApiStore, type ApiProfile } from '../../core/api-store.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => mockLynoxDir }));
@@ -146,7 +147,7 @@ function agentWith(store: ApiStore, secrets: Record<string, string> = { EXAMPLE_
         return JSON.parse(text.replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, (m, name: string) => secrets[name] ?? m)) as unknown;
       },
     },
-    toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
+    toolContext: { auditLog: testAuditLog().log, vaultNameBindings: bindingsAsMigrated(store), apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
   } as never;
 }
 

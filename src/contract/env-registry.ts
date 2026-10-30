@@ -66,7 +66,7 @@ export type EnvValueKind =
 
 export type EmitPolicy =
   | 'always' // emitted unconditionally for every provisioned tier
-  | 'tier' // emitted unconditionally for the tiers in `requiredForTier`
+  | 'tier' // emitted for the tiers in `requiredForTier`, unless the row's `notRequiredWhenOn` switch is on
   | 'when-true' // emitted only when the per-tenant flag is true (false never clobbers a hand-flipped .env)
   | 'when-non-default' // emitted only when configured / non-default / present
   | 'operator-only' // engine read exists; the CP must NOT emit
@@ -109,8 +109,15 @@ export interface EnvRegistryRow {
   emitPolicy: EmitPolicy;
   engineConsumed: EngineConsumption;
   secret?: { redact: 'whole-value' | 'exact-name'; preserveAcrossSyncEnv?: boolean };
-  /** Tiers for which the var is unconditionally present after the standard managed emit path. */
+  /** Tiers for which the var is present after the standard managed emit path, except where
+   *  `notRequiredWhenOn` names a switch that is on ({@link envVarRequired}). */
   requiredForTier?: BillingTier[];
+  /**
+   * A `bool` row whose switch, when on (`1` or `true`), lets this var be absent on a tier
+   * `requiredForTier` names. For an instance where the switch's feature rules out what this var
+   * feeds, so the control plane leaves it out.
+   */
+  notRequiredWhenOn?: string;
   /** Legacy env names still accepted at read boundaries (src/core/env.ts ENV_ALIASES) — read-aliases are permanent. */
   legacyReadAliases?: string[];
   /** Behavior of an OLDER engine receiving this var, when it differs from "ignored". */
@@ -157,23 +164,24 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
 
   // ── Provider key slots (SDK/ecosystem-canonical names) ────────────────────
   { name: 'ANTHROPIC_API_KEY', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' }, note: 'SDK-canonical key slot — managed Anthropic-main. Also consumed inside the Anthropic SDK constructor and via the provider-keys slot map.' },
-  { name: 'MISTRAL_API_KEY', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' }, note: 'SDK-canonical key slot — worker profile + in-UI switch target; also read via the provider-keys slot map.' },
+  { name: 'MISTRAL_API_KEY', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, notRequiredWhenOn: 'LYNOX_SHOPIFY_EXCHANGE', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' }, note: 'SDK-canonical key slot — worker profile + in-UI switch target; also read via the provider-keys slot map. Not required where LYNOX_SHOPIFY_EXCHANGE is on: the control plane may then leave out any of the Mistral block (this key, LYNOX_WORKER_PROFILE, LYNOX_MODEL_PROFILES_JSON). The control plane decides that; this row does not make the engine avoid Mistral. An engine without the key drops the Mistral slot and clears a worker profile that names a missing profile.' },
   { name: 'FIREWORKS_API_KEY', valueKind: 'opaque', emitPolicy: 'when-non-default', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/config.ts' }, note: 'Emitted only when the CP pool holds a Fireworks key (opt-in Efficient preset).' },
   { name: 'LYNOX_MANAGED_FIREWORKS_ENABLED', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'direct', readSite: 'src/core/tier-presets.ts' }, note: 'Unlocks the Fireworks slot for managed; emitted only alongside FIREWORKS_API_KEY (DPA-gated sub-processor).' },
   { name: 'LYNOX_FEATURE_PROACTIVE_DEEP', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep', consumerSite: 'src/core/session.ts' } }, note: 'Fleet opt-in for proactive deep escalation; engine still cost-gates on the deep-slot provider.' },
   { name: 'LYNOX_FEATURE_PROACTIVE_DEEP_ANTHROPIC', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep-anthropic', consumerSite: 'src/core/session.ts' } }, note: 'Allows proactive deep even on an Anthropic deep slot (premium).' },
   { name: 'LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'workflow-reviewed-grant', consumerSite: 'src/core/workflow-grant.ts' } }, note: 'Lets a person grant a saved workflow a reviewed write contract. Off by default in the engine, so a self-hosted instance turns it on itself; a control plane emits it per instance when its operator turns it on there.' },
+  { name: 'LYNOX_FEATURE_BULK_RUNS', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'bulk-runs', consumerSite: 'src/core/bulk-switch.ts' } }, note: 'Opens bulk runs on a managed pool tier (managed, managed_pro, managed_max), where the owner does not own the budget. A control plane emits it per instance, never fleet-wide; the owner can still turn bulk runs off in the config. No effect on any other tier.' },
   { name: 'LYNOX_FEATURE_INBOUND_WEBHOOKS', valueKind: 'bool', emitPolicy: 'operator-only', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'inbound-webhooks', consumerSite: 'src/server/http-api.ts' } }, note: 'Opens the unauthenticated inbound webhook route, POST /api/webhooks/<token>. Off by default; a verified delivery is recorded and nothing runs it yet, so no control plane emits it.' },
-  { name: 'LYNOX_FEATURE_SHOPIFY_BULK_READ', valueKind: 'bool', emitPolicy: 'operator-only', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'shopify-bulk-read', consumerSite: 'src/core/bulk-shopify.ts' } }, note: 'Lets a bulk run list a Shopify store\'s products and read their before-images. Off by default. Such a run only reads and cannot be approved until a write form for the store exists, so no control plane emits it, and it is not to be turned on in production before then.' },
-  { name: 'LYNOX_FEATURE_APPROVAL_QUEUE', valueKind: 'bool', emitPolicy: 'operator-only', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'approval-queue', consumerSite: 'src/core/approval-store.ts' } }, note: 'Lets a run nobody watches file a mail for its owner to send or discard, instead of asking. Off by default; the owner has no list to decide from yet, so no control plane emits it.' },
+  { name: 'LYNOX_FEATURE_SHOPIFY_BULK_READ', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'shopify-bulk-read', consumerSite: 'src/core/bulk-shopify.ts' } }, note: 'Lets a bulk run list a Shopify store\'s products or their images, read their before-images and, once the owner approves it, write a product\'s title and SEO fields through the engine\'s `shopify_product` form (not its description) and an image\'s alt text through its `shopify_media_alt` form. Off by default; switching it off also stops approving, resuming and writing such runs, while an undo of what one wrote still runs. A control plane emits it per instance, never fleet-wide. It reads or writes a store only where bulk runs are open on that instance.' },
+  { name: 'LYNOX_FEATURE_APPROVAL_QUEUE', valueKind: 'bool', emitPolicy: 'operator-only', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'approval-queue', consumerSite: 'src/core/approval-store.ts' } }, note: 'Lets a run nobody watches file a mail for its owner to send or discard, instead of asking; the owner decides on the approvals page. Off by default. No control plane emits it.' },
 
   // ── OAuth app credentials (per provider) ──────────────────────────────────
   { name: 'GOOGLE_CLIENT_ID', valueKind: 'opaque', emitPolicy: 'operator-only', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'pair-resolver', pair: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' }, readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, note: 'OAuth APP credential, not a user token. The value is public by construction — it travels in the browser redirect — and is still declared secret, because an undeclared key is masked fail-closed downstream and a row that opts OUT of that default needs a stronger reason than the value being harmless. Operators set it per deployment; no control plane emits it. The policy was briefly conditional, for a broker model in which the control plane would have handed each tenant a shared client pair — that model was dropped on 2026-08-26 in favour of the control plane exchanging tokens itself, so the pair never reaches a tenant and the row is operator-only again. Policy and emit site move together in BOTH directions: an emitting policy with no emit site, and an emit under a non-emitting policy, each fail their own side of the ABI check — which is why this row moves back rather than waiting for an emit that is not coming.' },
   { name: 'GOOGLE_CLIENT_SECRET', valueKind: 'opaque', emitPolicy: 'operator-only', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'pair-resolver', pair: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' }, readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, note: 'The secret half of the GOOGLE_CLIENT_ID pair. Also read in src/core/secret-store.ts, but through process.env[envVar] with a VARIABLE, which no literal form can assert — not listed as a read site.' },
 
   // ── Worker / model-profiles bridge ────────────────────────────────────────
-  { name: 'LYNOX_WORKER_PROFILE', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Names a profile key inside LYNOX_MODEL_PROFILES_JSON; engine clears a dangling one.' },
-  { name: 'LYNOX_MODEL_PROFILES_JSON', valueKind: 'json', valueSchema: 'ModelProfile', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, secret: { redact: 'whole-value' }, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'JSON embeds provider keys in model_profiles[*].api_key → whole-value redaction (exact-name would miss it). Entries must satisfy shapes.ts isModelProfile.' },
+  { name: 'LYNOX_WORKER_PROFILE', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, notRequiredWhenOn: 'LYNOX_SHOPIFY_EXCHANGE', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Names a profile key inside LYNOX_MODEL_PROFILES_JSON; engine clears a dangling one.' },
+  { name: 'LYNOX_MODEL_PROFILES_JSON', valueKind: 'json', valueSchema: 'ModelProfile', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, notRequiredWhenOn: 'LYNOX_SHOPIFY_EXCHANGE', secret: { redact: 'whole-value' }, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'JSON embeds provider keys in model_profiles[*].api_key → whole-value redaction (exact-name would miss it). Entries must satisfy shapes.ts isModelProfile.' },
 
   // ── Conditional / feature flags ───────────────────────────────────────────
   { name: 'LYNOX_BUGSINK_DSN', valueKind: 'opaque', emitPolicy: 'when-non-default', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/error-reporting.ts' } },
@@ -205,7 +213,7 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
 
   // ── Denylist (must never be emitted) ──────────────────────────────────────
   { name: 'LYNOX_LAZY_TOOLS_ENABLED', valueKind: 'bool', emitPolicy: 'denylist', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Parked feature (rafael 2026-07-22): the lazy-tools path does not work and is deferred — the engine read exists, but the CP must never emit/enable it fleet-side.' },
-  { name: 'LYNOX_SHELL_EXEC_SOCKET', valueKind: 'opaque', emitPolicy: 'operator-only', engineConsumed: { kind: 'direct', readSite: 'src/tools/builtin/bash.ts' }, note: 'Path of the shell sidecar\'s exec socket (PRD 152 v2 §4.1). Set = bash runs in the sidecar, with NO fallback to running it in the engine; set but empty is an error. It must come with the sidecar itself (the compose template that adds the sidecar sets it), never from the env emit alone: an engine told to use a sidecar that does not exist has no bash at all. Unset = bash runs in the engine as before (self-host, local). An OLDER engine ignores it and keeps running bash in its own container.' },
+  { name: 'LYNOX_SHELL_EXEC_SOCKET', valueKind: 'opaque', emitPolicy: 'operator-only', engineConsumed: { kind: 'direct', readSite: 'src/core/shell-isolation.ts' }, note: 'Path of the shell sidecar\'s exec socket (PRD 152 v2 §4.1). Set = bash runs in the sidecar, with NO fallback to running it in the engine; set but empty or blank stops the start, and so does set without the workspace anchor on fd 3 (or fd 3 a directory with it unset). Read once at boot; every consumer reads the mode object, not the env. It must come with the sidecar itself (the compose template that adds the sidecar sets it), never from the env emit alone: an engine told to use a sidecar that does not exist has no bash at all. Unset = bash runs in the engine as before (self-host, local). An OLDER engine ignores it and keeps running bash in its own container.' },
   { name: 'LYNOX_SHOPIFY_EXCHANGE', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'direct', readSite: 'src/tools/builtin/http.ts' }, note: 'Lets the Shopify connect callback exchange its code for a token, under the exchange store pass (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B4). Off (unset or anything but `1`/`true`) = every Shopify token exchange is refused as before. Emitted only when the instance\'s flag is true; it is turned on per instance as its own step, on staging for a live check and in production only once the fleet runs the containment cuts.' },
   { name: 'LYNOX_EGRESS_PROXY_URL', valueKind: 'opaque', emitPolicy: 'operator-only', engineConsumed: { kind: 'direct', readSite: 'src/shell-sidecar/egress.ts' }, note: 'Where the engine reaches the egress proxy\'s registration listener (PRD 152 v2 §4.2), on the tenant\'s internal network. Default http://proxy:3129: the compose service `proxy` resolves on the internal network to that listener (sec-infra, measured, 2026-10-16). Read only in sidecar mode with LYNOX_EGRESS_PROXY_SECRET set. Not emitted.' },
   { name: 'LYNOX_EGRESS_SHELL_PROXY', valueKind: 'opaque', emitPolicy: 'operator-only', engineConsumed: { kind: 'direct', readSite: 'src/shell-sidecar/egress.ts' }, note: 'host:port the shell sidecar dials as its proxy (PRD 152 v2 §4.2). The engine puts it, with the call\'s credential, into each call\'s HTTPS_PROXY. Default proxy:3128: on the shell network the service `proxy` resolves to the shell listener (sec-infra, measured, 2026-10-16), provided the sidecar is ONLY on that network. Not emitted.' },
@@ -220,6 +228,18 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
 export const ENV_REGISTRY_BY_NAME: ReadonlyMap<string, EnvRegistryRow> = new Map(
   ENV_REGISTRY.map((r) => [r.name, r]),
 );
+
+/**
+ * Whether `row`'s var must be present on an instance of `tier` whose emitted env is `env`: the
+ * tier is one `requiredForTier` names, and the switch `notRequiredWhenOn` names, if any, is not
+ * on. The switch counts as on as the engine reads a `bool` var: `1` or `true`, nothing else.
+ */
+export function envVarRequired(row: EnvRegistryRow, tier: BillingTier, env: Readonly<Record<string, string | undefined>>): boolean {
+  if (!(row.requiredForTier ?? []).includes(tier)) return false;
+  if (row.notRequiredWhenOn === undefined) return true;
+  const sw = env[row.notRequiredWhenOn];
+  return !(sw === '1' || sw === 'true');
+}
 
 /**
  * Engine-read `LYNOX_*` vars that are SELF-HOST / operator surface only — the

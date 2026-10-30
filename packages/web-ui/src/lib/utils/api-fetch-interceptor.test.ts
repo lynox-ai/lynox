@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const markSessionExpired = vi.fn();
-vi.mock('../stores/session.svelte.js', () => ({ markSessionExpired: () => markSessionExpired() }));
+const markMandateMemoryBlocked = vi.fn();
+vi.mock('../stores/session.svelte.js', () => ({
+	markSessionExpired: () => markSessionExpired(),
+	markMandateMemoryBlocked: (r: string) => markMandateMemoryBlocked(r),
+}));
 
 const { installApiFetchInterceptor } = await import('./api-fetch-interceptor.js');
 
@@ -14,7 +18,7 @@ function installOver(status: number, body: string): void {
 const REVOKED = JSON.stringify({ error: 'This access has ended.', code: 'mandate_revoked' });
 
 describe('api fetch interceptor', () => {
-	beforeEach(() => { markSessionExpired.mockClear(); });
+	beforeEach(() => { markSessionExpired.mockClear(); markMandateMemoryBlocked.mockClear(); });
 	afterEach(() => { vi.unstubAllGlobals(); });
 
 	it('ends the session on the 403 of an ended access, and a view that reads 403 as its own state does not swallow it', async () => {
@@ -56,5 +60,24 @@ describe('api fetch interceptor', () => {
 		expect(markSessionExpired).not.toHaveBeenCalled();
 		await window.fetch('/api/secrets');
 		expect(markSessionExpired).toHaveBeenCalledTimes(1);
+	});
+	// 660a-2: the engine refuses a delegated access while it runs without durable knowledge.
+	it.each([
+		['mandate_memory_off', 'off'],
+		['mandate_memory_missing', 'missing'],
+	] as const)('shows the lock for %s, and does not end the session: signing in again changes nothing', async (code, reason) => {
+		installOver(403, JSON.stringify({ error: 'This access cannot sign in here.', code }));
+		const res = await window.fetch('/api/threads');
+		expect(markMandateMemoryBlocked).toHaveBeenCalledWith(reason);
+		expect(markSessionExpired).not.toHaveBeenCalled();
+		expect(((await res.json()) as { code: string }).code).toBe(code);
+	});
+
+	it('does not show the lock for an ended access or another 403', async () => {
+		installOver(403, REVOKED);
+		await window.fetch('/api/threads');
+		installOver(403, JSON.stringify({ error: 'x', code: 'owner_only' }));
+		await window.fetch('/api/threads');
+		expect(markMandateMemoryBlocked).not.toHaveBeenCalled();
 	});
 });

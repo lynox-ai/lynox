@@ -37,11 +37,13 @@ import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
 import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
+import { WorkflowStore } from '../core/workflow-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
 import { ChangesetManager } from '../core/changeset.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { currentRunGroup } from '../core/run-group.js';
+import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from '../core/chat-context.js';
 
 // === Mock dependencies ===
 
@@ -251,6 +253,7 @@ vi.mock('../core/engine.js', () => ({
     this.forgetProjectManifest = vi.fn();
     // No engine.db: no mandate is live and no release exists (tests that need either swap them).
     this.getMandateEnds = vi.fn().mockReturnValue(null);
+    this.getLegacyMemoryReason = vi.fn().mockReturnValue(null);
     this.getSecretReleases = vi.fn().mockReturnValue(null);
     // Each vault secret bound as the boot migration binds it, over whatever store the test swaps
     // in (`tests/helpers/vault-bindings.ts`). The callback tests' token endpoint comes from the
@@ -434,6 +437,10 @@ vi.mock('../core/config.js', async (importOriginal) => ({
   // The REAL bound check, like the escaper below: the write gate under test is
   // this function, and a stub would let the route and the loader disagree.
   admitBackgroundModel: (await importOriginal<typeof import('../core/config.js')>()).admitBackgroundModel,
+  // The REAL pool endpoint pairing: the managed write gate and the loader must decide alike.
+  poolEndpointFor: (await importOriginal<typeof import('../core/config.js')>()).poolEndpointFor,
+  POOL_MISTRAL_ENDPOINTS: (await importOriginal<typeof import('../core/config.js')>()).POOL_MISTRAL_ENDPOINTS,
+  POOL_ANTHROPIC_ENDPOINT: (await importOriginal<typeof import('../core/config.js')>()).POOL_ANTHROPIC_ENDPOINT,
   // Not a stub: the REAL escaper, so this suite tests the same rendering the
   // engine ships. A stub here would let the two sinks drift, which is the exact
   // failure this helper exists to prevent.
@@ -1198,6 +1205,32 @@ describe('LynoxHTTPApi', () => {
       expect(asOwner.status).not.toBe(403);
     });
 
+    it('GET /api/config says whose session asks about bulk runs: the owner or a mandate', async () => {
+      repayRateWindow();
+      const viewerOf = async (token: string): Promise<unknown> => {
+        const res = await fetch(`${baseUrl}/api/config`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        return ((await res.json()) as { bulk_runs: { viewer: unknown } }).bulk_runs.viewer;
+      };
+      expect(await viewerOf(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token)).toBe('mandate');
+      expect(await viewerOf(webUiLoginSession(TEST_SECRET, null)!.token)).toBe('owner');
+    });
+
+    it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
+      repayRateWindow();
+      const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      for (const verb of ['deselect', 'reselect']) {
+        const send = (token: string): Promise<Response> => fetch(`${baseUrl}/api/bulk/runs/TEST-RUN/targets/0/${verb}`, {
+          method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const asMandate = await send(mandate);
+        expect(asMandate.status, verb).toBe(403);
+        expect(((await asMandate.json()) as { error: string }).error).toContain('Only the owner');
+        expect((await send(owner)).status, verb).not.toBe(403);
+      }
+    });
+
     for (const [path, field, value, what] of [
       ['/api/auth/token', 'token', TEST_SECRET, 'see the access token'],
       ['/api/vault/key', 'key', 'TEST-VAULT-KEY-0000000000000000', 'see the vault key'],
@@ -1267,7 +1300,7 @@ describe('LynoxHTTPApi', () => {
       const origTm = engineRef['getTaskManager'];
       engineRef['getAuditLog'] = () => ({ record: (e: { principal: unknown }) => { rows.push(e); } });
       engineRef['getRunHistory'] = () => ({ getTask: () => undefined, deleteTask: () => false, deleteTrigger: () => true });
-      engineRef['getTaskManager'] = () => ({ deleteTodo: () => false, deleteSchedule: () => true });
+      engineRef['getTaskManager'] = () => ({ deleteTodo: () => false, deleteSchedule: () => true, getTrigger: () => undefined });
       try {
         const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
         const res = await fetch(`${baseUrl}/api/tasks/trg-9`, { method: 'DELETE', headers: { cookie: `lynox_session=${mandate}` } });
@@ -1372,6 +1405,41 @@ describe('LynoxHTTPApi', () => {
         const res = await secrets(token);
         expect(res.status).toBe(403);
         expect(await res.json()).toEqual({ error: 'This access has ended.', code: 'mandate_revoked' });
+      });
+
+      // ── 660a-2: a mandate is refused while the engine runs the legacy memory tools ──
+
+      describe('on an engine with the legacy memory tools', () => {
+        let origLegacy: unknown;
+        beforeEach(() => { origLegacy = engineRef()['getLegacyMemoryReason']; });
+        afterEach(() => { engineRef()['getLegacyMemoryReason'] = origLegacy; });
+
+        it('refuses a live mandate with the code for durable knowledge turned off', async () => {
+          engineRef()['getLegacyMemoryReason'] = () => 'dk_off';
+          const res = await secrets(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+          expect(res.status).toBe(403);
+          expect(((await res.json()) as { code?: string }).code).toBe('mandate_memory_off');
+        });
+
+        it('refuses it with its own code when durable knowledge is on but its store is missing', async () => {
+          engineRef()['getLegacyMemoryReason'] = () => 'store_missing';
+          const res = await secrets(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+          expect(res.status).toBe(403);
+          expect(((await res.json()) as { code?: string }).code).toBe('mandate_memory_missing');
+        });
+
+        it('lets the owner through: the lock is a mandate\'s', async () => {
+          engineRef()['getLegacyMemoryReason'] = () => 'dk_off';
+          expect((await secrets(webUiLoginSession(TEST_SECRET, null)!.token)).status).toBe(200);
+        });
+
+        it('lets the same mandate through once the durable tools are back: checked per request, not at the grant', async () => {
+          const token = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+          engineRef()['getLegacyMemoryReason'] = () => 'dk_off';
+          expect((await secrets(token)).status).toBe(403);
+          engineRef()['getLegacyMemoryReason'] = () => null;
+          expect((await secrets(token)).status).toBe(200);
+        });
       });
 
       it('refuses a mandate revoked before its first request, and its login does not revive it', async () => {
@@ -2042,6 +2110,30 @@ describe('LynoxHTTPApi', () => {
       const runningSessions = (): Map<string, unknown> =>
         (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
 
+      it('marks a file shown with a note instead of a diff as not compared, so its zero counts do not read as unchanged', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-compared-'));
+        const big = join(cwd, 'big.bin');
+        const small = join(cwd, 'small.txt');
+        writeFileSync(big, 'before', 'utf-8');
+        writeFileSync(small, 'before\n', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(big);
+        csm.backupBeforeWrite(small);
+        // Larger than the 5 MB the review reads.
+        truncateSync(big, 20 * 1024 * 1024);
+        writeFileSync(small, 'after\n', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          const res = await jsonFetch('/api/sessions/test/changeset');
+          const { files } = (await res.json()) as { files: Array<{ file: string; added: number; removed: number; compared: boolean }> };
+          expect(files.find((f) => f.file === 'big.bin')).toMatchObject({ compared: false, added: 0, removed: 0 });
+          expect(files.find((f) => f.file === 'small.txt')).toMatchObject({ compared: true, added: 1, removed: 1 });
+        } finally {
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+
       it('is refused while a run is in progress, and the files stay as the run left them', async () => {
         const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-review-'));
         const file = join(cwd, 'a.txt');
@@ -2154,6 +2246,172 @@ describe('LynoxHTTPApi', () => {
           mockSessionInstance.getChangesetManager.mockReturnValue(null);
           csm.cleanup();
           rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+
+      it('a review whose only file was replaced by a link since is still answered, and names it', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-only-'));
+        const left = join(cwd, 'left.txt');
+        const outside = join(mkdtempSync(join(tmpdir(), 'lynox-cs-out-')), 'outside.txt');
+        writeFileSync(outside, 'not the workspace', 'utf-8');
+        writeFileSync(left, 'left before', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(left);
+        writeFileSync(left, 'left by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          rmSync(left);
+          symlinkSync(outside, left);
+          expect(csm.hasChanges(), 'precondition: the file dropped out of the changes').toBe(false);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ rolledBack: 0, notRestored: ['left.txt'] });
+          const again = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
+          expect(again.status, 'the answered review is gone').toBe(400);
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+          rmSync(dirname(outside), { recursive: true, force: true });
+        }
+      });
+
+      // A file the backup could not read was never shown and nothing was saved for it: the answer
+      // does not name it, since no restore was promised and the reason it gives would be wrong.
+      it('a rollback does not name a file the review never showed and the backup could not read', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-unread-'));
+        const pipe = join(cwd, 'pipe');
+        const back = join(cwd, 'back.txt');
+        execFileSync('mkfifo', [pipe]);
+        writeFileSync(back, 'back before', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(pipe);
+        csm.backupBeforeWrite(back);
+        writeFileSync(back, 'back by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          expect(csm.rollbackFiles([pipe]), 'precondition: the manager leaves it').toEqual([pipe]);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ rolledBack: 1, notRestored: [] });
+          expect(readFileSync(back, 'utf-8'), 'the shown file is restored (control)').toBe('back before');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+
+      // A file whose original the backup could not read (not a regular file then), which the run
+      // made a regular file: the review showed it, so a rollback that cannot put anything back names it.
+      it('a rollback names a shown file whose original the backup could not read', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-shown-'));
+        const made = join(cwd, 'made.txt');
+        execFileSync('mkfifo', [made]);
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(made);
+        rmSync(made);
+        writeFileSync(made, 'made by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          expect(csm.getChanges().map((c) => c.file), 'precondition: the review shows it').toEqual(['made.txt']);
+          expect(csm.hasOriginal(made), 'precondition: nothing saved for it').toBe(false);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
+          expect(await res.json()).toMatchObject({ rolledBack: 0, notRestored: ['made.txt'] });
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+
+      // The same file, replaced by a link after the review: it no longer shows, so rollback all cannot
+      // tell it from one never shown. A partial answer names it because the person chose it.
+      it('a partial answer names a chosen file the rollback left, even one no longer shown', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-chosen-'));
+        const made = join(cwd, 'made.txt');
+        const outside = join(mkdtempSync(join(tmpdir(), 'lynox-cs-out-')), 'outside.txt');
+        writeFileSync(outside, 'not the workspace', 'utf-8');
+        execFileSync('mkfifo', [made]);
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(made);
+        rmSync(made);
+        writeFileSync(made, 'made by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          rmSync(made);
+          symlinkSync(outside, made);
+          expect(csm.getChanges(), 'precondition: it dropped out of the changes').toEqual([]);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'partial', runId: 'run', rolledBackFiles: ['made.txt'] }) });
+          expect(await res.json()).toMatchObject({ rolledBack: 0, notRestored: ['made.txt'] });
+          expect(readFileSync(outside, 'utf-8')).toBe('not the workspace');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+          rmSync(dirname(outside), { recursive: true, force: true });
+        }
+      });
+
+      // A file the run added, replaced by a link since: it no longer shows, but a rollback has
+      // something to undo for it, so rollback all names it.
+      it('a rollback names a file the run added that was replaced by a link since', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-added-'));
+        const added = join(cwd, 'new.txt');
+        const outside = join(mkdtempSync(join(tmpdir(), 'lynox-cs-out-')), 'outside.txt');
+        writeFileSync(outside, 'not the workspace', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(added);
+        writeFileSync(added, 'added by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          rmSync(added);
+          symlinkSync(outside, added);
+          expect(csm.getChanges(), 'precondition: it dropped out of the changes').toEqual([]);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
+          expect(await res.json()).toMatchObject({ rolledBack: 0, notRestored: ['new.txt'] });
+          expect(readFileSync(outside, 'utf-8')).toBe('not the workspace');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+          rmSync(dirname(outside), { recursive: true, force: true });
+        }
+      });
+
+      // The review promised the original back. A file replaced by a link since is left as it is,
+      // and the answer names it instead of counting it as rolled back.
+      it.each(['rollback', 'partial'] as const)('a %s answer names a file it could not restore, and does not count it', async (action) => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-left-'));
+        const left = join(cwd, 'left.txt');
+        const back = join(cwd, 'back.txt');
+        const outside = join(mkdtempSync(join(tmpdir(), 'lynox-cs-out-')), 'outside.txt');
+        writeFileSync(outside, 'not the workspace', 'utf-8');
+        writeFileSync(left, 'left before', 'utf-8');
+        writeFileSync(back, 'back before', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(left);
+        csm.backupBeforeWrite(back);
+        writeFileSync(left, 'left by the run', 'utf-8');
+        writeFileSync(back, 'back by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          const shown = await jsonFetch('/api/sessions/test/changeset');
+          expect(shown.status, 'precondition: the review shows both').toBe(200);
+          rmSync(left);
+          symlinkSync(outside, left);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', {
+            method: 'POST', body: JSON.stringify({ action, runId: 'run', rolledBackFiles: ['left.txt', 'back.txt'] }),
+          });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ rolledBack: 1, accepted: 0, notRestored: ['left.txt'] });
+          expect(readFileSync(back, 'utf-8'), 'the other file is restored (control)').toBe('back before');
+          expect(readFileSync(outside, 'utf-8'), 'the link target is not written').toBe('not the workspace');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+          rmSync(dirname(outside), { recursive: true, force: true });
         }
       });
     });
@@ -3937,6 +4195,86 @@ describe('LynoxHTTPApi', () => {
         expect(row?.lastPersistedSeq).toBe(42);
       });
     });
+
+    // A scheduled run writes no registry row; its question marks its thread through the
+    // question itself (a task's run thread, a workflow's run-id thread).
+    describe('a pending question without a registry row', () => {
+      type Run = { runId: string; threadId: string; status: string; attachable?: boolean };
+      async function withQuestions(test: (reg: import('../core/run-registry.js').RunRegistry, store: import('../core/prompt-store.js').PromptStore, db: import('better-sqlite3').Database) => Promise<void>): Promise<void> {
+        const dir = mkdtempSync(join(tmpdir(), 'lynox-runs-active-q-'));
+        const history = new RunHistory(join(dir, 'history.db'));
+        const { PromptStore } = await import('../core/prompt-store.js');
+        const store = new PromptStore(history.getDb());
+        const ref = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+        const orig = ref.getPromptStore;
+        ref.getPromptStore = (): unknown => store;
+        try { await withRegistry(async (reg) => { await test(reg, store, history.getDb()); }); } finally {
+          ref.getPromptStore = orig;
+          history.close();
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+      const activeRuns = async (): Promise<Run[]> => {
+        const res = await jsonFetch('/api/runs/active');
+        expect(res.status).toBe(200);
+        return (await res.json() as { runs: Run[] }).runs;
+      };
+
+      it('marks a task question\'s thread and a workflow question\'s thread as awaiting input', async () => {
+        await withQuestions(async (_reg, store) => {
+          const task = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          const workflow = store.insertAskUser('workflow-run-id', 'Send the list?', ['Yes', 'No']);
+          const runs = await activeRuns();
+          // No stream stands behind either: the client must not re-attach to a question's id.
+          expect(runs).toContainEqual(expect.objectContaining({ runId: task, threadId: 'task-run-thread', status: 'awaiting_input', attachable: false }));
+          expect(runs).toContainEqual(expect.objectContaining({ runId: workflow, threadId: 'workflow-run-id', status: 'awaiting_input', attachable: false }));
+        });
+      });
+
+      it('drops the mark once the question is answered', async () => {
+        await withQuestions(async (_reg, store) => {
+          const id = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          expect(store.answerUser(id, 'A', OWNER_PRINCIPAL)).toBe(true);
+          expect((await activeRuns()).filter((r) => r.threadId === 'task-run-thread')).toEqual([]);
+        });
+      });
+
+      it('drops the mark once the question has expired, before any sweep closes it', async () => {
+        await withQuestions(async (_reg, store, db) => {
+          const id = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          db.prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 60_000).toISOString(), id);
+          expect(store.getById(id)?.status).toBe('pending');
+          expect((await activeRuns()).filter((r) => r.threadId === 'task-run-thread')).toEqual([]);
+        });
+      });
+
+      it('lists a chat run\'s thread once, from its registry row', async () => {
+        await withQuestions(async (reg, store) => {
+          reg.start('chat-thread', 'chat-run');
+          store.insertAskUser('chat-thread', 'Continue?', ['Yes', 'No']);
+          const here = (await activeRuns()).filter((r) => r.threadId === 'chat-thread');
+          expect(here).toEqual([expect.objectContaining({ runId: 'chat-run', status: 'awaiting_input', attachable: true })]);
+        });
+      });
+
+      it('marks a question in a thread whose earlier chat run was interrupted', async () => {
+        await withQuestions(async (reg, store) => {
+          reg.start('mixed-thread', 'old-chat-run');
+          expect(reg.sweepInterrupted()).toBeGreaterThan(0);
+          const id = store.insertAskUser('mixed-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          const here = (await activeRuns()).filter((r) => r.threadId === 'mixed-thread');
+          // Listed after the ended run, so the thread's mark is the question's.
+          expect(here.map((r) => [r.runId, r.status])).toEqual([['old-chat-run', 'interrupted'], [id, 'awaiting_input']]);
+        });
+      });
+
+      it('does not mark the onboarding card\'s thread', async () => {
+        await withQuestions(async (_reg, store) => {
+          store.insertOnboardingBasics('onboarding-thread', [{ question: 'Your company?' }], ['company']);
+          expect((await activeRuns()).filter((r) => r.threadId === 'onboarding-thread')).toEqual([]);
+        });
+      });
+    });
   });
 
   // Who answered a question is recorded beside the answer (history.db v68), from the request's
@@ -4726,6 +5064,84 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // The provider account a consent signed in with is a personal detail of whoever connected: the
+    // owner sees every one, a mandate only the one of a connection it made with its own login, and
+    // the control plane's bearer none. Who connected stays for everyone.
+    describe('GET of the api profiles shows a provider account only to the person who connected', () => {
+      type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+      let cookieResolver: Resolver;
+      beforeEach(() => { cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver; });
+      afterEach(() => { api.setPrincipalResolverForTesting(cookieResolver); mockGetApiStore.mockReturnValue(null); });
+
+      const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
+      const EVA_TAG = 'mandate:eva@example.invalid';
+      const grantOf = (extra: Record<string, unknown>, label: string): Record<string, unknown> =>
+        ({ grant_id: `g-${label}`, account: { label: `${label}@example.invalid`, source: 'id-token' }, ...extra });
+      const PROFILES = [
+        { id: 'owners', name: 'owners', base_url: 'https://a.example', description: 'd', oauth_grant: grantOf({}, 'owner') },
+        { id: 'evas', name: 'evas', base_url: 'https://b.example', description: 'd', oauth_grant: grantOf({ connected_by: EVA_TAG, connected_mandate_id: 'grant-1' }, 'eva') },
+        // Eva's address under another grant: an earlier mandate of hers, not this login's consent.
+        { id: 'evas-old', name: 'evas-old', base_url: 'https://c.example', description: 'd', oauth_grant: grantOf({ connected_by: EVA_TAG, connected_mandate_id: 'grant-0' }, 'old') },
+        // Another person's mandate, with a credential record: the branch that drops the account
+        // must build on the grant without it, not on the stored one.
+        { id: 'toms', name: 'toms', base_url: 'https://d.example', description: 'd', oauth_grant: grantOf({ connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', fingerprints: { TOM_KEY: 'k-1' }, foreign: ['t-1'], fingerprint_check: 'c-1' }, 'tom') },
+      ];
+      const accountsSeenBy = async (reader: RequestPrincipal): Promise<{ list: Record<string, unknown>; one: Record<string, unknown> }> => {
+        mockGetApiStore.mockReturnValue({
+          getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES,
+          get: (id: string) => PROFILES.find((p) => p.id === id),
+        });
+        api.setPrincipalResolverForTesting(() => reader);
+        const res = await jsonFetch('/api/api-profiles');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { profiles: Array<{ id: string; oauth_grant?: Record<string, unknown> }> };
+        const list = Object.fromEntries(body.profiles.map((p) => [p.id, p.oauth_grant?.['account'] ?? null]));
+        // The grant says the account was left out exactly where it was, so the page does not read
+        // a withheld account as one the engine never recorded.
+        for (const p of body.profiles) expect(p.oauth_grant?.['account_withheld'] === true).toBe(list[p.id] === null);
+        const one: Record<string, unknown> = {};
+        for (const p of PROFILES) {
+          const r = await jsonFetch(`/api/api-profiles/${p.id}`);
+          expect(r.status).toBe(200);
+          one[p.id] = ((await r.json()) as { profile: { oauth_grant?: Record<string, unknown> } }).profile.oauth_grant?.['account'] ?? null;
+        }
+        return { list, one };
+      };
+      const label = (who: string): unknown => ({ label: `${who}@example.invalid`, source: 'id-token' });
+
+      it('the owner sees every account', async () => {
+        const { list, one } = await accountsSeenBy(OWNER_PRINCIPAL);
+        const all = { owners: label('owner'), evas: label('eva'), 'evas-old': label('old'), toms: label('tom') };
+        expect(list).toEqual(all);
+        expect(one).toEqual(all);
+      });
+
+      it('a mandate sees the account of the connection it made under this grant, and no other', async () => {
+        const { list, one } = await accountsSeenBy(EVA);
+        const mine = { owners: null, evas: label('eva'), 'evas-old': null, toms: null };
+        expect(list).toEqual(mine);
+        expect(one).toEqual(mine);
+      });
+
+      it('a mandate login without a grant id sees none, not even its own address\'s', async () => {
+        const { list } = await accountsSeenBy({ kind: 'mandate', email: 'eva@example.invalid' });
+        expect(list).toEqual({ owners: null, evas: null, 'evas-old': null, toms: null });
+      });
+
+      it('the control plane\'s bearer sees none', async () => {
+        const { list, one } = await accountsSeenBy(CP_ADMIN_PRINCIPAL);
+        expect(Object.values(list)).toEqual([null, null, null, null]);
+        expect(Object.values(one)).toEqual([null, null, null, null]);
+      });
+
+      it('keeps who connected and the rest of the grant for every reader', async () => {
+        mockGetApiStore.mockReturnValue({ getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES, get: () => PROFILES[3] });
+        api.setPrincipalResolverForTesting(() => EVA);
+        const body = await (await jsonFetch('/api/api-profiles/toms')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
+        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', account_withheld: true });
+      });
+    });
+
     // The API page shows the files the import of the earlier profiles waits on; the route hands
     // them over beside the profiles.
     it('GET of the api profiles lists the files the import waits on', async () => {
@@ -5459,26 +5875,116 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
-    // ── bulk_runs_enabled: this route cannot turn bulk runs on ──
-    it.each([['self-host', ''], ['hosted', 'hosted'], ['managed', 'managed']])(
-      'PUT refuses bulk_runs_enabled:true on %s and persists nothing, not even the other keys',
+    // ── bulk_runs_enabled: an owner who owns the config may turn bulk runs on ──
+    it.each([['self-host', ''], ['hosted', 'hosted']])(
+      'PUT accepts bulk_runs_enabled:true on %s and persists it',
       async (_label, tier) => {
         const { saveUserConfig } = await import('../core/config.js');
-        const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+        const calls = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
+        // Counted first, so the case requires exactly one save of its own.
+        const saves = calls.length;
         vi.stubEnv('LYNOX_BILLING_TIER', tier);
         try {
-          for (const body of [{ bulk_runs_enabled: true }, { thinking_mode: 'adaptive', bulk_runs_enabled: true }]) {
-            const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(body) });
-            expect(res.status).toBe(403);
-            // This route's own refusal, not the managed allowlist's, which also names the key.
-            expect(await res.text()).toContain('bulk_runs_enabled cannot be turned on');
-          }
+          const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: true }) });
+          expect(res.status).toBe(200);
         } finally {
           vi.stubEnv('LYNOX_BILLING_TIER', '');
         }
-        expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+        expect(calls.length).toBe(saves + 1);
+        expect(calls.at(-1)![0]['bulk_runs_enabled']).toBe(true);
       },
     );
+
+    // On a managed pool tier the owner may write the field: there it can only turn bulk runs
+    // OFF, because the control plane's per-instance flag opens them (`core/bulk-switch.ts`,
+    // where a stored true without the flag is asserted to open nothing).
+    it.each([true, false])('PUT accepts bulk_runs_enabled:%s on a managed pool tier and persists it', async (value) => {
+      repayRateWindow();
+      const { saveUserConfig } = await import('../core/config.js');
+      const calls = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
+      const saves = calls.length;
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: value }) });
+        expect(res.status).toBe(200);
+      } finally {
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+      }
+      expect(calls.length).toBe(saves + 1);
+      expect(calls.at(-1)![0]['bulk_runs_enabled']).toBe(value);
+    });
+
+    it('the managed write gate still refuses a field the owner does not own — the control for the case above', async () => {
+      repayRateWindow();
+      const { saveUserConfig } = await import('../core/config.js');
+      const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: false, bugsink_dsn: 'https://sink.example.invalid/1' }) });
+        expect(res.status).toBe(403);
+        expect(await res.text()).toContain('cannot change bugsink_dsn');
+      } finally {
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+      }
+      expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+    });
+
+    // GET says whether bulk runs are on, who decides, and whether turning them on would take
+    // effect here — the settings page greys its switch from `allowed`.
+    it.each([
+      ['a managed pool tier without the flag', 'managed', '', { source: 'control-plane', allowed: false }],
+      ['a managed pool tier with the flag', 'managed', '1', { source: 'control-plane', allowed: true }],
+      ['a self-hosted instance, the flag set', '', '1', { source: 'config', allowed: true }],
+    ] as const)('GET /api/config reports bulk runs on %s', async (_label, tier, flag, expected) => {
+      repayRateWindow();
+      const host = api as unknown as { engine: Record<string, unknown> };
+      const origDb = host.engine['getEngineDb'];
+      const origLedger = host.engine['getBulkLedger'];
+      host.engine['getEngineDb'] = () => ({});
+      vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', flag);
+      // Pinned, not left to the shell: `shopify` reads the flag, and one set in the shell would fail this.
+      vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
+      try {
+        for (const on of [false, true]) {
+          host.engine['getBulkLedger'] = () => (on ? {} : null);
+          const res = await jsonFetch('/api/config');
+          expect(res.status).toBe(200);
+          const body = await res.json() as Record<string, unknown>;
+          expect(body['bulk_runs']).toEqual({ on, ...expected, db: true, shopify: false, viewer: 'owner' });
+        }
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '1');
+        repayRateWindow();
+        const read = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        expect((read['bulk_runs'] as Record<string, unknown>)['shopify']).toBe(true);
+      } finally {
+        host.engine['getEngineDb'] = origDb;
+        host.engine['getBulkLedger'] = origLedger;
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
+      }
+    });
+
+    it('GET /api/config: without engine.db bulk runs cannot be turned on, on any tier', async () => {
+      repayRateWindow();
+      vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '1');
+      vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
+      try {
+        const res = await jsonFetch('/api/config');
+        const body = await res.json() as Record<string, unknown>;
+        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false, db: false, shopify: false, viewer: 'owner' });
+        // On a pool tier lynox opened, the missing database is still the reason, not the tier.
+        vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+        repayRateWindow();
+        const pool = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        expect(pool['bulk_runs']).toEqual({ on: false, source: 'control-plane', allowed: false, db: false, shopify: false, viewer: 'owner' });
+      } finally {
+        vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
+      }
+    });
 
     it('PUT accepts bulk_runs_enabled:false and persists it', async () => {
       const { saveUserConfig } = await import('../core/config.js');
@@ -5772,6 +6278,34 @@ describe('LynoxHTTPApi', () => {
       expect(hl['default_context_window_tokens']).toBe(200_000);
       // Self-host: locks is empty
       expect(body['locks']).toEqual({});
+    });
+
+    // On a pool tier no path reads a vault MISTRAL_API_KEY: the pool's key comes from the
+    // environment. Reporting Mistral as available from the vault alone would show a provider
+    // that does not run without the pool's key.
+    it.each([
+      ['managed', ['MISTRAL_API_KEY'], '', false],
+      ['managed_pro', ['MISTRAL_API_KEY'], '', false],
+      ['managed_max', ['MISTRAL_API_KEY'], '', false],
+      ['eu', ['MISTRAL_API_KEY'], '', false],
+      ['managed', [], 'pool-mistral-key', true],
+      ['hosted', ['MISTRAL_API_KEY'], '', true],
+      ['', ['MISTRAL_API_KEY'], '', true],
+    ] as const)('mistral_available on tier "%s" with vault %j and env "%s" is %s', async (tier, vault, env, available) => {
+      repayRateWindow();
+      vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      vi.stubEnv('MISTRAL_API_KEY', env);
+      mockSecretListNames.mockReturnValue([...vault]);
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const caps = (await res.json() as { capabilities: Record<string, unknown> }).capabilities;
+        expect(caps['mistral_available']).toBe(available);
+      } finally {
+        // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('MISTRAL_API_KEY', '');
+      }
     });
 
     it('has_calendar follows the REGISTRY, so an instance with the calendar on reports it', async () => {
@@ -8163,7 +8697,7 @@ describe('LynoxHTTPApi', () => {
       const MARK = 'ZXQ-BULK-BEFORE-IMAGE';
       const dir = mkdtempSync(join(tmpdir(), 'lynox-bulk-debug-'));
       const db = new EngineDb(join(dir, 'engine.db'), 'route-key');
-      const ledger = new BulkLedger(db);
+      const ledger = new BulkLedger(db, null);
       ledger.recordDryRun({
         createdBy: 't1', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w',
         targets: [{ key: `/ws/${MARK}.md`, before: { absent: false, value: `old ${MARK}` }, after: `new ${MARK}` }],
@@ -9001,6 +9535,16 @@ describe('LynoxHTTPApi', () => {
       try { await body(); } finally { engineRef['getWorkerLoop'] = orig; }
     }
 
+    it('POST /api/triggers/:id/run says a webhook trigger runs on events, with its own code', async () => {
+      await withLoop(() => Promise.resolve({ ok: false, reason: 'runs_on_events' }), async () => {
+        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+        expect(res.status).toBe(409);
+        const body = await res.json() as { code?: string; error?: string };
+        expect(body.code).toBe('runs_on_events');
+        expect(body.error).toContain('cannot be started by hand');
+      });
+    });
+
     it('POST /api/triggers/:id/run carries a CODE for the waiting case, not just a sentence', async () => {
       await withLoop(() => Promise.resolve({ ok: false, reason: 'awaiting_answer' }), async () => {
         const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
@@ -9310,12 +9854,13 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('GET /api/triggers adds the two flags and nothing else to a row', async () => {
+    it('GET /api/triggers adds the two flags, and the pause\'s, and nothing else to a row', async () => {
       // Who started the run stays inside: any further field — a starter tag, an effect —
-      // would be a new disclosure on a list a mandate reads.
+      // would be a new disclosure on a list a mandate reads. `paused` is the plan pause's
+      // (`triggerForRoute`), on by default since the takeover is in the view.
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
-        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'running', 'stoppable', 'title']);
+        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'running', 'stoppable', 'title']);
       });
     });
 
@@ -9739,6 +10284,25 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.decidedBy).toBe('owner');
     });
 
+    // A mandate is told that a mail waits, but the decision is the owner's —
+    // a live mandate holding the right checksum is refused, and the mail keeps waiting.
+    it('refuses a mandate, even one holding the checksum, and the mail keeps waiting', async () => {
+      const id = filed();
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      try {
+        for (const action of ['approve', 'reject', 'move_to_chat', 'clear_unknown']) {
+          const res = await decide(id, { action, checksum: store.get(id)!.checksum });
+          expect(res.status, action).toBe(403);
+        }
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+      }
+      expect(store.get(id)!.status).toBe('pending');
+      // control: the owner, same entry, same checksum
+      expect((await decide(id, { action: 'approve', checksum: store.get(id)!.checksum })).status).toBe(200);
+    });
+
     it('refuses a checksum other than the stored one, and the mail keeps waiting', async () => {
       const id = filed();
       const res = await decide(id, { action: 'approve', checksum: 'not-it' });
@@ -9799,12 +10363,309 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.status).toBe('approved');
     });
 
+    it('hands a moved draft to the model before the owner\'s words, and for a waiting one only that it is not available', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const taskOf = async (id: string): Promise<string> => {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'change it', context: { kind: 'approval', id } }) });
+        await res.text();
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return typeof call?.[0] === 'string' ? call[0] : '';
+      };
+      const waiting = filed();
+      // A draft that does not load is said to be missing, in the same words whatever the cause.
+      const missing = await taskOf(waiting);
+      expect(missing).toBe(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}change it`);
+      expect(missing).not.toContain('Hier der Bericht.');
+      expect(await taskOf('00000000-0000-4000-8000-000000000000')).toBe(missing);
+      expect((await decide(waiting, { action: 'move_to_chat' })).status).toBe(200);
+      const handed = await taskOf(waiting);
+      expect(handed.startsWith(`[Loaded draft moved from the approval queue — entry: ${waiting}`)).toBe(true);
+      expect(handed).toContain('Message: Hier der Bericht.');
+      expect(handed.endsWith('[/loaded-context]\n\nchange it')).toBe(true);
+    });
+
+    it('points a moved reply at the account it was read through only while the registry has it as an IMAP account', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const out = store.file({
+        filing: { kind: 'mail_reply', payload: {
+          accountId: 'acc-1', fromAddress: 'me@example.com', to: [{ address: 'anna@example.com' }], cc: [],
+          subject: 'Re: Angebot', bodyText: 'Danke.', originalThreadKey: 't-1', originalMessageId: '<m-route@example.com>',
+          originalFolderUid: 'INBOX:41', readAccountId: 'acc-read',
+          original: { from: 'anna@example.com', to: ['me@example.com'], cc: [], subject: 'Angebot', date: '2026-10-20T10:00:00.000Z' },
+        } },
+        origin: { source: 'workflow', triggerId: 'trg-route', runId: 'run-route', rootRunId: 'run-route' },
+        createdBy: 'owner', mandateId: null,
+      });
+      if (!out.ok) throw new Error(out.reason);
+      expect((await decide(out.id, { action: 'move_to_chat' })).status).toBe(200);
+      const handed = async (): Promise<string> => {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'change it', context: { kind: 'approval', id: out.id } }) });
+        await res.text();
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return typeof call?.[0] === 'string' ? call[0] : '';
+      };
+      const origMail = engineFor()['getMailContext'];
+      // The registry's providers, by the type each declares (`MailProvider.authType`).
+      const registryOf = (authType: string) => () => ({ registry: { get: (id: string) => (id === 'acc-read' ? { authType } : null) } });
+      try {
+        engineFor()['getMailContext'] = registryOf('imap');
+        expect(await handed()).toContain('call mail_reply with account: "acc-read", uid: 41');
+        // Gmail and Microsoft 365 number their mails per running instance: a stored uid is not trusted.
+        for (const authType of ['oauth_google', 'oauth_microsoft']) {
+          engineFor()['getMailContext'] = registryOf(authType);
+          const searched = await handed();
+          expect(searched, authType).not.toContain('call mail_reply with account');
+          expect(searched, authType).toContain('Find the original with mail_search');
+        }
+        engineFor()['getMailContext'] = () => ({ registry: { get: () => null } });
+        expect(await handed()).not.toContain('call mail_reply with account');
+        engineFor()['getMailContext'] = () => null;
+        const without = await handed();
+        expect(without).not.toContain('call mail_reply with account');
+        expect(without).toContain('Find the original with mail_search');
+      } finally {
+        engineFor()['getMailContext'] = origMail;
+      }
+    });
+
     it('answers as if it did not exist while the queue is off', async () => {
       const id = filed();
       delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
       const res = await decide(id, { action: 'approve', checksum: store.get(id)!.checksum });
       expect(res.status).toBe(404);
       expect(store.get(id)!.status).toBe('pending');
+    });
+  });
+
+  describe('the approval queue\'s list and count routes', () => {
+    let qDir: string;
+    let qDb: EngineDb;
+    let store: ApprovalStore;
+    const kept: Record<string, unknown> = {};
+    const STUBBED = ['getApprovalStore', 'getEngineDb', 'getAuditLog'] as const;
+    const prevFlag = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+    const engineFor = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+    type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+    let cookieResolver: Resolver;
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+    beforeEach(() => {
+      qDir = mkdtempSync(join(tmpdir(), 'lynox-approval-list-'));
+      qDb = new EngineDb(join(qDir, 'engine.db'), 'route-key');
+      store = new ApprovalStore(qDb);
+      const log = new AuditLog(qDb.getDb());
+      for (const k of STUBBED) kept[k] = engineFor()[k];
+      engineFor()['getApprovalStore'] = () => store;
+      engineFor()['getEngineDb'] = () => qDb;
+      engineFor()['getAuditLog'] = () => log;
+      cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+      process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+    });
+    afterEach(() => {
+      for (const k of STUBBED) engineFor()[k] = kept[k];
+      api.setPrincipalResolverForTesting(cookieResolver);
+      if (prevFlag === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      else process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = prevFlag;
+      qDb.close();
+      rmSync(qDir, { recursive: true, force: true });
+    });
+
+    const ANNA = 'mandate:anna@example.com';
+    let n = 0;
+    const filed = (who: { createdBy?: string; mandateId?: string | null; triggerId?: string } = {}): string => {
+      n++;
+      const out = store.file({
+        filing: { kind: 'mail_send', payload: {
+          accountId: 'acc-1', fromAddress: 'me@example.com', to: [{ address: 'bob@example.com' }], cc: [], bcc: [],
+          subject: `Wochenbericht ${String(n)}`, bodyText: 'Hier der Bericht.', trackFollowup: null,
+        } },
+        origin: { source: 'workflow', triggerId: who.triggerId ?? `trg-${String(n)}`, runId: `run-${String(n)}`, rootRunId: `run-${String(n)}` },
+        createdBy: who.createdBy ?? 'owner', mandateId: who.mandateId ?? null,
+        // A second apart, so newest-first is the filing order.
+        now: Date.now() + n * 1000,
+      });
+      if (!out.ok) throw new Error(out.reason);
+      return out.id;
+    };
+    type Card = { id: string; status: string; checksum?: string; setup: Array<{ kind: string; name: string }> };
+    const list = async (view = 'open'): Promise<{ entries: Card[]; pending: number }> => {
+      const res = await jsonFetch(`/api/approvals?view=${view}`);
+      expect(res.status).toBe(200);
+      return await res.json() as { entries: Card[]; pending: number };
+    };
+    const count = async (): Promise<number> => {
+      const res = await jsonFetch('/api/approvals/count');
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { pending: number }).pending;
+    };
+    const as = (p: RequestPrincipal): void => { api.setPrincipalResolverForTesting(() => p); };
+
+    it('lists nothing while the queue is off, and the count says it is off without failing', async () => {
+      filed();
+      delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      expect((await jsonFetch('/api/approvals')).status).toBe(404);
+      // The shell asks for the count on every page: a refusal would be a failed request in the console.
+      const res = await jsonFetch('/api/approvals/count');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ enabled: false });
+    });
+
+    it('shows the owner every entry, with the checksum to approve it, and a count that matches', async () => {
+      const own = filed();
+      const anna = filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      const done = filed();
+      qDb.getDb().prepare(`UPDATE approval_entries SET status = 'done' WHERE id = ?`).run(done);
+      as(OWNER_PRINCIPAL);
+      const open = await list('open');
+      expect(open.entries.map((e) => e.id)).toEqual([anna, own]);
+      expect(open.entries.map((e) => e.checksum)).toEqual([store.get(anna)!.checksum, store.get(own)!.checksum]);
+      expect((await list('all')).entries.map((e) => e.id)).toEqual([done, anna, own]);
+      expect(open.pending).toBe(2);
+      expect(await count()).toBe(open.entries.filter((e) => e.status === 'pending').length);
+    });
+
+    it('shows a mandate only the entries of its own grant, without a checksum', async () => {
+      filed();
+      const own = filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      filed({ createdBy: 'mandate:bea@example.com', mandateId: 'grant-9' });
+      as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
+      const got = await list('all');
+      expect(got.entries.map((e) => e.id)).toEqual([own]);
+      expect('checksum' in got.entries[0]!).toBe(false);
+      expect(got.pending).toBe(1);
+      expect(await count()).toBe(1);
+    });
+
+    it('shows a mandate whose login names no grant nothing at all', async () => {
+      filed();
+      filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      filed({ createdBy: ANNA, mandateId: null });
+      as({ kind: 'mandate', email: 'anna@example.com' });
+      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'none', retentionDays: 30, unclearStays: true });
+      expect(await count()).toBe(0);
+    });
+
+    it('says an unclear entry stays until closed only on an engine with a vault key', async () => {
+      filed();
+      as(OWNER_PRINCIPAL);
+      const unclearStays = async (): Promise<unknown> => ((await list('all')) as { unclearStays?: unknown }).unclearStays;
+      expect(await unclearStays()).toBe(true);
+      const plainDir = mkdtempSync(join(tmpdir(), 'lynox-approval-plain-'));
+      const plain = new EngineDb(join(plainDir, 'engine.db'), '');
+      try {
+        engineFor()['getApprovalStore'] = () => new ApprovalStore(plain);
+        expect(await unclearStays()).toBe(false);
+      } finally {
+        plain.close();
+        rmSync(plainDir, { recursive: true, force: true });
+      }
+    });
+
+    it('shows a later grant for the same address nothing of the earlier grant\'s entries', async () => {
+      filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-2' });
+      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'mandate', retentionDays: 30, unclearStays: true });
+      expect(await count()).toBe(0);
+      // Twin on the same machinery: the earlier grant reads it.
+      as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
+      expect((await list('all')).entries).toHaveLength(1);
+      expect(await count()).toBe(1);
+    });
+
+    it('says whose session asked, in the count and in the list: the owner, a mandate, or none it can name', async () => {
+      filed();
+      filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      // The list words a card by whose session reads it, so both answers must name the same viewer.
+      const viewerOf = async (): Promise<unknown> => {
+        const res = await jsonFetch('/api/approvals/count');
+        expect(res.status).toBe(200);
+        const counted = ((await res.json()) as { viewer?: unknown }).viewer;
+        expect((await list('all') as { viewer?: unknown }).viewer).toBe(counted);
+        return counted;
+      };
+      as(OWNER_PRINCIPAL);
+      expect(await viewerOf()).toBe('owner');
+      as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
+      expect(await viewerOf()).toBe('mandate');
+      as({ kind: 'mandate', email: 'anna@example.com' });
+      expect(await viewerOf()).toBe('none');
+      as({ kind: 'cp-admin' });
+      expect(await viewerOf()).toBe('none');
+    });
+
+    it('refuses a view it does not know', async () => {
+      expect((await jsonFetch('/api/approvals?view=everything')).status).toBe(400);
+    });
+
+    it('never answers with the hashed keys, the binding or the stored result', async () => {
+      const a = filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      const b = filed();
+      qDb.getDb().prepare(`UPDATE approval_entries SET status = 'failed', result_json = ? WHERE id = ?`)
+        .run(qDb.enc(JSON.stringify({ reason: 'provider_error', message: 'RAW-PROVIDER-TEXT' })), b);
+      const stored = qDb.getDb().prepare('SELECT dedup_key, family_key, result_json FROM approval_entries').all() as Array<Record<string, string | null>>;
+      const secrets = stored.flatMap((r) => [r['dedup_key'], r['family_key'], r['result_json']]).filter((v): v is string => typeof v === 'string' && v !== '');
+      expect(secrets.length).toBeGreaterThanOrEqual(5);
+      for (const p of [OWNER_PRINCIPAL, { kind: 'mandate' as const, email: 'anna@example.com', mandateId: 'grant-1' }]) {
+        as(p);
+        const res = await jsonFetch('/api/approvals?view=all');
+        const text = await res.text();
+        expect(res.status).toBe(200);
+        expect(text).toContain(p.kind === 'owner' ? b : a);
+        for (const name of ['dedup_key', 'dedupKey', 'family_key', 'familyKey', 'binding', 'result_json', 'resultJson']) expect(text).not.toContain(name);
+        for (const value of secrets) expect(text).not.toContain(value);
+        expect(text).not.toContain('RAW-PROVIDER-TEXT');
+      }
+      as(OWNER_PRINCIPAL);
+      expect((await list('all')).entries.find((e) => e.id === b)).toMatchObject({ outcome: 'provider_error' });
+    });
+
+    it('names who set it up from the trigger and workflow marks, by the name in the trail', async () => {
+      const BEA = { kind: 'mandate' as const, email: 'bea@example.com', mandateId: 'grant-b' };
+      new AuditLog(qDb.getDb()).record({ principal: { kind: 'mandate', email: 'anna@example.com', display: 'Anna A.', mandateId: 'grant-a' }, action: 'x', phase: 'read', correlationId: 'c-1' });
+      const workflows = new WorkflowStore(qDb);
+      workflows.upsert({ id: 'wf-1', name: 'Bericht', definitionJson: '{}', isTemplate: true }, null);
+      workflows.upsert({ id: 'wf-1', name: 'Bericht', definitionJson: '{}', isTemplate: true }, BEA);
+      new TriggerStore(qDb).insert({ id: 'trg-setup', title: 'Wochenbericht', pipelineId: 'wf-1', createdBy: ANNA, createdMandateId: 'grant-a' });
+      filed({ createdBy: 'mandate:bea@example.com', mandateId: 'grant-b', triggerId: 'trg-setup' });
+      as(OWNER_PRINCIPAL);
+      const [card] = (await list()).entries;
+      expect(card!.setup).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
+    });
+
+    it('names another grant to a mandate by its address only, and the owner sees both names, on the same entry', async () => {
+      const log = new AuditLog(qDb.getDb());
+      for (const [email, display, mandateId] of [['anna@example.com', 'Anna A.', 'grant-a'], ['bea@example.com', 'Bea B.', 'grant-b']] as const) {
+        log.record({ principal: { kind: 'mandate', email, display, mandateId }, action: 'x', phase: 'read', correlationId: `c-${mandateId}` });
+      }
+      new TriggerStore(qDb).insert({ id: 'trg-shared', title: 'Wochenbericht', createdBy: ANNA, createdMandateId: 'grant-a' });
+      const id = filed({ createdBy: 'mandate:bea@example.com', mandateId: 'grant-b', triggerId: 'trg-shared' });
+      as({ kind: 'mandate', email: 'bea@example.com', mandateId: 'grant-b' });
+      const res = await jsonFetch('/api/approvals?view=all');
+      const text = await res.text();
+      const mine = (JSON.parse(text) as { entries: Card[] }).entries;
+      expect(mine.map((e) => e.id)).toEqual([id]);
+      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+      expect(text).not.toContain('Anna A.');
+      // Counter-witness: the same entry, the same trail, read by the owner.
+      as(OWNER_PRINCIPAL);
+      const theirs = (await list('all')).entries.find((e) => e.id === id)!;
+      expect(theirs.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
+    });
+
+    it('takes the marks only from the trigger with the entry\'s exact id, not from one whose id starts with it', async () => {
+      new TriggerStore(qDb).insert({ id: 'trg-pre-setup', title: 'Wochenbericht', createdBy: ANNA, createdMandateId: 'grant-a' });
+      const prefixed = filed({ triggerId: 'trg-pre' });
+      const exact = filed({ triggerId: 'trg-pre-setup' });
+      as(OWNER_PRINCIPAL);
+      const cards = (await list('all')).entries;
+      expect(cards.find((e) => e.id === prefixed)!.setup).toEqual([]);
+      // Twin: the trigger's own entry carries its mark, so the marks are read at all.
+      expect(cards.find((e) => e.id === exact)!.setup).toEqual([{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
     });
   });
 
@@ -9829,7 +10690,7 @@ describe('LynoxHTTPApi', () => {
     beforeEach(() => {
       bulkDir = mkdtempSync(join(tmpdir(), 'lynox-bulk-route-'));
       bulkDb = new EngineDb(join(bulkDir, 'engine.db'), 'route-key');
-      bulkLedger = new BulkLedger(bulkDb);
+      bulkLedger = new BulkLedger(bulkDb, null);
       bulkHolder.ledger = bulkLedger;
     });
     afterEach(() => {
@@ -9837,6 +10698,47 @@ describe('LynoxHTTPApi', () => {
       bulkHolder.ownership = NO_OWNERSHIP;
       bulkDb.close();
       rmSync(bulkDir, { recursive: true, force: true });
+    });
+
+    describe('taking a target out before approving (PRD shopify-preset §20.2 item 4)', () => {
+      it('deselects with the checksum the owner saw, answers the new one, and puts it back', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const seen = bulkLedger.computeChecksum(id)!;
+        const off = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: seen }) });
+        expect(off.status).toBe(200);
+        const { checksum } = await off.json() as { checksum: string };
+        expect(checksum).toBe(bulkLedger.computeChecksum(id));
+        expect(checksum).not.toBe(seen);
+        expect(bulkLedger.getStatus(id)!.deselected).toBe(1);
+        const on = await jsonFetch(`/api/bulk/runs/${id}/targets/0/reselect`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect(on.status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.deselected).toBe(0);
+      });
+
+      it('refuses a stale checksum and a missing one, and moves nothing', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const stale = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: 'stale' }) });
+        expect(stale.status).toBe(409);
+        const none = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: '{}' });
+        expect(none.status).toBe(400);
+        expect(bulkLedger.getStatus(id)!.deselected).toBe(0);
+      });
+
+      it('names by code a target that is not taken out and one already out, for the page to word (U-040)', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const seen = bulkLedger.computeChecksum(id)!;
+        const back = await jsonFetch(`/api/bulk/runs/${id}/targets/0/reselect`, { method: 'POST', body: JSON.stringify({ checksum: seen }) });
+        expect(back.status).toBe(409);
+        expect(await back.json()).toMatchObject({ code: 'not_taken_out' });
+        const off = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: seen }) });
+        const { checksum } = await off.json() as { checksum: string };
+        const again = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect(again.status).toBe(409);
+        expect(await again.json()).toMatchObject({ code: 'not_writing' });
+      });
     });
 
     describe('a run whose planner has ended (§3.13 B7)', () => {
@@ -9886,6 +10788,64 @@ describe('LynoxHTTPApi', () => {
         const res = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' });
         expect(res.status).toBe(200);
         expect(new TriggerStore(bulkDb).getById(`bulk-preview-${id}`)).toBeDefined();
+      });
+    });
+
+    // 660b: an approved run no one can be shown to have planned would write without a row in the
+    // instance's trail, so it is not resumed. Its approval was the owner's act: it is not ended.
+    describe('resuming an approved run no one can be shown to have planned', () => {
+      /** An approved run, halted, stamped with the planner given (null: a run from before v31). */
+      const haltedRun = (principal: string | null, mandateId: string | null = null, createdBy = 't'): string => {
+        const id = bulkLedger.recordDryRun({
+          createdBy, principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem',
+          targets: [{ key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' }],
+        }).id;
+        const approved = bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)! });
+        if (!approved.ok) throw new Error(approved.reason);
+        bulkLedger.halt(id, BULK_HALT_REASONS.runUnrecorded);
+        bulkDb.getDb().prepare(`UPDATE bulk_runs SET principal = ?, mandate_id = ?, created_at = '2026-10-13 08:00:00' WHERE id = ?`).run(principal, mandateId, id);
+        return id;
+      };
+      const resume = (id: string) => jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+
+      it.each([
+        ['from before v31, in a conversation no one is recorded for', null],
+        ['with a planner tag that is neither the owner\'s nor a mandate\'s', 'member:someone@example.invalid'],
+      ] as const)('is refused %s, with the code the page words, and stays as it is', async (_what, principal) => {
+        const id = haltedRun(principal);
+        const res = await resume(id);
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'planner_unknown' });
+        expect(bulkLedger.getStatus(id)).toMatchObject({ phase: 'approved', haltReason: BULK_HALT_REASONS.runUnrecorded });
+      });
+
+      it('is refused from before v31 when the conversations cannot be read, even one the owner started', async () => {
+        bulkHolder.ownership = { isLive: () => false, threadCreator: () => 'owner', threadsKnown: false };
+        const res = await resume(haltedRun(null));
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'planner_unknown' });
+      });
+
+      it('a finished one gets the resume\'s own refusal, not this one', async () => {
+        const id = haltedRun(null);
+        bulkDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(id);
+        const res = await resume(id);
+        expect(res.status).toBe(409);
+        expect(await res.json()).not.toMatchObject({ code: 'planner_unknown' });
+      });
+
+      it('control: a run from before v31 in a conversation the owner started resumes', async () => {
+        bulkHolder.ownership = { isLive: () => false, threadCreator: (t) => (t === 't' ? 'owner' : undefined), threadsKnown: true };
+        expect((await resume(haltedRun(null))).status).toBe(200);
+      });
+
+      it('control: the owner\'s run resumes, also when the conversations cannot be read', async () => {
+        bulkHolder.ownership = { isLive: () => false, threadCreator: () => undefined, threadsKnown: false };
+        expect((await resume(haltedRun('owner'))).status).toBe(200);
+      });
+
+      it('control: a mandate\'s run resumes once its grant ended — it names its planner', async () => {
+        expect((await resume(haltedRun('mandate:helper@example.invalid', 'grant-1'))).status).toBe(200);
       });
     });
 
@@ -9967,6 +10927,32 @@ describe('LynoxHTTPApi', () => {
       expect((await resume({ listChecksum: shown['listStartChecksum'] })).status).toBe(409);
     });
 
+    // A Shopify run's targets are product GIDs; whether its write would reach the store is
+    // decided at the store's endpoint, not at a GID, which no network policy reads as an address.
+    it('checks a Shopify run\'s reach at its store\'s endpoint', async () => {
+      const host = 'acme.myshopify.com';
+      const gid = 'gid://shopify/Product/7';
+      const source = parseListSource(host, { form: 'shopify', after: { title: 'Neu' } }, 'PATCH', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      expect(bulkLedger.resumePreview(id, Date.now(), { listChecksum: bulkLedger.listStartChecksum(id)! }).ok).toBe(true);
+      bulkLedger.recordListPage(id, { page: 1, items: [{ key: gid, id: gid }], bytes: 10, lastId: 7 });
+      expect(bulkLedger.finishList(id, () => listReadContract(host, source))).toBe('listed');
+      expect(bulkLedger.resumePreview(id).ok).toBe(true);
+      bulkLedger.recordRead(id, 0, { before: { title: 'Alt' } });
+      expect(bulkLedger.finishPreview(id)).toBe(true);
+      const approve = (): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), unmeasuredConfirmed: true, maxTargets: 1 }) });
+
+      const refused = await approve();
+      expect(((await refused.json()) as { error: string }).error).toMatch(/stored credential for this run's host cannot be attached/);
+      expect(refused.status).toBe(409);
+
+      // Not the network policy: a GID read as an address would be refused there. The store's
+      // credential needs a store pass, which the S5 measurement exercises (PRD shopify-preset §16.10).
+      expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
+    });
+
     // A bulk run writes, and a profile on bexio's API that does not go through the provider gets
     // no credential for a write: the approval says so before the run starts.
     it('refuses to approve a run on the bexio API through a pasted-token profile', async () => {
@@ -10033,6 +11019,67 @@ describe('LynoxHTTPApi', () => {
         const ok = await start(id, { judgeRuleHash: shown['judgeRuleHash'], costCapUsd: 1.5 });
         expect(ok.status).toBe(200);
         expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_judge']]);
+      });
+
+      // The link domains the owner allows a judged list run's verdicts to add (PRD
+      // shopify-preset §20.2 item 5, S20-4): taken at the start that begins the judge only.
+      it('takes the start list at the judge start, refuses it at the list read and on a resume', async () => {
+        const host = 'shop.example.com';
+        const LIST_RULE = normalizeJudgeRule({ rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } }, { idField: 'id' });
+        const source = parseListSource(host, { path: '/wp-json/wc/v3/products', after: judgeTemplate(LIST_RULE) }, 'PUT', () => null);
+        const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source), judge: LIST_RULE });
+        if (!planned.ok) throw new Error('not planned');
+        const id = planned.status.id;
+        const listChecksum = bulkLedger.listStartChecksum(id)!;
+        const atList = await start(id, { listChecksum, startDomains: ['example.ch'] });
+        expect(atList.status).toBe(400);
+        expect(((await atList.json()) as { code?: string }).code).toBe('not_at_this_start');
+        expect(bulkLedger.getStatus(id)!.startDomains).toBeNull();
+        expect((await start(id, { listChecksum })).status).toBe(200);
+        bulkLedger.recordListPage(id, { page: 1, items: [{ key: `https://${host}/wp-json/wc/v3/products/1`, id: '1' }], bytes: 1 });
+        bulkLedger.finishList(id, (keys) => mintBulkContract(host, keys, 'PUT'));
+        new TriggerStore(bulkDb).updateFields(`bulk-preview-${id}`, { status: 'completed' });
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        const invalid = await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['*.example.ch'] });
+        expect(invalid.status).toBe(400);
+        expect(((await invalid.json()) as { code?: string }).code).toBe('start_domains_invalid');
+        const shared = await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['myshopify.com'] });
+        expect(((await shared.json()) as { code?: string }).code).toBe('start_domains_invalid');
+        // A start refused for another reason leaves no list behind; given again, it is taken.
+        expect((await start(id, { judgeRuleHash: hash, startDomains: ['a.example'] })).status).toBe(400);
+        expect(bulkLedger.getStatus(id)!.startDomains).toBeNull();
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['Example.CH'] })).status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
+        // Running: not a start any more.
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['b.example'] })).status).toBe(409);
+        expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
+        // Halted after the judge started: a restart keeps the list it was approved with.
+        bulkLedger.haltPreview(id, BULK_HALT_REASONS.timeBudget);
+        const frozen = await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['b.example'] });
+        expect(frozen.status).toBe(409);
+        expect(((await frozen.json()) as { code?: string }).code).toBe('start_domains_frozen');
+        expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
+      });
+
+      it('refuses a start list on the resume of a previewed run rather than ignoring it', async () => {
+        const host = 'api.example.com';
+        const key = `https://${host}/items/1`;
+        const planned = bulkLedger.recordExternalPlan({
+          createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { name: 'x' } }], contract: mintBulkContract(host, [key]),
+        });
+        if (!planned.ok) throw new Error('not planned');
+        const id = planned.status.id;
+        expect((await start(id, {})).status).toBe(200);
+        bulkLedger.recordRead(id, 0, { before: { name: 'y' } });
+        expect(bulkLedger.finishPreview(id)).toBe(true);
+        const refused = await start(id, { checksum: bulkLedger.computeChecksum(id), startDomains: ['example.ch'] });
+        expect(refused.status).toBe(400);
+        expect(((await refused.json()) as { code?: string }).code).toBe('not_at_this_start');
+        // Nor is it ignored on the approval, which would approve a list that binds nothing.
+        const atApprove = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), startDomains: ['example.ch'] }) });
+        expect(atApprove.status).toBe(400);
+        expect(((await atApprove.json()) as { code?: string }).code).toBe('not_at_this_start');
+        expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
       });
 
       it('says before the click that an instance with its own model key starts no judged run, and only there', async () => {
@@ -10470,7 +11517,7 @@ describe('LynoxHTTPApi', () => {
       // Without one: every response the owner approves from carries the note.
       bulkDb.close();
       bulkDb = new EngineDb(join(bulkDir, 'unkeyed.db'), '');
-      bulkLedger = new BulkLedger(bulkDb);
+      bulkLedger = new BulkLedger(bulkDb, null);
       bulkHolder.ledger = bulkLedger;
       const id = planRun();
       const run = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as { checksumBinding: string; checksumNote: string; checksum: string };
@@ -12013,6 +13060,35 @@ describe('LynoxHTTPApi', () => {
         },
       );
 
+      // The inbox classifier reads its key once, when the inbox bootstraps, and a write here would
+      // only reach it at the next restart. On an instance the control plane hosts that case cannot
+      // arise: neither a write nor a removal through this route reaches the key. It comes from the
+      // control plane's environment or from a migration import, and both take effect with a
+      // restart. If this route opens, the inbox key and its meter need a rebootstrap on the write.
+      it.each([['managed', 403], ['managed_pro', 403], ['managed_max', 403], ['hosted', 403], ['', 200]] as const)(
+        'PUT and DELETE /api/secrets/LYNOX_INBOX_MISTRAL_API_KEY in mode="%s" answer %s (self-host is the control)',
+        async (mode, status) => {
+          repayRateWindow();
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          vi.stubEnv('LYNOX_MANAGED_MODE', mode);
+          try {
+            const put = await jsonFetch('/api/secrets/LYNOX_INBOX_MISTRAL_API_KEY', {
+              method: 'PUT',
+              body: JSON.stringify({ value: 'user-inbox-key' }),
+            });
+            expect(put.status).toBe(status);
+            const del = await jsonFetch('/api/secrets/LYNOX_INBOX_MISTRAL_API_KEY', { method: 'DELETE' });
+            expect(del.status).toBe(status);
+            expect(mockSecretSet).toHaveBeenCalledTimes(status === 200 ? 1 : 0);
+            expect(mockSecretDelete).toHaveBeenCalledTimes(status === 200 ? 1 : 0);
+          } finally {
+            // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
+            vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', '');
+            vi.stubEnv('LYNOX_MANAGED_MODE', '');
+          }
+        },
+      );
+
       it('PUT /api/secrets/SMTP_PASSWORD accepts user-scope when LYNOX_MANAGED_MODE is unset', async () => {
         // Exotic but valid path: admin/user secret split WITHOUT managed
         // mode (a self-hoster who explicitly split the secret). The
@@ -12418,6 +13494,71 @@ describe('LynoxHTTPApi', () => {
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
         }
+      });
+
+      // A curated host is not enough: it must belong to the provider the save leaves in place,
+      // or the pool's key goes to the other vendor (the Anthropic key to Mistral, or back).
+      describe('PUT /api/config pairs api_base_url with the provider', () => {
+        const MISTRAL = 'https://api.mistral.ai/v1';
+        // This file shares ONE per-IP rate window; the requests below are paid back so a test
+        // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+        const rateCounts = (): Map<string, { count: number }> =>
+          (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+        let windowBefore = new Map<string, number>();
+        beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+        afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+        const put = async (body: Record<string, unknown>): Promise<{ status: number; error?: string }> => {
+          const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(body) });
+          const json = res.status === 200 ? {} : await res.json() as { error: string };
+          return { status: res.status, ...json };
+        };
+        const withStored = async (stored: Record<string, unknown>, run: () => Promise<void>): Promise<void> => {
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+          const { readUserConfig } = await import('../core/config.js');
+          const mocked = readUserConfig as unknown as { mockReturnValue: (v: unknown) => void };
+          mocked.mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', ...stored });
+          try {
+            await run();
+          } finally {
+            mocked.mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' });
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        };
+
+        it('refuses a Mistral URL while the provider stays Anthropic (or unset)', async () => {
+          for (const stored of [{ provider: 'anthropic' }, {}]) {
+            await withStored(stored, async () => {
+              const r = await put({ api_base_url: MISTRAL });
+              expect(r.status, JSON.stringify(stored)).toBe(403);
+              expect(r.error).toContain('does not belong to provider');
+            });
+          }
+        });
+
+        it('refuses the Anthropic URL while the provider stays the Mistral preset', async () => {
+          await withStored({ provider: 'openai', api_base_url: MISTRAL }, async () => {
+            const r = await put({ api_base_url: 'https://api.anthropic.com' });
+            expect(r.status).toBe(403);
+            expect(r.error).toContain("does not belong to provider 'openai'");
+          });
+        });
+
+        it('accepts the pairs that belong together, and a stored value sent back unchanged', async () => {
+          await withStored({ provider: 'anthropic' }, async () => {
+            expect((await put({ provider: 'openai', api_base_url: MISTRAL, openai_model_id: 'mistral-large-2512' })).status).toBe(200);
+            expect((await put({ api_base_url: 'https://api.anthropic.com' })).status).toBe(200);
+          });
+          await withStored({ provider: 'openai', api_base_url: MISTRAL }, async () => {
+            expect((await put({ api_base_url: 'https://api.mistral.ai' })).status).toBe(200);
+          });
+          // The Web UI sends every field back on each save; an unpaired value already in the
+          // file is not refused, the loader drops it.
+          await withStored({ provider: 'anthropic', api_base_url: MISTRAL }, async () => {
+            expect((await put({ provider: 'anthropic', api_base_url: MISTRAL })).status).toBe(200);
+          });
+        });
       });
 
       it('PUT /api/config pairs provider openai only with the exact curated Mistral URL, not a longer URL that starts with it', async () => {
@@ -13794,6 +14935,30 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // On a pool tier the stored Mistral key is the pool's. A probe naming another vendor's
+    // vetted host must not borrow it; off a pool tier the fallback is as before (control).
+    it.each([['managed', false], ['hosted', true]] as const)('a probe of another vendor\'s host on %s sends the stored Mistral key: %s', async (tier, sent) => {
+      const keep = { tier: process.env['LYNOX_BILLING_TIER'], mode: process.env['LYNOX_MANAGED_MODE'], mistral: process.env['MISTRAL_API_KEY'] };
+      process.env['LYNOX_BILLING_TIER'] = tier;
+      process.env['MISTRAL_API_KEY'] = 'sk-pool-mistral-probe';
+      // The probe goes out through the pinned transport; it records what would be sent.
+      const { setPinnedTransportForTests } = await import('../core/network-guard.js');
+      const outbound: string[] = [];
+      const restoreTransport = setPinnedTransportForTests(async (input) => {
+        outbound.push(`${input.hostname} ${new Headers(input.headers).get('authorization') ?? ''}`);
+        return new Response('{}', { status: 401 });
+      });
+      try {
+        await llmTestFetch({ provider: 'openai', base_url: 'https://api.anthropic.com' });
+        expect(outbound.some((h) => h.startsWith('api.anthropic.com ') && h.includes('sk-pool-mistral-probe'))).toBe(sent);
+      } finally {
+        restoreTransport();
+        for (const [name, v] of [['LYNOX_BILLING_TIER', keep.tier], ['LYNOX_MANAGED_MODE', keep.mode], ['MISTRAL_API_KEY', keep.mistral]] as const) {
+          if (v === undefined) delete process.env[name]; else process.env[name] = v;
+        }
+      }
+    });
+
     it('vertex returns 200 with skipped=true (auth too heavy for sync probe)', async () => {
       const res = await llmTestFetch({ provider: 'vertex' });
       expect(res.status).toBe(200);
@@ -15132,7 +16297,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getKnowledgeLayer: () => ({
           listEntities,
           stats: () => Promise.resolve({ entityCount: 250, relationCount: 0, memoryCount: 0 }),
-          getEntityRelations: () => Promise.resolve([]),
+          getEntityRelationsForExport: () => Promise.resolve([]),
         }),
         getCRM: () => null,
         getDataStore: () => null,
@@ -15146,6 +16311,35 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         expect(listEntities).toHaveBeenCalledWith({ limit: 200, offset: 0 });
         expect(listEntities).toHaveBeenCalledWith({ limit: 200, offset: 200 });
         expect(listEntities).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it('GET /api/export keeps a relation of a deleted source, marked and explained', async () => {
+      const entity = {
+        id: 'e1', canonicalName: 'Alice', entityType: 'person', aliases: [],
+        description: '', scopeType: 'global', scopeId: 'global', mentionCount: 0,
+        firstSeenAt: '', lastSeenAt: '',
+      };
+      const rel = (to: string, sourceDeleted: boolean) => ({
+        fromEntityId: 'e1', toEntityId: to, relationType: 'works_at', description: `at ${to}`,
+        confidence: 1, sourceMemoryId: `m-${to}`, createdAt: '', sourceDeleted,
+      });
+      await swapEngine({
+        getKnowledgeLayer: () => ({
+          listEntities: () => Promise.resolve([entity]),
+          stats: () => Promise.resolve({ entityCount: 1, relationCount: 1, memoryCount: 0 }),
+          getEntityRelations: () => Promise.resolve([rel('e2', false)]),
+          // e3 twice: a deleted assertion before a live one of the same relation.
+          getEntityRelationsForExport: () => Promise.resolve([rel('e2', false), rel('e3', true), { ...rel('e3', false), sourceMemoryId: 'm-live' }]),
+        }),
+        getCRM: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { knowledge_graph: { relationships: Array<{ toEntityId: string; sourceDeleted: boolean }>; relationships_note?: string } };
+        expect(body.knowledge_graph.relationships.map(r => [r.toEntityId, r.sourceDeleted])).toEqual([['e2', false], ['e3', true], ['e3', false]]);
+        expect(body.knowledge_graph.relationships_note).toMatch(/^sourceDeleted: the memory this relation was derived from was removed/);
       });
     });
 
@@ -15416,7 +16610,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getKnowledgeLayer: () => ({
           listEntities,
           stats: () => Promise.resolve({ entityCount: 0, relationCount: 0, memoryCount: 0 }),
-          getEntityRelations: () => Promise.resolve([]),
+          getEntityRelationsForExport: () => Promise.resolve([]),
         }),
         getCRM: () => null,
         getDataStore: () => null,
@@ -16537,7 +17731,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockSecretSet.mockReset();
   });
 
-  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
+  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
     const { ApiStore } = await import('../core/api-store.js');
     const store = new ApiStore();
     expect(store.register({
@@ -16555,7 +17749,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockExchangeToken.mockReset();
     mockExchangeToken.mockResolvedValue({ ok: true, status: 200, responseOk: true, text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', scope: 'read_products,read_orders' }) });
     const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
-    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
+    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: opts.by ?? { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
     if (cookie === null) throw new Error('fixture could not be signed');
     return { cookie: `lynox_profile_oauth_state=${encodeURIComponent(cookie)}`, store };
   }
@@ -16658,16 +17852,29 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
   });
 
   it.each([
-    ['no signature', (): string => `?${new URLSearchParams(good()).toString()}`],
-    ['a signature under another secret', (): string => signed(good(), 'not-the-secret')],
-    ['another store, signed', (): string => signed(good({ shop: 'other.myshopify.com' }))],
-    ['a stale timestamp, signed', (): string => signed(good({ timestamp: String(Math.floor(Date.now() / 1000) - 600) }))],
-  ])('spends no code on %s', async (_label, query) => {
+    ['no signature', 'missing-hmac', (): string => `?${new URLSearchParams(good()).toString()}`],
+    ['a signature under another secret', 'signature-mismatch', (): string => signed(good(), 'not-the-secret')],
+    ['another store, signed', 'other-store', (): string => signed(good({ shop: 'other.myshopify.com' }))],
+    ['a stale timestamp, signed', 'timestamp-outside-window', (): string => signed(good({ timestamp: String(Math.floor(Date.now() / 1000) - 600) }))],
+  ])('spends no code on %s, and logs why without a value', async (_label, reason, query) => {
     const { cookie } = await arrange();
-    const res = await call(query(), cookie);
+    const q = query();
+    const written: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { written.push(String(chunk)); return true; });
+    let res: Response;
+    try {
+      res = await call(q, cookie);
+    } finally {
+      spy.mockRestore();
+    }
     expect(res.status).toBe(400);
     expect(mockExchangeToken).not.toHaveBeenCalled();
     expect(mockSecretSet).not.toHaveBeenCalled();
+    const refusals = written.filter((l) => l.startsWith('[lynox] shopify callback refused:'));
+    expect(refusals).toEqual([`[lynox] shopify callback refused: reason=${reason} profile=${PROFILE} params=${[...new URLSearchParams(q).keys()].sort().join(',')}\n`]);
+    for (const value of [STATE, CLIENT_SECRET, new URLSearchParams(q).get('hmac') ?? 'no-hmac-in-this-case']) {
+      expect(refusals[0]).not.toContain(value);
+    }
   });
 
   it('spends no code for a profile whose base names another store than its parameter', async () => {
@@ -16675,6 +17882,26 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     const res = await call(signed(good()), cookie);
     expect(res.status).toBe(409);
     expect(mockExchangeToken).not.toHaveBeenCalled();
+  });
+
+  it('names on the page what the store granted beyond what the connection asks for, and records all of it', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products' }, tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products,write_products' }) });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('The provider granted more access than this connection asks for: write_products. The token the provider issued holds all of it.');
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'write_products']);
+  });
+
+  it('says only "Connected" for a grant narrower than the ask, and records it as granted', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products read_orders' }, tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products' }) });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    const page = await res.text();
+    expect(page).toContain('Connected. You can close this tab');
+    expect(page).not.toContain('more access');
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products']);
   });
 
   it('records no granted scope when the answer names none', async () => {
@@ -16701,6 +17928,57 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(res.status).toBe(409);
     expect(mockExchangeToken).toHaveBeenCalledTimes(1);
     expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  // The store recheck after the exchange holds whoever started the connection: a mandate's
+  // consent is held to the store as the owner's is.
+  describe('a mandate\'s consent', () => {
+    const TAG = 'mandate:helper@example.invalid';
+    const MID = 'TEST-MANDATE-SHOP';
+    let origEnds: unknown;
+    let origReleases: unknown;
+    beforeEach(async () => {
+      const { releaseBinding } = await import('../core/profile-secret-view.js');
+      origEnds = engineRef()['getMandateEnds'];
+      engineRef()['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID });
+      // The owner released the store app's client pair to the profile for MID: what is under
+      // test is the store recheck, not the release.
+      origReleases = engineRef()['getSecretReleases'];
+      engineRef()['getSecretReleases'] = () => ({
+        releaseOf: (pid: string, author: string, name: string) => {
+          const p = mockGetApiStore() as { get(id: string): import('../core/api-store.js').ApiProfile | undefined } | null;
+          const current = p?.get(pid);
+          if (!current || current.created_by !== author || !['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'].includes(name)) return undefined;
+          return { binding: releaseBinding(current, name) ?? '', mandateId: MID };
+        },
+      });
+    });
+    afterEach(() => { engineRef()['getMandateEnds'] = origEnds; engineRef()['getSecretReleases'] = origReleases; });
+
+    it('control: stores the token for a mandate when the profile still names the store', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(store.get(PROFILE)?.oauth_grant).toMatchObject({ connected_by: TAG, connected_mandate_id: MID });
+    });
+
+    it('stores no token for a mandate when the profile is re-pointed to another store while the code is exchanged', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      mockExchangeToken.mockImplementation(async () => {
+        const p = store.get(PROFILE)!;
+        // Still the mandate's profile, so the mandate's own check passes: only the store moved.
+        store.register({ ...p, base_url: 'https://other.myshopify.com', auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_params: { shop: 'other' } } } });
+        return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+      });
+      const res = await call(signed(good()), cookie);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('address changed while it was being completed');
+      expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
   });
 
   it('stores no token when the profile is deleted while the code is exchanged', async () => {
@@ -16942,7 +18220,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       api.setPrincipalResolverForTesting(() => MANDATE_P);
       try { return await fetch(url, { ...init, headers: OWNER }); } finally { api.setPrincipalResolverForTesting(cookieResolver); }
     };
-    const withRecords = async (run: (ctx: { recordId: number; held: () => string | undefined; cancelRows: () => unknown[] }) => Promise<void>): Promise<void> => {
+    const withRecords = async (run: (ctx: { recordId: number; trailId: string; held: () => string | undefined; cancelRows: () => unknown[] }) => Promise<void>): Promise<void> => {
       const { store: plain } = await arrange();
       const { EngineDb } = await import('../core/engine-db.js');
       const { ConnectionStore } = await import('../core/connection-store.js');
@@ -16968,6 +18246,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         const record = erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')!;
         await run({
           recordId: record.id,
+          trailId: store.trailIdOf(PROFILE)!,
           held: () => erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.id === record.id)?.historyState,
           cancelRows: () => db.getDb().prepare("SELECT actor_kind AS a, target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all(),
         });
@@ -16979,6 +18258,18 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       }
     };
 
+    it('GET without an engine database: no notices, not an error', async () => {
+      const orig = engineRef()['getEngineDb'];
+      engineRef()['getEngineDb'] = () => null;
+      try {
+        const res = await fetch(`${baseUrl}/api/connections/records`, { headers: OWNER });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ notices: [] });
+      } finally {
+        engineRef()['getEngineDb'] = orig;
+      }
+    });
+
     it('GET: the owner reads the notice of the held erasure; a mandate is refused', async () => {
       await withRecords(async ({ recordId }) => {
         const owner = await fetch(`${baseUrl}/api/connections/records`, { headers: OWNER });
@@ -16986,7 +18277,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         const body = await owner.json() as { notices: Array<Record<string, unknown>> };
         expect(body.notices).toHaveLength(1);
         expect(body.notices[0]).toMatchObject({ recordId, connectionId: PROFILE });
-        expect(Object.keys(body.notices[0]!).sort()).toEqual(['connectionId', 'deadline', 'holdUntil', 'recordId']);
+        expect(Object.keys(body.notices[0]!).sort()).toEqual(['connectionId', 'deadline', 'holdUntil', 'reconnected', 'recordId', 'revokedAt']);
         const mandate = await asMandate(`${baseUrl}/api/connections/records`);
         expect(mandate.status).toBe(403);
         expect(await mandate.json()).toEqual({ error: 'Only the owner of this instance can read the erasure records.' });
@@ -16994,7 +18285,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     });
 
     it('POST cancel: a mandate is refused and nothing changes; the owner cancels and the audit row names the owner', async () => {
-      await withRecords(async ({ recordId, held, cancelRows }) => {
+      await withRecords(async ({ recordId, trailId, held, cancelRows }) => {
         const mandate = await asMandate(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
         expect(mandate.status).toBe(403);
         expect(await mandate.json()).toEqual({ error: 'Only the owner of this instance can cancel an erasure record.' });
@@ -17002,7 +18293,9 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         const owner = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
         expect(owner.status).toBe(200);
         expect(held()).toBe('cancelled');
-        expect(cancelRows()).toEqual([{ a: 'owner', t: `${PROFILE} ${recordId} owner` }]);
+        // The profile's opaque id, never its slug (the owner reads that back through the record id).
+        expect(trailId).toMatch(/^apf_[0-9a-f]{16}$/);
+        expect(cancelRows()).toEqual([{ a: 'owner', t: `${trailId} ${recordId} owner` }]);
         // Once cancelled it is no longer held, and an unknown id is not found.
         expect((await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER })).status).toBe(409);
         expect((await fetch(`${baseUrl}/api/connections/records/99999/cancel`, { method: 'POST', headers: OWNER })).status).toBe(404);
@@ -18420,6 +19713,8 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
     const history = (deleted: boolean): Record<string, unknown> => ({
       getTask: vi.fn().mockReturnValue(undefined), deleteTodo: vi.fn().mockReturnValue(false),
       deleteTask: vi.fn().mockReturnValue(false), deleteSchedule: vi.fn().mockReturnValue(deleted),
+      // The pause's refusal reads the trigger first (`_refusePaused`); none is paused here.
+      getTrigger: vi.fn().mockReturnValue(undefined),
     });
 
     it.each([
@@ -18803,7 +20098,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/takeover-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });
@@ -19295,7 +20590,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       ['POST', 'changeset/review', { action: 'accept' }],
       ['POST', 'compact', {}],
     ] as const)('%s %s: refuses a mandate the owner\'s last run in the mandate\'s own conversation', async (method, path, body) => {
-      const session = sessionRanBy(OWNER_PRINCIPAL, { compact: vi.fn(), getChangesetManager: vi.fn(() => ({ hasChanges: () => true })) });
+      const session = sessionRanBy(OWNER_PRINCIPAL, { compact: vi.fn(), getChangesetManager: vi.fn(() => ({ hasChanges: () => true, isEmpty: () => false })) });
       asMandate();
       await refusal(await jsonFetch(`/api/sessions/${OWN}/${path}`, { method, ...(body ? { body: JSON.stringify(body) } : {}) }));
       expect(session['abort']).not.toHaveBeenCalled();

@@ -279,6 +279,7 @@ describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)'
   it('fireworks pins exactly this picker list — no tier tag', () => {
     const entry = getCatalogEntryByKey('fireworks')!;
     expect((entry.tier_models ?? []).map((m) => m.id)).toEqual([
+      'accounts/fireworks/models/deepseek-v4p1-flash-1017',
       'accounts/fireworks/models/deepseek-v4p1-flash',
       'accounts/fireworks/models/glm-5p3',
       'accounts/fireworks/models/kimi-k3',

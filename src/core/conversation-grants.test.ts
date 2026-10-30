@@ -146,7 +146,7 @@ describe('history.db conversation_grants (v67)', () => {
     const after = new RunHistory(path);
     expect(after.getConversationGrants('with-messages')).toEqual([UNKNOWN_GRANT]);
     expect(after.getConversationGrants('empty')).toEqual([]);
-    expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(69);
+    expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     after.close();
   });
 

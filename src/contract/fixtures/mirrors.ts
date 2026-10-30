@@ -41,7 +41,7 @@ const HEALTH_BASE = {
     disk_total_gb: 100,
     disk_used_gb: 50,
   },
-  engine: { active_sessions: 0, total_threads: 0 },
+  engine: { active_sessions: 0, total_threads: 0, durable_memory: 'on' as const },
 };
 
 /** Fixture file name (relative to `fixtures/`) → its typed mirror. */

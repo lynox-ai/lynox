@@ -198,7 +198,7 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
   beforeEach(() => {
     dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-mail-')));
     engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-    ledger = new BulkLedger(engineDb);
+    ledger = new BulkLedger(engineDb, null);
     requests = [];
     vi.mocked(dns.lookup).mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
     restore = setPinnedTransportForTests(async (input: PinnedTransportInput) => {
