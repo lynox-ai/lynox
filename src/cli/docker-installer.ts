@@ -25,6 +25,7 @@ import {
   decideVaultKey,
   dockerModeFromSecurityOptions,
   freshDataDirProblem,
+  TOS_MARKER,
   handOverFreshDataDir,
   helperChownArgs,
   helperFailure,
@@ -40,11 +41,10 @@ const execFileAsync = promisify(execFileCb);
 // Terms-of-service acceptance
 // ---------------------------------------------------------------------------
 
-const TOS_VERSION = '1';
 
 async function acceptTos(rl: ReturnType<typeof createInterface>): Promise<boolean> {
   const lynoxDir = join(homedir(), '.lynox');
-  const flagPath = join(lynoxDir, `.tos-accepted-${TOS_VERSION}`);
+  const flagPath = join(lynoxDir, TOS_MARKER);
   if (existsSync(flagPath)) return true;
 
   stdout.write(`\n  ${BOLD}Terms of Service${RESET}\n`);

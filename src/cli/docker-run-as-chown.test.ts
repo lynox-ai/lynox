@@ -1,8 +1,8 @@
 // Handing a fresh ~/.lynox to the image's user when the installer runs as
 // root. That needs root to run for real, so fs's chown calls are recorded
 // here instead, and lstat reports root as the owner of what the test says.
-// What matters: only a fresh directory and its .env are re-owned, with
-// lchown, and anything else is refused before a single call.
+// What matters: only a fresh directory, its .env and the terms marker are
+// re-owned, with lchown, and anything else is refused before a single call.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -29,7 +29,7 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-const { freshDataDirProblem, handOverFreshDataDir } = await import('./docker-run-as.js');
+const { freshDataDirProblem, handOverFreshDataDir, TOS_MARKER } = await import('./docker-run-as.js');
 
 describe('handOverFreshDataDir hands over a fresh data dir only', () => {
   let root: string;
@@ -61,6 +61,23 @@ describe('handOverFreshDataDir hands over a fresh data dir only', () => {
     expect(state.lchown).toEqual([[join(dir, '.env'), 1001, 1001], [dir, 1001, 1001]]);
   });
 
+  // The installer writes the marker when the terms are accepted, before it judges the dir: a first
+  // install as root has it there every time, and refusing it refused every such install.
+  it('a directory holding the .env and the terms marker the installer wrote: both files, then the directory', () => {
+    writeFileSync(join(dir, '.env'), 'LYNOX_VAULT_KEY=k\n');
+    writeFileSync(join(dir, TOS_MARKER), '2026-10-30T00:00:00.000Z');
+    expect(freshDataDirProblem(dir, root)).toBeNull();
+    handOverFreshDataDir(dir, root);
+    expect(state.lchown).toEqual([[join(dir, '.env'), 1001, 1001], [join(dir, TOS_MARKER), 1001, 1001], [dir, 1001, 1001]]);
+  });
+
+  it('the terms marker alone, as on an install that wrote no recovery copy yet', () => {
+    writeFileSync(join(dir, TOS_MARKER), '');
+    expect(freshDataDirProblem(dir, root)).toBeNull();
+    handOverFreshDataDir(dir, root);
+    expect(state.lchown).toEqual([[join(dir, TOS_MARKER), 1001, 1001], [dir, 1001, 1001]]);
+  });
+
   it('an empty directory: only the directory', () => {
     handOverFreshDataDir(dir, root);
     expect(state.lchown).toEqual([[dir, 1001, 1001]]);
@@ -71,6 +88,7 @@ describe('handOverFreshDataDir hands over a fresh data dir only', () => {
       () => { symlinkSync(outside, join(dir, 'escape')); },
       () => { mkdirSync(join(dir, 'memory')); },
       () => { writeFileSync(join(dir, 'engine.db'), ''); },
+      () => { writeFileSync(join(dir, '.tos-accepted-2'), ''); },
     ]) {
       rmSync(dir, { recursive: true });
       mkdirSync(dir);
@@ -87,6 +105,15 @@ describe('handOverFreshDataDir hands over a fresh data dir only', () => {
     expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/not a regular file/);
     rmSync(join(dir, '.env'));
     linkSync(join(outside, 'secret'), join(dir, '.env'));
+    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/not a regular file/);
+    expect(touched()).toEqual([]);
+  });
+
+  it('refuses a terms marker that is a symlink or has a second name, and touches nothing', () => {
+    symlinkSync(join(outside, 'secret'), join(dir, TOS_MARKER));
+    expect(freshDataDirProblem(dir, root)).toEqual({ reason: `${join(dir, TOS_MARKER)} is not a regular file with one name.`, command: null });
+    rmSync(join(dir, TOS_MARKER));
+    linkSync(join(outside, 'secret'), join(dir, TOS_MARKER));
     expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/not a regular file/);
     expect(touched()).toEqual([]);
   });

@@ -35,6 +35,12 @@ import { dirname, join, resolve } from 'node:path';
 /** The uid and gid the image's runtime user `lynox` has (`Dockerfile`, `useradd -u 1001`). */
 export const IMAGE_IDS: Ids = { uid: 1001, gid: 1001 };
 
+/** The marker the installer writes into `<home>/.lynox` once the terms are accepted, before the data dir is judged. */
+export const TOS_MARKER = '.tos-accepted-1';
+
+/** What a fresh data dir may already hold: what the installer itself writes there before handing it over. */
+const FRESH_FILES: readonly string[] = ['.env', TOS_MARKER];
+
 /** The image that re-owns the data dir on rootless Docker. Pinned by digest: it runs as root over the user's data. */
 export const HELPER_IMAGE = 'alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc';
 
@@ -264,13 +270,13 @@ export function precheckDataDir(opts: {
 /**
  * Why a data dir cannot be handed to the image's user as it is, or `null`.
  * Installing as root, only a fresh directory is handed over: the directory
- * itself and the recovery copy `.env` the installer writes into it. No walk
+ * itself, the recovery copy `.env` and the terms marker the installer writes into it. No walk
  * over anything else, because a tree that another id can change while root
  * walks it lets that id point root at any file on the host. Anything more is
  * refused, with the command to run by hand.
  * - the path must be exactly `<home>/.lynox`, a real directory owned by root;
  * - `<home>` must belong to root (under `sudo -E` it is the user's home);
- * - nothing in it but a `.env` that is a regular file with one name.
+ * - nothing in it but a `.env` and the terms marker, each a regular file with one name.
  */
 export function freshDataDirProblem(
   dataDir: string,
@@ -293,9 +299,9 @@ export function freshDataDirProblem(
   if (st.isSymbolicLink() || !st.isDirectory()) return { reason: `${dataDir} is not a real directory.`, command: null };
   if (st.uid !== 0) return { reason: `${dataDir} belongs to uid ${String(st.uid)}, not to root or to the image's user.`, command: handBack };
   for (const name of readdirSync(dataDir)) {
-    if (name !== '.env') return { reason: `${dataDir} already holds ${name}; only a fresh directory is handed over.`, command: handBack };
-    const env = lstatSync(join(dataDir, name));
-    if (!env.isFile() || env.nlink > 1) { // lstat: a symlink is never a file
+    if (!FRESH_FILES.includes(name)) return { reason: `${dataDir} already holds ${name}; only a fresh directory is handed over.`, command: handBack };
+    const file = lstatSync(join(dataDir, name));
+    if (!file.isFile() || file.nlink > 1) { // lstat: a symlink is never a file
       return { reason: `${join(dataDir, name)} is not a regular file with one name.`, command: null };
     }
   }
@@ -304,14 +310,16 @@ export function freshDataDirProblem(
 
 /**
  * Hands a fresh data dir ({@link freshDataDirProblem}) to the image's user:
- * the `.env` first, then the directory, both with `lchown`, which never
+ * its files first, then the directory, all with `lchown`, which never
  * follows a symlink. Checks again right before, and throws on a problem.
  */
 export function handOverFreshDataDir(dataDir: string, home: string): void {
   const problem = freshDataDirProblem(dataDir, home);
   if (problem) throw new Error(`refusing to chown: ${problem.reason}`);
-  const env = join(dataDir, '.env');
-  if (readdirSync(dataDir).includes('.env')) lchownSync(env, IMAGE_IDS.uid, IMAGE_IDS.gid);
+  const present = readdirSync(dataDir);
+  for (const name of FRESH_FILES) {
+    if (present.includes(name)) lchownSync(join(dataDir, name), IMAGE_IDS.uid, IMAGE_IDS.gid);
+  }
   lchownSync(dataDir, IMAGE_IDS.uid, IMAGE_IDS.gid);
 }
 
