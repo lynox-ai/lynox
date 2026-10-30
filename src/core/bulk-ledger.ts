@@ -310,9 +310,11 @@ export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
  * is recorded as already holding the value, so it is no probe (a send of this run's that got no
  * clear answer may have set it). Null where none of these is known:
  * a run not approved yet, one whose probe is confirmed already, one whose single applied target
- * is neither, or one that applied nothing but sent a write that got no clear answer: that send
- * takes the one place a maximum of one allows ({@link sentCount}), and lynox does not send it again.
- * A send the host clearly refused is sent again, so such a run is still at `write_one`. A fact about the run, not advice: whether a step helps also depends on `missing`.
+ * is neither, or one that applied nothing but has sent a write ({@link sentCount}). Such a send
+ * takes the one place a maximum of one allows; whether writing on sends anything then depends on
+ * how it ended (one without a clear answer is never sent again, one the host clearly refused is),
+ * so `write_one` is not claimed there. A fact about the run, not advice: whether a step helps also
+ * depends on `missing`.
  */
 export type BulkProbeStep = 'write_one' | 'confirm' | 'too_many' | 'already_first';
 /** Why a run may not go past one target, and where it stands. */
@@ -1800,12 +1802,9 @@ export class BulkLedger {
       // As {@link probeCandidate}: a target found already holding its value was not written.
       'SELECT result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 LIMIT 2',
     ).all(run.id) as { result: string | null }[];
-    if (applied.length === 0) {
-      // A send that got no clear answer is not sent again, and under a maximum of one it takes
-      // the one place: writing on writes nothing. One the host clearly refused is sent again.
-      const unclear = this.engineDb.getDb().prepare(`SELECT 1 FROM bulk_targets WHERE run_id = ? AND ${UNCLEAR_SQL}`).get(run.id);
-      return unclear === undefined ? 'write_one' : null;
-    }
+    // Once anything was sent, whether writing on sends again depends on how that send ended:
+    // claim `write_one` only before any send.
+    if (applied.length === 0) return this.sentCount(run.id) === 0 ? 'write_one' : null;
     if (applied.length > 1) return 'too_many';
     const candidate = this.probeCandidate(run.id);
     if (candidate !== null && candidate !== 'not_found') return this.probeToConfirm(run.id) === null ? null : 'confirm';

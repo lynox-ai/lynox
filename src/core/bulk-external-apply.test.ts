@@ -1216,7 +1216,7 @@ describe('the write verb and the one-target probe', () => {
     }
   });
 
-  it('a run whose only send the host clearly refused is still told to write one, and writing on writes it', async () => {
+  it('a run whose only send the host clearly refused is not told to write one, though writing on writes it', async () => {
     const s = shop();
     const restore = serve(s);
     try {
@@ -1226,7 +1226,8 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
       ledger.markSent(runId, 0);
       ledger.markRefused(runId, 0);
-      expect(ledger.probeBlockFor(runId)?.step).toBe('write_one');
+      // Once anything was sent, the step does not claim that writing on writes the probe; here it does.
+      expect(ledger.probeBlockFor(runId)?.step).toBeNull();
       await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1']);
       expect(ledger.probeKey(runId)).toBe(url(1));
