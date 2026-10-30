@@ -2320,6 +2320,39 @@ describe('Engine + Session (Orchestrator)', () => {
         expect(vi.mocked(Agent).mock.calls.at(-1)![0].model).toBe(admitted.modelId);
       });
 
+      it('on an instance connected to a Shopify store the control plane\'s Mistral worker profile is dropped at boot: the worker runs on Anthropic', async () => {
+        vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+        vi.stubEnv('LYNOX_WORKER_PROFILE', 'worker');
+        vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({ worker: MISTRAL_PROFILE }));
+        // loadConfig() memoises: read the env this test sets, and drop it again after.
+        const { reloadConfig } = await import('./config.js');
+        reloadConfig();
+        try {
+          const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+          await engine.init();
+          expect(engine.getUserConfig().worker_profile).toBeUndefined();
+          expect(engine.resolveWorkerRunModel('standard').provider).toBe('anthropic');
+        } finally {
+          vi.unstubAllEnvs();
+          reloadConfig();
+        }
+      });
+
+      it('without the switch the same boot runs the worker on the Mistral profile', async () => {
+        vi.stubEnv('LYNOX_WORKER_PROFILE', 'worker');
+        vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({ worker: MISTRAL_PROFILE }));
+        const { reloadConfig } = await import('./config.js');
+        reloadConfig();
+        try {
+          const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+          await engine.init();
+          expect(engine.resolveWorkerRunModel('standard')).toEqual({ modelId: MISTRAL_PROFILE.model_id, provider: 'openai' });
+        } finally {
+          vi.unstubAllEnvs();
+          reloadConfig();
+        }
+      });
+
       it('an empty worker profile name: the standard run fails on it, the watch analysis skips it — the admission follows each', async () => {
         const engine = new Engine({} as import('../types/index.js').LynoxConfig);
         await engine.init();

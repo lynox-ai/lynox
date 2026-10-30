@@ -55,6 +55,8 @@ let mockEngineHooks: LynoxHooks[] = [];
 // availability + stream entry points overridden) so the capabilities endpoint
 // keeps its real shape while the speak/transcribe ROUTE tests stay hermetic.
 const mockHasSpeakProvider = vi.fn(() => true);
+// The transcribe route asks this per request (it used to read the boot-time HAS_WHISPER).
+const mockHasTranscribeProvider = vi.fn(() => true);
 const mockSpeakStream = vi.fn();
 // STT route entry points — overridden so the transcribe route tests can assert
 // the gate fires before the provider is touched, and drive a happy path.
@@ -511,8 +513,8 @@ vi.mock('../tools/builtin/pipeline.js', () => ({
 // Partial mocks for the voice facades: spread the real module so the
 // capabilities endpoint keeps every export it reads (getActiveSpeakProvider,
 // listMistralVoices, provider .isAvailable flags, …) and only override the
-// availability check + stream entry the /api/speak route uses, plus HAS_WHISPER
-// so the /api/transcribe route reaches the credit gate.
+// availability check + stream entry the /api/speak route uses, plus
+// hasTranscribeProvider so the /api/transcribe route reaches the credit gate.
 vi.mock('../core/speak.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/speak.js')>()),
   hasSpeakProvider: mockHasSpeakProvider,
@@ -520,7 +522,7 @@ vi.mock('../core/speak.js', async (importActual) => ({
 }));
 vi.mock('../core/transcribe.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/transcribe.js')>()),
-  HAS_WHISPER: true,
+  hasTranscribeProvider: mockHasTranscribeProvider,
   transcribeWithStream: mockTranscribeWithStream,
   extractSessionContext: mockExtractSessionContext,
   getActiveTranscribeProvider: mockGetActiveTranscribeProvider,
@@ -700,6 +702,7 @@ beforeEach(() => {
   // synth result. Per-test overrides drive the gate-block / debit cases.
   mockEngineHooks = [];
   mockHasSpeakProvider.mockReturnValue(true);
+  mockHasTranscribeProvider.mockReturnValue(true);
   mockSpeakStream.mockReset();
   mockSpeakStream.mockResolvedValue({ characters: 100, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
   mockExtractSessionContext.mockReturnValue({});
@@ -13207,6 +13210,70 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      it('GET /api/voice/info on an instance connected to a Shopify store: no speech output, no Mistral option, no voice fetch', async () => {
+        // ux U-074: the buttons hang on `available`, so the switch has to act there, not only
+        // when a request is refused. A Mistral key is set, so without the switch both would be on.
+        // This file shares ONE per-IP rate window: the requests below are paid back after.
+        const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+        const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
+        // Set and restored by hand: vi.unstubAllEnvs would also undo this file's own env stubs.
+        const saved = { admin: process.env['LYNOX_HTTP_ADMIN_SECRET'], mistral: process.env['MISTRAL_API_KEY'], sw: process.env['LYNOX_SHOPIFY_EXCHANGE'] };
+        process.env['LYNOX_HTTP_ADMIN_SECRET'] = 'admin-secret-token-99999';
+        process.env['MISTRAL_API_KEY'] = ['mistral', 'test'].join('-');
+        delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+        const restore = (k: string, v: string | undefined): void => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
+        type Info = {
+          speech_service_off?: boolean;
+          stt: { available: boolean; provider: string | null; providers: Array<{ id: string; available: boolean }> };
+          tts: { available: boolean; providers: Array<{ id: string; available: boolean }>; voices: unknown[] };
+        };
+        const mistral = (list: Array<{ id: string; available: boolean }>): boolean | undefined => list.find((p) => p.id === 'mistral')?.available;
+        // The real availability, not the route tests' stand-ins.
+        const realSpeak = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
+        const realStt = await vi.importActual<typeof import('../core/transcribe.js')>('../core/transcribe.js');
+        mockHasSpeakProvider.mockImplementation(realSpeak.hasSpeakProvider);
+        mockHasTranscribeProvider.mockImplementation(realStt.hasTranscribeProvider);
+        let fetchSpy: { mockRestore(): void } | undefined;
+        try {
+          const without = await (await jsonFetch('/api/voice/info')).json() as Info;
+          expect(without.speech_service_off).toBe(false);
+          expect(without.tts.available).toBe(true);
+          expect(mistral(without.stt.providers)).toBe(true);
+          const auto = (list: Array<{ id: string; available: boolean }>): boolean | undefined => list.find((p) => p.id === 'auto')?.available;
+          expect(auto(without.tts.providers)).toBe(true);
+          expect(auto(without.stt.providers)).toBe(true);
+
+          process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+          const { hasWhisperCpp } = await import('../core/transcribe.js');
+          const spy = vi.spyOn(globalThis, 'fetch');
+          fetchSpy = spy;
+          const info = await (await jsonFetch('/api/voice/info')).json() as Info;
+          expect(info.speech_service_off).toBe(true);
+          expect(info.tts.available).toBe(false);
+          expect(info.tts.voices).toEqual([]);
+          expect(mistral(info.tts.providers)).toBe(false);
+          expect(mistral(info.stt.providers)).toBe(false);
+          expect(info.stt.available).toBe(hasWhisperCpp());
+          // `auto` is offered only where it resolves to something: never for speech output, and for
+          // dictation only with whisper.cpp on the instance.
+          expect(auto(info.tts.providers)).toBe(false);
+          expect(auto(info.stt.providers)).toBe(hasWhisperCpp());
+          // With speech recognition on the instance (stood in here: this box has no whisper.cpp).
+          mockHasTranscribeProvider.mockReturnValue(true);
+          const local = await (await jsonFetch('/api/voice/info')).json() as Info;
+          expect(auto(local.stt.providers)).toBe(true);
+          expect(auto(local.tts.providers)).toBe(false);
+          // The route's own fetch is the test's request; nothing went to Mistral for the voices.
+          expect(spy.mock.calls.some(([u]) => String(u).includes('mistral.ai'))).toBe(false);
+        } finally {
+          fetchSpy?.mockRestore();
+          for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+          restore('LYNOX_HTTP_ADMIN_SECRET', saved.admin);
+          restore('MISTRAL_API_KEY', saved.mistral);
+          restore('LYNOX_SHOPIFY_EXCHANGE', saved.sw);
+        }
+      });
+
       it('PUT /api/config accepts user-scope in managed mode for allowlisted fields', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
@@ -14881,6 +14948,60 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('on an instance connected to a Shopify store probes only a provider on the list, and sends nothing to another', async () => {
+      // This file shares ONE per-IP rate window: the requests below are paid back after.
+      const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
+      // Set by hand, not vi.stubEnv: unstubAllEnvs would also drop this block's LYNOX_TRUST_PROXY.
+      const prev = process.env['LYNOX_SHOPIFY_EXCHANGE'];
+      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+      const realFetch = globalThis.fetch;
+      // Anthropic answers here; the test's own requests to the API go out as they are.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((u, init) =>
+        String(u).startsWith('https://api.anthropic.com') ? Promise.resolve(new Response('{}', { status: 200 })) : realFetch(u, init));
+      const { PROVIDER_NOT_ON_LIST_REFUSAL } = await import('../core/contained-providers.js');
+      try {
+        // The refusal text is the assertion. The openai and custom probes would not go through
+        // the spied global fetch (they use the pinned network path), so only anthropic's is counted.
+        for (const body of [
+          { provider: 'openai', base_url: 'https://api.mistral.ai/v1', api_key: 'k' },
+          { provider: 'custom', base_url: 'https://proxy.example/v1', api_key: 'k' },
+          { provider: 'vertex' },
+        ]) {
+          const res = await llmTestFetch(body);
+          const json = await res.json() as { error?: string };
+          expect(json.error, JSON.stringify(body)).toBe(PROVIDER_NOT_ON_LIST_REFUSAL);
+        }
+        // On a pool tier: a typed key is the user's and is refused before Anthropic is asked;
+        // without one, the stored pool key goes to Anthropic, which the list allows.
+        const savedTier = process.env['LYNOX_BILLING_TIER'];
+        const savedKey = process.env['ANTHROPIC_API_KEY'];
+        process.env['LYNOX_BILLING_TIER'] = 'managed';
+        process.env['ANTHROPIC_API_KEY'] = ['sk', 'ant', 'pool'].join('-');
+        try {
+          const toAnthropic = (): number => fetchSpy.mock.calls.filter(([u]) => String(u).startsWith('https://api.anthropic.com')).length;
+          const typed = await (await llmTestFetch({ provider: 'anthropic', api_key: ['sk', 'ant', 'typed'].join('-') })).json() as { error?: string };
+          expect(typed.error).toBe(PROVIDER_NOT_ON_LIST_REFUSAL);
+          expect(toAnthropic()).toBe(0);
+          const stored = await (await llmTestFetch({ provider: 'anthropic' })).json() as { ok?: boolean; error?: string };
+          expect(stored.error).not.toBe(PROVIDER_NOT_ON_LIST_REFUSAL);
+          expect(toAnthropic()).toBe(1);
+        } finally {
+          if (savedTier === undefined) delete process.env['LYNOX_BILLING_TIER']; else process.env['LYNOX_BILLING_TIER'] = savedTier;
+          if (savedKey === undefined) delete process.env['ANTHROPIC_API_KEY']; else process.env['ANTHROPIC_API_KEY'] = savedKey;
+        }
+        // Without the switch the same probe is not refused by the list (vertex: nothing is sent).
+        delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+        const res = await llmTestFetch({ provider: 'vertex' });
+        const json = await res.json() as { error?: string };
+        expect(json.error).not.toBe(PROVIDER_NOT_ON_LIST_REFUSAL);
+      } finally {
+        fetchSpy.mockRestore();
+        for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+        if (prev === undefined) delete process.env['LYNOX_SHOPIFY_EXCHANGE']; else process.env['LYNOX_SHOPIFY_EXCHANGE'] = prev;
+      }
+    });
+
     it('400 when base_url is missing for custom provider', async () => {
       const res = await llmTestFetch({ provider: 'custom', api_key: 'sk-test' });
       expect(res.status).toBe(400);
@@ -15171,6 +15292,28 @@ describe('LynoxHTTPApi', () => {
       mockGetUserConfig.mockReturnValue({});
       mockHistoryGetRecentRuns.mockReturnValue([{ id: 'run-1', task_text: 'test', status: 'completed' }]);
       clearPrimaryCache();
+    });
+
+    it('on an instance connected to a Shopify store names no provider off the list', async () => {
+      // An Anthropic primary with a Mistral fast slot and the Mistral fallback key: with the
+      // switch on neither Mistral entry is reached (`contained-providers.ts`), so neither shows.
+      const config = { ...HYBRID, api_base_url: undefined };
+      await withMistralPrimary(config);
+      const llmClient = await import('../core/llm-client.js');
+      vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('anthropic');
+      vi.stubEnv('MISTRAL_API_KEY', 'test-key');
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+      try {
+        const names = (await callProvidersStatus()).map((p) => p.provider);
+        expect(names).not.toContain('Mistral');
+        expect(names).toContain('Fireworks AI');
+        // Counter-witness: the same instance without the switch names Mistral.
+        vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', undefined as unknown as string);
+        clearPrimaryCache();
+        expect((await callProvidersStatus()).map((p) => p.provider)).toContain('Mistral');
+      } finally {
+        vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', undefined as unknown as string);
+      }
     });
 
     it('lists one entry per tier_set provider, primary first, deduped', async () => {
@@ -16066,6 +16209,32 @@ describe('metered audio routes: managed credit gate + debit', () => {
   });
 
   describe('POST /api/transcribe', () => {
+    it('on an instance connected to a Shopify store without whisper.cpp: 503 that names why, not a Mistral key', async () => {
+      const realStt = await vi.importActual<typeof import('../core/transcribe.js')>('../core/transcribe.js');
+      mockHasTranscribeProvider.mockImplementation(realStt.hasTranscribeProvider);
+      // This file shares ONE per-IP rate window: the request below is paid back after.
+      const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
+      // Set and restored by hand: vi.unstubAllEnvs would also undo this file's own env stubs.
+      const saved = { mistral: process.env['MISTRAL_API_KEY'], sw: process.env['LYNOX_SHOPIFY_EXCHANGE'] };
+      const restore = (k: string, v: string | undefined): void => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
+      process.env['MISTRAL_API_KEY'] = ['mistral', 'test'].join('-');
+      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+      try {
+        if (realStt.hasWhisperCpp()) return; // a box with whisper.cpp transcribes, which is right
+        const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+        expect(res.status).toBe(503);
+        const body = await res.json() as { error: string };
+        expect(body.error).toContain('Shopify');
+        expect(body.error).not.toContain('MISTRAL_API_KEY');
+        expect(mockTranscribeWithStream).not.toHaveBeenCalled();
+      } finally {
+        for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+        restore('MISTRAL_API_KEY', saved.mistral);
+        restore('LYNOX_SHOPIFY_EXCHANGE', saved.sw);
+      }
+    });
+
     it('blocks with 402 when the onBeforeRun hook denies — provider never touched', async () => {
       // The gate is wired immediately after audio decode, before the route
       // touches extractSessionContext / transcribeWithStream — so a denied

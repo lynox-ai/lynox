@@ -113,7 +113,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { copyWithToast } from '../utils/clipboard.js';
 	import { playSpeech, playSpeechQueued, stopSpeech, primeIosTts, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
-	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
+	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider, isSttAvailable, isSpeechServiceOff } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
@@ -817,6 +817,10 @@
 	void ensureVoiceInfoProbed();
 	const transcribeProvider = $derived(getSttProvider());
 	const ttsAvailable = $derived(isTtsAvailable());
+	// ux U-074: on an instance connected to a Shopify store dictation runs only with whisper.cpp
+	// on the instance; without it the mic would only fail, so it is not shown. Elsewhere the mic
+	// stays as it was.
+	const micHidden = $derived(isSpeechServiceOff() && !isSttAvailable());
 
 	const voicePrivacyKey = $derived(
 		transcribeProvider === 'mistral-voxtral' ? 'chat.voice_privacy_hint'
@@ -985,6 +989,9 @@
 		// button is already removed from the DOM while the composer shows the
 		// transcribing spinner.
 		if (recording || isStartingRecording || transcribing) return;
+		// The keyboard shortcut reaches here too: where the mic is hidden (ux U-074) a recording
+		// would run with no visible indicator and could only fail.
+		if (micHidden) return;
 		isStartingRecording = true;
 		try {
 			if (!navigator.mediaDevices?.getUserMedia) {
@@ -3857,7 +3864,7 @@
 					     appends/replaces the input text. Either way the user
 					     should never lose access to voice input just because
 					     they typed something. -->
-					{@render micButton()}
+					{#if !micHidden}{@render micButton()}{/if}
 					<!-- Hide the regular send button while recording: on mobile
 					     it sits a thumb-width away from the mic, and a stop-tap
 					     misaim would post whatever's still in the input box

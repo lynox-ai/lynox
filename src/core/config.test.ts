@@ -177,6 +177,34 @@ describe('Config', () => {
     });
   });
 
+  describe('model profiles on an instance connected to a Shopify store (§E7 provider list)', () => {
+    const MISTRAL_WORKER = { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-8b-2512' };
+    afterEach(() => { delete process.env['LYNOX_SHOPIFY_EXCHANGE']; });
+
+    it('drops the control plane\'s Mistral worker profile, so the worker runs on the main provider', async () => {
+      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+      process.env['LYNOX_WORKER_PROFILE'] = 'worker';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({ worker: MISTRAL_WORKER, fallback: MISTRAL_WORKER });
+      const { loadConfig } = await import('./config.js');
+      const cfg = loadConfig();
+      expect(cfg.worker_profile).toBeUndefined();
+      expect(cfg.model_profiles ?? {}).toEqual({});
+    });
+
+    it('without a worker profile at all, the worker runs on the main provider', async () => {
+      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().worker_profile).toBeUndefined();
+    });
+
+    it('keeps the Mistral worker profile without the switch', async () => {
+      process.env['LYNOX_WORKER_PROFILE'] = 'worker';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({ worker: MISTRAL_WORKER });
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().worker_profile).toBe('worker');
+    });
+  });
+
   describe('tier_preset expansion (model-presets W2)', () => {
     const writeUserConfig = (obj: Record<string, unknown>) => {
       const dir = join(fakeHome, '.lynox');

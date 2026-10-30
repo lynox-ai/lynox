@@ -11,6 +11,8 @@ import type { RunHistory } from './run-history.js';
 import type { BatchIndex } from './batch-index.js';
 import { hashPrompt } from './prompt-hash.js';
 import { SYSTEM_PROMPT } from './prompts.js';
+import { BATCH_REFUSAL, providerListApplies } from './contained-providers.js';
+import { FixedTextError } from './error-egress.js';
 
 /**
  * Batching is wired ONLY for the Anthropic-shaped `client.messages.batches`
@@ -72,6 +74,9 @@ export async function submitBatch(
   batchIndex: BatchIndex,
   contextId: string,
 ): Promise<{ batchId: string; parentRunId: string | null }> {
+  // PRD-SHOPIFY-CONTAINMENT-ERASURE §E7: the Batches API is off on an instance connected to a
+  // Shopify store, Anthropic's included (`contained-providers.ts`).
+  if (providerListApplies()) throw new FixedTextError(BATCH_REFUSAL, BATCH_REFUSAL);
   assertBatchingSupported(client);
   const model = MODEL_MAP[config.modelTier] ?? MODEL_MAP['deep'];
   const basePrompt = config.systemPrompt ?? SYSTEM_PROMPT;
@@ -138,11 +143,14 @@ export async function pollBatch(
   client: Anthropic,
   batchId: string,
 ): Promise<BatchResult[]> {
+  if (providerListApplies()) throw new FixedTextError(BATCH_REFUSAL, BATCH_REFUSAL);
   assertBatchingSupported(client);
   let delay = 30_000;
   const maxDelay = 300_000;
 
   while (true) {
+    // Asked again each round: a poll that started before the switch stops at its next round.
+    if (providerListApplies()) throw new FixedTextError(BATCH_REFUSAL, BATCH_REFUSAL);
     const batch = await client.messages.batches.retrieve(batchId);
     if (batch.processing_status === 'ended') {
       break;

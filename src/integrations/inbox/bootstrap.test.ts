@@ -288,6 +288,31 @@ describe('bootstrapInbox — wiring', () => {
     // failure path never invokes the onUsage hook.
     expect(runtime.budget.snapshot().spentUSD).toBe(0);
   });
+
+  it('on an instance connected to a Shopify store the EU region sends nothing — not to Mistral, not to the US path', async () => {
+    vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const create = vi.fn();
+    const client = { messages: { create } } as unknown as Anthropic;
+    try {
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, llmRegion: 'eu', mistralApiKey: 'eu-key' });
+      await runtime.hook(ACCOUNT.id, envelope());
+      for (let i = 0; i < 50 && runtime.state.listItems().length === 0; i++) {
+        await new Promise((r) => setImmediate(r));
+      }
+      await runtime.shutdown();
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+      const items = runtime.state.listItems();
+      expect(items).toHaveLength(1);
+      expect(items[0]?.bucket).toBe('requires_user');
+      expect(items[0]?.classifierVersion).toMatch(/^dead-letter:/);
+    } finally {
+      fetchSpy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 describe('bootstrapInbox — push notifier wire', () => {
