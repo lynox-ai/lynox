@@ -1253,13 +1253,15 @@ describe('managed-hook escalation notice', () => {
     delete process.env['LYNOX_HTTP_SECRET'];
   });
 
-  /** /status answers `spendGate`; /escalation answers ok, or rejects when `escalationOk` is false. */
-  function routingFetch(spendGate: string, escalationOk = true): ReturnType<typeof vi.fn> {
+  /** /status answers `spendGate`; /escalation answers ok, rejects when `escalationOk` is false, or
+   *  answers with that status when it is a number. */
+  function routingFetch(spendGate: string, escalationOk: boolean | number = true): ReturnType<typeof vi.fn> {
     return vi.fn().mockImplementation((url: string) => {
       if (String(url).endsWith('/status')) {
         return Promise.resolve({ ok: true, json: async () => ({ allowed: true, spend_gate: spendGate, balance_cents: 0 }) });
       }
       if (String(url).endsWith('/escalation')) {
+        if (typeof escalationOk === 'number') return Promise.resolve({ ok: false, status: escalationOk });
         return escalationOk ? Promise.resolve({ ok: true }) : Promise.reject(new Error('cp down'));
       }
       return Promise.resolve({ ok: true, json: async () => ({ allowed: true }) });
@@ -1302,6 +1304,21 @@ describe('managed-hook escalation notice', () => {
     const calls = noticeCalls(spy);
     expect(calls).toHaveLength(1);
     expect(JSON.parse(String(calls[0]![1].body))).toEqual({ kind: 'question' });
+  });
+
+  it('says in the log when the control plane refuses a notice, and is quiet when it takes one', async () => {
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const refused = await hookOn(routingFetch('balance', 400));
+    refused.onEscalationReported?.('not_delivered', 'question');
+    await flushMicrotasks();
+    const lines = () => err.mock.calls.map(([s]) => String(s)).filter((s) => s.includes('escalation notice'));
+    expect(lines()).toEqual(['[lynox] escalation notice (question) refused by the control plane: HTTP 400\n']);
+
+    err.mockClear();
+    const taken = await hookOn(routingFetch('balance'));
+    taken.onEscalationReported?.('not_delivered', 'escalation');
+    await flushMicrotasks();
+    expect(lines()).toEqual([]);
   });
 
   it('reports `no_channel` too, and never a delivered one', async () => {

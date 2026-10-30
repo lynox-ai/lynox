@@ -428,7 +428,13 @@ export function createManagedHook(opts: {
       headers: { 'Content-Type': 'application/json', 'x-instance-secret': secret },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(FLUSH_TIMEOUT_MS),
-    }).catch(() => { /* a liveness signal, not money owed: the next escalation tries again */ });
+    })
+      // A refusal is said in the log: a control plane that predates a kind answers it with 400,
+      // and then the owner gets no mail at all. Nothing else tells anyone.
+      .then((res) => {
+        if (!res.ok) process.stderr.write(`[lynox] escalation notice (${kind}) refused by the control plane: HTTP ${res.status}\n`);
+      })
+      .catch(() => { /* a liveness signal, not money owed: the next escalation tries again */ });
   }
 
   return {

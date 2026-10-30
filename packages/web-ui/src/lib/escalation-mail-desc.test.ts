@@ -16,7 +16,9 @@ import { ESCALATION_NOTICE_KINDS } from './contract/http.js';
  * the root vitest config cannot load (see `preset-cards-i18n.test.ts`).
  */
 const source = readFileSync(fileURLToPath(new URL('./i18n.svelte.ts', import.meta.url)), 'utf-8');
-const line = source.split('\n').find((l) => l.includes("'notifications.escalation_mail_desc':")) ?? '';
+// The entry itself, not a comment that names the key: the line that starts with it.
+const entries = source.split('\n').filter((l) => l.trimStart().startsWith("'notifications.escalation_mail_desc':"));
+const line = entries.length === 1 ? entries[0]! : '';
 
 /** What the description names for each kind, in each language. */
 const NAMED: Record<(typeof ESCALATION_NOTICE_KINDS)[number], { de: string[]; en: string[] }> = {
@@ -37,7 +39,7 @@ describe('the escalation mail setting names every kind that can send the mail', 
 	});
 
 	it('names each kind in both languages', () => {
-		expect(line).not.toBe('');
+		expect(entries).toHaveLength(1);
 		for (const kind of ESCALATION_NOTICE_KINDS) {
 			for (const phrase of [...NAMED[kind].de, ...NAMED[kind].en]) {
 				expect(line, `${kind}: ${phrase}`).toContain(phrase);
