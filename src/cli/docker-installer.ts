@@ -114,6 +114,9 @@ export type InstallerArgs =
 const INSTALLER_PROVIDERS: readonly InstallerProvider[] = ['anthropic', 'mistral', 'openai-compatible', 'none'];
 const VALUE_FLAGS = ['--provider', '--model', '--base-url', '--dir'] as const;
 const SWITCH_FLAGS = ['--accept-terms', '--reconfigure'] as const;
+// Read by src/index.ts before the installer runs (`--flag <value>` only); the
+// installer passes over them and their value.
+const ENGINE_VALUE_FLAGS = ['--project', '--data-dir'] as const;
 
 export const NON_INTERACTIVE_USAGE = [
   'Non-interactive install:',
@@ -126,8 +129,9 @@ export const NON_INTERACTIVE_USAGE = [
 /**
  * Reads the installer's own flags from the CLI arguments. Its flags are only
  * valid together with `--non-interactive`. An interactive run leaves every other
- * argument alone; a non-interactive one accepts only `init` / `--init` besides
- * its flags, so a typo stops the run instead of turning into a default.
+ * argument alone; a non-interactive one accepts only `init` / `--init` and the
+ * engine's `--project` / `--data-dir` besides its flags, so a typo stops the
+ * run instead of turning into a default.
  */
 export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { error: string } {
   const values = new Map<string, string>();
@@ -140,7 +144,8 @@ export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { e
     const eq = arg.indexOf('=');
     const name = eq === -1 ? arg : arg.slice(0, eq);
     if (name === '--non-interactive' && eq === -1) { nonInteractive = true; continue; }
-    if (arg === '--init' || (i === 0 && arg === 'init')) continue;
+    if (arg === '--init' || arg === 'init') continue;
+    if ((ENGINE_VALUE_FLAGS as readonly string[]).includes(arg)) { i++; continue; }
     if ((SWITCH_FLAGS as readonly string[]).includes(name)) {
       if (eq !== -1) return { error: `${name} takes no value.` };
       switches.add(name);
@@ -154,8 +159,10 @@ export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { e
       values.set(name, value);
       continue;
     }
-    // Only a flag's name is ever echoed: a stray value may be a key.
-    unknown.push(arg.startsWith('-') ? name : 'a value without a flag');
+    // Only something shaped like a flag name is ever echoed: a stray value may
+    // be a key.
+    unknown.push(/^--?[a-z]+(-[a-z]+)*$/i.test(name) && name.length <= 40 ? name
+      : name.startsWith('-') ? 'an unknown flag' : 'a value without a flag');
   }
 
   if (!nonInteractive) {

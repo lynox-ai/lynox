@@ -121,8 +121,14 @@ describe('parseInstallerArgs', () => {
     expect(parseInstallerArgs(['init', '--non-interactive', '--init', '--provider', 'none']))
       .toEqual({ nonInteractive: true, options: { acceptTerms: false, provider: 'none', dir: './lynox', reconfigure: false } });
     const secret = `sk-${randomBytes(12).toString('hex')}`;
-    const r = parseInstallerArgs(['--non-interactive', '--provider', 'none', `--api-key=${secret}`, secret]);
-    expect('error' in r && r.error).toBe('Unknown arguments: --api-key, a value without a flag.');
+    const r = parseInstallerArgs(['--non-interactive', '--provider', 'none', `--api-key=${secret}`, secret, `--${secret}`]);
+    expect('error' in r && r.error).toBe('Unknown arguments: --api-key, a value without a flag, an unknown flag.');
+  });
+
+  it("passes over the engine's --project and --data-dir with their values, and init anywhere", () => {
+    expect(parseInstallerArgs([
+      '--non-interactive', '--provider', 'none', '--data-dir', '/srv/ly', '--project', '/srv/p', 'init',
+    ])).toEqual({ nonInteractive: true, options: { acceptTerms: false, provider: 'none', dir: './lynox', reconfigure: false } });
   });
 
   it('does not echo a base URL it rejects, since a URL can carry credentials', () => {
@@ -140,9 +146,9 @@ describe('pollHealth', () => {
   it('gives up when the timeout passes, after asking more than once', async () => {
     const fetchImpl = vi.fn(async () => new Response('', { status: 503 }));
     const started = Date.now();
-    const healthy = await pollHealth(3000, 150, { fetchImpl: fetchImpl as unknown as typeof fetch, intervalMs: 20 });
+    const healthy = await pollHealth(3000, 400, { fetchImpl: fetchImpl as unknown as typeof fetch, intervalMs: 20 });
     expect(healthy).toBe(false);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(150);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(400);
     expect(fetchImpl.mock.calls.length).toBeGreaterThan(1);
   });
 
@@ -347,6 +353,25 @@ describe('runDockerInstaller refusals after the Docker check', () => {
     expect(output()).toContain('PORT=3001 npx @lynox-ai/core');
     expect(output()).not.toContain('Alternative port');
     expect(dockerCalls()).not.toContain('compose up');
+  });
+});
+
+// The healthy end of runDockerInstaller needs a real Docker and the full health
+// wait, so these three lines are pinned on the source; startupReport's own
+// behaviour is tested above.
+describe('the end of a run, pinned on the source', () => {
+  const src = readFileSync(join(__dirname, 'docker-installer.ts'), 'utf-8');
+
+  it('sets the exit code from the closing report', () => {
+    expect(src).toMatch(/stdout\.write\(report\.text\);\s*process\.exitCode = report\.exitCode;/);
+  });
+
+  it('opens no browser in a non-interactive run', () => {
+    expect(src).toContain('if (healthy && !ni) {');
+  });
+
+  it('gives a non-interactive run an empty input instead of stdin', () => {
+    expect(src).toMatch(/const rl = ni\s*\?\s*createInterface\(\{ input: Readable\.from\(\[\]\)/);
   });
 });
 
