@@ -38,14 +38,18 @@ const PROMPT_MAX_CHARS = 300;
 /**
  * What a mandate's turn gets instead of a dialog. The dialog would send what the person at the
  * screen types to the vault route, which only the owner may write, so the key would leave their
- * hands and be refused. It says who stores keys and what a saved profile does, and it asks for
- * nothing again: the refusal is prompt surface, and a retry instruction here would teach a loop.
+ * hands and be refused. It says who stores keys, what a saved profile does, and where the owner
+ * acts on it: the owner sees a release request only when lynox answers in the owner's own chat
+ * (`releaseRequestsNote`). It asks for nothing again: the refusal is prompt surface, and a retry
+ * instruction here would teach a loop.
  */
 export const MANDATE_SECRET_REFUSAL =
   'Refused: in this session no key or password is entered. Only the owner of this instance stores keys. ' +
   'A profile you save here asks the owner to release the keys it reads, and until the owner does, the engine ' +
-  'sends nothing under those keys. Tell the user that the owner adds or releases the key; do not ask for it ' +
-  'again, and never ask for it in chat.';
+  'sends nothing under those keys. Tell the user to ask the owner to do it in a chat of the owner\'s own: ' +
+  'store the key there if it is not stored yet, and, if a profile saved here reads it, ask lynox there to release ' +
+  'it to that profile, naming the key and the profile. Do not ask for the key again, and never ask the user to ' +
+  'paste it into this chat.';
 
 /**
  * What forges a quote rather than filling it: bidi overrides and isolates
