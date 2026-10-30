@@ -45,6 +45,6 @@ describe('the open chat\'s `contained` flag in the chat store', () => {
 	it('a reply for a chat the user has since left does not land on the one now open', () => {
 		expect(src).toContain('if (!res?.ok || sessionId !== sid) return;');
 		// Again after the body arrived, right at the assignment.
-		expect(src).toContain("if (sessionId !== sid || data?.thread?.contained !== true || threadContained) return;\n\tthreadContained = true;");
+		expect(src).toContain("if (sessionId !== sid || !data?.thread) return;");
 	});
 });

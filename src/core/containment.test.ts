@@ -168,6 +168,14 @@ describe('threadStates tells a record from a failed read', () => {
     expect(sorted(new Containment(throwingDb, null).threadStates(['t2']).unknown)).toEqual(['t2']);
   });
 
+  it('a history copy whose read throws leaves engine.db to answer: a recorded thread stays known', () => {
+    containment.contain({ kind: 'thread', id: 't1' }, { kind: 'api', connectionId: 'shop-acme' });
+    const throwingMirror = { has: () => { throw new Error('x'); }, threadIds: () => { throw new Error('x'); } };
+    const s = new Containment(engineDb.getDb(), throwingMirror as never).threadStates(['t1', 't2']);
+    expect(sorted(s.contained)).toEqual(['t1']);
+    expect(sorted(s.unknown)).toEqual([]);
+  });
+
   it('no engine.db: unknown on a provisioned instance, clear elsewhere', () => {
     expect(sorted(new Containment(null, null).threadStates(['t2']).unknown)).toEqual([]);
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');

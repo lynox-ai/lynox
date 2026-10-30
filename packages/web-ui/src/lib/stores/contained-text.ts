@@ -5,7 +5,7 @@
  * read whether the chat read store data (engine.db unreadable, or a provisioned instance without
  * the record). Then it adds `contained_unknown`, and the page must not say the chat read store
  * data: it says the check failed, that this holds for every chat, and where to look — support on
- * an instance the control plane set up, the instance's logs on a self-hosted one (ux U-078).
+ * an instance the control plane set up, the instance's logs on a self-hosted one.
  */
 
 /** Why a chat counts as contained although its record could not be read, and so where to look. */

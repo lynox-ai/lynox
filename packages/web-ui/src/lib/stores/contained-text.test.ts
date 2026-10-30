@@ -5,7 +5,7 @@ import { containedTextKeys, readContainedUnknown, type ContainedSlot } from './c
 
 const SLOTS: ContainedSlot[] = ['locked', 'badge', 'bar', 'error'];
 
-describe('what the page says about a chat that only reads (ux U-078)', () => {
+describe('what the page says about a chat that only reads', () => {
 	it('a known record: the text that says the chat read store data', () => {
 		expect(SLOTS.map((s) => containedTextKeys(s, null))).toEqual([
 			['threads.contained_locked'], ['threads.contained_badge'], ['contained.bar'], ['threads.error_contained'],

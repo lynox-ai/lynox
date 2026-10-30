@@ -5831,10 +5831,10 @@ export class LynoxHTTPApi {
       // record, fail-closed — a record that cannot be read refuses. Refused before anything
       // else in the request is applied, so the answer is the whole truth.
       if (skipExtraction === false) {
-        const { threadIsContained } = await import('../core/containment.js');
-        if (threadIsContained(engine.getToolContext().containment, params['id']!)) {
-          // Which of the two, for the owner's text: a record that could not be read names where to look.
-          const { contained_unknown } = containedFields(containedThreadStates(engine.getToolContext().containment, [params['id']!]), params['id']!);
+        // One read decides and says which of the two, for the owner's text: a record that could
+        // not be read names where to look.
+        const { contained, contained_unknown } = containedFields(containedThreadStates(engine.getToolContext().containment, [params['id']!]), params['id']!);
+        if (contained) {
           errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.', 'contained',
             contained_unknown !== undefined ? { contained_unknown } : undefined);
           return;

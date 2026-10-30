@@ -607,6 +607,9 @@ let threadContained = $state(false);
 /** Set while `threadContained` comes only from a record the engine could not read
  *  (`contained_unknown`): the chat may never have read store data (`contained-text.ts`). */
 let threadContainedUnknown = $state<ContainedUnknown | null>(null);
+/** Whether the page knew the chat as contained when the current run began: only a run that
+ *  began without it may put the line under its answer. Not reactive; nothing renders it. */
+let containedAtRunStart = false;
 /** This new chat was opened from a contained one with "Plan in a new chat": the old chat's id,
  *  sent as the context of the first run, and whether the prefill lost hidden characters. Cleared
  *  once that run is sent, and by any other chat. */
@@ -1336,6 +1339,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	const epoch = streamEpoch;
 	turn.epoch = epoch;
 	isStreaming = true;
+	containedAtRunStart = threadContained;
 	// Seed liveness markers so a stale value from the previous run can't
 	// flash "Verbindung scheint langsam" for the first ~20s of this run.
 	lastEventAt = Date.now();
@@ -3257,13 +3261,25 @@ function endStreaming(answer: ChatMessage | null = null): void {
 
 async function refreshThreadContained(opts: { afterRun?: boolean; answer?: ChatMessage | null } = {}): Promise<void> {
 	const sid = sessionId;
-	if (!sid || threadContained) return;
+	if (!sid) return;
+	// A recorded containment does not end, so there is nothing to read again — unless this run's
+	// answer may still need its line (an earlier read at the same run end, without the answer,
+	// may have seen it first). A failed check is read again: the engine may read the record now.
+	const answerOwed = opts.afterRun === true && !!opts.answer && !containedAtRunStart && !opts.answer.containedNotice;
+	if (threadContained && threadContainedUnknown === null && !answerOwed) return;
 	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
 	if (!res?.ok || sessionId !== sid) return;
 	const data = (await res.json().catch(() => null)) as { thread?: { contained?: boolean; contained_unknown?: unknown } | null } | null;
-	// Checked again after the body: the user may have switched chats while it arrived, and a
-	// second read that started meanwhile may have seen it first.
-	if (sessionId !== sid || data?.thread?.contained !== true || threadContained) return;
+	// Checked again after the body: the user may have switched chats while it arrived.
+	if (sessionId !== sid || !data?.thread) return;
+	if (data.thread.contained !== true) {
+		// Only a failed check is taken back; a recorded one stays as the page last read it.
+		if (threadContainedUnknown !== null) {
+			threadContained = false;
+			threadContainedUnknown = null;
+		}
+		return;
+	}
 	threadContained = true;
 	threadContainedUnknown = readContainedUnknown(data.thread.contained_unknown);
 	// A record that could not be read says nothing about this run: no line under its answer.
@@ -3275,7 +3291,7 @@ async function refreshThreadContained(opts: { afterRun?: boolean; answer?: ChatM
 	// answer by now. A run whose answer is gone (an empty one is removed), and a chat opened as
 	// contained, get no line; the bar above the input says it.
 	const answer = opts.answer;
-	if (opts.afterRun === true && answer && messages.indexOf(answer) >= 0) {
+	if (answerOwed && answer && messages.indexOf(answer) >= 0) {
 		answer.containedNotice = true;
 		persistChat();
 	}
@@ -3575,6 +3591,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 
 	const myEpoch = ++streamEpoch;
 	isStreaming = true;
+	containedAtRunStart = threadContained;
 	isReattached = true;
 	lastAppliedSeq = since;
 	streamingActivity = 'thinking';

@@ -112,8 +112,12 @@ export class Containment {
     const contained = new Set<string>(threadIds.filter((id) => id === ''));
     const unknownRest = (): Set<string> => new Set(named.filter((id) => !contained.has(id)));
     if (named.length === 0) return { contained, unknown: new Set() };
+    // The copy in the history only adds: a read of it that throws leaves engine.db to answer,
+    // so a thread engine.db records is not reported as one it could not read.
     try {
       if (this.mirror !== null) for (const id of this.mirror.threadIds(named)) contained.add(id);
+    } catch { /* engine.db below */ }
+    try {
       if (this.db === null) return { contained, unknown: isProvisionedInstance() ? unknownRest() : new Set() };
       const rows = this.db
         .prepare(`SELECT DISTINCT container_id AS id FROM contained WHERE container_kind = 'thread' AND container_id IN (${named.map(() => '?').join(',')})`)
