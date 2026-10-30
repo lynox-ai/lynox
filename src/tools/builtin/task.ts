@@ -480,8 +480,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         return withInstanceWrite(agent, { site: 'task_create#workflow', kind: 'create', store: 'tasks', target: () => [['type', 'workflow'], ['workflow', plannedId]], main: ['create'] }, (w) => {
           const task = w.run('create', () => managerRef.createPipelineTask({
             ...baseParams,
-            // The workflow checked above, not a prefix the store might resolve on its own.
-            pipelineId: plannedId ?? workflowId,
+            pipelineId: workflowId,
             scheduleCron: input.schedule,
             ...(pipelineParams !== undefined ? { pipelineParams } : {}),
             // The run this task starts has no session of its own; it inherits what this one
