@@ -411,7 +411,7 @@ describe('applying a media run', () => {
     const id = await previewed();
     const checksum = ledger.computeChecksum(id)!;
     expect(ledger.approve(id, { checksum })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
-    expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_media_alt', cause: 'own_missing' }], step: null } });
     expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
     s.requests.length = 0;
     await apply(id);
@@ -420,7 +420,7 @@ describe('applying a media run', () => {
     expect(mediaOf(image(11))!.alt).toBe('New alt');
     expect(mediaOf(image(12))!.alt).toBeNull();
 
-    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 4 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 4 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_media_alt', cause: 'own_missing' }], step: 'confirm' } });
     expect(ledger.confirmProbe(id)).toEqual({ ok: true });
     expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 4 })).toMatchObject({ ok: true });
     await apply(id);
@@ -438,7 +438,7 @@ describe('applying a media run', () => {
     mediaOf(image(11))!.alt = 'A1';
     engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(first);
     const second = await previewed();
-    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_media_alt', cause: 'other_run' }], step: null } });
   });
 
   it('records an image the store refuses as not ready as refused, and the alt as it was', async () => {

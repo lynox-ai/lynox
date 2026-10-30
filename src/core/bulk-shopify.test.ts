@@ -749,7 +749,7 @@ describe('applying a Shopify run', () => {
     expect(s.products.get(20)!['seo']).toEqual({ title: null, description: 'D2' });
 
     const checksum = ledger.computeChecksum(id)!;
-    expect(ledger.resume(id, { checksum, maxTargets: 3 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.resume(id, { checksum, maxTargets: 3 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_product', cause: 'own_missing' }], step: 'confirm' } });
     expect(ledger.confirmProbe(id)).toEqual({ ok: true });
     expect(ledger.resume(id, { checksum, maxTargets: 3 })).toMatchObject({ ok: true });
     await apply(id);
@@ -783,7 +783,7 @@ describe('applying a Shopify run', () => {
     s.products.set(10, { ...s.products.get(10)!, seo: { title: null, description: 'D1' } });
     engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(first);
     const second = await previewed();
-    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_product', cause: 'other_run' }], step: null } });
   });
 
   it('records a write the store refuses with userErrors as refused, and the product as it was', async () => {
@@ -852,7 +852,7 @@ describe('approving a Shopify run', () => {
     const id = await previewed();
     const checksum = ledger.computeChecksum(id)!;
     expect(ledger.approve(id, { checksum })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
-    expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_product', cause: 'own_missing' }], step: null } });
     expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
   });
 
