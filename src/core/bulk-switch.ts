@@ -28,3 +28,15 @@ export type BulkRunsSource = 'config' | 'control-plane';
 export function bulkRunsSource(billingTier: string | undefined): BulkRunsSource {
   return cpSuppliesLLMKey(billingTier) ? 'control-plane' : 'config';
 }
+
+/**
+ * Who can turn bulk runs on here, for a text that names the way: the owner through the config on
+ * every tier but a pool tier, and on a pool tier the control plane has opened them on and whose
+ * engine database opened; the control plane on any other pool tier. The same reading as
+ * `GET /api/config` `bulk_runs`: `source` is `'config'`, or `allowed` is true. Without the engine
+ * database the owner's config does not take effect on any tier; off a pool tier the answer stays
+ * the owner's, because nobody else turns them on there.
+ */
+export function bulkRunsTurnedOnBy(billingTier: string | undefined, engineDb: boolean): BulkRunsSource {
+  return bulkRunsSource(billingTier) === 'config' || (engineDb && isFeatureEnabled('bulk-runs')) ? 'config' : 'control-plane';
+}

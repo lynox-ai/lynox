@@ -1205,6 +1205,17 @@ describe('LynoxHTTPApi', () => {
       expect(asOwner.status).not.toBe(403);
     });
 
+    it('GET /api/config says whose session asks about bulk runs: the owner or a mandate', async () => {
+      repayRateWindow();
+      const viewerOf = async (token: string): Promise<unknown> => {
+        const res = await fetch(`${baseUrl}/api/config`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        return ((await res.json()) as { bulk_runs: { viewer: unknown } }).bulk_runs.viewer;
+      };
+      expect(await viewerOf(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token)).toBe('mandate');
+      expect(await viewerOf(webUiLoginSession(TEST_SECRET, null)!.token)).toBe('owner');
+    });
+
     it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
       repayRateWindow();
       const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
@@ -5932,37 +5943,46 @@ describe('LynoxHTTPApi', () => {
       host.engine['getEngineDb'] = () => ({});
       vi.stubEnv('LYNOX_BILLING_TIER', tier);
       vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', flag);
+      // Pinned, not left to the shell: `shopify` reads the flag, and one set in the shell would fail this.
+      vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       try {
         for (const on of [false, true]) {
           host.engine['getBulkLedger'] = () => (on ? {} : null);
           const res = await jsonFetch('/api/config');
           expect(res.status).toBe(200);
           const body = await res.json() as Record<string, unknown>;
-          expect(body['bulk_runs']).toEqual({ on, ...expected, db: true, shopify: false });
+          expect(body['bulk_runs']).toEqual({ on, ...expected, db: true, shopify: false, viewer: 'owner' });
         }
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '1');
+        repayRateWindow();
+        const read = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        expect((read['bulk_runs'] as Record<string, unknown>)['shopify']).toBe(true);
       } finally {
         host.engine['getEngineDb'] = origDb;
         host.engine['getBulkLedger'] = origLedger;
         vi.stubEnv('LYNOX_BILLING_TIER', '');
         vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       }
     });
 
     it('GET /api/config: without engine.db bulk runs cannot be turned on, on any tier', async () => {
       repayRateWindow();
       vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '1');
+      vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       try {
         const res = await jsonFetch('/api/config');
         const body = await res.json() as Record<string, unknown>;
-        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false, db: false, shopify: false });
+        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false, db: false, shopify: false, viewer: 'owner' });
         // On a pool tier lynox opened, the missing database is still the reason, not the tier.
         vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
         repayRateWindow();
         const pool = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
-        expect(pool['bulk_runs']).toEqual({ on: false, source: 'control-plane', allowed: false, db: false, shopify: false });
+        expect(pool['bulk_runs']).toEqual({ on: false, source: 'control-plane', allowed: false, db: false, shopify: false, viewer: 'owner' });
       } finally {
         vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
         vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       }
     });
 
