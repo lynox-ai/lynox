@@ -258,7 +258,7 @@ export function precheckDataDir(opts: {
     return { reason: `${dataDir} does not exist.`, command: `mkdir -p ${shellQuote(dataDir)}` };
   }
   if (st.isSymbolicLink() || !st.isDirectory()) {
-    return { reason: `${dataDir} is not a directory. Move it aside, then run this again.`, command: null };
+    return { reason: `${dataDir} is a link or not a directory. Move it aside, then run this again.`, command: null };
   }
   if (mode === 'rootless') return null;
   const writable = (st.uid === engine.uid && (st.mode & 0o300) === 0o300)
@@ -309,8 +309,12 @@ export function freshDataDirProblem(
   for (const name of readdirSync(dataDir)) {
     if (!FRESH_FILES.includes(name)) return { reason: `${dataDir} already holds ${name}; only a fresh directory is handed over.`, command: handBack };
     const file = lstatSync(join(dataDir, name));
-    if (!file.isFile() || file.nlink > 1) { // lstat: a symlink is never a file
-      return { reason: `${join(dataDir, name)} is a link, not a plain file. Move it out of ${dataDir}, then run this again.`, command: null };
+    // lstat: a symlink is never a file. The two cases are told apart, so the user looks for the right thing.
+    if (!file.isFile()) {
+      return { reason: `${join(dataDir, name)} is a link, a directory or another kind of entry, not a plain file. Move it out of ${dataDir}, then run this again.`, command: null };
+    }
+    if (file.nlink > 1) {
+      return { reason: `${join(dataDir, name)} has a second name elsewhere (a hard link). Move it out of ${dataDir}, then run this again.`, command: null };
     }
   }
   return null;

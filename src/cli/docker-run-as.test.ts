@@ -297,7 +297,7 @@ describe('on the filesystem', () => {
       symlinkSync(join(root, 'real'), join(root, '.lynox'));
       // No command: none fixes it for the user, so the reason names the step (ux U-082).
       expect(precheckDataDir({ mode: 'rootful', host: ME, engine: ME, dataDir: join(root, '.lynox') }))
-        .toEqual({ reason: `${join(root, '.lynox')} is not a directory. Move it aside, then run this again.`, command: null });
+        .toEqual({ reason: `${join(root, '.lynox')} is a link or not a directory. Move it aside, then run this again.`, command: null });
     });
 
     it('does not judge a rootless engine running as the image user (a subordinate id it does not compute)', () => {

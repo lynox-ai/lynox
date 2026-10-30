@@ -99,22 +99,27 @@ describe('handOverFreshDataDir hands over a fresh data dir only', () => {
     expect(touched()).toEqual([]);
   });
 
-  it('refuses a .env that is a symlink or has a second name, and touches nothing', () => {
+  it('refuses a .env that is a symlink, a directory or has a second name, each with its own reason, and touches nothing', () => {
+    const notPlain = `${join(dir, '.env')} is a link, a directory or another kind of entry, not a plain file. Move it out of ${dir}, then run this again.`;
     symlinkSync(join(outside, 'secret'), join(dir, '.env'));
-    expect(freshDataDirProblem(dir, root)).toEqual({ reason: `${join(dir, '.env')} is a link, not a plain file. Move it out of ${dir}, then run this again.`, command: null });
-    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/is a link, not a plain file/);
+    expect(freshDataDirProblem(dir, root)).toEqual({ reason: notPlain, command: null });
+    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/not a plain file/);
     rmSync(join(dir, '.env'));
+    mkdirSync(join(dir, '.env'));
+    expect(freshDataDirProblem(dir, root)).toEqual({ reason: notPlain, command: null });
+    rmSync(join(dir, '.env'), { recursive: true });
     linkSync(join(outside, 'secret'), join(dir, '.env'));
-    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/is a link, not a plain file/);
+    expect(freshDataDirProblem(dir, root)).toEqual({ reason: `${join(dir, '.env')} has a second name elsewhere (a hard link). Move it out of ${dir}, then run this again.`, command: null });
+    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/has a second name elsewhere/);
     expect(touched()).toEqual([]);
   });
 
   it('refuses a terms marker that is a symlink or has a second name, and touches nothing', () => {
     symlinkSync(join(outside, 'secret'), join(dir, TOS_MARKER));
-    expect(freshDataDirProblem(dir, root)).toEqual({ reason: `${join(dir, TOS_MARKER)} is a link, not a plain file. Move it out of ${dir}, then run this again.`, command: null });
+    expect(freshDataDirProblem(dir, root)).toEqual({ reason: `${join(dir, TOS_MARKER)} is a link, a directory or another kind of entry, not a plain file. Move it out of ${dir}, then run this again.`, command: null });
     rmSync(join(dir, TOS_MARKER));
     linkSync(join(outside, 'secret'), join(dir, TOS_MARKER));
-    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/is a link, not a plain file/);
+    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/has a second name elsewhere \(a hard link\)/);
     expect(touched()).toEqual([]);
   });
 
