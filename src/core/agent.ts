@@ -778,6 +778,8 @@ export class Agent implements IAgent {
   private _continuationToolCount = 0;
   /** Truncated thinking-only turns in a row with no tool dispatched — see the max_tokens branch in _loop. */
   private _thinkingOnlyStreak = 0;
+  /** Truncated turns in a row with no visible text and no tool dispatched between them. */
+  private _blankTruncatedStreak = 0;
   private readonly maxContinuations: number;
   private static readonly MAX_RETRIES = 3;
   private static readonly ABSOLUTE_MAX_ITERATIONS = 500;
@@ -2627,6 +2629,7 @@ export class Agent implements IAgent {
     this._continuationLoopCount = 0;
     this._continuationToolCount = 0;
     this._thinkingOnlyStreak = 0;
+    this._blankTruncatedStreak = 0;
     this._loopToolCount = 0;
     this._repeatGuard.reset();
     this._sawUntrustedData = false;
@@ -2988,6 +2991,16 @@ export class Agent implements IAgent {
         const thinkingOnly = contentForHistory.every((b) => b.type === 'text' && b.text.trim().length === 0);
         if (!thinkingOnly || toolsDelta > 0) this._thinkingOnlyStreak = 0;
         if (thinkingOnly && ++this._thinkingOnlyStreak >= 2) throw new ThinkingOnlyLoopError();
+        // Both counters above reset on the other's shape: a turn cut off inside a tool call with
+        // no text is not thinking-only, and its blank prefix clears the prefix guard. So turns
+        // that alternate between the two, or repeat the cut-off call alone, passed both until
+        // the continuation cap. Neither shape gave the model anything to build on: the thinking
+        // is stripped, the cut-off call is discarded. Three in a row with no tool dispatched
+        // between them is a loop. Decided on what stays in the history, as `thinkingOnly` is: a
+        // server tool's blocks or a redacted thinking block are something to build on.
+        const blank = contentForHistory.every((b) => (b.type === 'text' && b.text.trim().length === 0) || b.type === 'tool_use');
+        if (!blank || toolsDelta > 0) this._blankTruncatedStreak = 0;
+        if (blank && ++this._blankTruncatedStreak >= 3) throw new ContinuationLoopError('');
         if (prefix.trim().length === 0) {
           this._continuationLoopPrefix = '';
           this._continuationLoopCount = 0;
