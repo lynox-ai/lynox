@@ -713,11 +713,24 @@ describe('Task Tools', () => {
       expect(await schedule('wf-theirs')).toMatch(/^Error: workflow wf-theirs: Not scheduled/);
     });
 
+    it('task_create schedules the workflow it checked, not another one a prefix also names', async () => {
+      const save = (id: string): void => {
+        history.insertPlannedPipeline({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, mandate);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      save('wf-dup-1');
+      save('wf-dup-2');
+      const { getPipeline } = await import('./pipeline.js');
+      const checked = getPipeline('wf-dup', history)!.id;
+      expect(await taskCreateTool.handler({ title: 'Dup', assignee: 'lynox', workflow_id: 'wf-dup', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate))).toContain('Workflow task created');
+      expect(tm.listTriggers({}).find((x) => x.title === 'Dup')!.pipeline_id).toBe(checked);
+    });
+
     it('task_create refuses a mandate a workflow it cannot find, and lets the owner through to the worker', async () => {
       expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate)))
-        .toMatch(/^Error: workflow wf-nowhere: Not scheduled: lynox could not read who set up this workflow/);
+        .toMatch(/^Error: workflow wf-nowhere: Not scheduled: lynox found no saved workflow with this id/);
       expect(tm.listTriggers({}).some((x) => x.title === 'Ghost')).toBe(false);
-      expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent())).not.toMatch(/Not scheduled/);
+      expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent())).toContain('Workflow task created');
     });
 
     it('control: a mandate\'s task_create assigned to lynox makes a schedule', async () => {

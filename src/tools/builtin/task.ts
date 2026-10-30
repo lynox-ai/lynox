@@ -445,18 +445,18 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // part of confirming, so the refusal says not to create it here again.
         // Only the id is echoed: this tool's result is not scanned, and the
         // stored name is free text written by someone else. A workflow this
-        // cannot find is left to the manager and the worker, which already
-        // report a missing target.
+        // cannot find is left, for the owner, to the manager and the worker,
+        // which already report a missing target.
         const { getPipeline } = await import('./pipeline.js');
         const planned = getPipeline(input.workflow_id, agent.toolContext.runHistory);
         // A schedule on another mandate's workflow ties both mandates into one plan, so a mandate
         // schedules only its own workflows and the owner's (`foreignWorkflowScheduleRefusal`). A
-        // workflow this cannot find has no author to check, so only the owner may schedule it.
+        // workflow this cannot find has no author to check, so a mandate's schedule on it is refused.
         if (!isOwnerPrincipal(agent.principal)) {
-          const { foreignWorkflowScheduleRefusal, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL } = await import('../../core/plan-stamp.js');
+          const { foreignWorkflowScheduleRefusal, MISSING_WORKFLOW_SCHEDULE_REFUSAL } = await import('../../core/plan-stamp.js');
           const refusal = planned
             ? foreignWorkflowScheduleRefusal(agent.principal, planned.id, agent.toolContext.runHistory)
-            : UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL;
+            : MISSING_WORKFLOW_SCHEDULE_REFUSAL;
           if (refusal !== null) return `Error: workflow ${planned?.id ?? input.workflow_id}: ${refusal}`;
         }
         if (planned) {
@@ -480,7 +480,8 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         return withInstanceWrite(agent, { site: 'task_create#workflow', kind: 'create', store: 'tasks', target: () => [['type', 'workflow'], ['workflow', plannedId]], main: ['create'] }, (w) => {
           const task = w.run('create', () => managerRef.createPipelineTask({
             ...baseParams,
-            pipelineId: workflowId,
+            // The workflow checked above: a prefix the store resolves on its own may name another.
+            pipelineId: plannedId ?? workflowId,
             scheduleCron: input.schedule,
             ...(pipelineParams !== undefined ? { pipelineParams } : {}),
             // The run this task starts has no session of its own; it inherits what this one

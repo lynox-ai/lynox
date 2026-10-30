@@ -1862,6 +1862,7 @@ describe('LynoxHTTPApi', () => {
         author = 'mandate:jan@example.invalid';
         api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
         expect((await post()).status).toBe(201);
+        expect(mockTaskCreatePipeline).toHaveBeenCalledTimes(3);
       } finally {
         api.setPrincipalResolverForTesting(resolver);
         history['getWorkflowAuthorship'] = savedAuthorship;
