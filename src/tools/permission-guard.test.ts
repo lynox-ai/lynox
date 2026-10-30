@@ -7,6 +7,7 @@ import { channels } from '../core/observability.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { join } from 'node:path';
 import { getLynoxDir } from '../core/config.js';
+import { resetShellIsolationForTest, setShellIsolationForTest, type SidecarRoot } from '../core/shell-isolation.js';
 
 // Stub ToolEntry fixtures mirroring the real `destructive` declarations
 // in data-store.ts / artifact.ts / memory.ts / google-{drive,calendar,sheets,docs}.ts.
@@ -3421,6 +3422,19 @@ describe('bash allowlist observe mode', () => {
       run_id: 'run-1',
       detail: 'program=cat;reason=ok;current=free',
     }]);
+  });
+
+  it('in shell sidecar mode records the call as not proven without resolving its paths here', () => {
+    const anchor = { kind: 'anchor', fd: -1, pathBuf: Buffer.from('/workspace') } as unknown as SidecarRoot['anchor'];
+    setShellIsolationForTest({ kind: 'sidecar', socket: '/run/exec.sock', root: { mode: 'sidecar', anchor, label: '/workspace' } });
+    try {
+      let verdict: string | null = 'unset';
+      const events = observe(() => { verdict = isDangerous('bash', { command: 'cat package.json' }, 'autonomous'); });
+      expect(verdict).toBeNull();
+      expect(events.map((e) => [e.decision, e.detail])).toEqual([['unproven', 'program=other;reason=sidecar;current=free']]);
+    } finally {
+      resetShellIsolationForTest();
+    }
   });
 
   it('records an unproven call that runs today, and still lets it run', () => {

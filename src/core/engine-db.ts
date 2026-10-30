@@ -1569,11 +1569,19 @@ const MIGRATIONS: string[] = [
   // own migration, so that a database that already ran the one before it gets it too.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (62);
    CREATE INDEX IF NOT EXISTS idx_inbound_events_state_received ON inbound_events(state, received_at);`,
-  // v63: the owner's advance warning before a mandate's known end (`plan-pause.ts`). One row per
+  // v63 (660a-1c S-2): an opaque id for each API profile, `apf_` and 16 hex, that a mandate's row
+  // in the instance trail names instead of the slug the model chose (which can carry a name). Only
+  // `kind = 'api'` rows get one; the boot fills any a row is still missing (`fillApiTrailIds`).
+  // `randomblob` is enough: the id is a label with no secret value.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (63);
+   ALTER TABLE connections ADD COLUMN trail_id TEXT;
+   UPDATE connections SET trail_id = 'apf_' || lower(hex(randomblob(8))) WHERE trail_id IS NULL AND kind = 'api';
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_trail_id ON connections(trail_id);`,
+  // v64: the owner's advance warning before a mandate's known end (`plan-pause.ts`). One row per
   // plan, mandate and end: a plan the mandate joins after the warning gets its own, and an
   // extension (a new end) warns again. `claimed_at` is when a process took it, `delivered_at` when
   // a channel of the owner accepted the warning; only a delivered row makes a pause say "warned".
-  `INSERT OR IGNORE INTO schema_version (version) VALUES (63);
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (64);
    CREATE TABLE IF NOT EXISTS plan_advance_warnings (
      trigger_id TEXT NOT NULL REFERENCES triggers(id) ON DELETE CASCADE,
      mandate_id TEXT NOT NULL,

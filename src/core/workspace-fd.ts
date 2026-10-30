@@ -32,6 +32,7 @@ import {
   closeSync,
   constants,
   fchmodSync,
+  fchownSync,
   fstatSync,
   fsyncSync,
   lstatSync,
@@ -208,11 +209,15 @@ const S_ISGID = 0o2000;
 /**
  * fchmod needs a real fd; an O_PATH fd gives EBADF, so reopen the directory read-only. A new
  * directory under a set-group-ID parent inherits that bit from mkdir; it is kept, as a mkdir by
- * name keeps it, so files made below stay in the parent's group.
+ * name keeps it, so files made below stay in the parent's group. With `group`, the directory is
+ * given that group first, through the same reopened fd (fchown on O_PATH is EBADF as well).
  */
-function setMode(dir: DirHandle, mode: number): void {
+function setMode(dir: DirHandle, mode: number, group?: number): void {
   const fd = IS_LINUX ? openSync(self(dir), constants.O_RDONLY | O_DIRECTORY) : dir.fd;
-  try { fchmodSync(fd, mode | (fstatSync(fd).mode & S_ISGID)); } finally { if (fd !== dir.fd) closeSync(fd); }
+  try {
+    if (group !== undefined) fchownSync(fd, -1, group);
+    fchmodSync(fd, mode | (fstatSync(fd).mode & S_ISGID));
+  } finally { if (fd !== dir.fd) closeSync(fd); }
 }
 
 /**
@@ -222,7 +227,7 @@ function setMode(dir: DirHandle, mode: number): void {
  * directory this call did not create keeps its mode. The caller closes the
  * returned handle with `closeDir` — it may be the anchor.
  */
-function walkDir(anchor: DirHandle, parts: readonly string[], create?: { dirMode: number }): DirHandle {
+function walkDir(anchor: DirHandle, parts: readonly string[], create?: { dirMode: number; group?: number | undefined }): DirHandle {
   assertLive(anchor);
   let cur: DirHandle = anchor;
   try {
@@ -243,8 +248,15 @@ function walkDir(anchor: DirHandle, parts: readonly string[], create?: { dirMode
         next = openChildDir(cur, name);
         if (made) {
           try {
-            setMode(next, create.dirMode);
+            setMode(next, create.dirMode, create.group);
           } catch (modeErr) {
+            // A directory left with mkdir's 0700 would never get its mode or group: the next call
+            // finds it and does not count it as made. Removed again, if it is still the one made
+            // here and still empty.
+            try {
+              const ino = fstatSync(next.fd).ino;
+              if (lstatOrNull(cur, name)?.ino === ino) rmdirSync(at(cur, name));
+            } catch { /* no longer empty, or gone */ }
             closeSync(next.fd);
             throw modeErr;
           }
@@ -304,6 +316,46 @@ export function ensureSubAnchor(anchor: WorkspaceAnchor, name: string, dirMode: 
   if (parts.length !== 1) throw new WorkspaceAccessError('BAD_PATH', `a sub-anchor is one component, got ${JSON.stringify(name)}`);
   const dir = walkDir(anchor, parts, { dirMode });
   return { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf };
+}
+
+/** A directory that is not, or could not be made, what the caller asked for. */
+export class DirStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DirStateError';
+  }
+}
+
+/**
+ * As {@link ensureSubAnchor}, and the directory gets `dirMode` and `group` whether this call made it
+ * or it was there already (a context directory left at mkdir's 0700 by an earlier start, or changed
+ * since). Set through a reopened fd, as `setMode` does: on the O_PATH anchor fchown and fchmod are
+ * EBADF.
+ *
+ * A directory that does not belong to `owner` is refused before anything is changed. Afterwards
+ * the directory is read back: a kernel that drops the set-group-ID bit without an error (fchmod by
+ * a process outside `group`) leaves a mode nobody asked for, and that is refused as well. A
+ * failed call closes what it opened and throws, naming the call in its errno message.
+ */
+export function ensureSubAnchorWithMode(anchor: WorkspaceAnchor, name: string, dirMode: number, group: number, owner: number): WorkspaceAnchor {
+  const parts = splitRel(name);
+  if (parts.length !== 1) throw new WorkspaceAccessError('BAD_PATH', `a sub-anchor is one component, got ${JSON.stringify(name)}`);
+  // A new directory is made 0700 by the walk; group and mode are set below for new and old alike,
+  // the group first, so the group bits never open to a group the directory does not have yet.
+  const dir = walkDir(anchor, parts, { dirMode: 0o700 });
+  try {
+    const before = fstatSync(dir.fd).uid;
+    if (before !== owner) throw new DirStateError(`it belongs to uid ${before}, not to uid ${owner}; give it to uid ${owner} or remove it`);
+    setMode(dir, dirMode, group);
+    const after = fstatSync(dir.fd);
+    if ((after.mode & 0o7777) !== dirMode || after.gid !== group) {
+      throw new DirStateError(`after fchown and fchmod it has mode 0o${(after.mode & 0o7777).toString(8)} and group ${after.gid}, not 0o${dirMode.toString(8)} and ${group}`);
+    }
+    return { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf };
+  } catch (err) {
+    closeSync(dir.fd);
+    throw err;
+  }
 }
 
 /**
@@ -483,6 +535,8 @@ export interface OpenWriteOptions {
   readonly createMode?: number | undefined;
   /** Mode for directories created on the way; omit to require that they exist. */
   readonly dirMode?: number | undefined;
+  /** Group given (fchown) to the file and the directories this call creates; omit to keep the default. */
+  readonly group?: number | undefined;
 }
 
 function refuseWriteOpen(dir: DirHandle, leaf: Buffer, err: unknown): never {
@@ -504,7 +558,7 @@ function refuseWriteOpen(dir: DirHandle, leaf: Buffer, err: unknown): never {
  */
 export function openWrite(anchor: WorkspaceAnchor, rel: string, opts: OpenWriteOptions = {}): { fd: number; created: boolean } {
   const { dirParts, leaf } = splitLeaf(rel);
-  const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode } : undefined);
+  const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode, group: opts.group } : undefined);
   try {
     let fd: number;
     let created = false;
@@ -521,8 +575,16 @@ export function openWrite(anchor: WorkspaceAnchor, rel: string, opts: OpenWriteO
     }
     try {
       if (!fstatSync(fd).isFile()) throw new WorkspaceAccessError('NOT_FILE', `${show(dir, leaf)} is not a regular file`);
+      if (created && opts.group !== undefined) fchownSync(fd, -1, opts.group);
       if (created && opts.createMode !== undefined) fchmodSync(fd, opts.createMode);
     } catch (err) {
+      // A file made here and left 0600 would be written later as it is, since it then exists:
+      // removed again, if the name still holds the file made here.
+      if (created) {
+        try {
+          if (lstatOrNull(dir, leaf)?.ino === fstatSync(fd).ino) unlinkSync(at(dir, leaf));
+        } catch { /* already gone */ }
+      }
       closeSync(fd);
       throw err;
     }
@@ -537,6 +599,8 @@ export interface WriteOptions {
   readonly fileMode: number;
   /** Mode for directories created on the way; omit to require that they exist. */
   readonly dirMode?: number | undefined;
+  /** Group given (fchown) to the new file and the directories this call creates; omit to keep the default. */
+  readonly group?: number | undefined;
 }
 
 /** Prefix of a staged or temp file: `.lynox-stage-` plus 24 hex characters. */
@@ -561,13 +625,14 @@ function assertNotDir(dir: DirHandle, leaf: Buffer): void {
   }
 }
 
-/** Write a new temp file in `dir` (O_EXCL|O_NOFOLLOW), fill, fchmod, fsync. Returns its name. */
-function writeTemp(dir: DirHandle, fileMode: number, data: string | Uint8Array): { tmp: Buffer; bytes: number } {
+/** Write a new temp file in `dir` (O_EXCL|O_NOFOLLOW), fill, fchown (with `group`), fchmod, fsync. Returns its name. */
+function writeTemp(dir: DirHandle, fileMode: number, data: string | Uint8Array, group?: number): { tmp: Buffer; bytes: number } {
   const tmp = tempName();
   const fd = openSync(at(dir, tmp), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_NOFOLLOW, 0o600);
   let open = true;
   try {
     const bytes = writeAll(fd, data);
+    if (group !== undefined) fchownSync(fd, -1, group);
     fchmodSync(fd, fileMode);
     fsyncSync(fd);
     closeSync(fd);
@@ -587,9 +652,9 @@ function writeTemp(dir: DirHandle, fileMode: number, data: string | Uint8Array):
  */
 export function writeFileAt(anchor: WorkspaceAnchor, rel: string, data: string | Uint8Array, opts: WriteOptions): void {
   const { dirParts, leaf } = splitLeaf(rel);
-  const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode } : undefined);
+  const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode, group: opts.group } : undefined);
   try {
-    const { tmp } = writeTemp(dir, opts.fileMode, data);
+    const { tmp } = writeTemp(dir, opts.fileMode, data, opts.group);
     try {
       assertNotDir(dir, leaf);
       renameSync(at(dir, tmp), at(dir, leaf));
@@ -602,9 +667,9 @@ export function writeFileAt(anchor: WorkspaceAnchor, rel: string, data: string |
   }
 }
 
-/** Create a directory path; existing components must be real directories. */
-export function mkdirAt(anchor: WorkspaceAnchor, rel: string, dirMode: number): void {
-  closeDir(walkDir(anchor, splitRel(rel), { dirMode }), anchor);
+/** Create a directory path; existing components must be real directories. With `group`, the directories it creates get that group. */
+export function mkdirAt(anchor: WorkspaceAnchor, rel: string, dirMode: number, group?: number): void {
+  closeDir(walkDir(anchor, splitRel(rel), { dirMode, group }), anchor);
 }
 
 /** Remove one non-directory entry (a symlink is removed, not its target). */

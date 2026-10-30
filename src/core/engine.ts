@@ -44,7 +44,6 @@ import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
 import { resolveContext } from './context.js';
-import { ShellIsolationError } from './shell-isolation.js';
 import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
 import { closeWorkspaceBase } from './workspace-rel.js';
@@ -1573,12 +1572,6 @@ export class Engine {
     // Resolve context (CLI: project detection, others: explicit)
     // In sidecar mode the context's workspace is the label (D0); the mode was built with the tool context.
     this.context = resolveContext(this.config, this._toolContext.shellIsolation);
-    // In sidecar mode the workspace sites below still reach the tree by name; they move to the
-    // fd-3 anchor in their own change. Until then the start stops here, so nothing is created by
-    // name under the label (PRD shell-sidecar-activation D3).
-    if (this._toolContext.shellIsolation.kind === 'sidecar') {
-      throw new ShellIsolationError('D3', 'the workspace is still reached by name in this version; sidecar mode cannot be switched on yet.');
-    }
 
     // Non-CLI sources always get isolated workspace. A root or context directory the engine
     // cannot use stops the boot here, naming the path, instead of every upload quietly falling
@@ -1743,6 +1736,14 @@ export class Engine {
         // estimate that said "the store is already on the engine" was measuring
         // a reachability that did not exist.
         this._connectionStore = connStore;
+        // Every API profile row without its opaque id gets one, on every boot (660a-1c S-2): the
+        // migration ran once, and a row an older binary wrote after a pin back has none. In its own
+        // catch: a failure costs a row's id, never the profiles or engine.db.
+        try {
+          connStore.fillApiTrailIds();
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox] API profile id fill failed: ${processErrorText(err)}\n`);
+        }
         this._apiStore.importFromDirectoryIfNeeded(apisDir, connStore);
         loaded = this._apiStore.loadFromConnections(connStore);
         this._apiStore.setConnectionStore(connStore);

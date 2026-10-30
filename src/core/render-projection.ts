@@ -48,6 +48,17 @@ export const MAX_TOKENS_CONTINUATION_PROMPT =
   'Your previous response was truncated due to length. Please continue from where you left off.';
 
 /**
+ * The continuation after a truncated turn that held only thinking. Its thinking is not kept in
+ * the history (the agent strips thinking blocks), so "continue from where you left off" points
+ * at nothing the model can see: it starts the same reasoning over, and the next turn is cut off
+ * the same way. This one says what happened and asks for an act. Persisted and suppressed in
+ * the projection like {@link MAX_TOKENS_CONTINUATION_PROMPT}; keep today's string as a legacy
+ * match if the wording ever changes.
+ */
+export const THINKING_ONLY_CONTINUATION_PROMPT =
+  'Your previous turn spent its whole output limit on thinking and produced no answer and no tool call. That thinking is not kept, so do not start it over. Act now: call a tool, or answer with what you have.';
+
+/**
  * UI-ready projection of stored thread messages.
  *
  * The storage layer keeps raw Anthropic `BetaMessageParam` shape (role + content
@@ -388,7 +399,7 @@ export function projectMessages(
           : '';
       // The agent's own "please continue" turn: the model reads it, the user
       // never wrote it. The answer before and after it renders as one turn.
-      if (text === MAX_TOKENS_CONTINUATION_PROMPT) continue;
+      if (text === MAX_TOKENS_CONTINUATION_PROMPT || text === THINKING_ONLY_CONTINUATION_PROMPT) continue;
       out.push({
         seq: r.seq,
         role: 'user',

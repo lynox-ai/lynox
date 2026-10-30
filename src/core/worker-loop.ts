@@ -8,7 +8,7 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
-import { errorText, errorTextReduced, processErrorText } from './error-egress.js';
+import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isFeatureEnabled } from './features.js';
@@ -34,6 +34,7 @@ import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
 import { inquiryOptions, summarizeDelivery } from './notification-router.js';
+import { stripHidden } from './hidden-text.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
@@ -2262,10 +2263,10 @@ export class WorkerLoop {
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
           followUps: stopped
-            ? [{ label: 'Run again', task: task.description ?? task.title }]
+            ? [{ label: 'Run again', task: stripHidden(task.description ?? task.title) }]
             : [
-              { label: 'Retry', task: task.description ?? task.title },
-              { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${pushedMsg}` },
+              { label: 'Retry', task: stripHidden(task.description ?? task.title) },
+              { label: 'Explain', task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${stripHidden(pushedMsg)}` },
             ],
         });
       }
@@ -2883,6 +2884,10 @@ export class WorkerLoop {
       // the box carries the field names the question lists, never the values.
       const offBoxText = flattenPrompt(offBoxPrompt(rawQuestion));
       const offBoxQuestion = secretStore ? secretStore.maskAll(offBoxText) : offBoxText;
+      // Whether the question reached anyone goes onto the trigger and, through the engine as a
+      // workflow question's does, to the hooks: on a managed instance a push that reached nobody
+      // then mails the owner a fixed text that names neither the question nor the task.
+      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id));
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
         body: offBoxQuestion,
@@ -2894,6 +2899,8 @@ export class WorkerLoop {
         data: { threadId: session.sessionId, promptId },
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
+      }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
+        process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });
       try {
         const taskSignal = active?.controller.signal;
@@ -3054,9 +3061,15 @@ export class WorkerLoop {
       }
     };
 
-    const base = task.description && task.description.trim() !== task.title.trim()
-      ? `Task: ${task.title}\n\n${task.description}`
-      : `Task: ${task.title}`;
+    // Without the characters that render as nothing (`hidden-text.ts`): the model's write tools
+    // refuse them, but a plan confirmed before, or saved through another path, carries them, and a hidden clause in its
+    // text would reach the model as part of the task. Stripped, not refused, so a plan that holds
+    // a stray one from a paste keeps running on what its owner can see.
+    const title = stripHidden(task.title);
+    const description = task.description ? stripHidden(task.description) : task.description;
+    const base = description && description.trim() !== title.trim()
+      ? `Task: ${title}\n\n${description}`
+      : `Task: ${title}`;
     // §0 A10: the answer goes into the INPUT, named alongside the question it
     // answers. Without this the re-armed run asks the same thing again and parks
     // again — a loop on the wait's own period, which is a worse outcome than the
@@ -3218,8 +3231,8 @@ export class WorkerLoop {
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
         data: { threadId: session.sessionId },
         followUps: [
-          { label: 'Details', task: `Show me more details about: ${task.title}` },
-          { label: 'Run again', task: task.description ?? task.title },
+          { label: 'Details', task: `Show me more details about: ${stripHidden(task.title)}` },
+          { label: 'Run again', task: stripHidden(task.description ?? task.title) },
         ],
       });
     }
@@ -3444,7 +3457,10 @@ export class WorkerLoop {
       // Surface conversion / validation / not-found / not-template errors as
       // typed throws so the existing executeTask catch routes them through
       // Bugsink + recordTaskRun like any other task failure.
-      throw new Error(result.error ?? `Pipeline ${task.pipeline_id} execution failed`);
+      // A refusal that names stored text carries its fixed wording too: a push from a contained
+      // instance then says why the run did not start, not only that it failed.
+      const message = result.error ?? `Pipeline ${task.pipeline_id} execution failed`;
+      throw result.fixedError !== undefined ? new FixedTextError(message, result.fixedError) : new Error(message);
     }
 
     // What the owner must read even when every step completed: a write the run was
@@ -3772,9 +3788,11 @@ export class WorkerLoop {
     const contentForPrompt = currentSignal.length > WATCH_CONTENT_CHARS
       ? currentSignal.slice(0, WATCH_CONTENT_CHARS) + ' […truncated]'
       : currentSignal;
+    // The URL as stored, without the characters that render as nothing (`hidden-text.ts`): the
+    // model's write tool refuses them, but a watch saved before, or through another path, carries them.
     const analysisPrompt = isFirstRun
-      ? `You are monitoring ${config.url} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
-      : `You are monitoring ${config.url} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
+      ? `You are monitoring ${stripHidden(config.url)} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
+      : `You are monitoring ${stripHidden(config.url)} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
 
     // noTools: this turn embeds up to 8 KB of the WATCHED PAGE — content the
     // user did not author and an attacker may control (a monitored forum, a

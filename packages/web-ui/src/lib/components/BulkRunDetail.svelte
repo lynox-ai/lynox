@@ -10,7 +10,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkSentUnknownText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSentUnknownText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -94,10 +94,13 @@
 			// the error, never a run whose approval covers more than it lists.
 			// A preview the owner approves is loaded whole: the approval covers every target, and
 			// each one the owner may take out has to be on the page to be taken out.
+			// So is a run whose rollback left targets: the sentence names the marked ones, and each
+			// has to be on the page to be seen.
 			const approving = r.body.phase === 'previewed' && r.body.kind === 'apply';
-			const shown = approving ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
+			const whole = approving || bulkRollbackIncomplete(r.body);
+			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
-			if (approving && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
+			if (whole && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
 			const deleted = r.body.kind === 'undo' ? await loadCreates(r.body) : [];
 			run = r.body;
 			targets = shown;
@@ -316,6 +319,7 @@
 	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
+	const rollbackText = $derived(run ? bulkRollbackText(run, i18n) : null);
 	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
 	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');
@@ -367,7 +371,7 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
-					<dd>{atProbe && run.haltKey === 'maxTargets' ? t('bulk.halted_after_probe') : haltText?.cause ?? resumeText?.cause ?? run.haltReason}</dd>
+					<dd>{atProbe && run.haltKey === 'maxTargets' ? t('bulk.halted_after_probe') : haltText?.cause ?? resumeText?.cause ?? rollbackText?.cause ?? run.haltReason}</dd>
 				{/if}
 			</dl>
 
@@ -405,7 +409,12 @@
 							<tbody>
 								{#each shownTargets as target (target.seq)}
 									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}">
-										<td class="py-1.5 pr-3"><code class="text-xs break-all">{bulkVisibleText(target.key)}</code></td>
+										<td class="py-1.5 pr-3">
+											<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+											{#if bulkRollbackLeft(run, target)}
+												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
+											{/if}
+										</td>
 										<td class="py-1.5">
 											{#if target.diff.kind === 'fields'}
 												{#each target.diff.fields as f (f.field)}

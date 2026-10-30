@@ -2237,6 +2237,172 @@ describe('LynoxHTTPApi', () => {
           rmSync(cwd, { recursive: true, force: true });
         }
       });
+
+      it('a review whose only file was replaced by a link since is still answered, and names it', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-only-'));
+        const left = join(cwd, 'left.txt');
+        const outside = join(mkdtempSync(join(tmpdir(), 'lynox-cs-out-')), 'outside.txt');
+        writeFileSync(outside, 'not the workspace', 'utf-8');
+        writeFileSync(left, 'left before', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(left);
+        writeFileSync(left, 'left by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          rmSync(left);
+          symlinkSync(outside, left);
+          expect(csm.hasChanges(), 'precondition: the file dropped out of the changes').toBe(false);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ rolledBack: 0, notRestored: ['left.txt'] });
+          const again = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
+          expect(again.status, 'the answered review is gone').toBe(400);
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+          rmSync(dirname(outside), { recursive: true, force: true });
+        }
+      });
+
+      // A file the backup could not read was never shown and nothing was saved for it: the answer
+      // does not name it, since no restore was promised and the reason it gives would be wrong.
+      it('a rollback does not name a file the review never showed and the backup could not read', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-unread-'));
+        const pipe = join(cwd, 'pipe');
+        const back = join(cwd, 'back.txt');
+        execFileSync('mkfifo', [pipe]);
+        writeFileSync(back, 'back before', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(pipe);
+        csm.backupBeforeWrite(back);
+        writeFileSync(back, 'back by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          expect(csm.rollbackFiles([pipe]), 'precondition: the manager leaves it').toEqual([pipe]);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ rolledBack: 1, notRestored: [] });
+          expect(readFileSync(back, 'utf-8'), 'the shown file is restored (control)').toBe('back before');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+
+      // A file whose original the backup could not read (not a regular file then), which the run
+      // made a regular file: the review showed it, so a rollback that cannot put anything back names it.
+      it('a rollback names a shown file whose original the backup could not read', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-shown-'));
+        const made = join(cwd, 'made.txt');
+        execFileSync('mkfifo', [made]);
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(made);
+        rmSync(made);
+        writeFileSync(made, 'made by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          expect(csm.getChanges().map((c) => c.file), 'precondition: the review shows it').toEqual(['made.txt']);
+          expect(csm.hasOriginal(made), 'precondition: nothing saved for it').toBe(false);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
+          expect(await res.json()).toMatchObject({ rolledBack: 0, notRestored: ['made.txt'] });
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+
+      // The same file, replaced by a link after the review: it no longer shows, so rollback all cannot
+      // tell it from one never shown. A partial answer names it because the person chose it.
+      it('a partial answer names a chosen file the rollback left, even one no longer shown', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-chosen-'));
+        const made = join(cwd, 'made.txt');
+        const outside = join(mkdtempSync(join(tmpdir(), 'lynox-cs-out-')), 'outside.txt');
+        writeFileSync(outside, 'not the workspace', 'utf-8');
+        execFileSync('mkfifo', [made]);
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(made);
+        rmSync(made);
+        writeFileSync(made, 'made by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          rmSync(made);
+          symlinkSync(outside, made);
+          expect(csm.getChanges(), 'precondition: it dropped out of the changes').toEqual([]);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'partial', runId: 'run', rolledBackFiles: ['made.txt'] }) });
+          expect(await res.json()).toMatchObject({ rolledBack: 0, notRestored: ['made.txt'] });
+          expect(readFileSync(outside, 'utf-8')).toBe('not the workspace');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+          rmSync(dirname(outside), { recursive: true, force: true });
+        }
+      });
+
+      // A file the run added, replaced by a link since: it no longer shows, but a rollback has
+      // something to undo for it, so rollback all names it.
+      it('a rollback names a file the run added that was replaced by a link since', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-added-'));
+        const added = join(cwd, 'new.txt');
+        const outside = join(mkdtempSync(join(tmpdir(), 'lynox-cs-out-')), 'outside.txt');
+        writeFileSync(outside, 'not the workspace', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(added);
+        writeFileSync(added, 'added by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          rmSync(added);
+          symlinkSync(outside, added);
+          expect(csm.getChanges(), 'precondition: it dropped out of the changes').toEqual([]);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
+          expect(await res.json()).toMatchObject({ rolledBack: 0, notRestored: ['new.txt'] });
+          expect(readFileSync(outside, 'utf-8')).toBe('not the workspace');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+          rmSync(dirname(outside), { recursive: true, force: true });
+        }
+      });
+
+      // The review promised the original back. A file replaced by a link since is left as it is,
+      // and the answer names it instead of counting it as rolled back.
+      it.each(['rollback', 'partial'] as const)('a %s answer names a file it could not restore, and does not count it', async (action) => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-left-'));
+        const left = join(cwd, 'left.txt');
+        const back = join(cwd, 'back.txt');
+        const outside = join(mkdtempSync(join(tmpdir(), 'lynox-cs-out-')), 'outside.txt');
+        writeFileSync(outside, 'not the workspace', 'utf-8');
+        writeFileSync(left, 'left before', 'utf-8');
+        writeFileSync(back, 'back before', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(left);
+        csm.backupBeforeWrite(back);
+        writeFileSync(left, 'left by the run', 'utf-8');
+        writeFileSync(back, 'back by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          const shown = await jsonFetch('/api/sessions/test/changeset');
+          expect(shown.status, 'precondition: the review shows both').toBe(200);
+          rmSync(left);
+          symlinkSync(outside, left);
+          const res = await jsonFetch('/api/sessions/test/changeset/review', {
+            method: 'POST', body: JSON.stringify({ action, runId: 'run', rolledBackFiles: ['left.txt', 'back.txt'] }),
+          });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ rolledBack: 1, accepted: 0, notRestored: ['left.txt'] });
+          expect(readFileSync(back, 'utf-8'), 'the other file is restored (control)').toBe('back before');
+          expect(readFileSync(outside, 'utf-8'), 'the link target is not written').toBe('not the workspace');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+          rmSync(dirname(outside), { recursive: true, force: true });
+        }
+      });
     });
 
     it('masks a credential typed into the message before the run gets it, and points the model to ask_secret', async () => {
@@ -18034,7 +18200,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       api.setPrincipalResolverForTesting(() => MANDATE_P);
       try { return await fetch(url, { ...init, headers: OWNER }); } finally { api.setPrincipalResolverForTesting(cookieResolver); }
     };
-    const withRecords = async (run: (ctx: { recordId: number; held: () => string | undefined; cancelRows: () => unknown[] }) => Promise<void>): Promise<void> => {
+    const withRecords = async (run: (ctx: { recordId: number; trailId: string; held: () => string | undefined; cancelRows: () => unknown[] }) => Promise<void>): Promise<void> => {
       const { store: plain } = await arrange();
       const { EngineDb } = await import('../core/engine-db.js');
       const { ConnectionStore } = await import('../core/connection-store.js');
@@ -18060,6 +18226,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         const record = erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')!;
         await run({
           recordId: record.id,
+          trailId: store.trailIdOf(PROFILE)!,
           held: () => erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.id === record.id)?.historyState,
           cancelRows: () => db.getDb().prepare("SELECT actor_kind AS a, target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all(),
         });
@@ -18098,7 +18265,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     });
 
     it('POST cancel: a mandate is refused and nothing changes; the owner cancels and the audit row names the owner', async () => {
-      await withRecords(async ({ recordId, held, cancelRows }) => {
+      await withRecords(async ({ recordId, trailId, held, cancelRows }) => {
         const mandate = await asMandate(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
         expect(mandate.status).toBe(403);
         expect(await mandate.json()).toEqual({ error: 'Only the owner of this instance can cancel an erasure record.' });
@@ -18106,7 +18273,9 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         const owner = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
         expect(owner.status).toBe(200);
         expect(held()).toBe('cancelled');
-        expect(cancelRows()).toEqual([{ a: 'owner', t: `${PROFILE} ${recordId} owner` }]);
+        // The profile's opaque id, never its slug (the owner reads that back through the record id).
+        expect(trailId).toMatch(/^apf_[0-9a-f]{16}$/);
+        expect(cancelRows()).toEqual([{ a: 'owner', t: `${trailId} ${recordId} owner` }]);
         // Once cancelled it is no longer held, and an unknown id is not found.
         expect((await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER })).status).toBe(409);
         expect((await fetch(`${baseUrl}/api/connections/records/99999/cancel`, { method: 'POST', headers: OWNER })).status).toBe(404);
@@ -20401,7 +20570,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       ['POST', 'changeset/review', { action: 'accept' }],
       ['POST', 'compact', {}],
     ] as const)('%s %s: refuses a mandate the owner\'s last run in the mandate\'s own conversation', async (method, path, body) => {
-      const session = sessionRanBy(OWNER_PRINCIPAL, { compact: vi.fn(), getChangesetManager: vi.fn(() => ({ hasChanges: () => true })) });
+      const session = sessionRanBy(OWNER_PRINCIPAL, { compact: vi.fn(), getChangesetManager: vi.fn(() => ({ hasChanges: () => true, isEmpty: () => false })) });
       asMandate();
       await refusal(await jsonFetch(`/api/sessions/${OWN}/${path}`, { method, ...(body ? { body: JSON.stringify(body) } : {}) }));
       expect(session['abort']).not.toHaveBeenCalled();

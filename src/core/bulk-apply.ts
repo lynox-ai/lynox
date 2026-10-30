@@ -26,6 +26,7 @@ import {
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
 import { processUmask } from './workspace-rel.js';
+import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
 
 export type BulkEffect = BulkWriteEffect;
@@ -286,8 +287,10 @@ async function applyRunEffect(
       continue;
     }
     if (now() > deadline) {
-      // An atomic run must not stop half written: out of time, it rolls back instead.
-      if (run.atomic) return rollBack(ledger, writer, run, now);
+      // An atomic run must not stop half written: out of time, it rolls back instead. One that
+      // has written nothing is not half written — a rollback would only end it for good, so it
+      // halts like any run and can be resumed (as `endStopped` does for the owner's stop).
+      if (run.atomic && ledger.listAppliedDesc(runId).length > 0) return rollBack(ledger, writer, run, now, 'time');
       ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.timeBudget}.`) };
     }
@@ -418,13 +421,14 @@ async function applyRunEffect(
 }
 
 /**
- * An atomic run hit a target it could not write: take back every target it wrote, newest
- * first, each only while it still holds what the run wrote, and end the run `aborted`.
- * Local only — an external target has no transaction to lean on (PRD §3.4).
+ * An atomic run hit a target it could not write, was stopped, or ran out of time: take back
+ * every target it wrote, newest first, each only while it still holds what the run wrote, and
+ * end the run `aborted`. A target left as it is keeps no `undone_at`, which is how the owner's
+ * view finds it. Local only — an external target has no transaction to lean on (PRD §3.4).
  */
 async function rollBack(
   ledger: BulkLedger, writer: TargetWriter, run: BulkRunForApply, now: () => number,
-  cause: 'failed' | 'stopped' = 'failed',
+  cause: 'failed' | 'stopped' | 'time' = 'failed',
 ): Promise<BulkEffectOutcome> {
   let complete = true;
   for (const t of ledger.listAppliedDesc(run.id)) {
@@ -438,15 +442,19 @@ async function rollBack(
       complete = false;
     }
   }
-  // The reason names the cause: a stopped run that read "could not be written" would tell
-  // the owner a target failed when none did.
+  // The reason names the cause: a stopped or timed-out run that read "could not be written"
+  // would tell the owner a target failed when none did.
   const reason = cause === 'stopped'
     ? (complete ? BULK_HALT_REASONS.atomicStoppedRolledBack : BULK_HALT_REASONS.atomicStoppedRollbackIncomplete)
-    : (complete ? BULK_HALT_REASONS.atomicRolledBack : BULK_HALT_REASONS.atomicRollbackIncomplete);
+    : cause === 'time'
+      ? (complete ? BULK_HALT_REASONS.atomicTimeRolledBack : BULK_HALT_REASONS.atomicTimeRollbackIncomplete)
+      : (complete ? BULK_HALT_REASONS.atomicRolledBack : BULK_HALT_REASONS.atomicRollbackIncomplete);
   ledger.setPhase(run.id, ['writing'], 'aborted', reason);
   const lead = cause === 'stopped'
     ? (complete ? 'Atomic bulk run stopped and rolled back.' : 'Atomic bulk run stopped; the rollback did not complete.')
-    : (complete ? 'Atomic bulk run aborted and rolled back.' : 'Atomic bulk run aborted; the rollback did not complete.');
+    : cause === 'time'
+      ? (complete ? 'Atomic bulk run out of time and rolled back.' : 'Atomic bulk run out of time; the rollback did not complete.')
+      : (complete ? 'Atomic bulk run aborted and rolled back.' : 'Atomic bulk run aborted; the rollback did not complete.');
   return { status: 'aborted', summary: summarize(ledger, run.id, lead) };
 }
 
@@ -604,8 +612,15 @@ export function anchoredWorkspaceWriter(): TargetWriter {
       // Something other than a file at the leaf (a link planted since the read) is not what the
       // run planned for — and a link's mode would be copied onto the new file.
       if (st !== null && st.type !== 'file') throw new Error('not a regular file');
-      const umask = processUmask();
-      writeFileAt(at.anchor, at.rel, after.value, {
+      const sidecar = sidecarWriteModes();
+      const umask = sidecar === null ? processUmask() : 0;
+      writeFileAt(at.anchor, at.rel, after.value, sidecar !== null ? {
+        // In sidecar mode the shell's pool keeps group read and write on what the run replaced
+        // (a pool file written under umask 022 is 0644), and a new file takes the layout's mode.
+        fileMode: st !== null ? sidecarReplaceMode(st.mode) : sidecar.fileMode,
+        dirMode: sidecar.dirMode,
+        group: sidecar.group,
+      } : {
         // The new file is the engine's: setuid and setgid are not carried over, as the kernel drops
         // them on a write to the file in place.
         fileMode: st !== null ? st.mode & ~0o6000 : 0o666 & ~umask,

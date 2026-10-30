@@ -10,7 +10,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
  */
 type ExecCallback = (err: Error | null, stdout: string, stderr: string) => void;
 const h = vi.hoisted(() => ({
-  spawns: 0, reads: 0, onFirstRead: null as null | (() => void),
+  spawns: 0, reads: 0, onFirstRead: null as null | (() => void), chowns: [] as number[],
   // How the stand-in ends: at once (the default), only when its signal aborts, or at once after
   // running `beforeEnd` (a stop that lands between ffmpeg's end and the tool going on).
   ending: 'now' as 'now' | 'on-abort', beforeEnd: null as null | (() => void), opts: [] as unknown[],
@@ -22,6 +22,12 @@ vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
   return {
     ...actual,
+    // The group a write asks for, recorded; set to the process's own, since no test runner is in
+    // the sidecar's group. An O_PATH fd still fails here, as it would with the real group.
+    fchownSync: (fd: number, uid: number, gid: number) => {
+      h.chowns.push(gid);
+      actual.fchownSync(fd, uid, process.getgid!());
+    },
     readSync: (...args: Parameters<typeof actual.readSync>) => {
       if (h.reads++ === 0 && h.onFirstRead) h.onFirstRead();
       return actual.readSync(...args);
@@ -52,11 +58,14 @@ vi.mock('node:child_process', async () => {
   };
 });
 
-const { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } = await import('node:fs');
+const { chmodSync, constants, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } = await import('node:fs');
 const { execFileSync } = await import('node:child_process');
 const { mediaProcessTool } = await import('./media-process.js');
-const { setTenantWorkspace, clearTenantWorkspace } = await import('../../core/workspace.js');
+const { setTenantWorkspace, clearTenantWorkspace, _resetCache } = await import('../../core/workspace.js');
 const { closeWorkspaceBase } = await import('../../core/workspace-rel.js');
+const { resetShellIsolationForTest, setShellIsolationForTest, SHARED_GROUP, WORKSPACE_LABEL } = await import('../../core/shell-isolation.js');
+const { anchorFromFd, closeAnchor } = await import('../../core/workspace-fd.js');
+const { _resetWorkspaceAccess } = await import('../../core/workspace-access.js');
 
 let ws: string;
 let outside: string;
@@ -68,12 +77,14 @@ beforeEach(() => {
   h.ending = 'now';
   h.beforeEnd = null;
   h.opts = [];
+  h.chowns = [];
   ws = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-media-ws-')));
   outside = realpathSync(mkdtempSync('/tmp/lynox-media-out-'));
   setTenantWorkspace(ws);
 });
 
 afterEach(() => {
+  resetShellIsolationForTest();
   closeWorkspaceBase();
   clearTenantWorkspace();
   rmSync(ws, { recursive: true, force: true });
@@ -104,6 +115,38 @@ describe('media_process reaches the files area through its open directory', () =
     // The same file named by its absolute workspace path.
     await run(join(ws, 'clips', 'a.mov'));
     expect(landed()).toHaveLength(2);
+  });
+
+  it.each([0o022, 0o077])('in sidecar mode writes the output 0660 with the shell\'s group, under umask %o', async (mask) => {
+    // As the boot in sidecar mode: the tree is the fd the entrypoint hands over, named by its label.
+    const tree = join(ws, 'tree');
+    mkdirSync(join(tree, 'ctx1'), { recursive: true });
+    const prevData = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = outside;
+    closeWorkspaceBase();
+    const anchor = anchorFromFd(openSync(tree, constants.O_RDONLY | constants.O_DIRECTORY), WORKSPACE_LABEL);
+    try {
+      setShellIsolationForTest({ kind: 'sidecar', socket: join(ws, 'exec.sock'), root: { mode: 'sidecar', anchor, label: WORKSPACE_LABEL } });
+      _resetCache();
+      setTenantWorkspace(`${WORKSPACE_LABEL}/ctx1`);
+      writeFileSync(join(tree, 'ctx1', 'a.mov'), Buffer.from([1, 2, 3]));
+      const before = process.umask(mask);
+      try {
+        await run('a.mov');
+      } finally {
+        process.umask(before);
+      }
+      const [name] = readdirSync(join(tree, 'ctx1')).filter((n) => n.startsWith('media_'));
+      expect(name).toBeDefined();
+      expect(statSync(join(tree, 'ctx1', name!)).mode & 0o7777).toBe(0o660);
+      expect(h.chowns).toEqual([SHARED_GROUP]);
+    } finally {
+      closeWorkspaceBase();
+      _resetWorkspaceAccess();
+      _resetCache();
+      closeAnchor(anchor);
+      if (prevData === undefined) delete process.env['LYNOX_DATA_DIR']; else process.env['LYNOX_DATA_DIR'] = prevData;
+    }
   });
 
   it('resolves a relative input against the files area, not the working directory', async () => {

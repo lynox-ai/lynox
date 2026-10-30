@@ -23,7 +23,7 @@ import type { BetaContentBlockParam, BetaMessageParam } from '@anthropic-ai/sdk/
 import type { ThreadMessageRecord } from './thread-store.js';
 import { sanitizeNoteDetail } from './render-projection.js';
 
-export type RunStopCode = 'run_interrupted' | 'tool_loop_break';
+export type RunStopCode = 'run_interrupted' | 'tool_loop_break' | 'thinking_loop';
 
 export interface RunStop {
   readonly code: RunStopCode;
@@ -36,7 +36,7 @@ const RUN_STOP = Symbol('lynox.runStop');
 type WithStop = BetaMessageParam & { [RUN_STOP]?: RunStop };
 
 export function isRunStopCode(code: unknown): code is RunStopCode {
-  return code === 'run_interrupted' || code === 'tool_loop_break';
+  return code === 'run_interrupted' || code === 'tool_loop_break' || code === 'thinking_loop';
 }
 
 /** The display-note detail for a loop break, from `ToolLoopBreakError.loopKey`
@@ -68,6 +68,9 @@ export function readRunStop(msg: BetaMessageParam): RunStop | undefined {
 export function runStopText(stop: RunStop): string {
   if (stop.code === 'tool_loop_break') {
     return '[This run was stopped because the same tool call above kept repeating without progress. Do not repeat that call; the steps above are kept.]';
+  }
+  if (stop.code === 'thinking_loop') {
+    return '[This run was stopped because two turns in a row spent the whole output limit on thinking, with no answer and no tool call. The steps above are kept. Next time, answer from what is there or take a smaller step.]';
   }
   return '[This run was interrupted before it finished. The steps above are kept.]';
 }

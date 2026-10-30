@@ -2,6 +2,7 @@ import { closeSync, existsSync, fstatSync, mkdirSync, realpathSync, statSync } f
 import { join } from 'node:path';
 import { getLynoxDir } from './config.js';
 import { closeAnchor, openAnchor, type WorkspaceAnchor } from './workspace-fd.js';
+import { shellIsolation, type SidecarRoot } from './shell-isolation.js';
 import { ensureWorkspaceRoot, resolveWorkspaceRoot, WorkspaceRootError, type WorkspaceRoot } from './workspace-root.js';
 
 /**
@@ -23,11 +24,25 @@ export interface WorkspaceAccess {
 
 let held: WorkspaceAccess | null = null;
 
+/** The sidecar's access object, one per mode object, so callers can compare it by identity. */
+let sidecarHeld: { readonly from: SidecarRoot; readonly access: WorkspaceAccess } | null = null;
+
+function sidecarAccess(root: SidecarRoot): WorkspaceAccess {
+  if (sidecarHeld === null || sidecarHeld.from !== root) {
+    sidecarHeld = { from: root, access: { root: { path: root.label, mode: 'sidecar' }, anchor: root.anchor } };
+  }
+  return sidecarHeld.access;
+}
+
 /**
  * The anchored root. Throws `WorkspaceRootError` when the root cannot be resolved or opened, so a
  * caller that promises coverage (a backup, an erasure) fails instead of skipping the workspace.
  */
 export function workspaceAccess(): WorkspaceAccess {
+  // In shell sidecar mode the root is the fd the entrypoint handed over, checked at start (D2).
+  // The fd is the identity; the label names nothing the engine can open (D3).
+  const isolation = shellIsolation();
+  if (isolation.kind === 'sidecar') return sidecarAccess(isolation.root);
   const root = resolveWorkspaceRoot();
   if (held !== null && held.root.path === root.path && held.root.mode === root.mode) {
     if (!isAnchoredRoot(held, root.path)) {
@@ -109,7 +124,13 @@ function sameDir(a: string, b: string): boolean {
  * root that cannot be opened throws: its files exist somewhere this cannot reach.
  */
 export function leaseWorkspaceFor(dataDir: string, opts: { readonly create?: boolean } = {}): WorkspaceLease | null {
-  if (sameDir(dataDir, getLynoxDir())) {
+  const own = sameDir(dataDir, getLynoxDir());
+  // In shell sidecar mode the engine's own workspace is fd 3 (`workspaceAccess`); another data
+  // directory's workspace would be opened by name, so it is refused (D3).
+  if (!own && shellIsolation().kind === 'sidecar') {
+    throw new WorkspaceRootError(`In shell sidecar mode the workspace of ${dataDir} is not opened by name.`);
+  }
+  if (own) {
     const root = resolveWorkspaceRoot();
     if (root.mode === 'default' && !existsSync(root.path)) {
       if (opts.create !== true) return null;
@@ -138,4 +159,6 @@ export function _resetWorkspaceAccess(): void {
     try { closeSync(held.anchor.fd); } catch { /* already closed */ }
   }
   held = null;
+  // The sidecar's anchor belongs to the mode object and is never closed here.
+  sidecarHeld = null;
 }

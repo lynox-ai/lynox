@@ -95,6 +95,7 @@ vi.mock('./agent.js', () => {
     RunAbortedError: MockRunAbortedError,
     ToolLoopBreakError: MockToolLoopBreakError,
     ContinuationLoopError: MockContinuationLoopError,
+    ThinkingOnlyLoopError: class MockThinkingOnlyLoopError extends MockContinuationLoopError {},
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;

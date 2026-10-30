@@ -7,7 +7,9 @@ import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS, isPathWithin } from '../core/workspace.js';
-import { proveBashCommand, BASH_OBSERVE_EVENT } from './bash-allowlist.js';
+import { proveBashCommand, BASH_OBSERVE_EVENT, type BashProof } from './bash-allowlist.js';
+import { shellIsolation } from '../core/shell-isolation.js';
+import { namesSidecarLabel } from '../core/workspace-root.js';
 import { channels } from '../core/observability.js';
 import { globToRegex } from '../core/glob.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
@@ -567,6 +569,8 @@ const SENSITIVE_PATHS: RegExp[] = [
 
 function resolveRealPath(filePath: string): string {
   const resolved = resolve(filePath);
+  // In shell sidecar mode a workspace path is judged by its spelling, not looked up by name (D3).
+  if (namesSidecarLabel(resolved)) return resolved;
   if (existsSync(resolved)) {
     return realpathSync(resolved);
   }
@@ -683,12 +687,16 @@ function observeBashProof(toolName: string, input: unknown, autonomy: AutonomyLe
   if (!channels.securityFlagged.hasSubscribers) return;
   if (!input || typeof input !== 'object' || !('command' in input)) return;
   const command = String((input as { command: unknown }).command);
-  const proof = proveBashCommand(command, {
-    cwd: getWorkspaceCwd(),
-    home: process.env['HOME'],
-    readRoots: READ_ONLY_ROOTS,
-    isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)),
-  });
+  // In shell sidecar mode the proof would resolve the command's paths here, by name, in a tree
+  // the command never runs in: not proven, and nothing is looked up (PRD shell-sidecar-activation D3).
+  const proof: BashProof = shellIsolation().kind === 'sidecar'
+    ? { proven: false, reason: 'sidecar', program: 'other' }
+    : proveBashCommand(command, {
+      cwd: getWorkspaceCwd(),
+      home: process.env['HOME'],
+      readRoots: READ_ONLY_ROOTS,
+      isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)),
+    });
   const current = !warning ? 'free' : warning.includes('[BLOCKED') ? 'blocked' : 'asks';
   channels.securityFlagged.publish({
     event_type: BASH_OBSERVE_EVENT,
