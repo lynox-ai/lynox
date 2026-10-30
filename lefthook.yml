@@ -99,6 +99,17 @@ pre-push:
       # The invocation lives in .lefthook/pre-push/public-repo-guard-commits.sh.
       runner: bash
       use_stdin: true
+    "corpus-structure-guard-commits.sh":
+      # The files each commit this push ADDS OR CHANGES, read for the shape of an eval corpus (an
+      # object with a `turns` or `gold` array), whatever the file is called. The pre-commit command
+      # below reads the index; this hook reads every pushed commit, so a commit made without that
+      # hook is still read before it is published. Its CI twin is a step in the required public-repo-guard job, which
+      # prevents the merge. Ranges from pushed-ranges.sh; exit 2 when it could not check.
+      # The invocation lives in .lefthook/pre-push/corpus-structure-guard-commits.sh.
+      # No `skip` for merge or rebase: the range comes from the pushed refs, not the checkout, and
+      # a push made while a rebase is paused publishes like any other.
+      runner: bash
+      use_stdin: true
   commands:
     security-scan:
       run: sh scripts/security-scan.sh
@@ -160,6 +171,16 @@ pre-commit:
       # `DEF-` register id, and a short list of phrases about security findings) at push
       # time and in CI.
       run: node scripts/disclosure-vocabulary-scan.mjs
+      skip:
+        - merge
+        - rebase
+    corpus-structure-guard:
+      # Refuses a file this commit ADDS OR CHANGES whose content has the shape of an eval corpus — an object
+      # with a `turns` or `gold` array — whatever it is called: `.gitignore` can only match names,
+      # and a corpus built from real threads must not reach this public repo. A file named as JSON
+      # that does not parse is refused too. Exit 1 = refused, 2 = the index could not be read.
+      # Twins: the pre-push script above and a step in the public-repo-guard CI job.
+      run: node scripts/corpus-structure-guard.mjs --staged
       skip:
         - merge
         - rebase

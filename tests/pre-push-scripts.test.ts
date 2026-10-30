@@ -29,7 +29,7 @@ const NAME = ['zzqx', 'fictional', 'corp'].join('-');
 /** An invented register id, assembled so this file carries none (the commit scan reads it). */
 const ID = ['DE', 'F-', 'example-invented-row'].join('');
 /** The three hooks that scan a range, and the file that tells each of them what the range is. */
-const RANGE_HOOKS = ['public-repo-guard-meta.sh', 'public-repo-guard-files.sh', 'public-repo-guard-commits.sh'] as const;
+const RANGE_HOOKS = ['public-repo-guard-meta.sh', 'public-repo-guard-files.sh', 'public-repo-guard-commits.sh', 'corpus-structure-guard-commits.sh'] as const;
 const RANGES = 'pushed-ranges.sh';
 const FETCH = 'git fetch origin main:refs/remotes/origin/main';
 /** These tests start git, lefthook and bash, and each builds its own clone; the default 5 s is too
@@ -65,6 +65,7 @@ function setup() {
   cpSync(join(REPO, 'scripts/public-repo-guard.sh'), join(seed, 'scripts/public-repo-guard.sh'));
   cpSync(join(REPO, 'scripts/lib'), join(seed, 'scripts/lib'), { recursive: true });
   cpSync(join(REPO, 'scripts/added-lines-guard.mjs'), join(seed, 'scripts/added-lines-guard.mjs'));
+  cpSync(join(REPO, 'scripts/corpus-structure-guard.mjs'), join(seed, 'scripts/corpus-structure-guard.mjs'));
   copyFileSync(join(REPO, '.lefthook/pre-push', RANGES), join(seed, '.lefthook/pre-push', RANGES));
   const real = parse(readFileSync(join(REPO, 'lefthook.yml'), 'utf8')) as { 'pre-push': { scripts: Record<string, unknown> } };
   const mine: Record<string, unknown> = {};
@@ -177,6 +178,15 @@ describe('every range hook scans the pushed ref, not the checked-out HEAD', () =
         c.git('commit', '-q', '-m', 'Add note');
       },
       says: /note\.md:1: internal register id/,
+    },
+    'corpus-structure-guard-commits.sh': {
+      make: (c) => {
+        // The shape is built here, at run time: no corpus-shaped literal lives in this file.
+        writeFileSync(join(c.work, 'data.json'), JSON.stringify({ threads: [{ [['tu', 'rns'].join('')]: [] }] }));
+        c.git('add', 'data.json');
+        c.git('commit', '-q', '-m', 'Add data');
+      },
+      says: /data\.json \(commit [0-9a-f]{10}\) carries an array named/,
     },
   };
 
