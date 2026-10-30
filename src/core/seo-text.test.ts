@@ -20,6 +20,7 @@ describe('the SEO value rule (PRD shopify-preset §23.1 item 3)', () => {
     ['EVIL.COM', 'link'],
     ['evil.COM', 'link'],
     ['info@x.example', 'address'],
+    ['a@b@c.EXAMPLE', 'address'],
     ['<b>', 'markup'],
     ['Size < 40', 'markup'],
   ])('refuses %s as %s', (value, kind) => {
@@ -42,7 +43,7 @@ describe('the SEO value rule (PRD shopify-preset §23.1 item 3)', () => {
   it.each([
     [null], [''], ['Wasserfilter & Kalkschutz – 20 € günstiger'], ["Kinder's Shirt"], ['5.5 l für 0.5l-Flaschen, 1.5kg'],
     ['Inkl.MwSt'], ['Inkl.MWSt'], ['GmbH & Co.KG'], ['Gr.XL'], ['Vol.II'], ['2.OG'], ['Nr.CH-123'],
-    ['Bio // vegan'], ['Rot//Blau'], ['Größe 38//40'], ['Evil.Com'], ['Preis @ 5 €'], ['Team@Home'], ['Pipe 2" wide > 1"'],
+    ['Bio // vegan'], ['Rot//Blau'], ['Größe 38//40'], ['Evil.Com'], ['Preis @ 5 €'], ['Team@Home'], ['Team@Home @ Mo.Fr'], ['Pipe 2" wide > 1"'],
   ])('lets %s pass', (value) => {
     expect(meta(value)).toEqual({ ok: true });
   });
@@ -63,6 +64,7 @@ describe('the SEO value rule (PRD shopify-preset §23.1 item 3)', () => {
     const long = `${'a.'.repeat(50_000)}a1`;
     const started = performance.now();
     expect(meta(long)).toEqual({ ok: true });
+    expect(meta('x@'.repeat(50_000))).toEqual({ ok: true });
     expect(performance.now() - started).toBeLessThan(1_000);
   });
 });

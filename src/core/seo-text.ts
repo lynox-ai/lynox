@@ -44,8 +44,9 @@ export function seoFieldsOfListForm(form: BulkListSourceForm | null): readonly s
 
 /** A link with a scheme, or a scheme-relative one at a word start (`Rot//Blau` is no link). */
 const SCHEME_LINK = /:\/\/|(?:^|[\s(])\/\/[\p{L}\p{N}]/u;
-/** A run of non-space characters, `@`, and a run of non-space characters holding a `.`. */
-const ADDRESS = /\S@\S*\./u;
+/** A run of non-space characters, `@`, and a run of non-space characters holding a `.`. Read from
+ *  the last `@` before the `.` (the same values), so a long run of `@` costs linear time. */
+const ADDRESS = /\S@[^\s@]*\./u;
 /** `www.` and the host it starts. */
 const WWW = /www\.[\p{L}\p{N}.-]*/giu;
 /**
