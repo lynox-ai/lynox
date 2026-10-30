@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -169,6 +169,53 @@ describe('routes in sidecar mode (real engine)', () => {
         const body = await res.json() as { entries: Array<{ name: string }> };
         expect(body.entries.map(e => e.name)).toEqual(['report.md']);
       });
+    });
+
+    // In sidecar mode a pool uid can put a link into the area. Download and read must refuse a link
+    // to a file outside, at the file or on the way, and never send what it points to; the listing
+    // must not list a linked directory. The label path does not exist on this machine, so any read
+    // by name fails here: these checks show the routes go through fd 3, not what a read by name
+    // would do where the label exists.
+    it('download, read and listing refuse a link out of the area, at the file and on the way', async () => {
+      expect(existsSync(WORKSPACE_LABEL)).toBe(false);
+      const outside = join(dir, 'engine-only');
+      try {
+        await withTree(async (tree) => {
+          const engineOnly = `engine-only-${randomBytes(6).toString('hex')}`;
+          mkdirSync(outside, { recursive: true });
+          writeFileSync(join(outside, 'f.txt'), engineOnly);
+          writeFileSync(join(tree, 'ctx1', 'plain.txt'), 'inside');
+          mkdirSync(join(tree, 'ctx1', 'sub'));
+          writeFileSync(join(tree, 'ctx1', 'sub', 'in.txt'), 'nested');
+          symlinkSync(join(outside, 'f.txt'), join(tree, 'ctx1', 'x.txt'));
+          symlinkSync(outside, join(tree, 'ctx1', 'dl'));
+          for (const route of ['/api/files/download', '/api/files/read']) {
+            // Controls: a plain file and one in a real directory are served, so a refusal below is
+            // the link's, not the route's and not the walk's.
+            for (const [path, content] of [['plain.txt', 'inside'], ['sub/in.txt', 'nested']] as const) {
+              const ok = await call('GET', `${route}?path=${encodeURIComponent(path)}`);
+              expect({ route, path, status: ok.status }).toEqual({ route, path, status: 200 });
+              expect(await ok.text()).toContain(content);
+            }
+            for (const path of ['x.txt', 'dl/f.txt']) {
+              const res = await call('GET', `${route}?path=${encodeURIComponent(path)}`);
+              const text = await res.text();
+              expect({ route, path, status: res.status }).toEqual({ route, path, status: 403 });
+              expect(text).toContain('Outside workspace');
+              expect(text).not.toContain(engineOnly);
+            }
+          }
+          const sub = await call('GET', '/api/files?path=sub');
+          expect(sub.status).toBe(200);
+          expect(await sub.text()).toContain('in.txt');
+          const listed = await call('GET', '/api/files?path=dl');
+          const listedText = await listed.text();
+          expect(listed.status).toBe(403);
+          expect(listedText).not.toContain('f.txt');
+        });
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
     });
 
     it('the workspace status names the sidecar mode, compares fd 3\'s mount, and reads no old location', async () => {
