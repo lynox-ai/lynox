@@ -232,13 +232,24 @@ describe('startupReport', () => {
 
 describe('runDockerInstaller exit codes before Docker is touched', () => {
   let home: string;
+  let dockerLog: string;
   let savedHome: string | undefined;
+  let savedPath: string | undefined;
   let savedExitCode: typeof process.exitCode;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'lynox-installer-ni-'));
+    // A stand-in `docker` that logs and fails: if a broken guard lets the run
+    // go on, it stops at the Docker check instead of reaching the real daemon.
+    const bin = join(home, 'bin');
+    dockerLog = join(home, 'docker-calls.log');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'docker'), `#!/bin/sh\necho "$*" >> '${dockerLog}'\nexit 1\n`);
+    chmodSync(join(bin, 'docker'), 0o755);
     savedHome = process.env['HOME'];
+    savedPath = process.env['PATH'];
     process.env['HOME'] = home;
+    process.env['PATH'] = `${bin}:${savedPath ?? ''}`;
     savedExitCode = process.exitCode;
     process.exitCode = undefined;
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -249,6 +260,8 @@ describe('runDockerInstaller exit codes before Docker is touched', () => {
     vi.restoreAllMocks();
     if (savedHome === undefined) delete process.env['HOME'];
     else process.env['HOME'] = savedHome;
+    if (savedPath === undefined) delete process.env['PATH'];
+    else process.env['PATH'] = savedPath;
     process.exitCode = savedExitCode;
     rmSync(home, { recursive: true, force: true });
   });
@@ -265,19 +278,21 @@ describe('runDockerInstaller exit codes before Docker is touched', () => {
   it('asks for --accept-terms even when an earlier run on this machine accepted the terms', async () => {
     mkdirSync(join(home, '.lynox'), { recursive: true });
     writeFileSync(join(home, '.lynox', '.tos-accepted-1'), 'x\n');
-    await runDockerInstaller(['--non-interactive', '--provider', 'none']);
+    await runDockerInstaller(['--non-interactive', '--provider', 'none', '--dir', join(home, 'inst')]);
     expect(process.exitCode).toBe(1);
     const out = vi.mocked(process.stdout.write).mock.calls.map(c => String(c[0])).join('');
     expect(out).toContain('Pass --accept-terms');
+    expect(existsSync(dockerLog)).toBe(false);
   });
 
   it('exits 1 when the terms were not accepted, and stops before anything else', async () => {
-    await runDockerInstaller(['--non-interactive', '--provider', 'none']);
+    await runDockerInstaller(['--non-interactive', '--provider', 'none', '--dir', join(home, 'inst')]);
     expect(process.exitCode).toBe(1);
     const out = vi.mocked(process.stdout.write).mock.calls.map(c => String(c[0])).join('');
     expect(out).toContain("lynox's terms of use (https://lynox.ai/terms) must be accepted first. Pass --accept-terms to accept them in a non-interactive run.");
     // checkDocker always prints one of these; none may appear.
     expect(out).not.toMatch(/Docker not found|Docker daemon is not running|✓\S* Docker \S/);
+    expect(existsSync(dockerLog)).toBe(false);
   });
 });
 
