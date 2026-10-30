@@ -110,6 +110,56 @@ async function activeEntries() {
   return (await r.json()).entries.map(e => ({ id: e.id, text: e.text }));
 }
 
+/**
+ * The answer the runner gives to a question the agent asks (`ask_user`). A model that asks
+ * before it writes (Sonnet 5 does, on a bare briefing) waits a day for the answer, and the case
+ * would end on the timeout instead of at its turn end. The runner picks the option that asks the
+ * operator for nothing more, or else says "Entscheide selbst.", so no new content comes in;
+ * the answer is kept with the row, because it is operator text the capture can read.
+ */
+const NEUTRAL = /\b(nein|ohne|allgemein|selbst|weiter|egal|no|without|general)\b/i;
+function pickAnswer(options) {
+  const real = (options ?? []).filter(o => typeof o === 'string' && o.trim() !== '' && o !== '\u0000');
+  // Without such an option, no option: picking the first would hand the agent a product fact
+  // (a material, a colour) the operator never gave, and the capture could record it.
+  return real.find(o => NEUTRAL.test(o)) ?? 'Entscheide selbst.';
+}
+
+/** Read one turn's SSE stream to its end, answering every question on the way. */
+async function drainTurn(res, sessionId, answers) {
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let cut;
+    while ((cut = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, cut);
+      buf = buf.slice(cut + 2);
+      if (!/^event: prompt$/m.test(block)) continue;
+      const data = block.split('\n').filter(l => l.startsWith('data: ')).map(l => l.slice(6)).join('\n');
+      let p;
+      try { p = JSON.parse(data); } catch { continue; }
+      if (Array.isArray(p.questions)) {
+        await fetch(`${BASE}/api/sessions/${sessionId}/reply-tabs`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ promptId: p.promptId, answers: p.questions.map(() => '__dismissed__') }),
+        });
+        answers.push(`(tabs dismissed: ${p.questions.length})`);
+        continue;
+      }
+      const answer = pickAnswer(p.options);
+      await fetch(`${BASE}/api/sessions/${sessionId}/reply`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ promptId: p.promptId, answer }),
+      });
+      answers.push(`${String(p.question ?? '').slice(0, 120)} → ${answer}`);
+    }
+  }
+}
+
 async function runOne(turns) {
   // Events are matched to the case by THREAD, not by sink position. A case cut off by the
   // timeout keeps running in the engine, and its late write landed after the next case's
@@ -122,6 +172,7 @@ async function runOne(turns) {
   }).then(r => r.json());
   // One deadline for the whole case, all turns together.
   const deadline = AbortSignal.timeout(CASE_MS);
+  const answers = [];
   for (const text of turns) {
     const res = await fetch(`${BASE}/api/sessions/${s.sessionId}/run`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -130,8 +181,7 @@ async function runOne(turns) {
     });
     if (!res.ok) throw new Error(`turn ${turns.indexOf(text) + 1}: HTTP ${res.status}`);
     // Drain the SSE stream so the turn completes (and its capture runs) before the next one.
-    const reader = res.body.getReader();
-    for (;;) { const { done } = await reader.read(); if (done) break; }
+    await drainTurn(res, s.sessionId, answers);
   }
   await new Promise(r => setTimeout(r, 1200));   // the sink append is fire-and-forget
   const ended = Date.now();
@@ -151,6 +201,7 @@ async function runOne(turns) {
   const q = await fetch(`${BASE}/api/knowledge/queue?threadId=${threadId}`).then(r => (r.ok ? r.json() : { entries: [] }));
   for (const e of q.entries ?? []) created.push(`queued: ${e.text}`);
   return {
+    answers,
     texts: created,
     eligible: fresh.some(e => e.event === 'capture_eligible'),
     remembered: writes.length > 0,
@@ -176,6 +227,7 @@ for (const shape of fx.shapes) {
       rows.push({ shape: shape.id, case: i, expect: shape.expect, ...r, ok });
       const where = r.error ? '' : r.remembered ? ` (${r.active ? 'active' : r.queued ? 'QUEUED' : 'deduped'})` : ' (silent)';
       process.stdout.write(`  ${shape.id} #${i}${REPEATS > 1 ? `.${rep}` : ''}  ${r.error ? 'ERR ' + r.error : (ok ? 'OK ' : 'MISS') + where}\n`);
+      for (const a of r.answers ?? []) process.stdout.write(`      asked: ${a.replace(/\s+/g, ' ')}\n`);
       for (const t of r.texts ?? []) process.stdout.write(`      ${t.replace(/\s+/g, ' ').slice(0, 300)}\n`);
     }
   }
