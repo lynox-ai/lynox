@@ -15,14 +15,24 @@
 import { singleLine } from './prompt-value.js';
 import { normalizeApprovalHost } from './untrusted-epoch.js';
 
-/** The two methods this engine reads with; everything else may change something. */
-function isRead(method: string): boolean {
+/**
+ * The two methods this engine reads with; everything else may change something. The one
+ * answer to "does this request only read?": every outbound gate calls it, and
+ * `tests/read-method-one-source.test.ts` lists each remaining line that compares a method with GET or HEAD
+ * with the other question it asks.
+ *
+ * An exact match, on purpose: no trim, no case fold. Each caller normalises the way its own
+ * question needs (the effective method, the upper-cased input, or the raw one the exfiltration
+ * check reads), and folding here would change what those callers decide. `null` and
+ * `undefined` (an override that is not a method, no method at all) are not reads.
+ */
+export function isReadMethod(method: string | null | undefined): method is 'GET' | 'HEAD' {
   return method === 'GET' || method === 'HEAD';
 }
 
 /** DELETE over every other write over the two reads. */
 function rank(method: string): number {
-  if (isRead(method)) return 0;
+  if (isReadMethod(method)) return 0;
   return method === 'DELETE' ? 2 : 1;
 }
 
@@ -42,6 +52,7 @@ function headerKey(raw: string): string {
  * What an override may say: a method name from the registered set (RFC 9110 and the WebDAV
  * family). A shape check is not enough — `my-secret-value` is a valid token — and a value
  * that passes is shown in the question and the refusals. Anything else is refused, never shown.
+ * Which of them only read is answered by `isReadMethod` above, never by this set.
  */
 const KNOWN_METHODS = new Set([
   'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT',
@@ -275,7 +286,7 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
     }
   } catch { /* an unparsable URL is refused before it is sent */ }
   // A GET or HEAD sends no body, so nothing in one can override it.
-  if (body !== undefined && !isRead(method.trim().toUpperCase())) {
+  if (body !== undefined && !isReadMethod(method.trim().toUpperCase())) {
     for (const reading of typeof body === 'string' ? [body] : body) {
       const fromBody = bodyOverrides(reading, headers);
       candidates.push(...fromBody.declared);
@@ -544,7 +555,7 @@ export const OUTBOUND_EFFECT_PATHS: readonly { readonly host: string; readonly s
 
 /** Whether a write to `url` with `method` is one the table names. A read never is. */
 export function isOutboundEffectWrite(url: string, method: string): boolean {
-  if (isRead(method.toUpperCase())) return false;
+  if (isReadMethod(method.toUpperCase())) return false;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return false; }
   const host = normalizeApprovalHost(parsed.hostname);
@@ -666,15 +677,26 @@ function windows1252Decode(text: string): string {
     WINDOWS_1252.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
 }
 
+/** `%uXXXX` read as the UTF-16 code unit it names, the way IIS and JavaScript's `unescape` read
+ *  it; a surrogate pair written as two escapes becomes the one character. Hex digits in either
+ *  case. A `%u` without four hex digits after it is kept as it is. */
+function percentUDecode(text: string): string {
+  return text.replace(/%u([0-9a-fA-F]{4})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+}
+
 /**
  * The steps a server may take on the way from the bytes it received to the value it uses:
- * percent-decoding as UTF-8 or in a single-byte charset, and `+` as a space, each on its own
- * or after one another. Taken up to three deep, counted from the bytes as sent, so a value
- * encoded up to three times (`%2573…`), or with `+` read only partly, is read the way such a
- * server reads it. A step that changes nothing yields the text itself, so the readings may
+ * percent-decoding as UTF-8 or in a single-byte charset, `%uXXXX`, and `+` as a space, each on
+ * its own or after one another. Taken up to three deep, counted from the bytes as sent, so a
+ * value encoded up to three times (`%2573…`), or with `+` read only partly, is read the way such
+ * a server reads it. A step that changes nothing yields the text itself, so the readings may
  * hold it: callers pass text already masked.
+ *
+ * Only readings a server takes on its own are here. An encoding a sender chooses and no server
+ * undoes by itself (base64, HTML entities, a fourth layer) is not: for those the mask is a hurdle,
+ * not a boundary, and the boundary is the question showing the value that is sent.
  */
-const READING_STEPS: ReadonlyArray<(text: string) => string> = [lenientDecode, latin1Decode, windows1252Decode, (t) => t.replace(/\+/g, ' ')];
+const READING_STEPS: ReadonlyArray<(text: string) => string> = [lenientDecode, latin1Decode, windows1252Decode, percentUDecode, (t) => t.replace(/\+/g, ' ')];
 const READING_DEPTH = 3;
 function serverReadings(text: string): Set<string> {
   const seen = new Set<string>();
@@ -688,7 +710,8 @@ function serverReadings(text: string): Set<string> {
         next.push(read);
       }
     }
-    frontier = next;
+    // The same text read again gives the same readings: each is taken once.
+    frontier = [...new Set(next)];
   }
   return seen;
 }
@@ -769,8 +792,23 @@ export function bodyFieldNames(body: string | undefined, mask: (text: string) =>
  * handler runs, so the URL may carry the value). Single-line and clipped.
  */
 export function pathForQuestion(url: string, mask: (text: string) => string): string {
+  const shown = pathShown(url, mask);
+  return shown === undefined ? '(unparsable)' : clipName(shown, MAX_PATH_CHARS);
+}
+
+/**
+ * Whether the path a request sends holds a secret `mask` knows, in any reading the question
+ * masks or stars: the question's path read once masked and once with nothing masked, before it
+ * is clipped, so a secret past the clip still counts.
+ */
+export function pathHoldsSecret(url: string, mask: (text: string) => string): boolean {
+  return pathShown(url, mask) !== pathShown(url, (text) => text);
+}
+
+/** {@link pathForQuestion} before it is clipped; `undefined` for a URL that does not parse. */
+function pathShown(url: string, mask: (text: string) => string): string | undefined {
   let parsed: URL;
-  try { parsed = new URL(url); } catch { return '(unparsable)'; }
+  try { parsed = new URL(url); } catch { return undefined; }
   // Masked in both forms, encoded and decoded: a secret with a character the URL encodes is
   // found only in the decoded one, and the decoded form is what is shown. Segment by segment,
   // so another server reading of one (a second decoding, a single-byte charset) that turns it into a secret
@@ -793,13 +831,13 @@ export function pathForQuestion(url: string, mask: (text: string) => string): st
     return shownPiece(raw, read, mask);
   }))];
   const query = keys.length > 0 ? `?${keys.map((k) => `${k}=…`).join('&')}` : '';
-  return clipName(`${path}${query}`, MAX_PATH_CHARS);
+  return `${path}${query}`;
 }
 
 /**
  * The most of a write's body a question shows whole, in bytes of what is SENT (not of what
  * is shown: masking and indenting change the length of the display, never the decision).
- * Measured against request bodies shaped like real set-up steps (`~/lynox-plans/n12-measure/`:
+ * Measured against request bodies shaped like real set-up steps (a local measurement:
  * a bexio contact 0.5 KB, an invoice with 15 positions 8.7 KB, an offer with 30 positions
  * 20.7 KB, a Shopify product with 100 variants 33.3 KB); only an inline binary upload went
  * past it. A body above it is never shown cut short.
@@ -854,6 +892,68 @@ function minifyJson(text: string): string {
   return out;
 }
 
+/** The longest header line the question shows (`name: value`), measured as shown: masked, with
+ *  invisible characters and tabs spelled out. */
+export const SHOWN_HEADER_MAX_CHARS = 200;
+
+/** Why a request's headers cannot be shown: the header named, and what is wrong with it. */
+export type UnshowableHeader =
+  | { reason: 'duplicate'; name: string }
+  | { reason: 'too-long'; name: string; length: number }
+  | { reason: 'escaped-secret'; name: string }
+  | { reason: 'secret-name'; name: string };
+
+/** What the question does with one header: show it, leave it out but key it, or leave it out. */
+export type HeaderShowing = 'show' | 'key' | 'omit';
+
+/**
+ * The headers a write sends, as its approval question shows them, and as its approval key holds
+ * them. `headers` is the set that goes out (the engine's credential included); `showing` says
+ * what the question does with each: the engine's credential and a header the transport sets
+ * itself are left out (`omit`), a `content-type` or `accept` the question need not show is keyed
+ * but not shown (`key`). A value that is not a string is never sent and is left out.
+ *
+ * Shown whole or not at all, like the body: one `name: value` line per header, the value masked,
+ * invisible characters and tabs as their code point. Not shown, so the write is refused: two
+ * names that differ only in case or spacing (a server reads one, the question would show the
+ * other), a line longer than `SHOWN_HEADER_MAX_CHARS` as shown, a value whose decoded form still
+ * holds a secret, and a name that holds one. The key gets the raw values, by lower-case name,
+ * sorted: two secrets that mask alike are still two writes.
+ */
+export function headersForQuestion(
+  headers: Readonly<Record<string, unknown>>,
+  mask: (text: string) => string,
+  showing: (name: string, value: string) => HeaderShowing,
+): { lines: string[]; names: string[]; keyed: Array<[string, string]> } | { unshowable: UnshowableHeader } {
+  const seen = new Set<string>();
+  for (const k of Object.keys(headers)) {
+    const name = k.trim().toLowerCase();
+    if (seen.has(name)) return { unshowable: { reason: 'duplicate', name } };
+    seen.add(name);
+  }
+  const sent = Object.entries(headers)
+    .filter((e): e is [string, string] => typeof e[1] === 'string')
+    .map(([k, v]) => ({ k, v, how: showing(k.trim().toLowerCase(), v) }))
+    .filter((h) => h.how !== 'omit')
+    .sort((a, b) => (a.k.trim().toLowerCase() < b.k.trim().toLowerCase() ? -1 : 1));
+  const shown = sent.filter((h) => h.how === 'show');
+  const spelled = (text: string): string => visible(text).replace(/\t/g, '⟨U+0009⟩');
+  const lines: string[] = [];
+  for (const { k, v } of shown) {
+    if (mask(k) !== k || hidesEncodedSecret(k, mask)) return { unshowable: { reason: 'secret-name', name: k } };
+    const masked = mask(v);
+    const line = `${spelled(k)}: ${spelled(masked)}`;
+    if (line.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'too-long', name: k, length: line.length } };
+    if (hidesEncodedSecret(masked, mask)) return { unshowable: { reason: 'escaped-secret', name: k } };
+    lines.push(line);
+  }
+  return {
+    lines,
+    names: shown.map(({ k }) => spelled(k)),
+    keyed: sent.map(({ k, v }) => [k.trim().toLowerCase(), v]),
+  };
+}
+
 /**
  * The body as the question shows it, every value with each secret the vault knows masked;
  * or why it cannot be shown.
@@ -871,8 +971,13 @@ function minifyJson(text: string): string {
  * is not showable when its percent-decoded form still holds a secret. Invisible characters are
  * shown as their code point.
  * Whether the body is small enough to show is the caller's decision (`SHOWN_BODY_MAX_BYTES`).
+ *
+ * `escapedSecret` is about what is SENT, not about how it is shown: a secret the mask did not
+ * see as sent, found only in another server reading. A form body shows such a part masked in the
+ * reading it shows, or starred, and stays showable, so a caller that refuses such a body asks
+ * this as well as `unshowable` (which implies it).
  */
-export function bodyForQuestion(body: string, mask: (text: string) => string, contentType = ''): { text: string } | { unshowable: 'escaped-secret' } {
+export function bodyForQuestion(body: string, mask: (text: string) => string, contentType = ''): { text: string; escapedSecret: boolean } | { unshowable: 'escaped-secret' } {
   let parsed: unknown;
   let isJson = true;
   try { parsed = JSON.parse(body); } catch { isJson = false; }
@@ -895,7 +1000,7 @@ export function bodyForQuestion(body: string, mask: (text: string) => string, co
         return v;
       };
       const text = visible(mask(JSON.stringify(walk(parsed), null, 2)));
-      return encodedSecret ? { unshowable: 'escaped-secret' } : { text };
+      return encodedSecret ? { unshowable: 'escaped-secret' } : { text, escapedSecret: false };
     }
     // Shown as sent, masked as text. Decided on what is LEFT after that mask: every string
     // literal of the masked TEXT, decoded one by one. One still holding a secret was written in
@@ -908,7 +1013,7 @@ export function bodyForQuestion(body: string, mask: (text: string) => string, co
       const decoded = JSON.parse(literal) as string;
       if (mask(decoded) !== decoded || hidesEncodedSecret(decoded, mask)) return { unshowable: 'escaped-secret' };
     }
-    return { text: visible(shownRaw) };
+    return { text: visible(shownRaw), escapedSecret: false };
   }
   const shown = mask(body);
   // A form body is shown pair by pair only when it is SENT as one (its Content-Type): the same
@@ -918,19 +1023,50 @@ export function bodyForQuestion(body: string, mask: (text: string) => string, co
   // secret. A line break inside a decoded part is shown as `\n`, so a value cannot add a
   // `name = value` line of its own.
   if (FORM_CONTENT_TYPE.test(contentType) && /^[^=&\s]+=[^&]*(?:&[^=&\s]+=[^&]*)*$/.test(shown)) {
-    const part = (raw: string) => shownPiece(raw, lenientDecode(raw.replace(/\+/g, ' ')), mask).replace(/\r?\n/g, '\\n');
     return {
       text: visible(shown.split('&').map((pair) => {
         const at = pair.indexOf('=');
-        return `${part(pair.slice(0, at))} = ${part(pair.slice(at + 1))}`;
+        return `${formPart(pair.slice(0, at), mask)} = ${formPart(pair.slice(at + 1), mask)}`;
       }).join('\n')),
+      escapedSecret: hidesEncodedSecret(shown, mask),
     };
   }
   // Any other body is shown as text, and the server may still read it percent-decoded (a form
   // sent without its Content-Type, or one whose masked secret removed its `=`/`&` structure).
   // A secret left in the decoded form was written in a form the text mask did not see.
   if (hidesEncodedSecret(shown, mask)) return { unshowable: 'escaped-secret' };
-  return { text: visible(shown) };
+  return { text: visible(shown), escapedSecret: false };
+}
+
+/** One side of a `name=value` pair of a form body or a query that the caller masked whole: shown
+ *  decoded, `+` read as a space, masked again, and starred when another server reading of it
+ *  holds a secret (`shownPiece`). A line break is shown as `\n`, so a value cannot add a
+ *  `name = value` line of its own. */
+function formPart(raw: string, mask: (text: string) => string): string {
+  return shownPiece(raw, lenientDecode(raw.replace(/\+/g, ' ')), mask).replace(/\r?\n/g, '\\n');
+}
+
+/**
+ * The query as a write's question shows it, by the rule of a form body: masked whole, then one
+ * `name = value` per line, each side decoded and masked again (`formPart`); a pair without `=` is
+ * shown as its name. `search` is the query as sent, `URL.search` of the serialized URL, so what is
+ * shown is what goes on the wire. Whether it is small enough to show is the caller's decision
+ * (`SHOWN_BODY_MAX_BYTES`, on the bytes sent).
+ *
+ * `secret`: the query sends a value the vault knows, so the question says so. `escaped`: one is
+ * found only in another server reading of the query (percent-encoded, or `+` for a space), which
+ * the mask did not see as sent; a mandate's session and a connected account refuse such a query
+ * (`http.ts`).
+ */
+export function queryForQuestion(search: string, mask: (text: string) => string): { text: string; secret: boolean; escaped: boolean } {
+  const sent = search.startsWith('?') ? search.slice(1) : search;
+  const shown = mask(sent);
+  const escaped = hidesEncodedSecret(shown, mask);
+  const lines = shown.split('&').filter((pair) => pair !== '').map((pair) => {
+    const at = pair.indexOf('=');
+    return at < 0 ? formPart(pair, mask) : `${formPart(pair.slice(0, at), mask)} = ${formPart(pair.slice(at + 1), mask)}`;
+  });
+  return { text: visible(lines.join('\n')), secret: escaped || shown !== sent, escaped };
 }
 
 /** The form media type alone, parameters allowed; a list of two types is not one form. */

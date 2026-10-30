@@ -7,17 +7,22 @@ import { _resetPipelineStore, getPipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
+import { WorkflowStore } from '../../core/workflow-store.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
 import type { IAgent, LynoxUserConfig, PlannedPipeline, InlinePipelineStep } from '../../types/index.js';
 import type { CapabilityContract } from '../../types/capability-contract.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 const mockConfig = { api_key: 'test-key' } as LynoxUserConfig;
 
-function makeAgent(runHistory: RunHistory): IAgent {
+function makeAgent(runHistory: RunHistory, principal: RequestPrincipal = OWNER_PRINCIPAL): IAgent {
   const toolContext = createToolContext(mockConfig);
   toolContext.runHistory = runHistory;
+  // A mandate's writes leave rows in the actor trail and are refused without one.
+  toolContext.auditLog = testAuditLog().log;
   return {
     name: 'test', model: 'test-model', memory: null, tools: [], onStream: null,
-    currentRunId: 'run-1', toolContext,
+    currentRunId: 'run-1', toolContext, principal,
   } as unknown as IAgent;
 }
 
@@ -55,7 +60,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
   });
 
   it('rewrites a step task and persists it', async () => {
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     _resetPipelineStore(); // drop the read-cache so we exercise the SQLite round-trip
     const agent = makeAgent(history);
 
@@ -70,8 +75,21 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(reread.steps[1]!.task).toBe('Write the report AND email it');
   });
 
+  it('a mandate\'s edit of the owner\'s workflow makes the mandate its editor, not its creator (engine.db v45)', async () => {
+    history.insertPlannedPipeline(makePlanned(), OWNER_PRINCIPAL);
+    const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+    const out = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-1', value: 'Write it' }] },
+      makeAgent(history, eva),
+    );
+    expect(out).toContain('✓ Updated workflow');
+    expect(new WorkflowStore(engine).authorship('wf-1')).toMatchObject({
+      createdBy: null, mandateEditor: 'mandate:eva@firm.example', mandateEditorId: 'grant-eva',
+    });
+  });
+
   it('adds a new step (with deps) and appends it by default', async () => {
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     const agent = makeAgent(history);
 
     await updateWorkflowTool.handler(
@@ -84,7 +102,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
   });
 
   it('inserts an added step after a named step', async () => {
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     const agent = makeAgent(history);
 
     await updateWorkflowTool.handler(
@@ -96,7 +114,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
   });
 
   it('removes a step and drops it from dependents input_from', async () => {
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     const agent = makeAgent(history);
 
     await updateWorkflowTool.handler(
@@ -119,7 +137,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
   });
 
   it('refuses to edit a one-shot (non-template) run', async () => {
-    history.insertPlannedPipeline(makePlanned({ template: false }));
+    history.insertPlannedPipeline(makePlanned({ template: false }), null);
     const agent = makeAgent(history);
     const out = await updateWorkflowTool.handler(
       { workflow_id: 'wf-1', modifications: [{ action: 'remove', step_id: 'step-0' }] },
@@ -129,7 +147,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
   });
 
   it('rejects removing every step', async () => {
-    history.insertPlannedPipeline(makePlanned({ steps: [{ id: 'only', task: 'do it' }] }));
+    history.insertPlannedPipeline(makePlanned({ steps: [{ id: 'only', task: 'do it' }] }), null);
     const agent = makeAgent(history);
     const out = await updateWorkflowTool.handler(
       { workflow_id: 'wf-1', modifications: [{ action: 'remove', step_id: 'only' }] },
@@ -141,7 +159,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
   });
 
   it('rejects an add_step with a duplicate id / unknown dep / bad anchor', async () => {
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     const agent = makeAgent(history);
 
     const dup = await updateWorkflowTool.handler(
@@ -158,7 +176,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
   });
 
   it('re-infers mode → interactive when an edit introduces a human-in-the-loop step', async () => {
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     const agent = makeAgent(history);
 
     const out = await updateWorkflowTool.handler(
@@ -173,7 +191,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
   });
 
   it('says a schedule can no longer run it once an edit adds ask_secret', async () => {
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     const out = await updateWorkflowTool.handler(
       { workflow_id: 'wf-1', modifications: [{ action: 'add_step', step_id: 'step-key', value: 'Use ask_secret to get the API key' }] },
       makeAgent(history),
@@ -186,7 +204,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     history.insertPlannedPipeline(makePlanned({
       mode: 'interactive', confirmedAt: '2026-10-01T00:00:00.000Z',
       steps: [{ id: 'step-0', task: 'Use ask_user to pick the list' }],
-    }));
+    }), null);
     const out = await updateWorkflowTool.handler(
       { workflow_id: 'wf-1', modifications: [{ action: 'add_step', step_id: 'step-key', value: 'Use ask_secret to get the API key' }] },
       makeAgent(history),
@@ -200,7 +218,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     history.insertPlannedPipeline(makePlanned({
       mode: 'interactive', confirmedAt: '2026-10-01T00:00:00.000Z',
       steps: [{ id: 'step-0', task: 'Use ask_user to pick the list' }],
-    }));
+    }), null);
     const out = await updateWorkflowTool.handler(
       { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-0', value: 'Use ask_user to pick the month' }] },
       makeAgent(history),
@@ -213,7 +231,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
 
   describe('scheduled-workflow guard', () => {
     beforeEach(() => {
-      history.insertPlannedPipeline(makePlanned());
+      history.insertPlannedPipeline(makePlanned(), null);
       // An ENABLED cron task referencing the workflow → it is "scheduled".
       history.insertTrigger({ id: 'task-1', title: 'cron', scheduleCron: '0 9 * * *', pipelineId: 'wf-1' });
     });
@@ -259,7 +277,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     history.insertPlannedPipeline(makePlanned({
       capabilityContract: contract, confirmedAt: '2026-06-24T10:00:00.000Z',
       reviewedGrant: { by: 'local', at: '2026-06-24T10:00:00.000Z', checksum: 'c', binding: 'keyed', triggerId: 'task-1', afterUntrusted: false },
-    }));
+    }), null);
     history.insertTrigger({ id: 'task-1', title: 'cron', scheduleCron: '0 9 * * *', pipelineId: 'wf-1' });
     const agent = makeAgent(history);
 
@@ -284,7 +302,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     // confirmedAt as consent for autonomous execution UNIFORMLY, so editing the
     // steps of a confirmed schedule must re-open that consent — otherwise the
     // edited (un-reconsented) steps run unattended on the human's stale confirm.
-    history.insertPlannedPipeline(makePlanned({ confirmedAt: '2026-06-24T10:00:00.000Z' }));
+    history.insertPlannedPipeline(makePlanned({ confirmedAt: '2026-06-24T10:00:00.000Z' }), null);
     history.insertTrigger({ id: 'task-1', title: 'cron', scheduleCron: '0 9 * * *', pipelineId: 'wf-1' });
     const agent = makeAgent(history);
 

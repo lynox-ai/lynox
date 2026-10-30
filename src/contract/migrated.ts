@@ -66,6 +66,7 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'ENV_REGISTRY_BY_NAME', contractFile: 'env-registry.ts', twinPattern: valueTwin('ENV_REGISTRY_BY_NAME') },
   { name: 'SELF_HOST_ONLY', contractFile: 'env-registry.ts', twinPattern: valueTwin('SELF_HOST_ONLY') },
   { name: 'PREFIX_FAMILIES', contractFile: 'env-registry.ts', twinPattern: valueTwin('PREFIX_FAMILIES') },
+  { name: 'envVarRequired', contractFile: 'env-registry.ts', twinPattern: valueTwin('envVarRequired') },
   // K-W2 — money-HTTP + health wire shapes (born in the contract; a local
   // re-declaration downstream is the same silent-divergence failure mode).
   { name: 'UsageReportRun', contractFile: 'http.ts', twinPattern: typeTwin('UsageReportRun') },
@@ -128,6 +129,9 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   // either side is how the two would drift apart.
   { name: 'ProviderIncidentRequest', contractFile: 'http.ts', twinPattern: typeTwin('ProviderIncidentRequest') },
   { name: 'EscalationNoticeRequest', contractFile: 'http.ts', twinPattern: typeTwin('EscalationNoticeRequest') },
+  { name: 'ESCALATION_NOTICE_KINDS', contractFile: 'http.ts', twinPattern: valueTwin('ESCALATION_NOTICE_KINDS') },
+  { name: 'EscalationNoticeKind', contractFile: 'http.ts', twinPattern: typeTwin('EscalationNoticeKind') },
+  { name: 'isEscalationNoticeKind', contractFile: 'http.ts', twinPattern: valueTwin('isEscalationNoticeKind') },
   { name: 'OAuthRefreshRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshRequest') },
   { name: 'OAuthRefreshResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshResponse') },
   { name: 'OAuthRevokeRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRevokeRequest') },
@@ -138,6 +142,11 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'MICROSOFT_OAUTH_DECLINE_CODES', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_DECLINE_CODES') },
   { name: 'MicrosoftOAuthDeclineCode', contractFile: 'http.ts', twinPattern: typeTwin('MicrosoftOAuthDeclineCode') },
   { name: 'isMicrosoftOAuthDeclineCode', contractFile: 'http.ts', twinPattern: valueTwin('isMicrosoftOAuthDeclineCode') },
+  // Born in the contract: the Microsoft return parameters and the admin-consent status route.
+  { name: 'MICROSOFT_OAUTH_CLAIM_PARAM', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_CLAIM_PARAM') },
+  { name: 'MICROSOFT_OAUTH_ERROR_PARAM', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_ERROR_PARAM') },
+  { name: 'AdminConsentStatusRequest', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusRequest') },
+  { name: 'AdminConsentStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusResponse') },
   // K-W3 — the guarded-capable boot marker. The literal existed twice by hand
   // across the repo boundary; a local re-declaration is that failure returning.
   { name: 'GUARDED_CAPABLE_MARKER', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_MARKER') },

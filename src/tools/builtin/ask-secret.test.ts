@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { askSecretTool } from './ask-secret.js';
 import { SecretStore } from '../../core/secret-store.js';
 import type { IAgent } from '../../types/index.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
 
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   return {
@@ -10,6 +11,7 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
     memory: null,
     tools: [],
     onStream: null,
+    principal: OWNER_PRINCIPAL,
     ...overrides,
   } as IAgent;
 }
@@ -403,6 +405,30 @@ describe('askSecretTool — discovery + reconciliation', () => {
     expect(result).toContain('ZAI_API_KEY');
     expect(result).not.toContain('sk-zai-secretvalue'); // no plaintext value
     expect(result).not.toContain('MAIL_ACCOUNT_SHOP'); // infra excluded
+  });
+
+  // A mandate's turn references no secret (`secret:` is refused under its lock), so it is
+  // listed nothing: not the owner's names, not their last characters. The owner on the same
+  // store and the same tool still gets both.
+  it('action:"list" in a mandate\'s turn lists no name and no masked value; the owner\'s turn on the same store lists both', async () => {
+    process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-secretvalue';
+    const store = new SecretStore();
+    const mandate = { kind: 'mandate', email: 'helper@example.org', mandateId: 'M-1' } as RequestPrincipal;
+
+    const forMandate = await askSecretTool.handler({ action: 'list' }, makeAgent({ secretStore: store, principal: mandate }));
+    expect(forMandate).toBe('Secrets are not listed in this session and are not referenced with "secret:": a secret reaches a request only through an API profile, which the engine attaches it from.');
+    expect(forMandate).not.toContain('ZAI_API_KEY');
+    expect(forMandate).not.toContain('***');
+
+    const forOwner = await askSecretTool.handler({ action: 'list' }, makeAgent({ secretStore: store }));
+    expect(forOwner).toContain(`ZAI_API_KEY (${store.getMasked('ZAI_API_KEY')!})`);
+    expect(store.getMasked('ZAI_API_KEY')).toMatch(/^\*\*\*.{4}$/);
+  });
+
+  it('action:"list" lists nothing to an agent that names no principal', async () => {
+    process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-secretvalue';
+    const result = await askSecretTool.handler({ action: 'list' }, makeAgent({ secretStore: new SecretStore(), principal: undefined as never }));
+    expect(result).toBe('Secrets are not listed in this session and are not referenced with "secret:": a secret reaches a request only through an API profile, which the engine attaches it from.');
   });
 
   it('action:"list" reports an empty vault cleanly', async () => {

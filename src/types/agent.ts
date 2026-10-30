@@ -6,6 +6,8 @@ import type { IMemory, MemoryScopeRef } from './memory.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';
 import type { AutonomyLevel } from './modes.js';
 import type { AgentWarning } from './models.js';
+import type { ConversationGrants } from '../core/conversation-grants.js';
+import type { CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 
 export interface TabQuestion {
   question: string;
@@ -83,6 +85,13 @@ export interface PromptMeta extends PromptOrigin {
    * pending for its TTL. Runtime only: no origin/wire field is read from it.
    */
   signal?: AbortSignal | undefined;
+  /**
+   * The question asks to approve a hard block (`DangerSignal.hardBlock`). Every wrapper passes
+   * meta on, so it reaches the function that stores the question, whose reader decides:
+   * `PromptStore.insertQuestion` refuses it for a reader who does not watch the run. Runtime
+   * only, like `signal`.
+   */
+  blocked?: boolean | undefined;
 }
 
 /**
@@ -145,6 +154,12 @@ export type ToolCallRecorder = (call: {
   /** The connection the engine resolved for this call (`core/call-connection.ts`);
    *  absent when none was resolved. Never taken from tool input. */
   connection?: { id: string; createdAt: string | null; grantId: string | null } | undefined;
+  /** The write grant that let this call's write through (`GrantLift`); absent when none did. */
+  grant?: GrantLift | undefined;
+  /** Where the call stood toward the run's contract, as its gates saw it (`CallContract`). */
+  contract?: CallContract | undefined;
+  /** How the call's filing for the owner's approval ended (`CallFiled`); absent when it filed nothing. */
+  filed?: CallFiled | undefined;
   /** The id of the `tool_use` block this call answers, as the model's turn carried it.
    *  A required key, so a producer cannot leave it out by accident; `undefined`
    *  only where no block id exists. */
@@ -249,13 +264,6 @@ export interface SessionCounters {
    *  next one waits on it, so they are asked one at a time (one pending prompt per Session).
    *  See `core/prompt-chain.ts`. */
   secretPromptChain?: Promise<void> | undefined;
-  /** Moves whenever content the engine did not write enters this Session; see
-   *  `core/untrusted-epoch.ts`. Absent means 0. */
-  untrustedEpoch?: number | undefined;
-  /** Write approvals keyed `METHOD host` (METHOD: every write the request names, sorted and
-   *  joined by `+`), each with the epoch it was given in; it holds
-   *  only while that epoch is current. Created on first use; not carried between Sessions. */
-  approvedWrites?: Map<string, number> | undefined;
 }
 
 /**
@@ -360,6 +368,12 @@ export interface IAgent {
    * context. Undefined when no interactive surface is available (autonomous
    * mode, headless). See {@link PromptMailConnectFn}. */
   promptMailConnect?: PromptMailConnectFn | undefined;
+  /** What this run files with when nobody watches it (`approval-filing.ts`). Set by its runner,
+   *  inherited by its children; never set in an attended session. */
+  readonly approvalFiling?: import('../core/approval-filing.js').ApprovalFilingContext | undefined;
+  /** File a mail for the owner's approval from a handler's consent step. Refuses unless the
+   *  danger check marked the current call slot `filing`. */
+  fileApproval?(filing: import('../core/approval-store.js').ApprovalFiling): import('../core/approval-filing.js').FilingOutcome;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
   /** For a sub-agent: the chat it was spawned from, which it does not run AS (it has no
@@ -372,6 +386,8 @@ export interface IAgent {
    *  so a child inherits it and books onto its own run. See
    *  {@link ToolCallRecorder}. */
   recordToolCall?: ToolCallRecorder | undefined;
+  /** The conversation's grant set — read by `spawn_agent` so a child adds to its root's set. */
+  readonly conversationGrants?: ConversationGrants | undefined;
   /** Wave 1.2: has this run seen wrapped untrusted content? Read by the memory tools
    *  (`sourceUntrusted` evidence) and by spawn to propagate a child's taint to a parent
    *  that shares its Memory. */
@@ -398,13 +414,8 @@ export interface IAgent {
    *  cause, so arming the marker for a taint that was merely inherited tells the operator this
    *  turn read something external when nothing did. */
   restoreConversationTaint?(): void;
-  /** New content the engine did not write entered the conversation; moves the write
-   *  approvals' epoch (see `core/untrusted-epoch.ts`). Optional like `noteUntrustedData`. */
-  noteForeignContent?(): void;
-  /** The epoch a write approval is checked against and stored with (`core/untrusted-epoch.ts`):
-   *  the one the current tool batch started in. Absent on a test double: the current epoch. */
-  approvalEpoch?(): number;
-  /** The current tool batch as an identity, undefined outside one. */
+  /** The current tool batch as an identity, undefined outside one. A write approval sends in
+   *  this batch only (`http_request`). */
   approvalBatch?(): object | undefined;
   readonly spawnDepth?: number | undefined;
   readonly secretStore?: SecretStoreLike | undefined;

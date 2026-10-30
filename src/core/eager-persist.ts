@@ -1,6 +1,6 @@
 // Pure helper for the eager-persist hook fired by the agent loop. Without
 // this checkpoint, a container restart or OOM kill mid-loop drops every
-// turn since the last completed run-end (rafael prod 2026-05-18 incident).
+// turn since the last completed run-end (2026-05-18 production incident).
 // Extracted from `Session._persistMessages` so the contract is unit-testable.
 
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
@@ -94,7 +94,7 @@ export interface FailedTurnDisplayInput {
    *  one would surface the internal compaction prompt as a user message in the
    *  thread (a system prompt leaking into the visible history). */
   internal?: boolean | undefined;
-  /** A stop (`run_interrupted` / `tool_loop_break`) whose completed prefix the
+  /** A stop (`run_interrupted` / `tool_loop_break` / `thinking_loop`) whose completed prefix the
    *  agent KEPT in its context (`Agent.takeInterruptKeep`). The disk then keeps
    *  the same prefix: only the rows after it turn display-only, the kept messages
    *  not yet on disk are written as API rows, and the note is flagged so a reload

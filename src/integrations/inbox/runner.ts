@@ -14,7 +14,7 @@
 // surfaces to the user as a `requires_user` item — a missed customer mail
 // is unrepairable; an extra Needs-You item is a one-click archive.
 
-import { ClassifierQueue, type ClassifierQueueOptions } from './classifier/queue.js';
+import { ClassifierQueue, DrainedForRestoreError, DrainedForShutdownError, type ClassifierQueueOptions } from './classifier/queue.js';
 import {
   CLASSIFIER_VERSION,
   classifyMail,
@@ -204,6 +204,37 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
     onDeadLetter: (payload, error) => {
       // PRD fail-closed default: surface to Needs You so the user sees it.
       const envelopeFields = payload.envelope ?? {};
+      if (error instanceof DrainedForRestoreError || error instanceof DrainedForShutdownError) {
+        // Waiting when a migration restore stopped the engine: never sent to the classifier.
+        // Or, on a shutdown, waiting when its classify window ran out or cut off while running.
+        // The body it would have seen goes with it, as for an overflowing queue. No notification
+        // per mail: the process is ending, and the items wait in Needs You.
+        const forRestore = error instanceof DrainedForRestoreError;
+        const drainedId = state.insertItemWithAudit(
+          {
+            tenantId: payload.tenantId,
+            accountId: payload.accountId,
+            channel: payload.channel ?? 'email',
+            threadKey: payload.threadKey,
+            bucket: 'requires_user',
+            confidence: 0,
+            reasonDe: forRestore
+              ? 'Wegen der Migration nicht klassifiziert — manuell prüfen.'
+              : 'Beim Herunterfahren nicht klassifiziert — manuell prüfen.',
+            classifiedAt: new Date(),
+            classifierVersion: forRestore ? 'restore-drain' : 'shutdown-drain',
+            ...envelopeFields,
+          },
+          {
+            tenantId: payload.tenantId,
+            action: 'classified',
+            actor: 'system',
+            payloadJson: JSON.stringify({ dead_letter: true, reason: forRestore ? 'restore_drain' : 'shutdown_drain' }),
+          },
+        );
+        _writeThreadMessage(state, payload, drainedId, payload.classifierInput.body);
+        return;
+      }
       const itemId = state.insertItemWithAudit(
         {
           tenantId: payload.tenantId,

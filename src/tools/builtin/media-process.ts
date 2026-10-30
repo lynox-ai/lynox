@@ -34,13 +34,15 @@ import { mkdtempSync, rmSync, copyFileSync, statSync, mkdirSync, fstatSync, clos
 import { tmpdir } from 'node:os';
 import { join, extname, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import type { ToolEntry } from '../../types/index.js';
+import type { ToolEntry, IAgent } from '../../types/index.js';
 import { resolveFileAreaPath, getFileAreaDir } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES } from '../../core/constants.js';
 import { toWorkspaceRel } from '../../core/workspace-rel.js';
 import { openRead, WorkspaceAccessError, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 import { anchoredError, reachWorkspace, writeInPlace } from './fs.js';
 import { INPUT_GUARD_ARGS } from '../../core/ffmpeg-input.js';
+import { currentCallSignal } from '../../core/call-connection.js';
+import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 // The demuxer list and the input-side arguments live in core/ffmpeg-input.ts, shared with the
 // voice paths (transcribe/whisper-cpp.ts, audio-duration.ts). Re-exported for the tests here.
@@ -211,14 +213,25 @@ export function checkOutputSize(bytes: number): void {
 }
 
 /** Hand-rolled Promise wrapper over execFile (mirrors audio-duration.ts —
- *  util.promisify's custom symbol doesn't survive vi.mock). */
+ *  util.promisify's custom symbol doesn't survive vi.mock).
+ *
+ *  ffmpeg runs only on the tmp copies, so a stop of the run may kill it: `execFile` ends the
+ *  process when the call's signal aborts and rejects with an AbortError. Nothing has reached
+ *  the files area yet; the caller's `finally` removes the tmp directory. */
 function runFfmpeg(args: string[]): Promise<void> {
+  const signal = currentCallSignal();
   return new Promise((resolve, reject) => {
-    execFile('ffmpeg', args, { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: MAX_BUFFER_BYTES }, (err) => {
+    execFile('ffmpeg', args, { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: MAX_BUFFER_BYTES, ...(signal !== undefined ? { signal } : {}) }, (err) => {
       if (err) reject(err instanceof Error ? err : new Error(String(err)));
       else resolve();
     });
   });
+}
+
+/** A run stopped while ffmpeg ran, or just after: the output is not put into the files area.
+ *  Called right before that write, which is synchronous, so no stop can fall between the two. */
+function assertNotStopped(): void {
+  if (currentCallSignal()?.aborted === true) throw new DOMException('media_process was stopped before its output was saved', 'AbortError');
 }
 
 /** What the tool answers once the output is in the files area. */
@@ -265,7 +278,7 @@ function copyFromFd(fd: number, dest: string): void {
  * (a link on the way or at the file is refused, never followed) and copied from that descriptor;
  * the output is created in the workspace the same way. ffmpeg still only sees the tmp copies.
  */
-async function processAnchored(input: MediaProcessInput, anchor: WorkspaceAnchor, ws: string): Promise<string> {
+async function processAnchored(input: MediaProcessInput, anchor: WorkspaceAnchor, ws: string, agent: IAgent): Promise<string> {
   const mapped = toWorkspaceRel(resolve(ws, input.input), ws);
   if (mapped.kind !== 'inside') throw new Error(`input '${input.input}' is outside your files area.`);
   // The files area itself is a directory.
@@ -308,10 +321,14 @@ async function processAnchored(input: MediaProcessInput, anchor: WorkspaceAnchor
     }
     checkOutputSize(outStat.size);
 
+    assertNotStopped();
     const outName = `media_${Date.now()}_${randomBytes(4).toString('hex')}.${spec.ext}`;
     const shown = `${ws}/${outName}`;
     try {
-      writeInPlace({ anchor, rel: outName, shown }, readFileSync(localOutput), true);
+      withInstanceWrite(agent, { site: 'media_process#anchored', kind: 'create', store: 'files', target: () => [['file', outName]], main: ['write'] }, (w) => {
+        w.run('write', () => writeInPlace({ anchor, rel: outName, shown }, readFileSync(localOutput), true), ifReturned);
+        w.created('write', outName);
+      });
     } catch (err: unknown) {
       throw anchoredError(shown, err);
     }
@@ -364,12 +381,12 @@ export const mediaProcessTool: ToolEntry<MediaProcessInput> = {
       required: ['operation', 'input', 'format'],
     },
   },
-  handler: async (input: MediaProcessInput): Promise<string> => {
+  handler: async (input: MediaProcessInput, agent: IAgent): Promise<string> => {
     // 1. Structured validation — throws before any fs work or spawn.
     validateMediaInput(input);
     // With isolation the files area is the context workspace: reached through its open directory.
     const base = reachWorkspace(input.input);
-    if (base !== null) return processAnchored(input, base.anchor, base.ws);
+    if (base !== null) return processAnchored(input, base.anchor, base.ws, agent);
 
     // 2. Confine the input to the tenant's file area (SAME resolver as
     //    GET /api/files/download). Rejects '..', absolute-outside, symlink escape.
@@ -416,10 +433,15 @@ export const mediaProcessTool: ToolEntry<MediaProcessInput> = {
 
       // 5. Land the output in the tenant's file area so the download endpoint
       //    can serve it. The name is generated by this module (no agent input).
+      assertNotStopped();
       const areaBase = getFileAreaDir();
-      mkdirSync(areaBase, { recursive: true });
+      // Named before the first change, so the row can name it.
       const outName = `media_${Date.now()}_${randomBytes(4).toString('hex')}.${spec.ext}`;
-      copyFileSync(localOutput, join(areaBase, outName));
+      withInstanceWrite(agent, { site: 'media_process#unanchored', kind: 'create', store: 'files', target: () => [['file', outName]], main: ['copy'] }, (w) => {
+        mkdirSync(areaBase, { recursive: true });
+        w.run('copy', () => copyFileSync(localOutput, join(areaBase, outName)), ifReturned);
+        w.created('copy', outName);
+      });
 
       return doneMessage(input, outName, outStat.size);
     } finally {

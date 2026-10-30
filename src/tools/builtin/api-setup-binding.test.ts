@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('node:dns/promises', () => ({ default: { lookup: vi.fn().mockResolvedValue([{ address: '1.2.3.4', family: 4 }]) } }));
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -19,6 +19,7 @@ import { flattenPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 import { apiSetupTool } from './api-setup.js';
 import { httpRequestTool } from './http.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 /**
  * Where a vault secret may go (`vault-name-bindings.ts`), end to end through the tools that send
@@ -128,6 +129,8 @@ function agentOf(store: ApiStore, opts: { promptUser?: Ask; principal?: unknown;
     },
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       apiStore: store, vaultNameBindings: bindings(), secretReleases: opts.releases ?? null, mandateEnds: opts.ends ?? null,
       userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity,
     },
@@ -315,6 +318,124 @@ describe('W-Migration: the boot binds a name its profiles agree on, and no other
   });
 });
 
+describe('W-Migration-holds: the one-time boot binds only what it can attribute to the owner', () => {
+  /** The stored profiles as files the boot reads, the way an upgrade finds them. */
+  function bootFromFiles(entries: ReadonlyArray<{ id: string; profile: Record<string, unknown> }>): ApiStore {
+    const apis = join(dir, 'apis');
+    mkdirSync(apis, { recursive: true });
+    for (const e of entries) writeFileSync(join(apis, `${e.id}.json`), JSON.stringify(e.profile));
+    const store = new ApiStore();
+    store.loadFromDirectory(apis);
+    const b = bindings();
+    if (bindingsModule && b) bindingsModule.migrateVaultNameBindings(b, store, () => {});
+    return store;
+  }
+
+  it('one stored set holding all three cases: each name is bound or left unbound as it should be, row by row', async () => {
+    vault['ACME_KEY'] = value('acme');
+    vault['SHOPIFY_CLIENT_SECRET'] = value('shop');
+    vault['SPLIT_KEY'] = value('split');
+    const store = bootFromFiles([
+      // An unreadable entry: the owner's profile for ACME_KEY cannot be read (an older version stored an empty
+      // description), so the profile beside it is the only one that names the key. Whose the key
+      // is cannot be told.
+      { id: 'acme', profile: { ...bearerOn('acme', 'acme.example', 'ACME_KEY'), description: '' } },
+      { id: 'grab', profile: bearerOn('grab', 'evil.example', 'ACME_KEY') as unknown as Record<string, unknown> },
+      // A built-in provider's client secret, named by a profile that is not that provider's.
+      { id: 'shopgrab', profile: bearerOn('shopgrab', 'evil.example', 'SHOPIFY_CLIENT_SECRET') as unknown as Record<string, unknown> },
+      // A profile whose base cannot be parsed still names SPLIT_KEY: which of the two is the
+      // owner's cannot be told, so neither destination is bound.
+      { id: 'split', profile: bearerOn('split', 'split.example', 'SPLIT_KEY') as unknown as Record<string, unknown> },
+      { id: 'nobase', profile: { ...bearerOn('nobase', 'nobase.example', 'SPLIT_KEY'), base_url: 'not a url' } },
+      // Control: a name one readable profile of the owner names, and nothing else.
+      { id: 'reports', profile: reports() as unknown as Record<string, unknown> },
+    ]);
+    expect(store.unreadableHolds('ACME_KEY')).toBe(true);
+    expect(store.knownProfiles().map((p) => p.id).sort()).toEqual(expect.arrayContaining(['grab', 'shopgrab', 'split', 'reports']));
+    const b = bindings()!;
+    expect({
+      ACME_KEY: b.boundOf('ACME_KEY'),
+      SHOPIFY_CLIENT_SECRET: b.boundOf('SHOPIFY_CLIENT_SECRET'),
+      SPLIT_KEY: b.boundOf('SPLIT_KEY'),
+      REPORT_KEY: b.boundOf('REPORT_KEY'),
+    }).toEqual({
+      ACME_KEY: [],
+      SHOPIFY_CLIENT_SECRET: [],
+      SPLIT_KEY: [],
+      REPORT_KEY: ['https://reports.example'],
+    });
+
+    // What a name left unbound may do afterwards: go nowhere, not "anywhere".
+    await get(store, 'https://evil.example/v1/items');
+    expect(carried(vault['ACME_KEY']!)).toBe(false);
+    expect(carried(vault['SHOPIFY_CLIENT_SECRET']!)).toBe(false);
+    await get(store, 'https://split.example/v1/items');
+    expect(carried(vault['SPLIT_KEY']!)).toBe(false);
+    expect(slotMayReach(store, 'ACME_KEY', 'request', 'https://evil.example', store.knownProfiles().find((p) => p.id === 'grab'))).toBe(false);
+    // And the bound ones go where they are bound.
+    sent = [];
+    await get(store, 'https://reports.example/v1/items');
+    expect(sent.map((s) => new URL(s.url).hostname)).toEqual(['reports.example']);
+    expect(carried(vault['REPORT_KEY']!)).toBe(true);
+  });
+});
+
+describe('W-Migration-preset: a built-in provider\'s client secret is bound only to a profile of that provider', () => {
+  /** A profile of preset `presetId` on api.bexio.com, naming `secretKey` as its client secret. */
+  const presetProfile = (id: string, presetId: string, secretKey: string): ApiProfile => ({
+    id, name: id, base_url: 'https://api.bexio.com/2.0', description: 'd', custom_endpoint_ack: ack('api.bexio.com'),
+    auth: { type: 'oauth2', vault_keys: [secretKey], oauth: { preset_id: presetId, client_id_key: 'BEXIO_CLIENT_ID', client_secret_key: secretKey } },
+  } as ApiProfile);
+
+  it('a profile of another provider naming it leaves it unbound; its own provider\'s profile binds it', () => {
+    if (!bindingsModule) return;
+    const b = bindings()!;
+    // The stored profiles as the boot reads them (`knownProfiles`), nothing unreadable.
+    const stored = [
+      presetProfile('bx-own', 'bexio', 'BEXIO_CLIENT_SECRET'),
+      presetProfile('bx-foreign', 'bexio', 'SHOPIFY_CLIENT_SECRET'),
+    ];
+    bindingsModule.migrateVaultNameBindings(b, { knownProfiles: () => stored, unreadableHolds: () => false, importWaitsOn: () => [] }, () => {});
+    expect(b.boundOf('SHOPIFY_CLIENT_SECRET')).toEqual([]);
+    expect(b.boundOf('BEXIO_CLIENT_SECRET').length).toBeGreaterThan(0);
+  });
+
+  it('a profile of the provider on a base of its own choosing is not the provider\'s', () => {
+    if (!bindingsModule) return;
+    const b = bindings()!;
+    const moved = { ...presetProfile('bx-moved', 'bexio', 'BEXIO_CLIENT_SECRET'), base_url: 'https://evil.example/2.0', custom_endpoint_ack: ack('evil.example') } as ApiProfile;
+    bindingsModule.migrateVaultNameBindings(b, { knownProfiles: () => [moved], unreadableHolds: () => false, importWaitsOn: () => [] }, () => {});
+    expect(b.boundOf('BEXIO_CLIENT_SECRET')).toEqual([]);
+  });
+
+  it('a preset id that only spells the provider\'s vault name is not the provider', () => {
+    if (!bindingsModule) return;
+    const b = bindings()!;
+    // `SHOPIFY` derives the vault name SHOPIFY_CLIENT_SECRET, but no provider has that id.
+    const stored = [presetProfile('spelled', 'SHOPIFY', 'SHOPIFY_CLIENT_SECRET')];
+    bindingsModule.migrateVaultNameBindings(b, { knownProfiles: () => stored, unreadableHolds: () => false, importWaitsOn: () => [] }, () => {});
+    expect(b.boundOf('SHOPIFY_CLIENT_SECRET')).toEqual([]);
+  });
+
+  it('while the import of profile files waits, nothing is bound; with nothing waiting, the same set is', () => {
+    if (!bindingsModule) return;
+    const stored = [reports()];
+    const waiting = [{ file: 'apis/broken.json' }] as unknown as ReturnType<ApiStore['importWaitsOn']>;
+    const b = bindings()!;
+    bindingsModule.migrateVaultNameBindings(b, { knownProfiles: () => stored, unreadableHolds: () => false, importWaitsOn: () => waiting }, () => {});
+    expect(b.boundOf('REPORT_KEY')).toEqual([]);
+    // Control on a fresh database: the same profiles, nothing waiting.
+    const otherDb = new EngineDb(join(dir, 'other.db'));
+    try {
+      const other = new bindingsModule.VaultNameBindings(otherDb.getDb());
+      bindingsModule.migrateVaultNameBindings(other, { knownProfiles: () => stored, unreadableHolds: () => false, importWaitsOn: () => [] }, () => {});
+      expect(other.boundOf('REPORT_KEY')).toEqual(['https://reports.example']);
+    } finally {
+      otherDb.close();
+    }
+  });
+});
+
 describe('W-Rotation and W-Ask-not-extend: a new value is not a new destination', () => {
   it('a new value under a bound name keeps its binding', async () => {
     const store = boot(reports());
@@ -465,5 +586,98 @@ describe('W-Normal: what was allowed keeps working', () => {
     await get(store, 'https://owner.example/v1/items');
     expect(sent.map((s) => new URL(s.url).pathname)).toEqual(['/oauth/token', '/v1/items']);
     expect(sent[1]!.auth).toMatch(/^Bearer at-/);
+  });
+});
+
+describe('W-901D-switch: a profile switched from oauth2 by a save signs in with its own key under the old token name', () => {
+  const allowAll: Ask = async () => 'Allow';
+  const slot = accessTokenKey('owner');
+  const asBearer = (): ApiProfile => ({ ...owner(), ...extra, auth: { type: 'bearer', vault_keys: [slot] } } as ApiProfile);
+
+  it('the save empties the minted token and drops it from written; the user\'s own key then reaches the base', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name)).toContain(slot);
+    const minted = vault[slot]!;
+
+    const upd = String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: asBearer() } as never, agentOf(store, { promptUser: allowAll })));
+    expect(upd).not.toMatch(/^Error/);
+    expect(vault[slot]).toBeUndefined();
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name) ?? []).not.toContain(slot);
+
+    const mine = value('mine');
+    vault[slot] = mine;
+    sent = [];
+    await get(store, 'https://owner.example/v1/items');
+    expect(sent.map((s) => s.auth)).toEqual([`Bearer ${mine}`]);
+    expect(carried(minted)).toBe(false);
+  });
+
+  it('a name the exchange wrote under output_secret_name is emptied but stays on the record: only the derived names leave it', async () => {
+    const store = boot(owner());
+    expect(String(await apiSetupTool.handler({ action: 'fetch_token', id: 'owner', output_secret_name: 'OWNER_OUT' } as never, agentOf(store)))).not.toMatch(/^Error/);
+    expect(vault['OWNER_OUT']).toBeDefined();
+    const bearer = { ...owner(), ...extra, auth: { type: 'bearer', vault_keys: ['MY_OWN_KEY'] } } as ApiProfile;
+    vault['MY_OWN_KEY'] = value('mine');
+    const upd = String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: bearer } as never, agentOf(store, { promptUser: allowAll })));
+    expect(upd).not.toMatch(/^Error/);
+    expect(vault['OWNER_OUT']).toBeUndefined();
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name)).toEqual(['OWNER_OUT']);
+  });
+
+  it('a save that stays oauth2 and moves the base empties the token but keeps the record as it was', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    const moved = { ...owner(), ...extra, base_url: 'https://api2.owner.example/v1', custom_endpoint_ack: ack('owner.example', 'api2.owner.example') } as ApiProfile;
+    const upd = String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: moved } as never, agentOf(store, { promptUser: allowAll })));
+    expect(upd).not.toMatch(/^Error/);
+    expect(vault[slot]).toBeUndefined();
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name)).toContain(slot);
+  });
+
+  it('a hand edit that then moves the base takes the key nowhere: it is bound to the base the owner allowed', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    expect(String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: asBearer() } as never, agentOf(store, { promptUser: allowAll })))).not.toMatch(/^Error/);
+    const mine = value('mine');
+    vault[slot] = mine;
+    // The profile file edited by hand and read at the next boot: the binding stays where the owner put it.
+    const edited = { ...store.storedProfile('owner')!, base_url: 'https://evil.example/v1', custom_endpoint_ack: ack('evil.example') } as ApiProfile;
+    const reread = new ApiStore();
+    expect(reread.register(edited)).toBe(true);
+    sent = [];
+    await get(reread, 'https://evil.example/v1/items');
+    expect(carried(mine)).toBe(false);
+  });
+
+  it('a hand edit that switches the type without a save keeps the minted token held, and it goes nowhere', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    const minted = vault[slot]!;
+    const edited = { ...store.storedProfile('owner')!, ...extra, auth: { type: 'bearer', vault_keys: [slot] } } as ApiProfile;
+    const reread = new ApiStore();
+    expect(reread.register(edited)).toBe(true);
+    sent = [];
+    const out = await get(reread, 'https://owner.example/v1/items');
+    expect(carried(minted)).toBe(false);
+    // The refusal names the cause and a way out, not "the profile that holds the connection".
+    // The whole sentence: a run with no user in it is told to stop, not to try the way out.
+    expect(out).toContain('but that vault name holds an OAuth access token that an earlier sign-in of profile "owner" wrote, and that profile no longer signs in with OAuth. Such a token goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, store your own key under another vault name and name that one in auth.vault_keys with api_setup action="update", or switch the profile back to oauth2 and connect again. If no user is in this conversation, stop here; the owner fixes this in a chat.');
+  });
+
+  it('an oauth block whose client secret was removed by hand keeps the minted token, and it goes nowhere, said so', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    const minted = vault[slot]!;
+    const stored = store.storedProfile('owner')!;
+    const { client_secret_key: _gone, ...oauth } = stored.auth!.oauth!;
+    const edited = { ...stored, auth: { ...stored.auth!, oauth } } as ApiProfile;
+    const reread = new ApiStore();
+    expect(reread.register(edited)).toBe(true);
+    sent = [];
+    const out = await get(reread, 'https://owner.example/v1/items');
+    expect(carried(minted)).toBe(false);
+    // The whole sentence: the model is told to ask for a secret it no longer has, never to make one up.
+    expect(out).toContain('but that vault name holds an OAuth access token of profile "owner", and its OAuth settings name no client secret. A token goes only where the client secret it was minted with may go, so with none named it goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, name the client secret again (auth.oauth.client_secret_key) with api_setup action="update"; if the client secret is no longer stored, ask the user to provide it, then get a new token with action="fetch_token" or by connecting again. If no user is in this conversation, stop here; the owner fixes this in a chat.');
   });
 });

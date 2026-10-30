@@ -20,7 +20,8 @@ import { InMemoryMailRegistry } from './registry.js';
 import { createMailSearchTool } from './mail-search.js';
 import { createMailReadTool } from './mail-read.js';
 import { createMailSendTool } from './mail-send.js';
-import { createMailReplyTool } from './mail-reply.js';
+import { createMailReplyTool, prepareReply, commitReply } from './mail-reply.js';
+import { prepareSend, commitSend } from '../send-core.js';
 import { createMailTriageTool } from './mail-triage.js';
 import { createMailConnectTool } from './mail-connect.js';
 import type { MailConnectPromptData } from '../../../types/index.js';
@@ -882,6 +883,13 @@ describe('mail_reply tool', () => {
     const tool = createMailReplyTool(registry);
     const out = await tool.handler({ uid: 1, body: 'reply' }, yesAgent);
     expect(out).toContain('could not determine recipient');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('a read of the original stopped with the run sends nothing', async () => {
+    provider.fetch.mockRejectedValueOnce(new DOMException('the mail read was stopped', 'AbortError'));
+    const out = await createMailReplyTool(registry).handler({ uid: 1, body: 'reply' }, yesAgent);
+    expect(out).toBe('mail_reply error: the mail read was stopped');
     expect(provider.send).not.toHaveBeenCalled();
   });
 
@@ -1803,5 +1811,88 @@ describe('mail_connect', () => {
     const names = createMailTools(new InMemoryMailRegistry()).map(t => t.definition.name);
     expect(names).toContain('mail_connect');
     expect(MAIL_WRITE_TOOLS.has('mail_connect')).toBe(true);
+  });
+});
+
+// ── prepare → consent → commit ────────────────────────────────────────────
+//
+// Both mail writes run in three steps. The first reads and checks and sends nothing; the last
+// sends exactly what the first fixed. A later consent step that is not a question (an
+// approval queue) builds on this seam.
+
+describe('mail_reply in three steps', () => {
+  it('prepare reads the original and checks, and sends nothing', async () => {
+    const orig = { ...envelope(90, { messageId: '<o90@x>', from: 'alice@example.com', subject: 'Offer' }), threadKey: 'thread-90' };
+    provider.fetch.mockResolvedValue({ ...makeMessage(orig, 'Original.'), references: '<r0@x>' });
+    const prepared = await prepareReply(registry, undefined, { uid: 90, body: 'Thanks.', cc: 'bob@example.com' });
+    expect(provider.send).not.toHaveBeenCalled();
+    if (!prepared.ok) throw new Error(prepared.message);
+    expect(prepared.commit).toEqual({
+      to: [{ address: 'alice@example.com' }],
+      cc: [{ address: 'bob@example.com' }],
+      subject: 'Re: Offer',
+      body: 'Thanks.',
+      inReplyTo: '<o90@x>',
+      references: '<r0@x> <o90@x>',
+      originalThreadKey: 'thread-90',
+    });
+    expect(flattenPrompt(prepared.preview)).toContain('**Subject:** Re: Offer');
+  });
+
+  it('prepare refuses an auto-generated original before any consent', async () => {
+    provider.fetch.mockResolvedValue(makeMessage({ ...envelope(91, { messageId: '<o91@x>' }), isAutoReply: true }, 'Out of office.'));
+    const prepared = await prepareReply(registry, undefined, { uid: 91, body: 'Thanks.' });
+    expect(prepared.ok ? '' : prepared.message).toContain('Auto-Submitted header');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('commit sends exactly what prepare fixed, reflowed, records it, and reconciles the thread', async () => {
+    const orig = { ...envelope(92, { messageId: '<o92@x>', from: 'alice@example.com', subject: 'Offer' }), threadKey: 'thread-92' };
+    provider.fetch.mockResolvedValue({ ...makeMessage(orig, 'Original.'), references: '<r0@x>' });
+    provider.send.mockResolvedValue({ messageId: '<r92@x>', accepted: ['alice@example.com'], rejected: [] });
+    const prepared = await prepareReply(registry, undefined, { uid: 92, body: 'A line the model wrapped\nmid-sentence.', cc: 'bob@example.com' });
+    if (!prepared.ok) throw new Error(prepared.message);
+    const notifyOutboundSent = vi.fn(async () => undefined);
+    const out = await commitReply(prepared.sendProvider, prepared.commit, { notifyOutboundSent } as unknown as MailContext);
+    expect(provider.send).toHaveBeenCalledWith({
+      to: [{ address: 'alice@example.com' }],
+      cc: [{ address: 'bob@example.com' }],
+      subject: 'Re: Offer',
+      text: 'A line the model wrapped mid-sentence.',
+      inReplyTo: '<o92@x>',
+      references: '<r0@x> <o92@x>',
+    });
+    expect(notifyOutboundSent).toHaveBeenCalledWith('rafael-gmail', expect.objectContaining({ isReply: true, originalThreadKey: 'thread-92', originalMessageId: '<o92@x>' }));
+    expect(out).toContain('Reply sent from rafael-gmail.');
+    // The send is recorded: the same reply prepared again falls in the dedup window.
+    const again = await prepareReply(registry, undefined, { uid: 92, body: 'Again.', cc: 'bob@example.com' });
+    expect(again.ok ? '' : again.message).toContain('same recipient(s) + subject was sent');
+  });
+});
+
+describe('sendMail in three steps', () => {
+  it('prepare runs the gates and sends nothing', async () => {
+    const prepared = await prepareSend(registry, { to: [{ address: 'a@x.com' }], subject: 's', body: 'b' }, {});
+    expect(provider.send).not.toHaveBeenCalled();
+    if (!prepared.ok) throw new Error(prepared.message);
+    expect(prepared.prepared.provider.accountId).toBe('rafael-gmail');
+    expect(prepared.prepared.isMassSend).toBe(false);
+  });
+
+  it('prepare refuses a body with a secret before any consent', async () => {
+    const prepared = await prepareSend(registry, { to: [{ address: 'a@x.com' }], subject: 's', body: `key ${'sk-ant-api03-'}${'x'.repeat(95)}` }, {});
+    expect(prepared.ok ? undefined : prepared.status).toBe('secret_in_body');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('commit sends exactly what prepare fixed, reflowed, and records it', async () => {
+    provider.send.mockResolvedValue({ messageId: '<s1@x>', accepted: ['a@x.com'], rejected: [] });
+    const prepared = await prepareSend(registry, { to: [{ address: 'a@x.com' }], cc: [{ address: 'c@x.com' }], subject: 's', body: 'one\ntwo' }, {});
+    if (!prepared.ok) throw new Error(prepared.message);
+    const result = await commitSend(prepared.prepared, {});
+    expect(result.ok).toBe(true);
+    expect(provider.send).toHaveBeenCalledWith({ to: [{ address: 'a@x.com' }], cc: [{ address: 'c@x.com' }], subject: 's', text: 'one two' });
+    const again = await prepareSend(registry, { to: [{ address: 'a@x.com' }], cc: [{ address: 'c@x.com' }], subject: 's', body: 'three' }, {});
+    expect(again.ok ? undefined : again.status).toBe('dedup_window');
   });
 });

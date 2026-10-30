@@ -231,20 +231,25 @@ export interface ProcessRecord {
 
 export type TaskStatus = 'open' | 'in_progress' | 'completed' | 'failed';
 
-/** A TRIGGER's status. The four {@link TaskStatus} values plus `waiting` — the
- *  parked state of a trigger whose run asked a question and is waiting for the
- *  answer (PRD-DURABLE-WAIT-STATE §0 E1a).
+/** A TRIGGER's status. The four {@link TaskStatus} values plus two the engine writes:
+ *  `waiting` — the parked state of a trigger whose run asked a question and is
+ *  waiting for the answer — and `stopped` — a
+ *  ONE-SHOT whose run was stopped before it finished (`TaskManager.recordTaskRun`):
+ *  by its owner, or because what the run depended on ended (the chat holding its
+ *  question was deleted, the mandate that started it ended). `stopped` is
+ *  ended like `completed` (never due, not active work) without saying the work was
+ *  done; a stopped CRON run keeps its status and its schedule.
  *
- *  `waiting` is ENGINE-ONLY and the widening is deliberately confined to this
- *  type. It is NOT in `VALID_STATUSES` (task-manager.ts), NOT in the task tool's
- *  status enums, and NOT a value any caller may pass to `TaskManager.update` —
- *  that still rejects it as an invalid status, which is the intended contract.
- *  It is written on the engine's own path (`history.updateTrigger` →
+ *  Both are ENGINE-ONLY and the widening is deliberately confined to this type. They
+ *  are NOT in `VALID_STATUSES` (task-manager.ts), NOT in the `task_update` enum, and
+ *  NOT values any caller may pass to `TaskManager.update` — that still rejects them
+ *  as invalid statuses, which is the intended contract. `task_list` offers both as
+ *  filters. They are written on the engine's own path (`history.updateTrigger` →
  *  `TriggerStore.updateFields`) and read back by the store's queries.
  *
  *  Widening {@link TaskStatus} itself would have widened {@link TaskRecord.status}
- *  along with it — the USER-TODO, which has no parked state and must not gain one. */
-export type TriggerStatus = TaskStatus | 'waiting';
+ *  along with it — the USER-TODO, which has neither state and must not gain one. */
+export type TriggerStatus = TaskStatus | 'waiting' | 'stopped';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
 /** A USER-TODO — project-management work lynox tracks FOR the user (the
@@ -372,6 +377,17 @@ export interface TriggerRecord {
   edited_by?: string | undefined;
   /** Who stamped `confirmed_at`. Only the owner stamps. */
   confirmed_by?: string | undefined;
+  /** The grant id of the mandate in {@link created_by}, set with it and never after. Absent
+   *  for the owner's triggers and for a mandate's from before engine.db v44: such a mandate
+   *  cannot be told live, so it counts as ended. */
+  created_mandate_id?: string | undefined;
+  /** The last MANDATE that changed this trigger, and its grant id. Unlike {@link edited_by},
+   *  neither the owner's stamp nor the owner's edit replaces it. */
+  mandate_editor?: string | undefined;
+  mandate_editor_id?: string | undefined;
+  /** When {@link mandate_editor} last changed it (engine.db v45); absent for a change from
+   *  before that version. */
+  mandate_edited_at?: string | undefined;
   /** When the last escalation of this trigger started. Set together with
    *  {@link last_escalation_outcome}; absent when it never escalated. */
   last_escalation_at?: string | undefined;
@@ -383,4 +399,19 @@ export interface TriggerRecord {
    *  trigger reads), from `condition_json.run_id`. Set only by the bulk approval route
    *  and, for a preview, the external bulk plan. */
   bulk_run_id?: string | undefined;
+  /** When the plan was paused because a mandate it depends on provably ended (unix seconds,
+   *  `plan-pause.ts`); absent when it is not paused. Only the takeover clears it. */
+  paused_at?: number | undefined;
+  /** The `next_run_at` the plan had when it was paused, for display. */
+  paused_due_at?: string | undefined;
+  /** The mandate marks the owner took over (`plan-takeover.ts`), as they stood: creator and last
+   *  mandate editor, each as tag, grant id and time. Absent when nothing was taken over. */
+  covered_created_by?: string | undefined;
+  covered_created_id?: string | undefined;
+  covered_created_at?: string | undefined;
+  covered_edited_by?: string | undefined;
+  covered_edited_id?: string | undefined;
+  covered_edited_at?: string | undefined;
+  /** Who ended, as stored: a JSON list read by `pausedForOf` (`plan-pause.ts`). */
+  paused_for?: string | undefined;
 }

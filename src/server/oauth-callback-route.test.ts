@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LynoxHTTPApi } from './http-api.js';
@@ -99,7 +100,8 @@ describe('what a stranger gets', () => {
       // Stamped NOW on purpose. With a stale timestamp the TTL refuses it before
       // the signature is ever computed, and the case silently stops being about
       // the signature at all — which is what it said on the label for one revision.
-      `${COOKIE}=${STATE}.bexio.${VERIFIER}.${String(Math.floor(Date.now() / 1000))}.dead`],
+      // Six fields, with a principal, so it is the signature and not the field count that refuses it.
+      `${COOKIE}=${STATE}.bexio.${VERIFIER}.${Buffer.from(JSON.stringify({ tag: 'owner' })).toString('base64url')}.${String(Math.floor(Date.now() / 1000))}.${'0'.repeat(64)}`],
     ['no code', `?state=${STATE}`, mintCookie()],
     ['no state', '?code=c', mintCookie()],
     ['a state that does not match the cookie', '?code=c&state=3f2504e0-4f89-11d3-9a0c-0305e82c3302', mintCookie()],
@@ -111,6 +113,28 @@ describe('what a stranger gets', () => {
     // The refusal never says which of the five it was, and never echoes a value.
     expect(body).not.toContain('bexio');
     expect(body).not.toContain(STATE);
+  });
+
+  it('refuses a state cookie without a principal, although this engine signed it', async () => {
+    // The format before the principal was carried: state, profile, verifier and time, signed with
+    // this engine's own key. A callback that took it would have no one to stamp the connection to.
+    const key = createHmac('sha256', 'lynox-profile-oauth-state').update(SECRET).digest();
+    const sign = (payload: string): string => `${COOKIE}=${encodeURIComponent(`${payload}.${createHmac('sha256', key).update(payload).digest('hex')}`)}`;
+    const at = String(Math.floor(Date.now() / 1000));
+    const res = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${at}`));
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain('no longer valid');
+    expect(body).not.toContain('bexio');
+    expect(body).not.toContain(STATE);
+
+    // The same signing with a principal field passes the cookie check and reaches the profile
+    // lookup, which finds no such profile here: the refusal above is the missing principal, not a
+    // signature this test got wrong.
+    const owner = Buffer.from(JSON.stringify({ tag: 'owner' })).toString('base64url');
+    const withPrincipal = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${owner}.${at}`));
+    expect(withPrincipal.status).toBe(409);
+    expect(await withPrincipal.text()).toContain('no longer exists');
   });
 
   it('refuses an expired cookie although its signature is valid', async () => {

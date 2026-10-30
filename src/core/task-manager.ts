@@ -9,6 +9,11 @@ import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
 import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
+import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
+import { encodeStamp } from './plan-stamp.js';
+import type { StampEntry } from './plan-run-context.js';
+import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
+import { stripHidden } from './hidden-text.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -80,6 +85,14 @@ function refuseForeignTodo(task: TaskRecord, by: RequestPrincipal | undefined, w
 
 function refuseBulkTrigger(trigger: TriggerRecord): void {
   if (Object.hasOwn(BULK_EFFECTS, trigger.effect)) throw new BulkTriggerLockedError();
+}
+
+/** A schedule on a `webhook` trigger: it would make the trigger due without an event. */
+export class WebhookTriggerScheduleError extends Error {
+  constructor() {
+    super('A webhook trigger runs when its provider sends an event, so it takes no schedule or run time.');
+    this.name = 'WebhookTriggerScheduleError';
+  }
 }
 
 export function deriveSourceEffect(intent: {
@@ -157,6 +170,9 @@ export interface TaskCreateParams {
    *  owner stamped it. A to-do records it only for a mandate (the owner's stays NULL), and a
    *  mandate's subtask hangs only under a to-do of its own. */
   createdBy?: string | undefined;
+  /** The grant id of the mandate in `createdBy` (`mandateIdOf` of the same principal). A
+   *  trigger keeps it as `created_mandate_id`; a to-do does not record it. */
+  createdMandateId?: string | undefined;
   /** Principal tag of whoever supplied `confirmedAt` — only ever the owner. */
   confirmedBy?: string | undefined;
 }
@@ -331,6 +347,7 @@ export class TaskManager {
         confirmedAt: params.confirmedAt,
         createdUntrusted: params.createdUntrusted,
         createdBy: params.createdBy,
+        createdMandateId: params.createdMandateId,
         confirmedBy: params.confirmedAt ? params.confirmedBy : undefined,
       });
 
@@ -352,6 +369,78 @@ export class TaskManager {
     });
 
     return this.history.getTask(id)!;
+  }
+
+  /**
+   * Create a `webhook` trigger: a provider's verified event starts the workflow `pipelineId`
+   * (PRD inbound-webhooks §4). The route token, and for `shared-token` the token the provider
+   * sends, are returned once and kept only as their hashes. It takes no schedule: its
+   * `next_run_at` stays empty, so only a recorded delivery gives it work.
+   *
+   * The mapping is set here and nowhere else: no update path writes `condition_json.webhook`,
+   * so a run cannot choose which of a third party's fields become its parameters.
+   */
+  createWebhookTrigger(params: {
+    title: string;
+    description?: string | undefined;
+    pipelineId: string;
+    verifier: WebhookVerifierKind;
+    /** `shopify-hmac`: the Shopify connection whose shop the trigger serves. */
+    connectionId?: string | undefined;
+    mapping?: Readonly<Record<string, string>> | undefined;
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
+    confirmedAt?: string | undefined;
+    confirmedBy?: string | undefined;
+    createdUntrusted?: string | undefined;
+    createdBy?: string | undefined;
+    createdMandateId?: string | undefined;
+  }): { trigger: TriggerRecord; routeToken: string; sharedToken?: string | undefined } {
+    if (params.verifier === 'shopify-hmac' && (params.connectionId === undefined || params.connectionId === '')) {
+      throw new Error('A Shopify webhook trigger needs the connection of the shop it serves.');
+    }
+    if (params.verifier === 'shared-token' && params.connectionId !== undefined) {
+      throw new Error('A shared-token webhook trigger serves no connection; leave the connection out.');
+    }
+    if (pipelineModeLookup) {
+      const found = pipelineModeLookup(params.pipelineId);
+      if (found && !found.schedulable) {
+        throw new Error(
+          `Cannot bind pipeline "${params.pipelineId}" to a webhook: mode is '${found.mode}', and only an 'autonomous' pipeline, or an interactive one whose only question tool is ask_user, runs without a person.`,
+        );
+      }
+    }
+    const shared = params.verifier === 'shared-token' ? mintRouteToken() : undefined;
+    // Read the way the receiver reads it, and stored as read: a spec the receiver would not
+    // accept is refused here, and what is kept is exactly what it will apply.
+    const read = parseWebhookSpec(JSON.stringify({ webhook: { verifier: params.verifier, shared_token_hash: shared?.hash, mapping: params.mapping } }));
+    if (read === null) {
+      throw new Error(`Invalid webhook mapping: at most ${String(MAPPING_MAX_ENTRIES)} entries, each a parameter name and a JSON pointer such as "/customer/email".`);
+    }
+    const spec = {
+      verifier: read.verifier,
+      ...(read.sharedTokenHash !== undefined ? { sharedTokenHash: read.sharedTokenHash } : {}),
+      ...(read.mapping !== undefined ? { mapping: read.mapping } : {}),
+    };
+    const id = randomUUID().slice(0, 8);
+    const route = mintRouteToken();
+    this.history.insertWebhookTrigger({
+      id,
+      title: params.title,
+      description: params.description,
+      pipelineId: params.pipelineId,
+      spec,
+      routeTokenHash: route.hash,
+      sourceConnectionId: params.verifier === 'shopify-hmac' ? params.connectionId : undefined,
+      scopeType: params.scopeType ?? 'context',
+      scopeId: params.scopeId ?? '',
+      confirmedAt: params.confirmedAt,
+      confirmedBy: params.confirmedAt !== undefined ? params.confirmedBy : undefined,
+      createdUntrusted: params.createdUntrusted,
+      createdBy: params.createdBy,
+      createdMandateId: params.createdMandateId,
+    });
+    return { trigger: this.history.getTrigger(id)!, routeToken: route.token, ...(shared !== undefined ? { sharedToken: shared.token } : {}) };
   }
 
   /** @param by The request's principal, when a request completes it: a mandate completes only
@@ -474,6 +563,10 @@ export class TaskManager {
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
       refuseBulkTrigger(trigger);
+      // Its `next_run_at` stays empty, so only a recorded delivery gives it work (PRD §4.4 [R2-3]).
+      if (trigger.source === 'webhook' && (params.nextRunAt !== undefined || params.scheduleCron !== undefined)) {
+        throw new WebhookTriggerScheduleError();
+      }
       const triggerUpdate: {
         title?: string | undefined;
         description?: string | undefined;
@@ -568,10 +661,11 @@ export class TaskManager {
   }
 
   /** List AGENT-TRIGGERs (the WorkerLoop-fired rows: cron/watch/pipeline/etc). */
-  listTriggers(opts?: { status?: TriggerStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined }): TriggerRecord[] {
+  listTriggers(opts?: { status?: TriggerStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined; paused?: boolean | undefined }): TriggerRecord[] {
     return this.history.getTriggers({
       status: opts?.status,
       taskType: opts?.taskType,
+      paused: opts?.paused,
       scopeType: opts?.scope?.type,
       scopeId: opts?.scope?.id,
     });
@@ -584,8 +678,9 @@ export class TaskManager {
   getAssignedToLynox(scopes?: MemoryScopeRef[]): TriggerRecord[] {
     // Exclude terminal states. `failed` is terminal for one-shot triggers
     // (no retries remaining) — same as `completed`, it must not count
-    // as active work or get re-surfaced in the briefing.
-    const isActive = (t: TriggerRecord) => t.status !== 'completed' && t.status !== 'failed';
+    // as active work or get re-surfaced in the briefing. `stopped` is a one-shot
+    // its owner stopped: proposing it as work would undo the owner's stop.
+    const isActive = (t: TriggerRecord) => t.status !== 'completed' && t.status !== 'failed' && t.status !== 'stopped';
     if (scopes && scopes.length > 0) {
       const all: TriggerRecord[] = [];
       for (const scope of scopes) {
@@ -650,10 +745,13 @@ export class TaskManager {
     if (lynoxTasks.length > 0) counts.push(`${lynoxTasks.length} assigned to you`);
     parts.push(counts.join(', ') + '.');
 
+    // Every session reads this, the unattended run of a plan too, and a plan's text may have been
+    // written by someone else: without the characters that render as nothing (`hidden-text.ts`).
+    // The model's write tools refuse them, but a plan saved before, or through another path, carries them.
     for (const t of summary.overdue) {
-      const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${t.scope_id})`;
-      const assignee = t.assignee ? ` [${t.assignee}]` : '';
-      parts.push(`Overdue: "${t.title}"${scope}, due ${t.due_date}, ${t.priority.toUpperCase()}${assignee}`);
+      const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${stripHidden(t.scope_id)})`;
+      const assignee = t.assignee ? ` [${stripHidden(t.assignee)}]` : '';
+      parts.push(`Overdue: "${stripHidden(t.title)}"${scope}, due ${t.due_date}, ${t.priority.toUpperCase()}${assignee}`);
     }
 
     // Highlight tasks assigned to lynox that aren't already shown as overdue
@@ -664,8 +762,9 @@ export class TaskManager {
       for (const t of pendingLynox) {
         // These are AGENT-TRIGGERs — no `due_date` column; surface the next
         // scheduled fire instead when present.
-        const next = t.next_run_at ? `, next run ${t.next_run_at}` : '';
-        parts.push(`  - "${t.title}" [${t.status}]${next}`);
+        // A paused plan says so instead of a next run that will not come (`plan-pause.ts`).
+        const next = isPaused(t) ? `, ${PAUSED_MODEL_TEXT}` : t.next_run_at ? `, next run ${t.next_run_at}` : '';
+        parts.push(`  - "${stripHidden(t.title)}" [${t.status}]${next}`);
       }
     }
 
@@ -774,12 +873,21 @@ export class TaskManager {
    *  the resolved id (same idiom as {@link setEnabled} + the workflow confirm — the
    *  confirm surfaces are human-HTTP-only, not agent-tool mutation paths). Returns the
    *  updated trigger, or undefined if not found / out of scope. */
-  confirmTrigger(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, confirmedBy?: string | undefined): TriggerRecord | undefined {
+  confirmTrigger(
+    id: string,
+    scopeFilter?: Array<{ type: string; id: string }> | undefined,
+    confirmedBy?: string | undefined,
+    /** The connections this stamp lists, and the workflow confirmation they were listed with
+     *  (`plan-stamp.ts`); without it the stamp lists none. */
+    connections?: { readonly wf: string | null; readonly entries: readonly StampEntry[] } | undefined,
+  ): TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (!trigger) return undefined;
     refuseBulkTrigger(trigger);
-    this.history.setTriggerConfirmedAt(trigger.id, new Date().toISOString(), confirmedBy);
+    const at = new Date().toISOString();
+    const listed = connections !== undefined && connections.entries.length > 0 ? encodeStamp(at, connections.wf, connections.entries) : undefined;
+    this.history.setTriggerConfirmedAt(trigger.id, at, confirmedBy, listed);
     return this.history.getTrigger(trigger.id, scopeOpts);
   }
 
@@ -788,13 +896,13 @@ export class TaskManager {
    *  Resolves the id like the other write methods; returns false if no trigger matched
    *  (the caller then lets its own write report the 404). A TODO is not a trigger and has
    *  no stamp, so it is left alone. */
-  markEditedBy(id: string, editedBy: string, clearStamp: boolean): boolean {
+  markEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
     const trigger = this.history.getTrigger(id);
     if (!trigger) return false;
     // Before the mark, not after: the write that follows refuses a bulk trigger, and a
     // refused attempt must not leave a mark that would hold the owner's approved run.
     refuseBulkTrigger(trigger);
-    return this.history.markTriggerEditedBy(trigger.id, editedBy, clearStamp);
+    return this.history.markTriggerEditedBy(trigger.id, editor, clearStamp);
   }
 
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */
@@ -902,7 +1010,8 @@ export class TaskManager {
   /**
    * Record the outcome of a run against its trigger.
    *
-   * ⭐ `'stopped'` is the owner's deliberate halt, and it is NOT a kind of failure —
+   * ⭐ `'stopped'` is a deliberate halt — by the owner, or because what the run depended
+   * on ended (chat deleted, mandate ended) — and it is NOT a kind of failure —
    * which matters twice over:
    *   · **It must not retry.** The branch below sends `failed` and `timeout` into a
    *     backoff re-fire. A stop recorded as `failed` would therefore restart exactly
@@ -919,28 +1028,27 @@ export class TaskManager {
    * that is neither: `status` stayed `open` while `next_run_at` was cleared, so the row
    * was never due again and never closed — and `task_list` reads exactly that pair as a
    * schedule the model should repair, which is the behaviour its own docstring records
-   * (three invented replacement configs). So a stopped one-shot is written `completed`:
-   * the word is the SCHEDULE's lifecycle ("it is finished, nothing will give it another
-   * run"), not a verdict on the run, and `last_run_status = 'stopped'` carries the
-   * outcome — the same division the cron branch already relies on.
+   * (three invented replacement configs). So a stopped one-shot is written `stopped`
+   * ({@link TriggerStatus}): ended like `completed` — never due again, not active work,
+   * left out of every query that `completed` is left out of — without the borrowed
+   * claim that its work was done. It was `completed` until the word existed. One
+   * exception: a row the owner already completed while the run was going stays
+   * `completed`.
+   * `last_run_status = 'stopped'` still carries the outcome of the run itself.
    *
-   * ⛔ WHY NOT A `stopped` STATUS, corrected: NOT because a `CHECK` forbids it. An
-   * earlier version of this paragraph quoted `CHECK(status IN ('open','in_progress',
-   * 'completed','failed'))` — which belongs to the LEGACY `triggers` table in the
-   * history.db ladder, not to the live one. Every trigger write goes through
-   * `TriggerStore` to engine.db, whose `triggers` has NO check on `status`;
-   * `engine-db.ts` says so in as many words and adds that "which of the two a search
-   * shows first depends on the tool". The live proof is `'waiting'`, which that column
-   * already holds and the quoted list does not contain. What a `stopped` status actually
-   * costs is the VOCABULARY and its readers — `TriggerStatus`, `VALID_STATUSES`, the
-   * status filter the agent tool offers, and the UI's status map — which is a wider unit
-   * than this one and is filed as its own. No migration.
+   * No migration: the live `triggers` table (engine.db, through `TriggerStore`) has no
+   * `CHECK` on `status` — `engine-db.ts` says so; the `CHECK` quoted in older notes
+   * belongs to the LEGACY table in the history.db ladder — and `'waiting'` already
+   * lives in that column. The cost of the word is its readers, and each reader that
+   * excludes `completed` excludes `stopped` too.
    *
    * `'halted'` is a run that stopped where its approval told it to — a bulk run at its
-   * approved maximum, with no failed write in that pass. It is scheduled exactly like a stop (no retry, a one-shot is `completed`, a cron keeps its
-   * status) for the same reason: the run did what was asked and waits for the owner, and
-   * the owner's resume re-arms the trigger. Recorded as `failed`, it was a failure the owner
-   * learned to read past, right next to the real ones.
+   * approved maximum, with no failed write in that pass. It is scheduled like a stop (no
+   * retry, a cron keeps its status) for the same reason: the run did what was asked and
+   * waits for the owner, and the owner's resume re-arms the trigger. A halted ONE-SHOT is
+   * written `completed`, not `stopped`: nobody stopped it, it reached the end it was
+   * approved for. Recorded as `failed`, it was a failure the owner learned to read past,
+   * right next to the real ones.
    *
    * `'interrupted'` is a run the engine lost mid-way and did not resume. It IS a run
    * that did not finish, so it is scheduled exactly like `failed` (the same retry, the same
@@ -949,14 +1057,17 @@ export class TaskManager {
   /**
    * @param opts.noRetry No retry for this run, whatever the trigger's retries say: a run a
    *   non-owner started by hand (PRD customer-granted-operator-access §3.12 point 6, "once
-   *   per request"). A retry carries no request, so it would run as the owner's schedule with
-   *   the full tool set.
+   *   per request"). A retry carries no request, so it would run as the schedule's run, not
+   *   the request's.
+   * @param opts.keepSchedule Record the run and leave the schedule as it is: no status, no next
+   *   run, no retry. Only for a run the plan's pause ended (`plan-pause.ts`): a paused plan keeps
+   *   its due time for when it is taken over, and is not in `getDue` meanwhile.
    * @returns Whether this scheduled a retry of the run. The caller reports a failure only
    *   when it did not, so this is the one place that decides — a second copy of the retry
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined }): boolean {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.
@@ -982,7 +1093,11 @@ export class TaskManager {
     // run, no retry. A one-shot recorded `completed` or `failed` would never fire after the
     // owner stamps it. (The wait sweep, outside any run, decides on the row and records a
     // proposal's expired test question through the same scope.)
-    if (isHandRunOf(task.id)) {
+    // A webhook trigger is the same case for another reason: its work comes from the events its
+    // provider sends, one ledger row each. It has no cron, so
+    // the branches below would read it as a one-shot and set it `completed` or `failed` — and a
+    // trigger in either state accepts no further delivery.
+    if (isHandRunOf(task.id) || task.source === 'webhook' || opts?.keepSchedule === true) {
       this.history.updateTriggerRunResult(id, {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,
@@ -1021,8 +1136,9 @@ export class TaskManager {
       // run-history-persistence.ts `getDueTriggers`.
       // Guard: don't resurrect a cron that was manually marked
       // 'completed' mid-tick (narrow race between complete() and the
-      // finishing tick).
-      if (mayWriteStatus && task.status !== 'completed') {
+      // finishing tick), nor a one-shot that was `stopped` and later
+      // given a schedule — a run of it must not reopen it.
+      if (mayWriteStatus && task.status !== 'completed' && task.status !== 'stopped') {
         this.history.updateTrigger(id, { status: status === 'success' ? 'open' : 'failed' });
       }
     } else if (task.watch_config) {
@@ -1055,7 +1171,7 @@ export class TaskManager {
       // 'timeout') for the UI.
       if (mayWriteStatus) {
         this.history.updateTrigger(id, { status: 'failed' });
-      } else if ((status === 'stopped' || status === 'halted') && task.status !== 'waiting') {
+      } else if ((status === 'stopped' || status === 'halted') && task.status !== 'waiting' && task.status !== 'completed') {
         // Terminal, for the reason in the docstring: this row has no next run and
         // nothing will give it one, so leaving it `open` is a lie the model acts on.
         //
@@ -1064,7 +1180,12 @@ export class TaskManager {
         // before it unwinds to here, so this branch sees `waiting` only when that
         // un-park failed and swallowed its error. It is kept because the unit that
         // constructs the state directly is cheap and the failure it guards is silent.
-        this.history.updateTrigger(id, { status: 'completed' });
+        //
+        // `completed` is left as it is: an owner who completed the trigger while its run
+        // was going said it is done, and the stop that followed does not undo that.
+        // (A permanent FAILURE after complete() still writes `failed` above; only a
+        // stop is guarded here.)
+        this.history.updateTrigger(id, { status: status === 'stopped' ? 'stopped' : 'completed' });
       }
       // `next_run_at` is cleared regardless: a parked trigger must not become due
       // again on the strength of a run that ended without its answer. What ends
@@ -1080,12 +1201,13 @@ export class TaskManager {
       retryCount,
     });
     // A retry is only real where the worker will pick it up: `getDue` leaves out a row
-    // completed, disabled, parked or marked failed while the run went on. A parked row
-    // that is answered later runs again, but as the resume of its question, not as this
-    // retry. The confirmation gates in `getDue` are not repeated here: a row that loses
-    // its confirmation mid-run still reads as retrying.
-    return retrying && task.status !== 'completed' && task.status !== 'waiting'
-      && task.status !== 'failed' && task.enabled !== 0;
+    // completed, stopped, disabled, parked or marked failed while the run went on. A
+    // parked row that is answered later runs again, but as the resume of its question,
+    // not as this retry. The confirmation gates in `getDue` are not repeated here: a row
+    // that loses its confirmation mid-run still reads as retrying.
+    // A paused plan is not in `getDue` either, so a retry of it would not run.
+    return retrying && task.status !== 'completed' && task.status !== 'stopped'
+      && task.status !== 'waiting' && task.status !== 'failed' && task.enabled !== 0 && !isPaused(task);
   }
 }
 

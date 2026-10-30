@@ -23,6 +23,7 @@ jobs:
   # Not a required check itself.
   detect:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     outputs:
@@ -48,6 +49,7 @@ jobs:
   # the likelier ways this public repo would leak one.
   gitleaks:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
@@ -90,8 +92,10 @@ jobs:
     # shell against a stubbed curl). Their own timeout signals the shell it
     # started, not that shell's own children — an orphaned grandchild outlives
     # it. Without a job ceiling such a process would burn the runner's 6h
-    # default instead of failing. Matches `smoke` below.
-    timeout-minutes: 20
+    # default instead of failing. The ceiling sits above the suite's own time,
+    # not at it: the suite alone ran 18-20 min on main by late October 2026
+    # (one run was cancelled at 20:03), so 20 cut off green runs.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -158,6 +162,10 @@ jobs:
     # `needs` would turn a broken `detect` into three green required checks.
     if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
     runs-on: ubuntu-latest
+    # Successful runs take 3-5 min (job time p95 4.2 min over 397 runs, 17-20 Oct 2026); one green
+    # run still showed 12.07 min job time, most of it after its last step, so the bound leaves room
+    # for that. Without a bound a stalled build holds the required check open for the 6 h default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/docker-hub-mirror

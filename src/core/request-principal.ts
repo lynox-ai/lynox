@@ -57,6 +57,13 @@ export function isOwnerPrincipal(p: RequestPrincipal): boolean {
   return p.kind === 'owner';
 }
 
+/** The grant id of a mandate principal, or undefined for any other kind and for a mandate whose
+ *  login named none. A row stores it beside the principal's tag, and only from the same
+ *  principal, so a tag never carries another mandate's grant. */
+export function mandateIdOf(p: RequestPrincipal): string | undefined {
+  return p.kind === 'mandate' ? p.mandateId : undefined;
+}
+
 /** The tag a row records for who created, changed or stamped it. */
 export function principalTag(p: RequestPrincipal): string {
   switch (p.kind) {
@@ -118,6 +125,135 @@ export function principalHasEnded(p: RequestPrincipal, isLive: (mandateId: strin
     case 'cp-admin': return true;
     default: return unhandledPrincipal(p);
   }
+}
+
+/**
+ * Who shaped a plan, as its row records it: a trigger's columns, or a workflow's in the same
+ * names. `mandate_editor` is the last mandate that changed the plan; neither the owner's stamp nor
+ * the owner's edit replaces it, so a plan a mandate shaped still names that mandate after the
+ * owner stamped it (`edited_by` then names the owner, which is why it is not read here).
+ *
+ * `covered_*` are the marks the owner took over (`plan-takeover.ts`), as they stood. They are
+ * required, not optional, so that a literal that leaves them out does not compile: a reader that
+ * missed them would count a taken-over mandate as a member again. Built through
+ * {@link planAuthorshipOf} and {@link planAuthorshipOfWorkflow}.
+ */
+export interface PlanAuthorship {
+  readonly created_by?: string | null | undefined;
+  readonly created_mandate_id?: string | null | undefined;
+  readonly created_at?: string | null | undefined;
+  readonly mandate_editor?: string | null | undefined;
+  readonly mandate_editor_id?: string | null | undefined;
+  readonly mandate_edited_at?: string | null | undefined;
+  readonly covered_created_by: string | null | undefined;
+  readonly covered_created_id: string | null | undefined;
+  readonly covered_created_at: string | null | undefined;
+  readonly covered_edited_by: string | null | undefined;
+  readonly covered_edited_id: string | null | undefined;
+  readonly covered_edited_at: string | null | undefined;
+}
+
+/** The authorship columns of a row, in `PlanAuthorship`'s names, with the covered marks. */
+export interface PlanAuthorshipRow {
+  readonly created_by?: string | null | undefined;
+  readonly created_mandate_id?: string | null | undefined;
+  readonly created_at?: string | null | undefined;
+  readonly mandate_editor?: string | null | undefined;
+  readonly mandate_editor_id?: string | null | undefined;
+  readonly mandate_edited_at?: string | null | undefined;
+  readonly covered_created_by?: string | null | undefined;
+  readonly covered_created_id?: string | null | undefined;
+  readonly covered_created_at?: string | null | undefined;
+  readonly covered_edited_by?: string | null | undefined;
+  readonly covered_edited_id?: string | null | undefined;
+  readonly covered_edited_at?: string | null | undefined;
+}
+
+/** A trigger's or a workflow's row as a {@link PlanAuthorship}: a missing covered mark is none. */
+export function planAuthorshipOf(r: PlanAuthorshipRow): PlanAuthorship {
+  return {
+    created_by: r.created_by ?? null, created_mandate_id: r.created_mandate_id ?? null, created_at: r.created_at ?? null,
+    mandate_editor: r.mandate_editor ?? null, mandate_editor_id: r.mandate_editor_id ?? null, mandate_edited_at: r.mandate_edited_at ?? null,
+    covered_created_by: r.covered_created_by ?? null, covered_created_id: r.covered_created_id ?? null, covered_created_at: r.covered_created_at ?? null,
+    covered_edited_by: r.covered_edited_by ?? null, covered_edited_id: r.covered_edited_id ?? null, covered_edited_at: r.covered_edited_at ?? null,
+  };
+}
+
+/** A workflow's authorship as `WorkflowStore.authorship` returns it, as a {@link PlanAuthorship}. */
+export function planAuthorshipOfWorkflow(a: {
+  readonly createdBy: string | null; readonly createdMandateId: string | null; readonly createdAt: string | null;
+  readonly mandateEditor: string | null; readonly mandateEditorId: string | null; readonly mandateEditedAt: string | null;
+  readonly coveredCreatedBy: string | null; readonly coveredCreatedId: string | null; readonly coveredCreatedAt: string | null;
+  readonly coveredEditedBy: string | null; readonly coveredEditedId: string | null; readonly coveredEditedAt: string | null;
+}): PlanAuthorship {
+  return {
+    created_by: a.createdBy, created_mandate_id: a.createdMandateId, created_at: a.createdAt,
+    mandate_editor: a.mandateEditor, mandate_editor_id: a.mandateEditorId, mandate_edited_at: a.mandateEditedAt,
+    covered_created_by: a.coveredCreatedBy, covered_created_id: a.coveredCreatedId, covered_created_at: a.coveredCreatedAt,
+    covered_edited_by: a.coveredEditedBy, covered_edited_id: a.coveredEditedId, covered_edited_at: a.coveredEditedAt,
+  };
+}
+
+/** Whether a mark is the one the owner took over: tag, grant id and time all equal, null-safe. */
+function sameMark(tag: string | null | undefined, id: string | null | undefined, at: string | null | undefined,
+  ctag: string | null | undefined, cid: string | null | undefined, cat: string | null | undefined): boolean {
+  return (tag ?? null) !== null && (tag ?? null) === (ctag ?? null) && (id ?? null) === (cid ?? null) && (at ?? null) === (cat ?? null);
+}
+
+/** Whether the editor mark of this side is covered by the owner's takeover. */
+export function editorCovered(a: PlanAuthorship): boolean {
+  return sameMark(a.mandate_editor, a.mandate_editor_id, a.mandate_edited_at, a.covered_edited_by, a.covered_edited_id, a.covered_edited_at);
+}
+
+/** Whether the creator mark of this side is covered by the owner's takeover. */
+export function creatorCovered(a: PlanAuthorship): boolean {
+  return sameMark(a.created_by, a.created_mandate_id, a.created_at, a.covered_created_by, a.covered_created_id, a.covered_created_at);
+}
+
+/** The mandate a plan names, and when it last shaped the plan. */
+export interface PlanMandate {
+  readonly principal: Extract<RequestPrincipal, { kind: 'mandate' }>;
+  /** Unix milliseconds; `-Infinity` when the row records no time (a change from before the
+   *  column), so such a mark loses to any dated one. */
+  readonly at: number;
+}
+
+function mandateOfTag(tag: string, mandateId: string | null | undefined): Extract<RequestPrincipal, { kind: 'mandate' }> {
+  return { kind: 'mandate', email: tag.slice(MANDATE_TAG_PREFIX.length), ...(mandateId ? { mandateId } : {}) };
+}
+
+/** SQLite writes `YYYY-MM-DD HH:MM:SS` in UTC without a zone; an ISO string carries its own. */
+function planTime(at: string | null | undefined): number {
+  if (typeof at !== 'string' || at === '') return -Infinity;
+  const t = Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(at) ? `${at.replace(' ', 'T')}Z` : at);
+  return Number.isNaN(t) ? -Infinity : t;
+}
+
+/**
+ * The mandate a plan runs for: the last mandate that changed it, else the mandate that
+ * created it, else none (the owner's plan). A mark the owner took over (`covered_*`) is skipped:
+ * the takeover covers every mark of a side at once, so a covered side is the owner's. A mark
+ * without a grant id keeps its principal with `mandateId` absent, which {@link principalHasEnded}
+ * counts as ended: such a plan cannot be told live, so it does not run.
+ */
+export function planMandate(a: PlanAuthorship): PlanMandate | undefined {
+  if (isMandateTag(a.mandate_editor) && !editorCovered(a)) return { principal: mandateOfTag(a.mandate_editor!, a.mandate_editor_id), at: planTime(a.mandate_edited_at) };
+  if (isMandateTag(a.created_by) && !creatorCovered(a)) return { principal: mandateOfTag(a.created_by!, a.created_mandate_id), at: planTime(a.created_at) };
+  return undefined;
+}
+
+/**
+ * Which mandates a plan's run depends on, and which of them it runs for. A schedule names one
+ * mandate, the workflow it runs may name another; the run goes ahead only while EVERY one of them
+ * is live, so a mandate whose access ended cannot keep acting through a plan someone else touched
+ * last. The one it runs for is the member that changed the plan last; a tie goes to the schedule.
+ * No member: the owner's plan, `of` absent.
+ */
+export function planMembers(trigger: PlanMandate | undefined, workflow: PlanMandate | undefined): { readonly of?: PlanMandate['principal']; readonly members: readonly PlanMandate['principal'][] } {
+  const marks = [trigger, workflow].filter((m): m is PlanMandate => m !== undefined);
+  if (marks.length === 0) return { members: [] };
+  const last = marks.reduce((a, b) => (b.at > a.at ? b : a));
+  return { of: last.principal, members: marks.map((m) => m.principal) };
 }
 
 /**

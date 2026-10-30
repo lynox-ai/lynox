@@ -23,6 +23,30 @@ export const DEFAULT_MAX_QUEUE_DEPTH = 500;
 /** Reason annotated on the AbortError when the per-job timer fires. */
 export const TIMEOUT_REASON = 'classifier-timeout';
 
+/**
+ * The error a job waiting in the queue is dead-lettered with when the queue is drained for a
+ * migration restore: it was never classified, and the classifier was not asked.
+ */
+export class DrainedForRestoreError extends Error {
+  constructor() {
+    super('drained-for-restore');
+    this.name = 'DrainedForRestore';
+  }
+}
+
+/**
+ * The error a job is dead-lettered with when the process stops: either it was still waiting when
+ * the shutdown's classify window ran out, or it was running when the shutdown cut it off. It was
+ * not classified, and nothing classifies it later: the watcher marked the mail seen when it was
+ * queued.
+ */
+export class DrainedForShutdownError extends Error {
+  constructor() {
+    super('drained-for-shutdown');
+    this.name = 'DrainedForShutdown';
+  }
+}
+
 export interface QueueClassifyFn<T> {
   (input: T, opts: { signal: AbortSignal }): Promise<ClassifyResult>;
 }
@@ -52,6 +76,19 @@ function nextJobId(): string {
   return `cjob_${String(Date.now())}_${String(_jobCounter)}`;
 }
 
+/** Whether `work` settles before the epoch-millisecond `deadline`. */
+async function settlesBy(work: Promise<void>, deadline: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // run-group-starter: a single timeout, cleared below whichever way this ends; its callback
+  // only settles a local promise and reports no spend.
+  const timedOut = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now())); });
+  try {
+    return await Promise.race([work.then(() => true as const), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function asError(value: unknown): Error {
   if (value instanceof Error) return value;
   return new Error(typeof value === 'string' ? value : JSON.stringify(value));
@@ -74,6 +111,8 @@ export class ClassifierQueue<T> {
   private active = 0;
   private draining = false;
   private drainResolvers: Array<() => void> = [];
+  /** Aborted by `abortRunning`: running jobs stop waiting for the classifier. */
+  private readonly cutOff = new AbortController();
 
   constructor(options: ClassifierQueueOptions<T>) {
     this.classify = options.classify;
@@ -114,13 +153,54 @@ export class ClassifierQueue<T> {
   /**
    * Stop accepting new work and resolve once everything in-flight settles.
    * Idempotent — calling twice returns the same promise.
+   *
+   * With `deadLetterPending`, the jobs still waiting are not classified: each goes to
+   * `onDeadLetter` with that error, and only the jobs already running are awaited. It also
+   * applies to a queue that is already draining.
    */
-  drain(): Promise<void> {
+  async drain(options: { deadLetterPending?: Error | undefined } = {}): Promise<void> {
     this.draining = true;
-    if (this.depth === 0) return Promise.resolve();
+    if (options.deadLetterPending) {
+      const reason = options.deadLetterPending;
+      for (const job of this.pending.splice(0)) {
+        await this._safeCallback('onDeadLetter', () => this.onDeadLetter(job.input, reason));
+      }
+      this._maybeResolveDrain();
+    }
+    if (this.depth === 0) return;
     return new Promise<void>((resolve) => {
       this.drainResolvers.push(resolve);
     });
+  }
+
+  /**
+   * Drain for a process that is about to be killed. Jobs are classified as usual until
+   * `classifyUntil`; the jobs still waiting then are dead-lettered with `reason`, and the running
+   * ones are awaited until `cutOffAt`, when they are dead-lettered with `reason` too. Both are
+   * epoch milliseconds, so two queues drained one after the other share one budget. Resolves once
+   * every job is classified or dead-lettered, and reports how many were dead-lettered at each step.
+   */
+  async drainWithin(opts: { classifyUntil: number; cutOffAt: number; reason: Error }): Promise<{ deadLetteredWaiting: number; cutOffRunning: number }> {
+    const all = this.drain();
+    if (await settlesBy(all, opts.classifyUntil)) return { deadLetteredWaiting: 0, cutOffRunning: 0 };
+    const deadLetteredWaiting = this.pending.length;
+    const running = this.drain({ deadLetterPending: opts.reason });
+    if (await settlesBy(running, opts.cutOffAt)) return { deadLetteredWaiting, cutOffRunning: 0 };
+    const cutOffRunning = this.active;
+    this.abortRunning(opts.reason);
+    await running;
+    return { deadLetteredWaiting, cutOffRunning };
+  }
+
+  /**
+   * Stop waiting for the jobs that are running: each is dead-lettered with `reason` at once, and
+   * a classification that arrives afterwards is dropped. A job whose classification already
+   * arrived finishes as classified. Only for `drainWithin`, which has emptied the waiting jobs
+   * first: a job started after this would not be cut off.
+   */
+  private abortRunning(reason: Error): void {
+    this.draining = true;
+    this.cutOff.abort(reason);
   }
 
   private _tryStart(): void {
@@ -165,14 +245,27 @@ export class ClassifierQueue<T> {
   }
 
   private async _attempt(job: QueueJob<T>): Promise<ClassifyResult> {
+    const cutOff = this.cutOff.signal;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       controller.abort(new Error(TIMEOUT_REASON));
     }, this.perJobTimeoutMs);
+    // The cut-off does not wait for the classifier to honour its signal: a provider that hangs
+    // past it is exactly the case it is for.
+    let onCutOff: (() => void) | undefined;
+    const cut = new Promise<never>((_resolve, reject) => {
+      onCutOff = () => {
+        controller.abort(cutOff.reason);
+        reject(asError(cutOff.reason));
+      };
+      // run-group-starter: removed when this attempt ends; it only ends this attempt, no spend.
+      cutOff.addEventListener('abort', onCutOff, { once: true });
+    });
     try {
-      return await this.classify(job.input, { signal: controller.signal });
+      return await Promise.race([this.classify(job.input, { signal: controller.signal }), cut]);
     } finally {
       clearTimeout(timer);
+      if (onCutOff) cutOff.removeEventListener('abort', onCutOff);
     }
   }
 

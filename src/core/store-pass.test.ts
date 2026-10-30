@@ -216,6 +216,21 @@ describe('the token exchange\'s pass (kind exchange)', () => {
   const post = (url: string, p: StorePass, init: RequestInit = {}): Promise<Response> =>
     fetchPinned(url, { method: 'POST', headers: FORM, body: BODY, ...init }, p);
 
+  it('an exchange the redirect loop refuses comes back to the connect callback as a failed exchange, with the loop\'s reason', async () => {
+    const { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused } = await import('./oauth-token-exchange.js');
+    const endpoint = vetTokenEndpoint(TOKEN_URL, { accepted: true, hosts: ['acme.myshopify.com'] });
+    if (isTokenEndpointRefused(endpoint)) throw new Error('fixture is not vetted');
+    respond = () => (sent.length === 1 ? { status: 307, headers: { location: '/admin/oauth/access_token' } } : { status: 200 });
+    const result = await exchangeToken(
+      { endpoint, params: { client_id: 'cid', client_secret: 'csecret', code: 'c0de' }, bodyFormat: 'form' },
+      undefined, undefined, xpass(),
+    );
+    // This message is what reaches the callback, which does not render it (http-api.test.ts).
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toMatch(/would send the same write again/);
+    expect(sent).toHaveLength(1);
+  });
+
   it('sends exactly the exchange it was minted for, once', async () => {
     const res = await post(TOKEN_URL, xpass());
     expect(res.status).toBe(200);
@@ -281,8 +296,10 @@ describe('the token exchange\'s pass (kind exchange)', () => {
     for (const status of [307, 308]) {
       sent = [];
       respond = () => (sent.length === 1 ? { status, headers: { location: '/admin/oauth/access_token' } } : { status: 200 });
+      // The redirect loop refuses a hop back to the very target before the pass is asked; the
+      // pass's own one request is held above (a second `post`) and below (the public loop).
       await expect(fetchWithValidatedRedirects(TOKEN_URL, { method: 'POST', headers: FORM, body: BODY }, { surface: 'full-control' },
-        undefined, undefined, undefined, undefined, undefined, xpass()), String(status)).rejects.toThrow(/sends one request/);
+        undefined, undefined, undefined, undefined, undefined, xpass()), String(status)).rejects.toThrow(/would send the same write again/);
       expect(sent, String(status)).toHaveLength(1);
       sent = [];
       await expect(fetchWithPublicRedirects(TOKEN_URL, { method: 'POST', headers: FORM, body: BODY }, { pass: xpass() }), String(status))

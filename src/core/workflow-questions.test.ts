@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -109,10 +110,41 @@ describe('a question of a scheduled workflow run', () => {
     await vi.waitFor(() => { expect(h.deliveries).toEqual(['delivered']); });
     expect(h.pending).toEqual([id]);
 
-    h.prompts.answerUser(id, 'B');
+    h.prompts.answerUser(id, 'B', OWNER_PRINCIPAL);
     await expect(answer).resolves.toBe('B');
     expect(h.pending).toEqual([id, undefined]);
     expect(h.q.unanswered).toBe(false);
+  });
+
+  it('seeds the thread\'s turns without the characters that render as nothing in the schedule\'s title', async () => {
+    // A schedule saved before the write paths refused them: a tag-spelled clause after the title.
+    const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const h = makeHarness({ title: `Weekly offer${hidden}` });
+    // The question a step asks can carry them too, copied from what the step read.
+    const answer = h.q.ask(`Which list, A or B?${hidden}`, ['A', 'B'], { stepId: 'pick', stepTask: 'pick a list', workflowName: 'Weekly offer' });
+    const id = await openQuestion(h);
+    const msgs = h.threads.getMessages(RUN_ID, { apiOnly: true });
+    expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(msgs[0]!.content_json).toContain('Weekly offer');
+    expect(msgs[1]!.content_json).toContain('Which list, A or B?');
+    expect(msgs.map((m) => m.content_json).join('')).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+    h.prompts.answerUser(id, 'A', OWNER_PRINCIPAL);
+    await expect(answer).resolves.toBe('A');
+  });
+
+  it('a hard block is not put to the owner: nothing is stored or sent', async () => {
+    const h = makeHarness();
+    // The channel only carries ask_user today; a hard block reaching it is refused all the same.
+    const asked = h.q.ask('rm -rf /?', ['Allow', 'Deny'], { blocked: true });
+    expect(await stillPending(asked), 'refused at once, not waiting for an answer').toBe(false);
+    expect(h.prompts.getPending(RUN_ID)).toBeUndefined();
+    expect(h.notified).toEqual([]);
+    // Twin, on a fresh run (the refusal ends the run's questions, as a failed write does): the
+    // same question unmarked is stored and sent.
+    const twin = makeHarness();
+    void twin.q.ask('rm -rf /?', ['Allow', 'Deny']);
+    await openQuestion(twin);
+    expect(twin.notified).toHaveLength(1);
   });
 
   it('masks a known secret in the copy that leaves the box, not in the stored row', async () => {
@@ -132,10 +164,10 @@ describe('a question of a scheduled workflow run', () => {
     const second = h.q.ask('Second?');
     const firstId = await openQuestion(h);
     expect(h.prompts.getById(firstId)!.question).toBe('First?');
-    h.prompts.answerUser(firstId, 'one');
+    h.prompts.answerUser(firstId, 'one', OWNER_PRINCIPAL);
     await expect(first).resolves.toBe('one');
     await vi.waitFor(() => { expect(h.prompts.getPending(RUN_ID)?.question).toBe('Second?'); });
-    h.prompts.answerUser(h.prompts.getPending(RUN_ID)!.id, 'two');
+    h.prompts.answerUser(h.prompts.getPending(RUN_ID)!.id, 'two', OWNER_PRINCIPAL);
     await expect(second).resolves.toBe('two');
     expect(h.threads.getMessages(RUN_ID, { apiOnly: true }).filter((m) => m.role === 'assistant')).toHaveLength(2);
   });
@@ -147,7 +179,7 @@ describe('a question of a scheduled workflow run', () => {
     const since = Date.now();
     await new Promise((r) => { setTimeout(r, 30); });
     expect(h.q.pausedMs()).toBeGreaterThanOrEqual(25);
-    h.prompts.answerUser(id, 'yes');
+    h.prompts.answerUser(id, 'yes', OWNER_PRINCIPAL);
     await answer;
     const total = h.q.pausedMs();
     expect(total).toBeGreaterThanOrEqual(Date.now() - since - 5);

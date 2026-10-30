@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
+import { currentCallSignal } from '../../core/call-connection.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
@@ -8,7 +9,7 @@ import { wrapChannelMessage } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
-import { namedTarget } from '../../core/audit-log.js';
+import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
 
 // === Types ===
 
@@ -98,7 +99,12 @@ async function driveFetch(auth: GoogleAuth, url: string, options?: RequestInit):
       Authorization: `Bearer ${token}`,
       ...options?.headers,
     },
-    signal: options?.signal ?? AbortSignal.timeout(30_000),
+    // The 30 s limit always holds: a caller's signal is added to it, never in its place. Only
+    // reads pass one, the read actions and the read before a move: the call's
+    // (`currentCallSignal`), so a stop of the run ends the read. A write takes none and runs to
+    // its end once it started. The token refresh above takes no signal either: it is shared by
+    // every call waiting on it, and one stopped call must not fail the others.
+    signal: options?.signal ? AbortSignal.any([AbortSignal.timeout(30_000), options.signal]) : AbortSignal.timeout(30_000),
   }, auth.hostPolicy);
   return response;
 }
@@ -124,8 +130,8 @@ export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<Dri
     outwardRead: (input) => {
       switch (input.action) {
         case 'search': return 'search';
-        case 'read': case 'move': return `${input.action} ${namedTarget([['file', input.file_id]])}`.trimEnd();
-        case 'list': return `list ${namedTarget([['folder', input.folder_id]])}`.trimEnd();
+        case 'read': case 'move': return `${input.action} ${namedTarget([['file', input.file_id === undefined ? undefined : withoutAddresses(input.file_id)]])}`.trimEnd();
+        case 'list': return `list ${namedTarget([['folder', input.folder_id === undefined ? undefined : withoutAddresses(input.folder_id)]])}`.trimEnd();
         default: return null;
       }
     },
@@ -299,6 +305,7 @@ async function handleSearch(auth: GoogleAuth, input: DriveInput): Promise<string
 
   const response = await driveFetch(auth, `${DRIVE_BASE}/files?${params}`, {
     headers: { 'Content-Type': 'application/json' },
+    signal: currentCallSignal() ?? null,
   });
 
   if (!response.ok) return `Error: Search failed (${response.status}).`;
@@ -319,6 +326,7 @@ async function handleRead(auth: GoogleAuth, input: DriveInput): Promise<string> 
   // First get file metadata
   const metaResponse = await driveFetch(auth, `${DRIVE_BASE}/files/${input.file_id}?fields=id,name,mimeType,size`, {
     headers: { 'Content-Type': 'application/json' },
+    signal: currentCallSignal() ?? null,
   });
 
   if (!metaResponse.ok) return `Error: Failed to get file metadata (${metaResponse.status}).`;
@@ -328,7 +336,7 @@ async function handleRead(auth: GoogleAuth, input: DriveInput): Promise<string> 
   const exportMime = EXPORT_MIME_MAP[meta.mimeType];
   if (exportMime) {
     const params = new URLSearchParams({ mimeType: exportMime });
-    const exportResponse = await driveFetch(auth, `${DRIVE_BASE}/files/${input.file_id}/export?${params}`);
+    const exportResponse = await driveFetch(auth, `${DRIVE_BASE}/files/${input.file_id}/export?${params}`, { signal: currentCallSignal() ?? null });
     if (!exportResponse.ok) return `Error: Failed to export file (${exportResponse.status}).`;
     const content = await exportResponse.text();
     const truncated = content.slice(0, 50_000) + (content.length > 50_000 ? '\n\n(Content truncated)' : '');
@@ -344,7 +352,7 @@ async function handleRead(auth: GoogleAuth, input: DriveInput): Promise<string> 
   }
 
   // Binary/text file → download
-  const dlResponse = await driveFetch(auth, `${DRIVE_BASE}/files/${input.file_id}?alt=media`);
+  const dlResponse = await driveFetch(auth, `${DRIVE_BASE}/files/${input.file_id}?alt=media`, { signal: currentCallSignal() ?? null });
   if (!dlResponse.ok) return `Error: Failed to download file (${dlResponse.status}).`;
 
   const contentType = dlResponse.headers.get('content-type') ?? '';
@@ -479,6 +487,7 @@ async function handleList(auth: GoogleAuth, input: DriveInput): Promise<string> 
 
   const response = await driveFetch(auth, `${DRIVE_BASE}/files?${params}`, {
     headers: { 'Content-Type': 'application/json' },
+    signal: currentCallSignal() ?? null,
   });
 
   if (!response.ok) return `Error: Failed to list files (${response.status}).`;
@@ -499,13 +508,19 @@ async function handleMove(auth: GoogleAuth, input: DriveInput): Promise<string> 
   if (!input.file_id) return 'Error: "file_id" is required for action "move".';
   if (!input.target_folder_id) return 'Error: "target_folder_id" is required for action "move".';
 
-  // Get current parents
+  // Get current parents. A read before the write: it ends with the call, and a stopped read
+  // sends no move.
   const metaResponse = await driveFetch(auth, `${DRIVE_BASE}/files/${input.file_id}?fields=parents`, {
     headers: { 'Content-Type': 'application/json' },
+    signal: currentCallSignal() ?? null,
   });
   if (!metaResponse.ok) return `Error: Failed to get file info (${metaResponse.status}).`;
   const meta = await metaResponse.json() as { parents?: string[] };
   const removeParents = meta.parents?.join(',') ?? '';
+
+  // Stopped after the read (the run's stop or the tool's time limit): the move has not
+  // started, so it is not sent.
+  if (currentCallSignal()?.aborted === true) return 'Error: the call was stopped before the move was sent. Nothing was moved.';
 
   const params = new URLSearchParams({
     addParents: input.target_folder_id,

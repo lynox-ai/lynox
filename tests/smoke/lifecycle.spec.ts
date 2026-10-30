@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { createHmac } from 'node:crypto';
+import { mintOwnerSessionCookie } from './session-cookie.js';
 
 /**
  * CHAT-RUN LIFECYCLE RESILIENCE — the missing automated layer.
@@ -32,12 +32,6 @@ import { createHmac } from 'node:crypto';
 
 const SMOKE_SECRET = process.env['SMOKE_HTTP_SECRET'] ?? 'smoke-test-http-secret-ephemeral';
 
-function mintSessionCookie(secret: string): string {
-  const ts = Math.floor(Date.now() / 1000).toString();
-  const key = createHmac('sha256', 'lynox-session').update(secret).digest();
-  return `${ts}.${createHmac('sha256', key).update(ts).digest('hex')}`;
-}
-
 async function authenticate(page: Page): Promise<void> {
   // The engine sets `lynox_session` httpOnly, so `document.cookie` can't install
   // it (JS cannot write an httpOnly cookie). Set it at the CONTEXT level instead,
@@ -47,7 +41,7 @@ async function authenticate(page: Page): Promise<void> {
   const origin = new URL(page.url()).origin;
   await page.context().addCookies([{
     name: 'lynox_session',
-    value: mintSessionCookie(SMOKE_SECRET),
+    value: mintOwnerSessionCookie(SMOKE_SECRET),
     url: origin,
     httpOnly: true,
     secure: origin.startsWith('https'),
@@ -71,7 +65,7 @@ test.describe('chat-run lifecycle resilience', () => {
     // FLIPPED: the per-thread run registry shipped — /api/runs/active is live.
     // Query it authenticated (the standalone `request` fixture carries no page
     // cookie) and assert it returns a runs array, not a 404.
-    const cookie = mintSessionCookie(SMOKE_SECRET);
+    const cookie = mintOwnerSessionCookie(SMOKE_SECRET);
     const res = await request.get('/api/runs/active', { headers: { cookie: `lynox_session=${cookie}` } });
     expect(res.ok(), 'run-registry endpoint is live post-resilience').toBeTruthy();
     const body = (await res.json()) as { runs?: unknown };

@@ -5,10 +5,12 @@ import { tmpdir } from 'node:os';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { apiSetupTool } from './api-setup.js';
+import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { connectionTokenAllowed, connectionWaits } from '../../core/profile-secret-view.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => mockLynoxDir }));
@@ -72,6 +74,7 @@ interface AgentOpts {
   promptUser?: ((q: unknown, o?: string[]) => Promise<string>) | null;
   live?: readonly string[] | null;
   runSignal?: AbortSignal;
+  autonomy?: string;
 }
 
 function agentWith(store: ApiStore, opts: AgentOpts = {}): never {
@@ -81,7 +84,10 @@ function agentWith(store: ApiStore, opts: AgentOpts = {}): never {
     sessionCounters: { httpRequests: 0 },
     promptUser: opts.promptUser === null ? undefined : (opts.promptUser ?? (async () => 'Allow')),
     runSignal: opts.runSignal,
+    ...(opts.autonomy ? { autonomy: opts.autonomy } : {}),
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       vaultNameBindings: bindingsAsMigrated(store),
       apiStore: store,
       mandateEnds: live === null ? null : { isLive: (id: string) => live.includes(id) },
@@ -277,7 +283,9 @@ describe('api_setup adopt_connection', () => {
 
   it.each([
     ['the user declines', { promptUser: async () => 'Deny' }, 'user declined'],
-    ['nobody can be asked', { promptUser: null }, 'no interactive prompt is available'],
+    ['nobody can be asked', { promptUser: null }, 'needs the user\'s own answer in an interactive session'],
+    // An autonomous run can hold a prompt channel (a schedule the owner stamped): still no question.
+    ['the run is autonomous, with a prompt channel', { autonomy: 'autonomous' }, 'needs the user\'s own answer in an interactive session'],
     ['a mandate asks', { principal: MANDATE }, 'only the owner can adopt'],
   ] as const)('changes nothing when %s', async (_label, opts, says) => {
     const store = storeWith();
@@ -285,6 +293,15 @@ describe('api_setup adopt_connection', () => {
     const reply = await adopt(agentWith(store, opts as AgentOpts));
     expect(reply).toContain(says);
     expect(JSON.stringify(store.get('crm-api'))).toBe(before);
+  });
+
+  it('asks nothing in an autonomous run that could still prompt', async () => {
+    const promptUser = vi.fn(async () => 'Allow');
+    await adopt(agentWith(storeWith(), { promptUser, autonomy: 'autonomous' }));
+    expect(promptUser).not.toHaveBeenCalled();
+    // Control: the same agent in an interactive run is asked.
+    await adopt(agentWith(storeWith(), { promptUser }));
+    expect(promptUser).toHaveBeenCalled();
   });
 
   it('asks nothing of a mandate', async () => {
@@ -298,8 +315,11 @@ describe('api_setup adopt_connection', () => {
     const ac = new AbortController();
     ac.abort();
     const promptUser = vi.fn(async () => 'Allow');
-    const reply = await adopt(agentWith(store, { promptUser, runSignal: ac.signal }));
+    const slot: CallSlot = {};
+    const reply = await runInCallSlot(slot, () => adopt(agentWith(store, { promptUser, runSignal: ac.signal })));
     expect(reply).toContain('the run was stopped');
+    // The reply speaks of the stop itself, so the engine adds no sentence of its own to it.
+    expect(slot.ownStopSentence).toBe(true);
     expect(promptUser).not.toHaveBeenCalled();
     expect(store.get('crm-api')?.oauth_grant?.connected_by).toBe(TAG);
   });

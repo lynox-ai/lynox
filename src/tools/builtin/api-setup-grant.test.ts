@@ -15,18 +15,21 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { apiSetupTool, exchangedTokenExpiryFor, providerBodySummary, sentCredentials } from './api-setup.js';
+import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import { isDangerous } from '../permission-guard.js';
 import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
 import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
 import { scopeSecretStore } from '../../core/secret-scope.js';
+import { holdsValueAsHost } from '../../core/secret-store.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { ConnectionStore } from '../../core/connection-store.js';
 import { tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { httpRequestTool, oauthRenewalBackoffSizeForTests, resetOAuthRenewalBackoffForTests, OAUTH_RENEWAL_BACKOFF_MS, HTTP_HARD_CAP_MS, HTTP_WALL_GRACE_MS } from './http.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({
@@ -68,6 +71,8 @@ interface MockVault {
   listNames(): string[];
   /** Optional, as on the real store — the renewal's log sink calls it if present. */
   maskAll?(text: string): string;
+  /** As on the real store: the http tool asks it for a mandate's host. */
+  containsSecretAsHost(host: string): boolean;
 }
 
 /**
@@ -108,6 +113,7 @@ function makeVault(
     },
     peek: (name) => store[name],
     listNames: () => Object.keys(store),
+    containsSecretAsHost: (host) => holdsValueAsHost(host, Object.values(store)),
   };
   if (opts.mask !== undefined) {
     const mask = opts.mask;
@@ -177,6 +183,8 @@ function makeAgent(
     getAvailableTools: () => granted.map((name) => ({ definition: { name } })),
     promptUser,
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       apiStore,
       dataStore: null,
       taskManager: null,
@@ -861,11 +869,14 @@ describe('fetch_token — a grant a user gave is never renewed as an app token',
     // The record this handler writes after every exchange: names it wrote, and who connected.
     // A refusal keyed on "has an oauth_grant" would stop exactly this profile's second token.
     const store = new ApiStore();
-    expect(store.register(crmProfile({ oauth_grant: { written: [{ name: ACCESS, fp: tokenFingerprint('old-token') }], connected_by: 'owner' } }, 'client_credentials'))).toBe(true);
+    expect(store.register(crmProfile({ oauth_grant: { written: [{ name: ACCESS, fp: tokenFingerprint('old-token') }], connected_by: 'owner', account: { label: 'books@example.invalid', source: 'id-token' } } }, 'client_credentials'))).toBe(true);
     const vault = makeVault({ ...VAULT, [ACCESS]: 'old-token' });
     const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'new-token', expires_in: 86399 }));
 
     const result = await fetchToken(makeAgent(store, vault));
+
+    // A renewal is no new consent: the account the consent signed in with stays on the grant.
+    expect(store.get('crm-api')?.oauth_grant?.account).toEqual({ label: 'books@example.invalid', source: 'id-token' });
 
     expect(spy).toHaveBeenCalledTimes(1);
     const body = new URLSearchParams(String((spy.mock.calls[0]![1] as RequestInit).body));
@@ -1109,6 +1120,24 @@ describe('fetch_token — which host the rate limit counts against', () => {
 });
 
 describe('fetch_token — what a successful exchange records', () => {
+  it('renews the granted scopes from the renewal\'s answer', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), granted_scope: ['contact_show', 'contact_edit'] } }));
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-new', expires_in: 3600, scope: 'contact_show' }));
+
+    expect(await fetchToken(makeAgent(store, vaultWithRefresh()))).toContain('Token exchange OK');
+    expect(store.get('crm-api')?.oauth_grant?.granted_scope).toEqual(['contact_show']);
+  });
+
+  it('keeps the granted scopes when the renewal\'s answer names none', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), granted_scope: ['contact_show'] } }));
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-new', expires_in: 3600 }));
+
+    expect(await fetchToken(makeAgent(store, vaultWithRefresh()))).toContain('Token exchange OK');
+    expect(store.get('crm-api')?.oauth_grant?.granted_scope).toEqual(['contact_show']);
+  });
+
   it('stamps a fingerprint of the client, not the id itself, for the refresh token now in play', async () => {
     const store = new ApiStore();
     store.register(crmProfile());
@@ -2052,13 +2081,17 @@ describe('(285) delete asks the person before it removes anything', () => {
     const stop = new AbortController();
     const ask = vi.fn(async () => { stop.abort(); return 'Deny'; });
     const agent = { ...(makeAgent(store, vaultOf(), ask) as object), runSignal: stop.signal } as never;
+    const slots: [CallSlot, CallSlot] = [{}, {}];
     const [first, second] = await Promise.all([
-      apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
-      apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
+      runInCallSlot(slots[0], () => apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent)),
+      runInCallSlot(slots[1], () => apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent)),
     ]);
     expect(ask).toHaveBeenCalledTimes(1);
     expect(first).toContain('user declined');
     expect(second).toBe('Blocked: API profile "crm-api" not deleted — the run was stopped before the question was asked.');
+    // The stopped reply speaks of the stop itself; the declined one does not.
+    expect(slots[1].ownStopSentence).toBe(true);
+    expect(slots[0].ownStopSentence).toBeUndefined();
     expect(store.get('crm-api')).toBeDefined();
   });
 
@@ -4371,7 +4404,7 @@ describe('mandates and stored credentials', () => {
   });
 
   it('a mandate\'s allowed write to the account it connected itself goes out with that account\'s credential', async () => {
-    const own: ApiProfile = { ...presetProfile(), created_by: M, oauth_grant: { ...presetProfile().oauth_grant, connected_by: M } };
+    const own: ApiProfile = { ...presetProfile(), created_by: M, oauth_grant: { ...presetProfile().oauth_grant, connected_by: M, connected_mandate_id: 'TEST-MANDATE-1' } };
     const { calls } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
     expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
   });
@@ -4458,6 +4491,37 @@ describe('mandates and stored credentials', () => {
     });
     await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api' }, makeAgent(apiStore, vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'from-env' }, ['CRM_CLIENT_SECRET']) as never));
     expect(calls.some((u) => u.includes('/oauth/token'))).toBe(exchanged);
+  });
+
+  it.each([
+    ['does not send', false],
+    ['control: sends, once released,', true],
+  ] as const)('a profile a mandate wrote %s the owner\'s stored client secret to its token endpoint (fetch_token)', async (_label, secretReleased) => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register({ ...crmProfile({}, 'client_credentials'), created_by: M });
+    const calls: Array<{ url: string; body: string }> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url, body: String(init?.body ?? '') });
+      return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    // Stored in the vault, not taken from the environment: the owner's values, which reach the
+    // profile a mandate wrote only through the owner's release. The client id is released in
+    // both cases, so the one difference between them is the release of the client secret.
+    const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'stored-secret' });
+    const agent = makeAgent(apiStore, v as never) as unknown as { toolContext: { secretReleases: { releaseOf: (id: string, author: string, name: string) => unknown } } };
+    const releases = agent.toolContext.secretReleases;
+    const releaseOf = releases.releaseOf.bind(releases);
+    releases.releaseOf = (id, author, name) => (name === 'CRM_CLIENT_SECRET' && !secretReleased ? undefined : releaseOf(id, author, name));
+    const out = String(await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api' }, agent as never));
+    if (secretReleased) {
+      expect(calls.find((c) => c.url.includes('/oauth/token'))?.body).toContain('stored-secret');
+    } else {
+      expect(calls).toEqual([]);
+      expect(out).toContain('"CRM_CLIENT_SECRET" is not available to this profile');
+      expect(out).toContain('Nothing was sent.');
+    }
   });
 
   // No preset profile carries a mandate as author any more (api_setup refuses to save one);
@@ -4782,9 +4846,24 @@ describe('fetch_token — whose consent a grant records', () => {
     expect(consent(store)).toEqual({ connected_by: 'owner', connected_mandate_id: undefined });
   });
 
+  // A connection a mandate made with its own login is renewed by that mandate only: another
+  // mandate's turn and the owner's are told whose it is, and nothing is sent.
   it.each([
-    ['another mandate', TAG_A, { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' }, B],
-    ['the owner', TAG_A, { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' }, OWNER_PRINCIPAL],
+    ['another mandate', B, 'so it is not used in this session.'],
+    ['the owner', OWNER_PRINCIPAL, 'so lynox does not use it for you.'],
+  ])('refuses %s renewing a mandate\'s own connection, and the recorded consent stays', async (_label, actor, says) => {
+    const recorded = { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' };
+    const store = new ApiStore();
+    store.register(crmProfile({ created_by: TAG_A, oauth_grant: { ...stamp('client-1', 'rt-1'), ...recorded } }, 'client_credentials'));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const out = await fetchToken(makeAgent(store, vault(), undefined, undefined, actor));
+    expect(out).toContain(`Connection not used: a@example.invalid set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, ${says}`);
+    expect(out).toContain('Nothing was sent.');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(consent(store)).toEqual(recorded);
+  });
+
+  it.each([
     ['a mandate, of the owner\'s consent on the owner\'s profile', undefined, { connected_by: 'owner' }, A],
   ])('leaves the recorded consent as it was when %s renews', async (_label, author, recorded, actor) => {
     const store = new ApiStore();
@@ -4792,6 +4871,18 @@ describe('fetch_token — whose consent a grant records', () => {
     ok();
     expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, actor))).toContain('Token exchange OK');
     expect(consent(store)).toEqual({ connected_mandate_id: undefined, ...recorded });
+  });
+
+  // An owner's save before such saves were refused removed the author and kept the grant. The
+  // mandate whose consent it records still renews it.
+  it('lets a mandate renew its own connection on a profile whose author an earlier save removed', async () => {
+    const recorded = { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' };
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), ...recorded } }, 'client_credentials'));
+    expect(store.get('crm-api')?.created_by).toBeUndefined();
+    ok();
+    expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, A))).toContain('Token exchange OK');
+    expect(consent(store)).toEqual(recorded);
   });
 
   it('refuses a mandate\'s exchange into its own profile\'s slot when the owner\'s consent filled it, and keeps the stamp', async () => {
@@ -4846,6 +4937,8 @@ describe('fetch_token — what the success-path save tells the grant store', () 
         replacedAccessFp: `k-${tokenFingerprint('at-old')}`,
         wrote: [ACCESS, REFRESH],
       },
+      // The run's principal, which decides whether the save may cancel a provider's held erasure.
+      actor: OWNER_PRINCIPAL,
     });
   });
 
@@ -4874,5 +4967,126 @@ describe('fetch_token — what the success-path save tells the grant store', () 
 
     expect(saveSpy).toHaveBeenCalled();
     for (const call of saveSpy.mock.calls) expect(call[2]?.exchange).toBeUndefined();
+  });
+});
+
+describe('api_setup replies that speak of the stop', () => {
+  it('every one marks itself, so the engine adds no second sentence', async () => {
+    // A source check, for the stop replies no test above reaches (a binding question, an
+    // unreadable entry, a release): each line that answers "the run was stopped" also notes it.
+    const { readFileSync } = await import('node:fs');
+    const lines = readFileSync(new URL('./api-setup.ts', import.meta.url), 'utf8').split('\n').filter((l) => /the run was stopped before the (question was asked|owner could be asked)/.test(l));
+    expect(lines.length).toBe(5);
+    for (const l of lines) expect(l, l.trim()).toContain('noteOwnStopSentence()');
+  });
+});
+
+describe('fetch_token — only a revocation verdict writes a provider record (T21)', () => {
+  // Read through the module object, so a missing export fails these tests, not the file.
+  const erasureModule = (): Promise<{ setProviderErasureForTests?: (on: boolean) => () => void; erasureRecords: (db: unknown, id: string) => ReadonlyArray<{ kind: string; cause?: string }> }> =>
+    import('../../core/connection-erasure.js') as never;
+  let restoreSwitch: (() => void) | undefined;
+  afterEach(() => { restoreSwitch?.(); restoreSwitch = undefined; });
+
+  async function setup(over: Partial<ApiProfile> = {}): Promise<{ store: ApiStore; db: EngineDb; records: () => ReadonlyArray<{ kind: string; cause?: string }> }> {
+    const mod = await erasureModule();
+    restoreSwitch = mod.setProviderErasureForTests!(true);
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const conn = new ConnectionStore(db);
+    const store = new ApiStore();
+    store.loadFromConnections(conn);
+    store.setConnectionStore(conn);
+    const { GrantLedger } = await import('../../core/grant-ledger.js');
+    store.setGrantLedger(new GrantLedger(db.getDb()));
+    expect(store.save(crmProfile({ oauth_grant: stamp('client-1', 'rt-1'), ...over })).ok).toBe(true);
+    const records = (): ReadonlyArray<{ kind: string; cause?: string }> =>
+      mod.erasureRecords(db.getDb(), 'crm-api').filter((r) => r.cause === 'provider_revoked');
+    return { store, db, records };
+  }
+
+  it('invalid_grant to the minting client writes one provider record', async () => {
+    const { store, records } = await setup();
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    await fetchToken(makeAgent(store, vaultWithRefresh()));
+    expect(store.get('crm-api')?.oauth_grant?.state).toBe('revoked');
+    expect(records().map((r) => r.kind)).toEqual(['erasure']);
+  });
+
+  it('a working exchange after the refusal cancels the held erasure, and the audit row names the run\'s principal', async () => {
+    const { store, db, records } = await setup();
+    const { AuditLog } = await import('../../core/audit-log.js');
+    store.setAuditLog(new AuditLog(db.getDb()));
+    const refusal = tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    await fetchToken(makeAgent(store, vaultWithRefresh()));
+    refusal.mockRestore();
+    expect((records()[0] as { historyState?: string }).historyState).toBe('pending');
+    // A refresh token put in since, which the provider accepts.
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', refresh_token: 'rt-3', expires_in: 3600 }));
+    await fetchToken(makeAgent(store, vaultWithRefresh('rt-2')));
+    expect((records()[0] as { historyState?: string }).historyState).toBe('cancelled');
+    const rows = db.getDb().prepare("SELECT actor_kind AS a FROM audit_log WHERE action = 'connection.erasure.cancel'").all();
+    expect(rows).toEqual([{ a: 'owner' }]);
+  });
+
+  it('a refusal of a refresh token stored since the stamp writes a closing record, never an erasure', async () => {
+    const { store, records } = await setup();
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    await fetchToken(makeAgent(store, vaultWithRefresh('rt-typed-in-later')));
+    expect(store.get('crm-api')?.oauth_grant?.state).toBe('revoked');
+    expect(records().map((r) => r.kind)).toEqual(['closing']);
+  });
+
+  it('a store error is reported without its message; a refused save names its reason', async () => {
+    const { store, records } = await setup();
+    const { SaveRefused } = await import('../../core/api-store.js');
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    const spy = vi.spyOn(store, 'markRevokedWithRecord').mockImplementationOnce(() => { throw new Error('EACCES: /srv/instance/apis/crm-api.json'); });
+    const failed = await fetchToken(makeAgent(store, vaultWithRefresh()));
+    expect(failed).toContain('storing that verdict failed (a storage error)');
+    expect(failed).not.toContain('/srv/instance');
+    spy.mockImplementationOnce(() => { throw new SaveRefused('the profile names a host another profile holds'); });
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    const refused = await fetchToken(makeAgent(store, vaultWithRefresh()));
+    expect(refused).toContain('storing that verdict failed (the profile names a host another profile holds)');
+    expect(refused).toContain('Do not call fetch_token again unchanged');
+    expect(records()).toHaveLength(0);
+    spy.mockRestore();
+  });
+
+  it('invalid_client writes none (the control)', async () => {
+    const { store, records } = await setup();
+    tokenEndpoint(401, JSON.stringify({ error: 'invalid_client' }));
+    await fetchToken(makeAgent(store, vaultWithRefresh()));
+    expect(records()).toHaveLength(0);
+  });
+
+  it('a server error writes none', async () => {
+    const { store, records } = await setup();
+    tokenEndpoint(503, 'unavailable');
+    await fetchToken(makeAgent(store, vaultWithRefresh()));
+    expect(records()).toHaveLength(0);
+  });
+
+  it('a refresh token replaced while the request was out writes none', async () => {
+    const { store, records } = await setup();
+    const vault = vaultWithRefresh();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      vault.set(REFRESH, 'rt-2');
+      return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    });
+    const result = await fetchToken(makeAgent(store, vault));
+    expect(result).toContain('Nothing was recorded');
+    expect(records()).toHaveLength(0);
+  });
+
+  it('a profile reading its refresh token from its own slot writes none', async () => {
+    const { store, records } = await setup({
+      auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID', 'CRM_CLIENT_SECRET'], oauth: { token_url: 'https://api.crm.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET', refresh_token_key: 'CRM_OWN_REFRESH' } },
+    });
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    const result = await fetchToken(makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_OWN_REFRESH: 'rt-1' })));
+    expect(result).toContain('Nothing was recorded');
+    expect(records()).toHaveLength(0);
   });
 });

@@ -6,6 +6,7 @@ import type Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore, personNameTokens, isProperTokenSubset, isPersonSubsetSafe, personTokenKey, isRepointTarget } from './subject-store.js';
 import { DataStore } from './data-store.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /**
  * PR-C dedup mechanism: SubjectStore.mergeSubjects / resolveActiveSubject /
@@ -35,7 +36,7 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
   it('migration v7 adds merged_into (schema at latest version)', () => {
     const { db, engine } = makeStore();
     const v = (db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v;
-    expect(v).toBe(43); // v43 (bulk connection and grant per target) is the latest migration
+    expect(v).toBe(64); // v58 (bulk_runs.start_domains) + v59 (bulk_targets.deselected_at) + v60 (covered_* and paused_db_at for the takeover) + v61/v62 (the webhook drain) + v63 (connections.trail_id) + v64 (plan_advance_warnings) is the latest migration
     const cols = (db.prepare("PRAGMA table_info('subjects')").all() as Array<{ name: string }>).map(c => c.name);
     expect(cols).toContain('merged_into');
     engine.close();
@@ -473,10 +474,10 @@ describe('DataStore.repointSubjectId (Record-on-spine merge follow-through)', ()
       { client: 'old-id', vendor: 'x', amount: 10 },
       { client: 'other', vendor: 'old-id', amount: 20 },
       { client: 'other', vendor: 'other', amount: 30 },
-    ] });
+    ], stamp: TEST_STAMP });
     // A 2nd collection with NO subject column — exercises the skip branch + multi-collection walk.
     ds.createCollection({ name: 'notes', scope: { type: 'global', id: 'g' }, columns: [{ name: 'body', type: 'string' }] });
-    ds.insertRecords({ collection: 'notes', records: [{ body: 'old-id' }] });   // literal string, NOT a subject cell
+    ds.insertRecords({ collection: 'notes', records: [{ body: 'old-id' }], stamp: TEST_STAMP });   // literal string, NOT a subject cell
 
     const rec = ds.repointSubjectId('old-id', 'new-id');
     expect(rec.every(r => r.collection === 'invoices')).toBe(true);   // notes untouched (no subject column)
@@ -496,7 +497,7 @@ describe('DataStore.repointSubjectId (Record-on-spine merge follow-through)', ()
       { name: 'client', type: 'subject', subjectKind: 'organization' },
       { name: 'note', type: 'string' },
     ] });
-    ds.insertRecords({ collection: 'invoices', records: [{ client: 'new-id', note: 'new-id' }] });
+    ds.insertRecords({ collection: 'invoices', records: [{ client: 'new-id', note: 'new-id' }], stamp: TEST_STAMP });
 
     expect(ds.repointRecordState({ collection: 'invoices', column: 'client' })).toBe('ok');
     expect(ds.repointRecordState({ collection: 'invoices', column: 'note' })).toBe('foreign');
@@ -519,7 +520,7 @@ describe('DataStore.repointSubjectId (Record-on-spine merge follow-through)', ()
     ds.createCollection({ name: 'invoices', scope: { type: 'global', id: 'g' }, columns: [
       { name: 'client', type: 'subject', subjectKind: 'organization' },
     ] });
-    ds.insertRecords({ collection: 'invoices', records: [{ client: 'new-id' }] });
+    ds.insertRecords({ collection: 'invoices', records: [{ client: 'new-id' }], stamp: TEST_STAMP });
     ds.rollbackRepoint('old-id', 'new-id', [
       { collection: 'quotes', column: 'client', ids: [1] },      // collection dropped since
       { collection: 'invoices', column: 'vendor', ids: [1] },    // column no longer in the schema

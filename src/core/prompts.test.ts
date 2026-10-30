@@ -11,6 +11,8 @@ import {
   DATASTORE_PROMPT_SUFFIX,
   GROUNDING_PROMPT_BLOCK,
   safeModelId,
+  SHOPIFY_PRESET_PROMPT_SUFFIX,
+  shopifyPresetSuffix,
 } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
 import { resolveTierModel, setTierSetResolver } from './tier-resolver.js';
@@ -155,7 +157,7 @@ describe('currentDateContext', () => {
     // Day-precision is what keeps the Anthropic prompt cache key stable across
     // the whole day. This string is the head of the cached prefix, so any
     // change re-bills the entire conversation — hour precision busted the cache
-    // at every hour boundary (rafael 2026-06-05). The precise wallclock lives
+    // at every hour boundary (2026-06-05). The precise wallclock lives
     // in the per-turn `[Now: …Z]` marker, outside the cache, so coarsening here
     // costs no accuracy. Pinning the contract explicitly.
     vi.useFakeTimers();
@@ -292,7 +294,7 @@ describe('withCurrentTimePrefix', () => {
 });
 
 // F-Halu regression-pin (2026-05-18): the SYSTEM_PROMPT must include the
-// "Honesty over completeness" guardrail — rafael prod fabricated a list
+// "Honesty over completeness" guardrail — our own production instance fabricated a list
 // when memory_recall returned only a partial answer.
 //
 // Assertions are deliberately a mix of literal + intent — the heading and
@@ -391,7 +393,7 @@ describe('SYSTEM_PROMPT operator channels', () => {
 // Fix C regression-pin (v1.5.2): SYSTEM_PROMPT alone does not anchor model
 // identity, so a Mistral/Custom model can hallucinate "I am Claude Haiku"
 // from training-data bias. modelIdentityContext is the injection point —
-// without it, the rafael-prod 2026-05-18 incident regresses.
+// without it, the 2026-05-18 production incident regresses.
 describe('modelIdentityContext', () => {
   it('returns an empty string when the PROVIDER is missing (no anchor possible)', () => {
     expect(modelIdentityContext(undefined, 'claude-sonnet-4-6')).toBe('');
@@ -509,7 +511,7 @@ describe('modelIdentityContext sanitization (prompt-injection guard)', () => {
   // slashes produced `accountsfireworksmodelsglm-5p2` in a prompt that then
   // orders the agent to "state THIS exact model id" — so the agent was told to
   // report an id that does not exist, with authority. Found in a real prod
-  // prompt snapshot (rafael, 2026-07-30).
+  // prompt snapshot (2026-07-30).
   it('keeps slashes in a path-shaped model id (hosted-inference namespacing)', () => {
     const out = modelIdentityContext('openai', 'accounts/fireworks/models/glm-5p2');
     expect(out).toContain('`accounts/fireworks/models/glm-5p2`');
@@ -872,7 +874,7 @@ describe('safeModelId — the one sanitiser all three prompt writers share', () 
 });
 
 describe('the no-install policy', () => {
-  // The failure this pins is a COST failure, and it was measured: one dogfood
+  // The failure this pins is a COST failure, and it was measured: one thread in our own use
   // thread spent 41 bash calls trying `apt-get install`, `npm install`, five
   // hand-written PDF extractors and `strings | grep` over a binary before the
   // agent gave up. The tool description had listed "package management" as one of
@@ -920,7 +922,7 @@ describe('the no-install policy', () => {
   });
 
   it('rules out the fallback as well as the first attempt', () => {
-    // The dogfood thread did not open with `apt-get`; it arrived there after
+    // That thread did not open with `apt-get`; it arrived there after
     // three other things failed. A policy that only covers the opening move
     // would not have changed that thread.
     expect(policy).toMatch(/not as a first attempt and not as a fallback/i);
@@ -935,3 +937,43 @@ describe('the no-install policy', () => {
     expect(policy).toMatch(/fact to REPORT/i);
   });
 });
+
+describe('SHOPIFY_PRESET_PROMPT_SUFFIX', () => {
+  it('is empty without the switch and the suffix with it', () => {
+    expect(shopifyPresetSuffix(false)).toBe('');
+    expect(shopifyPresetSuffix(true)).toBe(SHOPIFY_PRESET_PROMPT_SUFFIX);
+  });
+
+  it('names the preset, the connect action, research and the scope field', () => {
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('auth.oauth.preset_id "shopify"');
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('action "connect"');
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('web_research');
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('auth.oauth.scope');
+  });
+
+  it('keeps the client secret out of the chat', () => {
+    // The one security statement in the hint: the app's secret goes into the connection form.
+    // Without it, a model asks for the secret in the chat.
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toMatch(/secret[^.]*never in the chat/i);
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('Settings → API Profiles');
+  });
+
+  it('forbids asking for the client ID or secret, in the chat or through ask_secret', () => {
+    // "never in the chat" names a place; this names the act, which is what a model did anyway.
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toMatch(/Never ask the user to give you, paste or type the client ID or secret/);
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toMatch(/do not collect them with `ask_secret`/);
+  });
+
+  it('names the closed admin path only in the sentence that forbids it', () => {
+    // Named so the model recognises the path it remembers; kept out of the steps, so the name
+    // never reads as guidance.
+    const lines = SHOPIFY_PRESET_PROMPT_SUFFIX.split('\n').filter((l) => /develop apps|app development|private app|custom app|admin api access token/i.test(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^Never send the user to /);
+  });
+
+  it('is not part of SYSTEM_PROMPT', () => {
+    expect(SYSTEM_PROMPT).not.toMatch(/shopify/i);
+  });
+});
+

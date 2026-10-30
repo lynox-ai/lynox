@@ -376,6 +376,40 @@ describe('spawn_agent tool', () => {
     expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
   });
 
+  // The approval queue's seam and the security review's conditions for the seam: a child of a
+  // run nobody watches files under its parent's trigger and names the root run; the trigger
+  // comes from the parent agent, never from the tool's input; a chat's child gets nothing.
+  describe('what a child files a mail with', () => {
+    const store = { tag: 'store' };
+    const parentFiling = { source: 'task', triggerId: 'trg-parent', store, createdBy: 'owner', mandateId: null };
+    const childConfig = async (parent: Partial<IAgent>, input: Record<string, unknown> = {}): Promise<Record<string, unknown>> => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Send the report', ...input }] } as never, makeAgent(parent));
+      return vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    };
+
+    it('a child of a filing run gets its trigger, with the parent\'s run as the root', async () => {
+      const cfg = await childConfig({ approvalFiling: parentFiling, currentRunId: 'run-root', autonomy: 'autonomous' } as Partial<IAgent>);
+      expect(cfg['approvalFiling']).toEqual({ ...parentFiling, rootRunId: 'run-root' });
+    });
+
+    it('a grandchild keeps the root run, not its parent\'s', async () => {
+      const cfg = await childConfig({ approvalFiling: { ...parentFiling, rootRunId: 'run-root' }, currentRunId: 'run-child', autonomy: 'autonomous' } as Partial<IAgent>);
+      expect(cfg['approvalFiling']).toEqual({ ...parentFiling, rootRunId: 'run-root' });
+    });
+
+    it('a trigger id in the spawn input changes nothing', async () => {
+      const cfg = await childConfig({ approvalFiling: parentFiling, currentRunId: 'run-root', autonomy: 'autonomous' } as Partial<IAgent>, { triggerId: 'trg-forged', approvalFiling: { triggerId: 'trg-forged' } });
+      expect((cfg['approvalFiling'] as { triggerId: string }).triggerId).toBe('trg-parent');
+    });
+
+    it('a chat\'s child gets none', async () => {
+      const cfg = await childConfig({ currentRunId: 'chat-run' } as Partial<IAgent>);
+      expect(cfg['approvalFiling']).toBeUndefined();
+    });
+  });
+
   it('a child writes under its parent\'s review: it gets the parent\'s writer view, not the mark that skips its checks', async () => {
     const review = { active: true as const, backupBeforeWrite: () => true, recordWritten: () => {}, isEmpty: () => false };
     const { Agent: MockAgent } = await import('../../core/agent.js');
@@ -1475,7 +1509,7 @@ describe('spawn_agent tool', () => {
     });
 
     /**
-     * Cost per delegation (rafael 2026-07-30).
+     * Cost per delegation (2026-07-30).
      *
      * The child's spend already reached the `runs` table and the tenant's
      * balance; what was missing was the user seeing it. Reported on
@@ -1856,28 +1890,6 @@ describe('spawn_agent tool', () => {
     await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
     expect(parentRestore).toHaveBeenCalled();
     expect(parentNote).not.toHaveBeenCalled();
-  });
-
-  it('(270, 18b) a tainted child hands the parent new content for its write approvals; a clean child does not', async () => {
-    const parentForeign = vi.fn();
-    const agent = makeAgent({
-      memory: {} as IAgent['memory'],
-      noteUntrustedData: vi.fn(),
-      restoreConversationTaint: vi.fn(),
-      noteForeignContent: parentForeign,
-    } as Partial<IAgent>);
-    // The child's taint is set by the stub with no read of its own: with shared counters a
-    // read would have moved the epoch already, and the hand-back would be untestable.
-    mockSend.mockImplementationOnce(async function (this: { conversationSawUntrusted?: boolean }) {
-      this.conversationSawUntrusted = true;
-      return 'sub-agent result';
-    });
-    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
-    expect(parentForeign).toHaveBeenCalledTimes(1);
-
-    parentForeign.mockClear();
-    await spawnAgentTool.handler({ agents: [{ name: 'c2', task: 'do work' }] }, agent);
-    expect(parentForeign).not.toHaveBeenCalled();
   });
 
   it('S8 fallback: a parent WITHOUT restoreConversationTaint still receives the hand-off via noteUntrustedData', async () => {
@@ -4528,6 +4540,24 @@ describe('spawn_agent tool', () => {
       expect(promptTabs).toHaveBeenCalledWith([{ question: 'Which one?' }], expect.anything());
     });
 
+    it('a child\'s hard block reaches the parent\'s channel still marked, and an ordinary question unmarked', async () => {
+      // Whatever stores the question decides who reads it, so the mark has to survive the
+      // child's wrapper: a child of an unattended agent must not queue a hard block either.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const promptUser = vi.fn().mockResolvedValue('__unattended_block__');
+      const agent = makeAgent({ promptUser: promptUser as unknown as IAgent['promptUser'] });
+      const answers: unknown[] = [];
+      await whileChildRuns(async (child) => {
+        answers.push(await child.promptUser('rm -rf /?', ['Allow', 'Deny'], { blocked: true }));
+        answers.push(await child.promptUser('Send it?', ['Allow', 'Deny']));
+      });
+      await spawnAgentTool.handler({ agents: [{ name: 'asker', task: 'Clean up' }] }, agent);
+      expect(vi.mocked(MockAgent)).toHaveBeenCalled();
+      expect(answers).toEqual(['__unattended_block__', '__unattended_block__']);
+      const blocked = promptUser.mock.calls.map((c) => (c[2] as { blocked?: boolean } | undefined)?.blocked === true);
+      expect(blocked).toEqual([true, false]);
+    });
+
     it('a spawned child can raise a credential prompt of its own', async () => {
       // The barrier on a credential prompt sits on the NAME, not on the caller,
       // so handing `promptSecret` to children does not weaken it — but it does
@@ -4671,6 +4701,17 @@ describe('spawn_agent tool', () => {
 
       const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { recordToolCall?: unknown };
       expect(ctorArg.recordToolCall, 'the child must be given the parent\'s sink').toBe(parentSink);
+    });
+
+    it('gives the child the parent\'s grant set itself, so what it fetches is in the root\'s set', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const { ConversationGrants } = await import('../../core/conversation-grants.js');
+      const set = ConversationGrants.detached();
+      const agent = makeAgent({ currentRunId: 'parent-run', currentThreadId: 'thread-1' });
+      (agent as unknown as { conversationGrants?: unknown }).conversationGrants = set;
+      await spawnAgentTool.handler({ agents: [{ name: 'worker', task: 'Do the work' }] }, agent);
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { conversationGrants?: unknown };
+      expect(ctorArg.conversationGrants).toBe(set);
     });
 
     it('stamps the child\'s own tool_call_count, so the column agrees with the rows', async () => {
@@ -5397,7 +5438,7 @@ describe('spawn_agent tool', () => {
     });
 
     // === the third outcome: a child that RETURNS, but returns nothing ===
-    // Observed on rafael's prod instance 2026-08-18 (thread `d8047252`,
+    // Observed on our own production instance 2026-08-18 (thread `d8047252`,
     // engine 2.14.2): 3 of 8 sub-agents came back `''` at status=completed /
     // stop_reason=end_turn / error_text=NULL. Pre-fix the parent rendered a
     // heading plus an EMPTY untrusted-data envelope — a section that reads as
@@ -5727,7 +5768,7 @@ describe('spawn_agent tool', () => {
   // In hybrid a base-fallback tier must resolve from the child's OWN tier (slot
   // or base), NEVER inherit the parent's runtime provider — the parent runs on
   // ITS tier's slot, so inheriting it pairs a base-tier model with the wrong
-  // wire → `404 no Route matched` (fast collectors died silently on rafael prod).
+  // wire → `404 no Route matched` (fast collectors died silently on our own production instance).
   describe('resolveSpawnChildProviderConfig: hybrid resolves from child tier, not parent', () => {
     const ANTHROPIC_PARENT: ProviderConfigSnapshot = {
       // The parent (main chat) runs on its balanced Sonnet-5 slot → anthropic.
@@ -5781,7 +5822,7 @@ describe('spawn_agent tool', () => {
     });
 
     it('a same-base slot reported cross (base_url, no key) gets its key RESOLVED, not left empty', () => {
-      // rafael's CURRENT config: fast slot {provider:openai, api_base_url:…} but no
+      // Our own instance's CURRENT config: fast slot {provider:openai, api_base_url:…} but no
       // api_key (enrichTierSetCreds skips same-provider slots) → crossProviderSlot
       // is true yet apiKey is undefined. A fresh child Agent needs an explicit key.
       const out = resolveSpawnChildProviderConfig({

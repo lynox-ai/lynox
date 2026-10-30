@@ -84,17 +84,35 @@ export interface ProviderIncidentRequest {
 // === Escalation notice — POST /internal/usage/:instanceId/escalation (engine → CP) ===
 
 /**
- * The engine tells the control plane that an escalation (a scheduled workflow
- * failed, or a watch found something) reached nobody: its push answered
- * `not_delivered` or `no_channel`. The CP may then mail the instance's owner
- * from a lynox sender, with a fixed text.
+ * What reached nobody, one fixed mail text each:
+ *  - `'escalation'` — a scheduled workflow failed, or a watch found something.
+ *  - `'question'`   — a scheduled run (a task or a workflow) asked its owner a
+ *    question and waits for the answer.
+ *
+ * Read by the control plane to accept a notice and pick its text. A control
+ * plane that predates a kind answers it with 400, and then no mail goes out at
+ * all; the engine cannot tell, so a new kind is deployed on the control plane
+ * before any engine sends it.
+ */
+export const ESCALATION_NOTICE_KINDS = ['escalation', 'question'] as const;
+export type EscalationNoticeKind = typeof ESCALATION_NOTICE_KINDS[number];
+
+/** Whether a parsed body field is a notice kind this contract knows. */
+export function isEscalationNoticeKind(value: unknown): value is EscalationNoticeKind {
+  return typeof value === 'string' && (ESCALATION_NOTICE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * The engine tells the control plane that a notice reached nobody: its push
+ * answered `not_delivered` or `no_channel`. The CP may then mail the
+ * instance's owner from a lynox sender, with the fixed text for its `kind`.
  *
  * A class signal and nothing else: no schedule id, no title, no text from the
- * run. The CP's mail says that a notification did not arrive and where to look;
- * what happened stays in the instance.
+ * run, and never the question. The CP's mail says that a notification did not
+ * arrive and where to look; what happened stays in the instance.
  */
 export interface EscalationNoticeRequest {
-  kind: 'escalation';
+  kind: EscalationNoticeKind;
 }
 
 // === Usage status — GET /internal/usage/:instanceId/status (engine ← CP) ===
@@ -292,8 +310,18 @@ export interface HealthBody {
   engine: {
     active_sessions: number;
     total_threads: number;
+    /**
+     * Whether durable knowledge runs: `on`; switched off: `off`; switched on but its store did
+     * not load at boot: `not_loaded`. A mandate login is refused on `off` and `not_loaded`, and
+     * the control plane reads this to tell the owner before a grant. One word, no reason: the
+     * route answers without auth. Absent from engines older than this field.
+     */
+    durable_memory?: DurableMemoryState | undefined;
   };
 }
+
+/** The `engine.durable_memory` word of {@link HealthBody}. */
+export type DurableMemoryState = 'on' | 'off' | 'not_loaded';
 
 // === Magic-link verify — POST /internal/auth/verify-magic (engine → CP) ===
 
@@ -792,4 +820,66 @@ export type MicrosoftOAuthDeclineCode = (typeof MICROSOFT_OAUTH_DECLINE_CODES)[n
 /** Runtime membership test for a `microsoft_oauth_error` value read off a URL. */
 export function isMicrosoftOAuthDeclineCode(value: unknown): value is MicrosoftOAuthDeclineCode {
   return typeof value === 'string' && (MICROSOFT_OAUTH_DECLINE_CODES as readonly string[]).includes(value);
+}
+
+// === Microsoft return to the instance (CP → browser → engine card) ===
+
+/**
+ * The query parameter carrying the claim nonce when the control plane sends the
+ * browser back to the instance after a Microsoft grant. The engine redeems it with
+ * {@link OAuthClaimRequest} at `POST /internal/oauth/microsoft/claim`.
+ *
+ * Its own name rather than Google's `google_oauth`: a card that read a shared name
+ * would redeem the other provider's nonce at the wrong claim route. The control
+ * plane appends either this or {@link MICROSOFT_OAUTH_ERROR_PARAM}, never both.
+ *
+ * ⚠ Producer and reader import this constant; neither types the string. The
+ * contract's twin check sees a re-declared NAME, not a re-typed literal, so a
+ * hand-typed `'microsoft_oauth'` would drift silently: the card would never see
+ * the nonce. A test in this repository sweeps `src/` and `packages/web-ui/src/`
+ * for the literal; it checks this repository only.
+ */
+export const MICROSOFT_OAUTH_CLAIM_PARAM = 'microsoft_oauth';
+
+/**
+ * The query parameter carrying why a Microsoft connect came back without a grant.
+ * Its value is one of {@link MICROSOFT_OAUTH_DECLINE_CODES}; anything else is not
+ * ours, and the reader must treat it as a failed connect. Imported, never typed,
+ * for the reason {@link MICROSOFT_OAUTH_CLAIM_PARAM} gives.
+ */
+export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
+
+// === Admin consent status — GET /internal/oauth/microsoft/adminconsent/status (engine → CP) ===
+
+/**
+ * Whether an admin consent was reported for this instance, read by the card.
+ * Sent as query parameters, as `?instance_id=…`.
+ *
+ * Authenticated exactly like the claim: `x-instance-secret`, matched in constant
+ * time against the secret of the instance this `instance_id` names. An unknown
+ * id, an instance without a secret, and a secret of one instance presented with
+ * another's id all get the same 403 and nothing about the named instance, so the
+ * status code does not tell them apart. A request missing the id or the secret
+ * is a 400. This is how the claim and refresh routes answer.
+ */
+export interface AdminConsentStatusRequest {
+  instance_id: string;
+}
+
+/**
+ * The last time an admin-consent return reached the control plane for this
+ * instance with a valid admin-link state and without an `error`, or `null` when
+ * none did. `admin_consent=True` alone does not count: Microsoft documents it
+ * in the error answer too.
+ *
+ * ⚠ DISPLAY ONLY. The return is forgeable by anyone holding the link, so this
+ * is "reported", never "granted": it hides no link, starts no state and stands
+ * in for no connect attempt. Whether the consent took effect is shown by the
+ * user's next connect.
+ *
+ * A second click on the same link reports again, so this is the latest report.
+ * Absolute time, epoch milliseconds (not a TTL, not seconds).
+ */
+export interface AdminConsentStatusResponse {
+  reported_at: number | null;
 }

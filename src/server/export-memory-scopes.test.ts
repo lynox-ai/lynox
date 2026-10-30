@@ -11,6 +11,7 @@ import { createToolContext } from '../core/tool-context.js';
 import { Memory } from '../core/memory.js';
 import { saveManifest } from '../core/project.js';
 import type { IAgent } from '../types/index.js';
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 
 type Scopes = Record<string, Record<string, string>>;
 
@@ -81,7 +82,7 @@ describe('Art. 15 export and Art. 17 erasure see every flat-file memory scope (r
 
   it('exports a fact memory_store wrote into a user scope next to the default one, and the erasure removes both', async () => {
     const agent: IAgent = {
-      name: 'test', model: 'test-model', memory: memoryOf(), tools: [], onStream: null,
+      principal: OWNER_PRINCIPAL, name: 'test', model: 'test-model', memory: memoryOf(), tools: [], onStream: null,
       toolContext: createToolContext({}),
     };
     const stored = await memoryStoreTool.handler({ namespace: 'knowledge', content: USER_FACT, scope: `user:${USER_ID}` }, agent);
@@ -119,7 +120,7 @@ describe('Art. 15 export and Art. 17 erasure see every flat-file memory scope (r
     // wrote. Seeded through the real store first, then the instance is taken away.
     const mem = memoryOf();
     const agent: IAgent = {
-      name: 'test', model: 'test-model', memory: mem, tools: [], onStream: null,
+      principal: OWNER_PRINCIPAL, name: 'test', model: 'test-model', memory: mem, tools: [], onStream: null,
       toolContext: createToolContext({}),
     };
     await memoryStoreTool.handler({ namespace: 'knowledge', content: USER_FACT, scope: `user:${USER_ID}` }, agent);

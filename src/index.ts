@@ -145,6 +145,7 @@ const require = createRequire(import.meta.url);
 const pkg = require('../package.json') as { version: string };
 import { getErrorMessage } from './core/utils.js';
 import { normalizeAllowedOrigins } from './server/cross-site-write.js';
+import { installSignalShutdown } from './server/signal-shutdown.js';
 
 /**
  * Resolve the default ORIGIN env var for `--http-api` boot.
@@ -268,16 +269,7 @@ Docs: https://docs.lynox.ai
     await api.start(port);
 
     // Graceful shutdown — close KG + DBs before exit to prevent WAL corruption
-    let shuttingDown = false;
-    const graceful = async (signal: string) => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      process.stderr.write(`\n[lynox] ${signal} received — shutting down…\n`);
-      try { await api.shutdown(); } catch { /* best-effort */ }
-      process.exit(0);
-    };
-    process.on('SIGINT', () => void graceful('SIGINT'));
-    process.on('SIGTERM', () => void graceful('SIGTERM'));
+    installSignalShutdown(api);
     return;
   }
 

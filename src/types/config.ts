@@ -11,6 +11,7 @@ import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, CostGuardConfig } from './modes.js';
 import type { SecretStoreLike, IsolationConfig, NetworkPolicy } from './security.js';
 import type { CapabilityContract } from './capability-contract.js';
+import type { ConversationGrants } from '../core/conversation-grants.js';
 
 /**
  * Everything ONE session's abort may reach: its spawned children, its workflow-step
@@ -55,6 +56,9 @@ export interface AgentConfig {
   promptTabs?:      PromptTabsFn | undefined;
   promptSecret?:    PromptSecretFn | undefined;
   promptMailConnect?: PromptMailConnectFn | undefined;
+  /** What the agent files with when nobody watches its run (`approval-filing.ts`). Read only
+   *  when its autonomy is `autonomous`. */
+  approvalFiling?: import('../core/approval-filing.js').ApprovalFilingContext | undefined;
   /**
    * The abort scope this agent belongs to. A spawned child or a workflow step inherits
    * its parent's, which is how a session's abort reaches a whole chain and nothing else.
@@ -112,8 +116,18 @@ export interface AgentConfig {
    * (Bugsink breadcrumbs, the debug subscriber).
    */
   recordToolCall?:     ToolCallRecorder | undefined;
+  /** The grants the conversation took data from (`ConversationGrants`). A sub-agent and a
+   *  pipeline step get the root's object, so what they fetch is in the root's set. */
+  conversationGrants?: ConversationGrants | undefined;
+  /** True for a conversation's own agent (the Session's). Only its user turns and its resume
+   *  add `unknown` to {@link conversationGrants}; a step or sub-agent turn is built from what
+   *  the root already took in. */
+  conversationRoot?: boolean | undefined;
   spawnDepth?:         number | undefined;
   briefing?:           string | undefined;
+  /** The `<secrets>` listing of the vault, given with the briefing but only to an owner's turn:
+   *  the principal is per run, and a mandate reaches no owner secret by name (`agent.ts`). */
+  secretsBriefing?:    string | undefined;
   autonomy?:           AutonomyLevel | undefined;
   /**
    * Capability contract authorising headless outbound writes. RESERVED SEAM
@@ -185,7 +199,7 @@ export interface AgentConfig {
    * during a long run doesn't lose the in-memory message buffer. Without
    * this, persistence happened only at end-of-run — if the process died
    * mid-loop, all turns since the last completed run were unrecoverable
-   * (2026-05-18 staging QA finding from rafael prod).
+   * (2026-05-18 staging QA finding from our own production instance).
    *
    * Fire-and-forget — the hook should never throw or block the loop. Implementer
    * is responsible for its own error handling.
@@ -220,6 +234,8 @@ export interface ChangesetManagerLike {
   /** `false` when nothing could be saved because the workspace could not be reached: then do not
    *  write. Any other result (also none) lets the write go ahead. */
   backupBeforeWrite(filePath: string): boolean | void;
+  /** Whether the last `backupBeforeWrite` returned `false` because the file is too large to save. */
+  readonly refusedTooLarge?: boolean;
   /** After a write returned: which file the run left at the path. A manager without it records
    *  nothing, and its rollback decides alone. */
   recordWritten?(filePath: string): void;
@@ -232,11 +248,16 @@ export interface ChangesetWriter {
   readonly active: true;
   /** False when nothing could be saved: then do not write. */
   backupBeforeWrite(filePath: string): boolean;
+  /** Whether the last `backupBeforeWrite` returned false because the file is too large to save. */
+  readonly refusedTooLarge: boolean;
   /** After a write returned: which file the run left at the path. */
   recordWritten(filePath: string): void;
   /** Whether nothing is backed up yet. */
   isEmpty(): boolean;
 }
+
+/** Max chars of a single tool result before the agent cuts it to its start (`max_tool_result_chars`). */
+export const DEFAULT_MAX_TOOL_RESULT_CHARS = 80_000;
 
 // === 4.7 Beta Headers ===
 
@@ -592,7 +613,7 @@ export interface LynoxUserConfig {
    * confirmation transfer). Zero rows are mutated — the columns go inert, not
    * corrected. Default: false — a tenant stays on the legacy scoring/write path
    * until a per-tenant flip. Both scoring branches are retained until the flag is
-   * soaked fleet-wide (dual-scorer sunset: rafael, 2026-08-31).
+   * soaked fleet-wide (dual-scorer sunset: 2026-08-31).
    */
   memory_scoring_v2?: boolean | undefined;
   /**
@@ -602,7 +623,7 @@ export interface LynoxUserConfig {
    * primitives backstop-refuse a downgrade, and a higher-trust re-assert of a near-dup
    * RAISES the stored fact (supersede-not-mutate). Default false → the write path is
    * byte-identical. The would-be decision is measured independently under
-   * `retrieval_shadow_log` (shadow-first). Per-tenant flip (rafael canary first);
+   * `retrieval_shadow_log` (shadow-first). Per-tenant flip (a canary instance first);
    * intentionally NOT in PROJECT_SAFE_KEYS (operator-only, never agent-settable).
    */
   memory_write_trust_gate?: boolean | undefined;
@@ -616,7 +637,7 @@ export interface LynoxUserConfig {
    * per-turn `knowledgeLayer.retrieve` default-injection, and stands down the
    * end-of-turn extraction. Default false → BYTE-IDENTICAL (legacy extraction +
    * injection + `memory_*` tools; the v9 tables exist but are never read/written on
-   * the hot path). Operator-only per-tenant flip (rafael canary first); intentionally
+   * the hot path). Operator-only per-tenant flip (a canary instance first); intentionally
    * NOT in PROJECT_SAFE_KEYS — never agent-settable.
    */
   durable_memory_enabled?: boolean | undefined;

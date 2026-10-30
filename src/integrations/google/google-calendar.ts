@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
+import { currentCallSignal } from '../../core/call-connection.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
@@ -8,7 +9,7 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
-import { namedTarget } from '../../core/audit-log.js';
+import { ADDRESS_PLACEHOLDER, namedTarget } from '../../core/audit-log.js';
 
 // === Types ===
 
@@ -100,7 +101,12 @@ async function calendarFetch(auth: GoogleAuth, url: string, options?: RequestIni
       'Content-Type': 'application/json',
       ...options?.headers,
     },
-    signal: options?.signal ?? AbortSignal.timeout(30_000),
+    // The 30 s limit always holds: a caller's signal is added to it, never in its place. Only
+    // the read actions pass one — the call's (`currentCallSignal`), so a stop of the run ends
+    // the read. A write takes none and runs to its end once it started. The token refresh
+    // above takes no signal either: it is shared by every call waiting on it, and one stopped
+    // call must not fail the others.
+    signal: options?.signal ? AbortSignal.any([AbortSignal.timeout(30_000), options.signal]) : AbortSignal.timeout(30_000),
   }, auth.hostPolicy);
   return response;
 }
@@ -141,10 +147,14 @@ const CALENDAR_WRITE_ACTIONS = new Set<CalendarInput['action']>(['create_event',
 export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<CalendarInput> {
   return {
     outwardWrite: (input) => (CALENDAR_WRITE_ACTIONS.has(input.action) ? input.action : null),
-    // Which calendars were read, never what they hold.
+    // Which calendars were read, never what they hold. A calendar id reads only as `primary` or
+    // the connected account's own address; any other is someone else's (a shared calendar
+    // carries its owner's address) and is replaced, since a recipient is not named in a row.
     outwardRead: (input) => {
-      if (input.action === 'list_events') return `list_events ${namedTarget([['calendar', input.calendar_id ?? 'primary']])}`;
-      if (input.action === 'free_busy') return `free_busy ${namedTarget([['calendars', (input.calendars ?? []).join(',')]])}`.trimEnd();
+      const own = getAuth()?.grantEmail?.trim().toLowerCase();
+      const forRow = (id: string): string => (id === 'primary' || (own !== undefined && own !== '' && id.trim().toLowerCase() === own) ? id : ADDRESS_PLACEHOLDER);
+      if (input.action === 'list_events') return `list_events ${namedTarget([['calendar', forRow(input.calendar_id ?? 'primary')]])}`;
+      if (input.action === 'free_busy') return `free_busy ${namedTarget([['calendars', (input.calendars ?? []).map(forRow).join(',')]])}`.trimEnd();
       return null;
     },
     destructive: {
@@ -316,7 +326,7 @@ async function handleListEvents(auth: GoogleAuth, input: CalendarInput): Promise
     orderBy: 'startTime',
   });
 
-  const response = await calendarFetch(auth, `${CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events?${params}`);
+  const response = await calendarFetch(auth, `${CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events?${params}`, { signal: currentCallSignal() ?? null });
   if (!response.ok) return `Error: Failed to list events (${response.status}).`;
 
   const data = await response.json() as EventListResponse;
@@ -538,6 +548,8 @@ async function handleFreeBusy(auth: GoogleAuth, input: CalendarInput): Promise<s
   const calendarIds = input.calendars ?? ['primary'];
 
   const response = await calendarFetch(auth, `${CALENDAR_BASE}/freeBusy`, {
+    // A read, though it is a POST.
+    signal: currentCallSignal() ?? null,
     method: 'POST',
     body: JSON.stringify({
       timeMin,

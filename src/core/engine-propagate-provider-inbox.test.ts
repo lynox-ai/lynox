@@ -25,8 +25,10 @@ vi.mock('./config.js', () => ({
 }));
 
 const mockResolveProviderApiKey = vi.fn();
+const pool = vi.hoisted(() => ({ on: false }));
 vi.mock('./llm/provider-keys.js', () => ({
   resolveProviderApiKey: (opts: unknown) => mockResolveProviderApiKey(opts),
+  poolSuppliesLLMKeys: () => pool.on,
 }));
 
 const mockCreateLLMClient = vi.fn();
@@ -104,7 +106,7 @@ vi.mock('../integrations/inbox/bootstrap.js', () => ({
   bootstrapInbox: (opts: unknown) => mockBootstrapInbox(opts),
 }));
 
-import { Engine } from './engine.js';
+import { Engine, RESTORE_INBOX_BOUND_MS, SHUTDOWN_INBOX_CLASSIFY_MS, SHUTDOWN_INBOX_CUTOFF_MS } from './engine.js';
 import type { LynoxConfig, LynoxUserConfig } from '../types/index.js';
 
 interface MockRuntime {
@@ -150,6 +152,90 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     delete process.env['LYNOX_INBOX_LLM_REGION'];
     delete process.env['MISTRAL_API_KEY'];
     delete process.env['LYNOX_INBOX_MISTRAL_API_KEY'];
+    pool.on = false;
+  });
+
+  /** Switches the engine from Anthropic to Mistral, so the inbox is bootstrapped again for the EU
+   *  region, with `vault` as the secret store; returns the options that bootstrap got. */
+  async function rebootstrapToEu(vault: Record<string, string>): Promise<{ mistralApiKey?: string; meteredHost?: unknown; engine: Engine }> {
+    const engine = new Engine({ model: 'balanced' });
+    const handle = engine as unknown as {
+      _inboxRuntime: MockRuntime | null; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
+      _inboxRebootstrapInflight: Promise<void> | null; secretStore: { resolve(n: string): string | null } | null;
+    };
+    handle._inboxRuntime = makeRuntime('us-runtime');
+    handle._mailStateDb = { __sentinel: 'mail-db' };
+    handle._inboxLlmRegion = 'us';
+    handle.secretStore = { resolve: (n) => vault[n] ?? null };
+    mockBootstrapInbox.mockReturnValueOnce(makeRuntime('eu-runtime'));
+    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
+    await engine.reloadCredentials();
+    if (handle._inboxRebootstrapInflight) await handle._inboxRebootstrapInflight;
+    expect(mockBootstrapInbox).toHaveBeenCalledTimes(1);
+    return { ...(mockBootstrapInbox.mock.calls[0]![0] as { mistralApiKey?: string; meteredHost?: unknown }), engine };
+  }
+
+  describe('the EU classifier on a pool tier: which Mistral key, and whether the instance is debited', () => {
+    it('uses the pool\'s key, not the user\'s own vault key, and debits the instance', async () => {
+      pool.on = true;
+      process.env['MISTRAL_API_KEY'] = 'sk-pool';
+      const opts = await rebootstrapToEu({ MISTRAL_API_KEY: 'sk-own' });
+      expect(opts.mistralApiKey).toBe('sk-pool');
+      expect(opts.meteredHost).toBe(opts.engine);
+    });
+
+    it('uses a key set for the inbox on purpose, and does not debit the instance for it', async () => {
+      pool.on = true;
+      process.env['MISTRAL_API_KEY'] = 'sk-pool';
+      const opts = await rebootstrapToEu({ LYNOX_INBOX_MISTRAL_API_KEY: 'sk-inbox' });
+      expect(opts.mistralApiKey).toBe('sk-inbox');
+      expect(opts.meteredHost, 'the user already pays Mistral').toBeUndefined();
+    });
+
+    it('the US classifier, on the pool\'s Anthropic client, is debited as before', async () => {
+      pool.on = true;
+      const engine = new Engine({ model: 'balanced' });
+      const handle = engine as unknown as {
+        _inboxRuntime: MockRuntime | null; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
+        _inboxRebootstrapInflight: Promise<void> | null;
+      };
+      handle._inboxRuntime = makeRuntime('eu-runtime');
+      handle._mailStateDb = { __sentinel: 'mail-db' };
+      handle._inboxLlmRegion = 'eu';
+      mockBootstrapInbox.mockReturnValueOnce(makeRuntime('us-runtime'));
+      mockLoadConfig.mockReturnValueOnce({ provider: 'anthropic' });
+      await engine.reloadCredentials();
+      if (handle._inboxRebootstrapInflight) await handle._inboxRebootstrapInflight;
+      const opts = mockBootstrapInbox.mock.calls[0]![0] as { llmRegion: string; meteredHost?: unknown };
+      expect(opts.llmRegion).toBe('us');
+      expect(opts.meteredHost).toBe(engine);
+    });
+
+    it('the US classifier off a pool tier, on the user\'s own client, is not debited', async () => {
+      const engine = new Engine({ model: 'balanced' });
+      const handle = engine as unknown as {
+        _inboxRuntime: MockRuntime | null; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
+        _inboxRebootstrapInflight: Promise<void> | null;
+      };
+      handle._inboxRuntime = makeRuntime('eu-runtime');
+      handle._mailStateDb = { __sentinel: 'mail-db' };
+      handle._inboxLlmRegion = 'eu';
+      mockBootstrapInbox.mockReturnValueOnce(makeRuntime('us-runtime'));
+      mockLoadConfig.mockReturnValueOnce({ provider: 'anthropic' });
+      await engine.reloadCredentials();
+      if (handle._inboxRebootstrapInflight) await handle._inboxRebootstrapInflight;
+      const opts = mockBootstrapInbox.mock.calls[0]![0] as { llmRegion: string; meteredHost?: unknown };
+      expect(opts.llmRegion).toBe('us');
+      expect(opts.meteredHost).toBeUndefined();
+    });
+
+    it('off a pool tier keeps the vault key first and debits nothing (control)', async () => {
+      process.env['MISTRAL_API_KEY'] = 'sk-env';
+      const opts = await rebootstrapToEu({ MISTRAL_API_KEY: 'sk-own' });
+      expect(opts.mistralApiKey).toBe('sk-own');
+      expect(opts.meteredHost).toBeUndefined();
+    });
   });
 
   /**
@@ -416,5 +502,94 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     expect(euRuntime.hook).toHaveBeenCalledWith('acct-1', mockMail2);
     // OLD US runtime never saw anything across the entire flow.
     expect(usRuntime.hook).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A migration restore's shutdown that meets a rebootstrap mid-drain: the old runtime's backlog
+   * is drained the short way, so the rebootstrap settles instead of holding the restore for as
+   * long as classifying the backlog takes.
+   */
+  async function engineMidRebootstrap(shortDrain: 'releases' | 'hangs'): Promise<{ engine: Engine; usRuntime: MockRuntime; releaseDrain: () => void }> {
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-test';
+    const engine = new Engine({ model: 'balanced' });
+    const usRuntime = makeRuntime('us-runtime');
+    const engineHandle = engine as unknown as {
+      _inboxRuntime: MockRuntime | null;
+      _mailStateDb: unknown;
+      _inboxLlmRegion: 'us' | 'eu' | null;
+      _inboxRebootstrapInflight: Promise<void> | null;
+    };
+    engineHandle._inboxRuntime = usRuntime;
+    engineHandle._mailStateDb = { __sentinel: 'mail-db' };
+    engineHandle._inboxLlmRegion = 'us';
+
+    // The old runtime's plain drain holds (a backlog being classified); drained the short way it
+    // releases the held drain too, as the queue does, unless its running jobs hang.
+    let releaseDrain!: () => void;
+    const heldDrain = new Promise<void>((resolve) => { releaseDrain = resolve; });
+    usRuntime.shutdown.mockImplementation((opts?: { deadLetterBacklog?: boolean; within?: unknown }) => {
+      if ((opts?.deadLetterBacklog === true || opts?.within !== undefined) && shortDrain === 'releases') { releaseDrain(); return Promise.resolve(); }
+      return heldDrain;
+    });
+    mockBootstrapInbox.mockReturnValueOnce(makeRuntime('eu-runtime'));
+    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' } satisfies LynoxUserConfig);
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
+    await engine.reloadCredentials();
+    await Promise.resolve();
+    expect(engineHandle._inboxRebootstrapInflight, 'fixture: rebootstrap mid-drain').not.toBeNull();
+    return { engine, usRuntime, releaseDrain };
+  }
+
+  it('a restore shutdown drains the runtime a rebootstrap is retiring the short way', async () => {
+    const { engine, usRuntime, releaseDrain } = await engineMidRebootstrap('releases');
+    try {
+      const outcome = await Promise.race([
+        engine.shutdown({ inboxBacklog: 'dead-letter' }).then(() => 'settled' as const),
+        new Promise<'stuck'>((resolve) => setTimeout(() => resolve('stuck'), 2_000)),
+      ]);
+      expect(outcome, 'restore shutdown stuck behind the retiring runtime\'s plain drain').toBe('settled');
+      expect(usRuntime.shutdown).toHaveBeenCalledWith({ deadLetterBacklog: true });
+    } finally {
+      releaseDrain();
+    }
+  });
+
+  it('a signal shutdown gives the retiring and the live runtime one deadline: classify, then cut off', async () => {
+    const { engine, usRuntime, releaseDrain } = await engineMidRebootstrap('releases');
+    try {
+      const before = Date.now();
+      await engine.shutdown({ inboxBacklog: 'bounded' });
+      const after = Date.now();
+      const euRuntime = mockBootstrapInbox.mock.results[0]?.value as MockRuntime;
+      const [retiring] = usRuntime.shutdown.mock.calls.find((c) => (c[0] as { within?: unknown } | undefined)?.within !== undefined) ?? [];
+      const [live] = euRuntime.shutdown.mock.calls[0] ?? [];
+      const within = (retiring as { within: { classifyUntil: number; cutOffAt: number } } | undefined)?.within;
+      expect(within, 'retiring runtime not drained within the deadline').toBeDefined();
+      expect(within!.classifyUntil).toBeGreaterThanOrEqual(before + SHUTDOWN_INBOX_CLASSIFY_MS);
+      expect(within!.classifyUntil).toBeLessThanOrEqual(after + SHUTDOWN_INBOX_CLASSIFY_MS);
+      expect(within!.cutOffAt - within!.classifyUntil).toBe(SHUTDOWN_INBOX_CUTOFF_MS - SHUTDOWN_INBOX_CLASSIFY_MS);
+      // The live runtime shares the deadline; it does not start a new one after the rebootstrap.
+      expect(live).toEqual({ within });
+      // Classify first, then cut off; the deadlines themselves lie inside the container's 10 s grace.
+      expect(SHUTDOWN_INBOX_CLASSIFY_MS).toBeLessThan(SHUTDOWN_INBOX_CUTOFF_MS);
+      expect(SHUTDOWN_INBOX_CUTOFF_MS).toBeLessThan(10_000);
+    } finally {
+      releaseDrain();
+    }
+  });
+
+  it('a retiring runtime whose running jobs hang ends the restore shutdown at the bound', async () => {
+    const { engine, releaseDrain } = await engineMidRebootstrap('hangs');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      let outcome: 'pending' | 'settled' | Error = 'pending';
+      engine.shutdown({ inboxBacklog: 'dead-letter' }).then(() => { outcome = 'settled'; }, (err: unknown) => { outcome = err as Error; });
+      await vi.advanceTimersByTimeAsync(RESTORE_INBOX_BOUND_MS);
+      expect(outcome, 'retiring runtime\'s drain not under the bound').toBeInstanceOf(Error);
+      expect((outcome as Error).message).toMatch(/inbox shutdown did not settle within 60 s/);
+    } finally {
+      vi.useRealTimers();
+      releaseDrain();
+    }
   });
 });

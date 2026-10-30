@@ -11,6 +11,7 @@ import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
+import { principalFromTag } from './request-principal.js';
 
 /**
  * The consent reminder: an unconfirmed `run_agent` trigger that comes due is held back by
@@ -69,6 +70,8 @@ function boot(dir: string, channelsOn = true): Proc {
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   const channels = { on: channelsOn };
   const notify = vi.fn().mockResolvedValue(undefined);
@@ -257,7 +260,7 @@ describe('a new unconfirmed phase earns exactly one new reminder — and only a 
   it('confirming and then a change by someone the owner let in, which drops the stamp', async () => {
     const p = await remindedThen((_p, store) => {
       store.setConfirmedAt('trg-1', STAMP, 'owner');
-      store.markEditedBy('trg-1', 'mandate:helper@example.test', true);
+      store.markEditedBy('trg-1', principalFromTag('mandate:helper@example.test'), true);
     });
     expect(reminders(p)).toHaveLength(2);
   });
@@ -284,7 +287,7 @@ describe('a new unconfirmed phase earns exactly one new reminder — and only a 
 
   it('NOT a change by someone the owner let in to a trigger that is still waiting', async () => {
     const p = await remindedThen((_p, store) => {
-      store.markEditedBy('trg-1', 'mandate:helper@example.test', true);
+      store.markEditedBy('trg-1', principalFromTag('mandate:helper@example.test'), true);
     });
     expect(reminders(p)).toHaveLength(1);
   });
@@ -310,7 +313,7 @@ describe('a new unconfirmed phase earns exactly one new reminder — and only a 
     const stampOld = (q: Proc): void => {
       q.engineDb.getDb().prepare("UPDATE triggers SET confirmed_at = ?, confirmed_by = 'owner' WHERE id = 'trg-1'").run(STAMP);
     };
-    const viaMandate = await remindedThen((q, store) => { stampOld(q); store.markEditedBy('trg-1', 'mandate:helper@example.test', true); });
+    const viaMandate = await remindedThen((q, store) => { stampOld(q); store.markEditedBy('trg-1', principalFromTag('mandate:helper@example.test'), true); });
     expect(reminders(viaMandate)).toHaveLength(2);
     const viaUnstamp = await remindedThen((q, store) => { stampOld(q); store.setConfirmedAt('trg-1', null); });
     expect(reminders(viaUnstamp)).toHaveLength(2);

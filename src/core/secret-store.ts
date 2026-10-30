@@ -1,9 +1,11 @@
+import { domainToASCII, domainToUnicode } from 'node:url';
 import { LinearJwtRegExp, JWT_SHAPE, JWT_EGRESS_WIDE, withFlags } from './jwt-scan.js';
 import type { SecretScope, SecretStoreLike, LynoxUserConfig } from '../types/index.js';
 import { channels } from './observability.js';
 import type { SecretVault } from './secret-vault.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 import { isPresetClientSecretName } from './oauth-presets.js';
+import { ENV_REGISTRY } from '../contract/env-registry.js';
 
 export const SECRET_REF_PATTERN = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
 
@@ -219,8 +221,12 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   // Slack (xoxo + xoxr added — webhook + refresh-token prefixes)
   { label: 'Slack token', kind: 'vendor', pattern: credentialShape(String.raw`xox[bpoasr]-`, String.raw`[A-Za-z0-9-]{10,}`) },
   // Shopify (admin / app-secret / partner / custom — added 2026-05-18 after
-  // a Shopify integration flow leaked the prefix into the agent transcript)
-  { label: 'Shopify token', kind: 'vendor', pattern: credentialShape(String.raw`shp(at|ss|pa|ca)_`, String.raw`[A-Fa-f0-9]{20,}`) },
+  // a Shopify integration flow leaked the prefix into the agent transcript;
+  // refresh token `shprt_` added 2026-10-27). Shopify documents these values
+  // as opaque, so the body takes letters and digits, not hex only. A token
+  // with no prefix (Shopify's own examples show one) has no shape to match:
+  // a bare 32-hex value is what an ETag or a content hash looks like too.
+  { label: 'Shopify token', kind: 'vendor', pattern: credentialShape(String.raw`shp(at|ss|pa|ca|rt)_`, String.raw`[A-Za-z0-9]{20,}`) },
   // JWT (three base64-url segments) — catches OAuth ID tokens etc. Matched in linear time,
   // see `jwt-scan.ts`; the regex it equals is `JWT_SHAPE.regex`.
   { label: 'JWT token', kind: 'jwt', pattern: new LinearJwtRegExp(JWT_SHAPE) },
@@ -280,7 +286,7 @@ export function matchesSecretPatternStrict(text: string): string | null {
 
 /**
  * Mask text that matches common secret patterns.
- * Replaces detected secrets with `***<last4>`.
+ * Replaces detected secrets with their mask (`maskMatch`: `***<last4>`, or `***` for a short match or a credential in a URL).
  */
 export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boolean }): string {
   let result = text;
@@ -293,10 +299,7 @@ export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boole
   const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
   for (const pattern of patterns) {
     const globalPattern = withFlags(pattern, 'g');
-    result = result.replace(globalPattern, (match) => {
-      if (match.length <= 4) return '***';
-      return `***${match.slice(-4)}`;
-    });
+    result = result.replace(globalPattern, (match) => maskMatch(match));
   }
   return result;
 }
@@ -323,7 +326,7 @@ const KEY_BLOCK = /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\
 
 /**
  * Remove credential-shaped values from a message a person typed, before anything stores or
- * sends it. Same masking as `maskSecretPatterns` (`***<last4>`); a private key goes as a whole
+ * sends it. Same masking as `maskSecretPatterns` (`maskMatch`); a private key goes as a whole
  * block, not just its header. Returns the labels of what was removed, each once.
  */
 export function maskCredentialInput(text: string): { text: string; labels: string[] } {
@@ -333,7 +336,7 @@ export function maskCredentialInput(text: string): { text: string; labels: strin
   for (const shape of INPUT_SHAPES) {
     result = result.replace(shape.pattern, (match) => {
       note(shape.label);
-      return match.length <= 4 ? '***' : `***${match.slice(-4)}`;
+      return maskMatch(match);
     });
   }
   return { text: result, labels };
@@ -367,20 +370,22 @@ export function withoutTypedCredentials(text: string): string {
  *
  * (The docblock this replaces claimed masking "only shortens" the text, so the
  * exact pass could not hide a shape. It does not: a value of four characters or
- * fewer becomes `***`, so `xx ab yy` grows by one.)
+ * fewer becomes `***` (today every value under 16), so `xx ab yy` grows by one.)
  */
 export function maskSecretsAndPatterns(
   text: string,
   values: readonly string[],
   opts?: { includeGeneric?: boolean },
 ): string {
-  const spans: Array<{ start: number; end: number }> = [];
+  // `suffix`: whether this span alone could show its last four. A merged span shows them only
+  // if every span in it could, since the union's last four may belong to a short one.
+  const spans: Array<{ start: number; end: number; suffix: boolean }> = [];
 
   const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
   for (const pattern of patterns) {
     const global = withFlags(pattern, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
     for (const m of text.matchAll(global)) {
-      if (m.index !== undefined) spans.push({ start: m.index, end: m.index + m[0].length });
+      if (m.index !== undefined) spans.push({ start: m.index, end: m.index + m[0].length, suffix: matchShowsSuffix(m[0]) });
     }
   }
 
@@ -391,7 +396,7 @@ export function maskSecretsAndPatterns(
     for (;;) {
       const at = text.indexOf(value, from);
       if (at === -1) break;
-      spans.push({ start: at, end: at + value.length });
+      spans.push({ start: at, end: at + value.length, suffix: value.length >= MASK_SUFFIX_MIN_LENGTH });
       from = at + value.length;
     }
   }
@@ -399,16 +404,16 @@ export function maskSecretsAndPatterns(
   if (spans.length === 0) return text;
 
   spans.sort((a, b) => a.start - b.start || a.end - b.end);
-  const merged: Array<{ start: number; end: number }> = [];
+  const merged: Array<{ start: number; end: number; suffix: boolean }> = [];
   for (const span of spans) {
     const last = merged[merged.length - 1];
-    // `<=`, not `<`, and this is PRESENTATION, not safety — measured, because the
-    // first version of this comment claimed the opposite. With `<`, two touching
-    // spans stay separate and BOTH are still masked: `******kkkk` instead of
-    // `***kkkk`. Nothing is revealed either way, so the mutation `<=` -> `<` is
-    // equivalent in the dimension that matters and is not claimed as covered.
-    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
-    else merged.push({ ...span });
+    // `<=`, not `<`: touching spans merge into one mask. That is presentation, because the
+    // merged span shows its last four only when every span in it could (`suffix`); without
+    // that, two touching 8-character values would show four characters of the second.
+    if (last && span.start <= last.end) {
+      last.end = Math.max(last.end, span.end);
+      last.suffix = last.suffix && span.suffix;
+    } else merged.push({ ...span });
   }
 
   let out = '';
@@ -416,7 +421,7 @@ export function maskSecretsAndPatterns(
   for (const span of merged) {
     out += text.slice(cursor, span.start);
     const matched = text.slice(span.start, span.end);
-    out += matched.length <= 4 ? '***' : `***${matched.slice(-4)}`;
+    out += span.suffix ? maskValue(matched) : '***';
     cursor = span.end;
   }
   return out + text.slice(cursor);
@@ -430,10 +435,134 @@ interface InternalSecret {
   ttlMs: number; // 0 = no expiry
 }
 
+/**
+ * Env-registry secrets that are identities, not credentials. Masking them would hide the
+ * owner's own address, or a public OAuth app id, in every tool result that names them.
+ */
+const ENV_SECRETS_NOT_MASKED: ReadonlySet<string> = new Set([
+  'LYNOX_MANAGED_CUSTOMER_EMAIL',
+  'GOOGLE_CLIENT_ID',
+]);
+
+const MIN_ENV_SECRET_LENGTH = 8;
+
+/**
+ * The values of the engine's own env secrets (the registry rows marked `secret`), read
+ * from `process.env` at call time so a key the engine sets after this store exists (the
+ * vault key, `engine-init.ts`) is still masked. Mask-only: they never enter `secrets`, so
+ * nothing resolves, lists or advertises them.
+ *
+ * It covers the case without an attacker, where a value read once would otherwise stay in the
+ * thread and go to the model provider in clear.
+ *
+ * A value under {@link MIN_ENV_SECRET_LENGTH} is skipped: an operator's `{}` or a word like
+ * `lynox` would otherwise be masked in every text, and every text holding it refused by
+ * the `containsSecret` gates. No real credential is that short.
+ */
+function engineEnvSecretValues(): string[] {
+  const values: string[] = [];
+  for (const row of ENV_REGISTRY) {
+    if (!row.secret || ENV_SECRETS_NOT_MASKED.has(row.name)) continue;
+    const value = process.env[row.name];
+    if (value && value.length >= MIN_ENV_SECRET_LENGTH) values.push(value);
+  }
+  return values;
+}
+
+/**
+ * Whether a parsed host name holds one of `values` the way a host is read. A host goes out
+ * lower-cased (the URL parser folds it, DNS and TLS compare names without case), so a stored
+ * `Sk-Live-Canary` in `sk-live-canary.h.example` is the same value on the wire while the exact
+ * mask misses it. `host` is what the parser wrote, never the request's text: the parser's rules
+ * (user info, a backslash read as a slash, a tab dropped) decide what goes out, and reading the
+ * text instead rebuilds them one by one. The host is read as it goes out and with its labels as
+ * Unicode (`domainToUnicode`): a value outside ASCII is found inside a longer punycode label, and a
+ * value written into a punycode label as its ASCII part is found on the wire, where decoding would
+ * break it up. A value
+ * is compared lower-cased and as the parser maps it (`domainToASCII`, back to Unicode: a final
+ * sigma, a full-width value); that form is taken only for a value a host name can hold, since the
+ * parser cuts the rest at the first delimiter (`x/y` is `x`). A number the parser reads as an IPv4
+ * address counts only as the whole host: its dotted form shares no characters with the value, and
+ * as part of a host it would refuse names that send nothing stored. Only for a host: a path, a
+ * query or a header keeps its case, and folding there would refuse writes that send nothing.
+ */
+export function holdsValueAsHost(host: string, values: readonly string[]): boolean {
+  const onWire = host.toLowerCase();
+  const asRead = domainToUnicode(host); // '' for a host that does not decode: read on the wire alone
+  for (const value of values) {
+    if (value.length < 2) continue; // the floor `containsSecret` keeps
+    const folded = value.toLowerCase();
+    if (onWire.includes(folded) || asRead.includes(folded)) return true;
+    const asHostName = HOST_NAME_CHARS.test(value) ? domainToASCII(value) : '';
+    if (asHostName.length < 2) continue;
+    if (IPV4.test(asHostName)) {
+      if (host === asHostName) return true;
+      continue;
+    }
+    const mapped = domainToUnicode(asHostName);
+    if (onWire.includes(asHostName) || (mapped.length >= 2 && asRead.includes(mapped))) return true;
+  }
+  return false;
+}
+/** Characters a value may hold to be read as a host name: no delimiter, space or escape. */
+const HOST_NAME_CHARS = /^[^\s/\\?#@:%[\]]+$/u;
+const IPV4 = /^\d+\.\d+\.\d+\.\d+$/;
+
+/**
+ * The engine's own env secrets masked in `text`, for a caller that holds no store (a
+ * headless workflow step): the values belong to the process, not to a store.
+ */
+export function maskEngineEnvSecrets(text: string): string {
+  return maskValuesIn(text, engineEnvSecretValues());
+}
+
+/** Below this length the mask shows no character of the value: four of five, or half of eight,
+ *  would be most of it. From it on, the last four identify a key the way a provider dashboard does. */
+const MASK_SUFFIX_MIN_LENGTH = 16;
+
+/** The one mask for a secret value, wherever one is shown: `***` + its last four characters,
+ *  or `***` alone when the value is shorter than {@link MASK_SUFFIX_MIN_LENGTH}. */
 function maskValue(value: string): string {
-  if (value.length <= 4) return '***';
-  const suffix = value.slice(-4);
-  return `***${suffix}`;
+  if (value.length < MASK_SUFFIX_MIN_LENGTH) return '***';
+  return `***${value.slice(-4)}`;
+}
+
+/** Whether a credential-shaped match may show its last four. A credential in a URL
+ *  (`scheme://user:password@`) ends in the password, whatever the match's length. */
+function matchShowsSuffix(match: string): boolean {
+  return match.length >= MASK_SUFFIX_MIN_LENGTH && !match.includes('://');
+}
+
+/** The mask of a credential-shaped match: {@link maskValue}, except that a credential in a URL
+ *  shows none of its characters (see {@link matchShowsSuffix}). */
+function maskMatch(match: string): string {
+  return matchShowsSuffix(match) ? maskValue(match) : '***';
+}
+
+/**
+ * Replace every value in `values` that occurs in `text` with its mask. Longest first: a
+ * shorter value inside a longer one would otherwise be replaced first, and the rest of the
+ * longer one would no longer match and stay in clear.
+ */
+function maskValuesIn(text: string, values: readonly string[]): string {
+  let result = text;
+  for (const value of [...values].sort((a, b) => b.length - a.length)) {
+    if (value.length < 2) continue;
+    let masked = maskValue(value);
+    // Guard against a degenerate mask that CONTAINS the raw value (a value made
+    // of the mask's own '*' chars, like "***" → "***"): it
+    // would both loop forever below AND leak the secret through its own
+    // replacement. Fall back to a fixed token that cannot embed the value.
+    if (masked.includes(value)) masked = '[redacted]';
+    // Single global pass — split+join replaces every (non-overlapping)
+    // occurrence at once (literal replacement, no regex special-char issues).
+    // The previous `while (result.includes(...))` loop re-scanned the output
+    // and hung whenever the mask re-introduced the pattern.
+    if (result.includes(value)) {
+      result = result.split(value).join(masked);
+    }
+  }
+  return result;
 }
 
 export class SecretStore implements SecretStoreLike {
@@ -651,12 +780,25 @@ export class SecretStore implements SecretStoreLike {
     return [...exact, ...vendor];
   }
 
+  /** Every value the maskers hide: the stored secrets and the engine's own env secrets. */
+  private _maskedValues(): string[] {
+    const values: string[] = [];
+    for (const secret of this.secrets.values()) values.push(secret.value);
+    values.push(...engineEnvSecretValues());
+    return values;
+  }
+
   containsSecret(text: string): boolean {
-    for (const secret of this.secrets.values()) {
-      if (secret.value.length < 2) continue; // skip single-char values to avoid false positives
-      if (text.includes(secret.value)) return true;
+    for (const value of this._maskedValues()) {
+      if (value.length < 2) continue; // skip single-char values to avoid false positives
+      if (text.includes(value)) return true;
     }
     return false;
+  }
+
+  /** {@link holdsValueAsHost} over the stored values. The values never leave this object. */
+  containsSecretAsHost(host: string): boolean {
+    return holdsValueAsHost(host, this._maskedValues());
   }
 
   /**
@@ -664,30 +806,11 @@ export class SecretStore implements SecretStoreLike {
    * {@link maskSecretsAndPatterns}. The values never leave this object.
    */
   maskAll(text: string, opts?: { includeGeneric?: boolean }): string {
-    const values: string[] = [];
-    for (const secret of this.secrets.values()) values.push(secret.value);
-    return maskSecretsAndPatterns(text, values, opts);
+    return maskSecretsAndPatterns(text, this._maskedValues(), opts);
   }
 
   maskSecrets(text: string): string {
-    let result = text;
-    for (const secret of this.secrets.values()) {
-      if (secret.value.length < 2) continue;
-      let masked = maskValue(secret.value);
-      // Guard against a degenerate mask that CONTAINS the raw value (e.g. a
-      // value made of the mask's own '*' chars, like "***ab" → "*****ab"): it
-      // would both loop forever below AND leak the secret through its own
-      // replacement. Fall back to a fixed token that cannot embed the value.
-      if (masked.includes(secret.value)) masked = '[redacted]';
-      // Single global pass — split+join replaces every (non-overlapping)
-      // occurrence at once (literal replacement, no regex special-char issues).
-      // The previous `while (result.includes(...))` loop re-scanned the output
-      // and hung whenever the mask re-introduced the pattern.
-      if (result.includes(secret.value)) {
-        result = result.split(secret.value).join(masked);
-      }
-    }
-    return result;
+    return maskValuesIn(text, this._maskedValues());
   }
 
   recordConsent(name: string): void {
@@ -714,6 +837,15 @@ export class SecretStore implements SecretStoreLike {
    */
   canPersist(): boolean {
     return this.vault !== null;
+  }
+
+  /**
+   * True when the vault file holds a row under `name`, decryptable or not. A
+   * write-once marker checks this rather than `resolve()`: under a different
+   * LYNOX_VAULT_KEY the row exists and does not resolve.
+   */
+  hasVaultRow(name: string): boolean {
+    return this.vault?.has(name) ?? false;
   }
 
   /**

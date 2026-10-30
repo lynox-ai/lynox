@@ -80,7 +80,7 @@ the code when it matters.
 A model can ace every behaviour probe and still be **unfit** if its window cannot hold
 lynox's jobs — tool results are the bulk of the context, and main chat + sub-agents +
 compaction all run over the full thread. The harness applies a hard floor
-**`MIN_CONTEXT_WINDOW` (200k, rafael 2026-07-19)**, read first from lynox's OWN registry
+**`MIN_CONTEXT_WINDOW` (200k, 2026-07-19)**, read first from lynox's OWN registry
 (`MODEL_CAPABILITIES[id].contextWindow`) and only otherwise from `OVERRIDES` — so for a model
 the engine does not ship yet, a hand-typed row is what clears or fails this gate. It is
 checked before any behaviour is *judged* — but not before it is *run*: a sub-floor candidate
@@ -110,7 +110,7 @@ A tier with **no case in the current suite prints `NOT MEASURED`**, not a fit se
 print the whole roster: `[].every(…)` is `true`, and `--scenarios` carries no fast-tier case
 at all. A screen that manufactures a verdict from zero evidence is the failure this whole
 page is about, so the decision is a pure function (`grid.ts`) with its own tests.
-Per-tier priority (rafael 2026-07-19):
+Per-tier priority (2026-07-19):
 
 - **FAST** — *cheap and fast, just clear the bar.*
 - **BALANCED = the main chat** — *output QUALITY first, then cost.* Highest-volume job, and
@@ -123,7 +123,7 @@ purely because a stronger one was not a candidate. A missing row reads exactly l
 ### The independent judge (`judge.ts`)
 
 For the subjective axis a pass/fail cannot reach. **Why independent:** an LLM judge has a
-self-preference bias — a judge scores its own family higher (rafael 2026-07-19). Our
+self-preference bias — a judge scores its own family higher (2026-07-19). Our
 roster spans several families, so the judge is picked to be **none of them** — today Kimi
 via Fireworks (`judge.ts`). The invariant is *judge ∉ candidate families*, deliberately not
 an ordinal: "a third family" was written when the roster had two and was wrong by four by the

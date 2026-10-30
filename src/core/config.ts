@@ -15,6 +15,24 @@ import { TIER_PRESETS, expandTierPreset, FIREWORKS_API_BASE, managedFireworksEna
 const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
 
+/** The Mistral endpoints a pool tier's OpenAI-compatible provider may name. */
+export const POOL_MISTRAL_ENDPOINTS: ReadonlySet<string> = new Set([MISTRAL_API_BASE, 'https://api.mistral.ai']);
+/** The one explicit endpoint a pool tier's Anthropic provider may name; unset means the same. */
+export const POOL_ANTHROPIC_ENDPOINT = 'https://api.anthropic.com';
+
+/**
+ * The endpoint a pool tier sends its key to, for `provider` and the `api_base_url` a config
+ * names. On a pool tier `openai` is only the wire the Mistral preset rides, so its endpoint is
+ * a Mistral one — the named one when it is curated, the canonical one otherwise, never another
+ * host. Anthropic (or no provider) keeps an explicit canonical URL and otherwise uses its
+ * default (`undefined`). Any other provider gets no endpoint from the file.
+ */
+export function poolEndpointFor(provider: string | undefined, apiBaseUrl: string | undefined): string | undefined {
+  if (provider === 'openai') return apiBaseUrl !== undefined && POOL_MISTRAL_ENDPOINTS.has(apiBaseUrl) ? apiBaseUrl : MISTRAL_API_BASE;
+  if (provider === undefined || provider === 'anthropic') return apiBaseUrl === POOL_ANTHROPIC_ENDPOINT ? apiBaseUrl : undefined;
+  return undefined;
+}
+
 /**
  * Managed tier_set hardening — the PRD tenant-writable ship-blocker. For each
  * slot: keep ONLY an allowlisted provider (anthropic / mistral), STRIP the
@@ -417,7 +435,7 @@ export function loadConfig(): LynoxUserConfig {
     merged.memory_graph_reads = false;
   }
   // Memory Foundation Wave 0: the self-reinforcement emergency-stop flag. The CP
-  // flips it per-tenant via env (rafael canary first) without editing config.json.
+  // flips it per-tenant via env (a canary instance first) without editing config.json.
   // Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a
   // project config must not alter the user's memory scoring/write behaviour.
   const memScoringV2 = process.env['LYNOX_MEMORY_SCORING_V2'];
@@ -437,7 +455,7 @@ export function loadConfig(): LynoxUserConfig {
     merged.retrieval_shadow_log = false;
   }
   // Memory Foundation Wave 2: the write-trust gate enforcement flag. The CP flips it
-  // per-tenant via env (rafael canary first, after the shadow window closes) without
+  // per-tenant via env (a canary instance first, after the shadow window closes) without
   // editing config.json. Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in
   // PROJECT_SAFE_KEYS — a project config must not be able to change the user's memory
   // trust/write behaviour (an agent-writable flag would be a self-grant of the very
@@ -448,8 +466,8 @@ export function loadConfig(): LynoxUserConfig {
   } else if (memWriteTrustGate === 'false' || memWriteTrustGate === '0') {
     merged.memory_write_trust_gate = false;
   }
-  // Durable Knowledge Substrate (DK.1): the CP flips it per-tenant via env (rafael
-  // canary first) without editing config.json. Explicit 'true'/'1' vs 'false'/'0' (no
+  // Durable Knowledge Substrate (DK.1): the CP flips it per-tenant via env (a
+  // canary instance first) without editing config.json. Explicit 'true'/'1' vs 'false'/'0' (no
   // z.coerce). NOT in PROJECT_SAFE_KEYS — a project config must not be able to swap the
   // whole memory pillar (an agent-writable flag would let injected content route its own
   // writes past the extraction-decoupling + trust routing this substrate depends on).
@@ -471,7 +489,7 @@ export function loadConfig(): LynoxUserConfig {
     merged.calendar_enabled = false;
   }
   // Extended debug capture (operator surface). Lets the CP flip it per-tenant via env
-  // (rafael canary first) without editing config.json. Explicit 'true'/'1' vs 'false'/
+  // (a canary instance first) without editing config.json. Explicit 'true'/'1' vs 'false'/
   // '0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a project config must not be able to
   // start persisting the fully-assembled request (an agent-writable flag would let
   // injected content enable capture of what every subsequent turn sent to the model).
@@ -591,6 +609,9 @@ export function loadConfig(): LynoxUserConfig {
   // profile to a concrete provider/key/model. Env entries merge over (win
   // against) any file-config profiles. Malformed JSON is ignored rather than
   // crashing boot — a bad profile blob must not take the whole instance down.
+  // On a pool tier only these count: a profile from a config file carries the
+  // user's own `api_key`, which spawn(profile) would send in the pool's place.
+  if (poolTier) delete merged.model_profiles;
   if (process.env['LYNOX_MODEL_PROFILES_JSON']) {
     try {
       const parsed: unknown = JSON.parse(process.env['LYNOX_MODEL_PROFILES_JSON']);
@@ -920,6 +941,21 @@ export function loadConfig(): LynoxUserConfig {
   // honesty path). Setting TAVILY_API_KEY now has no effect.
   if (process.env['SEARXNG_URL']) {
     merged.searxng_url = process.env['SEARXNG_URL'];
+  }
+
+  // On a pool tier the key in the environment is the pool's, and the endpoint must be
+  // the one that key belongs to. A config file's `api_base_url` (or a leftover
+  // `LYNOX_API_BASE_URL`) survives the merge above (the control plane sets no endpoint), so a Mistral URL beside an Anthropic provider
+  // would send the pool's Anthropic key to Mistral, and the reverse. Only the pairs in
+  // `poolEndpointFor` count; an acceptance of a custom endpoint counts for nothing here.
+  // The Anthropic SDK reads `ANTHROPIC_BASE_URL` itself when no base URL is passed, so on a
+  // pool tier the variable goes too, or a leftover one would decide the host after all.
+  if (poolTier) {
+    delete process.env['ANTHROPIC_BASE_URL'];
+    delete merged.accepted_custom_endpoints;
+    const endpoint = poolEndpointFor(merged.provider, merged.api_base_url);
+    if (endpoint === undefined) delete merged.api_base_url;
+    else merged.api_base_url = endpoint;
   }
 
   // Managed Mistral key promotion (replaces the retired eu-sovereign toggle).

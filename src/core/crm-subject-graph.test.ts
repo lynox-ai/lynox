@@ -7,6 +7,7 @@ import { CRM } from './crm.js';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /**
  * S1c integration: the flag-gated additive mirror from CRM.upsertContact into
@@ -40,7 +41,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
   it('flag ON: contact→person(+detail), company→org, works_for edge; PII encrypted at rest', () => {
     const { crm, ds, engine } = makeCrm({ flag: true });
-    crm.upsertContact({ name: 'Alice Schmidt', email: 'Alice@Acme.com', phone: '+41791234567', company: 'Acme GmbH', type: 'customer' });
+    crm.upsertContact({ name: 'Alice Schmidt', email: 'Alice@Acme.com', phone: '+41791234567', company: 'Acme GmbH', type: 'customer' }, TEST_STAMP);
 
     // ds_contacts is authoritative (email lower-cased on write).
     expect(crm.findContact({ name: 'Alice Schmidt' })!.email).toBe('alice@acme.com');
@@ -74,7 +75,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
   it('flag OFF: ds_contacts written, engine.db subject-graph untouched (additive proof)', () => {
     const { crm, ds, engine } = makeCrm({ flag: false });
-    crm.upsertContact({ name: 'Bob', email: 'bob@x.com', company: 'Globex' });
+    crm.upsertContact({ name: 'Bob', email: 'bob@x.com', company: 'Globex' }, TEST_STAMP);
 
     expect(crm.findContact({ name: 'Bob' })!.email).toBe('bob@x.com'); // legacy ran
     expect(new SubjectStore(engine!).listSubjects()).toHaveLength(0);   // nothing mirrored
@@ -85,8 +86,8 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
   it('name-dedup: same name → one person subject + one idempotent works_for edge', () => {
     const { crm, ds, engine } = makeCrm({ flag: true });
-    crm.upsertContact({ name: 'Jane Doe', email: 'jane@a.com', company: 'Acme GmbH' });
-    crm.upsertContact({ name: 'jane doe', email: 'jane@b.com', company: 'Acme GmbH' }); // same name (diff email + case)
+    crm.upsertContact({ name: 'Jane Doe', email: 'jane@a.com', company: 'Acme GmbH' }, TEST_STAMP);
+    crm.upsertContact({ name: 'jane doe', email: 'jane@b.com', company: 'Acme GmbH' }, TEST_STAMP); // same name (diff email + case)
 
     const subs = new SubjectStore(engine!);
     expect(subs.listSubjects({ kind: 'person' })).toHaveLength(1);       // one person (name-deduped)
@@ -106,7 +107,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
   it('no company: person subject only, no org, no edge', () => {
     const { crm, ds, engine } = makeCrm({ flag: true });
-    crm.upsertContact({ name: 'Solo Person', email: 'solo@x.com' });
+    crm.upsertContact({ name: 'Solo Person', email: 'solo@x.com' }, TEST_STAMP);
 
     const subs = new SubjectStore(engine!);
     expect(subs.listSubjects({ kind: 'person' })).toHaveLength(1);
@@ -120,7 +121,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
   it('whitespace-only company: person subject only, no org/edge (trim guard)', () => {
     const { crm, ds, engine } = makeCrm({ flag: true });
-    crm.upsertContact({ name: 'Eve', email: 'eve@x.com', company: '   ' });
+    crm.upsertContact({ name: 'Eve', email: 'eve@x.com', company: '   ' }, TEST_STAMP);
 
     const subs = new SubjectStore(engine!);
     expect(subs.listSubjects({ kind: 'person' })).toHaveLength(1);
@@ -133,7 +134,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
   it('company present but no person detail: person+org+edge, people detail row null', () => {
     const { crm, ds, engine } = makeCrm({ flag: true });
-    crm.upsertContact({ name: 'Frank', company: 'Stark Industries' }); // no email/phone/type
+    crm.upsertContact({ name: 'Frank', company: 'Stark Industries' }, TEST_STAMP); // no email/phone/type
 
     const subs = new SubjectStore(engine!);
     const person = subs.findCanonical('Frank', 'person')!;
@@ -150,7 +151,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
   it('whitespace-only name: no person subject mirrored (guard returns)', () => {
     const { crm, ds, engine } = makeCrm({ flag: true });
-    crm.upsertContact({ name: '   ', email: 'ws@x.com' });
+    crm.upsertContact({ name: '   ', email: 'ws@x.com' }, TEST_STAMP);
 
     expect(new SubjectStore(engine!).listSubjects()).toHaveLength(0); // mirror skipped
     expect(crm.listContacts()).toHaveLength(1);                       // ds write still happened
@@ -161,7 +162,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
   it('name-only contact: no empty people detail row written', () => {
     const { crm, ds, engine } = makeCrm({ flag: true });
-    crm.upsertContact({ name: 'Nameless Co Contact' }); // no email/phone/type/company
+    crm.upsertContact({ name: 'Nameless Co Contact' }, TEST_STAMP); // no email/phone/type/company
 
     const subs = new SubjectStore(engine!);
     const person = subs.findCanonical('Nameless Co Contact', 'person')!;
@@ -176,7 +177,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
     const { crm, ds, engine } = makeCrm({ flag: true });
     try {
       engine!.close(); // subsequent mirror writes throw on the closed connection
-      crm.upsertContact({ name: 'Carol', email: 'carol@x.com', company: 'Initech' });
+      crm.upsertContact({ name: 'Carol', email: 'carol@x.com', company: 'Initech' }, TEST_STAMP);
 
       expect(crm.findContact({ name: 'Carol' })!.email).toBe('carol@x.com'); // ds write committed
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('[lynox:subject-graph] CRM contact mirror failed'));
@@ -188,7 +189,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
   it('no engineDb provided: upsertContact works, nothing mirrored, no crash', () => {
     const { crm, ds } = makeCrm({ flag: true, withEngine: false });
-    crm.upsertContact({ name: 'Dave', email: 'dave@x.com', company: 'Hooli' });
+    crm.upsertContact({ name: 'Dave', email: 'dave@x.com', company: 'Hooli' }, TEST_STAMP);
     expect(crm.findContact({ name: 'Dave' })!.email).toBe('dave@x.com');
     ds.close();
   });
@@ -202,8 +203,8 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
       // Era 1: flag OFF — contacts land in ds_contacts only, never mirrored.
       const crmOff = new CRM(ds, { engineDb: engine, subjectGraphEnabled: false });
-      crmOff.upsertContact({ name: 'Beatrice Vogt', email: 'bea@example-insurer.example', phone: '+41790000001', company: 'Example Insurer AG', type: 'customer' });
-      crmOff.upsertContact({ name: 'Quentin Zephyr', email: 'q@zephyr.io', company: 'Zephyr Robotics' });
+      crmOff.upsertContact({ name: 'Beatrice Vogt', email: 'bea@example-insurer.example', phone: '+41790000001', company: 'Example Insurer AG', type: 'customer' }, TEST_STAMP);
+      crmOff.upsertContact({ name: 'Quentin Zephyr', email: 'q@zephyr.io', company: 'Zephyr Robotics' }, TEST_STAMP);
       expect(new SubjectStore(engine).listSubjects()).toHaveLength(0); // nothing mirrored yet
 
       // Era 2: flag ON — the S2 backfill replays the existing rows.
@@ -233,7 +234,7 @@ describe('CRM → engine.db subject-graph mirror (S1c)', () => {
 
     it('flag OFF / no engineDb: backfill is a no-op', () => {
       const { crm, ds } = makeCrm({ flag: false });
-      crm.upsertContact({ name: 'Ed', email: 'ed@x.com' });
+      crm.upsertContact({ name: 'Ed', email: 'ed@x.com' }, TEST_STAMP);
       expect(crm.backfillSubjectGraph()).toEqual({ contacts: 0 });
       ds.close();
     });

@@ -30,7 +30,7 @@ import { judgeQuality, judgeAvailable } from './judge.js';
 
 // ── The tier→jobs spine: EVERY job each tier runs, with its coverage. `covers`
 //    is the capability/scenario id that tests it, or null for a still-open gap.
-//    This is the "list all the jobs each tier takes on" map (rafael 2026-07-19). ──
+//    This is the "list all the jobs each tier takes on" map (2026-07-19). ──
 export interface JobEntry { readonly job: string; readonly what: string; readonly covers: string | null; readonly minContext?: number; }
 export const TIER_JOBS: Record<Tier | 'cross', readonly JobEntry[]> = {
   fast: [
@@ -53,7 +53,7 @@ export const TIER_JOBS: Record<Tier | 'cross', readonly JobEntry[]> = {
   ],
   deep: [
     { job: 'heavy-multistep', what: 'user-elected heavy multi-step + policy work', covers: 'scenario:refund-policy-gate' },
-    // A SPECIALIZED deep job with its OWN context floor (rafael 2026-07-19):
+    // A SPECIALIZED deep job with its OWN context floor (2026-07-19):
     // ingesting + retrieving from a huge input needs >1M ctx. This is NOT a
     // blanket deep-tier requirement — it gates only this job (a candidate for it
     // is a big-context SPECIALIST, likely a spawn/sub-agent, not the general

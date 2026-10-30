@@ -8,7 +8,8 @@
 
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants, isReviewedHeaderName } from '../tools/permission-guard.js';
-import { isOutboundEffectWrite } from './outbound-write.js';
+import { effectiveWriteMethod, isOutboundEffectWrite, isReadMethod, writeMethodsNamed } from './outbound-write.js';
+import { maskSecretPatterns } from './secret-store.js';
 
 /** Start of the line that names a write an unattended run was not granted. */
 export const UNGRANTED_WRITE_PREFIX = 'Not granted for an unattended run:';
@@ -39,6 +40,28 @@ export function writeForNote(sentMethod: string, gatedMethod: string, named: rea
   return named.includes(sentMethod)
     ? `${sentMethod} (also naming ${alsoNamed.join(', ')})`
     : `${named.join(', ')} (sent as ${sentMethod})`;
+}
+
+/** How many methods a one-line note lists before it counts the rest (`writeForShortNote`). */
+const NOTE_METHODS_LISTED = 3;
+
+/**
+ * `writeForNote` for the one line a run report collects (`collectWriteNotes` keeps 300
+ * characters): a request can name up to 26 methods, and listing them all pushes the URL out of
+ * the line. The method the call is gated as and the one it sends are always named, the gated
+ * one first; only the others are counted, so the write the grant is missing is never in the
+ * counted rest.
+ */
+export function writeForShortNote(sentMethod: string, gatedMethod: string, named: readonly string[]): string {
+  const sends = named.includes(sentMethod);
+  const kept = [gatedMethod, ...named.filter((m) => m !== gatedMethod)].filter((m) => !(sends && m === sentMethod));
+  // Counted only when something is left over: what fits is listed as the refusals list it.
+  if (kept.length <= NOTE_METHODS_LISTED) return writeForNote(sentMethod, gatedMethod, named);
+  const listed = kept.slice(0, NOTE_METHODS_LISTED);
+  const more = ` and ${String(kept.length - listed.length)} more`;
+  return sends
+    ? `${sentMethod} (also naming ${listed.join(', ')}${more})`
+    : `${listed.join(', ')}${more} (sent as ${sentMethod})`;
 }
 
 /**
@@ -85,24 +108,87 @@ export function refusedReviewedHeaders(input: unknown, contract: CapabilityContr
 }
 
 /**
+ * The line in front of a response a write's redirect turned into a read: a 307/308 to another
+ * origin is followed as a GET without the body, so the answer is that GET's, and a 200 there
+ * says nothing about the write. `sent` opens it (`<write> was sent`, and a second sending on a
+ * redirect of its own origin when there was one). `carried`: a GET from that hop on kept a
+ * method override, so it is a write of its own wherever a server reads the override, and "not
+ * sent there" would be false.
+ */
+export function writeFollowedAsReadNote(sent: string, hopUrl: string, carried?: { method: string | undefined; url: string }): string {
+  let there = 'the write was not sent there, and the response below answers that GET, not the write.';
+  if (carried !== undefined) {
+    const what = carried.method === undefined ? 'a method override this check cannot read' : `${carried.method} as a method override`;
+    const where = carried.url === hopUrl ? 'that GET carried' : `a redirect after it carried, to ${urlForNote(carried.url)},`;
+    there = `${where} ${what}, which a server there may have acted on as a write, and the response below answers the last GET, not the first write.`;
+  }
+  return `${WRITE_POSSIBLY_LANDED_PREFIX} ${sent} and answered with a redirect to ${urlForNote(hopUrl)}, another origin, ` +
+    `where it was followed as a GET without the body: ${there} Check the target system for whether the write was carried out before sending it again.`;
+}
+
+/**
  * Names a refused write by verb, host and path, so the next grant can take it in, and the
  * headers when a reviewed grant refused it for them (`refusedReviewedHeaders`).
  */
-export function ungrantedWriteNote(method: string, url: string, afterUntrusted: boolean, refusedHeaders?: readonly string[]): string {
+export function ungrantedWriteNote(method: string, url: string, afterUntrusted: boolean, refusedHeaders?: readonly string[], hideHost = false, mask: (text: string) => string = (text) => text): string {
   const why = afterUntrusted ? ' The run read external content before this call, and its grant does not cover writes after that.' : '';
   const header = refusedHeaders === undefined ? '' : ` It sets ${headerListForNote(refusedHeaders)}, which a run under a reviewed grant may not set.`;
-  return `${UNGRANTED_WRITE_PREFIX} ${method} ${urlForNote(url)}.${why}${header}`;
+  const head = `${UNGRANTED_WRITE_PREFIX} ${method} `;
+  const tail = `.${why}${header}`;
+  // Masked before it is cut: a stored value cut in part is one no mask knows any more. `mask` is
+  // the caller's mask of stored values (the URL may carry them resolved), then credential shapes.
+  const shown = maskSecretPatterns(mask(hideHost ? urlWithoutHost(url) : urlForNote(url)));
+  return `${head}${urlWithin(shown, NOTE_LINE_MAX_CHARS - head.length - tail.length)}${tail}`;
+}
+
+/** `urlForNote` without the host, for a host that holds a stored secret (`hideHost`). */
+function urlWithoutHost(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//(host not shown: its address holds a stored secret)${u.pathname}`;
+  } catch {
+    return '(unparsable URL)';
+  }
+}
+
+/** What a run report keeps of one such line (`collectWriteNotes`). */
+const NOTE_LINE_MAX_CHARS = 300;
+
+/**
+ * A URL, already masked, cut to fit `budget`, marked with `…`: a long path would otherwise push
+ * the reason out of the line the report keeps, and the reason is what says why the write was
+ * refused. Cut only after a `/`, so no path segment is kept in part.
+ */
+function urlWithin(url: string, budget: number): string {
+  if (url.length <= budget) return url;
+  // However much else the line says, the service stays named: scheme, host and the path's `/`.
+  const origin = /^[a-z][a-z0-9+.-]*:\/\/[^/]*\/?/i.exec(url)?.[0] ?? url;
+  const cut = url.lastIndexOf('/', budget - 2);
+  return `${url.slice(0, Math.max(cut + 1, origin.length))}…`;
 }
 
 /**
  * The note for an `http_request` the agent loop refused without a prompt, or '' when the
  * call is not an outbound write. The autonomous posture refuses every method but GET and
- * HEAD, so that is what "write" means here.
+ * HEAD, so that is what "write" means here — read as the danger check reads it
+ * (`permission-guard.ts`): the effective method, overrides included, so a GET whose
+ * `?_method=POST` it refused is named as the write it was refused for. A method or override
+ * that is not a method counts as a write there; it is named without its value, which is
+ * whatever the request put there.
  */
 export function headlessRefusalNote(toolName: string, input: unknown, afterUntrusted: boolean, contract?: CapabilityContract): string {
   if (toolName !== 'http_request' || input === null || typeof input !== 'object') return '';
-  const { url, method } = input as { url?: unknown; method?: unknown };
-  const m = (typeof method === 'string' ? method : 'GET').toUpperCase();
-  if (typeof url !== 'string' || m === 'GET' || m === 'HEAD') return '';
-  return `\n${ungrantedWriteNote(m, url, afterUntrusted, refusedReviewedHeaders(input, contract))}`;
+  const req = input as { url?: unknown; method?: unknown; headers?: unknown; body?: unknown };
+  if (typeof req.url !== 'string') return '';
+  const sent = String(req.method ?? 'GET').trim().toUpperCase();
+  const headers = req.headers !== null && typeof req.headers === 'object'
+    ? Object.fromEntries(Object.entries(req.headers as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+    : {};
+  const body = typeof req.body === 'string' ? req.body : undefined;
+  const gated = effectiveWriteMethod(sent, headers, req.url, body);
+  if (isReadMethod(gated)) return '';
+  const shown = gated === null
+    ? 'a write whose method or method override is not an HTTP method, to'
+    : writeForShortNote(sent, gated, writeMethodsNamed(sent, headers, req.url, body));
+  return `\n${ungrantedWriteNote(shown, req.url, afterUntrusted, refusedReviewedHeaders(input, contract))}`;
 }

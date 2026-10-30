@@ -4,7 +4,7 @@
  * Prompt caching is the single biggest cost lever for a long chat: with a
  * stable cacheable prefix, turn N+1 reads the whole conversation back from
  * cache and pays full price only for the new turn. The dominant silent cost
- * regression (rafael 2026-06-05, ~$18/day) was a per-turn-volatile block
+ * regression (2026-06-05, ~$18/day) was a per-turn-volatile block
  * (retrieved knowledge) injected into the SYSTEM prefix — i.e. BEFORE the
  * conversation. Because Anthropic caching is a *prefix* cache, that re-broke
  * the cache for the entire history on every turn, re-billing it at full price.

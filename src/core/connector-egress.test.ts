@@ -120,6 +120,47 @@ describe('connector surface under the other policies', () => {
   });
 });
 
+// The redirect loop sends a write again on one hop per call at most. These callers pass no
+// guard of their own, so the cap is all that holds them, and a provider's single 307 must still
+// go through: a refused token exchange or Drive upload would be a regression, not a hardening.
+describe('a write redirected once still goes through on the connector and token-exchange paths', () => {
+  const redirect = (location: string): Response => new Response(null, { status: 307, headers: { location } });
+  const POST = { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' };
+
+  it('googleFetch follows one 307 with the write and returns the answer', async () => {
+    mockFetch.mockResolvedValueOnce(redirect('https://www.googleapis.com/upload/drive/v3/files/')).mockResolvedValueOnce(okJson());
+    const res = await googleFetch('https://www.googleapis.com/upload/drive/v3/files', POST, GUARDED);
+    expect(res.status).toBe(200);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('graphFetch follows one 307 with the write and returns the answer', async () => {
+    mockFetch.mockResolvedValueOnce(redirect('https://graph.microsoft.com/v1.0/me/messages/')).mockResolvedValueOnce(okJson());
+    const res = await graphFetch('https://graph.microsoft.com/v1.0/me/messages', POST, GUARDED);
+    expect(res.status).toBe(200);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('a token exchange follows one 307 and reads the token', async () => {
+    const { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused } = await import('./oauth-token-exchange.js');
+    const endpoint = vetTokenEndpoint('https://api.openai.com/oauth/token', undefined);
+    if (isTokenEndpointRefused(endpoint)) throw new Error('fixture is not vetted');
+    mockFetch.mockResolvedValueOnce(redirect('https://api.openai.com/oauth/token/'))
+      .mockResolvedValueOnce(new Response('{"access_token":"t"}', { status: 200, headers: { 'content-type': 'application/json' } }));
+    const result = await exchangeToken({ endpoint, params: { grant_type: 'refresh_token' }, bodyFormat: 'form' }, undefined);
+    expect(result).toMatchObject({ ok: true, status: 200, text: '{"access_token":"t"}' });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('control: a second hop that sends the write again is refused on the same path', async () => {
+    mockFetch.mockResolvedValueOnce(redirect('https://www.googleapis.com/upload/drive/v3/files/'))
+      .mockResolvedValueOnce(redirect('https://www.googleapis.com/upload/drive/v3/files/x'));
+    await expect(googleFetch('https://www.googleapis.com/upload/drive/v3/files', POST, GUARDED))
+      .rejects.toThrow(/would send the same write again/);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+});
+
 // The Graph half of the connector surface. Two statements that only mean something
 // together: the mail provider reaches Graph through `graphFetch`, and the generic
 // tool still cannot. The mail API refusal in `bulk-mail-targets.ts` stays as it is.

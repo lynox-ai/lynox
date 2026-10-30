@@ -5,7 +5,7 @@
  * away from its store, and on a self-hosted destination as on a managed one.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
@@ -148,6 +148,130 @@ describe('a migration import drops store connections', () => {
     const flat = JSON.parse(readFileSync(join(dst, 'apis', 'shop-acme.json'), 'utf-8')) as ApiProfile;
     expect(flat.oauth_grant?.store_binding).toBeUndefined();
     expect(flat.oauth_grant?.written).toBeUndefined();
+  });
+
+  it.each([['self-hosted', ''], ['managed', 'starter']])('%s: a flat file that parses to no profile (null, a list, a number) is skipped, and the store beside it is still stripped', (_label, tier) => {
+    vi.stubEnv('LYNOX_BILLING_TIER', tier);
+    const src = tmp(); const dst = tmp();
+    mkdirSync(join(src, 'apis'));
+    writeFileSync(join(src, 'apis', 'a-null.json'), 'null');
+    writeFileSync(join(src, 'apis', 'a-list.json'), '[]');
+    writeFileSync(join(src, 'apis', 'a-number.json'), '5');
+    writeFileSync(join(src, 'apis', 'shop-acme.json'), JSON.stringify(storeProfile('shop-acme')));
+    seedVault(src, SRC_KEY, SECRETS);
+    const v = migrate(src, dst);
+    expect(v.reconnectStores).toContain('shop-acme');
+    const flat = JSON.parse(readFileSync(join(dst, 'apis', 'shop-acme.json'), 'utf-8')) as ApiProfile;
+    expect(flat.oauth_grant?.store_binding).toBeUndefined();
+    expect(readFileSync(join(dst, 'apis', 'a-null.json'), 'utf-8')).toBe('null');
+  });
+
+  /**
+   * A store profile as a damaged file would hold it, and what the strip must still do with it: a
+   * `null` grant record is left as it is; with a `null` among what it wrote, the binding and the
+   * record still go, and so does a named slot recorded after the `null`.
+   */
+  const damaged = {
+    'a null grant record': {
+      profile: (): Record<string, unknown> => ({ ...storeProfile('shop-acme'), oauth_grant: null }),
+      check: (_names: string[], grant: unknown): void => { expect(grant).toBeNull(); },
+    },
+    'a null entry among what it wrote': {
+      profile: (): Record<string, unknown> => {
+        const p = storeProfile('shop-acme');
+        return { ...p, oauth_grant: { ...p.oauth_grant, written: [null, { name: 'MY_REFRESH', fp: tokenFingerprint('named-refresh') }] } };
+      },
+      check: (names: string[], grant: unknown): void => {
+        expect(names, 'the named slot recorded after the null entry').not.toContain('MY_REFRESH');
+        const g = grant as ApiProfile['oauth_grant'];
+        expect(g?.state).toBe('connected');
+        expect(g?.store_binding).toBeUndefined();
+        expect(g?.written).toBeUndefined();
+      },
+    },
+  };
+
+  it.each(Object.keys(damaged) as (keyof typeof damaged)[])('a flat store profile with %s is still stripped, and the restore completes', (kind) => {
+    const src = tmp(); const dst = tmp();
+    mkdirSync(join(src, 'apis'));
+    writeFileSync(join(src, 'apis', 'shop-acme.json'), JSON.stringify(damaged[kind].profile()));
+    seedVault(src, SRC_KEY, SECRETS);
+    expect(migrate(src, dst).reconnectStores).toEqual(['shop-acme']);
+    const names = vaultNames(dst);
+    expect(names, 'the vault landed').toContain('S_CID');
+    expect(names).not.toContain(accessTokenKey('shop-acme'));
+    const flat = JSON.parse(readFileSync(join(dst, 'apis', 'shop-acme.json'), 'utf-8')) as Record<string, unknown>;
+    damaged[kind].check(names, flat['oauth_grant']);
+  });
+
+  it.each(Object.keys(damaged) as (keyof typeof damaged)[])('an engine.db store row with %s is still stripped, and the restore completes', (kind) => {
+    const src = tmp(); const dst = tmp();
+    const { id, name, ...rest } = damaged[kind].profile();
+    const engine = new EngineDb(join(src, 'engine.db'), SRC_KEY);
+    try {
+      new ConnectionStore(engine).upsert({ id: String(id), kind: 'api', name: String(name), subjectId: null, direction: 'outbound', configJson: JSON.stringify(rest), vaultKeys: [], status: 'active' });
+    } finally { engine.close(); }
+    seedVault(src, SRC_KEY, SECRETS);
+    expect(migrate(src, dst).reconnectStores).toEqual(['shop-acme']);
+    const names = vaultNames(dst);
+    expect(names, 'the vault landed').toContain('S_CID');
+    expect(names).not.toContain(accessTokenKey('shop-acme'));
+    const after = readProfile(dst, 'shop-acme');
+    expect(after, 'the stripped row loads').toBeDefined();
+    damaged[kind].check(names, after?.oauth_grant);
+  });
+
+  /**
+   * A symbolic link in `apis/`, or `apis/` itself one, is never written through: the file it
+   * points to, outside the data dir, stays byte for byte. It is still read, as the boot reads it,
+   * so a store profile behind it still loses its derived tokens. A bundle cannot carry one; it is
+   * on the destination before the restore.
+   */
+  describe('a symbolic link in apis/', () => {
+    function outsideStore(): { target: string; before: string } {
+      const outside = tmp();
+      const target = join(outside, 'shop-acme.json');
+      const before = JSON.stringify(storeProfile('shop-acme'), null, 2);
+      writeFileSync(target, before);
+      return { target, before };
+    }
+
+    it('self-hosted: a profile file that is a link is read but not written through', () => {
+      const src = tmp(); const dst = tmp();
+      seedVault(src, SRC_KEY, SECRETS);
+      const { target, before } = outsideStore();
+      mkdirSync(join(dst, 'apis'));
+      symlinkSync(target, join(dst, 'apis', 'shop-acme.json'));
+      expect(migrate(src, dst).reconnectStores, 'the link was read').toEqual(['shop-acme']);
+      expect(readFileSync(target, 'utf-8'), 'the file behind the link').toBe(before);
+      const names = vaultNames(dst);
+      expect(names, 'the vault landed').toContain('S_CID');
+      expect(names).not.toContain(accessTokenKey('shop-acme'));
+    });
+
+    it('managed: the step after the strip refuses the link, and the strip has not written through it', () => {
+      vi.stubEnv('LYNOX_BILLING_TIER', 'starter');
+      const src = tmp(); const dst = tmp();
+      seedVault(src, SRC_KEY, SECRETS);
+      const { target, before } = outsideStore();
+      mkdirSync(join(dst, 'apis'));
+      symlinkSync(target, join(dst, 'apis', 'shop-acme.json'));
+      expect(() => migrate(src, dst)).toThrow(/apis\/shop-acme\.json is not a regular file/);
+      expect(readFileSync(target, 'utf-8'), 'the file behind the link').toBe(before);
+    });
+
+    it.each([['self-hosted', ''], ['managed', 'starter']])('%s: apis/ itself a link is read but nothing in it is written', (_label, tier) => {
+      vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      const src = tmp(); const dst = tmp();
+      seedVault(src, SRC_KEY, SECRETS);
+      const { target, before } = outsideStore();
+      symlinkSync(join(target, '..'), join(dst, 'apis'));
+      expect(migrate(src, dst).reconnectStores, 'the linked directory was read').toEqual(['shop-acme']);
+      expect(readFileSync(target, 'utf-8'), 'the file in the linked directory').toBe(before);
+      const names = vaultNames(dst);
+      expect(names, 'the vault landed').toContain('S_CID');
+      expect(names).not.toContain(accessTokenKey('shop-acme'));
+    });
   });
 
   it('a managed destination strips the same as a self-hosted one', () => {

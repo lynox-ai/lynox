@@ -1,10 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import { isDangerous, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, readCommandWords, curlOptionFromWords, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, _checkPatterns, _listUnions } from './permission-guard.js';
+import { isDangerous, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, readCommandWords, curlOptionFromWords, curlFormUploadsFile, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, SENDS_OR_KEEPS_BASH, _checkPatterns, _listUnions, _optionTextsRead, _bracesLeaveWorkspace } from './permission-guard.js';
 import type { AutonomyLevel, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
 import { channels } from '../core/observability.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
+import { join } from 'node:path';
+import { getLynoxDir } from '../core/config.js';
+import { resetShellIsolationForTest, setShellIsolationForTest, type SidecarRoot } from '../core/shell-isolation.js';
 
 // Stub ToolEntry fixtures mirroring the real `destructive` declarations
 // in data-store.ts / artifact.ts / memory.ts / google-{drive,calendar,sheets,docs}.ts.
@@ -2337,6 +2340,15 @@ describe('isDangerous', () => {
       ["git '-C' x push", 'git push'],
       ['echo "$(git -C . push)"', 'git push'],
       ["sh -c 'cd x; git -C . push'", 'git push'],
+      // Behind a wrapper's option the command reads as that option's value; it opens a run too.
+      ['env -i git -C . push', 'git push'],
+      ['nice -n5 git -C . push', 'git push'],
+      ['xargs -n1 git -C . push', 'git push'],
+      ['env -i git -c a=b -c c=d -C . push', 'git push'],
+      // Eight options with a value each, the most the short run drops.
+      ['env -i git -c a=1 -c b=2 -c c=3 -c d=4 -c e=5 -c f=6 -c g=7 -C . push', 'git push'],
+      // A `=` in a path is no assignment: the word still opens its run.
+      ['nice -n5 ./a=b/git -C . push', 'git push'],
     ])('blocks %s in autonomous mode', (command, label) => {
       const result = auto(command);
       expect(result).toContain(label);
@@ -2370,10 +2382,19 @@ describe('isDangerous', () => {
       'set -e x | head -3',
       'git -P|grep -c commit',
       'echo -n "first\nsecond > out"',
-      'grep -e git -c commit notes.txt',
       'echo git - commit',
+      'env -i git -C . status',
+      'nice -n5 git log',
+      'xargs -n1 git -C . fetch',
     ])('leaves %s free in autonomous mode', (command) => {
       expect(auto(command)).toBeNull();
+    });
+
+    it('reads a word after an option as a command too, and so stops a grep for git commit', () => {
+      // Whether `-e` takes a value is not known here; reading `git` as a possible command is what
+      // finds `env -i git -C . push`, and it reads this grep as `git commit` too. Fail-closed on
+      // purpose, as for an option without a value.
+      expect(auto('grep -e git -c commit notes.txt')).toContain('git commit');
     });
 
     // Reaching `git <subcommand>` behind `-C` must not drag in the read-only plumbing whose name
@@ -2413,13 +2434,428 @@ describe('isDangerous', () => {
       expect(performance.now() - started).toBeLessThan(10_000);
     });
 
+    it.each([
+      // The word after `-i` opens a short run: `git push` is among its readings.
+      ['env -i git -C . push', ['env git -C . push', 'env -C . push', 'env . push', 'env push', 'git . push', 'git push']],
+      // In the short run an option is never read as the subcommand: no `git -c x push`.
+      ['env -i git -C . -c x push', ['env git -C . -c x push', 'env -C . -c x push', 'env . -c x push', 'env -c x push', 'env x push', 'env push', 'git . -c x push', 'git x push', 'git push', '. x push', '. push']],
+      // A value with a `=` opens no run: no `a=b c=d status`.
+      ['git -c a=b -c c=d status', ['git a=b -c c=d status', 'git -c c=d status', 'git c=d status', 'git status']],
+      // Each reading once, though both values yield `v v status` and `v status`.
+      ['git -a v -a v -a v status', ['git v -a v -a v status', 'git -a v -a v status', 'git v -a v status', 'git -a v status', 'git v status', 'git status', 'v v -a v status', 'v v status', 'v status']],
+    ])('reads %s as exactly these commands', (segment, readings) => {
+      expect(withoutLeadingOptions(segment)).toEqual(readings);
+    });
+
+    it('keeps 16 words, the subcommand first, in a reading of a word after an option', () => {
+      const args = Array.from({ length: 40 }, (_, j) => `a${j}`).join(' ');
+      const reading = withoutLeadingOptions(`env -i git -C . push ${args}`).find((r) => r.startsWith('git push'));
+      expect(reading).toBe(`git push ${args.split(' ').slice(0, 15).join(' ')}`);
+    });
+
+    it('yields a number of readings linear in the run, however its values differ', () => {
+      // Counted, not timed: with every value different nothing repeats, and a value word that
+      // opened a full run would make the count grow with the square of the length.
+      const readings = (n: number) => withoutLeadingOptions(`git ${Array.from({ length: n }, (_, j) => `-a v${j} -b`).join(' ')} status`).length;
+      expect(readings(1000)).toBeGreaterThan(0);
+      expect(readings(2000) / readings(1000)).toBeLessThan(2.1);
+    });
+
     it('stays fast when options and values alternate', () => {
-      // Only a word that is neither an option nor an option's value opens a run; if every
-      // option after a value opened one, this would cost the square of its length.
+      // A word that may be an option's value opens only a short run; if it opened a full one,
+      // this would cost the square of its length.
       const cmd = `git ${'-a v -b '.repeat(125_000)}status`;
       const started = performance.now();
       expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();
       expect(performance.now() - started).toBeLessThan(10_000);
+    });
+
+    it.each(['autonomous', 'chat'] as const)('reads a command with options dropped once, for all lists (%s)', (mode) => {
+      // Counted, not timed: reading with options dropped is the costly part, and every list reads
+      // the same text. This one is its own only segment, so it is one text, read once.
+      const before = _optionTextsRead();
+      expect(isDangerous('bash', { command: 'git -a v -b status' }, mode === 'autonomous' ? 'autonomous' : undefined)).toBeNull();
+      expect(_optionTextsRead() - before).toBe(1);
+    });
+  });
+
+  describe('the two force-push rules stay bounded through the whole guard', () => {
+    // Each force-push rule alone costs the square of its window: it starts at every `git push ` and
+    // reads ahead to the end. Through the guard that cost stops at the first window, because a text
+    // they start on is a `git push` the critical list's own `git push` rule finds in that window.
+    // Without that rule the windows only make it linear: about 5 s for 1 MB. Counted, not timed, and
+    // what is counted is the reading with options dropped: the guard reads every window as written
+    // first and reads them again with options dropped only when that first pass found nothing, which
+    // is what these pumps do without the `git push` rule. A scan that ends on a later window's first
+    // pass is not counted, so this witnesses the rule for these pumps, not the window bound in general.
+    it.each([
+      ['git push a ', 'autonomous'], ['git push a ', 'chat'],
+      ['git push main ', 'autonomous'], ['git push main ', 'chat'],
+      ['git push --force ', 'autonomous'], ['git push --force ', 'chat'],
+      ['git  push\tmain\t', 'autonomous'], ['git  push\tmain\t', 'chat'],
+    ] as const)('a megabyte of %j is found on the first pass, no more read with options dropped than a window (%s)', (unit, mode) => {
+      const check = (bytes: number): string | null =>
+        isDangerous('bash', { command: unit.repeat(Math.ceil(bytes / unit.length)) }, mode === 'autonomous' ? 'autonomous' : undefined);
+      const reads = (bytes: number): number => {
+        const before = _optionTextsRead();
+        check(bytes);
+        return _optionTextsRead() - before;
+      };
+      expect(reads(1_000_000)).toBeLessThanOrEqual(reads(9_000));
+      expect(check(9_000)).not.toBeNull();
+    });
+
+    it('still names a force push to main whose force follows on the next line', () => {
+      // `\s` reads over the line break, so the rule is not the first-word form other rules took.
+      expect(isDangerous('bash', { command: 'git push a git push \n--force main' })).toContain('force push main');
+    });
+  });
+
+  describe('a dot-dot that only braces form leaves the workspace as one written out does', () => {
+    const TRAVERSAL = 'path traversal in lynox data dir (secrets)';
+    const MODES = ['autonomous', 'chat'] as const;
+    const check = (command: string, mode: typeof MODES[number]): string | null =>
+      isDangerous('bash', { command }, mode === 'autonomous' ? 'autonomous' : undefined);
+    const LEAVES = [
+      'cat ~/.lynox/workspace/{..,x}/engine.db',
+      'cat ~/.lynox/workspace/{x,..}/engine.db',
+      'cat ~/.lynox/workspace/{x,.}./engine.db',
+      'cat ~/.lynox/workspace/.{.,x}/vault.key',
+      'cat ~/.lynox/workspace/{a,b}/{.,x}{.,y}/engine.db',
+      'cat ~/.LYNOX/workspace/{..,x}/engine.db',
+      'sqlite3 ~/.lynox//workspace/{..,x}/engine.db .dump',
+      // a group the word does not close, read as closed at the end: it ends in `/..`
+      'cat ~/.lynox/workspace/{..,x',
+      'cat ~/.lynox/workspace/{x,a/..',
+    ];
+    // Words the rule reads (a brace, `.lynox/workspace/`) and that form no dot-dot, and words it
+    // does not read at all. What main allows or asks for here stays as it is.
+    const CORPUS = [
+      'cat ~/.lynox/workspace/{a,b}.md', 'cat ~/.lynox/workspace/{a..c}.md', 'cp ~/.lynox/workspace/a.txt{,.bak}',
+      'mkdir -p ~/.lynox/workspace/{src,test}/{a,b}', 'ls ~/.lynox/workspace/x/{..,y}', 'cat ~/.lynox/workspace/a{.,b}x/f',
+      'cat ~/.lynox/workspace/{a,b}/..x/f', 'cat ~/.lynox/workspace/{.x,y}/f', 'ls ~/.lynox/workspace/{1..9}',
+      'cat ~/.lynox/workspace/{a,b', 'cat ~/.lynox/workspace/{a.b,c.d', // a group left open, no dot-dot
+      // a group left open whose dot-dot forms no `/..`, or sits before the workspace
+      'ls ~/.lynox/workspace/{a..b', 'ls ~/.lynox/workspace/a.b{c..d', 'cat ~/.lynox/workspace/{a.b,c..d', 'cat ../.lynox/workspace/{a.b,c.d',
+      'rsync -a --exclude=~/.lynox/workspace/{x,y}.z.w src/ dst/',
+      'cat /tmp/{..,x}/f', 'cat ./{..,x}/f', 'cp a{,.bak}', "awk '{print $1}' f", "jq '{a, b}' f.json",
+      'find . -name x -exec rm {} \;', `curl -d '{"a":"..","b":1}' https://x.test`, 'echo {a,b}{c,d}',
+      'for f in {1..3}; do echo $f; done', 'cat ~/.lynox/workspace/notes.md', 'git log --format={%h}',
+    ];
+
+    it.each(MODES)('names each form as the written one is named (%s)', (mode) => {
+      expect(check('cat ~/.lynox/workspace/../engine.db', mode), 'positive control: the written form').toContain(`bash: ${TRAVERSAL}`);
+      for (const command of LEAVES) expect(check(command, mode), command).toContain(`bash: ${TRAVERSAL}`);
+    });
+
+    it('reads no dot-dot into a word that forms none', () => {
+      for (const command of LEAVES) expect(_bracesLeaveWorkspace(command), command).toBe(true);
+      for (const command of CORPUS) expect(_bracesLeaveWorkspace(command), command).toBe(false);
+    });
+
+    it.each([
+      // Each shape has a dot followed by brace syntax, so the automaton runs over all of it.
+      ['pairs in the workspace', `cat ~/.lynox/workspace/.{${'{a,b}'.repeat(200_000)}x`],
+      ['open braces in the workspace', `cat ~/.lynox/workspace/.${'{a,'.repeat(250_000)}`],
+      ['nested braces in the workspace', `cat ~/.lynox/workspace/.${'{'.repeat(500_000)}${'}'.repeat(500_000)}`],
+      ['repeated workspace words', 'cat ~/.lynox/workspace/{a.,b}{.c,d}/x '.repeat(25_000)],
+      ['dotted alternatives', `cat ~/.lynox/workspace/${'{.,a.}'.repeat(170_000)}x`],
+    ])('reads a megabyte of %s in one pass', (_name, command) => {
+      const started = performance.now();
+      _bracesLeaveWorkspace(command);
+      expect(performance.now() - started).toBeLessThan(1_000);
+    });
+  });
+
+  describe('a rule that reads a path after .lynox/ stays linear when the prefix repeats', () => {
+    // Each `.lynox/` starts a match; a rule that read from every start to the end of the path
+    // would cost the square of the run. One rule at a time, so each is a witness of its own.
+    const lynoxRules = CRITICAL_BASH.filter((r) => r.pattern.source.includes('lynox'));
+
+    it('finds the rules it times', () => {
+      expect(lynoxRules.length, 'positive control: the .lynox rules are found').toBeGreaterThanOrEqual(5);
+    });
+
+    it.each(['.lynox/', 'x.lynox/', '.lynox/./', '.lynox//', '.lynox/workspace/', '.lynox/workspace/a.'])('reads %s repeated 200 KB long in linear time, rule by rule', (unit) => {
+      const text = `cat ${unit.repeat(Math.floor(200_000 / unit.length))}x`;
+      for (const { pattern, label } of lynoxRules) {
+        const started = performance.now();
+        pattern.test(text);
+        expect(performance.now() - started, label).toBeLessThan(1_000);
+      }
+    });
+
+    it.each([
+      ['engine.db', 'access lynox engine database'],
+      ['engine.d{b,}', 'access lynox engine database'],
+      ['http-*', 'glob into lynox data dir'],
+      ['workspace/../x', 'path traversal in lynox data dir'],
+      // A `.lynox/workspace/` later in the path starts no match, so a read does not stop there.
+      ['workspace/engine.db', 'access lynox engine database'],
+      ['workspace/http-*', 'glob into lynox data dir'],
+      // A `.lynox//workspace/` inside a segment starts no match either, whatever its slashes.
+      ['{x.lynox//workspace/,}engine.db', 'access lynox engine database'],
+      ['{x.lynox//workspace/,}engine.d{b,}', 'access lynox engine database'],
+    ])('still finds %s behind a repeated prefix', (tail, label) => {
+      expect(isDangerous('bash', { command: `cat ${'.lynox/'.repeat(2000)}${tail}` }, 'autonomous')).toContain(label);
+    });
+
+    it('still leaves a long workspace path free', () => {
+      expect(isDangerous('bash', { command: `cat ~/.lynox/workspace/${'a/'.repeat(2000)}notes.md` }, 'autonomous')).toBeNull();
+    });
+  });
+
+  describe('a rule "A, then a pipe, then a shell" reads each line once', () => {
+    // Written as `A.*\|.*B`, every A was tried with every later pipe and every later shell name:
+    // cubic in the line. One rule at a time, so each is a witness of its own.
+    const pipeRules = DANGEROUS_BASH.filter((r) => /piped to shell/.test(r.label));
+
+    it('finds the rules it times', () => {
+      expect(pipeRules.map((r) => r.label).sort(), 'positive control: the four pipe rules are found').toEqual([
+        'base64 decode piped to shell', 'echo piped to shell', 'hex decode piped to shell', 'printf hex escape piped to shell',
+      ]);
+    });
+
+    it.each(['echo |', 'base64|', 'xxd -r|', 'printf \\x1|'])('reads %s repeated 10 KB long in linear time, rule by rule', (unit) => {
+      const text = unit.repeat(Math.floor(10_000 / unit.length));
+      for (const { pattern, label } of pipeRules) {
+        const started = performance.now();
+        pattern.test(text);
+        expect(performance.now() - started, label).toBeLessThan(1_000);
+      }
+    });
+
+    it('reads a 10 KB command of them in linear time through the whole check', () => {
+      const started = performance.now();
+      isDangerous('bash', { command: 'echo |'.repeat(1_700) });
+      expect(performance.now() - started).toBeLessThan(2_000);
+    });
+
+    it.each([
+      ['echo x | bash', 'echo piped to shell'],
+      ['echo a; echo b | grep c | sh', 'echo piped to shell'],
+      ['cat f | base64 -d | zsh', 'base64 decode piped to shell'],
+      ['xxd -p -r f | bash', 'hex decode piped to shell'],
+      ["printf '\\x6c\\x73' | sh", 'printf hex escape piped to shell'],
+      // The first A of a line need not be the one the pipe follows: a later line still counts,
+      // whatever ends the line before it.
+      ['echo a\necho b | bash', 'echo piped to shell'],
+      ['base64 a\rbase64 -d f | sh', 'base64 decode piped to shell'],
+      ['xxd f\u2028xxd -r f | bash', 'hex decode piped to shell'],
+    ])('still finds %j', (command, label) => {
+      expect(isDangerous('bash', { command })).toContain(label);
+    });
+
+    // The check splits a command into lines before most rules read it, so the cases above pass
+    // through the split as well. Each rule also reads unsplit forms of the command, so the rule
+    // itself must find a later line: asked of the rule directly.
+    it.each([
+      ['echo a\necho b | bash', 'echo piped to shell'],
+      ['base64 a\rbase64 -d f | sh', 'base64 decode piped to shell'],
+      ['xxd f\u2028xxd -r f | bash', 'hex decode piped to shell'],
+      ["printf a\u2029printf '\\x6c' | sh", 'printf hex escape piped to shell'],
+    ])('the rule itself finds %j on a later line', (text, label) => {
+      expect(pipeRules.find((r) => r.label === label)!.pattern.test(text)).toBe(true);
+    });
+
+    it.each([
+      'echo a\n| bash',
+      'xxd -r f\n|bash',
+      'echo bash |',
+    ])('still leaves %j to the other rules (the line ends before the pipe, or the shell comes first)', (command) => {
+      expect(isDangerous('bash', { command }) ?? '').not.toContain('piped to shell');
+    });
+  });
+
+  describe('a rule for a lone `env` or `set` reads each line once', () => {
+    // `^` under `m` starts at every line; a leading `\s*` ran across every blank line below it.
+    const lineRules = [...CRITICAL_BASH, ...DANGEROUS_BASH].filter((r) => /dump (environment|all variables)/.test(r.label));
+
+    it('finds the rules it times', () => {
+      expect(lineRules.length, 'positive control: the env and set rules are found').toBe(3);
+    });
+
+    it.each([['\\n', '\n'], ['\\r\\n', '\r\n'], ['\\u2028', '\u2028']])('reads %s repeated 40 KB long in linear time, rule by rule', (_name, unit) => {
+      const text = `ls${unit.repeat(Math.floor(40_000 / unit.length))}`;
+      for (const { pattern, label } of lineRules) {
+        const started = performance.now();
+        pattern.test(text);
+        expect(performance.now() - started, label).toBeLessThan(200);
+      }
+    });
+
+    it.each([
+      ['env', 'dump environment'],
+      ['  env  ', 'dump environment'],
+      ['ls\n\n  env', 'dump environment'],
+      ['ls\r env\t', 'dump environment'],
+      ['ls\u2028set', 'dump all variables'],
+      ['\n\nset\n', 'dump all variables'],
+    ])('every rule of that label still finds %j', (text, label) => {
+      // Every one, not some: `env` has a rule in both lists, and either alone must hold.
+      const own = lineRules.filter((r) => r.label.startsWith(label));
+      expect(own.length).toBeGreaterThan(0);
+      for (const r of own) expect(r.pattern.test(text), r.label).toBe(true);
+    });
+
+    it.each(['ls env', 'x env\n', 'env x', 'setx'])('the rules still leave %j', (text) => {
+      expect(lineRules.some((r) => r.pattern.test(text))).toBe(false);
+    });
+  });
+
+  describe('a rule "curl, then X" reads each line from its first curl', () => {
+    // Each rule reads a line from its first curl only, which finds what any later curl of the
+    // line would, and reads it in linear time; the bounds below hold the time. One rule at a
+    // time.
+    type Rule = { pattern: RegExp; label: string; matches?: (segment: string) => boolean };
+    const curlRules: Rule[] = [...CRITICAL_BASH, ...DANGEROUS_BASH, ...SENDS_OR_KEEPS_BASH]
+      // Chosen by `curl` followed by `.*` (or by the form rule's filter), which old and new form of
+      // each rule hold, so a rule put back as `curl.*X` stays timed; a curl rule spelled another way
+      // is not found here. The lynox-dir rule names curl only in a word list and is not one of them.
+      .filter((r) => /(?:\\bcurl\\b|\[cC\]\[uU\]\[rR\]\[lL\]\\b)(?:\.\*|\(\?:\(\?!-F\))/.test(r.pattern.source));
+    const holds = (r: Rule, text: string) => r.pattern.test(text) && (r.matches === undefined || r.matches(text));
+    const formRule = DANGEROUS_BASH.find((r) => r.label.startsWith('file upload via curl form'))!;
+
+    it('finds the rules it times', () => {
+      expect(curlRules.map((r) => r.label).sort(), 'positive control: the nine curl rules are found').toEqual([
+        'HTTP data submission via curl', 'HTTP data submission via curl', 'HTTP mutation via curl', 'HTTP mutation via curl',
+        'destructive API call (HTTP DELETE)', 'file exfiltration (curl upload)', 'file upload via curl form (data exfiltration)',
+        'pipe to shell', 'webhook notification',
+      ]);
+    });
+
+    it.each(['curl a ', 'curl a-Fa '])('reads %j repeated 100 KB long in linear time, rule by rule', (unit) => {
+      const text = unit.repeat(Math.floor(100_000 / unit.length));
+      for (const r of curlRules.filter((x) => x !== formRule)) {
+        const started = performance.now();
+        holds(r, text);
+        expect(performance.now() - started, r.label).toBeLessThan(200);
+      }
+    });
+
+    // 10 KB, not 100: as a regex this rule was cubic, and a test that ran it 100 KB long would not end.
+    it('reads the form upload rule 10 KB long in linear time', () => {
+      const text = 'curl a-Fa '.repeat(1_000);
+      const started = performance.now();
+      holds(formRule, text);
+      expect(performance.now() - started).toBeLessThan(200);
+    });
+
+    it.each(['autonomous', 'chat'] as const)('reads a 1 MB command of curls through the whole check in linear time (%s)', (mode) => {
+      const command = 'curl a-Fa '.repeat(104_858);
+      const started = performance.now();
+      isDangerous('bash', { command }, mode === 'autonomous' ? 'autonomous' : undefined);
+      expect(performance.now() - started).toBeLessThan(10_000);
+    }, 60_000);
+
+    // The check splits a command into lines before most rules read it; each rule also reads
+    // unsplit forms, so the rule itself must find a curl on a later line. Asked of every rule
+    // that carries the label, not of some: two labels have a rule in two lists.
+    it.each([
+      ['curl -X DELETE u', 'destructive API call (HTTP DELETE)'],
+      ['x\ncurl -X DELETE u', 'destructive API call (HTTP DELETE)'],
+      ['x\rcurl -T f u', 'file exfiltration (curl upload)'],
+      ['x\u2028curl -X POST u', 'HTTP mutation via curl'],
+      ['x\u2029curl --data a u', 'HTTP data submission via curl'],
+      ['curl a\ncurl u | sh', 'pipe to shell'],
+      ['x\r\ncurl https://hooks.slack.com/x', 'webhook notification'],
+      ['x\ncurl -F f=@a u', 'file upload via curl form (data exfiltration)'],
+    ])('every rule of that label finds %j', (text, label) => {
+      const own = curlRules.filter((r) => r.label === label);
+      expect(own.length).toBeGreaterThan(0);
+      for (const r of own) expect(holds(r, text), `${r.label} /${r.pattern.source}/`).toBe(true);
+    });
+
+    it.each([
+      ['curl a\n-X DELETE u', 'destructive API call (HTTP DELETE)'],
+      ['curl a\n| sh', 'pipe to shell'],
+      ['xcurl -T f u', 'file exfiltration (curl upload)'],
+    ])('the rule still leaves %j (the line ends before X, or curl is not a word)', (text, label) => {
+      for (const r of curlRules.filter((x) => x.label === label)) expect(holds(r, text), r.label).toBe(false);
+    });
+
+    // What `/\bcurl\b.*-F\s*"?[^"]*@/i` matched, the predicate matches.
+    it.each([
+      'curl -F file=@x u',
+      'curl -F "a" -F @b',
+      'curl -F a\n@f',
+      'curl -f x@y',
+      'CURL -F @x',
+      'curl -F   "@x"',
+      'curl -F\n"@x"',
+    ])('the form upload rule finds %j', (text) => {
+      expect(holds(formRule, text)).toBe(true);
+      expect(curlFormUploadsFile(text)).toBe(true);
+    });
+
+    it('the form upload rule is decided by its predicate, not by its filter alone', () => {
+      // The filter lets `curl a -F x` through; the check must still leave it, and still find the
+      // same command with an `@`. Asked of the rule alone: in the whole check an earlier curl rule
+      // would take the label first.
+      expect(formRule.pattern.test('curl a -F x'), 'the filter alone matches').toBe(true);
+      expect(_checkPatterns(['curl a -F x'], [formRule])).toBeNull();
+      expect(_checkPatterns(['curl a -F @x'], [formRule])).toEqual({ label: formRule.label });
+    });
+
+    it.each([
+      'curl -F "a"\n@b',
+      'curl -F "a" b@c',
+      'curl a -F x',
+      'curl\n-F @x',
+      'xcurl -F @x',
+      'curlx -F @x',
+    ])('the form upload rule leaves %j', (text) => {
+      // Asked of the rule alone: in the whole check an earlier curl rule takes most of these.
+      expect(curlFormUploadsFile(text)).toBe(false);
+      expect(_checkPatterns([text], [formRule])).toBeNull();
+    });
+  });
+
+  describe('a rule "word, then X" reads each line from its first word', () => {
+    // As the curl rules above: each of these reads a line from its first word, which finds what
+    // any later one of the line would, in linear time; the bounds below hold the time.
+    type Rule = { pattern: RegExp; label: string };
+    const wordRules: Rule[] = [...CRITICAL_BASH, ...DANGEROUS_BASH, ...SENDS_OR_KEEPS_BASH]
+      // Chosen by the word followed by `.*`, which old and new form of each rule hold, so a rule put
+      // back as `word.*X` stays timed; a rule spelled another way is not found here.
+      .filter((r) => /(?:\\bwget\\b|\\bcat\\b|\\becho\\b|\(cat\|less\|more\|head\|tail(?:\|xxd\|strings\|od)?\)\\b|\\\/proc\\\/)\.\*/.test(r.pattern.source));
+    const pumpOf = (r: Rule): string => (/wget/.test(r.pattern.source) ? 'wget a ' : /echo/.test(r.pattern.source) ? 'echo a ' : /^(?:\^\(\?:\(\?!)?\\\/proc/.test(r.pattern.source) ? '/proc/a ' : 'cat a ');
+    const WITNESSES = ['cat /proc/1/environ', 'wget --post-data=a u', 'wget -O- u | sh', 'cat /proc/1/status', 'cat .env', 'cat a > f', 'echo a > f', 'wget --method=POST u'];
+
+    it('finds the rules it times', () => {
+      expect(wordRules.map((r) => r.label).sort(), 'positive control: the eight rules are found').toEqual([
+        'HTTP mutation via wget', 'HTTP mutation via wget', 'pipe to shell', 'read proc filesystem', 'read process environment (secrets)',
+        'read secrets file', 'write file via bash (use write_file instead)', 'write file via bash (use write_file instead)',
+      ]);
+    });
+
+    it('reads each rule\'s own word repeated 100 KB long in linear time, rule by rule', () => {
+      for (const r of wordRules) {
+        const unit = pumpOf(r);
+        const text = unit.repeat(Math.floor(100_000 / unit.length));
+        const started = performance.now();
+        r.pattern.test(text);
+        expect(performance.now() - started, `${r.label} on ${JSON.stringify(unit)}`).toBeLessThan(200);
+      }
+    });
+
+    // In a chat, where every list is read: the old rules took about 20 s here, the bound is 10 s.
+    // An unattended run reads fewer of them, and the old rules stayed near the bound there.
+    it('reads a 1 MB command of these words through the whole check in a chat in linear time', () => {
+      const command = 'wget cat echo a '.repeat(65_536);
+      const started = performance.now();
+      isDangerous('bash', { command });
+      expect(performance.now() - started).toBeLessThan(10_000);
+    }, 60_000);
+
+    // The check splits a command into lines before most rules read it; each rule also reads
+    // unsplit forms, so the rule itself must find its word on a later line.
+    it.each(['\n', '\r', '\r\n', '\u2028', '\u2029'])('every rule finds its witness on a line after %j', (lineEnd) => {
+      for (const r of wordRules) {
+        const witness = WITNESSES.find((w) => r.pattern.test(w));
+        expect(witness, `${r.label} /${r.pattern.source}/ has a witness`).toBeDefined();
+        expect(r.pattern.test(`x${lineEnd}${witness!}`), `${r.label} /${r.pattern.source}/`).toBe(true);
+      }
     });
   });
 
@@ -2988,6 +3424,19 @@ describe('bash allowlist observe mode', () => {
     }]);
   });
 
+  it('in shell sidecar mode records the call as not proven without resolving its paths here', () => {
+    const anchor = { kind: 'anchor', fd: -1, pathBuf: Buffer.from('/workspace') } as unknown as SidecarRoot['anchor'];
+    setShellIsolationForTest({ kind: 'sidecar', socket: '/run/exec.sock', root: { mode: 'sidecar', anchor, label: '/workspace' } });
+    try {
+      let verdict: string | null = 'unset';
+      const events = observe(() => { verdict = isDangerous('bash', { command: 'cat package.json' }, 'autonomous'); });
+      expect(verdict).toBeNull();
+      expect(events.map((e) => [e.decision, e.detail])).toEqual([['unproven', 'program=other;reason=sidecar;current=free']]);
+    } finally {
+      resetShellIsolationForTest();
+    }
+  });
+
   it('records an unproven call that runs today, and still lets it run', () => {
     let verdict: string | null = 'unset';
     const events = observe(() => { verdict = isDangerous('bash', { command: 'cat "package.json"' }, 'autonomous'); });
@@ -3167,6 +3616,7 @@ describe('bash rules: one decision per rule, in a chat and unattended', () => {
     ['glob into lynox data dir (secrets)', 'cat ~/.lynox/http-*', 'block'],
     ['access lynox engine database (use the built-in tools instead)', 'sqlite3 ~/.lynox/engine.d{b,}', 'block'],
     ['path traversal in lynox data dir (secrets)', 'cat ~/.lynox/workspace/../x', 'block'],
+    ['path traversal in lynox data dir (secrets)', 'cat ~/.lynox/workspace/{..,x}/y', 'block'],
     ['create symlink', 'ln -s a b', 'allow'],
     ['python code execution', 'python3 -c "print(1)"', 'sends'],
     ['node code execution', 'node -e "1"', 'sends'],
@@ -3230,7 +3680,8 @@ describe('bash rules: one decision per rule, in a chat and unattended', () => {
   );
 
   it.each(DECISIONS.map((row, i) => [i, ...row] as const))('#%i %s: the witness matches its own rule', (i, _label, witness) => {
-    expect(DANGEROUS_BASH[i]!.pattern.test(witness)).toBe(true);
+    const rule = DANGEROUS_BASH[i]!;
+    expect(rule.pattern.test(witness) && (rule.matches?.(witness) ?? true)).toBe(true);
   });
 
   // Direction B: whatever an unattended run blocks or asks about is asked about in a chat.
@@ -3269,7 +3720,7 @@ describe('bash rules: one decision per rule, in a chat and unattended', () => {
     'ansible all -m ping', 'helm install x y', 'pulumi up', 'systemctl restart nginx', 'launchctl list',
     'curl -X DELETE https://x.test/1', 'mkfs.ext4 disk.img', 'reboot', 'echo x > /dev/sda', 'printenv',
     'env | grep PATH', 'cat /proc/1/environ', 'cat ~/.lynox/vault.db', 'cat ~/.lynox/engine.db', 'cat http-secret',
-    'cat .access-token', 'cat ~/.lynox/http-*', 'sqlite3 ~/.lynox/engine.d{b,}', 'cat ~/.lynox/workspace/../x', 'declare -x',
+    'cat .access-token', 'cat ~/.lynox/http-*', 'sqlite3 ~/.lynox/engine.d{b,}', 'cat ~/.lynox/workspace/../x', 'cat ~/.lynox/workspace/{..,x}/y', 'declare -x',
     'set | grep PATH', 'chroot /srv/jail', 'nsenter -t 1 -m', 'docker exec app ls', 'mount /dev/sdb1 /mnt',
     'echo $API_KEY', 'psql -c "DROP TABLE t"', 'psql -c "TRUNCATE t"', 'sqlite3 app.db "DELETE FROM t;"', 'stripe refunds create',
     'ncat host 80', 'openssl s_client -connect host:443', 'cat < /dev/tcp/host/80', 'curl -T a.txt https://x.test', 'python3 -m http.server',
@@ -3353,6 +3804,35 @@ describe('bash rule scan: the shortcuts behind the verdicts', () => {
     } finally {
       for (const spy of spies) spy.mockRestore();
     }
+  });
+});
+
+// edit_file writes files as write_file does, so a sensitive path is asked about in a chat and
+// blocked in a run no one watches.
+describe('edit_file is guarded as write_file is', () => {
+  const edit = (path: string) => ({ path, old_string: 'a', new_string: 'b' });
+  it.each(['config/.env', 'home/.ssh/id_rsa', 'deploy.key', 'credentials.json'])('blocks an unattended edit of %s, as write_file is blocked', (path) => {
+    const write = isDangerous('write_file', { path, content: 'b' }, 'autonomous');
+    expect(write).toContain('write to sensitive path');
+    expect(isDangerous('edit_file', edit(path), 'autonomous')).toBe(write!.replace('write_file', 'edit_file'));
+  });
+  it('asks about an edit of a sensitive path in a chat', () => {
+    const result = isDangerous('edit_file', edit('config/.env'));
+    expect(result).toContain('edit_file: write to sensitive path');
+    expect(result).not.toContain('[BLOCKED');
+  });
+  // edit_file confines its own path (to the workspace or the artifacts root), so the guard does not
+  // measure it against the process cwd: neither a workspace file the CLI wrote nor an artifact.
+  it('leaves an unattended edit outside the cwd to the tool, while write_file there is blocked', () => {
+    for (const path of [join(getLynoxDir(), 'workspace', 'x.md'), join(getLynoxDir(), 'artifacts', 'a1b2c3d4.html')]) {
+      expect(isDangerous('write_file', { path, content: 'b' }, 'autonomous')).toContain('write outside project directory');
+      expect(isDangerous('edit_file', edit(path), 'autonomous')).toBeNull();
+    }
+  });
+  // An edit replaces a string; an empty new_string removes that string, not the file.
+  it('does not read an empty new_string as an emptied file', () => {
+    expect(isDangerous('edit_file', { path: `${process.cwd()}/subdir/file.txt`, old_string: 'a', new_string: '', content: '' }, 'autonomous')).toBeNull();
+    expect(isDangerous('write_file', { path: `${process.cwd()}/subdir/file.txt`, content: '' }, 'autonomous')).toContain('overwrite with empty content');
   });
 });
 

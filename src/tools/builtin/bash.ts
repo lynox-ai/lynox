@@ -1,12 +1,14 @@
-import { execSync } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
-import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
+import { MAX_BUFFER_BYTES } from '../../core/constants.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
-import { execViaSidecar, SidecarOverflowError } from '../../shell-sidecar/client.js';
+import { execViaSidecar, SidecarOverflowError, SidecarStoppedError, CLIENT_GRACE_MS } from '../../shell-sidecar/client.js';
 import { egressConfigFromEnv, openShellEgress, PROXY_ENV_NAMES, withNetworkLines } from '../../shell-sidecar/egress.js';
+import { capTimeout } from '../../shell-sidecar/protocol.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
+import { currentCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 
 interface BashInput {
   command: string;
@@ -131,7 +133,7 @@ export function buildSafeEnv(isolation?: IsolationConfig): NodeJS.ProcessEnv {
 /**
  * Managed hosting runs bash in the shell sidecar, not in the engine (PRD 152 v2 §4.1): the
  * engine holds the vault key and the integration credentials, a call's processes must not
- * share its container. When the socket is set there is NO fallback to `execSync` — a
+ * share its container. When the socket is set there is NO fallback to running it here — a
  * missing or refusing sidecar is an error, never a reason to run the command here (S5).
  *
  * The call starts in the sidecar's workspace root, the same volume the engine's workspace
@@ -142,8 +144,13 @@ async function runInSidecar(socketPath: string, input: BashInput, env: NodeJS.Pr
   for (const [k, v] of Object.entries(env)) if (v !== undefined) callEnv[k] = v;
   let r;
   try {
-    r = await execViaSidecar(socketPath, { cmd: input.command, timeoutMs: input.timeout_ms, env: callEnv }, MAX_BUFFER_BYTES);
+    r = await execViaSidecar(socketPath, { cmd: input.command, timeoutMs: input.timeout_ms, env: callEnv }, MAX_BUFFER_BYTES, CLIENT_GRACE_MS, currentCallSignal());
   } catch (err: unknown) {
+    // The run was stopped and the call killed mid-command. Whatever it did until then stays,
+    // so the sentence must not read as "did not run". A soft failure, like the overflow below:
+    // what the command printed is foreign text of any length, and only the result path scans and
+    // caps it — a hard error's message goes to the model as is.
+    if (err instanceof SidecarStoppedError) throw stoppedFailure(err.stdout, err.stderr);
     if (err instanceof SidecarOverflowError) {
       const combined = [err.stdout, err.stderr].filter(Boolean).join('\n');
       throw new ToolSoftFailure(combined || `Command failed: ${input.command}`, `bash output exceeded ${String(err.maxBytes)} bytes`);
@@ -208,7 +215,7 @@ async function runInSidecarWithEgress(socketPath: string, input: BashInput, env:
   return withNetworkLines(lines, egress.redact(out));
 }
 
-// NOTE: This tool intentionally uses execSync with shell execution.
+// NOTE: This tool intentionally uses shell execution.
 // It is a bash tool for an autonomous agent — shell features are required by design.
 // Input comes from the LLM agent, not from untrusted external users.
 
@@ -249,60 +256,207 @@ export const bashTool: ToolEntry<BashInput> = {
       required: ['command'],
     },
   },
-  // NOTE: execSync is intentional — this is a bash tool requiring shell features.
+  // NOTE: a shell is intentional — this is a bash tool requiring shell features.
   // Input comes from the LLM agent, not untrusted external users.
   handler: async (input: BashInput, agent: IAgent): Promise<string> => {
     const safeEnv = buildSafeEnv(agent.isolation);
-    const sidecarSocket = process.env['LYNOX_SHELL_EXEC_SOCKET'];
-    // Set at all — even empty — means managed: an empty value is a broken config, not "run here".
-    if (sidecarSocket !== undefined) {
-      if (sidecarSocket === '') throw new Error('bash: LYNOX_SHELL_EXEC_SOCKET is set but empty');
-      return runInSidecarWithEgress(sidecarSocket, input, safeEnv, agent);
-    }
-
-    try {
-      const output = execSync(input.command, {
-        timeout: input.timeout_ms ?? DEFAULT_BASH_TIMEOUT_MS,
-        maxBuffer: MAX_BUFFER_BYTES,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: getWorkspaceCwd(),
-        env: safeEnv,
-      });
-      return output || '(no output)';
-    } catch (err: unknown) {
-      if (err && typeof err === 'object' && 'stderr' in err && 'stdout' in err) {
-        const stderr = String((err as { stderr: unknown }).stderr);
-        const stdout = String((err as { stdout: unknown }).stdout || '');
-        const combined = [stdout, stderr].filter(Boolean).join('\n');
-        // The agent still reads the output verbatim and adapts — that behaviour
-        // is deliberate and unchanged. But a non-zero exit is a FAILURE, and
-        // returning it plainly recorded it in the run ledger as a success:
-        // `toolEnd` publishes `success: true` for anything a handler returns.
-        // One real thread logged 123 tool calls and exactly 1 error while a long
-        // run of `wget` calls was failing. `status` is the exit code when
-        // execSync provides it.
-        // A TIMEOUT is not an exit code. `execSync` kills the child on timeout,
-        // leaving `status: null` and `signal: 'SIGTERM'` — the old text then read
-        // "bash exited non-zero", which is the one reason a reader would rule OUT
-        // a timeout. The ledger reason is the only trace of why a call failed, so
-        // it has to name the actual cause. (Residuum 2 of four, closing comment
-        // 2026-08-02.)
-        const status = (err as { status?: unknown }).status;
-        const signal = (err as { signal?: unknown }).signal;
-        const limitMs = input.timeout_ms ?? DEFAULT_BASH_TIMEOUT_MS;
-        const reason = typeof status === 'number'
-          ? `bash exited ${String(status)}`
-          : typeof signal === 'string' && signal.length > 0
-            ? `bash killed by ${signal} after ${String(limitMs)}ms`
-            : 'bash failed without an exit code';
-        throw new ToolSoftFailure(
-          combined || `Command failed: ${input.command}`,
-          reason,
-        );
-      }
-      const cause = err instanceof Error ? err : new Error(String(err));
-      throw new Error(`bash: ${cause.message}`, { cause });
-    }
+    // Decided once at boot (`shell-isolation.ts`): a broken socket value stopped the start there.
+    const isolation = agent.toolContext.shellIsolation;
+    if (isolation.kind === 'sidecar') return runInSidecarWithEgress(isolation.socket, input, safeEnv, agent);
+    return runLocal(input, safeEnv, currentCallSignal());
   },
 };
+
+/** The stop's own sentence, the same for both paths: what the command did until then stays. */
+function stoppedFailure(stdout: string, stderr: string): ToolSoftFailure {
+  const printed = [stdout, stderr].filter(Boolean).join('\n');
+  noteOwnStopSentence();
+  return new ToolSoftFailure(
+    `bash: stopped because the run was stopped, and the command was killed before it finished. `
+      + `What it did until then stays — check before running it again.${printed === '' ? '' : `\n\nOutput until the stop:\n${printed}`}`,
+    'bash stopped with its run',
+  );
+}
+
+const IS_WINDOWS = process.platform === 'win32';
+/** How long a command gets after SIGTERM (timeout, overflow) before its group is killed and
+ *  the call ends with what it printed — also when something it started still holds a pipe. */
+const KILL_GRACE_MS = 1000;
+
+/**
+ * The process groups of local commands still running. `detached` takes a command out of the
+ * terminal's process group, so a Ctrl+C on the engine no longer reaches it. Whatever still runs
+ * here is killed when the process emits 'exit': a normal exit, the SIGINT/SIGTERM shutdown, an
+ * uncaught exception. Not on SIGHUP (no handler, so Node ends without 'exit'), SIGKILL or a V8
+ * abort; a process that left the group with `setsid` outlives the engine, as under `execSync`.
+ */
+const liveGroups = new Set<number>();
+let exitHookInstalled = false;
+function trackGroup(pid: number): void {
+  liveGroups.add(pid);
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  // run-group-starter: a process-exit hook, it kills processes and reports no spend.
+  process.on('exit', () => {
+    for (const pgid of liveGroups) { try { process.kill(-pgid, 'SIGKILL'); } catch { /* gone */ } }
+  });
+}
+
+/**
+ * A call without the sidecar (self-host): the command runs here, in its own process group.
+ *
+ * It used to run through `execSync`, which blocks the event loop until the command ends: a
+ * stop of the run could not even be seen until then. Now the command runs asynchronously, and
+ * a stop kills its whole group at once (SIGKILL, as the sidecar does) and ends the call with
+ * the output so far, without waiting for a process that still holds a pipe open.
+ *
+ * The time limit follows the sidecar's rules ({@link capTimeout}): unset or invalid is the
+ * default, `0` and anything above it are the 15-minute ceiling. A command that no longer
+ * blocks the event loop is cut at the engine's 15-minute tool limit anyway, so "no limit" was
+ * not true any more; at the ceiling it is that tool limit, not this one, whose message the
+ * model reads. At the limit the group gets SIGTERM, then SIGKILL after {@link KILL_GRACE_MS}. stdout and stderr share one cap of {@link MAX_BUFFER_BYTES}, as they
+ * did under `execSync`; stdin is closed.
+ */
+async function runLocal(input: BashInput, env: NodeJS.ProcessEnv, signal: AbortSignal | undefined): Promise<string> {
+  const limitMs = capTimeout(input.timeout_ms);
+  if (signal?.aborted === true) {
+    noteOwnStopSentence();
+    throw new ToolSoftFailure('bash: not run, because the run was stopped before the command started.', 'bash stopped with its run');
+  }
+  // The stop arrives in the abort listener, outside this call's async context, where
+  // `noteOwnStopSentence` finds no call to mark. So the promise only reports it, and the
+  // failure is built after the `await`, back in the call's context.
+  const outcome = await new Promise<string | { stopped: true; stdout: string; stderr: string }>((resolve, reject) => {
+    let child: ChildProcess;
+    try {
+      child = spawn(input.command, {
+        shell: true,
+        cwd: getWorkspaceCwd(),
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // Its own process group, so that a kill reaches what the shell started too.
+        detached: !IS_WINDOWS,
+      });
+    } catch (err: unknown) {
+      const cause = err instanceof Error ? err : new Error(String(err));
+      reject(new Error(`bash: ${cause.message}`, { cause }));
+      return;
+    }
+    const pgid = child.pid;
+    if (pgid !== undefined && !IS_WINDOWS) trackGroup(pgid);
+    child.stdin?.end();
+
+    const out: Buffer[] = [];
+    const errOut: Buffer[] = [];
+    let bytes = 0;
+    let timedOut = false;
+    let overflowed = false;
+    let settled = false;
+    let grace: NodeJS.Timeout | undefined;
+    let killedAfterGrace = false;
+    const text = (chunks: Buffer[]): string => Buffer.concat(chunks).toString('utf-8');
+
+    const killGroup = (sig: NodeJS.Signals): void => {
+      if (pgid !== undefined && !IS_WINDOWS) {
+        try { process.kill(-pgid, sig); return; } catch { /* the group is gone already */ }
+      }
+      child.kill(sig);
+    };
+    const finish = (): void => {
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      if (grace !== undefined) clearTimeout(grace);
+      signal?.removeEventListener('abort', onStop);
+      if (pgid !== undefined) liveGroups.delete(pgid);
+    };
+    const failWith = (code: number | null, sig: NodeJS.Signals | null): void => {
+      const combined = [text(out), text(errOut)].filter(Boolean).join('\n');
+      // The agent still reads the output verbatim and adapts — that behaviour
+      // is deliberate and unchanged. But a non-zero exit is a FAILURE, and
+      // returning it plainly recorded it in the run ledger as a success:
+      // `toolEnd` publishes `success: true` for anything a handler returns.
+      // One real thread logged 123 tool calls and exactly 1 error while a long
+      // run of `wget` calls was failing.
+      // A TIMEOUT is not an exit code: the old text read "bash exited non-zero",
+      // which is the one reason a reader would rule OUT a timeout. The ledger
+      // reason is the only trace of why a call failed, so it has to name the
+      // actual cause. (Residuum 2 of four, closing comment 2026-08-02.)
+      const reason = overflowed
+        ? `bash output exceeded ${String(MAX_BUFFER_BYTES)} bytes`
+        : timedOut
+          ? killedAfterGrace
+            ? `bash killed by SIGKILL after ${String(limitMs)}ms and a ${String(KILL_GRACE_MS)}ms grace`
+            : `bash killed by ${sig ?? 'SIGTERM'} after ${String(limitMs)}ms`
+          : typeof code === 'number'
+            ? `bash exited ${String(code)}`
+            : sig !== null
+              ? `bash killed by ${sig}`
+              : 'bash failed without an exit code';
+      reject(new ToolSoftFailure(combined || `Command failed: ${input.command}`, reason));
+    };
+    /** Timeout or overflow: SIGTERM now; after the grace, SIGKILL and end the call, whether or
+     *  not the pipes closed (a process that left the group can hold them for good). */
+    const endCommand = (): void => {
+      // Once: a limit that passes during an overflow's grace changes nothing.
+      if (grace !== undefined) return;
+      clearTimeout(timer);
+      killGroup('SIGTERM');
+      // run-group-starter: lives only as long as this one command and reports no spend.
+      grace = setTimeout(() => {
+        if (settled) return;
+        finish();
+        killGroup('SIGKILL');
+        killedAfterGrace = true;
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        failWith(null, null);
+      }, KILL_GRACE_MS);
+    };
+    const onStop = (): void => {
+      if (settled) return;
+      finish();
+      killGroup('SIGKILL');
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve({ stopped: true, stdout: text(out), stderr: text(errOut) });
+    };
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    const timer = setTimeout(() => { timedOut = true; endCommand(); }, limitMs);
+    // run-group-starter: removed when the command ends (`finish`), and a stop reports no spend.
+    signal?.addEventListener('abort', onStop, { once: true });
+
+    const collect = (chunks: Buffer[]) => (chunk: Buffer): void => {
+      if (overflowed || settled) return;
+      bytes += chunk.length;
+      if (bytes > MAX_BUFFER_BYTES) {
+        overflowed = true;
+        endCommand();
+        return;
+      }
+      chunks.push(chunk);
+    };
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    child.stdout?.on('data', collect(out));
+    child.stderr?.on('data', collect(errOut));
+
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    child.on('error', (err) => {
+      if (settled) return;
+      finish();
+      // Mostly a working directory that is gone: Node names the shell, not the directory.
+      reject(new ToolSoftFailure(`bash: the command could not start in ${getWorkspaceCwd()}: ${err.message}`, 'bash failed to start'));
+    });
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    child.on('close', (code, sig) => {
+      if (settled) return;
+      finish();
+      if (code === 0 && !timedOut && !overflowed) {
+        resolve(text(out) || '(no output)');
+        return;
+      }
+      failWith(code, sig);
+    });
+  });
+  if (typeof outcome === 'string') return outcome;
+  throw stoppedFailure(outcome.stdout, outcome.stderr);
+}

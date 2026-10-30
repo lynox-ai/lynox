@@ -1,28 +1,32 @@
 import Database from 'better-sqlite3';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { renameSync } from 'node:fs';
-import { hkdfSync, randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto';
+import { hkdfSync, randomBytes, randomUUID, createCipheriv } from 'node:crypto';
 import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
+import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
 import { ensureDirSync } from './atomic-write.js';
-import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
+import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
+import type { CallContract, CallFiled, GrantLift } from './call-connection.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
 import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
+import type { RequestPrincipal } from './request-principal.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
 import type { EngineDb } from './engine-db.js';
-import { WorkflowStore, type ContentMigrationCounts, type WorkflowGrantRow } from './workflow-store.js';
+import { WorkflowStore, type ContentMigrationCounts, type WorkflowAuthorship, type WorkflowGrantRow } from './workflow-store.js';
 import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
+import { HISTORY_MARKERS_DDL } from './history-markers.js';
+import { findHiddenChar, hiddenCharRefusal } from './hidden-text.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
-const ENCRYPTED_PREFIX = 'enc:'; // Marks encrypted text in DB
 
 function getDefaultDbPath(): string {
   return join(getLynoxDir(), 'history.db');
@@ -124,6 +128,48 @@ export interface ToolCallRecord {
   grant_id?: string | null | undefined;
   /** v66: the id of the `tool_use` block this row records; NULL = place unknown (see v66). */
   tool_use_id?: string | null | undefined;
+  /** v69: the call's outcome, 1 for an error; NULL on a row from before v69 (see v69). */
+  is_error?: number | null | undefined;
+  /** v69: where the call stood toward the run's contract (`CallContract.state`). */
+  contract_state?: string | null | undefined;
+  /** v69: the accepted grant the run's contract carries (`CallContract.grantId`) — not `grant_id`. */
+  contract_grant_id?: string | null | undefined;
+  /** v69: the grant that lifted this call's write (`GrantLift`); NULL when none did. */
+  lift_grant_id?: string | null | undefined;
+  lift_entry?: string | null | undefined;
+  /** v69: how the call's filing for approval ended (`CallFiled`); NULL when it filed nothing. */
+  filing?: string | null | undefined;
+  approval_id?: string | null | undefined;
+}
+
+/**
+ * What a row says about its call beyond the call itself (PRD 3f-1b-α), read through
+ * {@link callFactsOf}. `unrecorded` is a row written before v69: its outcome and contract were
+ * never recorded, which is not the same as `ok` or `none`.
+ */
+export type CallFactsRead =
+  | { recorded: false }
+  | {
+      recorded: true;
+      status: 'ok' | 'error';
+      contract: 'none' | 'governing' | 'withheld';
+      contractGrantId: string | null;
+      lift: { grantId: string; entry: string } | null;
+      filing: { outcome: 'queued' | 'not-queued'; approvalId: string | null } | null;
+    };
+
+/** The facts {@link ToolCallRecord} holds about its call; `recorded: false` for a pre-v69 row. */
+export function callFactsOf(row: ToolCallRecord): CallFactsRead {
+  if (row.is_error === null || row.is_error === undefined) return { recorded: false };
+  const contract = row.contract_state === 'governing' || row.contract_state === 'withheld' ? row.contract_state : 'none';
+  return {
+    recorded: true,
+    status: row.is_error === 1 ? 'error' : 'ok',
+    contract,
+    contractGrantId: row.contract_grant_id ?? null,
+    lift: row.lift_grant_id ? { grantId: row.lift_grant_id, entry: row.lift_entry ?? '' } : null,
+    filing: row.filing === 'queued' || row.filing === 'not-queued' ? { outcome: row.filing, approvalId: row.approval_id ?? null } : null,
+  };
 }
 
 export interface RunStats {
@@ -1518,6 +1564,64 @@ const MIGRATIONS: string[] = [
   // No index: nothing selects by this column; a reader finds rows by connection and grant (v65).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (66);
    ALTER TABLE run_tool_calls ADD COLUMN tool_use_id TEXT;`,
+  // v67: the grants a conversation took data from (PRD connection-attribution A5). One row per
+  // member of the thread's set: a `grant_id` (a soft reference into engine.db
+  // `connection_grants`, like v65) or the literal 'unknown' — data from a source that resolved no
+  // grant. Written by the engine only (`ConversationGrants`), when the member enters the set; no
+  // tool input reaches it. A resume reads the thread's rows back.
+  //
+  // Every thread that already has messages gets 'unknown': what it read before this table
+  // existed was never recorded, so a resumed pre-cutover thread must not read as clean.
+  // INSERT OR IGNORE keeps the fill idempotent when an older schema is migrated again.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (67);
+   CREATE TABLE IF NOT EXISTS conversation_grants (
+     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+     grant_id TEXT NOT NULL,
+     first_at TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (thread_id, grant_id)
+   );
+   INSERT OR IGNORE INTO conversation_grants (thread_id, grant_id)
+     SELECT id, 'unknown' FROM threads WHERE EXISTS (SELECT 1 FROM thread_messages m WHERE m.thread_id = threads.id);`,
+  // v68: who answered a question — the answering request's tag (`owner`, `mandate:<address>`),
+  // and beside a mandate's tag the grant it answered under. Written with the answer by every way
+  // one is stored (`PromptStore.answerUser`, `answerUserTabs`, `answerSecret`,
+  // `answerMailConnect`), from the request's principal, never from its body. NULL while the
+  // question is open, and on every row answered before v68: not backfilled, since nothing
+  // recorded who answered then.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (68);
+   ALTER TABLE pending_prompts ADD COLUMN answered_by TEXT;
+   ALTER TABLE pending_prompts ADD COLUMN answered_mandate_id TEXT;`,
+  // v69: what a call's row says beyond the call (PRD 3f-1b-α). Written by both writers
+  // from the engine's own record of the call (`CallFacts` in agent.ts), never from tool input:
+  //  - `is_error` — the call's outcome, as the engine reported it (1 = error);
+  //  - `contract_state`, `contract_grant_id` — where the call stood toward the run's capability
+  //    contract when its gates ran (`none` | `governing` | `withheld`), and the accepted grant
+  //    that contract carries. `contract_grant_id` is NOT `grant_id` (v65), which is the grant of
+  //    the call's connection;
+  //  - `lift_grant_id`, `lift_entry` — the grant that let this call's write through (`GrantLift`);
+  //  - `filing`, `approval_id` — how the call's filing for the owner's approval ended.
+  // Every column holds an enumerated value, an id or a number, never free text: the connection
+  // erasure keeps them. The enumerated ones are held to their value sets by a
+  // CHECK, so a later writer that puts text there fails at the insert, not in an audit. A CHECK
+  // passes NULL, so every older row stays valid. The three ids are written only from the
+  // engine's own records (an accepted grant, an approval entry), never from tool input.
+  //
+  // NULL `is_error` means the row predates v69 (`callFactsOf` → not recorded), not `ok`. Not
+  // backfilled: nothing recorded these facts before. No index: nothing selects by them yet.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (69);
+   ALTER TABLE run_tool_calls ADD COLUMN is_error INTEGER CHECK (is_error IN (0, 1));
+   ALTER TABLE run_tool_calls ADD COLUMN contract_state TEXT CHECK (contract_state IN ('none', 'governing', 'withheld'));
+   ALTER TABLE run_tool_calls ADD COLUMN contract_grant_id TEXT;
+   ALTER TABLE run_tool_calls ADD COLUMN lift_grant_id TEXT;
+   ALTER TABLE run_tool_calls ADD COLUMN lift_entry TEXT CHECK (lift_entry IN ('v1'));
+   ALTER TABLE run_tool_calls ADD COLUMN filing TEXT CHECK (filing IN ('queued', 'not-queued'));
+   ALTER TABLE run_tool_calls ADD COLUMN approval_id TEXT;`,
+  // v70: history.db's copies of the two engine.db markers that must outlive engine.db
+  // (`history-markers.ts`, cut S3-E): `contained_threads` (the thread rows of `contained`) and
+  // `exact_marker_mirror` (the exact marker, with the instance it was set for). Written once,
+  // never changed. Not in HISTORY_KEPT_ON_ERASURE: the owner's erasure empties them with the
+  // threads. No backfill here: the boot copies what engine.db holds (`ContainmentMirror.syncFrom`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (70);${HISTORY_MARKERS_DDL}`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -1563,11 +1667,16 @@ export class RunHistory {
   private _subjectGraphEnabled = false;
   private _verbGraphWarned = false;
 
-  constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
+  /**
+   * @param options.onCorruption What a database that looks corrupt gets, as in `EngineDbOptions`:
+   *   `throw` (the default) keeps the file and says what to do; `recreate` sets it aside and opens
+   *   an empty one, only for the boot.
+   */
+  constructor(dbPath?: string | undefined, encryptionKey?: string | undefined, options: { onCorruption?: 'recreate' | 'throw' | undefined } = {}) {
     const path = dbPath ?? getDefaultDbPath();
     ensureDirSync(dirname(path));
     this.db = null!; // assigned by _openOrRecreate
-    this._openOrRecreate(path);
+    this._openOrRecreate(path, options.onCorruption ?? 'throw');
 
     // Derive history encryption key via HKDF from vault key
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
@@ -1637,14 +1746,26 @@ export class RunHistory {
    * the run log + thread anchors + resumable prompts this DB holds. (Mirrors the
    * EngineDb open flow — same class of fix.)
    */
-  private _openOrRecreate(path: string): void {
+  private _openOrRecreate(path: string, onCorruption: 'recreate' | 'throw'): void {
     let db = new Database(path);
+    let reported = false;
     try {
       const result = db.pragma('integrity_check') as { integrity_check: string }[];
       if (result[0]?.integrity_check !== 'ok') {
+        reported = true;
         throw new Error(`integrity_check: ${result[0]?.integrity_check ?? 'unknown'}`);
       }
     } catch (err) {
+      // Only what corruption looks like is set aside, as in EngineDb: the check reporting a
+      // fault, or SQLite finding no database or a malformed image. Anything else fails loud.
+      if (!(reported || isCorruptionError(err))) {
+        try { db.close(); } catch { /* best-effort */ }
+        throw err;
+      }
+      if (onCorruption === 'throw') {
+        try { db.close(); } catch { /* best-effort */ }
+        throw corruptFileLeftInPlace(basename(path), err);
+      }
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ History database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);
       try { db.close(); } catch { /* best-effort */ }
@@ -1687,29 +1808,30 @@ export class RunHistory {
 
   /** Decrypt text from storage. Handles both encrypted and plaintext (mixed mode). */
   private _dec(text: string): string {
-    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
-    if (!this._encKey) {
+    // A NULL column read at run time passes through, as it always has.
+    if (!text) return text;
+    const r = this.decStrict(text);
+    if (r.ok) return r.text;
+    if (r.kind === 'no_key') {
       if (!this._decWarnedNoKey) {
         this._decWarnedNoKey = true;
         process.stderr.write('⚠ History: encrypted data found but no encryption key set — data unreadable\n');
       }
-      return text;
+    } else if (this._decWarnedFailCount < 3) {
+      this._decWarnedFailCount++;
+      process.stderr.write('⚠ History: decryption failed for encrypted record — wrong key or corrupted data\n');
     }
-    try {
-      const buf = Buffer.from(text.slice(ENCRYPTED_PREFIX.length), 'base64');
-      const iv = buf.subarray(0, CRYPTO_IV_LENGTH);
-      const tag = buf.subarray(CRYPTO_IV_LENGTH, CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const data = buf.subarray(CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const decipher = createDecipheriv(CRYPTO_ALGORITHM, this._encKey, iv, { authTagLength: CRYPTO_TAG_LENGTH });
-      decipher.setAuthTag(tag);
-      return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
-    } catch {
-      if (this._decWarnedFailCount < 3) {
-        this._decWarnedFailCount++;
-        process.stderr.write('⚠ History: decryption failed for encrypted record — wrong key or corrupted data\n');
-      }
-      return text;
-    }
+    return text;
+  }
+
+  /**
+   * Decrypt text from storage and say whether it worked ({@link strictDecrypt}). For a reader that
+   * passes the text on: unlike the lenient reads, a value it cannot read never comes back as its
+   * text.
+   * @internal — for the store's own readers, not for package consumers.
+   */
+  decStrict(text: string): StrictDecryptResult {
+    return strictDecrypt(text, this._encKey);
   }
 
   private _migrate(): void {
@@ -1839,13 +1961,33 @@ export class RunHistory {
     connectionCreatedAt?: string | undefined;
     grantId?: string | undefined;
     toolUseId?: string | undefined;
+    /** v69 (see there). `isError` absent writes NULL, which reads as "not recorded". */
+    isError?: boolean | undefined;
+    contract?: CallContract | undefined;
+    lift?: GrantLift | undefined;
+    filed?: CallFiled | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
-      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id, tool_use_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null, params.toolUseId ?? null);
+      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id, tool_use_id,
+        is_error, contract_state, contract_grant_id, lift_grant_id, lift_entry, filing, approval_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null, params.toolUseId ?? null,
+      params.isError === undefined ? null : (params.isError ? 1 : 0), params.contract?.state ?? null, params.contract?.grantId ?? null,
+      params.lift?.grantId ?? null, params.lift?.entry ?? null, params.filed?.outcome ?? null, params.filed?.approvalId ?? null);
     return id;
+  }
+
+  /** Record one member of a thread's grant set (v67). A repeat is a no-op. Throws when the
+   *  thread row does not exist (the foreign key); the caller decides what that means. */
+  insertConversationGrant(threadId: string, grantId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO conversation_grants (thread_id, grant_id) VALUES (?, ?)').run(threadId, grantId);
+  }
+
+  /** The members recorded for a thread (v67), oldest first. */
+  getConversationGrants(threadId: string): string[] {
+    const rows = this.db.prepare('SELECT grant_id AS member FROM conversation_grants WHERE thread_id = ? ORDER BY first_at, rowid').all(threadId) as { member: string }[];
+    return rows.map(r => r.member);
   }
 
   insertSpawn(params: {
@@ -3182,12 +3324,31 @@ export class RunHistory {
     return this._workflowStore;
   }
 
-  insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; template?: boolean | undefined; capabilityContract?: CapabilityContract | undefined }): void {
+  /** `author` is the request that saves: its turn's principal, or `null` for a write no request
+   *  makes. Required, so no caller can leave it out (`WorkflowStore.upsert`). `copiedFrom` names
+   *  the workflow whose steps this one copies; the copy then carries that workflow's mandate mark
+   *  (`WorkflowStore.upsertCopy`). */
+  insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; template?: boolean | undefined; capabilityContract?: CapabilityContract | undefined }, author: RequestPrincipal | null, copiedFrom?: string): void {
     // Fail-closed contract validation at the save chokepoint (Slice B / D2):
     // every producer (save_workflow, plan_task, the Slice-C edit tool) routes
     // through here, so a contract-governed workflow with an unconstrained
     // re-targetable param is rejected before it can be persisted + scheduled.
     // No contract → no-op, so existing playbooks are unaffected.
+    // The text a run hands the model as its instruction (name, goal, each step's task, the
+    // parameters) carries no character that renders as nothing outside the places real text puts
+    // one (`hidden-text.ts`, `hidden-chars.ts`): a workflow
+    // copied from someone else's would bring its hidden instructions along. Only tools save here,
+    // so a refusal reaches the model that wrote it. Not read: a step's `input_template`, which is
+    // a tool's arguments as a session captured them (scraped text may hold such a character, and
+    // the model saving it cannot rewrite them; a run shows them escaped, `runtime-adapter.ts`), and `reasoning`, the capture's own record, which
+    // never reaches a run's model.
+    const hidden = findHiddenChar({
+      name: planned.name,
+      goal: planned.goal,
+      steps: planned.steps.map((s) => ({ task: s.task })),
+      parameters: (planned as { parameters?: unknown }).parameters,
+    });
+    if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
     // S3f write-cutover: write the workflow definition DIRECTLY to engine.db. The
@@ -3196,7 +3357,7 @@ export class RunHistory {
     // planned/executed rows). Same serialization the legacy row stored
     // (JSON.stringify(planned)); is_template is a real column. source_run_id stays
     // null (PlannedPipeline carries the capture run only inside `reasoning`).
-    this._requireWorkflowStore().upsert({
+    const row = {
       id: planned.id,
       name: planned.name,
       description: planned.goal,
@@ -3206,7 +3367,10 @@ export class RunHistory {
       definitionJson: JSON.stringify({ ...planned, schema_version: CURRENT_PIPELINE_SCHEMA_VERSION }),
       isTemplate: planned.template === true,
       sourceRunId: null,
-    });
+    };
+    const store = this._requireWorkflowStore();
+    if (copiedFrom === undefined) store.upsert(row, author);
+    else store.upsertCopy(row, author, copiedFrom);
   }
 
   /** Move 1 (PRD §4.1): forward-migrate every stored workflow-definition blob to
@@ -3220,6 +3384,12 @@ export class RunHistory {
     return this._workflowStore?.getPlanned(id);
   }
 
+  /** Who made the workflow with exactly this id and which mandate changed it last
+   *  (`WorkflowStore.authorship`); `undefined` without engine.db or without the row. */
+  getWorkflowAuthorship(id: string): WorkflowAuthorship | undefined {
+    return this._workflowStore?.authorship(id);
+  }
+
   /**
    * List planned pipelines (engine.db workflow definitions), newest first. Backs
    * the Saved-Workflows library (PRD §6.8 / D13) — the caller filters on the
@@ -3231,9 +3401,9 @@ export class RunHistory {
     return this._workflowStore?.listPlanned(limit) ?? [];
   }
 
-  /** Rename a planned pipeline's display name. Returns false if no row matched. */
-  renamePlannedPipeline(id: string, name: string): boolean {
-    return this._requireWorkflowStore().rename(id, name);
+  /** Rename a planned pipeline's display name, as `author`. Returns false if no row matched. */
+  renamePlannedPipeline(id: string, name: string, author: RequestPrincipal | null): boolean {
+    return this._requireWorkflowStore().rename(id, name, author);
   }
 
   /** Slice B2: stamp the human's first-run-confirm onto the workflow blob. */
@@ -3276,13 +3446,18 @@ export class RunHistory {
   /** Triggers-consent: stamp/clear the human first-run-confirm on a trigger (the
    *  consent surface's write). Pass an ISO timestamp to confirm a `run_agent`
    *  trigger for unattended execution, null to un-confirm. */
-  setTriggerConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined): boolean {
-    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt, confirmedBy);
+  setTriggerConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined, stampConnections?: string | undefined): boolean {
+    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt, confirmedBy, stampConnections);
+  }
+
+  /** The stamp and the connections it lists, for a run's dispatch (`TriggerStore.getStampConnections`). */
+  getTriggerStampConnections(id: string): { confirmedAt: string | null; stampConnections: string | null } | undefined {
+    return this._requireTriggerStore().getStampConnections(id);
   }
   /** Record a request's change to a trigger, dropping its stamp when the request was not
    *  the owner's (TriggerStore.markEditedBy). Call BEFORE the change. */
-  markTriggerEditedBy(id: string, editedBy: string, clearStamp: boolean): boolean {
-    return this._requireTriggerStore().markEditedBy(id, editedBy, clearStamp);
+  markTriggerEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
+    return this._requireTriggerStore().markEditedBy(id, editor, clearStamp);
   }
 
 
@@ -3291,11 +3466,12 @@ export class RunHistory {
     return this._requireWorkflowStore().remove(id);
   }
 
-  markPipelineExecuted(id: string): void {
+  /** Whether the definition was removed: its run row says so (660b). */
+  markPipelineExecuted(id: string): boolean {
     // A one-shot that executed leaves the DEFINITION set (only non-templates reach
     // markPipelineExecuted). Drop its engine.db def row so the library no longer
     // lists it. The Run itself is a separate pipeline_runs SPINE row (D6).
-    this._requireWorkflowStore().dropExecuted(id);
+    return this._requireWorkflowStore().dropExecuted(id);
   }
 
   insertTask(params: {
@@ -3344,10 +3520,17 @@ export class RunHistory {
     createdUntrusted?: string | undefined;
     /** Principal tag of the creating request (request-principal.ts). */
     createdBy?: string | undefined;
+    /** The grant id of the mandate in `createdBy` (`mandateIdOf` of the same principal). */
+    createdMandateId?: string | undefined;
     /** Principal tag of whoever supplied `confirmedAt`. */
     confirmedBy?: string | undefined;
   }): void {
     this._requireTriggerStore().insert(params);
+  }
+
+  /** Insert a `webhook` trigger ({@link TriggerStore.insertWebhook}). */
+  insertWebhookTrigger(params: Parameters<TriggerStore['insertWebhook']>[0]): void {
+    this._requireTriggerStore().insertWebhook(params);
   }
 
   /** Retrieve the manifest JSON for a pipeline run (by pipeline_runs.id). */
@@ -3519,6 +3702,7 @@ export class RunHistory {
     scopeId?: string | undefined;
     status?: string | undefined;
     taskType?: string | undefined;
+    paused?: boolean | undefined;
     limit?: number | undefined;
   }): TriggerRecord[] {
     return this._triggerStore?.listFiltered(opts) ?? [];

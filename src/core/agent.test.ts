@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent, ChangesetManagerLike } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
@@ -5,8 +6,7 @@ import { ToolSoftFailure } from './tool-soft-failure.js';
 import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
-import { noteAnsweredBy, noteNetworkContact } from './call-connection.js';
-import { approvalKey, currentEpoch, isApproved, recordApproval } from './untrusted-epoch.js';
+import { currentCallSignal, noteCallFiled, noteOwnStopSentence } from './call-connection.js';
 
 // === Mocks ===
 
@@ -80,7 +80,7 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE } from './agent.js';
+import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE, toolStoppedMessage, TOOL_STOPPED_RESULT_NOTE } from './agent.js';
 import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -112,7 +112,7 @@ import { createDocsTool } from '../integrations/google/google-docs.js';
 import { createDriveTool } from '../integrations/google/google-drive.js';
 import { createSheetsTool } from '../integrations/google/google-sheets.js';
 import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tools/index.js';
-import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
+import { currentCallTwins, noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 import { readRunStop, withRunStop } from './run-stop.js';
 
 function endTurnResponse(text: string) {
@@ -569,7 +569,7 @@ describe('Agent', () => {
       });
       const result = await agent.send('Question');
       expect(result).toBe('The answer is 42');
-      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined, expect.any(Function));
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null);
       // The fifth argument is read when the extraction RETURNS, so it must follow the agent's
       // flag after the call, not report the value it had when the call was made.
       const cancelled = memory.maybeUpdate.mock.calls[0]?.[4] as () => boolean;
@@ -646,9 +646,12 @@ describe('Agent', () => {
       // exhausted and the turn still produced nothing visible. Exactly 11
       // queued: the initial turn + maxContinuations(10) continuations — over-
       // queuing would leak into the next test (clearAllMocks keeps the queue).
+      // Two empty turns in a row stop the run (ThinkingOnlyLoopError, 996), so the empty turns
+      // alternate with turns cut off inside a tool call (no text either; the call is discarded,
+      // which is not a thinking-only turn). The last one is empty.
       for (let i = 0; i < 11; i++) {
         mockProcess.mockResolvedValueOnce({
-          content: [],
+          content: i % 2 === 0 ? [] : [{ type: 'tool_use', id: `tu_cut_${String(i)}`, name: 'write_file', input: {} }],
           stop_reason: 'max_tokens',
           usage: { input_tokens: 100, output_tokens: 16_000 },
         });
@@ -881,7 +884,7 @@ describe('Agent', () => {
 
       // The end_turn path passes the turn text to maybeUpdate; the endsTurn path
       // must do the same (only the tool-count differs — one tool ran this turn).
-      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', expect.any(Number), undefined, undefined, expect.any(Function));
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', expect.any(Number), undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null);
     });
 
     it('a non-endsTurn tool still continues the loop (contrast)', async () => {
@@ -949,7 +952,7 @@ describe('Agent', () => {
       expect(toolResults[1]!.content).not.toContain('xxxx');
     });
 
-    // ENGINE-10 regression (rafael prod 2026-06-05): a dangling `tool_use`
+    // ENGINE-10 regression (own production instance, 2026-06-05): a dangling `tool_use`
     // (assistant tool_use with no following tool_result) that reaches the API
     // 400s "tool_use ids were found without tool_result blocks", and because
     // the broken pair persists, EVERY subsequent turn 400s — bricking the
@@ -1173,7 +1176,7 @@ describe('Agent', () => {
       const viaGuard = makeMemory();
       const b = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], memory: viaGuard, costGuard: { maxBudgetUSD: 100, maxIterations: 2 } });
       expect(await b.send('go')).toContain('Response stopped');
-      expect(viaGuard.maybeUpdate).toHaveBeenCalledWith('Let me check.', expect.any(Number), undefined, undefined, expect.any(Function));
+      expect(viaGuard.maybeUpdate).toHaveBeenCalledWith('Let me check.', expect.any(Number), undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null);
     });
 
     it('safeToolNames: allowlist, dedupe, order, cap at 8', () => {
@@ -1376,6 +1379,29 @@ describe('Agent', () => {
       });
       return { promptUser, signals };
     }
+
+    it('mail_connect is exempt from the tool timeout: past it, the call still waits for the user', async () => {
+      vi.useFakeTimers();
+      try {
+        // The user takes 20 minutes to create an app password, longer than the 15-min tool cap.
+        const promptMailConnect = vi.fn(() => new Promise<'connected'>((resolve) => { setTimeout(() => resolve('connected'), 20 * 60_000); }));
+        const connects = makeTool('mail_connect', async (_i, a) => (a as Agent).promptMailConnect!({
+          id: 'm', displayName: 'Me', address: 'me@example.com', preset: 'custom', type: 'personal',
+          imap: { host: 'imap.example.com', port: 993, secure: true },
+          smtp: { host: 'smtp.example.com', port: 465, secure: true },
+        }));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_mail', name: 'mail_connect', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [connects], promptMailConnect });
+        const p = agent.send('go');
+        await vi.advanceTimersByTimeAsync(21 * 60_000);
+        await expect(p).resolves.toBe('done');
+        expect(toolResultFor(agent, 'tu_mail')).toMatchObject({ content: 'connected' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
 
     it('a call that times out while it waits on a question withdraws it, so the next call can ask', async () => {
       vi.useFakeTimers();
@@ -2339,6 +2365,48 @@ describe('Agent', () => {
       expect(store.resolveSecretRefs).not.toHaveBeenCalled();
     });
 
+    // A write approval names how many calls of the batch are the same call, counted on the input as
+    // the model wrote it: two calls naming two stored secrets with the same value are two calls,
+    // each asked as one, though they resolve alike.
+    it('counts calls alike by their input as written, not as resolved', async () => {
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      const twins: number[] = [];
+      const tool = makeTool('custom_writer', vi.fn(async () => { twins.push(currentCallTwins()); return 'ok'; }));
+      const call = (id: string, ref: string) => ({ id, name: 'custom_writer', input: { body: `secret:${ref}` } });
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([call('tu_a', 'ALPHA_KEY'), call('tu_b', 'BETA_KEY')]))
+        .mockResolvedValueOnce(toolUseResponse([call('tu_c', 'ALPHA_KEY'), call('tu_d', 'ALPHA_KEY')]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'), secretStore: store,
+      });
+      await agent.send('go');
+      expect(store.resolve('ALPHA_KEY')).toBe(store.resolve('BETA_KEY'));
+      expect.soft(twins.slice(0, 2), 'two references, one value: two calls of one each').toEqual([1, 1]);
+      expect(twins.slice(2), 'the control: the same reference twice is one call made twice').toEqual([2, 2]);
+    });
+
+    // A reference in the path of a store request would be filled in after the path was read, so
+    // a value such as `../../apps/x` would move the request out of `/admin/`. While store requests
+    // are refused, the request is refused before it is sent, every consent given. Once a
+    // pass carries them, the pass reads the finished URL (`store-pass.test.ts`, "refuses every
+    // path outside /admin/, including one that resolves out of it").
+    it('refuses a secret reference in the path of a store request before the value is filled in', async () => {
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), resolve: vi.fn().mockReturnValue('../../apps/x') });
+      const handler = vi.fn().mockResolvedValue('ok');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_s', name: 'http_request', input: { url: 'https://acme.myshopify.com/admin/secret:STORE_PATH/shop.json' } }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('http_request', handler)], promptUser: vi.fn().mockResolvedValue('Allow'), secretStore: store,
+      });
+      await agent.send('go');
+      const result = (agent.getMessages()[2] as { content: Array<{ content: string; is_error: boolean }> }).content[0]!;
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain('Shopify is temporarily unavailable in lynox');
+    });
+
     describe('a built-in provider\'s client secret', () => {
       // The owner's own turn, interactive, every consent given: what is left to refuse it is the name.
       async function run(input: Record<string, unknown>): Promise<{ handler: ReturnType<typeof vi.fn>; store: ReturnType<typeof makeSecretStore>; content: string }> {
@@ -2447,7 +2515,9 @@ describe('Agent', () => {
       const apiStore = new ApiStore();
       apiStore.register({
         id: 'shop-api', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'd',
-        auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: { preset_id: 'bexio', client_id_key: 'SHOP_CLIENT_ID' } },
+        // A preset account whose oauth block names its client secret. A token goes only where
+        // that secret is bound (bound here as the boot binds it); without one it goes nowhere.
+        auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: { preset_id: 'bexio', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET' } },
         ...(author === undefined ? {} : { created_by: author }),
       });
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), isEnvironmentSecret: () => false });
@@ -2460,7 +2530,7 @@ describe('Agent', () => {
         .mockResolvedValueOnce(endTurnResponse('Done'));
       const agent = new Agent({
         name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'),
-        secretStore: store, principal, toolContext: { ...createToolContext({}), apiStore },
+        secretStore: store, principal, toolContext: { ...createToolContext({}), apiStore, vaultNameBindings: bindingsAsMigrated(apiStore as never) },
       });
       await agent.send('send it');
       expect(tool.handler).toHaveBeenCalledTimes(runs ? 1 : 0);
@@ -2554,7 +2624,8 @@ describe('Agent', () => {
       // that would bake the importer's plaintext credential into the stored blob.
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       const handler = vi.fn().mockResolvedValue('imported');
-      const tool = makeTool('import_workflow', handler);
+      // The stub carries the real tool's declaration, so removing it there fails this test.
+      const tool = { ...makeTool('import_workflow', handler), secretRefs: builtinTools.importWorkflowTool.secretRefs };
 
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{
@@ -2582,7 +2653,7 @@ describe('Agent', () => {
       // not baked to plaintext here — same class as import_workflow.
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       const handler = vi.fn().mockResolvedValue('edited');
-      const tool = makeTool('update_workflow_steps', handler);
+      const tool = { ...makeTool('update_workflow_steps', handler), secretRefs: builtinTools.updateWorkflowTool.secretRefs };
 
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{
@@ -2748,6 +2819,63 @@ describe('Agent', () => {
       expect(input.headers.Authorization).toBe('secret:MY_KEY');
     });
 
+    it('masks the engine\'s own env secrets in a tool result without a secretStore (headless step)', async () => {
+      const vaultValue = ['vault', 'master', 'value', '0123456789'].join('-');
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      try {
+        const tool = makeTool('read_file', vi.fn().mockResolvedValue(`key: ${vaultValue}`));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'read_file', input: { path: 'x' } }]))
+          .mockResolvedValueOnce(endTurnResponse('Done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+        await agent.send('Read it');
+        const toolResults = agent.getMessages()[2] as { content: Array<{ content: string }> };
+        expect(toolResults.content[0]!.content).toContain('***6789');
+        expect(toolResults.content[0]!.content).not.toContain(vaultValue);
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
+    it('masks the engine\'s own env secrets in a tool error without a secretStore', async () => {
+      const vaultValue = ['vault', 'master', 'value', '0123456789'].join('-');
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      try {
+        const tool = makeTool('bash', vi.fn().mockRejectedValue(new Error(`Failed near ${vaultValue}`)));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'bash', input: { command: 'x' } }]))
+          .mockResolvedValueOnce(endTurnResponse('Done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+        await agent.send('Run it');
+        const toolResults = agent.getMessages()[2] as { content: Array<{ content: string }> };
+        expect(toolResults.content[0]!.content).toContain('***6789');
+        expect(toolResults.content[0]!.content).not.toContain(vaultValue);
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
+    it('matches a block holding an env secret without a secretStore (no false injection flag)', async () => {
+      const vaultValue = ['vault', 'master', 'value', '0123456789'].join('-');
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      try {
+        const tool = makeTool('http_request', vi.fn(async () => wrapUntrustedData(`page with ${vaultValue}`, 'web_page')));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'http_request', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('Done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+        await agent.send('go');
+        const out = JSON.stringify(agent.getMessages()[2]);
+        expect(out).toContain('***6789');
+        expect(out).not.toContain('resembles prompt injection');
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
     it('fails loud (does NOT send the literal) when a referenced secret is not in the vault', async () => {
       // Core regression: a tool that references `secret:DATAFORSEO` when the
       // vault has no such secret must ERROR (fail-loud guard), NOT send the
@@ -2791,10 +2919,10 @@ describe('Agent', () => {
       // call `spawnAgentTool.handler` directly cannot see this: they hand it the
       // raw ref themselves, below the point where the rewrite happens.
       const seen: unknown[] = [];
-      const spawn = makeTool('spawn_agent', vi.fn().mockImplementation((input: unknown) => {
+      const spawn = { ...makeTool('spawn_agent', vi.fn().mockImplementation((input: unknown) => {
         seen.push(input);
         return Promise.resolve('spawned');
-      }));
+      })), secretRefs: builtinTools.spawnAgentTool.secretRefs };
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{
@@ -2808,6 +2936,30 @@ describe('Agent', () => {
 
       expect(JSON.stringify(seen[0])).toContain('secret:MY_KEY');
       expect(JSON.stringify(seen[0])).not.toContain('actual-secret-val');
+    });
+
+    it('hands run_workflow the REF, not the value — a step resolves it through its own store', async () => {
+      // A workflow step is a child agent, as a spawn is. Resolved here, the value would travel in
+      // the step's task text, into its prompt and its run history.
+      const seen: unknown[] = [];
+      const run = { ...makeTool('run_workflow', vi.fn().mockImplementation((input: unknown) => {
+        seen.push(input);
+        return Promise.resolve('ran');
+      })), secretRefs: builtinTools.runWorkflowTool.secretRefs };
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'run_workflow',
+          input: { name: 'bill', steps: [{ id: 's1', task: 'reconcile with secret:MY_KEY' }] },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [run], secretStore: store });
+      await agent.send('Run it');
+
+      expect(JSON.stringify(seen[0])).toContain('secret:MY_KEY');
+      expect(JSON.stringify(seen[0])).not.toContain('actual-secret-val');
+      expect(store.resolveSecretRefs).not.toHaveBeenCalled();
     });
 
     /** A tool context whose api_profile for api.example.com names MY_KEY, so the destination
@@ -3097,11 +3249,17 @@ describe('Agent', () => {
         promptUser: vi.fn(async (_q, _o, m) => { seen['user'] = m?.signal; return 'ok'; }),
         promptTabs: vi.fn(async (_q, m) => { seen['tabs'] = m?.signal; return ['ok']; }),
         promptSecret: vi.fn(async (_n, _p, _k, m) => { seen['secret'] = m?.signal; return 'saved' as const; }),
+        promptMailConnect: vi.fn(async (_d, m) => { seen['mail'] = m?.signal; return 'canceled' as const; }),
       });
       const tool = makeTool('asker', vi.fn(async () => {
         await agent.promptUser!('q');
         await agent.promptTabs!([{ question: 'q' }]);
         await agent.promptSecret!('K', 'p');
+        await agent.promptMailConnect!({
+          id: 'm', displayName: 'Me', address: 'me@example.com', preset: 'custom', type: 'personal',
+          imap: { host: 'imap.example.com', port: 993, secure: true },
+          smtp: { host: 'smtp.example.com', port: 465, secure: true },
+        });
         await agent.promptUser!('q2', undefined, { signal: own.signal });
         // Stop the run: every prompt that carries the run's signal sees it.
         agent.abort();
@@ -3116,6 +3274,7 @@ describe('Agent', () => {
       // not the run signal itself; it aborts with it.
       expect(seen['tabs']?.aborted).toBe(true);
       expect(seen['secret']?.aborted).toBe(true);
+      expect(seen['mail']?.aborted).toBe(true);
       // The last promptUser call passed its own signal — that one wins.
       expect(seen['user']).toBe(own.signal);
       expect(own.signal.aborted).toBe(false);
@@ -3180,6 +3339,171 @@ describe('Agent', () => {
       release();
       await run.catch(() => undefined);
       expect(settled).toBe(true);
+    }, 3000);
+
+    it('a stop reaches the running call: a handler that listens to the call signal ends now, and the result says what is true', async () => {
+      let sawAbort = false;
+      // Stands in for I/O that passes the call signal on (a fetch, a socket): it ends on the abort
+      // with the platform's bare AbortError, and only then.
+      const listening = makeTool('slow_tool', vi.fn(() => new Promise<string>((_resolve, reject) => {
+        const signal = currentCallSignal();
+        signal?.addEventListener('abort', () => { sawAbort = true; reject(new DOMException('This operation was aborted', 'AbortError')); }, { once: true });
+      })));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-listen', name: 'slow_tool', input: {} }]));
+      const onStream = vi.fn();
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [listening], onStream });
+      const run = agent.send('go');
+      await vi.waitFor(() => { expect(listening.handler).toHaveBeenCalled(); });
+      agent.abort();
+      await expect(run).rejects.toBeInstanceOf(RunAbortedError);
+      expect(sawAbort).toBe(true);
+      const results = onStream.mock.calls.map((c) => c[0] as { type: string; result?: string; isError?: boolean }).filter((e) => e.type === 'tool_result');
+      expect(results).toHaveLength(1);
+      expect(results[0]!.isError).toBe(true);
+      expect(results[0]!.result).toBe(toolStoppedMessage('slow_tool'));
+    }, 3000);
+
+    it('an AbortError that is not the run\'s stop keeps its own message (the counter-witness)', async () => {
+      const failing = makeTool('slow_tool', vi.fn(async () => { throw new DOMException('This operation was aborted', 'AbortError'); }));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-own', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      const onStream = vi.fn();
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [failing], onStream });
+      await agent.send('go');
+      const results = onStream.mock.calls.map((c) => c[0] as { type: string; result?: string }).filter((e) => e.type === 'tool_result');
+      expect(results[0]!.result).toContain('This operation was aborted');
+      expect(results[0]!.result).not.toContain('because the run was stopped');
+    }, 3000);
+
+    it('the stop sentence does not read as "did not happen"', () => {
+      const text = toolStoppedMessage('x');
+      expect(text).toContain('What it did before the stop stays');
+      expect(text).toContain('check whether it already took effect before calling it again');
+    });
+
+    describe('a call that returns after the run was stopped', () => {
+      /** Runs `tool` once, stops the run while it runs, lets it return `out`, and gives back the
+       *  result the model would read. With `stop: false` the run is not stopped (the witness). */
+      async function resultOf(tool: ToolEntry, opts: { stop?: boolean; input?: Record<string, unknown> } = {}): Promise<string> {
+        let release!: () => void;
+        const gate = new Promise<void>((r) => { release = r; });
+        const inner = tool.handler;
+        const wrapped: ToolEntry = { ...tool, handler: vi.fn(async (input, agent) => { await gate; return inner(input, agent); }) };
+        mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-g1', name: tool.definition.name, input: opts.input ?? {} }]));
+        mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+        const onStream = vi.fn();
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [wrapped], onStream });
+        const run = agent.send('go');
+        await vi.waitFor(() => { expect(wrapped.handler).toHaveBeenCalled(); });
+        if (opts.stop !== false) agent.abort();
+        release();
+        await run.catch(() => undefined);
+        const results = onStream.mock.calls.map((c) => c[0] as { type: string; result?: string }).filter((e) => e.type === 'tool_result');
+        expect(results).toHaveLength(1);
+        return results[0]!.result!;
+      }
+
+      /** A tool that reads from outside: it declares the target it reads. */
+      const reader = (handler: ToolEntry['handler']): ToolEntry => ({ ...makeTool('reader', handler), outwardRead: () => 'example.com/page' });
+      /** A tool that reads first for some actions and writes outside for one. */
+      const mixed = (out: string): ToolEntry => ({
+        ...makeTool('mixed', vi.fn(async () => out)),
+        outwardRead: () => 'example.com/inbox',
+        outwardWrite: (input: { action?: string }) => (input.action === 'send' ? 'send' : null),
+      });
+
+      it('a call that reads from outside says its result may be incomplete', async () => {
+        const out = await resultOf(reader(vi.fn(async () => 'three of five pages')));
+        expect(out).toBe(`three of five pages\n\n${TOOL_STOPPED_RESULT_NOTE}`);
+      }, 3000);
+
+      it('a declared read action of a tool that also writes says so too', async () => {
+        expect(await resultOf(mixed('listed'), { input: { action: 'list' } })).toBe(`listed\n\n${TOOL_STOPPED_RESULT_NOTE}`);
+      }, 3000);
+
+      it('a write outside keeps its result as it is: it is what the call did', async () => {
+        expect(await resultOf(mixed('sent'), { input: { action: 'send' } })).toBe('sent');
+      }, 3000);
+
+      it('a tool that declares no read is left alone: it may have written locally', async () => {
+        // memory_store, write_file and the like declare neither marker. Their result is what they
+        // did; "may be incomplete" would invite a second, duplicate write.
+        expect(await resultOf(makeTool('local_write', vi.fn(async () => 'Stored the note.')))).toBe('Stored the note.');
+      }, 3000);
+
+      it('a soft failure gets no sentence: a failure is no result that may be partial', async () => {
+        const failing = reader(vi.fn(async () => { throw new ToolSoftFailure('Search failed: This operation was aborted', 'search failed'); }));
+        expect(await resultOf(failing)).toBe('Search failed: This operation was aborted');
+      }, 3000);
+
+      it('a result that already speaks of the stop gets no second sentence', async () => {
+        const own = reader(vi.fn(async () => { noteOwnStopSentence(); return 'Blocked: not done — the run was stopped before the question was asked.'; }));
+        expect(await resultOf(own)).toBe('Blocked: not done — the run was stopped before the question was asked.');
+      }, 3000);
+
+      it('a call in a run that was not stopped is left alone (the witness)', async () => {
+        expect(await resultOf(reader(vi.fn(async () => 'all five pages')), { stop: false })).toBe('all five pages');
+      }, 3000);
+
+      it('a run that was not stopped does not read the declarations at all', async () => {
+        const outwardRead = vi.fn(() => 'example.com/page');
+        const tool: ToolEntry = { ...makeTool('reader', vi.fn(async () => 'all five pages')), outwardRead };
+        expect(await resultOf(tool, { stop: false })).toBe('all five pages');
+        expect(outwardRead).not.toHaveBeenCalled();
+      }, 3000);
+
+      it('a declaration that throws on the input leaves the result as it is, not an error', async () => {
+        const tool: ToolEntry = { ...makeTool('reader', vi.fn(async () => 'three of five pages')), outwardRead: () => { throw new TypeError('input.calendars.join is not a function'); } };
+        expect(await resultOf(tool)).toBe('three of five pages');
+      }, 3000);
+
+      it('so does an outwardWrite that throws, after a read was declared', async () => {
+        const tool: ToolEntry = {
+          ...makeTool('reader', vi.fn(async () => 'three of five pages')),
+          outwardRead: () => 'example.com/page',
+          outwardWrite: () => { throw new TypeError('method.trim is not a function'); },
+        };
+        expect(await resultOf(tool)).toBe('three of five pages');
+      }, 3000);
+
+      it('the sentence comes after the cap, so a long result does not cut it off', async () => {
+        const out = await resultOf(reader(vi.fn(async () => 'x'.repeat(90_000))));
+        expect(out.endsWith(`]\n\n${TOOL_STOPPED_RESULT_NOTE}`)).toBe(true);
+      }, 3000);
+    });
+
+    it('a stop that lands between an approval and the handler still reaches the call', async () => {
+      // The approval and the stop arrive together: the question settles "Allow", then the run is
+      // stopped before the handler starts. The call is created on an already-stopped run.
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));
+      let agent!: Agent;
+      const promptUser = vi.fn(async () => { agent.abort(); return 'Allow'; });
+      const listening = makeTool('bash', vi.fn(() => new Promise<string>((_resolve, reject) => {
+        const signal = currentCallSignal();
+        const fail = (): void => reject(new DOMException('This operation was aborted', 'AbortError'));
+        // An open signal here is a stop the call never heard of: it would wait forever.
+        if (signal?.aborted === true) fail(); else signal?.addEventListener('abort', fail, { once: true });
+      })));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-late', name: 'bash', input: { command: 'rm -rf /' } }]));
+      agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [listening], promptUser });
+      await expect(agent.send('go')).rejects.toBeInstanceOf(RunAbortedError);
+      expect(listening.handler).toHaveBeenCalled();
+    }, 3000);
+
+    it('a call leaves no listener on the run signal behind', async () => {
+      // The run's signal lives through every call of a send; a listener per call would pile up.
+      const counts: number[] = [];
+      let agent!: Agent;
+      const counting = makeTool('slow_tool', vi.fn(async () => { counts.push(getEventListeners(agent.runSignal!, 'abort').length); return 'ok'; }));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-1', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-2', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-3', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [counting] });
+      await agent.send('go');
+      expect(counts).toHaveLength(3);
+      expect(counts[0]).toBeGreaterThan(0);   // witness: the call's own listener is there while it runs
+      expect(new Set(counts).size).toBe(1);
     }, 3000);
 
     it('a long-lived agent\'s pending confirmation ends on a stop: the question is withdrawn and the tool never runs', async () => {
@@ -3903,9 +4227,15 @@ describe('Agent', () => {
       const toolResult = streamed.find(e => e.type === 'tool_result');
       expect(toolResult).toBeDefined();
       expect(toolResult!.result).toBe(payload);
-      // NOT is_error: the agent loop must behave exactly as it did when the tool
-      // returned this string, or this stops being an observability fix.
+      // NOT is_error where the model reads it: the agent loop must behave exactly as it did when
+      // the tool returned this string, or this stops being an observability fix.
+      expect(toolResultFor(agent, 'ts2').content).toBe(payload);
+      expect(toolResultFor(agent, 'ts2').is_error).toBeUndefined();
+      // Nor on the result event, which a chat shows: a reloaded thread reads the model's block.
       expect(toolResult!.isError).toBeUndefined();
+      // The event says it failed in a field of its own, which a step's row is built from, as the
+      // agent's own row always recorded it (PRD 3f-1b-α).
+      expect((toolResult as { softFailure?: true }).softFailure).toBe(true);
     });
 
     it('leaves an ordinary throw on the hard-error path', async () => {
@@ -4269,7 +4599,7 @@ describe('Agent', () => {
   });
 
   // F-Eager-Persist regression-pin (2026-05-18): the agent must fire its
-  // onMessageCheckpoint hook at each stable turn boundary — rafael prod lost
+  // onMessageCheckpoint hook at each stable turn boundary — our own production instance lost
   // a long conversation when the engine restarted mid-loop.
   describe('onMessageCheckpoint (F-Eager-Persist)', () => {
     it('fires once per assistant turn on a simple end_turn response', async () => {
@@ -5230,7 +5560,7 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
   });
 
   describe('mandate tool lock (PRD customer-granted-operator-access D1)', () => {
-    // A mandate's agent gets only the tools on MANDATE_TOOL_SURFACE. The lock is read from
+    // A mandate's agent gets only the tools on MANDATE_TOOL_SURFACE, less the pattern writers. The lock is read from
     // `principal` at the three places `excludeTools` applies, so each place has its own
     // case: the list sent to the model, the list handed to children, the refusal at
     // execution. `plugin_reader` stands for any tool the allowlist does not name.
@@ -6650,146 +6980,7 @@ describe('the question channel of ask_user', () => {
   });
 });
 
-describe('untrusted epoch for write approvals', () => {
-  const H = 'api.example.test';
-  const POST_H = approvalKey('POST', H);
-  const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
-
-  /** An `http_request` stand-in: wraps its answer like the real tool and, unless told not
-   *  to, reports the host that answered. */
-  function answerFrom(host: string | undefined, ms = 0): ToolEntry {
-    return makeTool('http_request', vi.fn(async () => {
-      await delay(ms);
-      if (host !== undefined) noteAnsweredBy(host);
-      return `HTTP 200\n${wrapUntrustedData(`page ${Math.random()}`, 'http_response')}`;
-    }));
-  }
-
-  async function runBatch(tools: ToolEntry[], approveBefore = true): Promise<Agent> {
-    mockProcess
-      .mockResolvedValueOnce(toolUseResponse(tools.map((t, i) => ({ id: `t${i}`, name: t.definition.name, input: { i } }))))
-      .mockResolvedValueOnce(endTurnResponse('done'));
-    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools });
-    if (approveBefore) recordApproval(agent.sessionCounters, POST_H, currentEpoch(agent.sessionCounters));
-    await agent.send('go');
-    return agent;
-  }
-
-  const holds = (agent: Agent) => isApproved(agent.sessionCounters, POST_H, currentEpoch(agent.sessionCounters));
-
-  // An answer from the approved host is untrusted content like any other: a record a third party
-  // wrote on that host can carry an instruction to write there again, to another path. So the
-  // write approvals of that host do not survive it, for any method.
-  it.each(['POST', 'PATCH'])('voids a %s approval when the approved host itself answered', async (method) => {
-    const key = approvalKey(method, H);
-    mockProcess
-      .mockResolvedValueOnce(toolUseResponse([{ id: 't0', name: 'http_request', input: {} }]))
-      .mockResolvedValueOnce(endTurnResponse('done'));
-    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [answerFrom(H)] });
-    recordApproval(agent.sessionCounters, key, currentEpoch(agent.sessionCounters));
-    await agent.send('go');
-    expect(currentEpoch(agent.sessionCounters), 'the answer was counted').toBe(1);
-    expect(isApproved(agent.sessionCounters, key, currentEpoch(agent.sessionCounters))).toBe(false);
-  });
-
-  it('keeps an approval through a batch in which nothing answered', async () => {
-    const agent = await runBatch([makeTool('custom_noop', vi.fn(async () => 'ok'))]);
-    expect(currentEpoch(agent.sessionCounters)).toBe(0);
-    expect(holds(agent)).toBe(true);
-  });
-
-  it('voids it when the answer did not report its host', async () => {
-    expect(holds(await runBatch([answerFrom(undefined)]))).toBe(false);
-  });
-
-  it('voids it when a tool that returns unwrapped content ran', async () => {
-    const agent = await runBatch([makeTool('bash', vi.fn(async () => 'plain text from somewhere'))]);
-    expect(currentEpoch(agent.sessionCounters)).toBe(1);
-    expect(holds(agent)).toBe(false);
-  });
-
-  it('voids it when foreign content shares the batch, whichever result arrives first', async () => {
-    for (const [hostMs, otherMs] of [[0, 30], [30, 0]] as const) {
-      // Not an external-content tool by name: only the marker in its result can count it.
-      const other = makeTool('custom_reader', vi.fn(async () => { await delay(otherMs); return wrapUntrustedData('a mail', 'mail:body'); }));
-      expect(holds(await runBatch([answerFrom(H, hostMs), other])), `host after ${hostMs} ms`).toBe(false);
-    }
-  });
-
-  // The answer to the approved write itself counts too: it can echo fields a third party wrote.
-  it('voids an approval given during the batch once the write\'s own answer came back', async () => {
-    let agentRef: Agent | undefined;
-    const writer = makeTool('http_request', vi.fn(async () => {
-      recordApproval(agentRef!.sessionCounters, POST_H, agentRef!.approvalEpoch());
-      noteAnsweredBy(H);
-      return wrapUntrustedData('created', 'http_response');
-    }));
-    mockProcess
-      .mockResolvedValueOnce(toolUseResponse([{ id: 't0', name: 'http_request', input: {} }]))
-      .mockResolvedValueOnce(endTurnResponse('done'));
-    agentRef = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [writer] });
-    await agentRef.send('go');
-    expect(holds(agentRef)).toBe(false);
-  });
-
-  it('checks and stores approvals against the epoch the batch started in, even after a sibling moved it', async () => {
-    let agentRef: Agent | undefined;
-    let seen: number | undefined;
-    // A sub-agent sharing the counters moves the epoch mid-batch; a sibling call that asks
-    // for its approval epoch afterwards still gets the batch's start.
-    const child = makeTool('custom_child', vi.fn(async () => { agentRef!.sessionCounters.untrustedEpoch = 7; return 'ok'; }));
-    const writer = makeTool('custom_writer', vi.fn(async () => { await delay(20); seen = agentRef!.approvalEpoch(); return 'ok'; }));
-    mockProcess
-      .mockResolvedValueOnce(toolUseResponse([{ id: 't0', name: 'custom_child', input: {} }, { id: 't1', name: 'custom_writer', input: {} }]))
-      .mockResolvedValueOnce(endTurnResponse('done'));
-    agentRef = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [child, writer] });
-    await agentRef.send('go');
-    expect(seen).toBe(0);
-  });
-
-  it('voids it when the user turn itself carries untrusted content', async () => {
-    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
-    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [] });
-    recordApproval(agent.sessionCounters, POST_H, 0);
-    await agent.send([{ type: 'text', text: wrapUntrustedData('[File: a.pdf]\nterms', 'file_upload') }]);
-    expect(currentEpoch(agent.sessionCounters)).toBe(1);
-    expect(holds(agent)).toBe(false);
-  });
-
-  it('moves the epoch at once for content outside a batch', () => {
-    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [] });
-    agent.noteForeignContent();
-    expect(currentEpoch(agent.sessionCounters)).toBe(1);
-  });
-
-  it('(F1) voids it when http_request reached the network and failed, with or without a host report', async () => {
-    // A thrown error, and a soft failure (`Blocked:` text): both may carry a server's status
-    // text or a redirect target, and neither is wrapped.
-    const thrown = makeTool('http_request', vi.fn(async () => { noteNetworkContact(); noteAnsweredBy(H); throw new Error('timed out after 200 Z-controlled text'); }));
-    expect(holds(await runBatch([thrown]))).toBe(false);
-    const soft = makeTool('http_request', vi.fn(async () => { noteNetworkContact(); throw new ToolSoftFailure('Blocked: 200 Z-controlled text', 'Blocked: 200 Z-controlled text'); }));
-    expect(holds(await runBatch([soft]))).toBe(false);
-  });
-
-  it('(F1) keeps it when http_request was refused before it reached the network', async () => {
-    const refused = makeTool('http_request', vi.fn(async () => { throw new ToolSoftFailure('Blocked: denied by user.', 'Blocked: denied by user.'); }));
-    const agent = await runBatch([refused]);
-    expect(currentEpoch(agent.sessionCounters)).toBe(0);
-    expect(holds(agent)).toBe(true);
-  });
-
-  it('(17b) voids it when stored data was read back, which may come from a foreign source', async () => {
-    const agent = await runBatch([makeTool('data_store_query', vi.fn(async () => 'rows'))]);
-    expect(holds(agent)).toBe(false);
-  });
-
-  it('(16, 18) a taint handed down or restored after a rebuild does not move the epoch', () => {
-    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [] });
-    agent.noteUntrustedData();
-    agent.restoreConversationTaint();
-    expect(currentEpoch(agent.sessionCounters)).toBe(0);
-  });
-
+describe('write approvals in a tool batch', () => {
   // End to end through the real tool: what the person sees. Two writes of one batch share one
   // question; the write after the first one's answer is asked again. No question offers to
   // remember the answer for the host, and none says that later writes will not be asked.
@@ -6813,24 +7004,128 @@ describe('untrusted epoch for write approvals', () => {
     expect(promptUser, 'one question for the batch, one for the write after its answer').toHaveBeenCalledTimes(2);
     for (const [question, options] of promptUser.mock.calls as Array<[string | PromptText, string[]]>) {
       expect(options).toEqual(['Allow', 'Deny', '\x00']);
-      expect(flattenPrompt(question)).not.toMatch(/remember|this session|this host|not be asked|again/i);
+      expect(flattenPrompt(question)).not.toMatch(/remember|this session|this host|not be asked/i);
     }
+    // Each question says how far its Allow reaches: the two calls of the first batch, then one.
+    const asked = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(asked[0]).toContain(' This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time.');
+    expect(asked[1]).toContain(' Allowing sends this request once, now; it will ask again next time.');
   });
 
-  it('names each batch by its own identity, and none outside one', async () => {
+  // The count is of the same call as the model wrote it: the same tool with the same input. A call
+  // that makes the same write written another way (the default port spelled out) is not counted,
+  // finds no send left once the two are out, and asks for itself.
+  it('counts as one call only the calls with the same tool and the same input as written', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const sent: string[] = [];
+    const restore = setPinnedTransportForTests(async (req) => { sent.push(req.method); return new Response('{"id":1}', { status: 200 }); });
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const write = (id: string, url: string) => ({ id, name: 'http_request', input: { url, method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          write('tu_1', 'https://93.184.216.37/contacts'),
+          write('tu_2', 'https://93.184.216.37/contacts'),
+          write('tu_3', 'https://93.184.216.37:443/contacts'),
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    expect(sent).toEqual(['POST', 'POST', 'POST']);
+    const asked = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(asked).toHaveLength(2);
+    expect(asked[0]).toContain(' This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time.');
+    expect(asked[1]).toContain(' Allowing sends this request once, now; it will ask again next time.');
+  });
+
+  // The count follows the blocks, not their ids: a repeated id does not lend one call another's.
+  // All three share one id, so a count kept by id would give every call the last one's (1).
+  it('counts each call by its own block when two calls share a tool_use id', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const restore = setPinnedTransportForTests(async () => new Response('{"id":1}', { status: 200 }));
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const write = (id: string, path: string) => ({ id, name: 'http_request', input: { url: `https://93.184.216.37/${path}`, method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([write('tu_dup', 'contacts'), write('tu_dup', 'contacts'), write('tu_dup', 'notes')]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    const asked = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(asked).toHaveLength(2);
+    expect(asked.find((q) => q.includes('/contacts'))).toContain(' This step makes the same request 2 times;');
+    expect(asked.find((q) => q.includes('/notes'))).toContain(' Allowing sends this request once, now;');
+  });
+
+  // A call cut off by the batch's limit is never made, so it is not counted.
+  it('does not count a same call that the batch limit cut off', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const restore = setPinnedTransportForTests(async () => new Response('{"id":1}', { status: 200 }));
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const noop = makeTool('custom_noop', vi.fn(async () => 'ok'));
+    const write = (id: string) => ({ id, name: 'http_request', input: { url: 'https://93.184.216.37/contacts', method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          ...Array.from({ length: 9 }, (_, i) => ({ id: `n${i}`, name: 'custom_noop', input: { i } })),
+          write('tu_last_run'),
+          write('tu_cut_off'),
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool, noop], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    expect(promptUser).toHaveBeenCalledTimes(1);
+    expect(flattenPrompt((promptUser.mock.calls[0] as [string | PromptText])[0])).toContain(' Allowing sends this request once, now; it will ask again next time.');
+  });
+
+
+  // An Allow covers the write its question showed, not another path of the same service that a
+  // parallel call of the same batch sends.
+  it('asks again for a write of the same batch to another path of the same service', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const sent: string[] = [];
+    const restore = setPinnedTransportForTests(async (req) => { sent.push(new URL(req.url).pathname); return new Response('{"id":1}', { status: 200 }); });
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const write = (id: string, path: string) => ({ id, name: 'http_request', input: { url: `https://93.184.216.37${path}`, method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([write('tu_1', '/contacts'), write('tu_2', '/orders/7/cancel')]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    expect(sent.sort()).toEqual(['/contacts', '/orders/7/cancel']);
+    expect(promptUser, 'one question per path').toHaveBeenCalledTimes(2);
+    const shown = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(shown.some((q) => q.includes('/orders/7/cancel')), 'the second path was shown').toBe(true);
+  });
+
+  it('names each batch by its own identity, the same for all its calls, and none outside one', async () => {
     let agentRef: Agent | undefined;
     const seen: (object | undefined)[] = [];
     const probe = makeTool('custom_probe', vi.fn(async () => { seen.push(agentRef!.approvalBatch()); return 'ok'; }));
     mockProcess
-      .mockResolvedValueOnce(toolUseResponse([{ id: 't0', name: 'custom_probe', input: {} }]))
-      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'custom_probe', input: {} }]))
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't0', name: 'custom_probe', input: { i: 0 } }, { id: 't1', name: 'custom_probe', input: { i: 1 } }]))
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't2', name: 'custom_probe', input: {} }]))
       .mockResolvedValueOnce(endTurnResponse('done'));
     agentRef = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [probe] });
     await agentRef.send('go');
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(3);
     expect(seen[0]).toBeDefined();
-    expect(seen[1]).toBeDefined();
-    expect(seen[0]).not.toBe(seen[1]);
+    expect(seen[1], 'the calls of one batch share its identity').toBe(seen[0]);
+    expect(seen[2]).toBeDefined();
+    expect(seen[2], 'the next batch has its own').not.toBe(seen[0]);
     expect(agentRef.approvalBatch()).toBeUndefined();
   });
 });
@@ -7044,6 +7339,16 @@ describe('actor trail — a mandate\'s outward read', () => {
     await run(reader('http_request', handler), { url: 'https://api.example.invalid/x' }, { auditLog: owner.log });
     expect(handler).toHaveBeenCalledTimes(1);
     expect(owner.recs).toEqual([]);
+  });
+
+  it('names the approval entry on the end row of a write filed for the owner, and nothing for one not filed', async () => {
+    const write = { outwardWrite: () => 'send', outwardRead: () => null };
+    const filed = recorder();
+    await run(reader('mail_send', vi.fn().mockImplementation(async () => { noteCallFiled({ outcome: 'queued', approvalId: 'appr-1' }); return 'queued'; }), write), {}, { principal: MANDATE, auditLog: filed.log });
+    expect(filed.recs.map(r => [r.phase, r.target])).toEqual([['attempt', 'mail_send send'], ['returned', 'mail_send send approval=appr-1']]);
+    const refused = recorder();
+    await run(reader('mail_send', vi.fn().mockImplementation(async () => { noteCallFiled({ outcome: 'not-queued' }); return 'not queued'; }), write), {}, { principal: MANDATE, auditLog: refused.log });
+    expect(refused.recs.map(r => r.target)).toEqual(['mail_send send', 'mail_send send']);
   });
 
   it('records a write that reads first with both rows, the read first; refused at the read, it leaves no attempt', async () => {
@@ -7335,7 +7640,8 @@ describe('a write with the review on', () => {
     expect(view.isEmpty()).toBe(false);
     expect(changeset.backupBeforeWrite).toHaveBeenLastCalledWith('/w/a.txt');
     expect(changeset.recordWritten).toHaveBeenLastCalledWith('/w/b.txt');
-    expect(Object.keys(view).sort()).toEqual(['active', 'backupBeforeWrite', 'isEmpty', 'recordWritten']);
+    expect(view.refusedTooLarge, 'a manager that cannot say has refused nothing as too large').toBe(false);
+    expect(Object.keys(view).sort()).toEqual(['active', 'backupBeforeWrite', 'isEmpty', 'recordWritten', 'refusedTooLarge']);
   });
 
   it('hands no review to the tools when it is off', () => {
@@ -7412,29 +7718,41 @@ describe('a child agent under its parent\'s review', () => {
   });
 
   async function flow(childGetsReview: boolean): Promise<{ dir: string; manager: ChangesetManager; moved: { content: unknown; is_error?: boolean } }> {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    // Without isolation batch_files changes files only under the workspace root of the data dir.
+    const data = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    vi.stubEnv('LYNOX_DATA_DIR', data);
+    const dir = join(data, 'workspace');
+    mkdirSync(dir);
     const manager = new ChangesetManager(dir, 'run');
-    mkdirSync(join(dir, 'private'));
-    mkdirSync(join(dir, 'out'));
-    writeFileSync(join(dir, 'private', 'thesis.md'), 'the user wrote this');
-    const target = join(dir, 'out', 'thesis.md');
-    const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [editInPlace], changesetManager: manager });
-    const child = new Agent({
-      name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [batchFilesTool],
-      changesetManager: childGetsReview ? parent.changeset : undefined,
-    });
-    const edit = (): Promise<unknown> => (parent as unknown as Exec)._executeOneInner({
-      type: 'tool_use', id: `e${Math.random()}`, name: 'edit_file', input: { path: target, old_string: 'a', new_string: 'b' },
-    }).catch(() => undefined);
-    await edit(); // the path is missing: the review holds it as new, the edit fails
-    const moved = await (child as unknown as Exec)._executeOneInner({
-      type: 'tool_use', id: 'm1', name: 'batch_files',
-      input: { pattern: '*.md', directory: join(dir, 'private'), operation: 'move', destination: join(dir, 'out') },
-    });
-    await edit(); // in place, on whatever is there now
-    manager.settle();
-    manager.rollbackAll();
-    return { dir, manager, moved };
+    try {
+
+      mkdirSync(join(dir, 'private'));
+      mkdirSync(join(dir, 'out'));
+      writeFileSync(join(dir, 'private', 'thesis.md'), 'the user wrote this');
+      const target = join(dir, 'out', 'thesis.md');
+      const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [editInPlace], changesetManager: manager });
+      const child = new Agent({
+        name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [batchFilesTool],
+        changesetManager: childGetsReview ? parent.changeset : undefined,
+      });
+      const edit = (): Promise<unknown> => (parent as unknown as Exec)._executeOneInner({
+        type: 'tool_use', id: `e${Math.random()}`, name: 'edit_file', input: { path: target, old_string: 'a', new_string: 'b' },
+      }).catch(() => undefined);
+      await edit(); // the path is missing: the review holds it as new, the edit fails
+      const moved = await (child as unknown as Exec)._executeOneInner({
+        type: 'tool_use', id: 'm1', name: 'batch_files',
+        input: { pattern: '*.md', directory: join(dir, 'private'), operation: 'move', destination: join(dir, 'out') },
+      });
+      await edit(); // in place, on whatever is there now
+      manager.settle();
+      manager.rollbackAll();
+      return { dir, manager, moved };
+    } catch (err) {
+      // A throw before the callers' try leaves neither the stubbed env nor the data dir behind.
+      vi.unstubAllEnvs();
+      rmSync(data, { recursive: true, force: true });
+      throw err;
+    }
   }
 
   it('the child\'s move is refused, and "Rollback all" leaves the user\'s file where it was', async () => {
@@ -7445,7 +7763,8 @@ describe('a child agent under its parent\'s review', () => {
       expect(readFileSync(join(dir, 'private', 'thesis.md'), 'utf8')).toBe('the user wrote this');
     } finally {
       manager.cleanup();
-      rmSync(dir, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+      rmSync(join(dir, '..'), { recursive: true, force: true });
     }
   });
 
@@ -7457,7 +7776,8 @@ describe('a child agent under its parent\'s review', () => {
       expect(existsSync(join(dir, 'out', 'thesis.md'))).toBe(false);
     } finally {
       manager.cleanup();
-      rmSync(dir, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+      rmSync(join(dir, '..'), { recursive: true, force: true });
     }
   });
 

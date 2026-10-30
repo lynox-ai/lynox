@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
+import { isMandateTag, isOwnerPrincipal, principalTag, type RequestPrincipal } from './request-principal.js';
 
 /**
  * Escape LIKE metacharacters so a `%`/`_` in a (possibly client-supplied) id
@@ -55,6 +56,45 @@ export interface StoredWorkflow {
   createdAt: string;
 }
 
+/**
+ * Who made a workflow and which mandate changed it last (engine.db v45). A request writes it
+ * through {@link WorkflowStore.upsert} and {@link WorkflowStore.rename}; nothing else does.
+ */
+export interface WorkflowAuthorship {
+  /** The creating request's tag; null for the owner, the engine and rows from before v45. */
+  createdBy: string | null;
+  /** The grant id of the mandate in `createdBy`; only beside a mandate tag. */
+  createdMandateId: string | null;
+  /** The last mandate that changed the workflow, its grant id, and when. */
+  mandateEditor: string | null;
+  mandateEditorId: string | null;
+  mandateEditedAt: string | null;
+  createdAt: string;
+  /** The marks the owner took over (`plan-takeover.ts`), as they stood; null when none. */
+  coveredCreatedBy: string | null;
+  coveredCreatedId: string | null;
+  coveredCreatedAt: string | null;
+  coveredEditedBy: string | null;
+  coveredEditedId: string | null;
+  coveredEditedAt: string | null;
+}
+
+/**
+ * The columns a write by `author` sets. A mandate's write names the mandate with its grant id
+ * from the same principal; the owner's and the engine's (`null`) name nobody, so they leave a
+ * mandate's mark where it is.
+ */
+function authorColumns(author: RequestPrincipal | null): { tag: string | null; mandate: string | null; mandateId: string | null } {
+  // The type forbids it; a caller the compiler does not see (a test double, plain JS) must not
+  // turn a missing author into the owner.
+  if ((author as RequestPrincipal | null | undefined) === undefined) throw new Error('workflow write without an author');
+  if (author === null || isOwnerPrincipal(author)) return { tag: null, mandate: null, mandateId: null };
+  const tag = principalTag(author);
+  return author.kind === 'mandate'
+    ? { tag, mandate: tag, mandateId: author.mandateId ?? null }
+    : { tag, mandate: null, mandateId: null };
+}
+
 /** One accepted workflow grant, as `workflow_grants` holds it (engine.db v37). */
 export interface WorkflowGrantRow {
   grantId: string;
@@ -108,18 +148,32 @@ export class WorkflowStore {
    * mirror omits `ts` → both columns resolve to `datetime('now')` via COALESCE,
    * byte-for-byte the prior behaviour (verified: no-ts INSERT = DDL default now,
    * no-ts conflict-update `updated_at` = now).
+   *
+   * `author` is the request that saves ({@link WorkflowAuthorship}); `null` only for a write
+   * no request makes. It is required so that a new caller cannot leave it out: a missing
+   * author would read as the owner. The creator is written by the INSERT alone. A re-save
+   * leaves it, so a mandate that changes someone else's workflow becomes its editor and never
+   * its creator; a mandate's re-save sets the editor, anyone else's leaves it.
    */
-  upsert(row: WorkflowRow, ts?: { createdAt?: string | undefined; updatedAt?: string | undefined }): void {
+  upsert(row: WorkflowRow, author: RequestPrincipal | null, ts?: { createdAt?: string | undefined; updatedAt?: string | undefined }): void {
+    const by = authorColumns(author);
     this.db.prepare(`
-      INSERT INTO workflows (id, name, description, definition_json, is_template, source_run_id, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'active', COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
+      INSERT INTO workflows (id, name, description, definition_json, is_template, source_run_id, status, created_at, updated_at,
+                             created_by, created_mandate_id)
+      VALUES (?, ?, ?, ?, ?, ?, 'active', COALESCE(?, datetime('now')), COALESCE(?, datetime('now')), ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         description = excluded.description,
         definition_json = excluded.definition_json,
         is_template = excluded.is_template,
         source_run_id = excluded.source_run_id,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at,
+        mandate_editor = COALESCE(?, workflows.mandate_editor),
+        mandate_editor_id = CASE WHEN ? IS NULL THEN workflows.mandate_editor_id ELSE ? END,
+        mandate_edited_at = CASE WHEN ? IS NULL THEN workflows.mandate_edited_at ELSE datetime('now') END,
+        covered_edited_by = CASE WHEN ? IS NULL THEN workflows.covered_edited_by ELSE NULL END,
+        covered_edited_id = CASE WHEN ? IS NULL THEN workflows.covered_edited_id ELSE NULL END,
+        covered_edited_at = CASE WHEN ? IS NULL THEN workflows.covered_edited_at ELSE NULL END
     `).run(
       row.id,
       row.name,
@@ -129,7 +183,42 @@ export class WorkflowStore {
       row.sourceRunId ?? null,
       ts?.createdAt ?? null,
       ts?.updatedAt ?? null,
+      by.tag,
+      by.mandateId,
+      by.mandate,
+      by.mandate, by.mandateId,
+      by.mandate,
+      by.mandate, by.mandate, by.mandate,
     );
+  }
+
+  /**
+   * Save a copy of the workflow `sourceId` as {@link upsert} does, and give the copy the
+   * source's latest mandate mark as its editor, in one transaction: the source's mandate
+   * editor with its grant id and time, else its creator when that is a mandate, with the
+   * grant id and `created_at`. The copy holds that mandate's steps, so it answers for them as
+   * the source does; its creator is still `author`. A source without a mandate mark (or one
+   * that is gone) leaves the copy's editor empty.
+   *
+   * The owner's takeover of that mark travels with it into the copy's editor columns: from the
+   * source's editor cover, or its creator cover when the mark copied was the creator. Without it
+   * the copy of a workflow the owner took over would carry the ended mandate as a member again.
+   * Not a new edit, so the mark is not uncovered here.
+   */
+  upsertCopy(row: WorkflowRow, author: RequestPrincipal | null, sourceId: string): void {
+    this.db.transaction(() => {
+      this.upsert(row, author);
+      const src = this.authorship(sourceId);
+      if (src === undefined) return;
+      const mark = src.mandateEditor !== null
+        ? { editor: src.mandateEditor, id: src.mandateEditorId, at: src.mandateEditedAt, cby: src.coveredEditedBy, cid: src.coveredEditedId, cat: src.coveredEditedAt }
+        : isMandateTag(src.createdBy)
+          ? { editor: src.createdBy, id: src.createdMandateId, at: src.createdAt, cby: src.coveredCreatedBy, cid: src.coveredCreatedId, cat: src.coveredCreatedAt }
+          : null;
+      if (mark === null) return;
+      this.db.prepare('UPDATE workflows SET mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = ?, covered_edited_by = ?, covered_edited_id = ?, covered_edited_at = ? WHERE id = ?')
+        .run(mark.editor, mark.id, mark.at, mark.cby, mark.cid, mark.cat, row.id);
+    })();
   }
 
   /**
@@ -143,13 +232,43 @@ export class WorkflowStore {
    * library list — else the S3d read-cutover would visibly float renamed
    * workflows to the top (a non-transparent behavior change). `updated_at` tracks
    * full saves only (insert/re-save via {@link upsert}), matching started_at.
+   *
+   * A rename is a change: a mandate's rename marks every row it renames with the mandate,
+   * in the same statement, like {@link upsert}.
    */
-  rename(id: string, name: string): boolean {
+  rename(id: string, name: string, author: RequestPrincipal | null): boolean {
     if (id === '') return false; // empty id → likePrefix '%' would match ALL rows
-    const res = this.db.prepare(
-      "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?) WHERE id = ? OR id LIKE ? ESCAPE '\\'",
-    ).run(name, name, id, likePrefix(id));
+    const by = authorColumns(author);
+    const res = by.mandate === null
+      ? this.db.prepare(
+        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?) WHERE id = ? OR id LIKE ? ESCAPE '\\'",
+      ).run(name, name, id, likePrefix(id))
+      : this.db.prepare(
+        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?), mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now'), covered_edited_by = NULL, covered_edited_id = NULL, covered_edited_at = NULL WHERE id = ? OR id LIKE ? ESCAPE '\\'",
+      ).run(name, name, by.mandate, by.mandateId, id, likePrefix(id));
     return res.changes > 0;
+  }
+
+  /** Who made the workflow with exactly this id and which mandate changed it last, or
+   *  `undefined` when there is none. */
+  authorship(id: string): WorkflowAuthorship | undefined {
+    const r = this.db.prepare(
+      `SELECT created_by, created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, created_at,
+              covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at
+       FROM workflows WHERE id = ?`,
+    ).get(id) as {
+      created_by: string | null; created_mandate_id: string | null; mandate_editor: string | null;
+      mandate_editor_id: string | null; mandate_edited_at: string | null; created_at: string;
+      covered_created_by: string | null; covered_created_id: string | null; covered_created_at: string | null;
+      covered_edited_by: string | null; covered_edited_id: string | null; covered_edited_at: string | null;
+    } | undefined;
+    if (r === undefined) return undefined;
+    return {
+      createdBy: r.created_by, createdMandateId: r.created_mandate_id, mandateEditor: r.mandate_editor,
+      mandateEditorId: r.mandate_editor_id, mandateEditedAt: r.mandate_edited_at, createdAt: r.created_at,
+      coveredCreatedBy: r.covered_created_by, coveredCreatedId: r.covered_created_id, coveredCreatedAt: r.covered_created_at,
+      coveredEditedBy: r.covered_edited_by, coveredEditedId: r.covered_edited_id, coveredEditedAt: r.covered_edited_at,
+    };
   }
 
   /** Stamp `definition_json.$.confirmedAt` (the human's first-run-confirm).

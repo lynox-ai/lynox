@@ -11,6 +11,7 @@ import { channels } from './observability.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import type { CollectionShape } from './crm-schema.js';
 import { CRM_COLLECTIONS, createParamsOf } from './crm-schema.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 const scope: MemoryScopeRef = { type: 'context', id: 'test-proj' };
 
@@ -366,8 +367,8 @@ describe('DataStore', () => {
         scope,
         columns: [{ name: 'email', type: 'string', unique: true }],
       });
-      ds.insertRecords({ collection: 'unique_col', records: [{ email: 'a@b.com' }] });
-      const result = ds.insertRecords({ collection: 'unique_col', records: [{ email: 'a@b.com' }] });
+      ds.insertRecords({ collection: 'unique_col', records: [{ email: 'a@b.com' }], stamp: TEST_STAMP });
+      const result = ds.insertRecords({ collection: 'unique_col', records: [{ email: 'a@b.com' }], stamp: TEST_STAMP });
       expect(result.errors.length).toBeGreaterThan(0);
     });
   });
@@ -394,6 +395,7 @@ describe('DataStore', () => {
           { campaign: 'Brand', clicks: 100, active: true },
           { campaign: 'Search', clicks: 200, active: false },
         ],
+        stamp: TEST_STAMP,
       });
 
       expect(result.inserted).toBe(2);
@@ -414,7 +416,7 @@ describe('DataStore', () => {
         ],
         uniqueKey: ['email'], // enables ON CONFLICT DO UPDATE (upsert)
       });
-      ds.insertRecords({ collection: 'up', records: [{ email: 'a@b.com', name: 'A' }] });
+      ds.insertRecords({ collection: 'up', records: [{ email: 'a@b.com', name: 'A' }], stamp: TEST_STAMP });
       // Update the existing row + insert a new one; BOTH carry an unknown field,
       // which pushes a NON-fatal "unknown field ignored" warning into `errors`.
       const result = ds.insertRecords({
@@ -423,6 +425,7 @@ describe('DataStore', () => {
           { email: 'a@b.com', name: 'A2', bogus: 1 }, // update
           { email: 'c@d.com', name: 'C', bogus: 2 },  // insert
         ],
+        stamp: TEST_STAMP,
       });
       expect(result.inserted).toBe(1);
       // Pre-fix `updated` used `records.length - errors.length`, so the two
@@ -431,7 +434,7 @@ describe('DataStore', () => {
     });
 
     it('handles empty records', () => {
-      const result = ds.insertRecords({ collection: 'ads', records: [] });
+      const result = ds.insertRecords({ collection: 'ads', records: [], stamp: TEST_STAMP });
       expect(result.inserted).toBe(0);
     });
 
@@ -439,18 +442,20 @@ describe('DataStore', () => {
       expect(() => ds.insertRecords({
         collection: 'nonexistent',
         records: [{ x: 1 }],
+        stamp: TEST_STAMP,
       })).toThrow('not found');
     });
 
     it('rejects batch exceeding limit', () => {
       const records = Array.from({ length: 1001 }, (_, i) => ({ campaign: `c${i}`, clicks: i, active: true }));
-      expect(() => ds.insertRecords({ collection: 'ads', records })).toThrow('Maximum 1000');
+      expect(() => ds.insertRecords({ collection: 'ads', records, stamp: TEST_STAMP })).toThrow('Maximum 1000');
     });
 
     it('coerces number values', () => {
       const result = ds.insertRecords({
         collection: 'ads',
         records: [{ campaign: 'Test', clicks: '42', active: true }],
+        stamp: TEST_STAMP,
       });
       expect(result.inserted).toBe(1);
 
@@ -462,6 +467,7 @@ describe('DataStore', () => {
       const result = ds.insertRecords({
         collection: 'ads',
         records: [{ campaign: 'Test', clicks: 0, active: 'true' }],
+        stamp: TEST_STAMP,
       });
       expect(result.inserted).toBe(1);
 
@@ -473,6 +479,7 @@ describe('DataStore', () => {
       const result = ds.insertRecords({
         collection: 'ads',
         records: [{ campaign: 'Test', clicks: 1, active: true, unknown_field: 'x' }],
+        stamp: TEST_STAMP,
       });
       expect(result.inserted).toBe(1);
       expect(result.errors).toHaveLength(1);
@@ -483,6 +490,7 @@ describe('DataStore', () => {
       const result = ds.insertRecords({
         collection: 'ads',
         records: [{ campaign: 'Test' }],
+        stamp: TEST_STAMP,
       });
       expect(result.inserted).toBe(1);
 
@@ -497,6 +505,7 @@ describe('DataStore', () => {
           { campaign: 'Good', clicks: 10, active: true },
           { campaign: 'Bad', clicks: 'notanumber', active: true },
         ],
+        stamp: TEST_STAMP,
       });
       // The 'notanumber' will coerce to NaN for REAL type — but Number('notanumber') = NaN which fails
       expect(result.errors.length).toBeGreaterThan(0);
@@ -523,6 +532,7 @@ describe('DataStore', () => {
       const result = ds.insertRecords({
         collection: 'metrics',
         records: [{ date: '2026-01-01', campaign: 'Brand', spend: 100 }],
+        stamp: TEST_STAMP,
       });
       expect(result.inserted).toBe(1);
       expect(result.updated).toBe(0);
@@ -532,11 +542,13 @@ describe('DataStore', () => {
       ds.insertRecords({
         collection: 'metrics',
         records: [{ date: '2026-01-01', campaign: 'Brand', spend: 100 }],
+        stamp: TEST_STAMP,
       });
 
       const result = ds.insertRecords({
         collection: 'metrics',
         records: [{ date: '2026-01-01', campaign: 'Brand', spend: 150 }],
+        stamp: TEST_STAMP,
       });
       expect(result.updated).toBe(1);
       expect(result.inserted).toBe(0);
@@ -570,6 +582,7 @@ describe('DataStore', () => {
           { customer: 'Diana', amount: 300, status: 'paid', region: 'US' },
           { customer: 'Eve', amount: 75, status: 'pending', region: 'EU' },
         ],
+        stamp: TEST_STAMP,
       });
     });
 
@@ -632,6 +645,7 @@ describe('DataStore', () => {
       ds.insertRecords({
         collection: 'orders',
         records: [{ customer: 'Frank', amount: 0, status: 'draft' }],
+        stamp: TEST_STAMP,
       });
       const { rows } = ds.queryRecords({
         collection: 'orders',
@@ -742,6 +756,7 @@ describe('DataStore', () => {
           { region: 'US', product: 'B', revenue: 300, quantity: 12 },
           { region: 'EU', product: 'A', revenue: 50, quantity: 3 },
         ],
+        stamp: TEST_STAMP,
       });
     });
 
@@ -904,8 +919,8 @@ describe('DataStore', () => {
     const ROWS = 1200;
     beforeEach(() => {
       ds.createCollection({ name: 'walked', scope, columns: [{ name: 'k', type: 'number' }, { name: 'v', type: 'string' }], uniqueKey: ['k'] });
-      ds.insertRecords({ collection: 'walked', records: Array.from({ length: 1000 }, (_, i) => ({ k: i, v: 'a' })) });
-      ds.insertRecords({ collection: 'walked', records: Array.from({ length: ROWS - 1000 }, (_, i) => ({ k: 1000 + i, v: 'a' })) });
+      ds.insertRecords({ collection: 'walked', records: Array.from({ length: 1000 }, (_, i) => ({ k: i, v: 'a' })), stamp: TEST_STAMP });
+      ds.insertRecords({ collection: 'walked', records: Array.from({ length: ROWS - 1000 }, (_, i) => ({ k: 1000 + i, v: 'a' })), stamp: TEST_STAMP });
     });
 
     const walk = (between?: () => void): number[] => {
@@ -937,7 +952,7 @@ describe('DataStore', () => {
       const seen = walk(() => {
         round++;
         ds.deleteRecords({ collection: 'walked', filter: { k: { $in: [3 * round, 3 * round + 1] } } });
-        ds.insertRecords({ collection: 'walked', records: [{ k: 400 + round, v: 'b' }, { k: ROWS - 10 * round, v: 'b' }] });
+        ds.insertRecords({ collection: 'walked', records: [{ k: 400 + round, v: 'b' }, { k: ROWS - 10 * round, v: 'b' }], stamp: TEST_STAMP });
       });
       expect(round, 'precondition: the walk was written between pages').toBeGreaterThan(0);
       expect(ds.queryRecords({ collection: 'walked' }).total, 'precondition: the deletes landed').toBe(ROWS - 2 * round);
@@ -956,6 +971,38 @@ describe('DataStore', () => {
   });
 
   // === Collection Info & Listing ===
+
+  describe('deleteRecordsReturningIds (660a-2)', () => {
+    const seed = (): Array<{ _id: number; status: string }> => {
+      ds.createCollection({ name: 'leads', scope, columns: [{ name: 'status', type: 'string' }] });
+      ds.insertRecords({ collection: 'leads', records: [{ status: 'open' }, { status: 'lost' }, { status: 'lost' }, { status: 'open' }], stamp: TEST_STAMP });
+      return ds.queryRecords({ collection: 'leads' }).rows as Array<{ _id: number; status: string }>;
+    };
+
+    it('names exactly the records it removed, and the count matches', () => {
+      const before = seed();
+      const lost = before.filter(r => r.status === 'lost').map(r => r._id).sort((a, b) => a - b);
+      const res = ds.deleteRecordsReturningIds({ collection: 'leads', filter: { status: 'lost' } });
+      expect([...res.ids].sort((a, b) => a - b)).toEqual(lost);
+      expect(res.deleted).toBe(2);
+      const left = (ds.queryRecords({ collection: 'leads' }).rows as Array<{ _id: number }>).map(r => r._id);
+      expect(left.some(id => lost.includes(id))).toBe(false);
+      expect(left).toHaveLength(2);
+      expect(ds.getCollectionInfo('leads')?.recordCount).toBe(2);
+    });
+
+    it('names nothing and keeps the count when nothing matches', () => {
+      seed();
+      expect(ds.deleteRecordsReturningIds({ collection: 'leads', filter: { status: 'won' } })).toEqual({ deleted: 0, ids: [] });
+      expect(ds.getCollectionInfo('leads')?.recordCount).toBe(4);
+    });
+
+    it('deleteRecords still answers with the count alone', () => {
+      seed();
+      expect(ds.deleteRecords({ collection: 'leads', filter: { status: 'open' } })).toBe(2);
+      expect(ds.getCollectionInfo('leads')?.recordCount).toBe(2);
+    });
+  });
 
   describe('listCollections / getCollectionInfo', () => {
     it('lists all collections', () => {
@@ -977,7 +1024,7 @@ describe('DataStore', () => {
         columns: [{ name: 'val', type: 'number' }],
         uniqueKey: ['val'],
       });
-      ds.insertRecords({ collection: 'info_test', records: [{ val: 1 }, { val: 2 }] });
+      ds.insertRecords({ collection: 'info_test', records: [{ val: 1 }, { val: 2 }], stamp: TEST_STAMP });
 
       const info = ds.getCollectionInfo('info_test');
       expect(info?.recordCount).toBe(2);
@@ -1000,7 +1047,7 @@ describe('DataStore', () => {
 
     it('new columns have null for existing rows', () => {
       ds.createCollection({ name: 'evolve2', scope, columns: [{ name: 'x', type: 'string' }] });
-      ds.insertRecords({ collection: 'evolve2', records: [{ x: 'hello' }] });
+      ds.insertRecords({ collection: 'evolve2', records: [{ x: 'hello' }], stamp: TEST_STAMP });
       ds.alterCollection({ collection: 'evolve2', addColumns: [{ name: 'y', type: 'number' }] });
 
       const { rows } = ds.queryRecords({ collection: 'evolve2' });
@@ -1071,7 +1118,7 @@ describe('DataStore', () => {
 
     it('preserves a CRM-shaped collection with data — the user may rely on it', () => {
       ds.createCollection({ name: 'contacts', scope, columns: [{ name: 'email', type: 'string' }] });
-      ds.insertRecords({ collection: 'contacts', records: [{ email: 'alice@example.com' }] });
+      ds.insertRecords({ collection: 'contacts', records: [{ email: 'alice@example.com' }], stamp: TEST_STAMP });
       ds.dropEmptyCrmOverlaps([]);
       expect(ds.getCollectionInfo('contacts')).not.toBeNull();
     });
@@ -1113,9 +1160,9 @@ describe('DataStore', () => {
         .prepare("SELECT name, sql FROM sqlite_master WHERE tbl_name IN ('ds_contacts','ds_deals','ds_interactions') ORDER BY name")
         .all();
       expect(ddl).toEqual([
-        { name: 'ds_contacts', sql: 'CREATE TABLE "ds_contacts" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, "name" TEXT, "email" TEXT, "phone" TEXT, "company" TEXT, "type" TEXT, "source" TEXT, "channel_id" TEXT, "language" TEXT, "notes" TEXT, "tags" TEXT)' },
-        { name: 'ds_deals', sql: 'CREATE TABLE "ds_deals" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, "title" TEXT, "contact_name" TEXT, "value" REAL, "currency" TEXT, "stage" TEXT, "next_action" TEXT, "due_date" TEXT)' },
-        { name: 'ds_interactions', sql: 'CREATE TABLE "ds_interactions" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, "contact_name" TEXT, "type" TEXT, "channel" TEXT, "summary" TEXT, "date" TEXT)' },
+        { name: 'ds_contacts', sql: 'CREATE TABLE "ds_contacts" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, "name" TEXT, "email" TEXT, "phone" TEXT, "company" TEXT, "type" TEXT, "source" TEXT, "channel_id" TEXT, "language" TEXT, "notes" TEXT, "tags" TEXT)' },
+        { name: 'ds_deals', sql: 'CREATE TABLE "ds_deals" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, "title" TEXT, "contact_name" TEXT, "value" REAL, "currency" TEXT, "stage" TEXT, "next_action" TEXT, "due_date" TEXT)' },
+        { name: 'ds_interactions', sql: 'CREATE TABLE "ds_interactions" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, "contact_name" TEXT, "type" TEXT, "channel" TEXT, "summary" TEXT, "date" TEXT)' },
         { name: 'idx_contacts_ukey', sql: 'CREATE UNIQUE INDEX "idx_contacts_ukey" ON "ds_contacts" ("email")' },
         { name: 'idx_deals_ukey', sql: 'CREATE UNIQUE INDEX "idx_deals_ukey" ON "ds_deals" ("title", "contact_name")' },
       ]);
@@ -1142,6 +1189,7 @@ describe('DataStore', () => {
       ds.insertRecords({
         collection: 'json_test',
         records: [{ name: 'test', metadata: { tags: ['a', 'b'], score: 42 } }],
+        stamp: TEST_STAMP,
       });
 
       const { rows } = ds.queryRecords({ collection: 'json_test' });
@@ -1170,6 +1218,7 @@ describe('DataStore', () => {
           { a: 2, b: 'x' },
           { a: 1, b: 'y' },
         ],
+        stamp: TEST_STAMP,
       });
 
       const { rows } = ds.queryRecords({
@@ -1207,6 +1256,7 @@ describe('DataStore', () => {
       expect(() => ds.insertRecords({
         collection: 'size_test',
         records: [{ val: 'test' }],
+        stamp: TEST_STAMP,
       })).toThrow(/DataStore disk size.*exceeds limit/);
 
       // Restore
@@ -1219,7 +1269,7 @@ describe('DataStore', () => {
   describe('system columns', () => {
     it('filters by _id', () => {
       ds.createCollection({ name: 'sys_test', scope, columns: [{ name: 'x', type: 'string' }] });
-      ds.insertRecords({ collection: 'sys_test', records: [{ x: 'a' }, { x: 'b' }] });
+      ds.insertRecords({ collection: 'sys_test', records: [{ x: 'a' }, { x: 'b' }], stamp: TEST_STAMP });
 
       const { rows } = ds.queryRecords({
         collection: 'sys_test',
@@ -1251,6 +1301,7 @@ describe('DataStore', () => {
           { note: 'follow-up', patient: 'Anna Meier' },
           { note: 'new patient', patient: 'Ben Roth' },
         ],
+        stamp: TEST_STAMP,
       });
 
       const { rows } = ds.queryRecords({ collection: 'appointments', sort: [{ field: '_id', order: 'asc' }] });
@@ -1278,6 +1329,7 @@ describe('DataStore', () => {
           { title: 'unassigned', client: '' },
           { title: 'also unassigned' }, // omitted entirely
         ],
+        stamp: TEST_STAMP,
       });
 
       const { rows } = ds.queryRecords({ collection: 'tickets', sort: [{ field: '_id', order: 'asc' }] });
@@ -1300,6 +1352,7 @@ describe('DataStore', () => {
       ds.insertRecords({
         collection: 'orders',
         records: [{ sku: 'A-1', buyer: 'Clara Vogt' }],
+        stamp: TEST_STAMP,
       });
 
       const { rows } = ds.queryRecords({ collection: 'orders' });
@@ -1322,6 +1375,7 @@ describe('DataStore', () => {
       ds.insertRecords({
         collection: 'deliverables',
         records: [{ title: 'Logo v1', client: 'Acme GmbH' }],
+        stamp: TEST_STAMP,
       });
 
       const { rows } = ds.queryRecords({ collection: 'deliverables' });
@@ -1346,6 +1400,7 @@ describe('DataStore', () => {
       ds.insertRecords({
         collection: 'clinic_appointments',
         records: [{ when: '2026-07-10', patient: 'Anna Meier' }],
+        stamp: TEST_STAMP,
       });
 
       // Agency: a deliverable links to a client company (organization).
@@ -1360,6 +1415,7 @@ describe('DataStore', () => {
       ds.insertRecords({
         collection: 'agency_deliverables',
         records: [{ title: 'Landing page', client: 'Acme GmbH' }],
+        stamp: TEST_STAMP,
       });
 
       const clinic = ds.queryRecords({ collection: 'clinic_appointments' });
@@ -1387,6 +1443,7 @@ describe('DataStore', () => {
       ds.insertRecords({
         collection: 'leads',
         records: [{ label: 'unresolvable', contact: 'Ghost Name' }],
+        stamp: TEST_STAMP,
       });
 
       const { rows } = ds.queryRecords({ collection: 'leads' });
@@ -1407,6 +1464,7 @@ describe('DataStore', () => {
       ds.insertRecords({
         collection: 'visits',
         records: [{ day: 'mon', patient: '   ' }],
+        stamp: TEST_STAMP,
       });
 
       const { rows } = ds.queryRecords({ collection: 'visits' });
@@ -1429,8 +1487,8 @@ describe('DataStore', () => {
       });
       // Two inserts with the SAME (resolved client, plan) → the ON CONFLICT path
       // must dedup on the resolved subject_id, updating rather than duplicating.
-      ds.insertRecords({ collection: 'subscriptions', records: [{ client: 'Acme GmbH', plan: 'pro', seats: 5 }] });
-      const second = ds.insertRecords({ collection: 'subscriptions', records: [{ client: 'acme gmbh', plan: 'pro', seats: 9 }] });
+      ds.insertRecords({ collection: 'subscriptions', records: [{ client: 'Acme GmbH', plan: 'pro', seats: 5 }], stamp: TEST_STAMP });
+      const second = ds.insertRecords({ collection: 'subscriptions', records: [{ client: 'acme gmbh', plan: 'pro', seats: 9 }], stamp: TEST_STAMP });
 
       expect(second.updated).toBe(1);
       const { rows } = ds.queryRecords({ collection: 'subscriptions' });
@@ -1461,6 +1519,7 @@ describe('DataStore', () => {
           { note: 'new patient', patient: 'Ben Roth' },
           { note: 'follow-up', patient: 'anna meier' }, // case-variant → same subject
         ],
+        stamp: TEST_STAMP,
       });
     }
 
@@ -1620,6 +1679,7 @@ describe('DataStore', () => {
         res = ds.insertRecords({
           collection: 'appointments',
           records: [{ note: 'ambiguous patient', patient: 'Meier' }],
+          stamp: TEST_STAMP,
         });
       } finally {
         channels.subjectAmbiguous.unsubscribe(onAmbiguous);
@@ -1723,6 +1783,7 @@ describe('DataStore', () => {
           { title: 'linked', client: 'Acme GmbH' },
           { title: 'unlinked' }, // no client → null
         ],
+        stamp: TEST_STAMP,
       });
 
       const linked = ds.queryRecords({ collection: 'tickets', filter: { client: { $is_null: false } }, subjectsByName: true });
@@ -1752,7 +1813,7 @@ describe('DataStore', () => {
         scope,
         columns: [{ name: 'buyer', type: 'subject', subjectKind: 'person' }],
       });
-      ds.insertRecords({ collection: 'orders', records: [{ buyer: 'Anyone' }] });
+      ds.insertRecords({ collection: 'orders', records: [{ buyer: 'Anyone' }], stamp: TEST_STAMP });
 
       const { rows } = ds.queryRecords({ collection: 'orders', subjectsByName: true });
       expect(rows[0]!['buyer']).toBe('subj-x');
@@ -1767,7 +1828,7 @@ describe('DataStore', () => {
         scope,
         columns: [{ name: 'buyer', type: 'subject', subjectKind: 'person' }],
       });
-      ds.insertRecords({ collection: 'orders', records: [{ buyer: 'Clara Vogt' }, { buyer: 'Dan Ott' }] });
+      ds.insertRecords({ collection: 'orders', records: [{ buyer: 'Clara Vogt' }, { buyer: 'Dan Ott' }], stamp: TEST_STAMP });
 
       const { rows, total } = ds.queryRecords({ collection: 'orders', filter: { buyer: 'Clara Vogt' }, subjectsByName: true });
       expect(total).toBe(1);
@@ -2029,6 +2090,7 @@ describe('DataStore', () => {
           { note: 'new patient', patient: 'Ben Roth' },
           { note: 'follow-up', patient: 'anna meier' }, // case-variant → same subject
         ],
+        stamp: TEST_STAMP,
       });
 
       const { rows } = ds.queryRecords({
@@ -2076,10 +2138,10 @@ describe('DataStore', () => {
         { amount: 100, client: ACME, invoice_date: '2026-01-10' },
         { amount: 200, client: ACME, invoice_date: '2026-03-15' },
         { amount: 999, client: OTHER, invoice_date: '2026-06-01' }, // different subject
-      ] });
+      ], stamp: TEST_STAMP });
       ds.insertRecords({ collection: 'meetings', records: [
         { topic: 'kickoff', org: ACME, met_on: '2026-02-20' },
-      ] });
+      ], stamp: TEST_STAMP });
 
       const { occurrences, truncated } = ds.getRecordsForSubject(ACME);
       expect(truncated).toBe(false);
@@ -2098,7 +2160,7 @@ describe('DataStore', () => {
           { name: 'about', type: 'subject', subjectKind: 'organization' },
         ],
       });
-      ds.insertRecords({ collection: 'notes', records: [{ body: 'hi', about: ACME }] });
+      ds.insertRecords({ collection: 'notes', records: [{ body: 'hi', about: ACME }], stamp: TEST_STAMP });
       const { occurrences } = ds.getRecordsForSubject(ACME);
       expect(occurrences).toHaveLength(1);
       expect(occurrences[0]!.occurredAtIsEventTime).toBe(false);
@@ -2119,7 +2181,7 @@ describe('DataStore', () => {
       ds.insertRecords({ collection: 'transfers', records: [
         { sender: ACME, receiver: ACME, moved_on: '2026-05-05' },   // intra-org — one row
         { sender: ACME, receiver: OTHER, moved_on: '2026-04-04' },
-      ] });
+      ], stamp: TEST_STAMP });
       const { occurrences } = ds.getRecordsForSubject(ACME);
       expect(occurrences).toHaveLength(2); // NOT 3 — the both-columns row is one occurrence
       const both = occurrences.find(o => o.occurredAt === '2026-05-05')!;
@@ -2130,11 +2192,11 @@ describe('DataStore', () => {
 
     it('skips collections with no subject column and returns empty for an unknown subject', () => {
       ds.createCollection({ name: 'plain', scope, columns: [{ name: 'x', type: 'string' }] });
-      ds.insertRecords({ collection: 'plain', records: [{ x: 'a' }] });
+      ds.insertRecords({ collection: 'plain', records: [{ x: 'a' }], stamp: TEST_STAMP });
       ds.createCollection({ name: 'linked', scope, columns: [
         { name: 'y', type: 'string' }, { name: 'who', type: 'subject', subjectKind: 'person' },
       ] });
-      ds.insertRecords({ collection: 'linked', records: [{ y: 'b', who: ACME }] });
+      ds.insertRecords({ collection: 'linked', records: [{ y: 'b', who: ACME }], stamp: TEST_STAMP });
       expect(ds.getRecordsForSubject(ACME).occurrences).toHaveLength(1);
       expect(ds.getRecordsForSubject('subj-nobody').occurrences).toHaveLength(0);
     });
@@ -2147,7 +2209,7 @@ describe('DataStore', () => {
       ] });
       ds.insertRecords({ collection: 'events', records: Array.from({ length: 5 }, (_, i) => ({
         seq: i, org: ACME, on_date: `2026-01-0${String(i + 1)}`,
-      })) });
+      })), stamp: TEST_STAMP });
       const { occurrences, truncated } = ds.getRecordsForSubject(ACME, { limit: 3 });
       expect(occurrences).toHaveLength(3);
       expect(truncated).toBe(true);
@@ -2166,10 +2228,10 @@ describe('DataStore', () => {
       // 2 rows in each collection: neither alone exceeds limit 3, but 4 total does.
       ds.insertRecords({ collection: 'ca', records: [
         { org: ACME, d: '2026-01-01' }, { org: ACME, d: '2026-01-03' },
-      ] });
+      ], stamp: TEST_STAMP });
       ds.insertRecords({ collection: 'cb', records: [
         { org: ACME, d: '2026-01-02' }, { org: ACME, d: '2026-01-04' },
-      ] });
+      ], stamp: TEST_STAMP });
       const { occurrences, truncated } = ds.getRecordsForSubject(ACME, { limit: 3 });
       expect(occurrences).toHaveLength(3);
       expect(truncated).toBe(true); // the `out.length > limit` branch, not per-collection
@@ -2189,7 +2251,7 @@ describe('DataStore', () => {
         { label: 'real_old', client: ACME, happened: '2020-01-01' }, // the only true event time
         { label: 'empty', client: ACME, happened: '' },              // '' → fallback, NOT epoch-old
         { label: 'absent', client: ACME },                            // null → fallback
-      ] });
+      ], stamp: TEST_STAMP });
       const { occurrences } = ds.getRecordsForSubject(ACME);
       expect(occurrences).toHaveLength(3);
       // the 2020 row is the genuine oldest → sorts LAST; empty/absent get the recent

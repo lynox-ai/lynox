@@ -39,6 +39,12 @@ const DEFAULT_FLUSH_INTERVAL_MS = 30_000;
 const FLUSH_BATCH_SIZE = 10;
 const MAX_PENDING = 500;
 const FLUSH_TIMEOUT_MS = 15_000;
+// How long `onShutdown` waits for flushes already sending and starts attempts of
+// its own (up to three, 1 s apart, each cut to what is left). 48 s is what the
+// three attempts alone could take before (3 × 15 s + 3 × 1 s), so waiting for a
+// flush in flight comes out of that worst case instead of adding to it.
+export const SHUTDOWN_FLUSH_BUDGET_MS = 48_000;
+const SHUTDOWN_RETRY_PAUSE_MS = 1_000;
 // Coalesce provider-incident reports per host: every tenant on a down provider
 // fails at once, so a burst of runs must not storm the CP — one POST per host per
 // window (the CP dedups again on its side).
@@ -200,11 +206,24 @@ export function createManagedHook(opts: {
     return reports.reduce((n, r) => n + (Number.isFinite(r.cost_cents) ? r.cost_cents : 0), 0);
   }
 
-  async function flush(): Promise<void> {
-    if (flushing || pending.length === 0) return;
-    flushing = true;
+  // The batch a flush has taken out of `pending` and is still sending. A second
+  // flush returns at once while one runs, so without this a shutdown that starts
+  // mid-flush would neither wait for it nor know what it carries.
+  let inFlight: { batch: UsageReportRun[]; done: Promise<void> } | null = null;
 
+  function flush(timeoutMs: number = FLUSH_TIMEOUT_MS): Promise<void> {
+    if (flushing || pending.length === 0) return Promise.resolve();
+    flushing = true;
     const batch = pending.splice(0);
+    // run-group-starter: clears the slot when this one request ends; it reports no spend.
+    const done: Promise<void> = sendBatch(batch, timeoutMs).finally(() => {
+      if (inFlight?.done === done) inFlight = null;
+    });
+    inFlight = { batch, done };
+    return done;
+  }
+
+  async function sendBatch(batch: UsageReportRun[], timeoutMs: number): Promise<void> {
     // Track this batch as in-flight for the mirror: spliced out of `pending` but
     // not yet debited by the CP, so a /status re-anchor in this window must still
     // subtract it (FD1). Success → the CP debits it (lands in the next
@@ -218,7 +237,7 @@ export function createManagedHook(opts: {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-instance-secret': secret },
         body: JSON.stringify({ runs: batch } satisfies UsageFlushRequest),
-        signal: AbortSignal.timeout(FLUSH_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
 
       if (res.ok) {
@@ -535,11 +554,43 @@ export function createManagedHook(opts: {
     async onShutdown() {
       if (flushTimer) clearInterval(flushTimer);
       if (resyncTimer) clearInterval(resyncTimer);
-      // Final flush with retry
-      for (let attempt = 0; attempt < 3 && pending.length > 0; attempt++) {
-        await flush();
-        if (pending.length === 0) break;
-        await new Promise(r => setTimeout(r, 1_000));
+      const deadline = Date.now() + SHUTDOWN_FLUSH_BUDGET_MS;
+      let attempts = 0;
+      // Runs still finishing can start a flush of their own at any point in here,
+      // so each round looks again: a flush sending is waited for (on failure it
+      // puts its batch back into `pending`), otherwise one more attempt, each cut
+      // to what is left of the budget.
+      // run-group-starter: ends at the budget, inside the shutdown; it reports no spend.
+      for (;;) {
+        const left = deadline - Date.now();
+        if (left <= 0) break;
+        const running = inFlight;
+        if (running) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          // run-group-starter: a timer that ends this wait at the budget; it reports no spend.
+          await Promise.race([
+            running.done.catch(() => { /* counted below if its batch is back in `pending` */ }),
+            new Promise<void>(r => { timer = setTimeout(r, left); }),
+          ]);
+          clearTimeout(timer);
+          continue;
+        }
+        if (pending.length === 0 || attempts === 3) break;
+        attempts++;
+        await flush(Math.min(FLUSH_TIMEOUT_MS, left));
+        if (pending.length > 0 && attempts < 3 && deadline - Date.now() > SHUTDOWN_RETRY_PAUSE_MS) {
+          // run-group-starter: the 1 s pause between attempts; it reports no spend.
+          await new Promise(r => setTimeout(r, SHUTDOWN_RETRY_PAUSE_MS));
+        }
+      }
+      // Counted in the same tick, with no await between the two: a batch still
+      // sending can only land back in `pending` after both counts.
+      const unsettled = inFlight;
+      if (unsettled) {
+        // Still sending when the budget ran out. Whether the control plane got it
+        // is unknown; it is counted as lost, so a drop is never silent, even if it
+        // was debited after all.
+        reportDrop(unsettled.batch, 'shutdown-unflushed');
       }
       if (pending.length > 0) {
         // Reports that survived all retries at shutdown are lost — report them.

@@ -608,7 +608,7 @@ const MISTRAL_FEATURES_SMALL: ModelFeatures = {
 // legacy/opt-in roster (codestral, magistral, nemo, *-2410/2508/2603) stays
 // vision:false: codestral + nemo genuinely reject images ("Image input is not
 // enabled for this model"), and the reasoning/deprecated ids the product doesn't
-// tier-route are left unsupported by decision (rafael 2026-07-18) — a false-NO
+// tier-route are left unsupported by decision (2026-07-18) — a false-NO
 // only yields the clear pre-flight throw, never a silent answer to an unseen image.
 const MISTRAL_FEATURES_GEN3: ModelFeatures = {
   vision: true,
@@ -1013,7 +1013,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // pricing and context window of the model that actually answers (`MISTRAL_SERVED_AS`,
   // checked offline in models.test.ts and on the wire in tests/online/mistral-served-as).
   // Features are deliberately NOT mirrored: legacy Mistral ids stay `vision:false` by
-  // decision (rafael 2026-07-18), and a false-NO only yields the clear pre-flight error.
+  // decision (2026-07-18), and a false-NO only yields the clear pre-flight error.
   // magistral-medium-2509 / magistral-small-2509 are removed: Mistral answers them
   // `400 Invalid model`, so no spend can reach their rows.
   //
@@ -1210,8 +1210,8 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'Kimi K3',
     provenance: 'CN',
   },
-  // Balanced/main-chat CANDIDATES (2026-08-09, rafael canary): mistral-medium
-  // underperforms as the main on real requests (rafael), so the picker offers
+  // Balanced/main-chat CANDIDATES (2026-08-09, canary instance): mistral-medium
+  // underperforms as the main on real requests (owner observation), so the picker offers
   // alternatives to test. Pricing read from each model's Fireworks page — the
   // cached rates differ per model (0.028 / 0.08), never derived.
   // Fireworks retired the UNSUFFIXED alias on 2026-08-14: the last successful call
@@ -1265,6 +1265,32 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     // two paragraphs up. The reproducible claim is the DIRECTION: silent without the
     // suppression on a hard prompt at that budget, answering with it.)
     // The suppression is therefore not inherited by habit — it was re-measured.
+    defaultReasoningEffort: 'none',
+  },
+  // The provider's "minor update" of the entry above (listed 2026-10-17), and the FAST
+  // slot of efficient and balanced since 2026-10-27. The older id still serves and stays
+  // registered, so a config that names it keeps working; only the presets and the picker
+  // moved. Same 1M window, same tool support, same image-input claim on the listing —
+  // and the same text-only features here, for the reason given on the entry above.
+  'accounts/fireworks/models/deepseek-v4p1-flash-1017': {
+    id: 'accounts/fireworks/models/deepseek-v4p1-flash-1017',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    // Fireworks Standard row of docs.fireworks.ai/serverless/pricing, raw text 2026-10-27:
+    // "DeepSeek V4.1 Flash 1017 $0.30 / $0.006 / $1.20" — the same numbers as the row for
+    // the entry above, read on its own row, not carried over.
+    pricing: { input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.006 },
+    uiLabel: 'DeepSeek v4.1 Flash 1017',
+    provenance: 'CN',
+    // Measured 2026-10-27 at the fast-tier budgets, same prompts against both ids: on a
+    // hard prompt at `max_tokens: 64` without this field it returns HTTP 200 with an EMPTY
+    // string and `finish_reason: 'length'`, exactly like the entry above; with it the same
+    // call answers. Re-measured, not inherited.
     defaultReasoningEffort: 'none',
   },
   'accounts/fireworks/models/glm-5p3': {

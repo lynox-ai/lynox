@@ -43,6 +43,23 @@ export interface NotificationMessage {
    */
   recipient?: string | undefined;
   /**
+   * Which side of the instance this text is for, when the owner and the people the owner let in
+   * (mandates) are to read different sentences: `owner` reaches the owner's own devices only,
+   * `mandates` those of one live grant only, named by `mandateId`. A channel counts only the
+   * devices it was sent to.
+   * Addressing, like `recipient`, so it is never part of what a channel sends. Absent means the
+   * channel's whole audience, as before. A channel that cannot tell the two sides apart returns
+   * `skipped` for a message that names one, or the owner would read the mandates' sentence and a
+   * mandate the owner's (core's escalation mail channel does).
+   */
+  audience?: 'owner' | 'mandates' | undefined;
+  /**
+   * With `audience: 'mandates'`, the grant whose devices the message is for. A sentence about one
+   * grant's entry must not reach another grant's devices, so a mandates' message without it reaches
+   * no device at all. Addressing, like `audience`.
+   */
+  mandateId?: string | undefined;
+  /**
    * Channel-specific passthrough data — e.g. the inbox notifier sets
    * `{ itemId: '<inbox-row-id>' }` so the service worker's
    * `notificationclick` handler can deep-link to the affected mail.
@@ -61,8 +78,12 @@ export interface NotificationMessage {
  * - `skipped` — the message was not for this channel; nothing to do, nothing wrong.
  * - `failed` — the message was for this channel and did not reach anyone, including the
  *   case of a channel with nobody to deliver to.
+ * - `reached_others` — the message left, but only for readers other than the owner (a web
+ *   push that only a mandate's device took). It was sent, so whoever limits how often a
+ *   channel sends counts it (`sendTo`); the owner was not told, so it never counts as
+ *   delivered (`summarizeDelivery`), and an escalation still falls back to mail.
  */
-export type ChannelOutcome = 'delivered' | 'skipped' | 'failed';
+export type ChannelOutcome = 'delivered' | 'skipped' | 'failed' | 'reached_others';
 
 export interface NotificationChannel {
   readonly name: string;
@@ -74,8 +95,9 @@ export type NotifyReport = ReadonlyArray<{ readonly channel: string; readonly ou
 
 /**
  * Whether a `notify()` reached anyone: `delivered` iff at least one channel delivered,
- * `no_channel` when none was registered, `not_delivered` otherwise. A `skipped` channel
- * never counts — that is the reason `ChannelOutcome` has three values.
+ * `no_channel` when none was registered, `not_delivered` otherwise. A `skipped` or
+ * `reached_others` channel never counts — that is the reason `ChannelOutcome` is more than
+ * a boolean.
  */
 export type DeliverySummary = 'delivered' | 'not_delivered' | 'no_channel';
 
@@ -89,7 +111,7 @@ export type DeliverySummary = 'delivered' | 'not_delivered' | 'no_channel';
  * as `failed`.
  */
 export function outcomeOf(value: unknown): ChannelOutcome {
-  if (value === 'delivered' || value === 'skipped' || value === 'failed') return value;
+  if (value === 'delivered' || value === 'skipped' || value === 'failed' || value === 'reached_others') return value;
   return value === true ? 'skipped' : 'failed';
 }
 
@@ -149,7 +171,8 @@ export class NotificationRouter {
    * Send to a specific channel by name.
    * Returns `false` if the channel is not found or the send failed. A `skipped` message
    * returns `true`, as it did when channels answered with a boolean — callers throttle on
-   * this value (`integrations/inbox/notifier.ts`), so its meaning stays "handled".
+   * this value (`integrations/inbox/notifier.ts`), so its meaning stays "handled". So does
+   * `reached_others`: a push a mandate's device took was sent, and the throttle counts it.
    */
   async sendTo(
     channelName: string,
@@ -161,7 +184,7 @@ export class NotificationRouter {
     }
     try {
       const outcome = outcomeOf(await ch.send(msg));
-      return outcome === 'delivered' || outcome === 'skipped';
+      return outcome === 'delivered' || outcome === 'skipped' || outcome === 'reached_others';
     } catch (err: unknown) {
       const detail =
         err instanceof Error ? err.message : String(err);

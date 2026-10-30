@@ -5,6 +5,7 @@ import type { SecretScope } from '../types/index.js';
 import type { SecretVault } from './secret-vault.js';
 import { askSecretTool } from '../tools/builtin/ask-secret.js';
 import type { IAgent } from '../types/index.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 // A built-in provider's OAuth client lives under names derived from the provider's id. The secret
 // half is the engine's: the model does not see it listed, cannot reference it and cannot ask for it.
@@ -102,7 +103,7 @@ describe('the names a refusal reads are the names a resolution resolves', () => 
 
 describe('ask_secret', () => {
   const agentWith = (promptSecret: ReturnType<typeof vi.fn>, secretStore?: SecretStore): IAgent =>
-    ({ name: 't', model: 'm', memory: null, tools: [], onStream: null, promptSecret, ...(secretStore ? { secretStore } : {}) }) as unknown as IAgent;
+    ({ name: 't', model: 'm', memory: null, tools: [], onStream: null, principal: OWNER_PRINCIPAL, promptSecret, ...(secretStore ? { secretStore } : {}) }) as unknown as IAgent;
 
   it.each([
     ['SHOPIFY_CLIENT_SECRET', 'SHOPIFY_CLIENT_SECRET'],

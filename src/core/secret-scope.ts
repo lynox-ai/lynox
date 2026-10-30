@@ -243,6 +243,7 @@ export function scopeSecretStore(
 
     // Unnarrowed on purpose — see the doc comment above.
     containsSecret: (text) => inner.containsSecret(text),
+    containsSecretAsHost: (host) => inner.containsSecretAsHost(host),
     maskSecrets: (text) => inner.maskSecrets(text),
     maskAll: (text, opts) => inner.maskAll(text, opts),
     extractSecretNames: (input) => inner.extractSecretNames(input),

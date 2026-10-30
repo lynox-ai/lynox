@@ -17,16 +17,19 @@
 import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
+import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
+import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
-import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
+import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, ExtractionStoppedError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
+import { recordSessionCost } from '../../core/session-budget.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
@@ -34,13 +37,17 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
-import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
+import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
+import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 import { isRequestShapingHeaderName } from '../../core/outbound-write.js';
+import { ifEmptiedAny, ifOk, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -49,6 +56,11 @@ const OPENAPI_FETCH_TIMEOUT_MS = 15_000;
 /** Cap on the docs-page body pre-Haiku. 250 KB matches PRD-UNIFIED-API-PROFILE-V2. */
 const DOCS_BODY_MAX_BYTES = 250 * 1024;
 const DOCS_FETCH_TIMEOUT_MS = 15_000;
+
+/** What a bootstrap read throws when the run stopped it: the engine reports the stop. */
+function bootstrapStopped(): DOMException {
+  return new DOMException('api_setup bootstrap was stopped before its draft was built', 'AbortError');
+}
 /**
  * Hard $ budget per extraction call. The helper's default model is now
  * Sonnet 4.6 (matches the engine-wide LLM default) — Haiku was the legacy
@@ -161,6 +173,10 @@ const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
 const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 
 /** The built-in preset an oauth2 profile names, when the engine knows it. */
+function isPlainRecord<T>(value: T): value is T & Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function builtInPresetOf(profile: ApiProfile): ReturnType<typeof OAUTH_PRESETS.get> {
   const presetId: unknown = profile.auth?.type === 'oauth2' ? profile.auth.oauth?.preset_id : undefined;
   return typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
@@ -726,6 +742,8 @@ const DOCS_EXTRACT_SCHEMA: ExtractSchema = {
       items: {
         type: 'object',
         properties: {
+          // The methods a profile documents for its endpoints: a description the model reads, not
+          // a gate. Whether a method only reads is answered by `isReadMethod` (core/outbound-write.ts).
           method: { type: 'string', enum: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'] as const },
           path: { type: 'string' },
           description: { type: 'string' },
@@ -786,13 +804,6 @@ function deriveBaseUrlFromDocs(docsUrl: string): string {
   return `${u.protocol}//${u.host}`;
 }
 
-/** Second-level labels that, under a two-letter country code, are treated as
- *  a public suffix (`co.uk`, `com.au`, `ac.jp`). One entry per label; add a line
- *  to cover another. */
-const PUBLIC_SECOND_LEVEL_LABELS: readonly string[] = [
-  'co', 'com', 'net', 'org', 'ac', 'gov', 'edu', 'ne', 'or', 'go', 'ltd', 'plc',
-];
-
 /** The parent a candidate host must sit under: the docs host without its first
  *  label when it has more than two labels, otherwise the docs host itself. A parent of the
  *  form `<label from PUBLIC_SECOND_LEVEL_LABELS>.<two-letter country code>` is
@@ -802,10 +813,7 @@ function candidateParent(docsHost: string): string | null {
   const labels = docsHost.split('.');
   if (labels.length < 2) return null;
   const parent = labels.length > 2 ? labels.slice(1) : labels;
-  const isPublicSuffix = parent.length === 2
-    && /^[a-z]{2}$/.test(parent[1]!)
-    && PUBLIC_SECOND_LEVEL_LABELS.includes(parent[0]!);
-  return isPublicSuffix ? docsHost : parent.join('.');
+  return isCountrySecondLevel(parent) ? docsHost : parent.join('.');
 }
 
 /** Alt-host candidates referenced in the docs body that sit under the docs
@@ -935,9 +943,52 @@ function findLinkedSections(html: string, baseUrl: string): LinkedSection[] {
   return candidates.slice(0, LINKED_SECTION_MAX_COUNT).map(c => ({ url: c.url, anchor: c.anchor }));
 }
 
+/**
+ * Whether this conversation or run has used up its request budget (`MAX_REQUESTS_PER_SESSION`,
+ * shared with `http_request`). Only a read: it reserves nothing.
+ */
+function requestLimitReached(agent: IAgent): boolean {
+  return agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION;
+}
+
+/**
+ * Reserves one request of the budget for one of api_setup's own fetches, right before it goes
+ * out; false at the limit, and then nothing is reserved (row 1005). Charged before it sends, as
+ * `http_request` is, so a fetch that fails after it went out (a timeout, a redirect loop) stays
+ * charged, and a fetch the egress policy refuses is charged too. Checked and charged in one step
+ * before the first await, so parallel api_setup fetches cannot all pass the check at 99. That
+ * holds among api_setup's fetches only: `http_request` checks and charges with awaits between,
+ * so a racing `http_request` can still take one past the limit.
+ * `api-setup-request-limit.test.ts` holds every fetch here to this.
+ */
+function reserveRequest(agent: IAgent): boolean {
+  if (requestLimitReached(agent)) return false;
+  agent.sessionCounters.httpRequests++;
+  return true;
+}
+
+/**
+ * What the model reads when a bootstrap cannot fetch its page because the budget is spent (ux
+ * U-051, after U-010 for `fetch_token`). Nothing is stored yet, so the way on is to start the
+ * setup in a new chat; a bulk run is no way on for a setup.
+ */
+function bootstrapLimitMessage(what: 'the docs page' | 'the OpenAPI spec'): string {
+  return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it, so api_setup cannot fetch ${what}. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not start here and that they can start it in a new chat.`;
+}
+
+/**
+ * What the model reads when `fetch_token` cannot run because the budget is spent (ux U-010 for
+ * this step): no bulk run, which is no way on for a setup, and "continue", because the profile
+ * is already stored and outlives this chat.
+ */
+function fetchTokenLimitMessage(): string {
+  return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.`;
+}
+
 /** Fetch one linked docs section honouring the remaining body budget. Returns
- *  the empty string on any failure — sub-page reads are best-effort. */
-async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: number): Promise<string> {
+ *  the empty string on any failure — sub-page reads are best-effort — and null when the
+ *  request budget is spent, so the caller can tell the model. */
+async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: number): Promise<string | null> {
   if (remainingBudget < LINKED_SECTION_MIN_BUDGET) return '';
   try {
     const ac = new AbortController();
@@ -945,13 +996,12 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
     try {
       // A sub-page is a read the call's own row did not name: a delegated session records it
       // first, and what the recorder throws ends here as a section not read.
+      // Bootstrap fetches go around the http_request tool, so they reserve from its budget here,
+      // before the read is recorded: a section the budget stops leaves no row.
+      if (!reserveRequest(agent)) return null;
       outwardReadRecorder(agent, 'api_setup:read')?.(httpTarget('GET', url));
-      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
         undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
-      // Bootstrap fetches go around the http_request tool, so the session
-      // limit didn't see them pre-1.5.0. Charge each successful fetch so a
-      // pathological docs_url can't laundromat its way past the budget.
-      agent.sessionCounters.httpRequests++;
       if (!resp.ok) return '';
       const { text } = await readBodyLimited(resp, remainingBudget);
       return text;
@@ -1096,6 +1146,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     return 'Error: docs_url bootstrap requires the `api-setup-v2` feature, which is ON by default but has been disabled here (LYNOX_FEATURE_API_SETUP_V2=0). Remove that override to re-enable, or use `openapi_url` if the API has an OpenAPI 3.x spec.';
   }
 
+  if (!reserveRequest(agent)) return bootstrapLimitMessage('the docs page');
   emitBootstrapProgress(agent, 'fetching_docs');
   let docsText: string;
   let truncated: boolean;
@@ -1103,11 +1154,8 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
         undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
-      // Charge the primary docs fetch against the session HTTP budget so
-      // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
-      agent.sessionCounters.httpRequests++;
       if (!resp.ok) {
         // `resp.statusText` is the HTTP reason phrase — chosen by the REMOTE server,
         // free-form, and was echoed here verbatim. When this was written `api_setup`
@@ -1127,6 +1175,8 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       clearTimeout(timer);
     }
   } catch (err: unknown) {
+    // Stopped with the run: the engine reports the stop, not a failed fetch.
+    if (currentCallSignal()?.aborted === true) throw bootstrapStopped();
     // Strip query + fragment so a docs_url with a credential pasted as ?api_key=…
     // doesn't leak into the agent transcript / stderr via the error path.
     const safeUrl = safeUrlForLogging(docsUrl);
@@ -1140,9 +1190,15 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   const linkedSections = findLinkedSections(docsText, docsUrl);
   const fetchedSections: Array<{ url: string; text: string }> = [];
   let remainingBudget = DOCS_BODY_MAX_BYTES - Buffer.byteLength(docsText, 'utf8');
+  // Sections the request budget left unread: the model is told, so it does not present a profile
+  // built from part of the docs as complete (ux U-051).
+  let sectionsCutByLimit = false;
   for (const section of linkedSections) {
     if (remainingBudget < LINKED_SECTION_MIN_BUDGET) break;
+    // Stopped with the run: no further section is recorded or fetched.
+    if (currentCallSignal()?.aborted === true) break;
     const text = await fetchLinkedSection(section.url, agent, remainingBudget);
+    if (text === null) { sectionsCutByLimit = true; break; }
     if (text) {
       fetchedSections.push({ url: section.url, text });
       remainingBudget -= Buffer.byteLength(text, 'utf8');
@@ -1173,6 +1229,8 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       // leak path in `createLLMClient()` — see PR #568 for the analogous
       // spawn.ts fix).
       agent,
+      // A stop of the run, or the tool's time limit, ends the extraction call.
+      signal: currentCallSignal(),
       // Honour the operator model blocklist: without this a managed trial that
       // blocks premium Anthropic ids would still run the Sonnet default here on
       // the CP pool key. Note what this does NOT say: the fast-tier fallback
@@ -1198,6 +1256,12 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     // understated `balanced` by exactly the helper calls it could not see.
     debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, result.tier);
   } catch (err: unknown) {
+    // A stopped call has no reply to book: its bound goes to the session cap, never to the
+    // tenant debit (`aborted-call.ts`), and the engine reports the stop.
+    if (err instanceof ExtractionStoppedError) {
+      if (err.abortedCost !== undefined) recordSessionCost(agent.sessionCounters, err.abortedCost.upperBoundUsd);
+      throw err;
+    }
     // A refused extraction still paid for its reply: book it here, once, as the success
     // path above does. Undefined when the call never reached the model.
     const spent = extractionSpendOf(err);
@@ -1249,6 +1313,9 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   const truncatedNote = truncated
     ? `\nDocs body was truncated at ${String(DOCS_BODY_MAX_BYTES)} bytes — verify rate limits and pricing before trusting this draft.`
     : '';
+  const limitNote = sectionsCutByLimit
+    ? `\nSome linked docs sections were not read: this conversation or run reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests. The profile is built from the sections read so far and may miss endpoints. If a user is in this conversation, tell them that in one sentence when you present it.`
+    : '';
   const linkedNote = fetchedSections.length > 0
     ? `\nIncluded ${String(fetchedSections.length)} linked section(s): ${fetchedSections.map(s => s.url).join(', ')}`
     : '';
@@ -1262,7 +1329,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   // dropped, the next steps) stay outside. The id here is a slug of the docs URL's host, the
   // model's own input.
   return compose([
-    engineText(`Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).${injectedNote}${truncatedNote}${apiHostCandidates.length > 0 ? `\n${String(apiHostCandidates.length)} other API host(s) seen on the docs page are listed in the block below; verify against an authoritative source before swapping base_url.` : ''}
+    engineText(`Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).${injectedNote}${truncatedNote}${limitNote}${apiHostCandidates.length > 0 ? `\n${String(apiHostCandidates.length)} other API host(s) seen on the docs page are listed in the block below; verify against an authoritative source before swapping base_url.` : ''}
 
 Review the draft, fill auth.vault_keys via ask_secret, then call action="create":`),
     renderFence('api_bootstrap_draft', `${summary}${linkedNote}${hostHintNote}
@@ -1383,6 +1450,7 @@ function persistGrant(
   update: (current: OAuthGrantRecord | undefined) => OAuthGrantRecord,
   tokenExpiresAt?: number | 'unknown',
   exchange?: ExchangeFacts,
+  actor?: RequestPrincipal,
 ): 'saved' | 'gone' | 'not-saved' {
   if (!apiStore) return 'not-saved';
   const fresh = apiStore.get(id);
@@ -1400,7 +1468,7 @@ function persistGrant(
   }
   next.oauth_grant = update(fresh.oauth_grant);
   try {
-    return apiStore.save(next, apisDir, exchange !== undefined ? { exchange } : undefined).ok ? 'saved' : 'not-saved';
+    return apiStore.save(next, apisDir, { exchange, actor }).ok ? 'saved' : 'not-saved';
   } catch {
     // See the docstring: the exchange is complete either way.
     return 'not-saved';
@@ -1414,12 +1482,13 @@ function persistGrant(
  * exchange never writes a name twice: its output name may not be a refresh slot.
  */
 /**
- * Empty `names` in the vault, and return those still not known to be empty. A name this view may
- * not see, a protected name, a store with no delete, a delete that throws and a value still there
- * afterwards all count as not emptied: the caller refuses then, so no answer here may be a guess.
+ * Empty `names` in the vault: `left` are those still not known to be empty, `emptied` the rest. A
+ * name this view may not see, a protected name, a store with no delete, a delete that throws and a
+ * value still there afterwards all count as not emptied: the caller refuses then, so no answer
+ * here may be a guess.
  */
-function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: readonly string[]): string[] {
-  if (!store?.deleteSecret) return [...names];
+function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: readonly string[]): { left: string[]; emptied: string[] } {
+  if (!store?.deleteSecret) return { left: [...names], emptied: [] };
   const left: string[] = [];
   for (const name of names) {
     try {
@@ -1433,7 +1502,7 @@ function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: reado
       left.push(name);
     }
   }
-  return left;
+  return { left, emptied: names.filter((n) => !left.includes(n)) };
 }
 
 function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecret[]): WrittenSecret[] {
@@ -1596,7 +1665,7 @@ async function askBindingGrowth(agent: IAgent, profile: ApiProfile, act: 'saved'
   }
   const grow: Array<{ name: string; endpoints: string[] }> = [];
   for (const { name, bound } of needs) {
-    if (agent.runSignal?.aborted) return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the run was stopped before the owner could be asked.` };
+    if (agent.runSignal?.aborted) { noteOwnStopSentence(); return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the run was stopped before the owner could be asked.` }; }
     const answer = await agent.promptUser(pv`${bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e)))}`, ['Allow', 'Deny', '\x00']);
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
       return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the owner did not allow "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" to go to its destinations.` };
@@ -1833,16 +1902,15 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
       if (!input.openapi_url) {
         return 'Error: bootstrap requires either "openapi_url" (OpenAPI 3.x JSON spec, preferred) or "docs_url" (human-readable docs page; gated behind feature flag `api-setup-v2`). If neither is available, read the docs via web_research and build a profile manually with action "create".';
       }
+      if (!reserveRequest(agent)) return bootstrapLimitMessage('the OpenAPI spec');
       let spec: OpenApiDoc;
       try {
         const ac = new AbortController();
         const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
         let resp: Response;
         try {
-          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
             undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'))));
-          // Charge OpenAPI bootstrap fetches against the session budget too.
-          agent.sessionCounters.httpRequests++;
         } finally {
           clearTimeout(timer);
         }
@@ -1860,6 +1928,8 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         }
         spec = JSON.parse(text) as OpenApiDoc;
       } catch (err: unknown) {
+        // Stopped with the run: the engine reports the stop, not an unreadable spec.
+        if (currentCallSignal()?.aborted === true) throw bootstrapStopped();
         // A JSON syntax error quotes the start of the body ("Unexpected token 'I', "Ignore
         // all"... is not valid JSON"), which is remote-authored text: say only that it is
         // not JSON. The fetch's own failures go through `fetchFailureForModel`.
@@ -1964,17 +2034,24 @@ ${draftJson}
       }
 
       // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
-      const mergedSave = apiStore.save(merged, apisDir);
-      if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
+      const existingId = existing.id;
+      const refine = input.refine;
+      // A mandate's row names the profile by its opaque id, never by the slug the model chose. A
+      // row without one (an older binary's) gets the id made here, as for `save` below.
+      const refineTrailId = apiStore.newTrailId();
+      return withInstanceWrite(agent, { site: 'api_setup#refine', kind: 'change', store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(existingId) ?? refineTrailId]], main: ['save'] }, (w) => {
+        const mergedSave = w.run('save', () => apiStore.save(merged, apisDir, { trailId: refineTrailId }), ifOk);
+        if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
 
-      const changed: string[] = [];
-      if (input.refine.addGuidelines?.length) changed.push(`+${String(input.refine.addGuidelines.length)} guidelines`);
-      if (input.refine.addAvoid?.length) changed.push(`+${String(input.refine.addAvoid.length)} avoid`);
-      if (input.refine.addNotes?.length) changed.push(`+${String(input.refine.addNotes.length)} notes`);
-      if (input.refine.addEndpoints?.length) changed.push(`+${String(input.refine.addEndpoints.length)} endpoints`);
-      if (input.refine.response_shape) changed.push('response_shape updated');
-      if (input.refine.rate_limit) changed.push('rate_limit updated');
-      return `Refined profile "${merged.id}": ${changed.length > 0 ? changed.join(', ') : 'no changes'}. Saved.`;
+        const changed: string[] = [];
+        if (refine.addGuidelines?.length) changed.push(`+${String(refine.addGuidelines.length)} guidelines`);
+        if (refine.addAvoid?.length) changed.push(`+${String(refine.addAvoid.length)} avoid`);
+        if (refine.addNotes?.length) changed.push(`+${String(refine.addNotes.length)} notes`);
+        if (refine.addEndpoints?.length) changed.push(`+${String(refine.addEndpoints.length)} endpoints`);
+        if (refine.response_shape) changed.push('response_shape updated');
+        if (refine.rate_limit) changed.push('rate_limit updated');
+        return `Refined profile "${merged.id}": ${changed.length > 0 ? changed.join(', ') : 'no changes'}. Saved.`;
+      });
     }
 
     if (input.action === 'create' || input.action === 'update') {
@@ -2015,12 +2092,29 @@ ${draftJson}
       if (error) {
         return `Validation error: ${error}`;
       }
+      // A value the provider reads without regard to case is stored in lower case: "My-Store" is
+      // the store my-store, not a refusal. After the check, so the check reads what was written
+      // (a vault reference is refused by its upper-case name).
+      if (namedPreset && profile.auth?.oauth && isPlainRecord(profile.auth.oauth.preset_params)) {
+        profile.auth = { ...profile.auth, oauth: { ...profile.auth.oauth, preset_params: normalizedPresetParams(namedPreset, profile.auth.oauth.preset_params) } };
+      }
       // `create` overwrites an existing id as well, so both ask. The author is the engine's
       // to record, never the input's: a mandate's save records the mandate.
       // The stored version, registered or held back by the boot: an update of a held-back profile is
       // still an update of what is stored.
       const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.storedProfile(profile.id), profile.id);
       if (foreignSave) return foreignSave;
+      // The owner's save makes the profile the owner's. Over a connection a mandate made with its
+      // own login, while that mandate's access lasts, that would hand the owner its account and
+      // the mandate's session an owner's profile, past the question `adopt_connection` asks and
+      // refuses for a live connection. Once the access has ended the tokens wait for the owner
+      // anyway (`connectionTokenAllowed`), so a save changes nothing there.
+      const storedForSave = agent.toolContext?.apiStore?.storedProfile(profile.id);
+      if (storedForSave && isOwnerPrincipal(agent.principal) && isMandateConnection(storedForSave)
+        && !connectionWaits(storedForSave, agent.toolContext?.mandateEnds ?? null)) {
+        const theirs = memberConnectionRefusal(storedForSave, agent.principal, agent.toolContext?.mandateEnds ?? null);
+        return `Error: API profile "${profile.id}" was not saved. ${theirs ?? 'Its connection was made in a mandate\'s session that is still active.'}`;
+      }
       delete profile.created_by;
       const prior = agent.toolContext?.apiStore?.storedProfile(profile.id);
       // A save may not take a profile off the built-in provider it was set up with. A model
@@ -2284,10 +2378,6 @@ ${draftJson}
       if (!apiStore) {
         return 'Error: API store unavailable — cannot persist the profile. Restart the engine and retry.';
       }
-      // The owner says where each of the profile's own secrets may go before anything is emptied
-      // or stored; a no stores nothing. Written to the bindings only once the save went through.
-      const growth = await askBindingGrowth(agent, profile);
-      if ('refusal' in growth) return growth.refusal;
       // A save that moves where the credentials go, or a reader of another profile's refresh slot
       // whose update ends that or moves where its tokens go, empties every token slot it holds
       // first: what it holds was minted for the old destinations, or is a token of the other
@@ -2296,80 +2386,106 @@ ${draftJson}
       // nothing; emptied before the save, so a save that is still refused leaves it without tokens,
       // never a moved one with them. Every reply after an emptying names what was emptied.
       const cleared = slotsToClearBeforeSave(apiStore.storedProfile(profile.id), profile, apiStore.knownProfiles());
-      if (cleared.length > 0) {
-        const refusal = apiStore.saveRefusal(profile);
-        if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
-        const left = emptyTokenSlots(agent.secretStore, cleared);
-        if (left.length > 0) {
-          const emptied = cleared.filter((n) => !left.includes(n));
-          const done = emptied.length > 0 ? ` ${emptied.join(', ')} ${emptied.length === 1 ? 'was' : 'were'} emptied already and ${emptied.length === 1 ? 'is' : 'are'} empty now.` : ' None of them was emptied.';
-          return `Error: this update of profile "${profile.id}" changes where its credentials go, or where the tokens it read from another profile's refresh slot go. The tokens it holds were minted for the old destinations or may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
+      // A save that takes the profile off oauth2 and empties its derived token names drops them from
+      // `written` (a copy: the stored record is not touched before the save). Otherwise the profile
+      // kept holding its old access name through `written`, and a key the user stores there was a
+      // held token that goes nowhere (901 D). Dropped before the binding question, so such a key is
+      // the profile's own secret, asked about and bound like any other. Only the derived names: any
+      // other name an exchange wrote stays on the record, emptied or not, as every save keeps it.
+      if (cleared.length > 0 && profile.auth?.type !== 'oauth2' && profile.oauth_grant !== undefined && Array.isArray(profile.oauth_grant.written)) {
+        const derived = [accessTokenKey(profile.id), refreshTokenKey(profile.id)];
+        const gone = new Set(cleared.filter((n) => derived.includes(n)));
+        profile.oauth_grant = {
+          ...profile.oauth_grant,
+          written: profile.oauth_grant.written.filter((w) => !(typeof w?.name === 'string' && gone.has(w.name))),
+        };
+      }
+      // The owner says where each of the profile's own secrets may go before anything is emptied
+      // or stored; a no stores nothing. Written to the bindings only once the save went through.
+      const growth = await askBindingGrowth(agent, profile);
+      if ('refusal' in growth) return growth.refusal;
+      const savedId = profile.id;
+      // A mandate's row names the profile by its opaque id, never by the slug the model chose. Read
+      // from the database, not from `prior`: a row the store could not load still has its id, and
+      // the save keeps it. A new row takes the id made here, which the save is handed, so the row
+      // and the profile name the same one. Without engine.db there is no id and the row names the
+      // kind only.
+      const freshTrailId = apiStore.newTrailId();
+      return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(savedId) ?? freshTrailId]], main: ['save'] }, (w) => {
+        if (cleared.length > 0) {
+          const refusal = apiStore.saveRefusal(profile);
+          if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
+          const { left, emptied } = w.run('clear', () => emptyTokenSlots(agent.secretStore, cleared), ifEmptiedAny);
+          if (left.length > 0) {
+            const done = emptied.length > 0 ? ` ${emptied.join(', ')} ${emptied.length === 1 ? 'was' : 'were'} emptied already and ${emptied.length === 1 ? 'is' : 'are'} empty now.` : ' None of them was emptied.';
+            return `Error: this update of profile "${profile.id}" changes where its credentials go, or where the tokens it read from another profile's refresh slot go. The tokens it holds were minted for the old destinations or may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
+          }
         }
-      }
-      const saved = apiStore.save(profile, apisDir);
-      // A refusal used to arrive here as `isNew`, so the tool answered "Created
-      // … saved and activated immediately" for a profile that was never stored.
-      // Fail-closed in effect, false-confident in report — and the only trace was
-      // a stderr line no model ever reads.
-      if (!saved.ok) {
-        return cleared.length > 0
-          ? `Error: ${saved.reason} The token slots it held were emptied before this refusal and are empty now: ${cleared.join(', ')}.`
-          : `Error: ${saved.reason}`;
-      }
-      const isUpdate = !saved.isNew;
-      growBindings(agent, growth.grow);
+        const saved = w.run('save', () => apiStore.save(profile, apisDir, { trailId: freshTrailId }), ifOk);
+        // A refusal used to arrive here as `isNew`, so the tool answered "Created
+        // … saved and activated immediately" for a profile that was never stored.
+        // Fail-closed in effect, false-confident in report — and the only trace was
+        // a stderr line no model ever reads.
+        if (!saved.ok) {
+          return cleared.length > 0
+            ? `Error: ${saved.reason} The token slots it held were emptied before this refusal and are empty now: ${cleared.join(', ')}.`
+            : `Error: ${saved.reason}`;
+        }
+        const isUpdate = !saved.isNew;
+        growBindings(agent, growth.grow);
 
-      const verb = isUpdate ? 'Updated' : 'Created';
-      const parts: string[] = [
-        `${verb} API profile "${profile.name}" (${profile.id}).`,
-        `Base URL: ${profile.base_url}`,
-      ];
-      if (profile.auth) parts.push(`Auth: ${profile.auth.type}`);
-      if (profile.rate_limit) {
-        const rl: string[] = [];
-        if (profile.rate_limit.requests_per_second) rl.push(`${String(profile.rate_limit.requests_per_second)}/s`);
-        if (profile.rate_limit.requests_per_minute) rl.push(`${String(profile.rate_limit.requests_per_minute)}/min`);
-        if (profile.rate_limit.requests_per_hour) rl.push(`${String(profile.rate_limit.requests_per_hour)}/h`);
-        if (profile.rate_limit.requests_per_day) rl.push(`${String(profile.rate_limit.requests_per_day)}/day`);
-        if (rl.length > 0) parts.push(`Rate limits: ${rl.join(', ')}`);
-      }
-      if (profile.endpoints) parts.push(`Endpoints: ${String(profile.endpoints.length)}`);
-      if (profile.guidelines) parts.push(`Guidelines: ${String(profile.guidelines.length)}`);
-      if (profile.avoid) parts.push(`Avoid rules: ${String(profile.avoid.length)}`);
-      if (profile.response_shape && profile.response_shape.kind !== 'passthrough') {
-        parts.push('Response shape: active');
-      }
-      parts.push('Profile saved and activated immediately.');
-      if (cleared.length > 0) parts.push(`Its credentials go elsewhere now, or it read another profile's refresh token, so the tokens it held were removed first (${cleared.join(', ')}); connect it again or fetch a token of its own.`);
-      if (adopted !== undefined) {
-        parts.push(adoptionNote(adopted, profile));
-        // The profile is the owner's now and reads the vault unfiltered: what was asked for it,
-        // and what was released to it, is moot.
-        agent.toolContext?.secretReleases?.forgetProfile(profile.id);
-      }
-      const releaseAsk = askForReleases(agent, profile);
-      if (releaseAsk !== '') parts.push(releaseAsk);
-      if (grantDiscarded) {
-        parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
-      }
-      // Said here as well, because the disclosure above only runs when some host
-      // was non-vetted. A profile whose base_url is vetted saves with no prompt
-      // at all, and that is the case where the missing authorize host would
-      // otherwise leave no trace anywhere.
-      if (presetNote) parts.push(presetNote);
-      if (redirectUrls.length > 0 && !redirectAccepted) {
-        // Two sentences, because the two cases are not the same event. On a
-        // create nothing was added; on an update an acceptance a human gave
-        // earlier was just DROPPED — the save rebuilds the record from the
-        // incoming profile, and there is no acceptance to carry over when
-        // nobody could be asked. A single sentence let an update read as the
-        // harmless case.
-        parts.push(isUpdate
-          ? 'The acceptance for sending the user to the provider was REMOVED: this run could not ask anyone, and the record is rebuilt on every save. api_setup connect will refuse until the profile is saved again while a person is there to answer.'
-          : 'Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
-      }
-      parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
-      return parts.join('\n');
+        const verb = isUpdate ? 'Updated' : 'Created';
+        const parts: string[] = [
+          `${verb} API profile "${profile.name}" (${profile.id}).`,
+          `Base URL: ${profile.base_url}`,
+        ];
+        if (profile.auth) parts.push(`Auth: ${profile.auth.type}`);
+        if (profile.rate_limit) {
+          const rl: string[] = [];
+          if (profile.rate_limit.requests_per_second) rl.push(`${String(profile.rate_limit.requests_per_second)}/s`);
+          if (profile.rate_limit.requests_per_minute) rl.push(`${String(profile.rate_limit.requests_per_minute)}/min`);
+          if (profile.rate_limit.requests_per_hour) rl.push(`${String(profile.rate_limit.requests_per_hour)}/h`);
+          if (profile.rate_limit.requests_per_day) rl.push(`${String(profile.rate_limit.requests_per_day)}/day`);
+          if (rl.length > 0) parts.push(`Rate limits: ${rl.join(', ')}`);
+        }
+        if (profile.endpoints) parts.push(`Endpoints: ${String(profile.endpoints.length)}`);
+        if (profile.guidelines) parts.push(`Guidelines: ${String(profile.guidelines.length)}`);
+        if (profile.avoid) parts.push(`Avoid rules: ${String(profile.avoid.length)}`);
+        if (profile.response_shape && profile.response_shape.kind !== 'passthrough') {
+          parts.push('Response shape: active');
+        }
+        parts.push('Profile saved and activated immediately.');
+        if (cleared.length > 0) parts.push(`Its credentials go elsewhere now, or it read another profile's refresh token, so the tokens it held were removed first (${cleared.join(', ')}); connect it again or fetch a token of its own.`);
+        if (adopted !== undefined) {
+          parts.push(adoptionNote(adopted, profile));
+          // The profile is the owner's now and reads the vault unfiltered: what was asked for it,
+          // and what was released to it, is moot.
+          agent.toolContext?.secretReleases?.forgetProfile(profile.id);
+        }
+        const releaseAsk = askForReleases(agent, profile);
+        if (releaseAsk !== '') parts.push(releaseAsk);
+        if (grantDiscarded) {
+          parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
+        }
+        // Said here as well, because the disclosure above only runs when some host
+        // was non-vetted. A profile whose base_url is vetted saves with no prompt
+        // at all, and that is the case where the missing authorize host would
+        // otherwise leave no trace anywhere.
+        if (presetNote) parts.push(presetNote);
+        if (redirectUrls.length > 0 && !redirectAccepted) {
+          // Two sentences, because the two cases are not the same event. On a
+          // create nothing was added; on an update an acceptance a human gave
+          // earlier was just DROPPED — the save rebuilds the record from the
+          // incoming profile, and there is no acceptance to carry over when
+          // nobody could be asked. A single sentence let an update read as the
+          // harmless case.
+          parts.push(isUpdate
+            ? 'The acceptance for sending the user to the provider was REMOVED: this run could not ask anyone, and the record is rebuilt on every save. api_setup connect will refuse until the profile is saved again while a person is there to answer.'
+            : 'Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
+        }
+        parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
+        return parts.join('\n');
+      });
     }
 
     if (input.action === 'connect') {
@@ -2526,7 +2642,7 @@ ${draftJson}
       // Built from the parsed object, never by string surgery on the raw value.
       // The path prefix is kept deliberately: an engine served under one needs
       // it, and `origin` alone would silently produce a link to nothing.
-      const link = `${base.origin}${base.pathname.replace(/\/+$/, '')}/api/oauth/connect/${encodeURIComponent(id)}`;
+      const link = `${base.origin}${base.pathname.replace(/\/+$/, '')}${OAUTH_CONNECT_PATH}${encodeURIComponent(id)}`;
       const grant = profile.oauth_grant;
       // Three replies, one link. What differs is what the user is walking into,
       // and saying it here is cheaper than a surprise on the provider's page.
@@ -2592,7 +2708,7 @@ ${draftJson}
             pv`⚠ api_setup: delete the stored API profile ${id}, which could not be read (${singleLine(unreadableSource)})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
             ['Allow', 'Deny', '\x00'],
           ));
-        if (answer === null) return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`;
+        if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`; }
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
           return `Blocked: API profile entry "${id}" not deleted — user declined.`;
         }
@@ -2619,7 +2735,7 @@ ${draftJson}
             pv`⚠ api_setup: delete the API profile ${singleLine(String(existing.name))} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
             ['Allow', 'Deny', '\x00'],
           ));
-        if (answer === null) return `Blocked: API profile "${id}" not deleted — the run was stopped before the question was asked.`;
+        if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile "${id}" not deleted — the run was stopped before the question was asked.`; }
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
           return `Blocked: API profile "${id}" not deleted — user declined.`;
         }
@@ -2627,25 +2743,42 @@ ${draftJson}
       // Delete from the backing store + memory (S4b: engine.db `connections` when
       // wired, else the flat-JSON directory). The agent sees the deletion
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
-      let removed: boolean;
-      try {
-        removed = apiStore.remove(id, apisDir);
-      } catch (err) {
-        // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
-        // when a non-ENOENT unlink fails — the profile is already gone from
-        // memory. Surface it so the agent doesn't retry blindly. The tokens stay:
-        // a profile that resurrects on restart should come back working.
-        return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
-      }
-      if (!removed) return `API profile "${id}" not found.`;
-      agent.toolContext?.secretReleases?.forgetProfile(id);
-      // Only for a stored profile: an unreadable entry records nothing. A profile the boot held
-      // back is purged like a registered one; the purge takes only a value whose fingerprint is
-      // the one its record names, and leaves one the other half of a `-`/`_` pair records with
-      // the same fingerprint on the shared slot.
-      if (!existing) return `Deleted API profile "${id}".`;
-      if (!agent.secretStore) return `Deleted API profile "${id}". No vault is available here, so no token was checked or removed.`;
-      return `Deleted API profile "${id}".${purgeMessage(purgeRecordedTokens(apiStore, existing, agent.secretStore))}`;
+      // One block from the removal to the purge (the sweep, the releases and the vault among it): a
+      // throw of `remove` that the catch below answers reads `returned`, which claims nothing.
+      // Read while the row is still there; the slug is never named.
+      return withInstanceWrite(agent, { site: 'api_setup#delete', kind: 'delete', store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(id)]], main: ['removal'] }, (w) => {
+        let removed: boolean;
+        try {
+          // The person was asked above. Only the owner's delete erases the run-history record of
+          // what lynox sent through the connection (PRD source-connection R8-3): a mandate's would
+          // take the owner's records with it. And only once the question names the erasure
+          // (`erasureOnDeleteEnabled`); until then it is a closing record, as from the settings
+          // route. The only caller that may pass `erasure`; a source guard pins it.
+          if (isOwnerPrincipal(agent.principal) && erasureOnDeleteEnabled()) {
+            // The owner's delete: no row to note a step in.
+            removed = apiStore.remove(id, apisDir, { record: 'erasure' });
+          } else {
+            removed = w.run('removal', () => apiStore.remove(id, apisDir, { record: 'closing' }), ifTrue);
+          }
+        } catch (err) {
+          // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
+          // when a non-ENOENT unlink fails — the profile is already gone from
+          // memory. Surface it so the agent doesn't retry blindly. The tokens stay:
+          // a profile that resurrects on restart should come back working.
+          return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
+        }
+        if (!removed) return `API profile "${id}" not found.`;
+        // The first pass of the erasure the delete just recorded; boot and the interval repeat it.
+        agent.toolContext?.connectionErasureSweep?.();
+        agent.toolContext?.secretReleases?.forgetProfile(id);
+        // Only for a stored profile: an unreadable entry records nothing. A profile the boot held
+        // back is purged like a registered one; the purge takes only a value whose fingerprint is
+        // the one its record names, and leaves one the other half of a `-`/`_` pair records with
+        // the same fingerprint on the shared slot.
+        if (!existing) return `Deleted API profile "${id}".`;
+        if (!agent.secretStore) return `Deleted API profile "${id}". No vault is available here, so no token was checked or removed.`;
+        return `Deleted API profile "${id}".${purgeMessage(purgeRecordedTokens(apiStore, existing, agent.secretStore))}`;
+      });
     }
 
     if (input.action === 'fetch_token') {
@@ -2663,6 +2796,18 @@ ${draftJson}
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${input.id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
       }
+      // A connection someone else made with their own login is theirs to renew; said with who and
+      // which, before anything is read, not as a slot this profile "may not write".
+      const memberRefusal = refuseMemberConnection(profile, agent.principal, agent.toolContext?.mandateEnds ?? null, 'write');
+      if (memberRefusal !== null) return `${memberRefusal} Nothing was sent.`;
+      // When this profile shares a member connection's grant through a built-in provider, it reads
+      // that connection's refresh slot, and the exchange would store that login's new tokens under
+      // THIS profile's names, which are not the connection's. Refused for every reader, the member
+      // included: the one place that stores a token from another profile's refresh slot is here
+      // (the connect callback stores only its own consent's tokens under its own names).
+      const refreshSlot = readersRefreshSlot(profile);
+      const refreshHolder = agent.toolContext?.apiStore?.knownProfiles().find((p) => p.id !== profile.id && isMandateConnection(p) && grantTokenNames(p).has(refreshSlot));
+      if (refreshHolder !== undefined) return `${refuseSharedRefresh(refreshHolder, profile, agent.principal, agent.toolContext?.mandateEnds ?? null)} Nothing was sent.`;
       // ⛔ Every token this action writes lands in the two names derived from the id. The
       // store refuses an oauth2 profile whose derived names belong to this instance
       // (`protectedDerivedSlot`, applied when a profile is admitted), so a registered
@@ -2980,12 +3125,9 @@ ${draftJson}
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
       }
       // fetch_token drives a real outbound POST; honour the same per-session HTTP
-      // ceiling http_request enforces. It already increments httpRequests after a
-      // successful fetch (below), so without this pre-check it could charge past
-      // the limit rather than being bounded by it.
-      if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-        return `Error: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) reached — fetch_token cannot run. Start a new session or reduce request volume.`;
-      }
+      // ceiling http_request enforces. Checked here, before the rate bucket below is
+      // consumed, and reserved right before the POST (row 1005).
+      if (requestLimitReached(agent)) return fetchTokenLimitMessage();
       // Honour the per-API rate buckets too (http_request enforces these via
       // checkRateLimit). Without this a fetch_token loop against a profiled token
       // host bypasses the profile's own declared hourly/daily ceiling. Creds are
@@ -3029,13 +3171,14 @@ ${draftJson}
       // the tenant's network policy says, which is the exfiltration channel this
       // path is shaped around.
       //
-      // The session HTTP budget is charged through the callback, after the
-      // response: a refused egress never reached the provider to be charged for,
-      // and `fetch_token` must not be a freebie bypass of the per-session cap.
+      // The session HTTP budget is reserved before the POST, not charged after the response:
+      // an exchange that times out or fails after it went out stays charged, and parallel
+      // calls cannot all pass the check above (row 1005). A refused egress is charged too, as
+      // in `http_request`.
+      if (!reserveRequest(agent)) return fetchTokenLimitMessage();
       const exchanged = await exchangeToken(
         { endpoint: vetting, params, bodyFormat },
         agent.toolContext,
-        () => { agent.sessionCounters.httpRequests++; },
       );
       if (!exchanged.ok) return `Error: ${exchanged.message}`;
       const respText = exchanged.text;
@@ -3093,12 +3236,16 @@ ${draftJson}
           return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected the refresh token read from "${refreshKey}". This profile reads its refresh token from "${refreshKey}", but fetch_token stores a rotated one under "${refreshTokenKey(input.id)}", so the rejected token may just be an old one. Nothing was recorded. Remove auth.oauth.refresh_token_key from the profile with api_setup update, so both are the same slot, then call fetch_token again. ${responseBody}`;
         }
         if (kind === 'grant-revoked' && presentedFp !== undefined) {
-          persistGrant(apiStore, input.id, apisDir, (current) => ({
-            ...current,
-            state: 'revoked',
-            revoked_fp: presentedFp,
-            revoked_at: new Date().toISOString(),
-          }));
+          // The refusal and its record land together (a provider's erasure, held, or a closing
+          // record); a write that fails records neither, and says so.
+          try {
+            apiStore?.markRevokedWithRecord(input.id, presentedFp, new Date(), stampApplies, apisDir);
+          } catch (err: unknown) {
+            // Only a refused save's own reason goes back; any other error may name a path on the
+            // instance, and this reply reaches the model and the chat.
+            const reason = err instanceof SaveRefused ? err.reason : 'a storage error';
+            return `Token exchange failed with HTTP ${exchanged.status}: the provider refused the refresh token read from "${refreshKey}" as revoked, but storing that verdict failed (${reason}), so nothing was recorded. Do not call fetch_token again unchanged: check the profile with api_setup first. ${responseBody}`;
+          }
           return `${revokedGrantMessage(input.id, refreshKey, refreshTokenKey(input.id), undefined, tokenPreset !== undefined)}\n\n${responseBody}`;
         }
         if (kind === 'client-misconfigured') {
@@ -3208,6 +3355,10 @@ ${draftJson}
         // A token this exchange wrote is not the one a store callback bound: the binding goes
         // with it, or the new credential would be held to a store it never came from.
         delete next.store_binding;
+        // What this token can do, as the renewal's answer says. One that names no scope leaves the
+        // record as it was: the provider said nothing new.
+        const grantedNow = scopesOfAnswer(parsed.scope);
+        if (grantedNow !== undefined) next.granted_scope = grantedNow;
         next.written = mergeWrites(current, writes);
         if (next.connected_by === undefined) Object.assign(next, consentOf(agent, profile));
         return next;
@@ -3219,7 +3370,7 @@ ${draftJson}
         presentedRefreshTokenFp: presentedRefresh !== null ? apiStore?.tokenFingerprint(presentedRefresh) ?? null : null,
         replacedAccessFp,
         wrote: writes.map((w) => w.name),
-      });
+      }, agent.principal);
       // Deleted while the exchange was out: there is no profile to hold the
       // record, and the delete already ran — so the tokens this exchange wrote
       // would sit in the vault with nothing left to remove them.
@@ -3315,7 +3466,7 @@ ${draftJson}
           pv`⚠ api_setup: release the vault name ${shownName} to API profile ${id}, set up in the session of ${singleLine(author)}? The engine then sends its value, as ${role}, to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}${authority ? ` (${authority})` : ''}, for every request and run through this profile, the user's own and bulk runs included, until that mandate ends or the user withdraws it.${role === 'oauth.client_id_key' ? ' A client id also goes into the sign-in link, to the browser of whoever opens it.' : ''} The vault ${held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where it goes ends the release. Release it?`,
           ['Allow', 'Deny', '\x00'],
         ));
-      if (answer === null) return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`;
+      if (answer === null) { noteOwnStopSentence(); return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`; }
       if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) return `Blocked: ${shownName} was not released to API profile "${id}" — user declined.`;
       // Only what the answer covered: the author and where the value goes. A renewal while the
       // question was open changes neither, and does not void the answer.
@@ -3360,8 +3511,11 @@ ${draftJson}
       // owner's own session a text the model read (a mail, a page) can ask for it. So the
       // question is the engine's and names all of that before the yes, not after: the hosts, the
       // names, and whose session authorized it. With no one to ask, nothing changes.
-      if (!agent.promptUser) {
-        return `Blocked: adopting the connection of API profile "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was changed.`;
+      // Never in a run without a person present, as for `release`: an autonomous run can still hold
+      // a prompt channel (a stamped schedule), and the question would reach the owner about an act
+      // nobody in front of a screen started.
+      if (agent.autonomy === 'autonomous' || !agent.promptUser) {
+        return `Blocked: adopting the connection of API profile "${id}" needs the user's own answer in an interactive session, and this run has none. Nothing was changed.`;
       }
       const promptUser = agent.promptUser;
       // Read now, not after the wait (the same rule as `delete`).
@@ -3384,7 +3538,7 @@ ${draftJson}
           pv`⚠ api_setup: adopt the connection of API profile ${singleLine(String(asked.name))} (id ${id})? It was authorized at the provider in the session of ${by}, ${known ? 'which is not active' : 'and this engine cannot tell whether that mandate is still active'}. Once adopted, the profile is yours. The engine then sends to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}, for your requests and runs, the connection's tokens and the vault names this profile names, read like any of your profiles, values from the environment included: ${shownNames.length > 0 ? shownNames : 'none'}. Adopt it?`,
           ['Allow', 'Deny', '\x00'],
         ));
-      if (answer === null) return `Blocked: the connection of API profile "${id}" was not adopted — the run was stopped before the question was asked.`;
+      if (answer === null) { noteOwnStopSentence(); return `Blocked: the connection of API profile "${id}" was not adopted — the run was stopped before the question was asked.`; }
       if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
         return `Blocked: the connection of API profile "${id}" was not adopted — user declined.`;
       }

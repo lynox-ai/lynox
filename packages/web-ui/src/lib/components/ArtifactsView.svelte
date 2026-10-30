@@ -123,7 +123,7 @@
 
 	function formatDate(iso: string): string {
 		// Date AND time — "updated" without a time read as stale on a doc edited
-		// minutes ago (rafael 2026-06-04). Locale-aware so it matches the UI.
+		// minutes ago (2026-06-04). Locale-aware so it matches the UI.
 		const locale = getLocale() === 'de' ? 'de-CH' : 'en-GB';
 		return new Date(iso).toLocaleString(locale, {
 			day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',

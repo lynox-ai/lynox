@@ -51,7 +51,7 @@ import type {
 export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-2603';
 
 /**
- * Default voice — English, reads DE text with a light English accent. Rafael
+ * Default voice — English, reads DE text with a light English accent. The owner
  * approved on the Phase 0 p300/p3000 DE samples. `de_*` are still NOT available:
  * re-checked 2026-10-11 against the live catalog (30 voices — 8 en_us, 16 en_gb,
  * 6 fr_fr; no German).

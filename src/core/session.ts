@@ -30,7 +30,7 @@ import { effectiveContextWindow, profileNamed } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } from './agent.js';
 import { isInputRequired } from './input-required.js';
 import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
@@ -51,6 +51,7 @@ import { checkPersistentBudget } from './session-budget.js';
 import {
   SYSTEM_PROMPT,
   GOOGLE_PROMPT_SUFFIX,
+  shopifyPresetSuffix,
   PIPELINE_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
   CRM_PROMPT_SUFFIX,
@@ -75,6 +76,7 @@ import { buildCompactionSummaryPrompt } from './compaction-prompt.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
+import { shopifyExchangeSwitchOn } from '../tools/builtin/http.js';
 import type { RunHistory } from './run-history.js';
 import type { LynoxContext, MemoryScopeRef } from '../types/index.js';
 import type { SecretStore } from './secret-store.js';
@@ -86,6 +88,7 @@ import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
+import { ConversationGrants } from './conversation-grants.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -101,7 +104,7 @@ const COMPACT_PREPARE_PERCENT = 80;
 /** L1 cost-aware compaction (PRD engine-context-cost). The compaction trigger is
  *  gated on `% of the context window` — on a large (e.g. 1M) native window that
  *  is ~800K, so a thread carries 300–500K of cache-read-billed context before any
- *  trim. Ground-truth (rafael's prod + a staging heavy-thread walk): on heavy
+ *  trim. Ground-truth (our own production instance + a staging heavy-thread walk): on heavy
  *  threads the cache-read floor is the dominant *scaling* cost and the carried
  *  history (tool outputs) dominates it — so we ALSO gate compaction on an
  *  ABSOLUTE carried-token budget, independent of window size. This is the OFFER
@@ -153,6 +156,7 @@ const DEFAULT_COMPACTION_MODEL: ModelTier = 'fast';
  */
 export function classifyRunFailure(err: unknown): { noteCode: string; report: boolean } {
   if (isInputRequired(err)) return { noteCode: 'input_required', report: false };
+  if (err instanceof ThinkingOnlyLoopError) return { noteCode: 'thinking_loop', report: true };
   if (err instanceof ContinuationLoopError) return { noteCode: 'continuation_loop', report: true };
   if (err instanceof ToolLoopBreakError) return { noteCode: 'tool_loop_break', report: true };
   if (err instanceof RunAbortedError) return { noteCode: 'run_interrupted', report: true };
@@ -353,6 +357,9 @@ export class Session {
   } = {};
   readonly sessionId: string;
   private briefing: string | undefined;
+  /** The vault's `<secrets>` listing, consumed with the briefing; the agent gives it to an owner's
+   *  turn only, since the principal is per run and this is per session. */
+  private secretsBriefing: string | undefined;
   private _briefingConsumed = false;
   private currentRunId: string | null = null;
   /**
@@ -384,6 +391,9 @@ export class Session {
    *  agent (and inherited by any child it spawns). Null when no RunHistory is
    *  configured. See the construction site for why this replaced a subscriber. */
   private _toolCallRecorder: ToolCallRecorder | null = null;
+  /** The grants this conversation took data from (`ConversationGrants`). Held here, not on the
+   *  agent: a rebuilt agent gets the same object. Built on first use from the thread's rows. */
+  private _conversationGrants: ConversationGrants | undefined;
   private _userWaitMs = 0;
   private _runToolNames = new Set<string>();
   private _retrievedMemoryIds: string[] = [];
@@ -429,6 +439,7 @@ export class Session {
   private _promptTabs: PromptTabsFn | null = null;
   private _promptSecret: PromptSecretFn | null = null;
   private _promptMailConnect: PromptMailConnectFn | null = null;
+  private _approvalFiling: import('./approval-filing.js').ApprovalFilingContext | null = null;
   private _tenantId: string | null = null;
   private _skipMemoryExtractionOverride: boolean | null = null;
   /**
@@ -479,7 +490,7 @@ export class Session {
    * apiKey/provider/baseURL propagates. Without it, a UI-side provider
    * switch updates engine.client but the long-lived Session.agent keeps
    * a stale snapshot → empty replies + footer stuck on the old provider
-   * until logout (rafael 2026-05-27 BYOK provider-switch bug).
+   * until logout (2026-05-27 BYOK provider-switch bug).
    */
   private _configVersionAtAgentBuild = 0;
   private _model: ModelTier;
@@ -536,6 +547,12 @@ export class Session {
     this.briefing = rawBriefing && rawBriefing.length > 8000
       ? rawBriefing.slice(0, 8000) + '\n[...truncated]'
       : rawBriefing;
+    // Only on the default path, as before: a caller's own briefing never carried the listing.
+    // `?.()` on the method: several suites hand Session a partial engine double.
+    const rawSecrets = opts?.briefing === undefined ? engine.getSecretsBriefing?.() : undefined;
+    this.secretsBriefing = rawSecrets && rawSecrets.length > 8000
+      ? rawSecrets.slice(0, 8000) + '\n[...truncated]'
+      : rawSecrets;
     this.onStream = opts?.onStream ?? null;
     this._promptUser = opts?.promptUser ?? null;
     this._promptTabs = opts?.promptTabs ?? null;
@@ -615,6 +632,10 @@ export class Session {
             connectionCreatedAt: call.connection?.createdAt ?? undefined,
             grantId: call.connection?.grantId ?? undefined,
             toolUseId: call.toolUseId,
+            isError: call.isError,
+            contract: call.contract,
+            lift: call.grant,
+            filed: call.filed,
           });
         } catch {
           // Fire-and-forget
@@ -699,6 +720,17 @@ export class Session {
         ? (data: MailConnectPromptData, meta?: PromptMeta) => fn(data, meta)
         : undefined;
     }
+  }
+
+  /** What this session's runs file with when nobody watches them (`approval-filing.ts`). Set by
+   *  the worker for a trigger's run, after `_recreateAgent`; kept across a later rebuild. */
+  get approvalFiling(): import('./approval-filing.js').ApprovalFilingContext | null {
+    return this._approvalFiling;
+  }
+
+  set approvalFiling(ctx: import('./approval-filing.js').ApprovalFilingContext | null) {
+    this._approvalFiling = ctx;
+    if (this.agent) this.agent.approvalFiling = ctx ?? undefined;
   }
 
   /** The conversation clean-latch (`agent.conversationSawUntrusted`): TRUE once this
@@ -800,7 +832,7 @@ export class Session {
     // Agent against `this.engine.client`, so a stale snapshot means the
     // Session keeps calling the previous provider's API with the old key —
     // empty assistant replies + footer stuck on the previous provider name
-    // until the session is destroyed (rafael 2026-05-27 Settings provider
+    // until the session is destroyed (2026-05-27 Settings provider
     // switch from Anthropic → Mistral). One rebuild covers all three.
     if (
       this.engine.getRegistry().version !== this._registryVersion
@@ -884,7 +916,7 @@ export class Session {
           // Surface the block as a `warning` SSE event so the web-UI shows a
           // distinct, localized banner/toast instead of letting the reason
           // string slip through as a `done.result` that the chat used to
-          // render as total silence (rafael 2026-05-29, first-session
+          // render as total silence (2026-05-29, first-session
           // fail-closed credit check). The returned string is still the
           // single source for non-SSE callers (CLI) and the `done.result`
           // inline render fallback. `warning` (not `error`) keeps the failed
@@ -1041,6 +1073,7 @@ export class Session {
     // Compute prompt hash from the system prompt the agent uses
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
     basePrompt += languageOverrideSuffix(this.engine.config.language);
+    basePrompt += shopifyPresetSuffix(shopifyExchangeSwitchOn());
     // Mirror the prompt-assembly that _createAgent uses so the hash and the
     // recorded snapshot reflect what the Agent actually sees (Fix C, v1.5.2).
     // Both the tier map and the identity provider come from the SAME helpers
@@ -1193,7 +1226,7 @@ export class Session {
     // reply, so an abort/disconnect/process-restart before that first
     // checkpoint (stale-run takeover, navigate-away, queued send) used to lose
     // the user turn entirely while later assistant replies survived — the
-    // continued-session prompts that vanished on reload (rafael 2026-06-04,
+    // continued-session prompts that vanished on reload (2026-06-04,
     // lynox Marktanalyse). Idempotent with eager-persist: the count-based
     // delta slice sees this row already on disk and skips it. Skipped for
     // internal runs (compaction summary) so a system prompt never shows as a
@@ -1258,9 +1291,10 @@ export class Session {
       if (runOptions?.internal !== true) this._lastRunStop = runAgent.getLastStop?.() ?? null;
 
       // Clear briefing after first turn — it's one-time context (run history, file diffs, advisor)
-      if (!this._briefingConsumed && this.briefing) {
+      if (!this._briefingConsumed && (this.briefing || this.secretsBriefing)) {
         this._briefingConsumed = true;
         this.agent.setBriefing(undefined);
+        this.agent.setSecretsBriefing?.(undefined);
       }
 
       const durationMs = Date.now() - startTime;
@@ -1369,7 +1403,7 @@ export class Session {
           // Per-thread cost/tokens = SUM over run_history for this session (the
           // single source of truth), NOT this run's cost. The column used to be
           // overwritten with the last run's cost each turn, so a multi-turn
-          // thread under-reported its spend (rafael 2026-06-04). This run is
+          // thread under-reported its spend (2026-06-04). This run is
           // already recorded in run_history (updateRun above), so the sum
           // includes it; stamping it here self-heals historically-wrong rows.
           const threadTotals = runHistory ? runHistory.getThreadTotals(this.sessionId) : null;
@@ -1395,7 +1429,9 @@ export class Session {
               total_cost_usd: rollupCost,
             });
           }
-          if (startMessageCount === 0) {
+          // An internal run (a summary in a session of its own) has no user words to title, and
+          // its prompt is another thread's history: it would go to a second model call.
+          if (startMessageCount === 0 && !agent.isInternalRun) {
             // Derive the title from the user's OWN words, not the engine framing:
             // a context-opened chat (💬 mail-reply / fix / workflow-edit) carries a
             // `[Loaded …]\n[/loaded-context]\n\n` preamble on its first message that
@@ -1533,7 +1569,7 @@ export class Session {
       // Without this, an interrupted or errored run records cost 0, so its real
       // spend (the tokens were billed by the provider) silently drops out of the
       // thread + daily totals — under-reporting cost. With the resilience work
-      // making interrupts common, this is a material gap (rafael 2026-06-05).
+      // making interrupts common, this is a material gap (2026-06-05).
       // usageBefore/model are the same anchors the success path uses; partial
       // deltas are >= 0 (this.usage only grows). Computed OUTSIDE the persistence
       // try so it is also available to the debit-hook fire below even if the
@@ -1769,6 +1805,20 @@ export class Session {
     if (this.agent) {
       this.agent.reset();
     }
+    // The agent replaced its set (`Agent.reset`); the next agent this session builds gets that one.
+    this._conversationGrants = this.agent?.conversationGrants ?? this._conversationGrants?.renewed();
+  }
+
+  /** This conversation's grant set, built on first use: from the thread's recorded rows when
+   *  there is a history, else in memory only. */
+  private _grantSet(): ConversationGrants {
+    if (this._conversationGrants === undefined) {
+      const runHistory = this.engine.getRunHistory();
+      this._conversationGrants = runHistory
+        ? ConversationGrants.forThread(this.sessionId, runHistory)
+        : ConversationGrants.detached();
+    }
+    return this._conversationGrants;
   }
 
   /**
@@ -2631,6 +2681,9 @@ export class Session {
     if (engine.getGoogleAuth()?.isAuthenticated() === true) {
       basePrompt += GOOGLE_PROMPT_SUFFIX;
     }
+    // The Shopify preset, named only while the token exchange is switched on. Read here, at
+    // each agent build, not at import: the switch is the exchange's own predicate.
+    basePrompt += shopifyPresetSuffix(shopifyExchangeSwitchOn());
     // Append pipeline docs only when pipeline tools are registered
     if (engine.getPipelinesEnabled()) {
       basePrompt += PIPELINE_PROMPT_SUFFIX;
@@ -2686,6 +2739,8 @@ export class Session {
     }
 
     this.agent = new Agent({
+      conversationGrants: this._grantSet(),
+      conversationRoot: true,
       // Every agent this session builds is built for the principal of the run in flight, or
       // of the last run: a rebuild in the middle of a mandate's run (compaction, a tier
       // override, a registry change) must not hand the model the tools the lock withholds.
@@ -2752,6 +2807,7 @@ export class Session {
       promptMailConnect: this._promptMailConnect
         ? (data: MailConnectPromptData, meta?: PromptMeta) => this._promptMailConnect!(data, meta)
         : undefined,
+      approvalFiling: this._approvalFiling ?? undefined,
       maxIterations: this.agentOverrides.maxIterations,
       continuationPrompt: this.agentOverrides.continuationPrompt,
       // Merge user-disabled tools (Settings → Integrations → Tool Toggles)
@@ -2804,6 +2860,7 @@ export class Session {
       // model looks Anthropic; a cross-provider slot pins it to the slot model.
       openaiModelId: slotCfg.crossProviderSlot ? slotCfg.openaiModelId : (this._profileOverride?.model_id ?? userConfig.openai_model_id),
       briefing: this._briefingConsumed ? undefined : this.briefing,
+      secretsBriefing: this._briefingConsumed ? undefined : this.secretsBriefing,
       autonomy: this.agentOverrides.autonomy,
       secretStore: engine.getSecretStore() ?? undefined,
       userId: engine.getUserId() ?? undefined,

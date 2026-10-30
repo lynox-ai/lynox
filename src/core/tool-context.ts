@@ -25,6 +25,7 @@ import type {
   StepHint,
 } from '../types/index.js';
 import type { HostPolicyContext } from './network-guard.js';
+import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
 
 /** Provider for cross-session HTTP rate limiting (implemented by RunHistory). */
 export interface ToolCallCountProvider {
@@ -105,8 +106,14 @@ export interface ToolContext {
   /** The bulk-run ledger in engine.db. Null unless `bulk_runs_enabled` is on and
    *  engine.db opened. */
   bulkLedger: import('./bulk-ledger.js').BulkLedger | null;
+  /** One pass of the connection erasure sweep (PRD source-connection R8-3), run by the delete
+   *  that wrote an erasure record. Null without engine.db or run history. */
+  connectionErasureSweep: (() => void) | null;
 
   // ── Isolation (bash tool) ──
+  /** Where `bash` runs and, in sidecar mode, the workspace tree's fd (`shell-isolation.ts`). Built
+   *  once per process; the one source for every consumer — none reads the socket env. */
+  shellIsolation: ShellIsolation;
   isolationEnvOverride: Record<string, string> | undefined;
   isolationMinimalEnv: boolean;
 
@@ -155,6 +162,9 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     vaultNameBindings: null,
     artifactStore: null,
     bulkLedger: null,
+    connectionErasureSweep: null,
+    // The process's object, never a default: a context made without an engine reads the same mode.
+    shellIsolation: shellIsolation(),
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
     pendingStepHint: null,

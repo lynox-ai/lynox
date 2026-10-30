@@ -1,9 +1,10 @@
 import type Database from 'better-sqlite3';
-import { MANDATE_TAG_PREFIX } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
 import type { DeliverySummary } from './notification-router.js';
 import { normalizeTier, type ModelTier } from '../types/index.js';
+import { PLAN_PAUSE_SQL_FN, planPauseOn } from './plan-pause.js';
 
 /**
  * The parked status, as a typed constant rather than a SQL literal, so the two
@@ -13,6 +14,13 @@ import { normalizeTier, type ModelTier } from '../types/index.js';
  * behind that no longer name a reachable state.
  */
 const WAITING: TriggerStatus = 'waiting';
+
+/**
+ * A one-shot whose run its owner stopped (`TaskManager.recordTaskRun`). Ended like
+ * `completed`: every query below that leaves out `completed` leaves it out too. A typed
+ * constant for the same reason as {@link WAITING}.
+ */
+const STOPPED: TriggerStatus = 'stopped';
 
 /**
  * TriggerStore — the write/read layer over the engine.db `triggers` table
@@ -84,6 +92,8 @@ export interface TriggerRow {
   createdBy?: string | null | undefined;
   /** Principal tag of whoever stamped `confirmedAt`; cleared with it. */
   confirmedBy?: string | null | undefined;
+  /** Grant id of the mandate in `createdBy`; written only together with it. */
+  createdMandateId?: string | null | undefined;
 }
 
 export interface StoredTrigger {
@@ -144,6 +154,7 @@ export function triggerRecordToRow(rec: TriggerRecord): TriggerRow {
     createdUntrusted: rec.created_untrusted ?? null,
     createdBy: rec.created_by ?? null,
     confirmedBy: rec.confirmed_by ?? null,
+    createdMandateId: rec.created_mandate_id ?? null,
   };
 }
 
@@ -201,9 +212,22 @@ interface TriggerFullDbRow {
   created_by: string | null;
   edited_by: string | null;
   confirmed_by: string | null;
+  created_mandate_id: string | null;
+  mandate_editor: string | null;
+  mandate_editor_id: string | null;
+  mandate_edited_at: string | null;
   model_tier: string | null;
   last_escalation_at: string | null;
   last_escalation_outcome: string | null;
+  paused_at: number | null;
+  paused_due_at: string | null;
+  paused_for: string | null;
+  covered_created_by: string | null;
+  covered_created_id: string | null;
+  covered_created_at: string | null;
+  covered_edited_by: string | null;
+  covered_edited_id: string | null;
+  covered_edited_at: string | null;
 }
 
 /**
@@ -214,13 +238,18 @@ interface TriggerFullDbRow {
 const KEEP_MARKER_IF_UNSTAMPED_SQL =
   "CASE WHEN COALESCE(?NEW, '') = '' AND COALESCE(confirmed_at, '') = '' THEN consent_reminded_at ELSE NULL END";
 
+/** Drops the owner's takeover of the editor mark: written with every new mandate editor mark. */
+export const CLEAR_EDITOR_COVER_SQL = 'covered_edited_by = NULL, covered_edited_id = NULL, covered_edited_at = NULL';
+
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
 const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
-   confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by, model_tier,
-   last_escalation_at, last_escalation_outcome`;
+   confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by,
+   created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, model_tier, last_escalation_at,
+   last_escalation_outcome, paused_at, paused_due_at, paused_for,
+   covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -285,10 +314,24 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     created_by: row.created_by ?? undefined,
     edited_by: row.edited_by ?? undefined,
     confirmed_by: row.confirmed_by ?? undefined,
+    created_mandate_id: row.created_mandate_id ?? undefined,
+    mandate_editor: row.mandate_editor ?? undefined,
+    mandate_editor_id: row.mandate_editor_id ?? undefined,
+    mandate_edited_at: row.mandate_edited_at ?? undefined,
     // Read through `normalizeTier`, so a value no writer can produce reads as no choice.
     model_tier: normalizeTier(row.model_tier ?? undefined),
     ...(bulkRunId !== undefined ? { bulk_run_id: bulkRunId } : {}),
     ...escalationOf(row),
+    // Read as stored, flag or not: a reader that shows a pause asks `planPauseOn()` itself.
+    ...(row.paused_at !== null ? { paused_at: row.paused_at } : {}),
+    ...(row.paused_due_at !== null ? { paused_due_at: row.paused_due_at } : {}),
+    ...(row.paused_for !== null ? { paused_for: row.paused_for } : {}),
+    ...(row.covered_created_by !== null ? { covered_created_by: row.covered_created_by } : {}),
+    ...(row.covered_created_id !== null ? { covered_created_id: row.covered_created_id } : {}),
+    ...(row.covered_created_at !== null ? { covered_created_at: row.covered_created_at } : {}),
+    ...(row.covered_edited_by !== null ? { covered_edited_by: row.covered_edited_by } : {}),
+    ...(row.covered_edited_id !== null ? { covered_edited_id: row.covered_edited_id } : {}),
+    ...(row.covered_edited_at !== null ? { covered_edited_at: row.covered_edited_at } : {}),
   };
 }
 
@@ -325,25 +368,59 @@ export function bulkPreviewTriggerId(runId: string): string {
 const MANDATE_TAG_LIKE = `${MANDATE_TAG_PREFIX}%`;
 
 /**
+ * The terms of {@link ACCEPTS_SQL} that are not about consent: the owner's switch, the status, and
+ * a plan's pause (`plan-pause.ts`), read only while the pause is switched on. Shared with the
+ * consent reminder's query, which turns the consent terms round and keeps these. Binds two
+ * parameters: {@link WAITING}, {@link STOPPED}.
+ */
+const UNHELD_SQL = `enabled != 0
+         AND status != 'completed'
+         AND status != ?
+         AND status != ?
+         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
+         AND (paused_at IS NULL OR ${PLAN_PAUSE_SQL_FN}() = 0)`;
+
+/**
+ * Every term of {@link ARMED_SQL} except its time term: the owner's switch, the status, and
+ * the consent of an unconfirmed agent or mandate. The webhook receiver reads it as "accepts a
+ * delivery" ({@link TriggerStore.findWebhookReceiver}), because a webhook trigger never has a
+ * `next_run_at`. Binds the same three parameters as {@link ARMED_SQL}, in the same order.
+ */
+const ACCEPTS_SQL = `${UNHELD_SQL}
+         AND NOT (effect = 'run_agent' AND COALESCE(confirmed_at, '') = '')
+         AND NOT (COALESCE(confirmed_at, '') = '' AND COALESCE(edited_by, created_by, '') LIKE ?)`;
+
+/**
  * Every term of {@link TriggerStore.getDue} except the two about NOW — due yet, leased now:
  * a trigger that satisfies it is one `getDue` selects once its time comes and nobody holds it.
  * Shared, not copied, so the question "will this trigger still fire?"
- * ({@link TriggerStore.isLive}) cannot drift from what the tick actually selects. Binds two
- * parameters, in this order: {@link WAITING}, {@link MANDATE_TAG_LIKE}.
+ * ({@link TriggerStore.isLive}) cannot drift from what the tick actually selects. Binds three
+ * parameters, in this order: {@link WAITING}, {@link STOPPED}, {@link MANDATE_TAG_LIKE}.
  */
 const ARMED_SQL = `next_run_at IS NOT NULL
-         AND enabled != 0
-         AND status != 'completed'
-         AND status != ?
-         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
-         AND NOT (effect = 'run_agent' AND COALESCE(confirmed_at, '') = '')
-         AND NOT (COALESCE(confirmed_at, '') = '' AND COALESCE(edited_by, created_by, '') LIKE ?)`;
+         AND ${ACCEPTS_SQL}`;
+
+/** What the webhook receiver needs of the trigger a route token names. */
+export interface WebhookReceiverRow {
+  id: string;
+  conditionJson: string;
+  sourceConnectionId: string | null;
+}
+
+/** Handles `PLAN_PAUSE_SQL_FN` is registered on: registering again drops every prepared statement. */
+const planPauseFnOn = new WeakSet<Database.Database>();
 
 export class TriggerStore {
   private readonly db: Database.Database;
 
   constructor(engine: EngineDb) {
     this.db = engine.getDb();
+    // Read by `UNHELD_SQL` on every call, so switching the pause changes the next query. Once per
+    // handle: stores are built per operation, and one could be built under an open `.iterate()`.
+    if (!planPauseFnOn.has(this.db)) {
+      this.db.function(PLAN_PAUSE_SQL_FN, { deterministic: false }, () => (planPauseOn() ? 1 : 0));
+      planPauseFnOn.add(this.db);
+    }
   }
 
   /**
@@ -371,9 +448,9 @@ export class TriggerStore {
         params_json, scope_type, scope_id, status, enabled, next_run_at,
         last_run_at, last_run_result, last_run_status, notification_channel,
         max_retries, retry_count, confirmed_at, created_untrusted, created_by, confirmed_by,
-        created_at, updated_at
+        created_mandate_id, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -399,6 +476,12 @@ export class TriggerStore {
         -- The creator is set once: a re-write never replaces it. edited_by is not
         -- written here at all; only markEditedBy writes it.
         created_by = COALESCE(triggers.created_by, excluded.created_by),
+        -- The creator's grant goes with the creator's tag, never on its own: a row whose tag
+        -- is already set keeps its id, NULL included, so a later write by another mandate
+        -- cannot lend its grant to the first one's tag. mandate_editor[_id] is not written
+        -- here either.
+        created_mandate_id = CASE WHEN triggers.created_by IS NULL THEN excluded.created_mandate_id
+                                  ELSE triggers.created_mandate_id END,
         -- Who stamped goes with the stamp: no stamp, no stamper.
         confirmed_by = CASE WHEN COALESCE(excluded.confirmed_at, '') = '' THEN NULL
                             ELSE COALESCE(excluded.confirmed_by, triggers.confirmed_by) END,
@@ -430,6 +513,8 @@ export class TriggerStore {
       row.createdUntrusted ?? null,
       row.createdBy ?? null,
       row.confirmedAt ? (row.confirmedBy ?? null) : null,
+      // An id without a mandate tag beside it names nobody.
+      isMandateTag(row.createdBy) ? (row.createdMandateId ?? null) : null,
       ts?.createdAt ?? null,
       ts?.updatedAt ?? null,
     );
@@ -500,6 +585,8 @@ export class TriggerStore {
     createdUntrusted?: string | undefined;
     /** Principal tag of the creating request; absent for the agent tool and the engine. */
     createdBy?: string | undefined;
+    /** The grant id of the mandate in `createdBy`, from the same principal. */
+    createdMandateId?: string | undefined;
     /** Principal tag of whoever supplied `confirmedAt` — only the owner does. */
     confirmedBy?: string | undefined;
   }): void {
@@ -533,6 +620,7 @@ export class TriggerStore {
       confirmedAt: params.confirmedAt ?? null,
       createdUntrusted: params.createdUntrusted ?? null,
       createdBy: params.createdBy ?? null,
+      createdMandateId: params.createdMandateId ?? null,
       confirmedBy: params.confirmedBy ?? null,
     });
   }
@@ -575,6 +663,73 @@ export class TriggerStore {
     return id;
   }
 
+  /**
+   * Insert a `webhook` trigger: the route token's hash, the verifier spec (and the mapping) in
+   * `condition_json.webhook`, and for Shopify the connection whose shop it serves. Effect
+   * `run_workflow`, no cron and no `next_run_at`: the tick never selects it, and only a
+   * delivery the ledger records gives it work. One transaction, so a trigger is never
+   * reachable under its token without its spec.
+   */
+  insertWebhook(params: {
+    id: string;
+    title: string;
+    description?: string | undefined;
+    pipelineId: string;
+    spec: { verifier: 'shopify-hmac' | 'shared-token'; sharedTokenHash?: string | undefined; mapping?: Readonly<Record<string, string>> | undefined };
+    routeTokenHash: string;
+    sourceConnectionId?: string | undefined;
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
+    confirmedAt?: string | undefined;
+    confirmedBy?: string | undefined;
+    createdUntrusted?: string | undefined;
+    createdBy?: string | undefined;
+    createdMandateId?: string | undefined;
+  }): void {
+    // `upsert` stores an unknown workflow as NULL to keep a mirror going; a webhook trigger
+    // without its workflow would record events nothing can run, so it is refused instead.
+    const workflowId = this._resolveTargetWorkflowId(params.pipelineId);
+    if (workflowId === null) throw new Error(`No saved workflow "${params.pipelineId}" to bind the webhook to.`);
+    const webhook: Record<string, unknown> = { verifier: params.spec.verifier };
+    if (params.spec.sharedTokenHash !== undefined) webhook['shared_token_hash'] = params.spec.sharedTokenHash;
+    if (params.spec.mapping !== undefined) webhook['mapping'] = params.spec.mapping;
+    this.db.transaction(() => {
+      // `upsert` would update a row that has this id already, and keep its creator: a new
+      // trigger takes no row over.
+      if (this.db.prepare('SELECT 1 FROM triggers WHERE id = ?').get(params.id) !== undefined) {
+        throw new Error(`A trigger with id "${params.id}" exists already.`);
+      }
+      this.upsert({
+        id: params.id,
+        title: params.title,
+        description: params.description ?? '',
+        source: 'webhook',
+        effect: 'run_workflow',
+        conditionJson: JSON.stringify({ schedule_cron: null, watch_config: null, webhook }),
+        targetWorkflowId: workflowId,
+        paramsJson: '{}',
+        scopeType: params.scopeType ?? 'project',
+        scopeId: params.scopeId ?? '',
+        status: 'open',
+        enabled: true,
+        nextRunAt: null,
+        lastRunAt: null,
+        lastRunResult: null,
+        lastRunStatus: null,
+        notificationChannel: null,
+        maxRetries: 0,
+        retryCount: 0,
+        confirmedAt: params.confirmedAt ?? null,
+        createdUntrusted: params.createdUntrusted ?? null,
+        createdBy: params.createdBy ?? null,
+        createdMandateId: params.createdMandateId ?? null,
+        confirmedBy: params.confirmedAt !== undefined ? (params.confirmedBy ?? null) : null,
+      });
+      this.db.prepare('UPDATE triggers SET route_token_hash = ?, source_connection_id = ? WHERE id = ?')
+        .run(params.routeTokenHash, params.sourceConnectionId ?? null, params.id);
+    })();
+  }
+
   /** S3f write-cutover: flip the cron kill-switch DIRECTLY on engine.db, mirroring
    *  the legacy `setTriggerEnabled` (exact-id). Returns false if no row matched. */
   setEnabled(id: string, enabled: boolean): boolean {
@@ -587,7 +742,7 @@ export class TriggerStore {
    *  surface's write. `confirmedAt` = an ISO timestamp to confirm a `run_agent`
    *  trigger for unattended execution, or null to un-confirm. Exact-id (same idiom
    *  as {@link setEnabled}); returns false if no row matched. */
-  setConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined): boolean {
+  setConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined, stampConnections?: string | undefined): boolean {
     // A named stamper takes the trigger over: it becomes the last party in `edited_by`,
     // which is what the mandate gate in {@link getDue} reads. Without it, a schedule a
     // mandate set up would be held again by the owner's own later rename, forever.
@@ -599,8 +754,23 @@ export class TriggerStore {
       // keeps it, so rewriting a waiting trigger cannot make it announce itself again.
       // Asking for the OLD stamp too (SQLite reads the pre-update row on the right-hand side)
       // also covers a stamp written by a binary that predates the marker and left it set.
-      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, updated_at = datetime('now') WHERE id = ?`,
-    ).run(confirmedAt, by, by, confirmedAt, id).changes > 0;
+      // The connections the stamp lists go with this stamp and no other: a stamp written without
+      // a list clears any earlier one. Every other write that moves the stamp leaves the column
+      // as it is, and the list stops counting because it names the stamp it was written with
+      // (`stampFromRow` in plan-stamp.ts).
+      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, stamp_connections = ?, updated_at = datetime('now') WHERE id = ?`,
+    ).run(confirmedAt, by, by, confirmedAt, confirmedAt === null ? null : (stampConnections ?? null), id).changes > 0;
+  }
+
+  /**
+   * The stamp a run of this trigger is held to and the connections it lists, read in one row so
+   * the two cannot come from different stamps. Kept out of {@link TRIGGER_READ_COLS}: the list
+   * names grants, and every route that hands out a trigger reads those columns.
+   */
+  getStampConnections(id: string): { confirmedAt: string | null; stampConnections: string | null } | undefined {
+    const row = this.db.prepare('SELECT confirmed_at, stamp_connections FROM triggers WHERE id = ?').get(id) as
+      { confirmed_at: string | null; stamp_connections: string | null } | undefined;
+    return row === undefined ? undefined : { confirmedAt: row.confirmed_at, stampConnections: row.stamp_connections };
   }
 
   /**
@@ -609,13 +779,28 @@ export class TriggerStore {
    * BEFORE the change it records: a crash between the two leaves a trigger that is
    * unstamped and unchanged — never one that is changed and still stamped. The engine's
    * own writes (status, next run, lease) do not come through here.
+   *
+   * A mandate's change is also kept as `mandate_editor[_id]`, the last mandate that changed
+   * the trigger, which nothing but this method writes: the owner's stamp and the owner's own
+   * edits leave it, so a plan a mandate shaped still names that mandate after the owner
+   * renamed and stamped it. The id comes from the same principal as the tag, and
+   * `mandate_edited_at` says when: the time a mandate's plan is compared against.
+   *
+   * A mandate's new mark also drops the owner's takeover of the old one (`covered_edited_*`), in
+   * the same statement: the mark and its covered copy are compared whole, and a change by the same
+   * mandate in the same second as the takeover would otherwise read as taken over.
    */
-  markEditedBy(id: string, editedBy: string, clearStamp: boolean): boolean {
+  markEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
+    const editedBy = principalTag(editor);
+    const mandate = editor.kind === 'mandate'
+      ? `, mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now'), ${CLEAR_EDITOR_COVER_SQL}`
+      : '';
+    const params: Array<string | null> = editor.kind === 'mandate' ? [editedBy, editedBy, editor.mandateId ?? null] : [editedBy];
     return this.db.prepare(
       clearStamp
-        ? `UPDATE triggers SET edited_by = ?, confirmed_at = NULL, confirmed_by = NULL, consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}, updated_at = datetime('now') WHERE id = ?`
-        : "UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ?",
-    ).run(editedBy, id).changes > 0;
+        ? `UPDATE triggers SET edited_by = ?${mandate}, confirmed_at = NULL, confirmed_by = NULL, consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}, updated_at = datetime('now') WHERE id = ?`
+        : `UPDATE triggers SET edited_by = ?${mandate}, updated_at = datetime('now') WHERE id = ?`,
+    ).run(...params, id).changes > 0;
   }
 
   /**
@@ -768,9 +953,11 @@ export class TriggerStore {
 
   /**
    * S3e read-cutover (MONEY-PATH): triggers due to fire, as legacy
-   * {@link TriggerRecord}s. SQL is the exact predicate of the legacy
+   * {@link TriggerRecord}s. SQL is the predicate of the legacy
    * `getDueTriggers` — `next_run_at <= now AND enabled != 0 AND status !=
-   * 'completed' AND (status != 'failed' OR schedule_cron present)` — with
+   * 'completed' AND (status != 'failed' OR schedule_cron present)` — with the
+   * engine's two later words left out as well: `waiting` (the WAIT GATE below) and
+   * `stopped` ({@link STOPPED}, ended like `completed`), and
    * `schedule_cron` read out of `condition_json` via `json_extract`. The
    * `idx_triggers_enabled(enabled, next_run_at)` index supports it. `now` is a
    * param (default `new Date().toISOString()`, matching legacy) purely for test
@@ -830,7 +1017,7 @@ export class TriggerStore {
          AND next_run_at <= ?
          AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY next_run_at ASC`,
-    ).all(WAITING, MANDATE_TAG_LIKE, now, now) as TriggerFullDbRow[];
+    ).all(WAITING, STOPPED, MANDATE_TAG_LIKE, now, now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
   }
 
@@ -843,7 +1030,40 @@ export class TriggerStore {
   isLive(id: string, now: string = new Date().toISOString()): boolean {
     return this.db.prepare(
       `SELECT 1 FROM triggers WHERE id = ? AND ((${ARMED_SQL}) OR (lease_until IS NOT NULL AND lease_until > ?))`,
-    ).get(id, WAITING, MANDATE_TAG_LIKE, now) !== undefined;
+    ).get(id, WAITING, STOPPED, MANDATE_TAG_LIKE, now) !== undefined;
+  }
+
+  /**
+   * The `webhook` trigger whose route token hashes to `routeTokenHash`, if it accepts a
+   * delivery now ({@link ACCEPTS_SQL}): switched on, not stopped, completed or waiting, and not
+   * a mandate's or an agent's trigger the owner has not confirmed. An exact match on the hash,
+   * never a prefix. `undefined` for anything else, so every refusal looks alike to the caller.
+   */
+  findWebhookReceiver(routeTokenHash: string): WebhookReceiverRow | undefined {
+    const row = this.db.prepare(
+      `SELECT id, condition_json, source_connection_id FROM triggers
+       WHERE route_token_hash = ? AND source = 'webhook' AND effect = 'run_workflow' AND ${ACCEPTS_SQL}`,
+    ).get(routeTokenHash, WAITING, STOPPED, MANDATE_TAG_LIKE) as
+      { id: string; condition_json: string; source_connection_id: string | null } | undefined;
+    return row === undefined
+      ? undefined
+      : { id: row.id, conditionJson: row.condition_json, sourceConnectionId: row.source_connection_id };
+  }
+
+  /**
+   * The `webhook` trigger `id`, if it accepts an event now — the receiver's test
+   * ({@link findWebhookReceiver}) by id, which the drain repeats before it runs an event the
+   * receiver recorded: the trigger may have been switched off, stopped or changed since.
+   */
+  findAcceptingWebhook(id: string): WebhookReceiverRow | undefined {
+    const row = this.db.prepare(
+      `SELECT id, condition_json, source_connection_id FROM triggers
+       WHERE id = ? AND source = 'webhook' AND effect = 'run_workflow' AND ${ACCEPTS_SQL}`,
+    ).get(id, WAITING, STOPPED, MANDATE_TAG_LIKE) as
+      { id: string; condition_json: string; source_connection_id: string | null } | undefined;
+    return row === undefined
+      ? undefined
+      : { id: row.id, conditionJson: row.condition_json, sourceConnectionId: row.source_connection_id };
   }
 
   /**
@@ -852,7 +1072,7 @@ export class TriggerStore {
    *
    * The same predicate as `getDue` with its consent clause turned round: a trigger listed
    * here is one that would be running now if a human had confirmed it. The denylist terms
-   * around it stay, so a paused, completed, parked or leased trigger is not "due" here
+   * around it stay, so a paused, completed, stopped, parked or leased trigger is not "due" here
    * either. A trigger a mandate wrote is listed too when it is an unconfirmed `run_agent`;
    * the owner is the one who can stamp it, so telling the owner is right for both reasons
    * it waits.
@@ -863,15 +1083,12 @@ export class TriggerStore {
        FROM triggers
        WHERE next_run_at IS NOT NULL
          AND next_run_at <= ?
-         AND enabled != 0
-         AND status != 'completed'
-         AND status != ?
-         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
+         AND ${UNHELD_SQL}
          AND effect = 'run_agent' AND COALESCE(confirmed_at, '') = ''
          AND consent_reminded_at IS NULL
          AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY next_run_at ASC`,
-    ).all(now, WAITING, now) as TriggerFullDbRow[];
+    ).all(now, WAITING, STOPPED, now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
   }
 
@@ -1122,6 +1339,8 @@ export class TriggerStore {
     scopeId?: string | undefined;
     status?: string | undefined;
     taskType?: string | undefined;
+    /** Only paused plans (`plan-pause.ts`); none while the pause is switched off. */
+    paused?: boolean | undefined;
     limit?: number | undefined;
   }): TriggerRecord[] {
     const clauses: string[] = [];
@@ -1130,6 +1349,8 @@ export class TriggerStore {
     if (opts?.scopeId) { clauses.push('scope_id = ?'); params.push(opts.scopeId); }
     if (opts?.status) { clauses.push('status = ?'); params.push(opts.status); }
     if (opts?.taskType) { clauses.push('(source = ? OR effect = ?)'); params.push(opts.taskType, opts.taskType); }
+    // In SQL, before the limit: filtered afterwards, a paused plan past the first rows would be missing.
+    if (opts?.paused) clauses.push(`paused_at IS NOT NULL AND ${PLAN_PAUSE_SQL_FN}() = 1`);
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     params.push(opts?.limit ?? 100);
     const rows = this.db.prepare(
@@ -1140,16 +1361,29 @@ export class TriggerStore {
   }
 
   /**
+   * How many plans wait for the owner's takeover (`plan-pause.ts`): paused and not completed, so
+   * the count matches what a takeover would accept. 0 while the pause is switched off.
+   */
+  countPausedOpen(): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS n FROM triggers WHERE paused_at IS NOT NULL AND status != 'completed' AND ${PLAN_PAUSE_SQL_FN}() = 1`,
+    ).get() as { n: number };
+    return row.n;
+  }
+
+  /**
    * S3e read-cutover: triggers actively referencing a workflow (legacy
    * `getTriggersByPipelineId` — the destructive-edit guard). `target_workflow_id =
-   * ? AND enabled != 0 AND status != 'completed' ORDER BY created_at DESC`.
+   * ? AND enabled != 0 AND status != 'completed' AND status != 'stopped' ORDER BY
+   * created_at DESC`. A stopped one-shot will not run again, so editing the workflow
+   * does not change anything it would do.
    */
   getByWorkflowId(workflowId: string): TriggerRecord[] {
     const rows = this.db.prepare(
       `SELECT ${TRIGGER_READ_COLS} FROM triggers
-       WHERE target_workflow_id = ? AND enabled != 0 AND status != 'completed'
+       WHERE target_workflow_id = ? AND enabled != 0 AND status != 'completed' AND status != ?
        ORDER BY created_at DESC`,
-    ).all(workflowId) as TriggerFullDbRow[];
+    ).all(workflowId, STOPPED) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
   }
 

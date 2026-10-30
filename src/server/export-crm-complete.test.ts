@@ -8,6 +8,7 @@ import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import type { CRM } from '../core/crm.js';
 import type { DataStore } from '../core/data-store.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /**
  * The export read contacts, deals and every DataStore collection once through the store's
@@ -35,7 +36,7 @@ describe('Art. 15 export carries every contact, deal and DataStore row (real eng
   /** Insert in batches the store accepts (its per-call maximum is 1 000). */
   const insertAll = (ds: DataStore, collection: string, records: Record<string, unknown>[]): void => {
     for (let i = 0; i < records.length; i += 1000) {
-      const res = ds.insertRecords({ collection, records: records.slice(i, i + 1000) });
+      const res = ds.insertRecords({ collection, records: records.slice(i, i + 1000), stamp: TEST_STAMP });
       expect(res.errors, 'fixture: every row must land').toEqual([]);
     }
   };

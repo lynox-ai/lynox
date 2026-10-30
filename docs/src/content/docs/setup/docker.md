@@ -20,7 +20,7 @@ cp .env.example .env       # add your API key
 docker compose up -d
 ```
 
-Open [localhost:3000](http://localhost:3000) and log in with the access token shown in `docker logs lynox`. Sessions last 30 days. Includes SearXNG for free web search out of the box.
+Open [localhost:3000](http://localhost:3000) and log in with the access token. On the first start the log shows its first 8 characters (`docker compose logs lynox`); the full token is `docker compose exec lynox cat /home/lynox/.lynox/.access-token`. With a single container, use `docker exec <name>` instead. Sessions last 30 days. Includes SearXNG for free web search out of the box.
 
 The repo includes a `docker-compose.yml` with lynox + SearXNG pre-configured. Edit `.env` to set your API key and optional features (Mail, Google Workspace, etc.).
 
@@ -161,6 +161,8 @@ curl http://localhost:3000/api/health
 ```
 
 Both `/health` and `/api/health` work — `/health` is a thin alias for proxies that only allow root-level health checks.
+
+`status` reads `"degraded"` (HTTP stays 200) when the engine started without `engine.db` or `history.db`; no other database is part of this check. The container log says which one and why, in a line starting with `[lynox] EngineDb init failed` or `[lynox] RunHistory init failed`.
 
 ## Engine-Only Mode
 

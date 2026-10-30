@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import BetterSqlite3 from 'better-sqlite3';
-import { RunHistory, hashTask } from './run-history.js';
+import { RunHistory, callFactsOf, hashTask } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 
@@ -56,7 +56,8 @@ describe('RunHistory', () => {
     raw.close();
 
     // The open THROWS (fail loud), rather than silently recreating.
-    expect(() => new RunHistory(dbPath)).toThrow(/duplicate column name: primary_subject_id/i);
+    // The boot's option: the mode in which a mistaken corruption branch would wipe the file.
+    expect(() => new RunHistory(dbPath, undefined, { onCorruption: 'recreate' })).toThrow(/duplicate column name: primary_subject_id/i);
     // No .corrupt-* sidecar was minted — the original file was left in place…
     expect(readdirSync(dir).some(f => f.startsWith('test.db.corrupt-'))).toBe(false);
     // …and the real row survives, still stamped v45 (the v46 txn rolled back).
@@ -215,6 +216,73 @@ describe('RunHistory', () => {
     expect(calls[0]!.tool_name).toBe('bash');
     expect(calls[1]!.tool_name).toBe('read_file');
     h.close();
+  });
+
+  describe('v69: what a row says about its call (PRD 3f-1b-α)', () => {
+    const base = (runId: string, toolName: string, sequenceOrder: number) =>
+      ({ runId, toolName, inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder });
+
+    it('writes the outcome, contract, lift and filing, and reads them back through callFactsOf', () => {
+      const h = createHistory();
+      const runId = h.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
+      h.insertToolCall({ ...base(runId, 'http_request', 0), isError: false, grantId: 'g-connection',
+        contract: { state: 'governing', grantId: 'g-accepted' }, lift: { grantId: 'g-accepted', entry: 'v1' } });
+      h.insertToolCall({ ...base(runId, 'mail_send', 1), isError: true, contract: { state: 'withheld', grantId: 'g-accepted' },
+        filed: { outcome: 'queued', approvalId: 'ap-1' } });
+      h.insertToolCall({ ...base(runId, 'read_file', 2), isError: false, contract: { state: 'none' }, filed: { outcome: 'not-queued' } });
+      const [post, mail, read] = h.getRunToolCalls(runId);
+      expect(callFactsOf(post!)).toEqual({ recorded: true, status: 'ok', contract: 'governing', contractGrantId: 'g-accepted',
+        lift: { grantId: 'g-accepted', entry: 'v1' }, filing: null });
+      // The contract's grant and the connection's grant are two columns, never one.
+      expect(post!.grant_id).toBe('g-connection');
+      expect(post!.contract_grant_id).toBe('g-accepted');
+      expect(callFactsOf(mail!)).toEqual({ recorded: true, status: 'error', contract: 'withheld', contractGrantId: 'g-accepted',
+        lift: null, filing: { outcome: 'queued', approvalId: 'ap-1' } });
+      expect(callFactsOf(read!)).toEqual({ recorded: true, status: 'ok', contract: 'none', contractGrantId: null,
+        lift: null, filing: { outcome: 'not-queued', approvalId: null } });
+      h.close();
+    });
+
+    it('an Art. 17 erasure takes the rows with their facts, and the route\'s reader returns the facts before it', () => {
+      const h = createHistory();
+      const runId = h.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
+      h.insertToolCall({ ...base(runId, 'mail_send', 0), isError: false, contract: { state: 'governing', grantId: 'g-1' },
+        lift: { grantId: 'g-1', entry: 'v1' }, filed: { outcome: 'queued', approvalId: 'ap-1' } });
+      // `getRunToolCalls` is what GET /api/history/runs/:id/tool-calls returns.
+      expect(h.getRunToolCalls(runId)[0]).toMatchObject({ is_error: 0, contract_state: 'governing', contract_grant_id: 'g-1',
+        lift_grant_id: 'g-1', lift_entry: 'v1', filing: 'queued', approval_id: 'ap-1' });
+      h.deleteAllData();
+      expect((h.getDb().prepare('SELECT COUNT(*) AS n FROM run_tool_calls').get() as { n: number }).n).toBe(0);
+      h.close();
+    });
+
+    it('a row written without the facts reads as not recorded, never as ok', () => {
+      const h = createHistory();
+      const runId = h.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
+      h.insertToolCall(base(runId, 'http_request', 0));
+      const [row] = h.getRunToolCalls(runId);
+      expect(row!.is_error).toBeNull();
+      expect(callFactsOf(row!)).toEqual({ recorded: false });
+      h.close();
+    });
+
+    it('holds each enumerated column to its value set, so no free text gets in', () => {
+      const h = createHistory();
+      const runId = h.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
+      const db = h.getDb();
+      const raw = (column: string, value: unknown) => () =>
+        db.prepare(`INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, ${column}) VALUES (?, ?, 't', '{}', '', 1, 0, ?)`)
+          .run(`row-${column}-${String(value)}`, runId, value);
+      expect(raw('contract_state', 'the user said it was fine')).toThrow(/CHECK/);
+      expect(raw('lift_entry', 'v2')).toThrow(/CHECK/);
+      expect(raw('filing', 'sent')).toThrow(/CHECK/);
+      expect(raw('is_error', 2)).toThrow(/CHECK/);
+      // CONTROL: the values the engine writes, and NULL, all pass.
+      for (const [column, value] of [['contract_state', 'withheld'], ['lift_entry', 'v1'], ['filing', 'not-queued'], ['is_error', 1], ['filing', null]] as const) {
+        expect(raw(column, value)).not.toThrow();
+      }
+      h.close();
+    });
   });
 
   it('getSessionToolCalls gathers tool calls across all runs in a session', () => {
@@ -853,13 +921,13 @@ describe('RunHistory', () => {
         steps: [{ id: 's', task: 't' }],
         reasoning: 'r', estimatedCost: 0.01,
         createdAt: new Date().toISOString(),
-      } as Parameters<typeof h.insertPlannedPipeline>[0]);
+      } as Parameters<typeof h.insertPlannedPipeline>[0], null);
       h.insertPlannedPipeline({
         id: 'tpl-b', name: 'Saved B', goal: 'g',
         steps: [{ id: 's', task: 't' }],
         reasoning: 'r', estimatedCost: 0.01,
         createdAt: new Date().toISOString(),
-      } as Parameters<typeof h.insertPlannedPipeline>[0]);
+      } as Parameters<typeof h.insertPlannedPipeline>[0], null);
       // Two genuine executions.
       h.insertPipelineRun({
         id: 'run-1', manifestName: 'real-run-1', status: 'completed', manifestJson: '{}',
@@ -1018,7 +1086,7 @@ describe('RunHistory', () => {
         reasoning: 'r', estimatedCost: 0.01,
         createdAt: new Date().toISOString(),
         ...extra,
-      } as Parameters<typeof h.insertPlannedPipeline>[0]);
+      } as Parameters<typeof h.insertPlannedPipeline>[0], null);
     }
 
     it('getPlannedPipelines returns only status=planned rows, newest first', () => {
@@ -1118,7 +1186,7 @@ describe('RunHistory', () => {
     it('renamePlannedPipeline updates manifest_name AND manifest_json name', () => {
       const h = createHistory();
       insertPlanned(h, 'plan-rn', 'old name');
-      expect(h.renamePlannedPipeline('plan-rn', 'new name')).toBe(true);
+      expect(h.renamePlannedPipeline('plan-rn', 'new name', null)).toBe(true);
       const [row] = h.getPlannedPipelines(10);
       expect(row!.manifest_name).toBe('new name');
       // The name also lives inside manifest_json — the library list and
@@ -1130,14 +1198,14 @@ describe('RunHistory', () => {
 
     it('renamePlannedPipeline returns false for an unknown id', () => {
       const h = createHistory();
-      expect(h.renamePlannedPipeline('nope', 'x')).toBe(false);
+      expect(h.renamePlannedPipeline('nope', 'x', null)).toBe(false);
       h.close();
     });
 
     it('renamePlannedPipeline does not rename a non-planned run', () => {
       const h = createHistory();
       h.insertPipelineRun({ id: 'exec-2', manifestName: 'done', status: 'completed', manifestJson: '{}' });
-      expect(h.renamePlannedPipeline('exec-2', 'hacked')).toBe(false);
+      expect(h.renamePlannedPipeline('exec-2', 'hacked', null)).toBe(false);
       h.close();
     });
 
@@ -2318,7 +2386,7 @@ describe('RunHistory', () => {
       h.insertPlannedPipeline({
         id: 'wf-xyz', name: 'Monthly report', goal: 'report', steps: [],
         reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
-      });
+      }, null);
       h.insertTrigger({
         id: 'pipe-1', title: 'Monthly report', source: 'cron', effect: 'run_workflow',
         pipelineId: 'wf-xyz', scheduleCron: '0 9 1 * *',
@@ -2397,6 +2465,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (41);
         -- a real v41 db has threads (created v22); v46 ALTERs it. Minimal stub — this test exercises the tasks split, not threads.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- and thread_messages (created v22); v67 reads it (conversation_grants fill). Minimal stub.
+        CREATE TABLE IF NOT EXISTS thread_messages (thread_id TEXT);
         -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
@@ -2479,6 +2549,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (41);
         -- a real v41 db has threads (created v22); v46 ALTERs it. Minimal stub for the tasks-split test.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- and thread_messages (created v22); v67 reads it (conversation_grants fill). Minimal stub.
+        CREATE TABLE IF NOT EXISTS thread_messages (thread_id TEXT);
         -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
@@ -2568,6 +2640,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (42);
         -- a real v42 db has threads (created v22); v46 ALTERs it. Minimal stub for the v43 prompts-migration test.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- and thread_messages (created v22); v67 reads it (conversation_grants fill). Minimal stub.
+        CREATE TABLE IF NOT EXISTS thread_messages (thread_id TEXT);
         -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
@@ -2901,13 +2975,13 @@ describe('history.db v58 — who created a to-do', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.insertTask({ id: 'old1', title: 'kept' });
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare('SELECT id, title, created_by FROM tasks').get()).toEqual({ id: 'old1', title: 'kept', created_by: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 });
@@ -2923,13 +2997,13 @@ describe('history.db v59 — why a question was closed', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.getDb().prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, expires_at) VALUES ('p-old', 's1', 'ask_user', 'q', '2099-01-01T00:00:00.000Z')").run();
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 59; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 59; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare("SELECT id, status, closed_reason FROM pending_prompts WHERE id = 'p-old'").get()).toEqual({ id: 'p-old', status: 'pending', closed_reason: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 });
@@ -2945,14 +3019,14 @@ describe('history.db v60 — which mandate asked a question', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.getDb().prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, expires_at, created_by) VALUES ('p-old', 's1', 'ask_user', 'q', '2099-01-01T00:00:00.000Z', 'mandate:old@example.org')").run();
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 60; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 60; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare("SELECT id, status, created_by, mandate_id FROM pending_prompts WHERE id = 'p-old'").get())
         .toEqual({ id: 'p-old', status: 'pending', created_by: 'mandate:old@example.org', mandate_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 });
@@ -2970,7 +3044,7 @@ describe('history.db v65 — the grant a call went out under', () => {
     const runId = before.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
     before.getDb().prepare(`INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at)
       VALUES ('c-old', ?, 'http_request', '{}', '', 1, 0, 'shop', '2026-01-01 00:00:00')`).run(runId);
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 65; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 65; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
     return path;
   }
@@ -2982,7 +3056,7 @@ describe('history.db v65 — the grant a call went out under', () => {
         .toEqual({ connection_id: 'shop', grant_id: null });
       const cols = (after.getDb().prepare("SELECT name FROM pragma_index_info('idx_run_tool_calls_connection_grant') ORDER BY seqno").all() as { name: string }[]).map((r) => r.name);
       expect(cols).toEqual(['connection_id', 'grant_id']);
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 
@@ -3024,7 +3098,7 @@ describe('history.db v66 — the tool_use block a call row records', () => {
     const runId = before.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
     before.getDb().prepare(`INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id)
       VALUES ('c-old', ?, 'http_request', '{}', '', 1, 0, 'shop', '2026-01-01 00:00:00', 'g-1')`).run(runId);
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 66; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 66; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
     return path;
   }
@@ -3034,7 +3108,7 @@ describe('history.db v66 — the tool_use block a call row records', () => {
     try {
       expect(after.getDb().prepare("SELECT connection_id, grant_id, tool_use_id FROM run_tool_calls WHERE id = 'c-old'").get())
         .toEqual({ connection_id: 'shop', grant_id: 'g-1', tool_use_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 
@@ -3058,5 +3132,61 @@ describe('history.db v66 — the tool_use block a call row records', () => {
       db.insertToolCall({ runId, toolName: 'bash', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0 });
       expect(db.getRunToolCalls(runId)[0]!.tool_use_id).toBeNull();
     } finally { db.close(); }
+  });
+});
+
+describe('history.db v68 — who answered a question', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); dirs.length = 0; });
+
+  /** A v67 database holding one answered question: the current schema with v68 taken back out. */
+  function v67(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mig67-'));
+    dirs.push(dir);
+    const path = join(dir, 'history.db');
+    const before = new RunHistory(path);
+    before.getDb().prepare(`INSERT INTO pending_prompts (id, session_id, prompt_type, question, answer, status, answered_at, expires_at)
+      VALUES ('p-old', 's-1', 'ask_user', 'Which list?', 'B', 'answered', '2026-10-01 10:00:00', '2026-10-01 11:00:00')`).run();
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 68; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
+    before.close();
+    return path;
+  }
+
+  const cols = (db: RunHistory): Array<{ name: string; notnull: number; dflt_value: unknown }> =>
+    db.getDb().prepare('PRAGMA table_info(pending_prompts)').all() as Array<{ name: string; notnull: number; dflt_value: unknown }>;
+
+  it('exists on a fresh database, nullable and without a default', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mig67-fresh-'));
+    dirs.push(dir);
+    const db = new RunHistory(join(dir, 'history.db'));
+    try {
+      for (const name of ['answered_by', 'answered_mandate_id']) {
+        expect(cols(db).find((c) => c.name === name), name).toMatchObject({ notnull: 0, dflt_value: null });
+      }
+    } finally { db.close(); }
+  });
+
+  it('adds both columns empty to a question answered before it (no backfill) and keeps its answer', () => {
+    const after = new RunHistory(v67());
+    try {
+      expect(after.getDb().prepare("SELECT answer, status, answered_by, answered_mandate_id FROM pending_prompts WHERE id = 'p-old'").get())
+        .toEqual({ answer: 'B', status: 'answered', answered_by: null, answered_mandate_id: null });
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
+    } finally { after.close(); }
+  });
+
+  it('opens again without re-running it, and keeps who answered (a restart)', async () => {
+    const path = v67();
+    const first = new RunHistory(path);
+    const { PromptStore } = await import('./prompt-store.js');
+    const id = new PromptStore(first.getDb()).insertAskUser('s-2', 'Which list?');
+    expect(new PromptStore(first.getDb()).answerUser(id, 'B', { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' })).toBe(true);
+    first.close();
+    const second = new RunHistory(path);
+    try {
+      expect(second.getDb().prepare('SELECT answered_by, answered_mandate_id FROM pending_prompts WHERE id = ?').get(id))
+        .toEqual({ answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
+      expect((second.getDb().prepare('SELECT COUNT(*) n FROM schema_version WHERE version = 68').get() as { n: number }).n).toBe(1);
+    } finally { second.close(); }
   });
 });

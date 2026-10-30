@@ -15,6 +15,7 @@ import type { PlannedTarget } from './bulk-ledger.js';
 import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
 import type { MemoryScopeRef } from '../types/index.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /** Bounds, reasons and ledger behaviour of the bulk dry run, driven below the tool. */
 
@@ -166,6 +167,7 @@ describe('planDataStore', () => {
       store.insertRecords({
         collection: 'products',
         records: Array.from({ length: Math.min(100, n - i) }, (_, j) => ({ sku: `S${String(i + j)}`, price: 1 })),
+        stamp: TEST_STAMP,
       });
     }
   }
@@ -217,7 +219,7 @@ describe('planDataStore', () => {
 describe('BulkLedger', () => {
   let engineDb: EngineDb;
   let ledger: BulkLedger;
-  beforeEach(() => { engineDb = new EngineDb(join(dir, 'engine.db'), 'key-one'); ledger = new BulkLedger(engineDb); });
+  beforeEach(() => { engineDb = new EngineDb(join(dir, 'engine.db'), 'key-one'); ledger = new BulkLedger(engineDb, null); });
   afterEach(() => { engineDb.close(); });
 
   const record = (targets: PlannedTarget[]): string =>
@@ -287,7 +289,7 @@ describe('BulkLedger', () => {
     // pass the same-handle check above and fail here.
     engineDb.close();
     engineDb = new EngineDb(join(dir, 'engine.db'), 'key-one');
-    ledger = new BulkLedger(engineDb);
+    ledger = new BulkLedger(engineDb, null);
     expect(hashOf(record(one('alice@example.test')))).toBe(a);
     const plain = createHash('sha256');
     for (const p of ['workspace', 'workspace', 'alice@example.test', '"x"']) plain.update(`${String(Buffer.byteLength(p))}:`).update(p);
@@ -301,7 +303,7 @@ describe('BulkLedger', () => {
 
     const other = new EngineDb(join(dir, 'engine2.db'), 'key-two');
     try {
-      const c = new BulkLedger(other).recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'workspace', targets: one('alice@example.test') });
+      const c = new BulkLedger(other, null).recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'workspace', targets: one('alice@example.test') });
       const hc = (other.getDb().prepare('SELECT rule_hash FROM bulk_runs WHERE id = ?').get(c.id) as { rule_hash: string }).rule_hash;
       expect(hc).not.toBe(a);
     } finally {

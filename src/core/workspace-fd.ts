@@ -32,6 +32,7 @@ import {
   closeSync,
   constants,
   fchmodSync,
+  fchownSync,
   fstatSync,
   fsyncSync,
   lstatSync,
@@ -208,11 +209,15 @@ const S_ISGID = 0o2000;
 /**
  * fchmod needs a real fd; an O_PATH fd gives EBADF, so reopen the directory read-only. A new
  * directory under a set-group-ID parent inherits that bit from mkdir; it is kept, as a mkdir by
- * name keeps it, so files made below stay in the parent's group.
+ * name keeps it, so files made below stay in the parent's group. With `group`, the directory is
+ * given that group first, through the same reopened fd (fchown on O_PATH is EBADF as well).
  */
-function setMode(dir: DirHandle, mode: number): void {
+function setMode(dir: DirHandle, mode: number, group?: number): void {
   const fd = IS_LINUX ? openSync(self(dir), constants.O_RDONLY | O_DIRECTORY) : dir.fd;
-  try { fchmodSync(fd, mode | (fstatSync(fd).mode & S_ISGID)); } finally { if (fd !== dir.fd) closeSync(fd); }
+  try {
+    if (group !== undefined) fchownSync(fd, -1, group);
+    fchmodSync(fd, mode | (fstatSync(fd).mode & S_ISGID));
+  } finally { if (fd !== dir.fd) closeSync(fd); }
 }
 
 /**
@@ -222,7 +227,7 @@ function setMode(dir: DirHandle, mode: number): void {
  * directory this call did not create keeps its mode. The caller closes the
  * returned handle with `closeDir` — it may be the anchor.
  */
-function walkDir(anchor: DirHandle, parts: readonly string[], create?: { dirMode: number }): DirHandle {
+function walkDir(anchor: DirHandle, parts: readonly string[], create?: { dirMode: number; group?: number | undefined }): DirHandle {
   assertLive(anchor);
   let cur: DirHandle = anchor;
   try {
@@ -243,8 +248,15 @@ function walkDir(anchor: DirHandle, parts: readonly string[], create?: { dirMode
         next = openChildDir(cur, name);
         if (made) {
           try {
-            setMode(next, create.dirMode);
+            setMode(next, create.dirMode, create.group);
           } catch (modeErr) {
+            // A directory left with mkdir's 0700 would never get its mode or group: the next call
+            // finds it and does not count it as made. Removed again, if it is still the one made
+            // here and still empty.
+            try {
+              const ino = fstatSync(next.fd).ino;
+              if (lstatOrNull(cur, name)?.ino === ino) rmdirSync(at(cur, name));
+            } catch { /* no longer empty, or gone */ }
             closeSync(next.fd);
             throw modeErr;
           }
@@ -306,6 +318,46 @@ export function ensureSubAnchor(anchor: WorkspaceAnchor, name: string, dirMode: 
   return { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf };
 }
 
+/** A directory that is not, or could not be made, what the caller asked for. */
+export class DirStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DirStateError';
+  }
+}
+
+/**
+ * As {@link ensureSubAnchor}, and the directory gets `dirMode` and `group` whether this call made it
+ * or it was there already (a context directory left at mkdir's 0700 by an earlier start, or changed
+ * since). Set through a reopened fd, as `setMode` does: on the O_PATH anchor fchown and fchmod are
+ * EBADF.
+ *
+ * A directory that does not belong to `owner` is refused before anything is changed. Afterwards
+ * the directory is read back: a kernel that drops the set-group-ID bit without an error (fchmod by
+ * a process outside `group`) leaves a mode nobody asked for, and that is refused as well. A
+ * failed call closes what it opened and throws, naming the call in its errno message.
+ */
+export function ensureSubAnchorWithMode(anchor: WorkspaceAnchor, name: string, dirMode: number, group: number, owner: number): WorkspaceAnchor {
+  const parts = splitRel(name);
+  if (parts.length !== 1) throw new WorkspaceAccessError('BAD_PATH', `a sub-anchor is one component, got ${JSON.stringify(name)}`);
+  // A new directory is made 0700 by the walk; group and mode are set below for new and old alike,
+  // the group first, so the group bits never open to a group the directory does not have yet.
+  const dir = walkDir(anchor, parts, { dirMode: 0o700 });
+  try {
+    const before = fstatSync(dir.fd).uid;
+    if (before !== owner) throw new DirStateError(`it belongs to uid ${before}, not to uid ${owner}; give it to uid ${owner} or remove it`);
+    setMode(dir, dirMode, group);
+    const after = fstatSync(dir.fd);
+    if ((after.mode & 0o7777) !== dirMode || after.gid !== group) {
+      throw new DirStateError(`after fchown and fchmod it has mode 0o${(after.mode & 0o7777).toString(8)} and group ${after.gid}, not 0o${dirMode.toString(8)} and ${group}`);
+    }
+    return { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf };
+  } catch (err) {
+    closeSync(dir.fd);
+    throw err;
+  }
+}
+
 /**
  * Open the directory `rel` below `anchor` as its own anchor, every component with O_NOFOLLOW.
  * Creates nothing: a missing component is ENOENT, a symlink on the way is refused. `rel` must
@@ -337,6 +389,32 @@ export function mountIdAt(path: string): number | null {
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * The Linux mount id of the directory at `path`, links followed; null where it cannot be opened
+ * or its fdinfo read (off Linux, no `/proc`). The one other fdinfo reader, `workspace-root.ts`'s
+ * own copy, was folded into this one (PRD shell-sidecar-activation D2 (c)).
+ */
+export function mountIdOfDir(path: string): number | null {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | O_DIRECTORY);
+  } catch {
+    return null;
+  }
+  try {
+    return mountIdOf(fd);
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The fds this process holds open, from `/proc/self/fd`. Throws where that cannot be read. */
+export function openFds(): number[] {
+  return readdirSync('/proc/self/fd').map(Number).filter(Number.isInteger);
 }
 
 /** What identifies "the same mount": the mount id on Linux, the device id elsewhere. */
@@ -410,23 +488,43 @@ export function openRead(anchor: WorkspaceAnchor, rel: string): number {
 }
 
 /**
- * Read a whole regular file, refusing one larger than `maxBytes`. The limit holds
- * while reading, not only at open: a file another writer keeps growing is cut off.
+ * The most a file tool reads of one file in a single piece: read_file refuses a larger
+ * file, and the reads before a write (the diff preview, the review's backup, edit_file)
+ * stop at it, so a write to a file of any size cannot make the engine read all of it.
+ */
+export const FILE_TOOL_READ_CAP_BYTES = 5 * 1024 * 1024;
+
+/** Whether `err` is this module's refusal of a file over a read limit. */
+export function isReadLimit(err: unknown): boolean {
+  return err instanceof WorkspaceAccessError && err.code === 'LIMIT';
+}
+
+/**
+ * Read the rest of an open file, refusing one larger than `maxBytes` with a `LIMIT`
+ * error. The limit holds while reading, not only at open: a file another writer keeps
+ * growing is cut off. `label` names the file in the error. The caller closes the fd.
+ */
+export function readFdCapped(fd: number, maxBytes: number, label: string): Buffer {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const buf = Buffer.allocUnsafe(1 << 16);
+  for (;;) {
+    const n = readSync(fd, buf, 0, buf.length, null);
+    if (n === 0) break;
+    total += n;
+    if (total > maxBytes) throw new WorkspaceAccessError('LIMIT', `${label} is over the ${maxBytes}-byte limit`);
+    chunks.push(Buffer.from(buf.subarray(0, n)));
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * Read a whole regular file, refusing one larger than `maxBytes`, as {@link readFdCapped}.
  */
 export function readFileAt(anchor: WorkspaceAnchor, rel: string, maxBytes = Number.MAX_SAFE_INTEGER): Buffer {
   const fd = openRead(anchor, rel);
   try {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    const buf = Buffer.allocUnsafe(1 << 16);
-    for (;;) {
-      const n = readSync(fd, buf, 0, buf.length, null);
-      if (n === 0) break;
-      total += n;
-      if (total > maxBytes) throw new WorkspaceAccessError('LIMIT', `${rel} is over the ${maxBytes}-byte limit`);
-      chunks.push(Buffer.from(buf.subarray(0, n)));
-    }
-    return Buffer.concat(chunks, total);
+    return readFdCapped(fd, maxBytes, rel);
   } finally {
     closeSync(fd);
   }
@@ -437,6 +535,8 @@ export interface OpenWriteOptions {
   readonly createMode?: number | undefined;
   /** Mode for directories created on the way; omit to require that they exist. */
   readonly dirMode?: number | undefined;
+  /** Group given (fchown) to the file and the directories this call creates; omit to keep the default. */
+  readonly group?: number | undefined;
 }
 
 function refuseWriteOpen(dir: DirHandle, leaf: Buffer, err: unknown): never {
@@ -458,7 +558,7 @@ function refuseWriteOpen(dir: DirHandle, leaf: Buffer, err: unknown): never {
  */
 export function openWrite(anchor: WorkspaceAnchor, rel: string, opts: OpenWriteOptions = {}): { fd: number; created: boolean } {
   const { dirParts, leaf } = splitLeaf(rel);
-  const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode } : undefined);
+  const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode, group: opts.group } : undefined);
   try {
     let fd: number;
     let created = false;
@@ -475,8 +575,16 @@ export function openWrite(anchor: WorkspaceAnchor, rel: string, opts: OpenWriteO
     }
     try {
       if (!fstatSync(fd).isFile()) throw new WorkspaceAccessError('NOT_FILE', `${show(dir, leaf)} is not a regular file`);
+      if (created && opts.group !== undefined) fchownSync(fd, -1, opts.group);
       if (created && opts.createMode !== undefined) fchmodSync(fd, opts.createMode);
     } catch (err) {
+      // A file made here and left 0600 would be written later as it is, since it then exists:
+      // removed again, if the name still holds the file made here.
+      if (created) {
+        try {
+          if (lstatOrNull(dir, leaf)?.ino === fstatSync(fd).ino) unlinkSync(at(dir, leaf));
+        } catch { /* already gone */ }
+      }
       closeSync(fd);
       throw err;
     }
@@ -491,6 +599,8 @@ export interface WriteOptions {
   readonly fileMode: number;
   /** Mode for directories created on the way; omit to require that they exist. */
   readonly dirMode?: number | undefined;
+  /** Group given (fchown) to the new file and the directories this call creates; omit to keep the default. */
+  readonly group?: number | undefined;
 }
 
 /** Prefix of a staged or temp file: `.lynox-stage-` plus 24 hex characters. */
@@ -515,13 +625,14 @@ function assertNotDir(dir: DirHandle, leaf: Buffer): void {
   }
 }
 
-/** Write a new temp file in `dir` (O_EXCL|O_NOFOLLOW), fill, fchmod, fsync. Returns its name. */
-function writeTemp(dir: DirHandle, fileMode: number, data: string | Uint8Array): { tmp: Buffer; bytes: number } {
+/** Write a new temp file in `dir` (O_EXCL|O_NOFOLLOW), fill, fchown (with `group`), fchmod, fsync. Returns its name. */
+function writeTemp(dir: DirHandle, fileMode: number, data: string | Uint8Array, group?: number): { tmp: Buffer; bytes: number } {
   const tmp = tempName();
   const fd = openSync(at(dir, tmp), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_NOFOLLOW, 0o600);
   let open = true;
   try {
     const bytes = writeAll(fd, data);
+    if (group !== undefined) fchownSync(fd, -1, group);
     fchmodSync(fd, fileMode);
     fsyncSync(fd);
     closeSync(fd);
@@ -541,9 +652,9 @@ function writeTemp(dir: DirHandle, fileMode: number, data: string | Uint8Array):
  */
 export function writeFileAt(anchor: WorkspaceAnchor, rel: string, data: string | Uint8Array, opts: WriteOptions): void {
   const { dirParts, leaf } = splitLeaf(rel);
-  const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode } : undefined);
+  const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode, group: opts.group } : undefined);
   try {
-    const { tmp } = writeTemp(dir, opts.fileMode, data);
+    const { tmp } = writeTemp(dir, opts.fileMode, data, opts.group);
     try {
       assertNotDir(dir, leaf);
       renameSync(at(dir, tmp), at(dir, leaf));
@@ -556,9 +667,9 @@ export function writeFileAt(anchor: WorkspaceAnchor, rel: string, data: string |
   }
 }
 
-/** Create a directory path; existing components must be real directories. */
-export function mkdirAt(anchor: WorkspaceAnchor, rel: string, dirMode: number): void {
-  closeDir(walkDir(anchor, splitRel(rel), { dirMode }), anchor);
+/** Create a directory path; existing components must be real directories. With `group`, the directories it creates get that group. */
+export function mkdirAt(anchor: WorkspaceAnchor, rel: string, dirMode: number, group?: number): void {
+  closeDir(walkDir(anchor, splitRel(rel), { dirMode, group }), anchor);
 }
 
 /** Remove one non-directory entry (a symlink is removed, not its target). */
@@ -605,6 +716,9 @@ export interface WalkEntry {
   readonly size: number;
   readonly mode: number;
   readonly uid: number;
+  /** Device and inode, to recognise a second name (a hard link) for a file elsewhere. */
+  readonly dev: number;
+  readonly ino: number;
 }
 
 export interface WalkResult {
@@ -627,16 +741,32 @@ export interface WalkResult {
 const DEFAULT_LIMITS: WalkLimits = { maxDepth: 1024, maxEntries: Number.MAX_SAFE_INTEGER, maxBytes: Number.MAX_SAFE_INTEGER };
 
 /**
+ * Receives an entry below the walked directory that cannot be read (EACCES, EPERM), with the
+ * error code. Without it such an entry fails the walk or copy, which is what a backup needs.
+ * A caller that passes it promises to NAME what it was told about, never to drop it: the export
+ * lists these entries as unreadable instead of failing the whole answer.
+ */
+export type UnreadableSink = (rel: string, code: string) => void;
+
+function isUnreadable(err: unknown): string | null {
+  const code = errno(err);
+  return code === 'EACCES' || code === 'EPERM' ? code : null;
+}
+
+/**
  * List everything below `rel`, depth-first, pre-order. Symlinks are reported and
  * never followed. Entries that vanish while the walk runs are left out. Exceeding
  * a limit throws (LIMIT) rather than truncating, so a caller can never mistake a
- * cut-off listing for the whole tree.
+ * cut-off listing for the whole tree. With `onUnreadable`, a directory below `rel`
+ * that cannot be listed or entered, and an entry that cannot be stat'ed, go to it
+ * and the walk goes on; `rel` itself unreadable still throws.
  */
 export function walk(
   anchor: WorkspaceAnchor,
   rel: string,
   limits: WalkLimits = DEFAULT_LIMITS,
   watch?: { readonly dev: number; readonly ino: number },
+  onUnreadable?: UnreadableSink,
 ): WalkResult {
   const entries: WalkEntry[] = [];
   const mountBoundaries: string[] = [];
@@ -651,14 +781,31 @@ export function walk(
   };
   if (isWatched(root.fd)) watchedAt.push('');
   const visit = (dir: DirHandle, prefix: string, prefixExact: boolean, depth: number): void => {
-    for (const name of readNames(dir)) {
-      const st = lstatOrNull(dir, name);
-      if (st === null) continue;
+    let names: Buffer[];
+    try {
+      names = readNames(dir);
+    } catch (err) {
+      const code = isUnreadable(err);
+      if (code === null || onUnreadable === undefined || prefix === '') throw err;
+      onUnreadable(prefix, code);
+      return;
+    }
+    for (const name of names) {
       const { text, exact } = decode(name);
       const childRel = prefix === '' ? text : `${prefix}/${text}`;
+      let st: Stats | null;
+      try {
+        st = lstatOrNull(dir, name);
+      } catch (err) {
+        const code = isUnreadable(err);
+        if (code === null || onUnreadable === undefined) throw err;
+        onUnreadable(childRel, code);
+        continue;
+      }
+      if (st === null) continue;
       const childExact = prefixExact && exact;
       const type = classify(st);
-      entries.push({ rel: childRel, exactName: childExact, type, size: st.size, mode: st.mode & 0o7777, uid: st.uid });
+      entries.push({ rel: childRel, exactName: childExact, type, size: st.size, mode: st.mode & 0o7777, uid: st.uid, dev: st.dev, ino: st.ino });
       if (entries.length > limits.maxEntries) throw new WorkspaceAccessError('LIMIT', `more than ${limits.maxEntries} entries below ${JSON.stringify(rel)}`);
       if (type === 'file') {
         files++;
@@ -677,6 +824,8 @@ export function walk(
         } catch (err) {
           // Removed or swapped since the lstat: leave it out, never follow.
           if (errno(err) === 'ENOENT' || err instanceof WorkspaceAccessError) continue;
+          const code = isUnreadable(err);
+          if (code !== null && onUnreadable !== undefined) { onUnreadable(childRel, code); continue; }
           throw err;
         }
         try {
@@ -711,21 +860,25 @@ export interface CopyCount {
 /** Receives one regular file of a copy-out; `fd` is open for reading and closed after. */
 export type CopyOutSink = (rel: string, fd: number, size: number) => void;
 
+/** One regular file of a copy-out: `fd` is open for reading while the consumer holds it. */
+interface CopyOutFile {
+  readonly rel: string;
+  readonly fd: number;
+  readonly size: number;
+}
+
 /**
- * Copy every regular file below `rel` out of the workspace. The sink decides
- * where it goes (a directory outside the workspace, an archive, export chunks).
- * Mount boundaries are refused before anything is copied. A file that cannot be
- * read (EACCES) fails the copy: a backup must not be silently incomplete.
+ * The walk behind `copyOut` and `copyOutAsync`: yields each regular file below `rel` with its fd
+ * open, and closes the fd when the consumer moves on (or throws). Returns the count.
  */
-export function copyOut(
+function* copyOutFiles(
   anchor: WorkspaceAnchor,
   rel: string,
-  sink: CopyOutSink,
-  limits: WalkLimits = DEFAULT_LIMITS,
-  /** A directory that must not be inside (the data directory): copying it would copy it into itself. */
-  refuse?: { readonly dev: number; readonly ino: number },
-): CopyCount {
-  const listing = walk(anchor, rel, limits, refuse);
+  limits: WalkLimits,
+  refuse: { readonly dev: number; readonly ino: number } | undefined,
+  onUnreadable: UnreadableSink | undefined,
+): Generator<CopyOutFile, CopyCount, void> {
+  const listing = walk(anchor, rel, limits, refuse, onUnreadable);
   if (listing.mountBoundaries.length > 0) {
     throw new WorkspaceAccessError('MOUNT', `mount boundary below ${JSON.stringify(rel)}: ${listing.mountBoundaries.join(', ')}`);
   }
@@ -747,11 +900,13 @@ export function copyOut(
         skipped.push(e.rel);
         continue;
       }
+      const code = isUnreadable(err);
+      if (code !== null && onUnreadable !== undefined) { onUnreadable(e.rel, code); continue; }
       throw err;
     }
     try {
       const size = fstatSync(fd).size;
-      sink(e.rel, fd, size);
+      yield { rel: e.rel, fd, size };
       files++;
       bytes += size;
     } finally {
@@ -759,6 +914,70 @@ export function copyOut(
     }
   }
   return { files, dirs, bytes, skipped };
+}
+
+const NOTHING: CopyCount = { files: 0, dirs: 0, bytes: 0, skipped: [] };
+
+/** Drive the generator to its end, handing each file to `take`; a throwing `take` closes the open fd. */
+function drain(gen: Generator<CopyOutFile, CopyCount, void>, take: (f: CopyOutFile) => void): CopyCount {
+  // run-group-starter: a synchronous loop that ends with the walk, or with a throw from the walk or the sink, inside its caller's call; it reports no spend.
+  for (;;) {
+    const step = gen.next();
+    if (step.done === true) return step.value;
+    try {
+      take(step.value);
+    } catch (err) {
+      gen.return(NOTHING);
+      throw err;
+    }
+  }
+}
+
+/**
+ * Copy every regular file below `rel` out of the workspace. The sink decides
+ * where it goes (a directory outside the workspace, an archive, export chunks).
+ * Mount boundaries are refused before anything is copied. A file that cannot be
+ * read (EACCES) fails the copy: a backup must not be silently incomplete. Only a
+ * caller that names what it was not given (the export) passes `onUnreadable`;
+ * the copy then hands such an entry to it and goes on.
+ */
+export function copyOut(
+  anchor: WorkspaceAnchor,
+  rel: string,
+  sink: CopyOutSink,
+  limits: WalkLimits = DEFAULT_LIMITS,
+  /** A directory that must not be inside (the data directory): copying it would copy it into itself. */
+  refuse?: { readonly dev: number; readonly ino: number },
+  onUnreadable?: UnreadableSink,
+): CopyCount {
+  return drain(copyOutFiles(anchor, rel, limits, refuse, onUnreadable), f => sink(f.rel, f.fd, f.size));
+}
+
+/**
+ * As `copyOut`, with a sink that may await: for a copy large enough that holding the event loop
+ * for all of it would stall every other request (the export). The walk itself still runs in one
+ * go before the first file.
+ */
+export async function copyOutAsync(
+  anchor: WorkspaceAnchor,
+  rel: string,
+  sink: (rel: string, fd: number, size: number) => Promise<void>,
+  refuse?: { readonly dev: number; readonly ino: number },
+  onUnreadable?: UnreadableSink,
+): Promise<CopyCount> {
+  const gen = copyOutFiles(anchor, rel, DEFAULT_LIMITS, refuse, onUnreadable);
+  // run-group-starter: awaited by its caller and ends with the walk, or with a throw from the walk or the sink; it reports no spend.
+  for (;;) {
+    const step = gen.next();
+    if (step.done === true) return step.value;
+    try {
+      await sink(step.value.rel, step.value.fd, step.value.size);
+    } catch (err) {
+      // Closes the open fd through the generator's `finally`, then rethrows.
+      gen.return(NOTHING);
+      throw err;
+    }
+  }
 }
 
 export interface StageOptions {

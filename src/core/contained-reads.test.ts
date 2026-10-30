@@ -12,10 +12,10 @@ import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import { RunHistory } from './run-history.js';
 import {
-  Containment, CONTAINED_CDN_HOSTS, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, containedCallAllowed, containedThreads, containThreadFrom,
+  Containment, CONTAINED_CALL_REFUSAL, CONTAINED_CDN_HOSTS, CONTAINED_OTHER_SERVICE_REFUSAL, CONTAINED_PLAN_REFUSAL, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, CONTAINED_WRITE_REFUSAL, containedCallAllowed, containedCallRefusal, containedThreads, containThreadFrom,
 } from './containment.js';
 import { createToolContext } from './tool-context.js';
-import { resolveChatContext } from './chat-context.js';
+import { CONTAINED_ORIGIN_CONTEXT, containedOriginContext, resolveChatContext, type ContainedWayOutState } from './chat-context.js';
 import { generateBriefing } from './project.js';
 import { compose } from './data-boundary.js';
 import { diagnoseWorkflowTool } from '../tools/builtin/diagnose-workflow.js';
@@ -30,7 +30,7 @@ const SHOP = 'https://acme.myshopify.com/admin/api/2025-10/products.json';
 describe('the calls a contained chat may make', () => {
   it('are exactly these names: a tool added later is refused until it is named here', () => {
     expect([...CONTAINED_TOOLS].sort()).toEqual([
-      'archive_search', 'ask_user', 'bulk_plan', 'bulk_status', 'http_request', 'memory_list', 'memory_recall',
+      'archive_search', 'ask_user', 'bulk_status', 'http_request', 'memory_list', 'memory_recall',
       'recall', 'recall_tool_result', 'run_workflow', 'spawn_agent', 'suggest_follow_ups',
     ]);
     expect(Object.isFrozen(CONTAINED_TOOLS)).toBe(true);
@@ -57,14 +57,95 @@ describe('the calls a contained chat may make', () => {
     expect(containedCallAllowed('http_request', { url: 'https://cdn.shopify.com/s/files/x.png' })).toBe(false);
   });
 
-  it('bulk_plan only for an http run on a store host', () => {
-    expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com' })).toBe(true);
+  it('http_request to a store host only to read: each write a request names, GraphQL read only as a plain POST', () => {
+    const refusal = (input: Record<string, unknown>): string | null => containedCallRefusal('http_request', { url: SHOP, ...input })?.reason ?? null;
+    const GQL = 'https://acme.myshopify.com/admin/api/2025-10/graphql.json';
+    const json = { 'Content-Type': 'application/json' };
+    const query = JSON.stringify({ query: '{ shop { name } }' });
+    expect(refusal({})).toBeNull();
+    expect(refusal({ method: 'HEAD' })).toBeNull();
+    expect(refusal({ url: GQL, method: 'POST', headers: json, body: query })).toBeNull();
+    for (const [label, input] of [
+      ['a REST POST', { method: 'POST', body: '{}' }],
+      ['a REST POST whose body reads as a GraphQL query', { method: 'POST', headers: json, body: query }],
+      ['a PUT', { method: 'PUT', body: '{}' }],
+      ['a DELETE', { method: 'DELETE' }],
+      ['an OPTIONS', { method: 'OPTIONS' }],
+      ['not a method', { method: 'FROB' }],
+      ['a GET overridden to DELETE', { headers: { 'X-HTTP-Method-Override': 'DELETE' } }],
+      ['a GraphQL mutation', { url: GQL, method: 'POST', headers: json, body: JSON.stringify({ query: 'mutation { x }' }) }],
+      ['a GraphQL query overridden to PUT', { url: GQL, method: 'POST', headers: { ...json, 'X-HTTP-Method-Override': 'PUT' }, body: query }],
+      ['a GraphQL query sent as a PUT', { url: GQL, method: 'PUT', headers: json, body: query }],
+      ['a GraphQL query sent as a GET overridden to POST', { url: GQL, method: 'GET', headers: { ...json, 'X-HTTP-Method-Override': 'POST' }, body: query }],
+      ['a GraphQL query with a query string', { url: `${GQL}?query=x`, method: 'POST', headers: json, body: query }],
+      ['a GraphQL body the check cannot read', { url: GQL, method: 'POST', headers: json, body: '[{"query":"{ shop { name } }"}]' }],
+      ['a body that is not text', { method: 'POST', body: { a: 1 } }],
+    ] as const) {
+      expect(refusal(input as Record<string, unknown>), label).toBe('contained_write');
+    }
+    // A shape the tool does not take is not decided at dispatch: the schema refuses the first and
+    // the last, and the tool refuses the second before it sends (http-store-containment.test.ts).
+    for (const [label, input] of [
+      ['a method that is not text', { method: 7 }],
+      ['a header that is not text', { headers: { 'X-HTTP-Method-Override': 1 } }],
+      ['headers as a string', { headers: '{"X-HTTP-Method-Override":"DELETE"}' }],
+    ] as const) {
+      expect(refusal(input as Record<string, unknown>), label).toBeNull();
+    }
+    // A host that is not the store's gets the answer for another service, under the same reason.
+    expect(containedCallRefusal('http_request', { url: 'https://api.example.com/x', method: 'POST' })).toEqual({ reason: 'contained_call', text: CONTAINED_OTHER_SERVICE_REFUSAL });
+    expect(containedCallRefusal('mail_send', {})).toEqual({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
+    expect(containedCallRefusal('http_request', { url: SHOP, method: 'PUT' })).toEqual({ reason: 'contained_write', text: CONTAINED_WRITE_REFUSAL });
+    expect(containedCallRefusal('memory_recall', {})).toBeNull();
+  });
+
+  it('no bulk_plan, not even for an http run on a store host: a run is planned in a chat that has not read the store', () => {
+    expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com' })).toBe(false);
+    expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com', source_list: { form: 'shopify', after: { title: 'x' } } })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'workspace', target_host: 'acme.myshopify.com' })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'data_store', target_host: 'acme.myshopify.com' })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 'shop.example.com' })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com:443' })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 7 })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'http' })).toBe(false);
+    // Its own reason and text: the run needs the store's data, so the general answer would point the wrong way.
+    expect(containedCallRefusal('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com' })).toEqual({ reason: 'contained_plan', text: CONTAINED_PLAN_REFUSAL });
+    expect(CONTAINED_PLAN_REFUSAL).toContain('Plan in a new chat');
+    expect(CONTAINED_WRITE_REFUSAL).toContain('Plan in a new chat');
+    // The way, not a place: after a reload the button stands only above the input, and over the
+    // API there is none, so the sentence says a new chat is where it goes on.
+    for (const text of [CONTAINED_PLAN_REFUSAL, CONTAINED_WRITE_REFUSAL]) {
+      expect(text).toMatch(/they plan the (change|run) in a new chat, which they open themselves/);
+      expect(text).toContain('you cannot open it for them');
+      expect(text).not.toMatch(/below|under your|above/i);
+    }
+  });
+
+  it('a request to another service names the same button, and no place', () => {
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('so it reaches no other service');
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('they can open a chat where this works with "Plan in a new chat"');
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('you cannot open it for them');
+    // It holds for an engine that cannot read the state too, so it does not claim a read.
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('or this engine cannot read whether it has');
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).not.toMatch(/below|under your|above|in the bar/i);
+  });
+
+  it('only a request to another service gets that answer; a local tool or a store URL the chat does not send keeps the general one', () => {
+    const other = { reason: 'contained_call', text: CONTAINED_OTHER_SERVICE_REFUSAL };
+    const general = { reason: 'contained_call', text: CONTAINED_CALL_REFUSAL };
+    expect(containedCallRefusal('http_request', { url: 'https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live', method: 'POST' })).toEqual(other);
+    expect(containedCallRefusal('http_request', { url: 'http://api.example.com/x' })).toEqual(other);
+    // Not another service: the store itself over plain http, a URL that does not parse, no URL, a tool.
+    expect(containedCallRefusal('http_request', { url: 'http://acme.myshopify.com/admin/api/2025-10/products.json' })).toEqual(general);
+    expect(containedCallRefusal('http_request', { url: 'not a url' })).toEqual(general);
+    expect(containedCallRefusal('http_request', { url: 'ftp://files.example.com/x' })).toEqual(general);
+    expect(containedCallRefusal('http_request', {})).toEqual(general);
+    expect(containedCallRefusal('read_file', { path: 'notes.md' })).toEqual(general);
+    expect(containedCallRefusal('memory_store', { content: 'x' })).toEqual(general);
+    // The general answer claims nothing about another service, and it is not the other one.
+    expect(CONTAINED_CALL_REFUSAL).not.toContain('another service');
+    expect(CONTAINED_CALL_REFUSAL).not.toContain('other service');
+    expect(CONTAINED_CALL_REFUSAL).toContain('Work that does not need the store\'s data belongs in a new chat.');
   });
 });
 
@@ -91,7 +172,7 @@ const rowsOf = (threadId: string): { kind: string; connection_id: string }[] =>
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'lynox-contained-reads-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
-  containment = new Containment(engineDb.getDb());
+  containment = new Containment(engineDb.getDb(), null);
   history = new RunHistory(join(dir, 'history.db'));
   history.setVerbGraph(engineDb);
 });
@@ -261,7 +342,7 @@ describe('pipeline_runs.origin_thread_id (history.db v64)', () => {
   it('exists on a fresh database, nullable and without a default', () => {
     const col = columns(history.getDb()).find((c) => c.name === 'origin_thread_id');
     expect(col).toMatchObject({ notnull: 0, dflt_value: null });
-    expect((history.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+    expect((history.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     seedRun('run-none', undefined);
     seedRun('run-chat', 'chat-1');
     expect(history.getPipelineRunOrigin('run-none')).toBeNull();
@@ -275,12 +356,12 @@ describe('pipeline_runs.origin_thread_id (history.db v64)', () => {
     const path = join(dir, 'old.db');
     const before = new RunHistory(path);
     before.insertPipelineRun({ id: 'old-run', manifestName: 'x', status: 'completed', manifestJson: '{}' });
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 64; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 64; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     expect(columns(before.getDb()).map((c) => c.name)).not.toContain('origin_thread_id');
     before.close();
     const after = new RunHistory(path);
     try {
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
       expect(after.getPipelineRunOrigin('old-run')).toBeNull();
       after.insertPipelineRun({ id: 'new-run', manifestName: 'x', status: 'running', manifestJson: '{}', originThreadId: 'chat-2' });
       expect(after.getPipelineRunOrigin('new-run')).toBe('chat-2');
@@ -318,7 +399,7 @@ describe('the contained threads among many, in one read (the thread list)', () =
 
   it('is fail-closed like `isContained`: an empty id, or a read that throws, counts as contained', () => {
     expect([...containment.containedThreadIds(['', 't-c'])]).toEqual(['']);
-    const broken = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
+    const broken = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never, null);
     expect([...broken.containedThreadIds(['t-a', 't-c'])].sort()).toEqual(['t-a', 't-c']);
   });
 
@@ -326,5 +407,90 @@ describe('the contained threads among many, in one read (the thread list)', () =
     expect(containedThreads(null, ['t-a']).size).toBe(0);
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
     expect([...containedThreads(null, ['t-a', 't-c'])].sort()).toEqual(['t-a', 't-c']);
+  });
+});
+
+const OPEN: ContainedWayOutState = { bulkRuns: true, bulkRunsBy: 'config', shopifyBulk: true, managed: false };
+
+describe('a chat opened from a contained one (contained-origin)', () => {
+  it('reads a fixed text and nothing of the old chat, and stays uncontained', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-origin-'));
+    const engineDb = new EngineDb(join(dir, 'engine.db'), '');
+    try {
+      const containment = new Containment(engineDb.getDb(), null);
+      containment.contain({ kind: 'thread', id: 'old-chat' }, { kind: 'api', connectionId: 'shop-a' });
+      // Every store this kind could read throws: the text comes from none of them.
+      const boom = new Proxy({}, { get: () => { throw new Error('read'); } });
+      const threads = fakeThreads(['new-chat']);
+      const out = resolveChatContext(boom as never, { kind: 'contained-origin', id: 'old-chat' }, boom as never,
+        { threadId: 'new-chat', containment, threadStore: threads.store as never, wayOut: OPEN });
+      expect(out).toBe(CONTAINED_ORIGIN_CONTEXT);
+      expect(out).not.toContain('old-chat');
+      expect(containment.isContained({ threadId: 'new-chat' })).toBe(false);
+      expect(threads.flags.get('new-chat')).toBe(0);
+      // The control: the run kind on the same reader does read through the stores.
+      expect(() => resolveChatContext(boom as never, { kind: 'run', id: 'r1' }, boom as never,
+        { threadId: 'new-chat', containment, threadStore: threads.store as never })).toThrow('read');
+    } finally {
+      engineDb.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('what a chat opened from a contained one promises for a store change', () => {
+  const BULK_RUN = 'plan it as a bulk run (bulk_plan)';
+  const SUPPORT = 'support@lynox.ai';
+  const FLAG = 'LYNOX_FEATURE_SHOPIFY_BULK_READ';
+  const BULK_OFF = 'bulk runs are turned off on this instance';
+  const count = (text: string, part: string): number => text.split(part).length - 1;
+
+  it('promises the bulk run only with both switches on', () => {
+    expect(containedOriginContext(OPEN)).toBe(CONTAINED_ORIGIN_CONTEXT);
+    expect(CONTAINED_ORIGIN_CONTEXT).toContain(BULK_RUN);
+    for (const off of [{ bulkRuns: false }, { shopifyBulk: false }]) {
+      const text = containedOriginContext({ ...OPEN, ...off });
+      expect(text, JSON.stringify(off)).not.toContain('bulk_plan');
+      expect(text).toContain('the store cannot be changed from here');
+      expect(text).toContain('only then offer to draft the new texts here');
+    }
+  });
+
+  it('keeps what does not depend on the switches', () => {
+    const closed = containedOriginContext({ bulkRuns: false, bulkRunsBy: 'control-plane', shopifyBulk: false, managed: true });
+    const head = CONTAINED_ORIGIN_CONTEXT.slice(0, CONTAINED_ORIGIN_CONTEXT.indexOf('If the user wants to change'));
+    const tail = CONTAINED_ORIGIN_CONTEXT.slice(CONTAINED_ORIGIN_CONTEXT.indexOf('If the user wants a request'));
+    expect(closed.startsWith(head)).toBe(true);
+    expect(closed.endsWith(tail)).toBe(true);
+  });
+
+  it('names who turns on what is missing: the Shopify read, then bulk runs, support once', () => {
+    // self-hosted: the variable for the Shopify read; bulk runs off names no place
+    const selfBoth = containedOriginContext({ bulkRuns: false, bulkRunsBy: 'config', shopifyBulk: false, managed: false });
+    expect(selfBoth.indexOf(FLAG)).toBeGreaterThan(-1);
+    expect(selfBoth.indexOf(BULK_OFF)).toBeGreaterThan(selfBoth.indexOf(FLAG));
+    expect(selfBoth).not.toContain(SUPPORT);
+    const selfFlag = containedOriginContext({ ...OPEN, shopifyBulk: false });
+    expect(selfFlag).toContain(FLAG);
+    expect(selfFlag).not.toContain(BULK_OFF);
+    expect(containedOriginContext({ ...OPEN, bulkRuns: false })).toContain(BULK_OFF);
+    expect(containedOriginContext({ ...OPEN, bulkRuns: false })).not.toContain(FLAG);
+    // managed: support for the Shopify read, and for bulk runs where the control plane decides
+    const pool = containedOriginContext({ bulkRuns: false, bulkRunsBy: 'control-plane', shopifyBulk: false, managed: true });
+    expect(count(pool, SUPPORT)).toBe(1);
+    expect(pool).not.toContain(FLAG);
+    expect(pool).not.toContain(BULK_OFF);
+    expect(count(containedOriginContext({ ...OPEN, bulkRunsBy: 'control-plane', bulkRuns: false, managed: true }), SUPPORT)).toBe(1);
+    // managed with its own key: the owner's config decides bulk runs, support the Shopify read
+    const byok = containedOriginContext({ bulkRuns: false, bulkRunsBy: 'config', shopifyBulk: false, managed: true });
+    expect(count(byok, SUPPORT)).toBe(1);
+    expect(byok.indexOf(BULK_OFF)).toBeGreaterThan(byok.indexOf(SUPPORT));
+  });
+
+  it('without the instance\'s state, promises no bulk run', () => {
+    const out = resolveChatContext(null, { kind: 'contained-origin', id: 'old-chat' }, null,
+      { threadId: 'new-chat', containment: null, threadStore: null });
+    expect(out).not.toContain('bulk_plan');
+    expect(out).toContain(SUPPORT);
   });
 });

@@ -11,6 +11,7 @@ import { runSavedWorkflow, type RunSavedWorkflowResult } from '../tools/builtin/
 import { decideRunGrant, startedVia, type GrantDecision, type GrantRunOrigin } from './workflow-grant.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 import type { SubAgentPromptHandles } from '../orchestrator/runtime-adapter.js';
+import type { ApprovalFilingContext } from './approval-filing.js';
 import type { WorkflowQuestionWait } from './workflow-questions.js';
 
 /** `decideRunGrant` bound to this engine's schedules and keyed hash. */
@@ -101,6 +102,10 @@ export async function runGuardedSavedWorkflow(
      *  §4.1). See `runSavedWorkflow`. */
     parentPrompt?: SubAgentPromptHandles | undefined;
     questionWait?: WorkflowQuestionWait | undefined;
+    /** What the run's steps file a mail with for its owner. See `runSavedWorkflow`. */
+    approvalFiling?: ApprovalFilingContext | undefined;
+    /** A check of the workflow as the runner reads it; a reason refuses the run. See `runSavedWorkflow`. */
+    checkWorkflow?: ((planned: PlannedPipeline) => string | null) | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
@@ -191,6 +196,11 @@ export async function runGuardedSavedWorkflow(
     abortScope: opts?.abortScope,
     parentPrompt: opts?.parentPrompt,
     questionWait: opts?.questionWait,
+    approvalFiling: opts?.approvalFiling,
+    checkWorkflow: opts?.checkWorkflow,
+    // A webhook run's params are a third party's values: its step agents meet them only where a
+    // task names them, fenced.
+    paramsKeptFromSteps: opts?.origin?.kind === 'webhook',
   });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.

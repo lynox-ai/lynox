@@ -3,9 +3,12 @@ import { connectionTokenAllowed, mandateMayConnect, mandateMayRead, mayServeAsCl
 import type { ApiProfile } from './api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
+import { runAsPlanOf } from './plan-run-context.js';
 
 /** A reader with no releases and no live mandate: what every read had before releases existed. */
 const NO_RELEASES: ReadCtx = { principal: OWNER_PRINCIPAL, ends: null, releases: null };
+/** The mandate M, under its live grant M-1, reading: the only reader its own connection's tokens reach. */
+const MANDATE_READS: ReadCtx = { principal: { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' } as RequestPrincipal, ends: { isLive: (id) => id === 'M-1' }, releases: null };
 
 // PRD customer-granted-operator-access §3.13: the vault as the engine reads it for a
 // profile a mandate wrote. The owner's profile is the control each time.
@@ -109,14 +112,14 @@ describe('mandateMayRead', () => {
   const books = (connected_by?: string, created_by = M): ApiProfile => ({
     id: 'books-api', name: 'Books', base_url: 'https://api.books.example', description: 'd', created_by,
     auth: { type: 'oauth2', vault_keys: ['BOOKS_CLIENT_ID'], oauth: { preset_id: 'bexio', client_id_key: 'BOOKS_CLIENT_ID' } },
-    ...(connected_by === undefined ? {} : { oauth_grant: { connected_by } }),
+    ...(connected_by === undefined ? {} : { oauth_grant: { connected_by, ...(connected_by === M ? { connected_mandate_id: 'M-1' } : {}) } }),
   });
   const mine = (connected_by?: string): ApiProfile => ({
     id: 'mine-api', name: 'Mine', base_url: 'https://mine.example', description: 'd', created_by: M,
     auth: { type: 'oauth2', vault_keys: ['MINE_KEY'], oauth: { client_id_key: 'MINE_KEY' } },
-    ...(connected_by === undefined ? {} : { oauth_grant: { connected_by, written: [{ name: 'MY_OUTPUT', fp: 'x' }] } }),
+    ...(connected_by === undefined ? {} : { oauth_grant: { connected_by, ...(connected_by === M ? { connected_mandate_id: 'M-1' } : {}), written: [{ name: 'MY_OUTPUT', fp: 'x' }] } }),
   });
-  const may = (profiles: ApiProfile[], name: string, via?: ApiProfile, writing = false, ctx: ReadCtx = NO_RELEASES): boolean =>
+  const may = (profiles: ApiProfile[], name: string, via?: ApiProfile, writing = false, ctx: ReadCtx = MANDATE_READS): boolean =>
     mandateMayRead(vault, { knownProfiles: () => profiles }, M, name, via, ctx, writing);
 
   it('gives a mandate\'s preset profile the tokens of its own consent, and its client pair once released', () => {
@@ -183,6 +186,20 @@ describe('mandateMayRead', () => {
     expect(may([holder, second], 'MINE_API_ACCESS_TOKEN', holder)).toBe(true);
   });
 
+  it('gives a plan\'s run none of the tokens of the mandate\'s own consent, and still what the owner released', () => {
+    const p = books(M);
+    const PLAN_OF: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
+    // The same reads in the mandate's own session, the control.
+    expect(may([p], 'BOOKS_API_ACCESS_TOKEN', p)).toBe(true);
+    runAsPlanOf(PLAN_OF, () => {
+      expect(may([p], 'BOOKS_API_ACCESS_TOKEN', p)).toBe(false);
+      expect(may([p], 'BOOKS_API_REFRESH_TOKEN', p)).toBe(false);
+      expect(may([p], 'BOOKS_API_ACCESS_TOKEN', p, true)).toBe(false);
+      expect(may([p], 'BOOKS_CLIENT_ID', p, false, releasedFor(p, 'BOOKS_CLIENT_ID'))).toBe(true);
+    });
+    expect(may([p], 'BOOKS_API_ACCESS_TOKEN', p)).toBe(true);
+  });
+
   it('gives nothing from the environment, whatever names it', () => {
     expect(may([mine(M)], 'ENV_KEY', mine(M))).toBe(false);
     expect(may([], 'ENV_KEY')).toBe(false);
@@ -243,16 +260,16 @@ describe('mandateMayConnect — where a connection stores its tokens', () => {
   };
 
   it('lets a mandate connect its own profile when no one else reads the slots', () => {
-    expect(mandateMayConnect(store(), { knownProfiles: () => [mine] }, M, mine, NO_RELEASES)).toBe(true);
+    expect(mandateMayConnect(store(), { knownProfiles: () => [mine] }, M, mine, MANDATE_READS)).toBe(true);
   });
 
   it('refuses when a profile of the owner reads a slot the connection would write', () => {
-    expect(mandateMayConnect(store(), { knownProfiles: () => [mine, ownersPat] }, M, mine, NO_RELEASES)).toBe(false);
+    expect(mandateMayConnect(store(), { knownProfiles: () => [mine, ownersPat] }, M, mine, MANDATE_READS)).toBe(false);
   });
 
   it('refuses when the refresh slot is read by another author, the access slot alone being free', () => {
     const readsRefresh: ApiProfile = { ...ownersPat, id: 'crm-refresh', auth: { type: 'bearer', vault_keys: ['CRM_REFRESH_TOKEN'] } };
-    expect(mandateMayConnect(store(), { knownProfiles: () => [mine, readsRefresh] }, M, mine, NO_RELEASES)).toBe(false);
+    expect(mandateMayConnect(store(), { knownProfiles: () => [mine, readsRefresh] }, M, mine, MANDATE_READS)).toBe(false);
   });
 });
 

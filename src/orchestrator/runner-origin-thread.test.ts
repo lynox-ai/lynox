@@ -49,7 +49,7 @@ describe('origin_thread_id', () => {
   it('is written from the chat origin, on the nested run as well', async () => {
     const h = tmpHistory();
     try {
-      const state = await runManifest(NESTED, CONFIG, { parentTools: tools, runHistory: h, chatOrigin: chat('chat-1') });
+      const state = await runManifest(NESTED, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h, chatOrigin: chat('chat-1') });
       expect(state.status).toBe('completed');
       expect(rows(h)).toEqual([
         { parent_run_id: null, origin_thread_id: 'chat-1' },
@@ -61,7 +61,7 @@ describe('origin_thread_id', () => {
   it('is NULL for a run no chat started (control)', async () => {
     const h = tmpHistory();
     try {
-      await runManifest(STEP, CONFIG, { parentTools: tools, runHistory: h });
+      await runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h });
       expect(rows(h)).toEqual([{ parent_run_id: null, origin_thread_id: null }]);
     } finally { h.close(); }
   }, 60_000);
@@ -77,7 +77,7 @@ describe('a run whose record cannot be written', () => {
     const h = tmpHistory();
     try {
       failingInsert(h);
-      await expect(runManifest(STEP, CONFIG, { parentTools: tools, runHistory: h, chatOrigin: chat('chat-1') }))
+      await expect(runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h, chatOrigin: chat('chat-1') }))
         .rejects.toThrow('This workflow run was not started: its record, which names the chat it runs for, could not be written. Try again later.');
       expect(mockSpawnInline).not.toHaveBeenCalled();
     } finally { h.close(); }
@@ -87,10 +87,10 @@ describe('a run whose record cannot be written', () => {
     const h = tmpHistory();
     try {
       failingInsert(h);
-      expect((await runManifest(STEP, CONFIG, { parentTools: tools, runHistory: h, chatOrigin: chat('chat-1') })).status).toBe('completed');
+      expect((await runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h, chatOrigin: chat('chat-1') })).status).toBe('completed');
       vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
       failingInsert(h);
-      expect((await runManifest(STEP, CONFIG, { parentTools: tools, runHistory: h })).status).toBe('completed');
+      expect((await runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h })).status).toBe('completed');
       expect(mockSpawnInline).toHaveBeenCalledTimes(2);
     } finally { h.close(); }
   }, 60_000);

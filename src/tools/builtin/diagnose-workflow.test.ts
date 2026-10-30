@@ -19,7 +19,7 @@ function makeAgent(runHistory: RunHistory): IAgent {
 /** Seed a failed run (run row + per-step results) linked to a saved workflow that
  *  still exists (so the diagnose tool steers to update_workflow_steps). */
 function seedFailedRun(history: RunHistory): void {
-  history.insertPlannedPipeline({ id: 'wf-1', name: 'Monthly Report', goal: '', steps: [{ id: 'step-2', task: 't' }], reasoning: '', estimatedCost: 0, createdAt: '2026-06-24T00:00:00.000Z' });
+  history.insertPlannedPipeline({ id: 'wf-1', name: 'Monthly Report', goal: '', steps: [{ id: 'step-2', task: 't' }], reasoning: '', estimatedCost: 0, createdAt: '2026-06-24T00:00:00.000Z' }, null);
   history.insertPipelineRun({
     id: 'run-1', manifestName: 'Monthly Report', status: 'failed',
     manifestJson: '{}', error: 'stopped at step-2', workflowId: 'wf-1',
@@ -82,7 +82,7 @@ describe('diagnose_workflow_run (Slice C2)', () => {
   it('does NOT resolve a saved-workflow id (status=planned) as a run', async () => {
     // A saved workflow and a run share the pipeline_runs table; passing a
     // workflow id as a run_id must not render a bogus 'planned' run.
-    history.insertPlannedPipeline({ id: 'wf-saved', name: 'WF', goal: '', steps: [{ id: 's0', task: 't' }], reasoning: '', estimatedCost: 0, createdAt: '2026-06-24T00:00:00.000Z' });
+    history.insertPlannedPipeline({ id: 'wf-saved', name: 'WF', goal: '', steps: [{ id: 's0', task: 't' }], reasoning: '', estimatedCost: 0, createdAt: '2026-06-24T00:00:00.000Z' }, null);
     const out = await diagnoseWorkflowTool.handler({ run_id: 'wf-saved' }, makeAgent(history));
     expect(out).toContain('not found');
   });

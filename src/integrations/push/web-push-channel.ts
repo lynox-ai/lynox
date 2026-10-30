@@ -188,6 +188,13 @@ class PushSubscriptionStore {
 // Channel
 // ---------------------------------------------------------------------------
 
+/**
+ * A message without `taskId` gets a tag of its own. A shown notification is replaced by the next one
+ * with its tag (`sw.js`), and messages sent in the same tick share a `Date.now()`, so the count
+ * keeps two of them from replacing each other while both are reported delivered.
+ */
+let untaggedSends = 0;
+
 export class WebPushNotificationChannel implements NotificationChannel {
   readonly name = 'web-push';
   private readonly store: PushSubscriptionStore;
@@ -300,21 +307,38 @@ export class WebPushNotificationChannel implements NotificationChannel {
     return live.filter((row) => row.created_by === tag);
   }
 
-  /** `failed` with no subscription too: nobody was told, and that is what the caller asks. */
+  /**
+   * `delivered` only when one of the owner's devices took the message. A send reaches the
+   * devices of live mandates too, but a notice the owner did not get was not delivered to the
+   * person the router reports for: an escalation that reached only a mandate's phone must still
+   * fall back to mail, so that is `reached_others`. `failed` with no subscription too: nobody
+   * was told. A message for the mandates' side (`audience: 'mandates'`) is meant for them, so
+   * reaching one of them is its delivery.
+   */
   async send(msg: NotificationMessage): Promise<ChannelOutcome> {
     const result = await this.sendDetailed(msg);
-    return result.sent > 0 ? 'delivered' : 'failed';
+    if (msg.audience === 'mandates') return result.sent > 0 ? 'delivered' : 'failed';
+    return result.sentToOwner > 0 ? 'delivered' : result.sent > 0 ? 'reached_others' : 'failed';
   }
 
   /** With `onlyFor` a mandate, the message goes only to that mandate's own subscriptions. */
-  async sendDetailed(msg: NotificationMessage, onlyFor?: RequestPrincipal): Promise<{ sent: number; failed: number; cleaned: number }> {
+  async sendDetailed(msg: NotificationMessage, onlyFor?: RequestPrincipal): Promise<{ sent: number; sentToOwner: number; failed: number; cleaned: number }> {
     // Prune expired subscriptions on each send (lightweight — SQLite handles it fast)
     this.store.prune();
 
-    const subscriptions = this.liveSubscriptions(onlyFor);
-    if (subscriptions.length === 0) return { sent: 0, failed: 0, cleaned: 0 };
+    // A message for one side goes to that side's subscriptions only, within what `onlyFor` allows:
+    // the owner's sentence never reaches a mandate's device, and a mandate's device cannot make
+    // the owner's message count as sent while the owner heard nothing.
+    const reachable = this.liveSubscriptions(onlyFor);
+    const subscriptions = msg.audience === 'owner'
+      ? reachable.filter((row) => !isMandateTag(row.created_by))
+      : msg.audience === 'mandates'
+        // One grant's devices; without a named grant, none (a live mandate's row always names its grant).
+        ? reachable.filter((row) => isMandateTag(row.created_by) && row.mandate_id === msg.mandateId)
+        : reachable;
+    if (subscriptions.length === 0) return { sent: 0, sentToOwner: 0, failed: 0, cleaned: 0 };
 
-    const tag = msg.taskId ?? `lynox-${Date.now()}`;
+    const tag = msg.taskId ?? `lynox-${Date.now()}-${String(++untaggedSends)}`;
     const payload: PushPayload = {
       title: msg.title.slice(0, 64),
       body: msg.body.slice(0, 240),
@@ -333,6 +357,7 @@ export class WebPushNotificationChannel implements NotificationChannel {
     const payloadStr = JSON.stringify(payload);
     const staleEndpoints: string[] = [];
     let sent = 0;
+    let sentToOwner = 0;
     let failed = 0;
 
     await Promise.allSettled(
@@ -347,6 +372,7 @@ export class WebPushNotificationChannel implements NotificationChannel {
             { TTL: 86400 }, // 24h
           );
           sent++;
+          if (!isMandateTag(sub.created_by)) sentToOwner++;
         } catch (err: unknown) {
           // 404 or 410 = subscription expired, remove it
           const statusCode = (err as { statusCode?: number })?.statusCode;
@@ -368,6 +394,6 @@ export class WebPushNotificationChannel implements NotificationChannel {
       this.store.remove(ep);
     }
 
-    return { sent, failed, cleaned: staleEndpoints.length };
+    return { sent, sentToOwner, failed, cleaned: staleEndpoints.length };
   }
 }

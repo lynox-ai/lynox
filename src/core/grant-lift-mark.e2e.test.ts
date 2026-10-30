@@ -38,7 +38,7 @@ vi.mock('../orchestrator/runner.js', async (importOriginal) => {
   return {
     ...real,
     runManifest: (manifest: Parameters<typeof real.runManifest>[0], config: Parameters<typeof real.runManifest>[1], options?: Parameters<typeof real.runManifest>[2]) =>
-      real.runManifest(manifest, config, {
+      real.runManifest(manifest, config, { source: { kind: 'adhoc' as const },
         ...options,
         observeToolCall: (call) => {
           observed.records.push(call as StepRecord);
@@ -124,7 +124,7 @@ describe('a grant marks the call whose write it let through, and no other', () =
       createdAt: '2026-10-01T00:00:00.000Z', template: true,
       steps: [{ id: 's1', task: 'post the weekly report', tools: ['http_request'] }],
       ...{ mode: 'autonomous', parameters: [] },
-    } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
+    } as Parameters<RunHistory['insertPlannedPipeline']>[0], null);
     forgetPipeline(id);
     return getPipeline(id, history)!;
   }
@@ -161,6 +161,7 @@ describe('a grant marks the call whose write it let through, and no other', () =
       getSecretStore: () => null,
       getPromptStore: () => null,
       escalateToUser: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
   }
 
@@ -271,7 +272,11 @@ describe('a grant marks the call whose write it let through, and no other', () =
     expect(httpRecords()).toEqual([expect.objectContaining({ isError: true, grant: { grantId: stampedGrantId('wf-post'), entry: 'v1' } })]);
   });
 
-  it('a lifted POST answered with a redirect the grant does not cover keeps its mark, and is no error', async () => {
+  it('a lifted POST answered with a redirect the grant does not cover keeps its mark, and is recorded as the error it ends in', async () => {
+    // The call ends refused although the write may have landed (`RedirectRefusedAfterWrite`,
+    // http.ts). The agent's own sink always recorded it as an error; the step record said ok only
+    // because the result event carried no error flag after a soft failure (PRD 3f-1b-α, D3). Both
+    // now agree.
     const trigger = accept(saveWorkflow());
     transport = async (input) => input.method === 'POST' && input.url === TARGET
       ? new Response(null, { status: 307, headers: { location: OTHER_PATH } })
@@ -282,7 +287,7 @@ describe('a grant marks the call whose write it let through, and no other', () =
     const [rec] = httpRecords();
     expect(rec).toBeDefined();
     expect(rec!.outputJson).toContain('Write possibly landed');
-    expect(rec!.isError).toBe(false);
+    expect(rec!.isError).toBe(true);
     expect(rec!.grant).toEqual({ grantId: stampedGrantId('wf-post'), entry: 'v1' });
   });
 });

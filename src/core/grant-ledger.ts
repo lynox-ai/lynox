@@ -17,6 +17,62 @@ import type Database from 'better-sqlite3';
 export type GrantMintReason = 'new' | 'consent' | 'credentials' | 'backfill' | 'split'
   | 'baseline' | 'secret-write' | 'secret-changed' | 'exchange' | 'rekey' | 'engine-write';
 
+/**
+ * The mint reasons that begin a connection's own line of grants: its creation (`new`), and the
+ * boot giving it a grant of its own because the one it carried was absent, unknown or recorded
+ * for another connection (`backfill`, `split` — the same branch of `ApiStore.backfillGrants`,
+ * told apart only by how many profiles held the grant). Every other reason continues a line.
+ * Where an epoch starts (`connections.first_grant_id`) is always one of these: the one list the
+ * erasure's epoch, the write that keeps the start, and the migration that set it all read.
+ */
+export const EPOCH_START_REASONS: readonly GrantMintReason[] = ['new', 'backfill', 'split'];
+
+/** {@link EPOCH_START_REASONS} as an SQL list, for a statement that cannot bind an array. */
+export const EPOCH_START_SQL = EPOCH_START_REASONS.map((r) => `'${r}'`).join(', ');
+
+/** The grant a stored profile carries (`config_json`), as an SQL expression; NULL when it is not readable. */
+export function currentGrantSql(configJson: string): string {
+  return `CASE WHEN json_valid(${configJson}) THEN json_extract(${configJson}, '$.oauth_grant.grant_id') END`;
+}
+
+/**
+ * Where a connection row's epoch starts, read from the ledger by time: an SQL expression over the
+ * row's `id`, `created_at` and `config_json` (the column references are passed in, so the
+ * migration and the store's write read one rule). It is the earliest beginning grant of the id
+ * minted from `created_at` on, with two seconds of tolerance, because a save mints its grant and
+ * writes the row in one transaction on the same second-precision clock and the mint can fall a
+ * second before the INSERT. It is NULL, so the erasure covers nothing, when:
+ *  - two beginnings fall within two seconds of `created_at`: a connection removed and set up again
+ *    under the same id inside the tolerance, where which grant began this row cannot be told;
+ *  - the row's current grant (`config_json`) is not a grant the ledger holds for this id, or is
+ *    older than every candidate: the row has no line of its own yet (a file imported with another
+ *    engine's grant), so a lone candidate can be an earlier connection's; the boot gives it a
+ *    `backfill` or `split` grant, and the store's write that records it sets the start;
+ *  - no beginning was minted from `created_at` on (a clock stepped back).
+ *
+ * This is the one place where the clock decides. The epoch itself runs by rowid from the start
+ * (`connection-erasure.ts`, "a clock can step back; the rowid does not"); the clock only marks the
+ * window around the row's creation and, inside it, which beginning came first. Within that window a
+ * second beginning makes the start empty, so a clock stepped back cannot move the start to a later
+ * grant of the row: a later grant read as earlier than the creation grant falls into the window with
+ * it. A clock stepped back past the window leaves no candidate, and the start empty.
+ */
+export function epochStartByTimeSql(id: string, createdAt: string, configJson: string): string {
+  const current = `(SELECT cur.rowid FROM connection_grants cur WHERE cur.connection_id = ${id} AND cur.kind = 'api'
+      AND cur.grant_id = ${currentGrantSql(configJson)})`;
+  return `CASE
+    WHEN (SELECT COUNT(*) FROM connection_grants w
+           WHERE w.connection_id = ${id} AND w.kind = 'api' AND w.reason IN (${EPOCH_START_SQL})
+             AND datetime(w.minted_at) BETWEEN datetime(${createdAt}, '-2 seconds') AND datetime(${createdAt}, '+2 seconds')) > 1
+      THEN NULL
+    ELSE (SELECT g.grant_id FROM connection_grants g
+           WHERE g.connection_id = ${id} AND g.kind = 'api' AND g.reason IN (${EPOCH_START_SQL})
+             AND datetime(g.minted_at) >= datetime(${createdAt}, '-2 seconds')
+             AND g.rowid <= ${current}
+           ORDER BY datetime(g.minted_at), g.rowid LIMIT 1)
+  END`;
+}
+
 export interface GrantLedgerRow {
   grant_id: string;
   connection_id: string;

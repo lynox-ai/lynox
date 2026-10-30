@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   OAUTH_PRESETS,
+  askedScopes,
+  consentFrameProblems,
+  normalizedPresetParams,
+  scopesBeyondAsked,
+  scopesOfAnswer,
   derivePresetEndpoints,
   presetIds,
   presetNotFollowed,
@@ -88,7 +93,10 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
       // And `presetStoreHost`: it derives a host from a preset and a profile.
       // And `presetClientKeys` and `isPresetClientSecretName`: they derive vault names from a preset's id;
       // `presetClientSecretGuidance` only phrases a sentence around a name.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'isPresetClientSecretName', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName'].sort(),
+      // And `consentFrameProblems`: it reads a preset's customer text and lists what is missing.
+      // `normalizedPresetParams` returns a copy of a profile's values as its preset reads them;
+      // `askedScopes`, `scopesOfAnswer` and `scopesBeyondAsked` read scopes and add no preset.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'askedScopes', 'consentFrameProblems', 'derivePresetEndpoints', 'isPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
     );
   });
 
@@ -375,6 +383,63 @@ describe('derivation happens at use, from the register alone', () => {
   });
 });
 
+// A consent page with a frame lists every write access by name, and says under the list what a
+// write access covers. A frame over raw ids, or names under the English frame, would mix two
+// languages on a binding page. Holds every preset that has a customer text, so a write scope
+// added later without a name fails here.
+describe('a customer text with a frame names every write scope', () => {
+  const texts = OAUTH_PRESETS.ids().flatMap((id) => {
+    const notice = OAUTH_PRESETS.get(id)?.consentNotice;
+    return notice ? [[id, notice] as const] : [];
+  });
+
+  it('finds the presets that carry a customer text', () => {
+    expect(texts.map(([id]) => id)).toContain('bexio');
+  });
+
+  it.each(texts)('%s: has no frame problem', (_id, notice) => {
+    expect(consentFrameProblems(notice)).toEqual([]);
+  });
+
+  // A preset without a frame passes the line above without being looked at, and only some
+  // presets carry one: these hold the check itself, on texts made to fail it.
+  describe('the check, on made-up texts', () => {
+    const frame = { title: 'T', scopesIntro: 'I', scopesNote: 'N', button: 'B' };
+    const base = { lang: 'de', writeScopes: ['a_edit', 'b_edit'], paragraphs: ['P.'] };
+    const names = { a_edit: 'A: Schreibzugriff', b_edit: 'B: Schreibzugriff' };
+
+    it('passes a text with neither, and one with a frame and a name for each write scope', () => {
+      expect(consentFrameProblems(base)).toEqual([]);
+      expect(consentFrameProblems({ ...base, frame, scopeNames: names })).toEqual([]);
+    });
+
+    it('refuses a frame without names, and names without a frame', () => {
+      expect(consentFrameProblems({ ...base, frame })).toEqual(['frame and scopeNames come together']);
+      expect(consentFrameProblems({ ...base, scopeNames: names })).toEqual(['frame and scopeNames come together']);
+    });
+
+    it('refuses a write scope without a name, or with a blank one', () => {
+      expect(consentFrameProblems({ ...base, frame, scopeNames: { a_edit: 'A' } })).toEqual(['no readable name for b_edit']);
+      expect(consentFrameProblems({ ...base, frame, scopeNames: { ...names, b_edit: ' ' } })).toEqual(['no readable name for b_edit']);
+    });
+
+    it('refuses a name for a scope the text does not cover', () => {
+      expect(consentFrameProblems({ ...base, frame, scopeNames: { ...names, c_edit: 'C' } }))
+        .toEqual(['a name for c_edit, which is no write scope of this text']);
+    });
+
+    it.each([['title'], ['scopesIntro'], ['scopesNote'], ['button']] as const)('refuses an empty %s', (field) => {
+      expect(consentFrameProblems({ ...base, frame: { ...frame, [field]: '  ' }, scopeNames: names }))
+        .toEqual([`the frame's ${field} is empty`]);
+    });
+
+    it('refuses two write scopes under one name, which the list could not tell apart', () => {
+      expect(consentFrameProblems({ ...base, frame, scopeNames: { a_edit: 'Kontakte', b_edit: ' Kontakte' } }))
+        .toEqual(['two write scopes share a name']);
+    });
+  });
+});
+
 // The page before a connect appears for the scopes in `writeScopes`, which is a second list next
 // to `allowedScopes`. A write scope added to one and not the other would skip the page.
 describe('the bexio customer text covers every write scope the preset allows', () => {
@@ -490,5 +555,61 @@ describe('what a preset says about the request shape, and what a preset that say
     expect(presetTokenHeaderName(shopify)).toBe('X-Shopify-Access-Token');
     expect(presetTokenBodyFormat(shopify, 'json')).toBe('form');
     expect(shopify.callbackVerification).toBe('shopify-hmac');
+  });
+});
+
+describe('a store name typed as the person sees it', () => {
+  const shopify = OAUTH_PRESETS.get('shopify')!;
+
+  it('is kept in lower case, which is the store Shopify reads', () => {
+    expect(normalizedPresetParams(shopify, { shop: 'My-Store' })).toEqual({ shop: 'my-store' });
+    expect(derivePresetEndpoints('shopify', normalizedPresetParams(shopify, { shop: 'My-Store' }))).toMatchObject({ host: 'my-store.myshopify.com' });
+  });
+
+  it('still reaches the derivation, which refuses what the pattern does not match', () => {
+    expect(derivePresetEndpoints('shopify', normalizedPresetParams(shopify, { shop: 'My Store' }))).toMatchObject({ kind: 'bad-param' });
+  });
+
+  it('leaves a name the provider does not read without case as written', () => {
+    const preset: OAuthPreset = { ...shopify, params: [{ name: 'shop', pattern: /^[A-Za-z]+$/, describe: 'x' }] };
+    expect(normalizedPresetParams(preset, { shop: 'Acme' })).toEqual({ shop: 'Acme' });
+  });
+
+  it('lowers ASCII only, so a letter that lowers onto an ASCII one is still refused', () => {
+    // U+212A KELVIN SIGN lowers to "k" under toLowerCase.
+    expect(normalizedPresetParams(shopify, { shop: 'ac\u212Ame' })).toEqual({ shop: 'ac\u212Ame' });
+    expect(derivePresetEndpoints('shopify', normalizedPresetParams(shopify, { shop: 'ac\u212Ame' }))).toMatchObject({ kind: 'bad-param' });
+  });
+
+  it('leaves names the preset does not have, and values that are not text, as they are', () => {
+    expect(normalizedPresetParams(shopify, { shop: 'ACME', other: 'KEEP', n: 3 })).toEqual({ shop: 'acme', other: 'KEEP', n: 3 });
+  });
+});
+
+describe('the scopes a grant holds and the scopes a connection asks for', () => {
+  it('reads an answer separated by commas or spaces, and none when the answer names none', () => {
+    expect(scopesOfAnswer('read_products,read_orders')).toEqual(['read_products', 'read_orders']);
+    expect(scopesOfAnswer('read_products read_orders')).toEqual(['read_products', 'read_orders']);
+    expect(scopesOfAnswer(undefined)).toBeUndefined();
+    expect(scopesOfAnswer('')).toBeUndefined();
+    expect(scopesOfAnswer(' , ')).toBeUndefined();
+    expect(scopesOfAnswer(['read_products'])).toBeUndefined();
+  });
+
+  it('asks a built-in provider for its link\'s scopes, possibly none', () => {
+    expect(askedScopes({ preset_id: 'shopify', scope: 'read_orders' })).toEqual(['read_orders']);
+    expect(askedScopes({ preset_id: 'shopify' })).toEqual([]);
+  });
+
+  it('has nothing to compare for a scope the provider refuses, a provider that adds scopes of its own, or a profile of no provider', () => {
+    expect(askedScopes({ preset_id: 'shopify', scope: 'write_products' })).toBeUndefined();
+    expect(askedScopes({ preset_id: 'bexio', scope: 'contact_show' })).toBeUndefined();
+    expect(askedScopes({})).toBeUndefined();
+    expect(askedScopes({ scope: 'a b' })).toBeUndefined();
+  });
+
+  it('names what a grant holds beyond the ask, once each, and nothing for a narrower one', () => {
+    expect(scopesBeyondAsked(['read_products', 'write_products', 'write_products'], ['read_products', 'read_orders'])).toEqual(['write_products']);
+    expect(scopesBeyondAsked(['read_products'], ['read_products', 'read_orders'])).toEqual([]);
   });
 });

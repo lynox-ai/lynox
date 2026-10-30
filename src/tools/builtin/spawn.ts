@@ -22,6 +22,7 @@ import { resolveTools } from '../resolve-tools.js';
 import { checkSessionBudget } from '../../core/session-budget.js';
 import { compose, engineText, escapeXml, wrapUntrustedData, renderFence } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
+import { childFilingContext } from '../../core/approval-filing.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
   DEFAULT_SPAWN_MAX_TURNS,
@@ -1176,7 +1177,7 @@ export function formatSpawnError(err: unknown, depth = 0): string {
  * the throw joined bare `err.message`s, so a real fan-out reported
  * `All sub-agents failed: 404 no Route matched with those values; 404 no Route
  * matched with those values; 404 no Route matched with those values` and named
- * neither the children nor the status (dogfood 2026-09-24).
+ * neither the children nor the status (seen in our own use, 2026-09-24).
  *
  * It reports and does not explain, and that took four rounds to accept. Each
  * round wrote a sentence naming the cause; each was wrong for a case the next
@@ -1296,7 +1297,7 @@ export function resolveSpawnChildRouting(input: {
   const resolvedRun = resolveRunModel({
     requested: spec.model,
     // Unroled spawns pin to `balanced`, NOT the main chat's `default_tier`
-    // (rafael 2026-07-07): once the "Main chat model" picker can raise the main
+    // (2026-07-07): once the "Main chat model" picker can raise the main
     // chat to `deep` (Opus/Large), letting tier-unspecified spawns inherit that
     // would silently multiply per-message cost. Roles keep their own tier
     // (operator/collector=fast); an explicit `spec.model` still wins via
@@ -1719,6 +1720,10 @@ async function executeThinker(
     maxIterations,
     isolation: childIsolation,
     autonomy: parentAgent.autonomy,
+    // A child of a run nobody watches files a mail like its parent: under the parent's trigger
+    // (so the flooding limit counts the whole tree) and naming the root run. Taken from the
+    // parent agent only, never from this tool's input; a chat's child gets none.
+    approvalFiling: parentAgent.approvalFiling !== undefined ? childFilingContext(parentAgent.approvalFiling, parentAgent.currentRunId) : undefined,
     costGuard,
     // Propagate parent's excludeTools so child's defense-in-depth check
     // refuses tool_use blocks naming disabled tools (in addition to the
@@ -1825,6 +1830,8 @@ async function executeThinker(
     // http_request and mail rate limits. A child with no sink would run its
     // fan-out unmetered.
     recordToolCall: parentAgent.recordToolCall,
+    // The root's set, by reference: what the child fetches is in it before the parent writes.
+    conversationGrants: parentAgent.conversationGrants,
   };
 
   // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row
@@ -1910,12 +1917,6 @@ async function executeThinker(
       } else if (childCause !== 'none') {
         parentAgent.noteUntrustedData?.();
       }
-      // New content for the parent's write approvals. Here, at the hand-back, and not
-      // inside the two calls above: both also serve hand-downs and rebuilds, which bring
-      // no new content. The counters are shared with the child, so its own reads have
-      // usually moved the epoch already; this covers a child whose taint has no read of
-      // its own behind it.
-      if (childCause !== 'none') parentAgent.noteForeignContent?.();
     }
 
     // T2-X1 part 5: record the child's actual LLM spend into the same
@@ -2046,6 +2047,9 @@ async function executeThinker(
 }
 
 export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
+  // A spawn order names sources, it does not consume them, and `secret_scope` derives the
+  // child's default reach from the `secret:NAME` refs the order writes.
+  secretRefs: 'verbatim',
   definition: {
     name: 'spawn_agent',
     description: 'Delegate tasks to specialist roles working in parallel. Choose a role via "role" (researcher, creator, operator, collector) to auto-configure model, effort, and allowed tools. If no role fits your task, omit "role" and configure model/effort/tools directly instead of picking a close-but-wrong role name — unrecognised roles error out.',

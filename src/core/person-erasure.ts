@@ -75,6 +75,8 @@ export const PERSON_ERASURE_REACH: Readonly<Record<string, ReadonlyArray<'covere
   'workspace': ['files'],
   'sweeps': ['files'],
   'backups': ['backups'],
+  // A copy of the workspace files on its way out: removed when its download ends, or at the next start.
+  'export-staging': ['files'],
   'wire-sink': ['debug_capture'],
   'wire-sink-raw': ['debug_capture'],
   'batch-index.json': ['debug_capture'],

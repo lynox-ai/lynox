@@ -35,19 +35,23 @@ export interface RerankOptions {
   timeoutMs?: number;
   /** Explicit enable flag. If undefined, reads LYNOX_SEARCH_RERANK env var. */
   enabled?: boolean;
+  /** The calling tool call's signal (`currentCallSignal`). When it aborts — the run was
+   *  stopped — the rerank call is aborted too, and its cost is bounded like a timeout's. */
+  signal?: AbortSignal | undefined;
 }
 
 export interface RerankOutcome {
   results: SearchResult[];
   droppedCount: number;
   meanScore: number | null;
-  skipReason?: 'disabled' | 'too-few-results' | 'provider-unsupported' | 'timeout' | 'llm-error' | 'malformed' | 'cut-off';
+  skipReason?: 'disabled' | 'too-few-results' | 'provider-unsupported' | 'timeout' | 'stopped' | 'llm-error' | 'malformed' | 'cut-off';
   durationMs: number;
   /** Actual USD cost of the pool-key rerank call (from response.usage), for the
    *  managed in-run debit. Undefined when no LLM call was made (skip/error). */
   costUsd?: number | undefined;
-  /** Bounds for a rerank call aborted at the timeout, whose reply never arrived. The upper
-   *  bound is for the session cap only — an aborted call is never debited to the tenant. */
+  /** Bounds for a rerank call aborted at the timeout or by a stop of the run, whose reply never
+   *  arrived. The upper bound is for the session cap only — an aborted call is never debited to
+   *  the tenant. */
   abortedCost?: AbortedCallCost | undefined;
 }
 
@@ -152,6 +156,9 @@ export async function rerankSearchResults(
   // snapshot, so this only guards bare/partial callers.
   if (provider === 'openai' && !providerConfig) return base({ skipReason: 'provider-unsupported' });
 
+  // A run stopped before the call starts no call: nothing is sent, so nothing is booked.
+  if (opts.signal?.aborted === true) return base({ skipReason: 'stopped' });
+
   const threshold = opts.threshold ?? DEFAULT_THRESHOLD;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -164,6 +171,7 @@ export async function rerankSearchResults(
   let stream: unknown;
   let request: { system: string; messages: Array<{ role: 'user'; content: string }>; tools: Array<typeof SCORE_TOOL> } | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onStop: (() => void) | undefined;
   try {
     // Provider-aware client: on 'openai' (Mistral) createLLMClient has NO
     // global fallback for key/baseURL/model, so we MUST pass the resolved
@@ -212,7 +220,21 @@ export async function rerankSearchResults(
         reject(new Error('rerank-timeout'));
       }, timeoutMs);
     });
-    const { message: response, missed } = await Promise.race([callPromise, timeoutPromise]);
+    // A stop of the run aborts the call the same way. Whichever of the two comes first rejects
+    // the race, so the catch below books the aborted call exactly once.
+    const stopSignal = opts.signal;
+    const stoppedPromise = new Promise<never>((_, reject) => {
+      if (stopSignal === undefined) return;
+      onStop = (): void => {
+        controller.abort();
+        reject(new Error('rerank-stopped'));
+      };
+      // Not aborted yet: an aborted signal returned before the call was built, and nothing awaited since.
+      // run-group-starter: removed in this function's `finally`; it aborts this rerank call and reports no spend itself.
+      stopSignal.addEventListener('abort', onStop, { once: true });
+    });
+    stoppedPromise.catch(() => {});
+    const { message: response, missed } = await Promise.race([callPromise, timeoutPromise, stoppedPromise]);
 
     // Actual pool-key spend of this rerank call, for the managed in-run debit at
     // the call site (web-search-tool). Normalize the SDK's null cache fields.
@@ -264,16 +286,20 @@ export async function rerankSearchResults(
       ...(costUsd !== undefined ? { costUsd } : {}),
     };
   } catch (err) {
-    if (err instanceof Error && err.message === 'rerank-timeout') {
+    const aborted = err instanceof Error && (err.message === 'rerank-timeout' || err.message === 'rerank-stopped')
+      ? (err.message === 'rerank-timeout' ? 'timeout' : 'stopped')
+      : undefined;
+    if (aborted !== undefined) {
       if (rerankModel !== undefined) {
         const cost = abortedCallCost({ model: rerankModel, maxTokens: RERANK_MAX_TOKENS, request, partial: partialMessageOf(stream) });
         reportAbortedCall('search-reranker', rerankModel, cost);
-        return base({ skipReason: 'timeout', abortedCost: cost });
+        return base({ skipReason: aborted, abortedCost: cost });
       }
-      return base({ skipReason: 'timeout' });
+      return base({ skipReason: aborted });
     }
     return base({ skipReason: 'llm-error' });
   } finally {
     clearTimeout(timer);
+    if (onStop !== undefined) opts.signal?.removeEventListener('abort', onStop);
   }
 }

@@ -107,6 +107,17 @@ import type { PromptText } from '../../types/index.js';
  */
 export const MASS_SEND_THRESHOLD = 5;
 
+/**
+ * How many distinct recipients a mail has (addresses compared lower-cased, To, Cc and Bcc
+ * together), and whether that makes it a mass send. The one rule for the send's confirmation
+ * and for a mail shown in the approval queue.
+ */
+export function recipientSpread(recipients: ReadonlyArray<{ readonly address: string }>): { uniqueRecipientCount: number; isMassSend: boolean } {
+  const unique = new Set<string>();
+  for (const a of recipients) unique.add(a.address.toLowerCase());
+  return { uniqueRecipientCount: unique.size, isMassSend: unique.size > MASS_SEND_THRESHOLD };
+}
+
 export interface SendCoreInput {
   /** Account id; omit to use the registry default. */
   account?: string | undefined;
@@ -129,8 +140,10 @@ export interface SendCoreFollowup {
 }
 
 export interface SendCoreOptions {
-  /** Pre-send confirmation hook — runs after all blocking gates pass. */
-  beforeSend?: ((ctx: SendCoreBeforeSendCtx) => Promise<boolean>) | undefined;
+  /** Pre-send confirmation hook — runs after all blocking gates pass. `true` sends, `false`
+   *  cancels, and `{ queued }` means the hook handed the mail to the approval queue instead:
+   *  nothing is sent, and `queued` is what the caller reports. */
+  beforeSend?: ((ctx: SendCoreBeforeSendCtx) => Promise<boolean | SendCoreQueued>) | undefined;
   /** Optional follow-up registration on success — passed through to MailContext. */
   trackFollowup?: SendCoreFollowup | undefined;
   /**
@@ -139,6 +152,11 @@ export interface SendCoreOptions {
    * rate-limit. Default false.
    */
   skipRateLimit?: boolean | undefined;
+}
+
+/** A `beforeSend` outcome: the mail was filed (or refused) for approval, not sent. */
+export interface SendCoreQueued {
+  queued: string;
 }
 
 export interface SendCoreBeforeSendCtx {
@@ -167,7 +185,26 @@ export type SendCoreFailureStatus =
   | 'dedup_window'
   | 'secret_in_body'
   | 'cancelled'
+  /** `beforeSend` handed the mail to the approval queue; nothing was sent. */
+  | 'queued'
   | 'provider_error';
+
+/**
+ * What a send fixed before its consent step: the gates passed, and this is what goes out.
+ * Today the commit follows the consent within the same call. Not a record that can wait:
+ * it holds the live provider, and {@link commitSend} re-runs none of the gates.
+ */
+export interface PreparedSend {
+  provider: MailProvider;
+  accountConfig: MailAccountConfig | null;
+  input: SendCoreInput;
+  cc: ReadonlyArray<MailAddress>;
+  bcc: ReadonlyArray<MailAddress>;
+  isMassSend: boolean;
+  uniqueRecipientCount: number;
+}
+
+export type SendCoreFailure = Extract<SendCoreResult, { ok: false }>;
 
 /**
  * The pipeline. Validation gates fire first; `beforeSend` runs after
@@ -175,6 +212,9 @@ export type SendCoreFailureStatus =
  * `{ok: false, status, message}` failures let the caller choose between
  * "show modal" (mass-send cancelled), "block with reason" (secret
  * detected), or "transient error" (provider raised).
+ *
+ * Three steps: {@link prepareSend} (the gates), the consent (`beforeSend`),
+ * {@link commitSend} (the send and what it records).
  */
 export async function sendMail(
   registry: MailRegistry,
@@ -182,6 +222,45 @@ export async function sendMail(
   opts: SendCoreOptions = {},
   ctx?: MailContext | MailAccountLookup,
 ): Promise<SendCoreResult> {
+  const prepared = await prepareSend(registry, input, opts, ctx);
+  if (!prepared.ok) return prepared;
+  const p = prepared.prepared;
+
+  if (opts.beforeSend) {
+    let sendingAddress: string;
+    try {
+      sendingAddress = await resolveSendingAddress(p.provider);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, status: 'provider_error', message: `could not read the sending address: ${msg}`, errorCode: err instanceof MailError ? err.code : undefined };
+    }
+    const approved = await opts.beforeSend({
+      provider: p.provider,
+      accountConfig: p.accountConfig,
+      to: p.input.to,
+      cc: p.cc,
+      bcc: p.bcc,
+      subject: p.input.subject,
+      body: p.input.body,
+      isMassSend: p.isMassSend,
+      uniqueRecipientCount: p.uniqueRecipientCount,
+      sendingAddress,
+    });
+    if (typeof approved === 'object') return { ok: false, status: 'queued', message: approved.queued };
+    if (!approved) return { ok: false, status: 'cancelled', message: 'send cancelled' };
+  }
+
+  return commitSend(p, opts, ctx);
+}
+
+/** The gates of a send, before its consent step: rate, secret content, sending account,
+ *  recipients, dedup. Sends nothing. */
+export async function prepareSend(
+  registry: MailRegistry,
+  input: SendCoreInput,
+  opts: SendCoreOptions,
+  ctx?: MailContext | MailAccountLookup,
+): Promise<{ ok: true; prepared: PreparedSend } | SendCoreFailure> {
   if (!opts.skipRateLimit) {
     const rateBlock = checkMailRateLimit('mail_send');
     if (rateBlock) return { ok: false, status: 'rate_limit', message: rateBlock };
@@ -218,33 +297,20 @@ export async function sendMail(
   const dedupBlock = checkRecipientDedup(allRecipients, input.subject);
   if (dedupBlock) return { ok: false, status: 'dedup_window', message: dedupBlock };
 
-  const uniqueRecipients = new Set<string>();
-  for (const a of allRecipients) uniqueRecipients.add(a.address.toLowerCase());
-  const isMassSend = uniqueRecipients.size > MASS_SEND_THRESHOLD;
+  const { isMassSend, uniqueRecipientCount } = recipientSpread(allRecipients);
 
-  if (opts.beforeSend) {
-    let sendingAddress: string;
-    try {
-      sendingAddress = await resolveSendingAddress(provider);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { ok: false, status: 'provider_error', message: `could not read the sending address: ${msg}`, errorCode: err instanceof MailError ? err.code : undefined };
-    }
-    const approved = await opts.beforeSend({
-      provider,
-      accountConfig,
-      to: input.to,
-      cc,
-      bcc,
-      subject: input.subject,
-      body: input.body,
-      isMassSend,
-      uniqueRecipientCount: uniqueRecipients.size,
-      sendingAddress,
-    });
-    if (!approved) return { ok: false, status: 'cancelled', message: 'send cancelled' };
-  }
+  return { ok: true, prepared: { provider, accountConfig, input, cc, bcc, isMassSend, uniqueRecipientCount } };
+}
 
+/** The send after its consent step: exactly what {@link prepareSend} fixed, then the dedup
+ *  record, the follow-up and the sent log. */
+export async function commitSend(
+  prepared: PreparedSend,
+  opts: SendCoreOptions,
+  ctx?: MailContext | MailAccountLookup,
+): Promise<SendCoreResult> {
+  const { provider, input, cc, bcc } = prepared;
+  const allRecipients = [...input.to, ...cc, ...bcc];
   const sendInput: MailSendInput = {
     to: [...input.to],
     subject: input.subject,
@@ -330,7 +396,7 @@ export async function sendMail(
 
 /** Chars of the whitespace-flattened body rendered inline in the preview.
  *  4000 since 2026-08-14: at 200 the approver saw almost none of what they
- *  were approving (rafael: „damit der user auch sehen kann was er freigibt"),
+ *  were approving (owner feedback: „damit der user auch sehen kann was er freigibt"),
  *  and the web preview's scroll container (max-h-64 + overflow-y-auto, which
  *  already exists for this prompt) never engaged. The flattening stays: a
  *  line break in a value is a block-level markdown opener (`\n\n<!--` would

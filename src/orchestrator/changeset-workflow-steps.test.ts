@@ -89,8 +89,16 @@ function viewOf(m: ChangesetManager): ChangesetWriter {
   return new Agent({ name: 'chat', model: 'claude-sonnet-4-6', apiKey: 'test-key', changesetManager: m }).changeset!;
 }
 
+// The engine's store of who made a saved workflow, as the owner's: every saved workflow has that
+// row, and a run whose author cannot be read does not start. Everything else the run asks of the
+// store answers nothing.
+const OWNER_HISTORY = new Proxy({
+  getWorkflowAuthorship: () => ({ createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-10-12 12:00:00' }),
+} as Record<string, unknown>, { get: (t, k) => (typeof k === 'string' && k in t ? t[k] : () => undefined) }) as unknown as NonNullable<ReturnType<typeof createToolContext>['runHistory']>;
+
 function makeParent(review: ChangesetWriter | undefined): IAgent {
   const ctx = createToolContext(config);
+  ctx.runHistory = OWNER_HISTORY;
   ctx.tools = [observedWrite];
   return {
     toolContext: ctx,
@@ -99,7 +107,6 @@ function makeParent(review: ChangesetWriter | undefined): IAgent {
     userTimezone: 'UTC',
     changeset: review,
     noteUntrustedData: vi.fn(),
-    noteForeignContent: vi.fn(),
   } as unknown as IAgent;
 }
 
@@ -190,12 +197,12 @@ describe('workflow steps write under the review of the chat that started them', 
       manifest_version: '1.0', name: 'nested-review-probe', triggered_by: 'test', context: {},
       agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [STEP] }],
       gate_points: [], on_failure: 'stop',
-    }, config, buildRunCtx({
+    }, config, { ...buildRunCtx({
       autonomy: undefined,
       parentTools: [observedWrite],
       parentToolContext: parent.toolContext,
       parentChangeset: parent.changeset,
-    }));
+    }), source: { kind: 'adhoc' as const } });
     expectReviewedAndRolledBack();
   });
 
@@ -236,7 +243,7 @@ export default {
       manifest_version: '1.0', name: 'agent-review-probe', triggered_by: 'test', context: {},
       agents: [{ id: 'w', agent: 'writer', task: 'Write the draft.' }],
       gate_points: [], on_failure: 'stop',
-    }, config, { ...buildRunCtx({ autonomy: undefined, parentToolContext: parent.toolContext, parentChangeset: parent.changeset }), agentsDir });
+    }, config, { ...buildRunCtx({ source: { kind: 'adhoc' as const }, autonomy: undefined, parentToolContext: parent.toolContext, parentChangeset: parent.changeset }), agentsDir });
     expect({ status: result.status, write: readFileSync(thesis(), 'utf8') }).toEqual({ status: 'completed', write: 'the step wrote this' });
     expectReviewedAndRolledBack(0);
   });

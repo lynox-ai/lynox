@@ -7,6 +7,7 @@ import { DataStore } from './data-store.js';
 import { CRM } from './crm.js';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 function createTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'lynox-crm-test-'));
@@ -92,8 +93,13 @@ describe('CRM', () => {
   });
 
   describe('contacts', () => {
+    it('upsertContact returns the contact table\'s counts: inserted, then updated by email', () => {
+      expect(crm.upsertContact({ name: 'Dana', email: 'dana@test.com' }, TEST_STAMP)).toMatchObject({ inserted: 1, updated: 0 });
+      expect(crm.upsertContact({ name: 'Dana B.', email: 'DANA@test.com' }, TEST_STAMP)).toMatchObject({ inserted: 0, updated: 1 });
+    });
+
     it('upserts and finds a contact by name', () => {
-      crm.upsertContact({ name: 'Alice', email: 'alice@test.com', type: 'customer' });
+      crm.upsertContact({ name: 'Alice', email: 'alice@test.com', type: 'customer' }, TEST_STAMP);
       const found = crm.findContact({ name: 'Alice' });
       expect(found).not.toBeNull();
       expect(found!.email).toBe('alice@test.com');
@@ -101,14 +107,14 @@ describe('CRM', () => {
     });
 
     it('finds contact by channel_id', () => {
-      crm.upsertContact({ name: 'Bob', channel_id: 'mail:bob@example.com', source: 'mail' });
+      crm.upsertContact({ name: 'Bob', channel_id: 'mail:bob@example.com', source: 'mail' }, TEST_STAMP);
       const found = crm.findContact({ channel_id: 'mail:bob@example.com' });
       expect(found).not.toBeNull();
       expect(found!.name).toBe('Bob');
     });
 
     it('finds contact by email', () => {
-      crm.upsertContact({ name: 'Carol', email: 'carol@test.com' });
+      crm.upsertContact({ name: 'Carol', email: 'carol@test.com' }, TEST_STAMP);
       const found = crm.findContact({ email: 'carol@test.com' });
       expect(found).not.toBeNull();
       expect(found!.name).toBe('Carol');
@@ -120,8 +126,8 @@ describe('CRM', () => {
     });
 
     it('upserts existing contact on email (updates fields, no duplicate)', () => {
-      crm.upsertContact({ name: 'Alice', email: 'alice@acme.com', type: 'lead' });
-      crm.upsertContact({ name: 'Alice', email: 'alice@acme.com', type: 'customer', company: 'Acme' });
+      crm.upsertContact({ name: 'Alice', email: 'alice@acme.com', type: 'lead' }, TEST_STAMP);
+      crm.upsertContact({ name: 'Alice', email: 'alice@acme.com', type: 'customer', company: 'Acme' }, TEST_STAMP);
       const found = crm.findContact({ email: 'alice@acme.com' });
       expect(found!.type).toBe('customer');
       expect(found!.company).toBe('Acme');
@@ -131,22 +137,22 @@ describe('CRM', () => {
     // ── D2: email is the identity (dedup on email, not name) ──
 
     it('updates the same contact when the email matches but the name changed', () => {
-      crm.upsertContact({ name: 'Alice', email: 'a@x.com' });
-      crm.upsertContact({ name: 'Alice Smith', email: 'a@x.com' });
+      crm.upsertContact({ name: 'Alice', email: 'a@x.com' }, TEST_STAMP);
+      crm.upsertContact({ name: 'Alice Smith', email: 'a@x.com' }, TEST_STAMP);
       const all = crm.listContacts({ email: 'a@x.com' });
       expect(all).toHaveLength(1);
       expect(all[0]!.name).toBe('Alice Smith');
     });
 
     it('keeps two people with the same name but different emails as distinct contacts', () => {
-      crm.upsertContact({ name: 'John Smith', email: 'john1@x.com' });
-      crm.upsertContact({ name: 'John Smith', email: 'john2@x.com' });
+      crm.upsertContact({ name: 'John Smith', email: 'john1@x.com' }, TEST_STAMP);
+      crm.upsertContact({ name: 'John Smith', email: 'john2@x.com' }, TEST_STAMP);
       expect(crm.listContacts({ name: 'John Smith' })).toHaveLength(2);
     });
 
     it('dedups case-insensitively and stores email lower-cased (round-trips with the resolver lookup)', () => {
-      crm.upsertContact({ name: 'Casey', email: 'Casey@Example.COM' });
-      crm.upsertContact({ name: 'Casey C', email: 'casey@example.com' });
+      crm.upsertContact({ name: 'Casey', email: 'Casey@Example.COM' }, TEST_STAMP);
+      crm.upsertContact({ name: 'Casey C', email: 'casey@example.com' }, TEST_STAMP);
       // The inbox contact-resolver looks up the lower-cased address — it must hit.
       const found = crm.findContact({ email: 'casey@example.com' });
       expect(found).not.toBeNull();
@@ -155,8 +161,8 @@ describe('CRM', () => {
     });
 
     it('inserts every email-less contact (NULL emails do not collide — phone-only dedup is out of scope)', () => {
-      crm.upsertContact({ name: 'Phone Only A', phone: '111' });
-      crm.upsertContact({ name: 'Phone Only B', phone: '222' });
+      crm.upsertContact({ name: 'Phone Only A', phone: '111' }, TEST_STAMP);
+      crm.upsertContact({ name: 'Phone Only B', phone: '222' }, TEST_STAMP);
       expect(crm.listContacts()).toHaveLength(2);
     });
 
@@ -172,7 +178,7 @@ describe('CRM', () => {
         columns: [{ name: 'name', type: 'string' }, { name: 'email', type: 'string' }],
         uniqueKey: ['name'],
       });
-      ds.insertRecords({ collection: 'contacts', records: [{ name: 'Legacy', email: 'legacy@x.com' }] });
+      ds.insertRecords({ collection: 'contacts', records: [{ name: 'Legacy', email: 'legacy@x.com' }], stamp: TEST_STAMP });
 
       expect(() => crm.ensureSchema()).not.toThrow();
       // The legacy key survives (degrades to name-dedup) rather than being
@@ -181,15 +187,15 @@ describe('CRM', () => {
     });
 
     it('lists contacts sorted by last update', () => {
-      crm.upsertContact({ name: 'Alice', type: 'customer' });
-      crm.upsertContact({ name: 'Bob', type: 'lead' });
+      crm.upsertContact({ name: 'Alice', type: 'customer' }, TEST_STAMP);
+      crm.upsertContact({ name: 'Bob', type: 'lead' }, TEST_STAMP);
       const list = crm.listContacts();
       expect(list).toHaveLength(2);
     });
 
     it('lists contacts with filter', () => {
-      crm.upsertContact({ name: 'Alice', type: 'customer' });
-      crm.upsertContact({ name: 'Bob', type: 'lead' });
+      crm.upsertContact({ name: 'Alice', type: 'customer' }, TEST_STAMP);
+      crm.upsertContact({ name: 'Bob', type: 'lead' }, TEST_STAMP);
       const leads = crm.listContacts({ type: 'lead' });
       expect(leads).toHaveLength(1);
       expect(leads[0]!.name).toBe('Bob');
@@ -200,7 +206,7 @@ describe('CRM', () => {
     it('THE POINT: a wrong contact can be removed at all', () => {
       // Before this the CRM had NO removal path. `contacts_save` upserts on email, so a wrong
       // row could only be overwritten — and only if it has one.
-      crm.upsertContact({ name: 'Wrong Person', email: 'wrong@example.com', source: 'agent' });
+      crm.upsertContact({ name: 'Wrong Person', email: 'wrong@example.com', source: 'agent' }, TEST_STAMP);
       const [row] = crm.listContacts();
       expect(row?._id).toBeDefined();
       expect(crm.deleteContact(row!._id!)).toBe(true);
@@ -209,8 +215,8 @@ describe('CRM', () => {
 
     it('removes ONLY the named row', () => {
       // A filter that matched more than the id would take the neighbours with it.
-      crm.upsertContact({ name: 'Keep Me', email: 'keep@example.com', source: 'agent' });
-      crm.upsertContact({ name: 'Drop Me', email: 'drop@example.com', source: 'agent' });
+      crm.upsertContact({ name: 'Keep Me', email: 'keep@example.com', source: 'agent' }, TEST_STAMP);
+      crm.upsertContact({ name: 'Drop Me', email: 'drop@example.com', source: 'agent' }, TEST_STAMP);
       const drop = crm.listContacts().find(c => c.name === 'Drop Me')!;
       crm.deleteContact(drop._id!);
       const left = crm.listContacts();
@@ -225,7 +231,7 @@ describe('CRM', () => {
     it('removes an EMAIL-LESS contact — the case re-saving could never repair', () => {
       // A NULL email never collides, so every re-save inserted another row. Lead research
       // produces exactly these.
-      crm.upsertContact({ name: 'Researched Lead', company: 'Some Clinic', source: 'agent_external' });
+      crm.upsertContact({ name: 'Researched Lead', company: 'Some Clinic', source: 'agent_external' }, TEST_STAMP);
       const row = crm.listContacts()[0]!;
       expect(crm.deleteContact(row._id!)).toBe(true);
       expect(crm.listContacts()).toHaveLength(0);
@@ -235,9 +241,9 @@ describe('CRM', () => {
       // Otherwise "remove this person" deletes the row holding their phone number and keeps
       // the notes ABOUT them — `interactions.summary` is free text on what was discussed, and
       // both collections stay readable by name through their own routes.
-      crm.upsertContact({ name: 'Alte Kundin', email: 'alt@example.com', source: 'agent' });
-      crm.logInteraction({ contact_name: 'Alte Kundin', type: 'call', summary: 'Wollte einen Termin im Herbst' });
-      crm.upsertDeal({ title: 'Beratung', contact_name: 'Alte Kundin', value: 900, stage: 'proposal' });
+      crm.upsertContact({ name: 'Alte Kundin', email: 'alt@example.com', source: 'agent' }, TEST_STAMP);
+      crm.logInteraction({ contact_name: 'Alte Kundin', type: 'call', summary: 'Wollte einen Termin im Herbst' }, TEST_STAMP);
+      crm.upsertDeal({ title: 'Beratung', contact_name: 'Alte Kundin', value: 900, stage: 'proposal' }, TEST_STAMP);
       expect(crm.getInteractions('Alte Kundin')).toHaveLength(1);
       expect(crm.getDealsForContact('Alte Kundin')).toHaveLength(1);
 
@@ -249,11 +255,11 @@ describe('CRM', () => {
 
     it('leaves another contact\'s interactions and deals alone', () => {
       // The cascade is keyed by NAME, so a filter that is too loose takes the neighbours' history.
-      crm.upsertContact({ name: 'Geht Weg', email: 'weg@example.com', source: 'agent' });
-      crm.upsertContact({ name: 'Bleibt Da', email: 'bleibt@example.com', source: 'agent' });
-      crm.logInteraction({ contact_name: 'Geht Weg', type: 'call', summary: 'a' });
-      crm.logInteraction({ contact_name: 'Bleibt Da', type: 'call', summary: 'b' });
-      crm.upsertDeal({ title: 'D1', contact_name: 'Bleibt Da', value: 100, stage: 'lead' });
+      crm.upsertContact({ name: 'Geht Weg', email: 'weg@example.com', source: 'agent' }, TEST_STAMP);
+      crm.upsertContact({ name: 'Bleibt Da', email: 'bleibt@example.com', source: 'agent' }, TEST_STAMP);
+      crm.logInteraction({ contact_name: 'Geht Weg', type: 'call', summary: 'a' }, TEST_STAMP);
+      crm.logInteraction({ contact_name: 'Bleibt Da', type: 'call', summary: 'b' }, TEST_STAMP);
+      crm.upsertDeal({ title: 'D1', contact_name: 'Bleibt Da', value: 100, stage: 'lead' }, TEST_STAMP);
 
       const row = crm.listContacts().find(c => c.name === 'Geht Weg')!;
       crm.deleteContact(row._id!);
@@ -267,10 +273,10 @@ describe('CRM', () => {
       // and the cascade cannot tell them apart — it deleted the survivor's entire history.
       // Not orphaned rows: gone, with nothing to restore them from. Common name, one duplicate
       // cleaned up, a real customer's record silently emptied.
-      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-a.ch', source: 'agent' });
-      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-b.ch', source: 'agent' });
-      crm.logInteraction({ contact_name: 'Michael Müller', type: 'call', summary: 'Angebot besprochen' });
-      crm.upsertDeal({ title: 'Wartung', contact_name: 'Michael Müller', value: 4200, stage: 'proposal' });
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-a.ch', source: 'agent' }, TEST_STAMP);
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-b.ch', source: 'agent' }, TEST_STAMP);
+      crm.logInteraction({ contact_name: 'Michael Müller', type: 'call', summary: 'Angebot besprochen' }, TEST_STAMP);
+      crm.upsertDeal({ title: 'Wartung', contact_name: 'Michael Müller', value: 4200, stage: 'proposal' }, TEST_STAMP);
 
       const both = crm.listContacts().filter(c => c.name === 'Michael Müller');
       expect(both).toHaveLength(2);
@@ -287,10 +293,10 @@ describe('CRM', () => {
       // name was ever shared would leak rows forever. Deleting the second of two identical
       // names leaves no owner, so the cascade must fire — the test above is satisfied by a
       // cascade that never runs at all.
-      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-a.ch', source: 'agent' });
-      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-b.ch', source: 'agent' });
-      crm.logInteraction({ contact_name: 'Michael Müller', type: 'call', summary: 'Angebot besprochen' });
-      crm.upsertDeal({ title: 'Wartung', contact_name: 'Michael Müller', value: 4200, stage: 'proposal' });
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-a.ch', source: 'agent' }, TEST_STAMP);
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-b.ch', source: 'agent' }, TEST_STAMP);
+      crm.logInteraction({ contact_name: 'Michael Müller', type: 'call', summary: 'Angebot besprochen' }, TEST_STAMP);
+      crm.upsertDeal({ title: 'Wartung', contact_name: 'Michael Müller', value: 4200, stage: 'proposal' }, TEST_STAMP);
 
       for (const c of crm.listContacts().filter(c => c.name === 'Michael Müller')) {
         crm.deleteContact(c._id!);
@@ -300,8 +306,8 @@ describe('CRM', () => {
     });
 
     it('touches nothing when the id was not there', () => {
-      crm.upsertContact({ name: 'Unbeteiligt', email: 'u@example.com', source: 'agent' });
-      crm.logInteraction({ contact_name: 'Unbeteiligt', type: 'call', summary: 'x' });
+      crm.upsertContact({ name: 'Unbeteiligt', email: 'u@example.com', source: 'agent' }, TEST_STAMP);
+      crm.logInteraction({ contact_name: 'Unbeteiligt', type: 'call', summary: 'x' }, TEST_STAMP);
       expect(crm.deleteContact(999_999)).toBe(false);
       expect(crm.listContacts()).toHaveLength(1);
       expect(crm.getInteractions('Unbeteiligt')).toHaveLength(1);
@@ -327,7 +333,7 @@ describe('CRM', () => {
         written.push(String(chunk)); return true;
       }) as typeof process.stderr.write;
       try {
-        graphCrm.upsertContact({ name: 'Meier', email: 'meier@example.test' });
+        graphCrm.upsertContact({ name: 'Meier', email: 'meier@example.test' }, TEST_STAMP);
       } finally {
         process.stderr.write = orig;
         engineDb.close();
@@ -359,7 +365,7 @@ describe('CRM', () => {
       }) as typeof process.stderr.write;
       try {
         // an UNambiguous person, so only the company lookup can be the one that fails
-        graphCrm.upsertContact({ name: 'Rita Fuchs', company: 'Nordwerk', email: 'rita@example.test' });
+        graphCrm.upsertContact({ name: 'Rita Fuchs', company: 'Nordwerk', email: 'rita@example.test' }, TEST_STAMP);
       } finally {
         process.stderr.write = orig;
         engineDb.close();
@@ -373,17 +379,17 @@ describe('CRM', () => {
 
   describe('interactions', () => {
     it('logs and retrieves interactions', () => {
-      crm.upsertContact({ name: 'Alice' });
-      crm.logInteraction({ contact_name: 'Alice', type: 'message', channel: 'chat', summary: 'Asked about pricing' });
-      crm.logInteraction({ contact_name: 'Alice', type: 'email', channel: 'email', summary: 'Sent proposal' });
+      crm.upsertContact({ name: 'Alice' }, TEST_STAMP);
+      crm.logInteraction({ contact_name: 'Alice', type: 'message', channel: 'chat', summary: 'Asked about pricing' }, TEST_STAMP);
+      crm.logInteraction({ contact_name: 'Alice', type: 'email', channel: 'email', summary: 'Sent proposal' }, TEST_STAMP);
 
       const interactions = crm.getInteractions('Alice');
       expect(interactions).toHaveLength(2);
     });
 
     it('sets date automatically', () => {
-      crm.upsertContact({ name: 'Bob' });
-      crm.logInteraction({ contact_name: 'Bob', type: 'call', channel: 'manual', summary: 'Follow-up call' });
+      crm.upsertContact({ name: 'Bob' }, TEST_STAMP);
+      crm.logInteraction({ contact_name: 'Bob', type: 'call', channel: 'manual', summary: 'Follow-up call' }, TEST_STAMP);
       const interactions = crm.getInteractions('Bob');
       expect(interactions[0]!['date']).toBeTruthy();
     });
@@ -391,16 +397,16 @@ describe('CRM', () => {
 
   describe('deals', () => {
     it('creates and retrieves open deals', () => {
-      crm.upsertDeal({ title: 'Pro Package', contact_name: 'Alice', value: 4800, stage: 'proposal' });
-      crm.upsertDeal({ title: 'Basic Package', contact_name: 'Bob', value: 960, stage: 'lead' });
+      crm.upsertDeal({ title: 'Pro Package', contact_name: 'Alice', value: 4800, stage: 'proposal' }, TEST_STAMP);
+      crm.upsertDeal({ title: 'Basic Package', contact_name: 'Bob', value: 960, stage: 'lead' }, TEST_STAMP);
 
       const open = crm.getOpenDeals();
       expect(open).toHaveLength(2);
     });
 
     it('upserts deal by title + contact_name', () => {
-      crm.upsertDeal({ title: 'Pro', contact_name: 'Alice', value: 4800, stage: 'proposal' });
-      crm.upsertDeal({ title: 'Pro', contact_name: 'Alice', value: 4800, stage: 'negotiation' });
+      crm.upsertDeal({ title: 'Pro', contact_name: 'Alice', value: 4800, stage: 'proposal' }, TEST_STAMP);
+      crm.upsertDeal({ title: 'Pro', contact_name: 'Alice', value: 4800, stage: 'negotiation' }, TEST_STAMP);
 
       const open = crm.getOpenDeals();
       expect(open).toHaveLength(1);
@@ -408,8 +414,8 @@ describe('CRM', () => {
     });
 
     it('excludes won/lost from open deals', () => {
-      crm.upsertDeal({ title: 'Won Deal', contact_name: 'Alice', value: 1000, stage: 'won' });
-      crm.upsertDeal({ title: 'Open Deal', contact_name: 'Bob', value: 2000, stage: 'qualified' });
+      crm.upsertDeal({ title: 'Won Deal', contact_name: 'Alice', value: 1000, stage: 'won' }, TEST_STAMP);
+      crm.upsertDeal({ title: 'Open Deal', contact_name: 'Bob', value: 2000, stage: 'qualified' }, TEST_STAMP);
 
       const open = crm.getOpenDeals();
       expect(open).toHaveLength(1);
@@ -417,7 +423,7 @@ describe('CRM', () => {
     });
 
     it('defaults to CHF currency and lead stage', () => {
-      crm.upsertDeal({ title: 'Test', contact_name: 'Alice' });
+      crm.upsertDeal({ title: 'Test', contact_name: 'Alice' }, TEST_STAMP);
       const deals = crm.getOpenDeals();
       expect(deals[0]!['currency']).toBe('CHF');
       expect(deals[0]!['stage']).toBe('lead');
@@ -426,9 +432,9 @@ describe('CRM', () => {
 
   describe('pipeline summary', () => {
     it('returns deal count and total value per stage', () => {
-      crm.upsertDeal({ title: 'A', contact_name: 'Alice', value: 1000, stage: 'lead' });
-      crm.upsertDeal({ title: 'B', contact_name: 'Bob', value: 2000, stage: 'lead' });
-      crm.upsertDeal({ title: 'C', contact_name: 'Carol', value: 5000, stage: 'proposal' });
+      crm.upsertDeal({ title: 'A', contact_name: 'Alice', value: 1000, stage: 'lead' }, TEST_STAMP);
+      crm.upsertDeal({ title: 'B', contact_name: 'Bob', value: 2000, stage: 'lead' }, TEST_STAMP);
+      crm.upsertDeal({ title: 'C', contact_name: 'Carol', value: 5000, stage: 'proposal' }, TEST_STAMP);
 
       const summary = crm.getPipelineSummary();
       expect(summary.length).toBeGreaterThanOrEqual(2);
@@ -442,9 +448,9 @@ describe('CRM', () => {
 
   describe('contact stats', () => {
     it('returns count by type', () => {
-      crm.upsertContact({ name: 'A', type: 'customer' });
-      crm.upsertContact({ name: 'B', type: 'customer' });
-      crm.upsertContact({ name: 'C', type: 'lead' });
+      crm.upsertContact({ name: 'A', type: 'customer' }, TEST_STAMP);
+      crm.upsertContact({ name: 'B', type: 'customer' }, TEST_STAMP);
+      crm.upsertContact({ name: 'C', type: 'lead' }, TEST_STAMP);
 
       const stats = crm.getContactStats();
       const customers = stats.find(s => s['type'] === 'customer');

@@ -22,10 +22,10 @@ import { LynoxHTTPApi, READ_IDENTIFIERS } from './http-api.js';
  * - the scan must find exactly the `user` GET routes of the real table.
  */
 const NOT_IDENTIFYING = new Set([
-  // Paging, ordering and windows.
-  'limit', 'offset', 'since', 'fromSeq', 'days', 'dateFrom', 'dateTo', 'tzOffsetMin', 'window',
+  // Paging, ordering and windows (`before`: the access log's cursor, a row id of the log itself).
+  'limit', 'offset', 'before', 'since', 'fromSeq', 'days', 'dateFrom', 'dateTo', 'tzOffsetMin', 'window',
   // Filters over a list: what kind, not which one.
-  'status', 'type', 'stage', 'bucket', 'model', 'includeArchived', 'snoozedOnly', 'hidden', 'reveal',
+  'status', 'type', 'stage', 'bucket', 'model', 'includeArchived', 'snoozedOnly', 'hidden', 'reveal', 'view',
   // Free text: content, never logged.
   'q',
   // An OAuth provider's answer: a code and a state are credentials.
@@ -144,8 +144,11 @@ describe('the query identifiers of a read row, held to the handlers', () => {
     expect(other).toEqual([
       // A plugin's file URL, not a request's.
       'const mod = await import(pathToFileURL(abs).href) as { handler?: unknown };',
-      // The request log line.
-      "const url = req.url ?? '/';",
+      // The request log line, with a webhook route token taken out.
+      "const url = redactWebhookPath(req.url ?? '/');",
+      // The webhook route admits a raw path only when it equals the parsed one; the comparison
+      // reads the path up to `?`, never the query.
+      "if (token !== null && isCanonicalRequestPath(req.url ?? '/', url.pathname)) {",
       // The OAuth callback hands a provider's signature check (Shopify's HMAC) the query string
       // itself. Parsed only by that check, which hands back the code to spend from the signed
       // values; the route reads its other names through `searchParams` as everywhere else.

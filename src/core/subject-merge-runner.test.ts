@@ -8,6 +8,7 @@ import { DataStore } from './data-store.js';
 import { RunHistory } from './run-history.js';
 import { ThreadStore } from './thread-store.js';
 import { runMerge, rollbackMergeRun, pruneExpiredLedgers, listMergeRuns, rollbackMergeById, readMergeLedger, LEDGER_RETENTION_DAYS, type MergeLedgerFile } from './subject-merge-runner.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /**
  * The subject spine spans THREE SQLite files: engine.db (SubjectStore), datastore.db
@@ -216,7 +217,7 @@ describe('runMerge — three-store repoint + crash-safe ledger', () => {
         { name: 'client', type: 'subject', subjectKind: 'organization' },
         { name: 'amount', type: 'number' },
       ] });
-      ds.insertRecords({ collection: 'invoices', records: [{ client: dup, amount: 100 }] });
+      ds.insertRecords({ collection: 'invoices', records: [{ client: dup, amount: 100 }], stamp: TEST_STAMP });
 
       const r = runMerge(store, ds, threadStore, dir, dup, canon);
       expect(r.ok).toBe(true);
@@ -244,7 +245,7 @@ describe('runMerge — three-store repoint + crash-safe ledger', () => {
         { name: 'note', type: 'string' },
       ] });
       // `note` holds the canonical's id as plain text: a reversal that wrote it would change it.
-      ds.insertRecords({ collection: 'invoices', records: [{ client: dup, note: canon }] });
+      ds.insertRecords({ collection: 'invoices', records: [{ client: dup, note: canon }], stamp: TEST_STAMP });
       expect(runMerge(store, ds, threadStore, dir, dup, canon).ok).toBe(true);
       const led = readLedger(dir);
       const forged: MergeLedgerFile = { ...led, dataStore: [...led.dataStore, { collection: 'invoices', column: 'note', ids: [1] }] };
@@ -273,8 +274,8 @@ describe('runMerge — three-store repoint + crash-safe ledger', () => {
       const subjectCol = [{ name: 'client', type: 'subject' as const, subjectKind: 'organization' }];
       ds.createCollection({ name: 'invoices', scope: { type: 'global', id: 'g' }, columns: subjectCol });
       ds.createCollection({ name: 'quotes', scope: { type: 'global', id: 'g' }, columns: subjectCol });
-      ds.insertRecords({ collection: 'invoices', records: [{ client: dup }] });
-      ds.insertRecords({ collection: 'quotes', records: [{ client: dup }] });
+      ds.insertRecords({ collection: 'invoices', records: [{ client: dup }], stamp: TEST_STAMP });
+      ds.insertRecords({ collection: 'quotes', records: [{ client: dup }], stamp: TEST_STAMP });
       expect(runMerge(store, ds, threadStore, dir, dup, canon).ok).toBe(true);
       expect(readLedger(dir).dataStore.map(r => r.collection).sort()).toEqual(['invoices', 'quotes']);
       ds.dropCollection('quotes');
@@ -294,7 +295,7 @@ describe('runMerge — three-store repoint + crash-safe ledger', () => {
     const ds = new DataStore(join(dir, 'datastore.db'));
     try {
       ds.createCollection({ name: 'c', scope: { type: 'global', id: 'g' }, columns: [{ name: 'org', type: 'subject', subjectKind: 'organization' }] });
-      ds.insertRecords({ collection: 'c', records: [{ org: dup }] });
+      ds.insertRecords({ collection: 'c', records: [{ org: dup }], stamp: TEST_STAMP });
       expect(runMerge(store, ds, threadStore, dir, dup, canon).ok).toBe(true);
       expect(ds.queryRecords({ collection: 'c' }).rows[0]!['org']).toBe(canon);          // satellites on canonical
       expect(threadStore.getThread('t-z')!.primary_subject_id).toBe(canon);

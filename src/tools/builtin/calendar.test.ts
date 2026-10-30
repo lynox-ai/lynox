@@ -539,4 +539,13 @@ describe('calendar_read — a mandate\'s feed read', () => {
     await calendarReadTool.handler({}, withPrincipal(OWNER_PRINCIPAL, []));
     expect(vi.mocked(fetchIcsFeed).mock.calls[0]![2]).toBeUndefined();
   });
+
+  it('writes a feed label that is an address as the placeholder, whatever the label\'s store let through', async () => {
+    vi.mocked(fetchIcsFeed).mockResolvedValue({ ics: TZ_ICS(), truncated: false });
+    const recs: Array<{ action: string; target?: string }> = [];
+    const a = agentWith({ [`${CALENDAR_FEED_PREFIX}max@kunde.example`]: 'https://cal.example/x.ics' }) as unknown as Record<string, unknown>;
+    await calendarReadTool.handler({}, { ...a, principal: MANDATE, toolContext: { auditLog: { record: (e: { action: string; target?: string }) => { recs.push(e); } } } } as unknown as IAgent);
+    vi.mocked(fetchIcsFeed).mock.calls[0]![2]!('cal.example');
+    expect(recs).toEqual([expect.objectContaining({ action: 'calendar_read:feed', target: 'calendar=<address> host=cal.example' })]);
+  });
 });

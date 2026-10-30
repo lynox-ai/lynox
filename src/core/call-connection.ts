@@ -16,8 +16,8 @@
  *    It also covers what the call SENT to the connection, not only what it read.
  *  - It is a LOWER bound, not a complete list. A call is unstamped when its host
  *    maps to no profile — including a host variant the profile does not name —
- *    when two profiles share the host, and for pipeline-step calls (their rows
- *    are written from stream events by runner.ts). After a cross-host redirect
+ *    when two profiles share the host. A sub-agent spawned inside a pipeline
+ *    step writes no call row at all. After a cross-host redirect
  *    the stamp keeps the first host's profile. So NULL means "unknown", and a
  *    consumer must never read the column as "everything from connection X".
  *
@@ -31,6 +31,8 @@
  * so a value the model supplies cannot become the stamp.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { AuditLog } from './audit-log.js';
+import type { RequestPrincipal } from './request-principal.js';
 
 export interface CallConnection {
   /** `connections.id` of the resolved profile. */
@@ -79,23 +81,78 @@ export interface CallSlot {
    *  own slot). The result scan takes the closer of exactly these blocks as the engine's
    *  own (see `scanToolResult`); a closer anywhere else stays in the scan. */
   wrapped?: string[] | undefined;
-  /** The host whose answer this call returned, reported by `http_request` only when every
-   *  hop of the request stayed on that host. It no longer decides anything about write
-   *  approvals: every answer moves the approval epoch, this host's included (see
-   *  `untrusted-epoch.ts`). `null` once two different hosts were reported. */
-  answeredBy?: string | null | undefined;
-  /** Set once anything in this call tried to reach the network (`fetchPinned`). An
-   *  `http_request` result after that may carry server bytes even when it is an error,
-   *  so it counts as foreign content unless it is an answer reported for one host. */
-  contactedNetwork?: boolean | undefined;
-  /** Aborted when the engine stops waiting for this call (its tool timeout). A question the
-   *  call raised carries this signal, so it is withdrawn with the call instead of staying open
-   *  and holding the session's one pending prompt. */
+  /** Aborted when the engine stops waiting for this call (its tool timeout), and when the run
+   *  the call belongs to is stopped (`stoppedByRun`). A question the call raised carries this
+   *  signal, so it is withdrawn with the call instead of staying open and holding the session's
+   *  one pending prompt. A handler that does I/O passes it on, so a stop ends the I/O instead of
+   *  waiting for the handler's own limit. */
   abort?: AbortController | undefined;
+  /** Set when `abort` fired because the run was stopped, not because the call timed out. */
+  stoppedByRun?: boolean | undefined;
+  /** Set by {@link noteOwnStopSentence} when the handler's result already says the run was
+   *  stopped, so the engine does not add its own sentence to it. */
+  ownStopSentence?: boolean | undefined;
   /** How many questions this call is waiting on right now. */
   awaitingAnswers?: number | undefined;
+  /** Set once anything in this call tried to reach the network (`fetchPinned`). A call that
+   *  never got that far — refused before sending — took no data from its connection, so its
+   *  grant does not enter the conversation's set (`ConversationGrants`). */
+  contactedNetwork?: boolean | undefined;
   /** Set by {@link noteGrantLift} when a write grant let this call's write through. */
   grantLift?: GrantLift | undefined;
+  /** How many calls of this call's tool batch are this same call (the same tool with the same
+   *  input as the model wrote it), itself included. A write approval asked for one of them sends
+   *  that many (`http_request`). */
+  twins?: number | undefined;
+  /** Set by the agent's danger check when it let a queueable call through to be filed for its
+   *  owner's approval instead of asking or refusing (`Agent.fileApproval`). Only the slot the
+   *  agent built for this call carries it: a call made from inside the handler runs in a slot
+   *  of its own. */
+  filing?: boolean | undefined;
+  /** Set by {@link noteCallFiled} when this call's filing settled, either way. */
+  filed?: CallFiled | undefined;
+  /** Who makes this call, for the rows a write inside the instance leaves (`instance-trail.ts`):
+   *  fixed when the agent builds the slot, from the same sources as the outward trail, so a call
+   *  that settles after the next run began still writes under the principal that started it.
+   *  `'exempt'` for the owner, who leaves no row; `'unnamed'` when the caller names no principal,
+   *  whose writes are refused. Absent outside the agent's dispatch. */
+  instanceTrail?: InstanceTrail | 'exempt' | 'unnamed' | undefined;
+  /** Set once a row for a write inside the instance could not be written. Every later write of
+   *  this call is refused, and the dispatch answers with the refusal text, whatever the handler
+   *  made of the throw. */
+  instanceRefused?: boolean | undefined;
+}
+
+/** The actor of a call's writes inside the instance, captured with the slot. */
+export interface InstanceTrail {
+  readonly log: AuditLog | null;
+  readonly principal: RequestPrincipal;
+  readonly runId: string | undefined;
+  /** The tool the call dispatches, for the record only. */
+  readonly tool: string;
+}
+
+/**
+ * Where a call stood toward the run's capability contract, as the gates of that call saw it:
+ * `governing` when the contract applied, `withheld` when the run held it back after foreign
+ * content, `none` when the run has no contract. `grantId` names the accepted grant the
+ * contract carries (`workflow_grants.id`), also when it was withheld; absent for a contract
+ * nobody accepted (one handed in through `AgentConfig`). It says nothing about whether any gate
+ * lifted the call: that is {@link GrantLift}.
+ */
+export interface CallContract {
+  state: 'none' | 'governing' | 'withheld';
+  grantId?: string | undefined;
+}
+
+/**
+ * How a call's filing for the owner's approval ended: `queued` with the entry's id, or
+ * `not-queued` when nothing was filed (a duplicate, a flood, already sent, not marked, stopped,
+ * a store error). Read from the filing itself, never from the result text a handler returns.
+ */
+export interface CallFiled {
+  outcome: 'queued' | 'not-queued';
+  approvalId?: string | undefined;
 }
 
 /**
@@ -126,6 +183,18 @@ export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
 }
 
 /**
+ * Run `fn` outside any call's slot: `fn`, and everything it awaits, sees no slot at all. For work
+ * that a call starts but does not own — a `memory:store` subscriber, which `diagnostics_channel`
+ * runs synchronously inside the publisher's slot, or a write the call leaves running after its
+ * outcome row. Inheriting the slot would hand that work the call's trail, and let its refusal
+ * poison a call that has already answered. Only this storage is left; every other async context
+ * (run group, plan, worker) stays.
+ */
+export function runOutsideCallSlot<T>(fn: () => T): T {
+  return slotStorage.exit(fn);
+}
+
+/**
  * Record a block `wrapUntrustedData` produced while the current call runs. Outside a
  * slot (prompt building between calls, a test calling the wrapper directly) this is a
  * no-op, so nothing recorded here can reach another call's scan. A block from
@@ -139,9 +208,34 @@ export function noteOwnWrapped(block: string): void {
   if (slot) (slot.wrapped ??= []).push(block);
 }
 
+/** The current call's result says itself that the run was stopped (`bash`, the API profile
+ *  questions): the engine adds no sentence of its own to it. Outside a slot a no-op. */
+export function noteOwnStopSentence(): void {
+  const slot = slotStorage.getStore();
+  if (slot) slot.ownStopSentence = true;
+}
+
+/** How many calls of the current batch are this same call, itself included; 1 outside a slot. */
+export function currentCallTwins(): number {
+  return slotStorage.getStore()?.twins ?? 1;
+}
+
+/** Whether the current call was let through to be filed for approval; false outside a slot. */
+export function currentCallFiling(): boolean {
+  return slotStorage.getStore()?.filing === true;
+}
+
 /** The current call's abort signal; `undefined` outside a slot or for a slot without one. */
 export function currentCallSignal(): AbortSignal | undefined {
   return slotStorage.getStore()?.abort?.signal;
+}
+
+/** `signal` joined with the current call's signal, so that a stop of the run aborts it too;
+ *  `signal` alone outside a slot. For I/O that only reads: a write that must finish once
+ *  started takes no call signal. */
+export function joinCallSignal(signal: AbortSignal): AbortSignal {
+  const call = currentCallSignal();
+  return call === undefined ? signal : AbortSignal.any([signal, call]);
 }
 
 /** Count `answer` as a question the current call waits on until it settles; outside a slot it
@@ -151,20 +245,6 @@ export function trackCallAnswer<T>(answer: Promise<T>): Promise<T> {
   if (!slot) return answer;
   slot.awaitingAnswers = (slot.awaitingAnswers ?? 0) + 1;
   return answer.finally(() => { slot.awaitingAnswers = (slot.awaitingAnswers ?? 1) - 1; });
-}
-
-/** Mark the current call as one that tried to reach the network; outside a slot a no-op. */
-export function noteNetworkContact(): void {
-  const slot = slotStorage.getStore();
-  if (slot) slot.contactedNetwork = true;
-}
-
-/** Report the host that answered the current call. A second, different host makes the
- *  answer foreign; outside a slot this is a no-op. */
-export function noteAnsweredBy(host: string): void {
-  const slot = slotStorage.getStore();
-  if (!slot) return;
-  slot.answeredBy = slot.answeredBy === undefined || slot.answeredBy === host ? host : null;
 }
 
 /**
@@ -178,9 +258,27 @@ export function noteGrantLift(lift: GrantLift): void {
   if (slot) slot.grantLift = { ...lift };
 }
 
+/** Record how the current call's filing ended; outside a slot a no-op. The last write wins: a
+ *  handler files at most once. */
+export function noteCallFiled(filed: CallFiled): void {
+  const slot = slotStorage.getStore();
+  if (slot) slot.filed = { ...filed };
+}
+
+/** What {@link noteCallFiled} left on `slot`, as a copy; `undefined` when the call filed nothing. */
+export function callFiledOf(slot: CallSlot): CallFiled | undefined {
+  return slot.filed === undefined ? undefined : { ...slot.filed };
+}
+
 /** The mark {@link noteGrantLift} left on `slot`, as a copy; `undefined` when none did. */
 export function grantLiftOf(slot: CallSlot): GrantLift | undefined {
   return slot.grantLift === undefined ? undefined : { ...slot.grantLift };
+}
+
+/** Mark the current call as one that tried to reach the network; outside a slot a no-op. */
+export function noteNetworkContact(): void {
+  const slot = slotStorage.getStore();
+  if (slot) slot.contactedNetwork = true;
 }
 
 /**
@@ -193,4 +291,27 @@ export function grantLiftOf(slot: CallSlot): GrantLift | undefined {
 export function noteCallConnection(connection: CallConnection): void {
   const slot = slotStorage.getStore();
   if (slot && slot.connection === undefined) slot.connection = { ...connection };
+}
+
+/** The current call's instance trail as the agent fixed it; `undefined` outside a slot or for a
+ *  slot built without one. */
+export function currentInstanceTrail(): InstanceTrail | 'exempt' | 'unnamed' | undefined {
+  return slotStorage.getStore()?.instanceTrail;
+}
+
+/** Whether there is a slot at all: a write outside one takes its actor from the writer. */
+export function inCallSlot(): boolean {
+  return slotStorage.getStore() !== undefined;
+}
+
+/** Poison the current call: a row for a write inside the instance could not be written. Outside
+ *  a slot a no-op (the refusal is still thrown to the writer). */
+export function noteInstanceRefused(): void {
+  const slot = slotStorage.getStore();
+  if (slot) slot.instanceRefused = true;
+}
+
+/** Whether the current call is poisoned; false outside a slot. */
+export function isInstanceRefused(): boolean {
+  return slotStorage.getStore()?.instanceRefused === true;
 }

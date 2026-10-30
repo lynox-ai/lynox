@@ -23,6 +23,7 @@ vi.mock('@sentry/node', () => ({
   withScope: vi.fn(),
   flush: vi.fn().mockResolvedValue(true),
   close: vi.fn().mockResolvedValue(undefined),
+  getCurrentScope: () => ({ setClient: vi.fn() }),
 }));
 
 vi.mock('./secret-store.js', () => ({

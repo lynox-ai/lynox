@@ -269,7 +269,7 @@ function checkNegation(a: string, b: string): boolean {
  *     EN "24,000", DE "24.000"), normalised to bare digits before compare.
  * (Pre-fix the regex required a space before BOTH the connector and the digit,
  * so "Projektbudget: CHF 24'000" never matched → a budget correction was never
- * seen as a contradiction → an orphaned stale memory. Staging dogfood 2026-07-06.)
+ * seen as a contradiction → an orphaned stale memory. Seen on staging, 2026-07-06.)
  *
  * Deliberate limitation: `toDigits` strips ALL non-digits, so magnitude/decimal
  * notation is not normalised ("100k"≠"100000", "3.5"→"35"). The failure mode is

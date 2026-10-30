@@ -1,11 +1,15 @@
 import { realpathSync, existsSync } from 'node:fs';
-import { effectiveWriteMethod, isGraphqlEndpoint } from '../core/outbound-write.js';
+import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, isReadMethod } from '../core/outbound-write.js';
+import { isShopifyAdminHost } from '../core/shopify-host.js';
+import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyMediaListBody, shopifyTargetReadBody, shopifyWriteRequest, type ShopifyWrite } from '../core/shopify-graphql.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS, isPathWithin } from '../core/workspace.js';
-import { proveBashCommand, BASH_OBSERVE_EVENT } from './bash-allowlist.js';
+import { proveBashCommand, BASH_OBSERVE_EVENT, type BashProof } from './bash-allowlist.js';
+import { shellIsolation } from '../core/shell-isolation.js';
+import { namesSidecarLabel } from '../core/workspace-root.js';
 import { channels } from '../core/observability.js';
 import { globToRegex } from '../core/glob.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
@@ -57,8 +61,88 @@ const LYNOX_SECRET_FILES = new RegExp(
 // path matching is a bar, not a boundary). `workspace/` stays out: the agent's
 // own files live there. The match ends at the extension, so the `-wal`/`-shm`/
 // `-journal` siblings are covered too; `.db.md` and the like are not.
-const LYNOX_DB_FILES =
-  /\.lynox\/+(?!workspace\/)(?:[^\s'"`;|&<>/]+\/+)*[^\s'"`;|&<>/]*\.(?:db|db3|sqlite3?)(?![\w.])/i;
+//
+// A rule that reads the path after `.lynox/` reads it only up to the next `.lynox/` that would
+// start a match of its own (`LYNOX_DIR_AT`, the same text as the rule's start): that one finds
+// whatever lies beyond it. So each character is read from one start, not from every `.lynox/`
+// before it, and a command that repeats the prefix stays linear in its length. The rules match
+// what they matched before; only the start that reports the match can be a later one.
+// The start takes the whole run of slashes (`(?!\/…)`): read as a lookahead, a start that took
+// only some of them would hold at `.lynox//workspace/`, where no match can start, and the read
+// from an earlier `.lynox/` would stop there without anyone reporting it.
+const LYNOX_DIR_AT = String.raw`\.lynox\/+(?!\/|workspace\/)`;
+const LYNOX_PATH_CHAR = String.raw`(?:(?!${LYNOX_DIR_AT})[^\s'"\`;|&<>/])`;
+const LYNOX_DB_FILES = new RegExp(
+  String.raw`${LYNOX_DIR_AT}(?:${LYNOX_PATH_CHAR}+\/+)*${LYNOX_PATH_CHAR}*\.(?:db|db3|sqlite3?)(?![\w.])`,
+  'i',
+);
+
+const WORKSPACE_IN_LYNOX = '.lynox/workspace/';
+const UP_A_DIR = '/../';
+const DOTS_CAN_MEET = /\.[.{},]/;
+
+/**
+ * Whether some brace expansion of a word reads `.lynox/workspace/`, then anything, then `/../`,
+ * read in one pass without expanding: the positions read so far are carried through each group,
+ * every alternative from the positions at its `{`, and the group ends with their union. The shell
+ * reads a group the word does not close as written, but a scan window may have cut its close
+ * off: such a group is read as closed at the end of the word, and the word counts when that
+ * reading ends in `/..`, which the rest of the group could carry on as `/../`.
+ */
+function braceWordLeavesWorkspace(word: string): boolean {
+  const lower = word.toLowerCase();
+  const before = WORKSPACE_IN_LYNOX.length;
+  const done = before + UP_A_DIR.length;
+  // Bit i < before: `i` characters of `.lynox/workspace/` read. Bit before + j: the prefix read,
+  // and `j` characters of `/../` after it; bit `before` itself stays set once reached.
+  let states = 1;
+  const groups: Array<{ start: number; ends: number }> = [];
+  for (const c of lower) {
+    if (c === '{') {
+      groups.push({ start: states, ends: 0 });
+      continue;
+    }
+    if (c === ',' && groups.length > 0) {
+      const group = groups[groups.length - 1]!;
+      group.ends |= states;
+      states = group.start;
+      continue;
+    }
+    if (c === '}' && groups.length > 0) {
+      states |= groups.pop()!.ends;
+      continue;
+    }
+    let next = 1 | (states & (1 << before));
+    for (let set = states; set !== 0; set &= set - 1) {
+      const bit = 31 - Math.clz32(set & -set);
+      const expected = bit < before ? WORKSPACE_IN_LYNOX[bit] : UP_A_DIR[bit - before];
+      if (expected === c) next |= 1 << (bit + 1);
+    }
+    // The prefix's own last `/` is also the first of `/../`: `workspace/{..,x}/`.
+    if (!((states >> before) & 1) && (next >> before) & 1 && UP_A_DIR[0] === c) next |= 1 << (before + 1);
+    states = next;
+    if ((states >> done) & 1) return true;
+  }
+  if (groups.length === 0) return false;
+  while (groups.length > 0) states |= groups.pop()!.ends;
+  return ((states >> done) & 1) === 1 || ((states >> (done - 1)) & 1) === 1;
+}
+
+/**
+ * Whether a word of the segment leaves the workspace by a dot-dot only its braces form. Slashes
+ * are read one for a run, as the path is. Two dots meet in an expansion only where the first is
+ * followed by a dot or by brace syntax, so a word without such a dot after the workspace is not
+ * read. Exported for tests.
+ */
+export function _bracesLeaveWorkspace(segment: string): boolean {
+  return segment.split(/\s+/).some((word) => {
+    if (!word.includes('{')) return false;
+    const path = word.toLowerCase().replace(/\/+/g, '/');
+    const at = path.indexOf(WORKSPACE_IN_LYNOX);
+    if (at < 0) return false;
+    return DOTS_CAN_MEET.test(path.slice(at + WORKSPACE_IN_LYNOX.length)) && braceWordLeavesWorkspace(path);
+  });
+}
 
 // Bash spellings of the same read that do not name the full path: a glob into the
 // lynox dir (`cat ~/.lynox/http-*`) and the bare filename after a cd
@@ -67,7 +151,7 @@ const LYNOX_DB_FILES =
 // `http-secret` (the one plaintext secret; the DB names are too generic to flag
 // bare without false positives), and `~/.lynox/workspace/` — the agent's default
 // working area — stays globbable.
-const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
+const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string; matches?: (segment: string) => boolean }> = [
   { pattern: LYNOX_SECRET_FILES,   label: 'access lynox secret store (secrets)' },
   { pattern: LYNOX_DB_FILES,       label: 'access lynox engine database (use the built-in tools instead)' },
   { pattern: /\bhttp-secret\b/i,   label: 'access lynox secret store (secrets)' },
@@ -80,7 +164,7 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   // `.env` deliberately gets NO bare-name twin: a bare rule here lands in
   // CRITICAL_BASH, which would hard-block reading any project's own env file.
   { pattern: /\.access-token\b/i, label: 'access lynox secret store (secrets)' },
-  { pattern: /\.lynox\/(?!workspace\/)\S*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
+  { pattern: /\.lynox\/(?!workspace\/)(?:(?!\.lynox\/(?!workspace\/))[^\s*?[])*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
   // The shell can finish a database extension the rule above keys on:
   // `engine.d{b,}`, `engine.d${X}b` never spell `.db`. An expansion that follows
   // the start of a database extension (`.d`, `.s`, `.sq`, …) is flagged as if it
@@ -89,11 +173,17 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   // evaluate expansion, so a name assembled any other way — an expansion before
   // the dot or over the whole name (`engine${EXT}`, `.{db,x}`, `${F}`), a brace
   // opened before the dot — is not covered.
-  { pattern: /\.lynox\/+(?!workspace\/)(?:[^\s'"`;|&<>/]+\/+)*[^\s'"`;|&<>/]*\.(?:d|db|s|sq|sql|sqli|sqlit|sqlite)[{$`]/i, label: 'access lynox engine database (use the built-in tools instead)' },
+  { pattern: new RegExp(String.raw`${LYNOX_DIR_AT}(?:${LYNOX_PATH_CHAR}+\/+)*${LYNOX_PATH_CHAR}*\.(?:d|db|s|sq|sql|sqli|sqlit|sqlite)[{$\`]`, 'i'), label: 'access lynox engine database (use the built-in tools instead)' },
   // The workspace carve-out above is lexical, so `~/.lynox/workspace/../vault.db`
   // would launder a secret path through it — any dot-dot inside a .lynox path is
   // flagged instead (the model has no reason to spell workspace paths that way).
-  { pattern: /\.lynox\/\S*\.\.\//i, label: 'path traversal in lynox data dir (secrets)' },
+  { pattern: /\.lynox\/(?:(?!\.lynox\/)\S)*\.\.\//i, label: 'path traversal in lynox data dir (secrets)' },
+  // The same dot-dot, formed by a brace expansion out of the workspace
+  // (`~/.lynox/workspace/{..,x}/engine.db`), which never spells `../` as written.
+  // The pattern is the predicate's own precondition, read up to the next `.lynox/`: a dot followed by
+  // a dot or brace syntax after the workspace. So a command naming the workspace without one is not
+  // read rule by rule.
+  { pattern: /\.lynox\/+workspace\/(?:(?!\.lynox\/)\S)*\.[.{},]/i, label: 'path traversal in lynox data dir (secrets)', matches: _bracesLeaveWorkspace },
 ];
 
 // batch_files must not operate on the lynox dir outside the workspace subtree — a
@@ -132,16 +222,21 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bsystemctl\s+(start|stop|restart|enable|disable|mask)\b/i, label: 'service management' },
   { pattern: /\blaunchctl\b/i,                         label: 'service management (macOS)' },
   // Destructive HTTP via bash
-  { pattern: /\bcurl\b.*-X\s*DELETE/i,                 label: 'destructive API call (HTTP DELETE)' },
+  // Read from the line's first curl, in linear time.
+  { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*-X\s*DELETE/im,                 label: 'destructive API call (HTTP DELETE)' },
   { pattern: /\bmkfs\b/i,                       label: 'format disk' },
   { pattern: /\b(shutdown|reboot|halt)\b/i,     label: 'system control' },
   { pattern: />\s*\/dev\/(?!null\b)/i,           label: 'write to device' },
   { pattern: /\bprintenv\b/i,                   label: 'print environment (secrets)' },
-  { pattern: /^\s*env\s*$|\benv\b\s*[|>]/im,   label: 'dump environment (secrets)' },
-  { pattern: /\/proc\/.*\/environ/i,             label: 'read process environment (secrets)' },
+  // `^` under `m` starts at every line; a leading `\s*` would then run across every blank line
+  // below it, the square of the run. Only spaces within the line: a line break in the run before
+  // `env` is itself a line start `^` matches after, so the rules match what they matched before.
+  { pattern: /^[^\S\n\r\u2028\u2029]*env\s*$|\benv\b\s*[|>]/im,   label: 'dump environment (secrets)' },
+  // Read from the line's first /proc/, in linear time.
+  { pattern: /^(?:(?!\/proc\/).)*\/proc\/.*\/environ/im, label: 'read process environment (secrets)' },
   ...LYNOX_SECRET_BASH,
   { pattern: /\b(declare\s+-x|export\s+-p)\b/i, label: 'dump exported vars (secrets)' },
-  { pattern: /^\s*set\s*$|\bset\b\s*[|>]/im,   label: 'dump all variables (secrets)' },
+  { pattern: /^[^\S\n\r\u2028\u2029]*set\s*$|\bset\b\s*[|>]/im,   label: 'dump all variables (secrets)' },
   { pattern: /\bchroot\b/i,                     label: 'chroot escape' },
   { pattern: /\bnsenter\b/i,                    label: 'namespace escape' },
   { pattern: /\bdocker\s+(exec|run)\b/i,        label: 'container execution' },
@@ -159,7 +254,8 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   // Bash built-in networking — bypasses http tool entirely
   { pattern: /\/dev\/(tcp|udp)\//i,                label: 'bash built-in networking (/dev/tcp)' },
   // Data exfiltration via file upload
-  { pattern: /\bcurl\b.*(-T\s|--upload-file\s)/i,  label: 'file exfiltration (curl upload)' },
+  // Read from the line's first curl, in linear time.
+  { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*(-T\s|--upload-file\s)/im,  label: 'file exfiltration (curl upload)' },
   // Local HTTP server for data staging/exfiltration
   { pattern: /\bpython[23]?\s+-m\s+(http\.server|SimpleHTTPServer)\b/i, label: 'local HTTP server (data exfiltration)' },
 ];
@@ -183,7 +279,8 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
 const LYNOX_OUTSIDE_WORKSPACE = String.raw`(?<![\w.-])\.lynox(?:\/+(?!workspace(?:$|[\s'"]|\/(?!\.\.)))|(?=$|[\s'"]))`;
 /** The interpreters that run code they are handed. */
 const INTERPRETER = String.raw`(?:sh|bash|dash|zsh|ksh|node|python[23]?|perl|ruby|php|bun|deno)`;
-const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
+/** Exported for tests. */
+export const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   // Code passed inline to an interpreter, or fed to one on stdin.
   { pattern: /\bnode\s+(?:-[a-zA-Z]*[ep]\b|--eval\b|--print\b|-(?=\s|$))/i, label: 'node code execution' },
   { pattern: /\bpython(?:[23](?:\.\d+)?)?\s+(?:-[a-zA-Z]*c\b|-(?=\s|$))/i, label: 'python code execution' },
@@ -203,9 +300,12 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   // about too. Short options are case-sensitive, like curl's own: `-X` sets the method, `-x` a
   // proxy; `-d`, `-F` and `-T` send, `-D` and `-f` do not. A short option may be bundled or carry
   // its value glued.
-  { pattern: /\b[cC][uU][rR][lL]\b.*(?:\s-[a-zA-Z]*X\s*|\s--request(?:\s+|=))(?!(?:GET|HEAD|OPTIONS)\b)\S/, label: 'HTTP mutation via curl' },
-  { pattern: /\b[cC][uU][rR][lL]\b.*\s(?:--(?:expand-)?data\b|--form\b|--upload-file\b|--json\b|--config\b|-[a-zA-Z]*[dFTK])/, label: 'HTTP data submission via curl' },
-  { pattern: /\bwget\b.*\s--(?:post-[df]|body-[df]|meth)/i, label: 'HTTP mutation via wget' },
+  // Read from the line's first curl, in linear time.
+  { pattern: /^(?:(?!\b[cC][uU][rR][lL]\b).)*\b[cC][uU][rR][lL]\b.*(?:\s-[a-zA-Z]*X\s*|\s--request(?:\s+|=))(?!(?:GET|HEAD|OPTIONS)\b)\S/m, label: 'HTTP mutation via curl' },
+  // Read from the line's first curl, in linear time.
+  { pattern: /^(?:(?!\b[cC][uU][rR][lL]\b).)*\b[cC][uU][rR][lL]\b.*\s(?:--(?:expand-)?data\b|--form\b|--upload-file\b|--json\b|--config\b|-[a-zA-Z]*[dFTK])/m, label: 'HTTP data submission via curl' },
+  // Read from the line's first wget, in linear time.
+  { pattern: /^(?:(?!\bwget\b).)*\bwget\b.*\s--(?:post-[df]|body-[df]|meth)/im, label: 'HTTP mutation via wget' },
   // Writes into the lynox data dir outside the workspace: profiles there are read back as
   // configuration. A command that names a writing verb and such a path is asked about, in
   // either order: read from its start, so the rule costs one pass, not one per verb.
@@ -244,7 +344,67 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
  *   unattended because asking would refuse every saved workflow that cleans up after itself: a
  *   headless run has no one to ask.
  */
-type DangerousBashRule = { pattern: RegExp; label: string; unattended: 'block' | 'ask' | 'sends' | 'allow' };
+type DangerousBashRule = {
+  pattern: RegExp;
+  label: string;
+  unattended: 'block' | 'ask' | 'sends' | 'allow';
+  /**
+   * Where a regex would be slower than linear, the rule's test is this predicate, and `pattern`
+   * is only a linear filter in front of it: true wherever the predicate is (so the union of a list
+   * never skips a segment the rule matches), and the rule matches where both hold.
+   */
+  matches?: (segment: string) => boolean;
+};
+
+const isLineTerminator = (c: number): boolean => c === 0x0a || c === 0x0d || c === 0x2028 || c === 0x2029;
+const isAsciiWordChar = (c: number): boolean =>
+  (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) || c === 0x5f;
+const WHITESPACE_CHAR = /\s/;
+const lowerAscii = (c: number): number => (c >= 0x41 && c <= 0x5a ? c + 0x20 : c);
+
+/**
+ * Whether `segment` uploads a file with a curl form: true exactly where
+ * `/\bcurl\b.*-F\s*"?[^"]*@/i` matches, read in one pass. A line holds a whole-word `curl`, then
+ * on the same line a `-F` (or `-f`); after it, past any whitespace and at most one `"`, an `@`
+ * comes before the next `"`, on that line or a later one. Each `-F` of the line is tried, not only
+ * the first: `curl -F "a" -F @b` uploads through the second. Exported for tests.
+ */
+export function curlFormUploadsFile(segment: string): boolean {
+  const n = segment.length;
+  // From each index: where the next `@` and the next `"` are (n: none), and the first index that
+  // is not whitespace. Built once from the right, so each -F is answered in constant time.
+  const nextAt = new Int32Array(n + 1);
+  const nextQuote = new Int32Array(n + 1);
+  const nextNonSpace = new Int32Array(n + 1);
+  nextAt[n] = n; nextQuote[n] = n; nextNonSpace[n] = n;
+  for (let i = n - 1; i >= 0; i--) {
+    const ch = segment[i]!;
+    nextAt[i] = ch === '@' ? i : nextAt[i + 1]!;
+    nextQuote[i] = ch === '"' ? i : nextQuote[i + 1]!;
+    nextNonSpace[i] = WHITESPACE_CHAR.test(ch) ? nextNonSpace[i + 1]! : i;
+  }
+  const atBeforeQuote = (from: number): boolean => nextAt[from]! < n && nextAt[from]! < nextQuote[from]!;
+  let curlOnLine = false;
+  for (let i = 0; i < n; i++) {
+    const c = segment.charCodeAt(i);
+    if (isLineTerminator(c)) { curlOnLine = false; continue; }
+    if (!curlOnLine && lowerAscii(c) === 0x63 && i + 4 <= n
+        && lowerAscii(segment.charCodeAt(i + 1)) === 0x75 && lowerAscii(segment.charCodeAt(i + 2)) === 0x72
+        && lowerAscii(segment.charCodeAt(i + 3)) === 0x6c
+        && (i === 0 || !isAsciiWordChar(segment.charCodeAt(i - 1)))
+        && (i + 4 === n || !isAsciiWordChar(segment.charCodeAt(i + 4)))) {
+      curlOnLine = true;
+      i += 3;
+      continue;
+    }
+    if (curlOnLine && c === 0x2d && i + 1 < n && lowerAscii(segment.charCodeAt(i + 1)) === 0x66) {
+      const afterF = i + 2;
+      const p = nextNonSpace[afterF]!;
+      if ((p < n && segment[p] === '"') ? atBeforeQuote(p + 1) : atBeforeQuote(afterF)) return true;
+    }
+  }
+  return false;
+}
 
 export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\brm\s/i,                     label: 'remove files', unattended: 'allow' },
@@ -270,7 +430,8 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\bmkfs\b/i,                   label: 'format disk', unattended: 'block' },
   { pattern: /\b(shutdown|reboot|halt)\b/i, label: 'system control', unattended: 'block' },
   { pattern: />\s*\/dev\/(?!null\b)/i,      label: 'write to device', unattended: 'block' },
-  { pattern: /\bcurl\b.*\|\s*(sh|bash)/i,   label: 'pipe to shell', unattended: 'ask' },
+  // Read from the line's first curl, in linear time.
+  { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*\|\s*(sh|bash)/im,   label: 'pipe to shell', unattended: 'ask' },
   { pattern: /\b(npm|pnpm|yarn)\s+(publish|unpublish)\b/i, label: 'package publish', unattended: 'ask' },
   { pattern: /\bdocker\s+push\b/i,          label: 'docker push', unattended: 'block' },
   { pattern: /\bdocker\s+(rm|rmi|prune)/i,  label: 'docker cleanup', unattended: 'ask' },
@@ -302,11 +463,14 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\bcargo\s+install\b/i,        label: 'install Rust crate', unattended: 'ask' },
   { pattern: /\bgo\s+install\b/i,           label: 'install Go package', unattended: 'ask' },
   { pattern: /\bprintenv\b/i,               label: 'print environment (secrets)', unattended: 'block' },
-  { pattern: /^\s*env\s*$|\benv\b\s*[|>]/im, label: 'dump environment (secrets)', unattended: 'block' },
-  { pattern: /\bwget\b.*\|\s*(sh|bash)/i,   label: 'pipe to shell', unattended: 'ask' },
+  { pattern: /^[^\S\n\r\u2028\u2029]*env\s*$|\benv\b\s*[|>]/im, label: 'dump environment (secrets)', unattended: 'block' },
+  // Read from the line's first wget, in linear time.
+  { pattern: /^(?:(?!\bwget\b).)*\bwget\b.*\|\s*(sh|bash)/im, label: 'pipe to shell', unattended: 'ask' },
   { pattern: /\bnc\b\s+\S+\s+\d+/i,        label: 'outbound netcat connection', unattended: 'ask' },
-  { pattern: /\b(cat|less|more|head|tail|xxd|strings|od)\b.*\/proc\//i, label: 'read proc filesystem', unattended: 'ask' },
-  { pattern: /\b(cat|less|more|head|tail)\b.*\.env\b/i, label: 'read secrets file', unattended: 'allow' },
+  // Read from the line's first of these words, in linear time.
+  { pattern: /^(?:(?!\b(?:cat|less|more|head|tail|xxd|strings|od)\b).)*\b(cat|less|more|head|tail|xxd|strings|od)\b.*\/proc\//im, label: 'read proc filesystem', unattended: 'ask' },
+  // Read from the line's first of these words, in linear time.
+  { pattern: /^(?:(?!\b(?:cat|less|more|head|tail)\b).)*\b(cat|less|more|head|tail)\b.*\.env\b/im, label: 'read secrets file', unattended: 'allow' },
   ...LYNOX_SECRET_BASH.map((entry) => ({ ...entry, unattended: 'block' as const })),
   { pattern: /\bln\s+(-[a-zA-Z]*s|-[a-zA-Z]*\s+-[a-zA-Z]*s|--symbolic)\b/i, label: 'create symlink', unattended: 'allow' },
   { pattern: /\bpython[23]?\s+-c\b/i,       label: 'python code execution', unattended: 'sends' },
@@ -316,19 +480,31 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\bcrontab\b/i,                label: 'modify cron jobs', unattended: 'ask' },
   { pattern: /\biptables\b/i,               label: 'modify firewall rules', unattended: 'ask' },
   { pattern: /\buseradd\b|\busermod\b|\bgroupadd\b/i, label: 'modify users/groups', unattended: 'ask' },
-  { pattern: /\bcat\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/i, label: 'write file via bash (use write_file instead)', unattended: 'allow' },
-  { pattern: /\becho\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/i, label: 'write file via bash (use write_file instead)', unattended: 'allow' },
+  // Read from the line's first cat, in linear time.
+  { pattern: /^(?:(?!\bcat\b).)*\bcat\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/im, label: 'write file via bash (use write_file instead)', unattended: 'allow' },
+  // Read from the line's first echo, in linear time.
+  { pattern: /^(?:(?!\becho\b).)*\becho\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/im, label: 'write file via bash (use write_file instead)', unattended: 'allow' },
   { pattern: /\btee\b\s+(?!\/tmp\/)/i,      label: 'write file via bash (use write_file instead)', unattended: 'allow' },
   { pattern: /\bsed\s+-i\b/i,               label: 'in-place file edit via bash (use write_file instead)', unattended: 'allow' },
   // HTTP mutations via bash (bypasses http_request SSRF protection) — keep AFTER secrets patterns
-  { pattern: /\bcurl\b.*-X\s*(POST|PUT|PATCH|DELETE)/i, label: 'HTTP mutation via curl', unattended: 'sends' },
-  { pattern: /\bcurl\b.*(--data\b|-d\s|-F\s|--form\b)/i, label: 'HTTP data submission via curl', unattended: 'sends' },
-  { pattern: /\bwget\b.*(--post-data|--post-file|--method)/i, label: 'HTTP mutation via wget', unattended: 'sends' },
+  // Read from the line's first curl, in linear time.
+  { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*-X\s*(POST|PUT|PATCH|DELETE)/im, label: 'HTTP mutation via curl', unattended: 'sends' },
+  // Read from the line's first curl, in linear time.
+  { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*(--data\b|-d\s|-F\s|--form\b)/im, label: 'HTTP data submission via curl', unattended: 'sends' },
+  // Read from the line's first wget, in linear time.
+  { pattern: /^(?:(?!\bwget\b).)*\bwget\b.*(--post-data|--post-file|--method)/im, label: 'HTTP mutation via wget', unattended: 'sends' },
   // Shell escape / arbitrary code execution
+  //
+  // The four "A, then a pipe, then B" rules below read each line once. Written as `A.*\|.*B`,
+  // every A was tried with every later pipe and every later B: cubic in the line, about 48 s for
+  // a 10 KB command of repeated `echo |`. A line matches the old form exactly when its FIRST A is
+  // followed by a pipe and a B after it (any later A, pipe or B only comes later still), so each
+  // rule anchors at a line start (`^` with `m`) and reads up to the first A, then up to the next
+  // pipe (or `-r`, or `\x..`), never passing them. Neither part can give back a start to retry.
   { pattern: /\beval\b/i,                             label: 'eval (arbitrary code execution)', unattended: 'ask' },
-  { pattern: /base64.*\|.*(?:bash|sh|zsh)\b/i,        label: 'base64 decode piped to shell', unattended: 'ask' },
+  { pattern: /^(?:(?!base64).)*base64(?:(?!\|).)*\|.*(?:bash|sh|zsh)\b/im, label: 'base64 decode piped to shell', unattended: 'ask' },
   { pattern: /\bbash\s+-c\b/i,                        label: 'bash -c (explicit subshell)', unattended: 'sends' },
-  { pattern: /\becho\b.*\|.*\b(?:bash|sh|zsh)\b/i,    label: 'echo piped to shell', unattended: 'ask' },
+  { pattern: /^(?:(?!\becho\b).)*\becho\b(?:(?!\|).)*\|.*\b(?:bash|sh|zsh)\b/im, label: 'echo piped to shell', unattended: 'ask' },
   // SQL — data destruction (also in CRITICAL_BASH for autonomous blocking)
   { pattern: /\b(DROP\s+(TABLE|DATABASE|SCHEMA|INDEX|VIEW|TRIGGER))\b/i, label: 'SQL DROP (irreversible data destruction)', unattended: 'block' },
   { pattern: /\bTRUNCATE\b/i, label: 'SQL TRUNCATE (irreversible data destruction)', unattended: 'block' },
@@ -342,14 +518,17 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\bstripe\s+(charges|payouts|transfers|refunds|customers\s+delete|subscriptions\s+cancel)\b/i, label: 'payment mutation (financial impact)', unattended: 'block' },
   { pattern: /\b(stripe|paypal)\s/i, label: 'payment platform CLI', unattended: 'ask' },
   // Webhook/notification URLs via curl
-  { pattern: /\bcurl\b.*\b(hooks\.slack\.com|discord\.com\/api\/webhooks|webhook\.site)\b/i, label: 'webhook notification', unattended: 'ask' },
+  // Read from the line's first curl, in linear time.
+  { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*\b(hooks\.slack\.com|discord\.com\/api\/webhooks|webhook\.site)\b/im, label: 'webhook notification', unattended: 'ask' },
   // Messaging CLIs
   { pattern: /\b(slack-cli|twilio)\s/i, label: 'messaging platform CLI', unattended: 'ask' },
   // Encoding bypass — hex/octal decode piped to shell
-  { pattern: /\bxxd\b.*-r.*\|\s*(?:bash|sh|zsh)\b/i, label: 'hex decode piped to shell', unattended: 'ask' },
-  { pattern: /\bprintf\b.*\\x[0-9a-f].*\|\s*(?:bash|sh|zsh)\b/i, label: 'printf hex escape piped to shell', unattended: 'ask' },
-  // File upload via curl form (file exfiltration)
-  { pattern: /\bcurl\b.*-F\s*"?[^"]*@/i,           label: 'file upload via curl form (data exfiltration)', unattended: 'ask' },
+  { pattern: /^(?:(?!\bxxd\b).)*\bxxd\b(?:(?!-r).)*-r.*\|\s*(?:bash|sh|zsh)\b/im, label: 'hex decode piped to shell', unattended: 'ask' },
+  { pattern: /^(?:(?!\bprintf\b).)*\bprintf\b(?:(?!\\x[0-9a-f]).)*\\x[0-9a-f].*\|\s*(?:bash|sh|zsh)\b/im, label: 'printf hex escape piped to shell', unattended: 'ask' },
+  // File upload via curl form (file exfiltration). Read by `curlFormUploadsFile`, which matches
+  // what `/\bcurl\b.*-F\s*"?[^"]*@/i` matched, in linear time. The pattern is the predicate's
+  // filter.
+  { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b(?:(?!-F).)*-F/im, matches: curlFormUploadsFile, label: 'file upload via curl form (data exfiltration)', unattended: 'ask' },
   // Reverse shell / covert channel (also in CRITICAL for autonomous blocking)
   { pattern: /\b(ncat|socat)\b/i,                  label: 'reverse shell enabler (ncat/socat)', unattended: 'block' },
   // Bash built-in networking
@@ -390,6 +569,8 @@ const SENSITIVE_PATHS: RegExp[] = [
 
 function resolveRealPath(filePath: string): string {
   const resolved = resolve(filePath);
+  // In shell sidecar mode a workspace path is judged by its spelling, not looked up by name (D3).
+  if (namesSidecarLabel(resolved)) return resolved;
   if (existsSync(resolved)) {
     return realpathSync(resolved);
   }
@@ -417,6 +598,9 @@ export interface DangerSignal {
   /** The same prompt with what the agent wrote marked as values: what the person is asked with. */
   prompt: PromptText;
   payload?: WarningPayload | undefined;
+  /** A hard block: refused in an unattended run instead of being queued for approval. Set only by
+   *  the rule that decided it; an action that asks for an OK has `[BLOCKED` without this. */
+  hardBlock?: true | undefined;
 }
 
 /**
@@ -486,7 +670,7 @@ function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel
   }
 
   const payload = extractDangerPayload(toolName, input, autonomy, entry, parentProvider);
-  return { warning, prompt, ...(payload ? { payload } : {}) };
+  return { warning, prompt, ...(payload ? { payload } : {}), ...(danger.hardBlock === true ? { hardBlock: true as const } : {}) };
 }
 
 /**
@@ -503,12 +687,16 @@ function observeBashProof(toolName: string, input: unknown, autonomy: AutonomyLe
   if (!channels.securityFlagged.hasSubscribers) return;
   if (!input || typeof input !== 'object' || !('command' in input)) return;
   const command = String((input as { command: unknown }).command);
-  const proof = proveBashCommand(command, {
-    cwd: getWorkspaceCwd(),
-    home: process.env['HOME'],
-    readRoots: READ_ONLY_ROOTS,
-    isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)),
-  });
+  // In shell sidecar mode the proof would resolve the command's paths here, by name, in a tree
+  // the command never runs in: not proven, and nothing is looked up (PRD shell-sidecar-activation D3).
+  const proof: BashProof = shellIsolation().kind === 'sidecar'
+    ? { proven: false, reason: 'sidecar', program: 'other' }
+    : proveBashCommand(command, {
+      cwd: getWorkspaceCwd(),
+      home: process.env['HOME'],
+      readRoots: READ_ONLY_ROOTS,
+      isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)),
+    });
   const current = !warning ? 'free' : warning.includes('[BLOCKED') ? 'blocked' : 'asks';
   channels.securityFlagged.publish({
     event_type: BASH_OBSERVE_EVENT,
@@ -554,12 +742,20 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
 
   const obj = input as { url?: unknown; method?: unknown };
   const method = (typeof obj.method === 'string' ? obj.method : 'GET').toUpperCase();
+  // A contract the engine minted for a bulk run's Shopify reads decides every request that is
+  // neither a `GET` nor a `HEAD`, and every request to a GraphQL endpoint, here and finally: granted only as one of its bodies,
+  // refused otherwise — never handed on to the checks below, so a refusal does not rest on
+  // what `httpMethods` happens to hold.
+  const shopify = SHOPIFY_GRANTS.get(contract);
+  if (shopify !== undefined && (typeof obj.url !== 'string' || !isReadMethod(method) || isGraphqlEndpoint(obj.url))) {
+    return grantsShopify(input, method, shopify);
+  }
   if (!(contract.httpMethods ?? []).some(m => m.toUpperCase() === method)) return false;
   if (typeof obj.url !== 'string') return false;
-  // No contract grants a write to a GraphQL endpoint: there a read and every mutation the token
-  // can run are the same POST to the same path, and nothing here reads the document. Read from
-  // the URL alone, so it holds for the callers that never pass a body.
-  if (method !== 'GET' && method !== 'HEAD' && isGraphqlEndpoint(obj.url)) return false;
+  // No other contract grants a write to a GraphQL endpoint: there a read and every mutation the
+  // token can run are the same POST to the same path, and nothing here reads the document. Read
+  // from the URL alone, so it holds for the callers that never pass a body.
+  if (!isReadMethod(method) && isGraphqlEndpoint(obj.url)) return false;
 
   let parsed: URL;
   try {
@@ -738,6 +934,137 @@ function grantsListRead(input: object, url: string, method: string, constraints:
   return isReviewableUrl(parsedBase, base) && reviewableQuery(url.slice(q + 1), constraints);
 }
 
+/** What a minted Shopify grant admits: one endpoint, and the exact bodies it may receive. */
+interface ShopifyGrant {
+  readonly endpoint: string;
+  /** The exact read bodies — typed `unknown` so that whatever a caller passed, a missing body
+   *  included, is asked of the set itself, in one comparison. */
+  readonly reads: ReadonlySet<unknown>;
+  /** The exact write bodies, the same way; empty for every grant but an approved run's apply. */
+  readonly writes: ReadonlySet<unknown>;
+}
+
+/**
+ * The Shopify grants of the contracts the engine minted in this process, held here and
+ * never on the contract, like {@link LIST_QUERIES}: a stored, parsed or imported contract is a
+ * new object and carries none, so no row, workflow or model-proposed contract can name one.
+ */
+const SHOPIFY_GRANTS = new WeakMap<CapabilityContract, ShopifyGrant>();
+
+/** Which read a contract is minted for. The phase is the form: each grant holds one form's bodies only. */
+export type ShopifyReadPhase =
+  /** `form` names which list: the products (the default) or their images. */
+  | { readonly phase: 'list'; readonly afterId: number; readonly form?: 'shopify_products_list' | 'shopify_media_list' }
+  /** Each target is read by the document its GID's type names: a product's or an image's. */
+  | { readonly phase: 'read'; readonly targets: readonly string[] };
+
+/**
+ * A reviewed contract that also admits a bulk run's Shopify GraphQL reads on `host`: a `POST`
+ * to the pinned endpoint whose body is, byte for byte, one the
+ * engine builds here from its own documents — the list page after `afterId` in the list phase
+ * (of products, or of their images), one read per target GID in the preview (a product's or an
+ * image's, by the GID's type). Nothing else reaches that endpoint under
+ * it, no `GET` included. The documents and variables are built here, never taken from the
+ * caller: it names a phase, a host and the ledger's values, and a value that does not fit
+ * (a host that is not exactly a store host, a cursor that is not a safe integer, a key that is
+ * neither a product's nor an image's GID) throws. So does a contract that grants a write verb: a run whose contract
+ * names one is read everywhere else as a run that writes (`writeMethodOf`, the probe), and a
+ * contract whose hosts are not exactly `host`: the grant's host is the contract's own. The
+ * returned contract is a frozen copy; only it carries the grant, and copying it again (as
+ * `withListQuery` does) drops the grant.
+ */
+export function withShopifyRead(contract: CapabilityContract, host: string, read: ShopifyReadPhase): CapabilityContract {
+  const bodies = read.phase === 'list'
+    ? [read.form === 'shopify_media_list' ? shopifyMediaListBody(read.afterId) : shopifyListBody(read.afterId)]
+    : read.targets.map(shopifyTargetReadBody);
+  if (bodies.some((b) => b === null)) {
+    mintShopify(contract, host, [], []);
+    throw new Error('a Shopify read is only granted for a safe cursor and product or image GIDs');
+  }
+  return mintShopify(contract, host, bodies as string[], []);
+}
+
+/** What an approved run's apply sends: each target's read, and each target's write of its after-state. */
+export interface ShopifyApplyPhase {
+  readonly reads: readonly string[];
+  readonly writes: readonly ShopifyWrite[];
+}
+
+/**
+ * A reviewed contract that also admits an approved Shopify run's writes, as {@link withShopifyRead}
+ * admits its reads: each target's read (the apply reads a target before and after it writes) and,
+ * for each target, the one write of the after-state the ledger holds for it — built here from the
+ * form's document, byte for byte, never taken from the caller. So the write binds the target and
+ * its value both: a target outside `writes`, or another value for one inside, builds another
+ * body and is refused. Minted only where an approved run is applied (`worker-loop.ts`), from that
+ * run's ledger rows; the same checks on the contract as for a read, and the same throw for a
+ * value that does not fit.
+ */
+export function withShopifyApply(contract: CapabilityContract, host: string, apply: ShopifyApplyPhase): CapabilityContract {
+  const reads = apply.reads.map(shopifyTargetReadBody);
+  const writes = apply.writes.map(shopifyWriteRequest);
+  if (reads.some((b) => b === null) || writes.some((b) => b === null)) {
+    mintShopify(contract, host, [], []);
+    throw new Error('a Shopify write is only granted for product or image GIDs and after-states their form can write');
+  }
+  return mintShopify(contract, host, reads as string[], writes as string[]);
+}
+
+/**
+ * The checks every Shopify grant makes on the contract it is minted on, then the frozen copy that
+ * carries it. A contract that is not reviewed, a host that is not exactly a store host, a contract
+ * whose hosts are not exactly `host`, or one that grants a write verb throws: a run whose contract
+ * names a write verb is read everywhere else as a run that writes with it (`writeMethodOf`, the
+ * probe), while a Shopify run writes only through its form.
+ */
+function mintShopify(contract: CapabilityContract, host: string, reads: readonly string[], writes: readonly string[]): CapabilityContract {
+  if (contract.origin !== 'reviewed') throw new Error('a Shopify read is only granted by a reviewed contract');
+  if (!isShopifyAdminHost(host) || !isShopifyStoreHostName(host)) throw new Error('a Shopify read is only granted on a store host');
+  if (contract.hostPatterns.length !== 1 || contract.hostPatterns[0] !== host) throw new Error('a Shopify read is only granted on the contract\'s one host');
+  if ((contract.httpMethods ?? []).some((m) => !isReadMethod(m.toUpperCase()))) {
+    throw new Error('a Shopify read is only granted by a contract that grants no write verb');
+  }
+  const endpoint = shopifyGraphqlEndpoint(host);
+  if (endpoint === null) throw new Error('the Shopify preset pins no API version');
+  const copy = Object.freeze({ ...contract });
+  SHOPIFY_GRANTS.set(copy, Object.freeze({ endpoint, reads: new Set(reads), writes: new Set(writes) }));
+  return copy;
+}
+
+/**
+ * The request a Shopify read grant admits: a `POST` to exactly the endpoint, with a body that is
+ * one of the grant's — compared as the bytes that are sent, so a caller that passes no body is
+ * refused — and no header a reviewed grant does not allow. No override can change the verb:
+ * the override headers are not among the allowed ones, the address carries no query, and the
+ * body is the engine's. The body and its media type are also read as GraphQL (`graphqlWrite`):
+ * `application/json` (with `charset=utf-8` at most), and nothing that writes — a second layer,
+ * which a body equal to one of the engine's passes by construction.
+ */
+function grantsShopify(input: object, method: string, grant: ShopifyGrant): boolean {
+  if (method !== 'POST') return false;
+  const { url, body } = input as { url?: unknown; body?: unknown };
+  if (url !== grant.endpoint) return false;
+  const writes = grant.writes.has(body);
+  if (!writes && !grant.reads.has(body)) return false;
+  const rawHeaders = (input as { headers?: unknown }).headers;
+  if (rawHeaders === null || typeof rawHeaders !== 'object' || carriesUnreviewedHeader(rawHeaders)) return false;
+  const headers = Object.fromEntries(Object.entries(rawHeaders as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+  const reading = graphqlWrite(headers, body);
+  // A read body must not write, and a write body must be read as one: each set holds only its kind.
+  return !('refusal' in reading) && reading.mutates === writes;
+}
+
+/**
+ * Whether `body` is one of the write bodies an apply grant minted on `contract` holds
+ * ({@link withShopifyApply}): a write of the engine's own form, bound to this contract object.
+ * A stored or copied contract holds none, as for every grant here.
+ */
+export function isMintedShopifyWrite(contract: CapabilityContract | undefined, body: unknown): boolean {
+  if (contract === undefined) return false;
+  const grant = SHOPIFY_GRANTS.get(contract);
+  return grant !== undefined && grant.writes.has(body);
+}
+
 /** Max command length for regex safety checks (prevents ReDoS on adversarial inputs). */
 const MAX_CMD_CHECK_LEN = 10_000;
 
@@ -888,13 +1215,13 @@ export function _listUnions(patterns: ReadonlyArray<{ pattern: RegExp }>): RegEx
 }
 
 /** Exported for tests. */
-export function _checkPatterns(segments: string[], patterns: ReadonlyArray<{ pattern: RegExp; label: string }>): { label: string } | null {
+export function _checkPatterns(segments: string[], patterns: ReadonlyArray<{ pattern: RegExp; label: string; matches?: (segment: string) => boolean }>): { label: string } | null {
   const unions = _listUnions(patterns);
   for (const segment of segments) {
     // Only a segment some rule matches is read rule by rule, in list order, for the label.
     if (unions && !unions.some((union) => union.test(segment))) continue;
-    for (const { pattern, label } of patterns) {
-      if (pattern.test(segment)) {
+    for (const { pattern, label, matches } of patterns) {
+      if (pattern.test(segment) && (matches === undefined || matches(segment))) {
         return { label };
       }
     }
@@ -907,6 +1234,16 @@ const isOptionToken = (token: string): boolean =>
   token.length > 1 && token.startsWith('-') && !/[|;&<>()]/.test(token);
 /** Tokens of the remainder kept per variant — enough for any rule's subcommand and arguments. */
 const OPTION_VARIANT_TAIL = 64;
+/**
+ * A word right after an option may be that option's value or the next command (`env -i git`,
+ * `nice -n5 git`), so it also opens a run, a short one: this many words of options and their
+ * values dropped at most (eight options with a value each), this many tokens kept. Short, so a
+ * line of options and values stays linear and not quadratic.
+ */
+const VALUE_WORD_PREFIXES = 16;
+const VALUE_WORD_TAIL = 16;
+/** A shell assignment (`NAME=value`): where a command would stand, it is not the command. */
+const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /**
  * A shell word: a closed quoted span is part of the word it sits in (`-C "my dir"` is two words,
  * not three), and `\X` is one character. A quote that never closes does not swallow the rest of
@@ -922,7 +1259,8 @@ const SHELL_WORD = /(?:\\[\s\S]|[^\s"'\\]+|"(?:[^"\\]|\\[\s\S])*"|'[^']*')+/g;
  * `kubectl -n ns delete`. Which options take a value differs per tool, so this does not try
  * to know: for every command word followed by options, it yields the segment with each
  * prefix of that option run removed, a word directly after an option counting as a possible
- * value. One of those variants puts the real subcommand next to its command; the rules then
+ * value. That word may as well be the next command of a wrapper (`env -i git -C . push`), so it
+ * opens a short run of its own. One of those variants puts the real subcommand next to its command; the rules then
  * match it as they match the plain form. No tool is listed here, so a new CLI with global
  * options is covered without a change.
  *
@@ -940,19 +1278,28 @@ export function withoutLeadingOptions(segment: string): string[] {
     const tokens = [...line.matchAll(SHELL_WORD)].map((m) => ({ text: m[0], start: m.index, end: m.index + m[0].length }));
     for (let i = 0; i < tokens.length - 1; i++) {
       const word = tokens[i]!.text;
-      // A command word: not an option itself, and not the value of the option before it.
-      if (isOptionToken(word) || (i > 0 && isOptionToken(tokens[i - 1]!.text))) continue;
-      for (let k = i + 1; k < tokens.length - 1; k++) {
+      // A command word: not an option itself. One that may be the value of the option before it
+      // gets the short run (`VALUE_WORD_PREFIXES`), unless it is an assignment: there a command
+      // after it is not the value of an option and opens its own run.
+      if (isOptionToken(word)) continue;
+      const mayBeValue = i > 0 && isOptionToken(tokens[i - 1]!.text);
+      if (mayBeValue && ASSIGNMENT_WORD.test(word)) continue;
+      const end = mayBeValue ? Math.min(tokens.length - 1, i + 1 + VALUE_WORD_PREFIXES) : tokens.length - 1;
+      const tail = mayBeValue ? VALUE_WORD_TAIL : OPTION_VARIANT_TAIL;
+      for (let k = i + 1; k < end; k++) {
         const inRun = isOptionToken(tokens[k]!.text) || (k > i + 1 && isOptionToken(tokens[k - 1]!.text));
         if (!inRun) break;
         // Nothing would stand in the subcommand's place: `set -e x | head` is not `set | head`.
         if (/^[|;&<>)]/.test(tokens[k + 1]!.text)) continue;
-        const last = tokens[Math.min(k + OPTION_VARIANT_TAIL, tokens.length - 1)]!;
+        // In the short run only a word can be the subcommand, so an option in its place yields nothing.
+        if (mayBeValue && isOptionToken(tokens[k + 1]!.text)) continue;
+        const last = tokens[Math.min(k + tail, tokens.length - 1)]!;
         variants.push(`${word} ${line.slice(tokens[k + 1]!.start, last.end)}`);
       }
     }
   }
-  return variants;
+  // A repeated option run yields the same reading many times; each is scanned once.
+  return [...new Set(variants)];
 }
 
 /**
@@ -1434,7 +1781,17 @@ function _bashScanSurface(chunk: string, withVariants: boolean): string[] {
   if (!withVariants) return [normalized, stripped, ...all];
   // The whole chunk too: a segment ends at every line break, an escaped one included.
   const wholes = stripped !== normalized ? [normalized, stripped] : [normalized];
-  return [...wholes, ...all].flatMap(withoutLeadingOptions);
+  // Each text once: a chunk without a separator is its own only segment.
+  const texts = [...new Set([...wholes, ...all])];
+  optionTextsRead += texts.length;
+  return texts.flatMap(withoutLeadingOptions);
+}
+
+/** How many texts the scan has read with options dropped, the costly reading. */
+let optionTextsRead = 0;
+/** Exported for tests: counted, not timed. */
+export function _optionTextsRead(): number {
+  return optionTextsRead;
 }
 
 // Overlapping scan windows. Several danger patterns backtrack (multiple `.*`),
@@ -1448,20 +1805,42 @@ function _bashScanSurface(chunk: string, withVariants: boolean): string[] {
 const BASH_SCAN_WINDOW = MAX_CMD_CHECK_LEN;
 const BASH_SCAN_OVERLAP = 2_000;
 
+/** The scan surface of one window of a command, by its start and whether options are dropped. */
+type BashSurfaces = (start: number, withVariants: boolean) => string[];
+
+/**
+ * The surfaces of one command, each built once when first read: every list reads the same
+ * windows of the same command, and building a surface with options dropped costs more than
+ * reading it.
+ */
+function bashSurfaces(rawCmd: string): BashSurfaces {
+  const built = new Map<string, string[]>();
+  return (start, withVariants) => {
+    const key = `${start}:${withVariants}`;
+    let surface = built.get(key);
+    if (!surface) {
+      surface = _bashScanSegments(rawCmd.length <= BASH_SCAN_WINDOW ? rawCmd : rawCmd.slice(start, start + BASH_SCAN_WINDOW), withVariants);
+      built.set(key, surface);
+    }
+    return surface;
+  };
+}
+
 function _scanBashDanger(
   rawCmd: string,
-  patterns: ReadonlyArray<{ pattern: RegExp; label: string }>,
+  patterns: ReadonlyArray<{ pattern: RegExp; label: string; matches?: (segment: string) => boolean }>,
+  surfaces: BashSurfaces = bashSurfaces(rawCmd),
 ): { label: string } | null {
   // The command as written, in every window, before any reading with options dropped: a
   // variant only adds surface, so it must not put its label in front of a plain hit.
   for (const withVariants of [false, true]) {
     if (rawCmd.length <= BASH_SCAN_WINDOW) {
-      const hit = _checkPatterns(_bashScanSegments(rawCmd, withVariants), patterns);
+      const hit = _checkPatterns(surfaces(0, withVariants), patterns);
       if (hit) return hit;
       continue;
     }
     for (let start = 0; start < rawCmd.length; start += BASH_SCAN_WINDOW - BASH_SCAN_OVERLAP) {
-      const hit = _checkPatterns(_bashScanSegments(rawCmd.slice(start, start + BASH_SCAN_WINDOW), withVariants), patterns);
+      const hit = _checkPatterns(surfaces(start, withVariants), patterns);
       if (hit) return hit;
     }
   }
@@ -1494,8 +1873,29 @@ function quoted(text: string): string {
   return text.replace(/[\\"]/g, (c) => `\\${c}`);
 }
 
-/** A danger as `_detectDanger` returns it: the prompt the person is asked with, and the warning. */
-interface Danger { prompt: PromptText; warning: string }
+/** A danger as `_detectDanger` returns it: the prompt the person is asked with, the warning, and
+ *  whether it is a hard block (see {@link hardBlock}). */
+interface Danger { prompt: PromptText; warning: string; hardBlock?: true }
+
+/**
+ * Mark a danger as a hard block: an unattended run may never do this, and nobody approves it
+ * later from a queue (`DangerSignal.hardBlock`). Set where the rule decides, never read off the
+ * text: `[BLOCKED` also marks the actions that ask for an OK (mail, a destructive tool, HTTP
+ * DELETE), and those stay askable.
+ */
+function hardBlock(danger: Danger): Danger {
+  return { ...danger, hardBlock: true };
+}
+
+/**
+ * Mark an unattended `[BLOCKED` as one that asks for an OK: a person may approve it, from a queue
+ * too. It changes nothing at run time; it says the rule was classified. Every `[BLOCKED` return is
+ * either {@link hardBlock} or this, and a test holds that, so a new rule cannot fall into the
+ * askable class by being left unmarked.
+ */
+function askable(danger: Danger): Danger {
+  return danger;
+}
 
 /**
  * The danger prompts' template. Every interpolation says who wrote it, by type: {@link agentText}
@@ -1541,12 +1941,13 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
 
     // One pass per class, strictest first, each over the whole command: in a chain, the
     // strictest rule any segment matches decides, wherever that segment stands.
+    const surfaces = bashSurfaces(rawCmd);
     if (autonomy === 'autonomous') {
-      const hit = _scanBashDanger(rawCmd, CRITICAL_BASH);
+      const hit = _scanBashDanger(rawCmd, CRITICAL_BASH, surfaces);
       if (hit) {
-        return framed`⚠ ${system(toolName)}: ${system(hit.label)} — "${agentText(preview)}" [BLOCKED — this action needs to be run manually for safety]`;
+        return hardBlock(framed`⚠ ${system(toolName)}: ${system(hit.label)} — "${agentText(preview)}" [BLOCKED — this action needs to be run manually for safety]`);
       }
-      const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH) ?? _scanBashDanger(rawCmd, UNATTENDED_ASK_BASH) ?? curlOptionFromWords(rawCmd);
+      const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH, surfaces) ?? _scanBashDanger(rawCmd, UNATTENDED_ASK_BASH, surfaces) ?? curlOptionFromWords(rawCmd);
       if (ask) {
         return framed`⚠ ${system(toolName)}: ${system(ask.label)} — "${agentText(preview)}"`;
       }
@@ -1557,7 +1958,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // no one watches must not pass silently where someone could have been asked. Lists in turn,
     // not merged: a merged list would let a rule on an earlier segment take the label of a
     // stricter rule on a later one.
-    const hit = _scanBashDanger(rawCmd, CRITICAL_BASH) ?? _scanBashDanger(rawCmd, DANGEROUS_AFTER_CRITICAL_BASH) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH) ?? curlOptionFromWords(rawCmd);
+    const hit = _scanBashDanger(rawCmd, CRITICAL_BASH, surfaces) ?? _scanBashDanger(rawCmd, DANGEROUS_AFTER_CRITICAL_BASH, surfaces) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH, surfaces) ?? curlOptionFromWords(rawCmd);
     if (hit) {
       return framed`⚠ ${system(toolName)}: ${system(hit.label)} — "${agentText(preview)}"`;
     }
@@ -1570,36 +1971,40 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       // Check both raw (pre-symlink) and resolved path — /etc/ → /private/etc/ on macOS
       if (pattern.test(rawPath) || pattern.test(filePath)) {
         if (autonomy === 'autonomous') {
-          return framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`;
+          return hardBlock(framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`);
         }
         return framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" — this path contains system or security files`;
       }
     }
   }
 
-  if (toolName === 'write_file' && input && typeof input === 'object' && 'path' in input) {
+  // edit_file is read for sensitive paths as write_file is. Not for the empty-content check (an
+  // edit replaces a string), and not for the project-directory check below: edit_file confines its
+  // own path to the workspace or the artifacts root (fs.ts `resolveWritablePath`), so measured
+  // against the process cwd that check would judge a path the tool never writes.
+  if ((toolName === 'write_file' || toolName === 'edit_file') && input && typeof input === 'object' && 'path' in input) {
     const filePath = resolveRealPath(asPath('path', String((input as { path: unknown }).path)));
     for (const pattern of SENSITIVE_PATHS) {
       if (pattern.test(filePath)) {
         if (autonomy === 'autonomous') {
-          return framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`;
+          return hardBlock(framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`);
         }
         return framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(filePath)}" — this path contains system or security files`;
       }
     }
     // Overwriting an existing file with empty content destroys it (rm bypass)
     const content = (input as { content?: unknown }).content;
-    if (typeof content === 'string' && content.trim() === '') {
+    if (toolName === 'write_file' && typeof content === 'string' && content.trim() === '') {
       if (autonomy === 'autonomous') {
-        return framed`⚠ ${system(toolName)}: overwrite with empty content — "${agentText(filePath)}" [BLOCKED]`;
+        return hardBlock(framed`⚠ ${system(toolName)}: overwrite with empty content — "${agentText(filePath)}" [BLOCKED]`);
       }
       return framed`⚠ ${system(toolName)}: overwrite file with empty content — "${agentText(filePath)}"`;
     }
     // In autonomous mode without workspace, restrict writes to project directory
     if (autonomy === 'autonomous' && !isWorkspaceActive()) {
       const cwd = resolveRealPath(process.cwd());
-      if (!isPathWithin(filePath, cwd)) {
-        return framed`⚠ ${system(toolName)}: write outside project directory — "${agentText(filePath)}" [BLOCKED — I can only write files within the current project]`;
+      if (toolName === 'write_file' && !isPathWithin(filePath, cwd)) {
+        return hardBlock(framed`⚠ ${system(toolName)}: write outside project directory — "${agentText(filePath)}" [BLOCKED — I can only write files within the current project]`);
       }
     }
   }
@@ -1613,7 +2018,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       for (const pattern of [...SENSITIVE_PATHS, LYNOX_DIR]) {
         if (pattern.test(dirRaw) || pattern.test(dirPath)) {
           if (autonomy === 'autonomous') {
-            return framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}" [BLOCKED]`;
+            return hardBlock(framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}" [BLOCKED]`);
           }
           return framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}"`;
         }
@@ -1626,7 +2031,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       for (const pattern of [...SENSITIVE_PATHS, LYNOX_DIR]) {
         if (pattern.test(destRaw) || pattern.test(destPath)) {
           if (autonomy === 'autonomous') {
-            return framed`⚠ ${system(toolName)}: move into sensitive path — "${agentText(destPath)}" [BLOCKED]`;
+            return hardBlock(framed`⚠ ${system(toolName)}: move into sensitive path — "${agentText(destPath)}" [BLOCKED]`);
           }
           return framed`⚠ ${system(toolName)}: move files into sensitive path — "${agentText(destPath)}"`;
         }
@@ -1635,7 +2040,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       const cwd = resolveRealPath(process.cwd());
       if (!isPathWithin(destPath, cwd)) {
         if (autonomy === 'autonomous') {
-          return framed`⚠ ${system(toolName)}: move destination outside project — "${agentText(destPath)}" [BLOCKED]`;
+          return hardBlock(framed`⚠ ${system(toolName)}: move destination outside project — "${agentText(destPath)}" [BLOCKED]`);
         }
         return framed`⚠ ${system(toolName)}: move destination outside project — "${agentText(destPath)}"`;
       }
@@ -1648,7 +2053,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   const MAIL_WRITE_TOOLS = new Set(['mail_send', 'mail_reply', 'mail_connect']);
   if (MAIL_WRITE_TOOLS.has(toolName)) {
     if (autonomy === 'autonomous') {
-      return framed`⚠ ${system(toolName)} [BLOCKED — connecting/sending mail needs your OK]`;
+      return askable(framed`⚠ ${system(toolName)} [BLOCKED — connecting/sending mail needs your OK]`);
     }
     return toolName === 'mail_connect' ? framed`⚠ ${system(toolName)} — connects a mailbox` : framed`⚠ ${system(toolName)} — sends external mail`;
   }
@@ -1682,7 +2087,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
         const blockReason = mode === 'data'
           ? '[BLOCKED — destructive data operation needs your OK]'
           : '[BLOCKED — I need your OK before doing this]';
-        return framed`⚠ ${system(toolName)}${system(suffix)} ${system(blockReason)}`;
+        return askable(framed`⚠ ${system(toolName)}${system(suffix)} ${system(blockReason)}`);
       }
       const label = mode === 'data' ? 'destroys stored data' : 'modifies external data';
       return framed`⚠ ${system(toolName)}${system(suffix)} — ${system(label)}`;
@@ -1702,7 +2107,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     const method = effectiveWriteMethod(String(req.method ?? 'GET'), headers, String(req.url ?? ''), typeof req.body === 'string' ? req.body : undefined) ?? 'OVERRIDE';
     if (method === 'DELETE') {
       if (autonomy === 'autonomous') {
-        return framed`⚠ ${system(toolName)}: HTTP DELETE [BLOCKED — destructive operation]`;
+        return askable(framed`⚠ ${system(toolName)}: HTTP DELETE [BLOCKED — destructive operation]`);
       }
     }
     // Block write methods in autonomous mode — can send emails, create invoices, modify records.
@@ -1713,7 +2118,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // unwarned, and this branch was the last place that still needed the schema enum to
     // make that unreachable. DELETE never arrives here in autonomous mode — the branch
     // above returns for it.
-    if (!['GET', 'HEAD'].includes(method) && autonomy === 'autonomous') {
+    if (!isReadMethod(method) && autonomy === 'autonomous') {
       return framed`⚠ ${system(toolName)}: HTTP ${system(method)} — write operation, needs your OK`;
     }
   }

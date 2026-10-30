@@ -40,6 +40,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
+import { ConversationGrants } from '../core/conversation-grants.js';
 import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopToolsWithout, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, StepTimeout, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import { applyPluginToolGate } from '../core/session.js';
 import type { AgentDef } from '../types/orchestration.js';
@@ -148,6 +149,32 @@ describe('spawnInline with role', () => {
     const tools = agentConfig['tools'] as ToolEntry[];
     expect(tools.find(t => t.definition.name === 'spawn_agent')).toBeUndefined();
     expect(tools.find(t => t.definition.name === 'run_workflow')).toBeUndefined();
+  });
+
+  it('a step that names spawn_agent does not get it', async () => {
+    // A step's calls are recorded from its result events; a child it spawned would write no
+    // row at all. Steps therefore must not spawn (PRD 3f-1b-α). Two filters keep it out, each on
+    // its own: a named tool is narrowed to the inline pool (`inlineStepToolNames`), and the pool
+    // passes through `INLINE_EXCLUDED_TOOLS`. This test fails only when both are gone.
+    await spawnInline({ id: 'named', agent: 'named', runtime: 'inline', task: 't', tools: ['spawn_agent', 'read_file'] }, { task: 't' }, mockConfig, mockParentTools);
+    const tools = ((vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name);
+    // CONTROL: the other tool the step named got through, so the filter ran on a real set.
+    expect(tools).toContain('read_file');
+    expect(tools).not.toContain('spawn_agent');
+  });
+
+  it('a step under a role that grants the whole parent set, spawn_agent included, still does not get it', async () => {
+    // The path the pool filter above does not cover: a role with its own `allowTools` passes the
+    // parent set as is (`roleGrantsFullParent`). No built-in role names spawn_agent today; this
+    // one does, so only `INLINE_EXCLUDED_TOOLS` keeps it out.
+    mockGetRole.mockImplementation((name: unknown) => name === 'wide'
+      ? { model: 'balanced', effort: 'high', autonomy: 'autonomous', description: 'wide', allowTools: ['spawn_agent', 'bash'] } as RoleConfig
+      : undefined);
+    await spawnInline({ id: 'wide', agent: 'wide', runtime: 'inline', task: 't', role: 'wide' }, { task: 't' }, mockConfig, mockParentTools);
+    const tools = ((vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name);
+    // CONTROL: the same role passes the other parent tool it names, which the step did not name.
+    expect(tools).toContain('bash');
+    expect(tools).not.toContain('spawn_agent');
   });
 
   it('applies role model and effort', async () => {
@@ -718,6 +745,13 @@ describe('buildSubAgentPromptCallbacks', () => {
     expect(parent).toHaveBeenCalledWith('Pick one', ['red', 'green'], { stepId: 'vote', stepTask: 'Welche Tagline?' });
   });
 
+  it('passes a hard block\'s mark on to the parent channel', async () => {
+    const parent = vi.fn(async () => 'ok');
+    const cbs = buildSubAgentPromptCallbacks(step, { parentPromptUser: parent });
+    await cbs.promptUser!('rm -rf /?', ['Allow', 'Deny'], { blocked: true });
+    expect(parent).toHaveBeenCalledWith('rm -rf /?', ['Allow', 'Deny'], { stepId: 'vote', stepTask: 'Welche Tagline?', blocked: true });
+  });
+
   it('lets the caller override step meta', async () => {
     const parent = vi.fn(async () => 'ok');
     const cbs = buildSubAgentPromptCallbacks(step, { parentPromptUser: parent });
@@ -849,6 +883,25 @@ describe('spawnInline + parentPrompt propagation', () => {
     expect(namedTools).not.toContain('ask_secret');
     expect(named['promptUser']).toBeUndefined();
     expect(named['askUserPrompt']).toBeTypeOf('function');
+  });
+
+  // A step agent files with the run's context, from the
+  // handles alone, and without it has none.
+  it('a step agent gets the run\'s filing context from the handles, and none without it — both runtimes', async () => {
+    const approvalFiling = { source: 'workflow', triggerId: 'trg-1', rootRunId: 'run-1', store: {}, createdBy: 'owner', mandateId: null } as never;
+    const named = { name: 'a', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] } as never;
+    const last = (): Record<string, unknown> => vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+
+    await spawnInline({ id: 's', agent: 's', runtime: 'inline', task: 't' }, {}, mockConfig, mockParentTools, 'autonomous', undefined, { approvalFiling });
+    expect(last()['approvalFiling']).toBe(approvalFiling);
+    await spawnViaAgent({ id: 'a', agent: 'a', runtime: 'agent' }, named, {}, mockConfig, undefined, 'run-1', 'autonomous', { approvalFiling });
+    expect(last()['approvalFiling']).toBe(approvalFiling);
+
+    const promptUser = vi.fn(async () => 'Allow');
+    await spawnInline({ id: 's', agent: 's', runtime: 'inline', task: 't' }, {}, mockConfig, mockParentTools, undefined, undefined, { parentPromptUser: promptUser });
+    expect(last()['approvalFiling']).toBeUndefined();
+    await spawnViaAgent({ id: 'a', agent: 'a', runtime: 'agent' }, named, {}, mockConfig, undefined, 'run-1', undefined, { parentPromptUser: promptUser });
+    expect(last()['approvalFiling']).toBeUndefined();
   });
 
   // PRD 3b-2 G5 (a): a scheduled step's question holds its time limit; nothing else does.
@@ -1557,7 +1610,7 @@ describe('spawnPipeline — autonomy propagation (A1 C1 fix through nesting)', (
         context: { params: { note: 'as agreed' } },
         agents: [step], gate_points: [], on_failure: 'stop' as const,
       };
-      await runManifest(manifest, mockConfig, { parentTools: mockParentTools, autonomy: 'autonomous', isAcceptedParam: isAccepted });
+      await runManifest(manifest, mockConfig, { source: { kind: 'adhoc' as const }, parentTools: mockParentTools, autonomy: 'autonomous', isAcceptedParam: isAccepted });
       expect(sentTask()).toContain('note as agreed');
       expect(sentTask()).not.toContain('<untrusted_data');
     });
@@ -1598,6 +1651,19 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     expect(JSON.parse(calls[1]!.inputJson)).toEqual({ url: 'https://x' });
   });
 
+  it('copies the result event\'s contract and filing onto the record, and adds none the event lacks (PRD 3f-1b-α)', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'mail_send', input: {}, agent: 'step', toolUseId: 'tu_m' });
+    h({ type: 'tool_result', name: 'mail_send', result: 'queued', agent: 'step', toolUseId: 'tu_m',
+      contract: { state: 'withheld', grantId: 'g-1' }, filed: { outcome: 'queued', approvalId: 'ap-1' } });
+    h({ type: 'tool_call', name: 'read_file', input: {}, agent: 'step', toolUseId: 'tu_r' });
+    h({ type: 'tool_result', name: 'read_file', result: 'x', agent: 'step', toolUseId: 'tu_r' });
+    expect(calls[0]).toMatchObject({ contract: { state: 'withheld', grantId: 'g-1' }, filed: { outcome: 'queued', approvalId: 'ap-1' } });
+    expect(calls[1]!.contract).toBeUndefined();
+    expect(calls[1]!.filed).toBeUndefined();
+  });
+
   it('pairs same-named concurrent calls FIFO (input order preserved)', () => {
     const calls: Parameters<StepToolRecorder>[0][] = [];
     const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
@@ -1621,6 +1687,20 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
       ['https://b.example', 'from-b'],
       ['https://a.example', 'from-a'],
     ]);
+  });
+
+  it('a result out of call order keeps its own input next to its own connection stamp', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'https://a.example' }, agent: 'step', toolUseId: 'tu_a' });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'https://b.example' }, agent: 'step', toolUseId: 'tu_b' });
+    h({ type: 'tool_result', name: 'http_request', result: 'from-b', agent: 'step', toolUseId: 'tu_b', connection: { id: 'conn-b', createdAt: null, grantId: 'g-b' } });
+    h({ type: 'tool_result', name: 'http_request', result: 'from-a', agent: 'step', toolUseId: 'tu_a' });
+    expect(calls.map(c => [JSON.parse(c.inputJson).url, c.connection])).toEqual([
+      ['https://b.example', { id: 'conn-b', createdAt: null, grantId: 'g-b' }],
+      ['https://a.example', undefined],
+    ]);
+    expect('connection' in calls[1]!).toBe(false);
   });
 
   it('a repeated id never pairs across tools (an unanswered call keeps its id)', () => {
@@ -2178,6 +2258,47 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
     expect(taint.live!.size).toBe(1);        // removed itself in finally
   });
 
+  describe('the conversation\'s grant set reaches every step agent by reference (PRD connection-attribution A5)', () => {
+    const configs = () => vi.mocked(Agent).mock.calls.map(c => c[0] as unknown as { conversationGrants?: ConversationGrants });
+
+    it('newRunTaint takes the calling agent\'s set itself', () => {
+      const set = ConversationGrants.detached();
+      expect(newRunTaint({ conversationGrants: set }).grants).toBe(set);
+      expect(newRunTaint().grants).toBeUndefined();
+    });
+
+    it('spawnInline hands the step agent the run\'s set', async () => {
+      const set = ConversationGrants.detached();
+      await runInline({ ...newRunTaint(), grants: set });
+      expect(configs().at(-1)!.conversationGrants).toBe(set);
+    });
+
+    it('spawnViaAgent hands the step agent the run\'s set', async () => {
+      const set = ConversationGrants.detached();
+      const agentDef: AgentDef = { name: 'named', description: '', tools: [] };
+      await spawnViaAgent({ id: 'n1', agent: 'named', runtime: 'agent' }, agentDef, {}, mockConfig, undefined, 'run-1', undefined, undefined, undefined, undefined, undefined, undefined, undefined, { ...newRunTaint(), grants: set });
+      expect(configs().at(-1)!.conversationGrants).toBe(set);
+    });
+
+    it('a nested pipeline step adds to the same set', async () => {
+      const set = ConversationGrants.detached();
+      const step: ManifestStep = { id: 'nested-g', agent: 'nested-g', runtime: 'pipeline', pipeline: [{ id: 'inner-g', task: 'fetch' }] };
+      await spawnPipeline(step, {}, mockConfig, mockParentTools, 0,
+        undefined, undefined, undefined, null, undefined, undefined, undefined, undefined, undefined, { ...newRunTaint(), grants: set });
+      expect(configs().at(-1)!.conversationGrants).toBe(set);
+    });
+
+    it('a run with no conversation gives all its steps one set of its own', async () => {
+      const taint = newRunTaint();
+      await runInline(taint);
+      await runInline(taint);
+      const [first, second] = configs().slice(-2).map(c => c.conversationGrants);
+      expect(first).toBeInstanceOf(ConversationGrants);
+      expect(second).toBe(first);
+      expect(taint.grants).toBe(first);
+    });
+  });
+
   it('helpers: marker outranks external-tool; a reflected conversation cause carries nothing', () => {
     const taint = newRunTaint();
     expect(runTaintArmed(taint)).toBe(false);
@@ -2437,6 +2558,54 @@ describe('step agents are built for the run\'s principal (PRD customer-granted-o
     mockSend.mockResolvedValueOnce('done');
     await drive();
     expect((vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
+  });
+
+  // A step that names a tool the mandate's lock withholds is refused by name, not run without it.
+  const inline = (step: ManifestStep, principal?: Parameters<typeof spawnInline>[16]): ReturnType<typeof spawnInline> => spawnInline(
+    step, {}, mockConfig, mockParentTools, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, principal,
+  );
+  it.each([
+    [['bash'], /needs bash \(a shell in the engine process\)/],
+    [['read_file', 'task_list'], /needs read_file \(opens any absolute path outside a workspace\), which this run does not get/],
+    // Withheld from a mandate: the focus is the instance's, not one session's.
+    [['memory_focus'], /needs memory_focus \(sets the knowledge focus for every session of the instance\), which this run does not get/],
+  ])('refuses a step naming %j in a run for a mandate, before any agent is built', async (tools, message) => {
+    await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', tools }, MANDATE)).rejects.toThrow(message);
+    expect(vi.mocked(Agent)).not.toHaveBeenCalled();
+  });
+
+  // 660a-2: the pattern writers the lock holds back are dropped, not refused — on the engines a
+  // mandate signs in to they are not registered, and the planners still offer memory_update. That
+  // the step cannot call one where it is registered is the step agent's own lock, which it gets
+  // from the mandate it is built for (`mandate-tool-lock.test.ts`, `mandate-inside-writes.test.ts` (c)).
+  it('runs a mandate\'s step naming a pattern writer instead of refusing it, built for the mandate', async () => {
+    mockSend.mockResolvedValueOnce('done');
+    await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', tools: ['memory_update', 'task_list'] }, MANDATE)).resolves.toBeDefined();
+    expect(vi.mocked(Agent)).toHaveBeenCalledTimes(1);
+    expect((vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
+  });
+
+  it('refuses a step whose single `tool` is withheld, as it refuses one in `tools`', async () => {
+    await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', tool: 'bash' }, MANDATE)).rejects.toThrow(/needs bash \(a shell/);
+    expect(vi.mocked(Agent)).not.toHaveBeenCalled();
+  });
+
+  it('control: the same steps run for the owner, and with no principal', async () => {
+    for (const principal of [OWNER_PRINCIPAL, undefined]) {
+      for (const tools of [['bash'], ['read_file', 'task_list']]) {
+        mockSend.mockResolvedValueOnce('done');
+        await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', tools }, principal)).resolves.toBeDefined();
+      }
+    }
+    expect(vi.mocked(Agent)).toHaveBeenCalledTimes(4);
+  });
+
+  it('runs a step whose ROLE grants a withheld tool it does not name: the grant is a ceiling', async () => {
+    mockGetRole.mockReturnValue({ model: 'fast', allowTools: ['read_file', 'http_request'] } as never);
+    mockSend.mockResolvedValueOnce('done');
+    await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', role: 'collector' }, MANDATE)).resolves.toBeDefined();
+    expect(vi.mocked(Agent)).toHaveBeenCalledTimes(1);
   });
 });
 

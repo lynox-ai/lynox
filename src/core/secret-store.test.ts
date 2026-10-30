@@ -6,7 +6,7 @@ vi.mock('./observability.js', () => ({
   },
 }));
 
-import { SecretStore, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, matchesSecretPattern, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
+import { SecretStore, maskEngineEnvSecrets, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, matchesSecretPattern, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
 import { MICROSOFT_OAUTH_TOKENS_KEY } from '../integrations/microsoft/vault-keys.js';
 import { LLM_CATALOG } from './llm/catalog.js';
 import { VAULT_SLOT_BY_PROVIDER } from './llm/provider-keys.js';
@@ -204,6 +204,68 @@ describe('SecretStore', () => {
       expect(store.getMasked('UNKNOWN')).toBeNull();
     });
 
+    // A short value shows none of its characters: four of five, or half of eight, would be most
+    // of it. From 16 characters on, the mask carries the last four.
+    it.each([
+      ['5 characters', 'abcde', '***'],
+      ['8 characters', 'pin-1234', '***'],
+      ['15 characters', 'abcdefghijk1234', '***'],
+      ['16 characters', 'abcdefghijkl1234', '***1234'],
+    ])('getMasked of a value of %s is %s', (_label, value, mask) => {
+      const store = new SecretStore(undefined, mockVault([['K', { value, scope: 'any', ttlMs: 0 }]]));
+      expect(store.getMasked('K')).toBe(mask);
+    });
+
+    it('masks a short value in text with no character of it, in both maskers that see the values', () => {
+      const store = new SecretStore(undefined, mockVault([['PIN', { value: 'pin-9876', scope: 'any', ttlMs: 0 }]]));
+      expect(store.maskSecrets('the pin is pin-9876 here')).toBe('the pin is *** here');
+      expect(store.maskAll('the pin is pin-9876 here')).toBe('the pin is *** here');
+      // A long value keeps its last four in both.
+      const long = new SecretStore(undefined, mockVault([['T', { value: 'long-value-abcd9876', scope: 'any', ttlMs: 0 }]]));
+      expect(long.maskSecrets('x long-value-abcd9876 y')).toBe('x ***9876 y');
+      expect(long.maskAll('x long-value-abcd9876 y')).toBe('x ***9876 y');
+    });
+
+    // Some shapes match fewer than 16 characters (a GitHub token's minimum is 14, a Slack
+    // token's 15); their mask shows none of them either, in text and in typed input.
+    it('masks a short shape match with no character of it, in text and in typed input', () => {
+      const github = 'ghp_' + 'abcdefghij';
+      const slack = ['xox', 'b-', '0123456789'].join('');
+      expect(maskSecretPatterns(`token ${github} end`)).toBe('token *** end');
+      expect(maskSecretPatterns(`token ${slack} end`)).toBe('token *** end');
+      expect(maskCredentialInput(`my token ${github}`).text).toBe('my token ***');
+      // A longer one keeps its last four.
+      const longer = 'ghp_' + 'abcdefghijklmnop1234';
+      expect(maskSecretPatterns(`token ${longer} end`)).toBe('token ***1234 end');
+    });
+
+    // Touching spans merge into one mask, which shows its last four only when every span in it
+    // could: else two short values written together would show four characters of the second.
+    it('a merged mask of short values written together shows none of them', () => {
+      const store = new SecretStore(undefined, mockVault([
+        ['A', { value: 'pin-1234', scope: 'any', ttlMs: 0 }],
+        ['B', { value: 'abcdefgh', scope: 'any', ttlMs: 0 }],
+      ]));
+      expect(store.maskAll('x pin-1234pin-1234 y')).toBe('x *** y');
+      expect(store.maskAll('x pin-1234abcdefgh y')).toBe('x *** y');
+      // A short value right after a long one: the merged mask's last four would be the short one's.
+      const mixed = new SecretStore(undefined, mockVault([
+        ['T', { value: 'long-value-abcd9876', scope: 'any', ttlMs: 0 }],
+        ['P', { value: 'pin-1234', scope: 'any', ttlMs: 0 }],
+      ]));
+      expect(mixed.maskAll('x long-value-abcd9876pin-1234 y')).toBe('x *** y');
+      // Two long values together keep the last four.
+      const long = new SecretStore(undefined, mockVault([['T', { value: 'long-value-abcd9876', scope: 'any', ttlMs: 0 }]]));
+      expect(long.maskAll('x long-value-abcd9876long-value-abcd9876 y')).toBe('x ***9876 y');
+    });
+
+    // A credential in a URL ends in its password, so its mask shows none of it at any length.
+    it('masks a credential in a URL with no character of the password', () => {
+      const url = ['postgres://', 'admin', ':', 'hunter2', '@db.example.org/app'].join('');
+      expect(maskSecretPatterns(`url ${url}`)).toBe('url ***db.example.org/app');
+      expect(new SecretStore().maskAll(`url ${url}`)).toBe('url ***db.example.org/app');
+    });
+
     it('maskSecrets replaces all occurrences in text', () => {
       process.env['LYNOX_SECRET_KEY1'] = 'secret-value-1234';
       const store = new SecretStore();
@@ -224,15 +286,15 @@ describe('SecretStore', () => {
     });
 
     it('maskSecrets does not hang when a value contains its own mask', () => {
-      // maskValue('***ab') === '*****ab', which CONTAINS '***ab'. The old
-      // `while (result.includes(value))` loop re-scanned the growing output and
-      // spun forever (and leaked the value through its own replacement). The fix
+      // maskValue('***') === '***', which CONTAINS '***'. The old
+      // `while (result.includes(value))` loop re-scanned the output and spun
+      // forever (and leaked the value through its own replacement). The fix
       // does a single pass and falls back to a fixed token in this degenerate
       // case. If this regresses, the test fails via vitest's per-test timeout.
-      process.env['LYNOX_SECRET_STARVAL'] = '***ab';
+      process.env['LYNOX_SECRET_STARVAL'] = '***';
       const store = new SecretStore();
-      const masked = store.maskSecrets('leak: ***ab end');
-      expect(masked).not.toContain('***ab'); // value not leaked through the mask
+      const masked = store.maskSecrets('leak: *** end');
+      expect(masked).toBe('leak: [redacted] end'); // value not left in place through the mask
       expect(masked).toContain('leak:');
       expect(masked).toContain('end');
       delete process.env['LYNOX_SECRET_STARVAL'];
@@ -265,6 +327,155 @@ describe('SecretStore', () => {
       const store = new SecretStore();
       expect(store.containsSecret('x')).toBe(false);
       delete process.env['LYNOX_SECRET_TINY'];
+    });
+
+    // A host goes out lower-cased, so a value with capitals is the same value there; the exact
+    // check misses it, the host check does not. Each with a control that holds nothing stored.
+    it('containsSecretAsHost finds a stored value in a host whatever its case', () => {
+      process.env['LYNOX_SECRET_HOSTED'] = 'Sk-Live-Canary';
+      const store = new SecretStore();
+      expect(store.containsSecret('sk-live-canary.h.example')).toBe(false);
+      expect(store.containsSecretAsHost('sk-live-canary.h.example')).toBe(true);
+      expect(store.containsSecretAsHost('SK-LIVE-CANARY.h.example')).toBe(true);
+      expect(store.containsSecretAsHost('harmless-value.h.example')).toBe(false);
+      // A host that does not decode as Unicode is still read on the wire, without case.
+      expect(store.containsSecretAsHost('SK-LIVE-CANARY.XN--ZZ')).toBe(true);
+      delete process.env['LYNOX_SECRET_HOSTED'];
+    });
+
+    it('containsSecretAsHost reads a value outside ASCII as the parser writes it as a host name', () => {
+      process.env['LYNOX_SECRET_UMLAUT'] = 'Straße-K';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('xn--strae-k-3va.h.example')).toBe(true);
+      expect(store.containsSecretAsHost('xn--harmlos-3va.h.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_UMLAUT'];
+    });
+
+    // A value that is no host name on its own (it ends in a number) has no parser form, but a
+    // longer host still holds it: then only the comparison without case finds it.
+    it('containsSecretAsHost finds a value without a parser form in a longer host whatever its case', () => {
+      process.env['LYNOX_SECRET_DOTTED'] = 'Pw.42';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('x.pw.42.example')).toBe(true);
+      expect(store.containsSecretAsHost('x.pw.43.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_DOTTED'];
+    });
+
+    it('containsSecretAsHost finds a number as written, and as the IPv4 address the parser makes of it only as the whole host', () => {
+      process.env['LYNOX_SECRET_NUMBER'] = '256';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('10.0.1.0')).toBe(false);
+      expect(store.containsSecretAsHost('0.0.1.0')).toBe(true);
+      expect(store.containsSecretAsHost('h256.example')).toBe(true);
+      delete process.env['LYNOX_SECRET_NUMBER'];
+    });
+
+    // The parser cuts a value at its first delimiter (`x/y` would be read as `x`), so a value
+    // a host name cannot hold is compared only as it is.
+    it('containsSecretAsHost does not read a value with a delimiter as the host name it would be cut to', () => {
+      process.env['LYNOX_SECRET_SLASHED'] = 'ab/cdefgh';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('ab.h.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_SLASHED'];
+    });
+
+    // A value outside ASCII with no parser form (its last label is a number) is found in the
+    // host read as Unicode: on the wire the label is punycode.
+    it('containsSecretAsHost finds a value outside ASCII without a parser form in the host read as Unicode', () => {
+      process.env['LYNOX_SECRET_UMLAUT_DOTTED'] = 'Straße.1';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('xn--xstrae-fta.1.example')).toBe(true);
+      expect(store.containsSecretAsHost('xn--xstrae-fta.2.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_UMLAUT_DOTTED'];
+    });
+
+    // A value of two characters can have a parser form of one (a soft hyphen is dropped).
+    it('containsSecretAsHost keeps the floor on the parser form of a value', () => {
+      process.env['LYNOX_SECRET_SHORT_FORM_A'] = 'Ａ\u00AD';
+      process.env['LYNOX_SECRET_SHORT_FORM_B'] = 'Ä\u00AD';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('a.h.example')).toBe(false);
+      expect(store.containsSecretAsHost('xn--x-0fa.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_SHORT_FORM_A'];
+      delete process.env['LYNOX_SECRET_SHORT_FORM_B'];
+    });
+
+    it('containsSecretAsHost keeps the floor of single-char values', () => {
+      process.env['LYNOX_SECRET_TINY'] = 'X';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('x.h.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_TINY'];
+    });
+  });
+
+  // The engine's own env secrets (env-registry rows marked `secret`) are masked in every
+  // text the maskers see, but never become a stored secret: a bar against a value read
+  // once by accident staying in the thread.
+  describe('engine env secrets', () => {
+    const NAMES = ['LYNOX_VAULT_KEY', 'MISTRAL_API_KEY', 'LYNOX_MANAGED_CUSTOMER_EMAIL', 'LYNOX_TIER_SET_JSON'] as const;
+    const saved = new Map<string, string | undefined>();
+    const vaultValue = ['vault', 'master', 'value', '0123456789'].join('-');
+
+    beforeEach(() => {
+      for (const n of NAMES) { saved.set(n, process.env[n]); delete process.env[n]; }
+    });
+    afterEach(() => {
+      for (const n of NAMES) {
+        const v = saved.get(n);
+        if (v === undefined) delete process.env[n]; else process.env[n] = v;
+      }
+    });
+
+    it('masks the vault key the engine sets after the store exists, in all three maskers', () => {
+      const store = new SecretStore();
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      const text = `cat says: ${vaultValue}\n`;
+      expect(store.maskSecrets(text)).toBe('cat says: ***6789\n');
+      expect(store.maskAll(text)).not.toContain(vaultValue);
+      expect(store.containsSecret(text)).toBe(true);
+    });
+
+    it('masks any registry secret, not only the vault key', () => {
+      const mistral = ['mistral', 'value', 'abcdefgh'].join('-');
+      process.env['MISTRAL_API_KEY'] = mistral;
+      const store = new SecretStore();
+      expect(store.maskSecrets(`k=${mistral}`)).toBe('k=***efgh');
+    });
+
+    it('keeps them mask-only: nothing lists or resolves them', () => {
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      const store = new SecretStore();
+      expect(store.listNames()).not.toContain('LYNOX_VAULT_KEY');
+      expect(store.resolve('LYNOX_VAULT_KEY')).toBeNull();
+    });
+
+    it('leaves an identity marked secret in the registry visible (the owner address)', () => {
+      const address = ['owner', 'example.org'].join('@');
+      process.env['LYNOX_MANAGED_CUSTOMER_EMAIL'] = address;
+      const store = new SecretStore();
+      expect(store.maskSecrets(`To: ${address}`)).toBe(`To: ${address}`);
+      expect(store.containsSecret(`To: ${address}`)).toBe(false);
+    });
+
+    it('skips a value too short to be a credential (an operator\'s {})', () => {
+      process.env['LYNOX_TIER_SET_JSON'] = '{}';
+      const store = new SecretStore();
+      expect(store.maskSecrets('a {} b')).toBe('a {} b');
+      expect(store.containsSecret('a {} b')).toBe(false);
+    });
+
+    it('masks the longer value whole when a shorter secret sits inside it', () => {
+      const inner = ['inner', '42'].join('-');
+      const outer = `xx-${inner}-tail9876`;
+      process.env['LYNOX_SECRET_INNER'] = inner;
+      process.env['LYNOX_VAULT_KEY'] = outer;
+      const store = new SecretStore();
+      expect(store.maskSecrets(`k=${outer}`)).toBe('k=***9876');
+    });
+
+    it('masks them without a store, for a caller that holds none', () => {
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      expect(maskEngineEnvSecrets(`v=${vaultValue}`)).toBe('v=***6789');
     });
   });
 
@@ -537,7 +748,7 @@ describe('SecretStore', () => {
     });
 
     it('matches a stored name in the same VENDOR namespace (DATAFORSEO class)', () => {
-      // The real dogfood failure: stored DATAFORSEO_B64, agent guessed
+      // The real failure, seen in our own use: stored DATAFORSEO_B64, agent guessed
       // DATAFORSEO_API_LOGIN — they do NOT normalize-collide, but share the vendor.
       process.env['LYNOX_SECRET_DATAFORSEO_B64'] = 'base64creds';
       const store = new SecretStore();
@@ -730,6 +941,23 @@ describe('SECRET_SHAPES — the shared credential shape list', () => {
     expect(performance.now() - started).toBeLessThan(5_000);
   }, 60_000);
 
+  // Shopify calls its tokens opaque strings and documents no body alphabet, and its refresh
+  // token (`shprt_`) came after the first list. Bodies of letters and digits, not hex only.
+  it.each(['at', 'ss', 'pa', 'ca', 'rt'])('recognises a Shopify shp%s_ value whose body is not hex', (kind) => {
+    const shopify = SECRET_SHAPES.find((s) => s.label === 'Shopify token')!;
+    const value = 'shp' + kind + '_' + 'zZ9'.repeat(11);
+    expect(shopify.pattern.test(value)).toBe(true);
+    expect(maskSecretPatterns(`token ${value} end`)).not.toContain(value);
+  });
+
+  // Decided, not missed: a token without a prefix (Shopify's own examples show
+  // `f85632530bf277ec9ac6f649fc327f17`) matches no shape, since an ETag or a content hash
+  // has the same 32 hex digits. A stored token is held to its connection by its vault name.
+  it('leaves a bare 32-hex value to no vendor shape', () => {
+    const bare = 'f8563253' + '0bf277ec' + '9ac6f649' + 'fc327f17';
+    expect(SECRET_SHAPES.filter((s) => s.kind === 'vendor' && s.pattern.test(bare)).map((s) => s.label)).toEqual([]);
+  });
+
   it('keeps the generic catcher last — short-text callers drop the final entry', () => {
     expect(SECRET_SHAPES[SECRET_SHAPES.length - 1]!.kind).toBe('generic');
     expect(SECRET_SHAPES.filter((s) => s.kind === 'generic')).toHaveLength(1);
@@ -745,7 +973,7 @@ describe('SECRET_SHAPES — the shared credential shape list', () => {
   // Glued after `_`, a JSON escape or a URL escape, a shape matches when its body carries a
   // digit, so the witnesses start their body with two.
   const withDigits = (label: string, w: string): string => {
-    const prefix = w.match(/^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|[sr]k_(?:live|test)_|github_pat_|gh[pousr]_|AKIA|AIza|xox[bpoasr]-|shp(?:at|ss|pa|ca)_|ya29\.)/)![0];
+    const prefix = w.match(/^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|[sr]k_(?:live|test)_|github_pat_|gh[pousr]_|AKIA|AIza|xox[bpoasr]-|shp(?:at|ss|pa|ca|rt)_|ya29\.)/)![0];
     expect(prefix, label).toBeTruthy();
     return prefix + '42' + w.slice(prefix.length + 2);
   };

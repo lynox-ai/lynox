@@ -17,11 +17,14 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, writtenNames } from './api-store.js';
-import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
+import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
+import { createHash } from 'node:crypto';
+import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
-import type { RequestPrincipal } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
+import { singleLine } from './prompt-value.js';
 import type { SecretReleases } from './secret-releases.js';
 import type { VaultNameBindings } from './vault-name-bindings.js';
 import { DERIVED_NAME_SHAPE, shapedForLog, VAULT_NAME_SHAPE } from './profile-value-shape.js';
@@ -400,6 +403,45 @@ function sameEndpoints(a: ApiProfile, b: ApiProfile): boolean {
   return x.size === y.size && [...x].every((e) => y.has(e));
 }
 
+/**
+ * Why the owner of a held access slot has nothing to bind its token to, so that the token goes
+ * nowhere (901 D); null when it has a client, or never had one.
+ * - `not_oauth2`: the owner holds the slot only through the names its exchanges wrote, and no
+ *   longer signs in with OAuth; the client the token was minted with is gone from the profile. A
+ *   save that switches the type empties these slots and drops only the derived pair from
+ *   `written`; a name written under `output_secret_name`, and any slot after a hand edit, stays.
+ * - `no_client_secret`: the oauth block names no client secret; a hand edit that removed only the
+ *   secret would otherwise free the token.
+ * An oauth2 label without an oauth block (a legacy or human-driven profile, a pasted token) never
+ * had a client to bind to, and is left as it was.
+ */
+function clientlessWhy(owner: ApiProfile): 'not_oauth2' | 'no_client_secret' | null {
+  if (owner.auth?.type !== 'oauth2') return 'not_oauth2';
+  const secret: unknown = owner.auth.oauth?.client_secret_key;
+  if (owner.auth.oauth !== undefined && (typeof secret !== 'string' || secret === '')) return 'no_client_secret';
+  return null;
+}
+
+/**
+ * For the refusal that names the way out: the owner of the held access slot `name` and why it
+ * has nothing to bind the token to ({@link clientlessWhy}), or null for any other slot or reason.
+ * Anything that throws answers null, and the refusal falls back to the general text.
+ */
+export function clientlessSlot(
+  apiStore: Pick<ApiStore, 'knownProfiles' | 'unreadableHolds'>,
+  name: string,
+): { owner: string; why: 'not_oauth2' | 'no_client_secret' } | null {
+  try {
+    if (apiStore.unreadableHolds(name)) return null;
+    const grant = slotGrant(apiStore.knownProfiles(), name);
+    if (grant.kind !== 'owned' || grant.members.some((m) => isRefreshSlotOf(m, name))) return null;
+    const why = clientlessWhy(grant.owner);
+    return why === null ? null : { owner: grant.owner.id, why };
+  } catch {
+    return null;
+  }
+}
+
 /** Whether `name` is a refresh slot of `p`: the one its id derives, or the one it configures. */
 function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
   return p.auth?.type === 'oauth2' && (refreshTokenKey(p.id) === name || p.auth.oauth?.refresh_token_key === name);
@@ -451,6 +493,7 @@ export function slotMayReach(
       // moved without the owner's answer (a file edited by hand, a save the binding question
       // refused) takes no token along, the ones minted before the move included. Without a
       // binding context, none.
+      if (clientlessWhy(owner) !== null) return false;
       const clientSecret: unknown = owner.auth?.type === 'oauth2' ? owner.auth.oauth?.client_secret_key : undefined;
       if (typeof clientSecret === 'string' && clientSecret !== '') {
         if (bind === undefined) return false;
@@ -728,6 +771,12 @@ export function releaseState(
  *   elsewhere — the mandate's own preset profiles included;
  * - a token of a connection, unless `via` itself holds the grant and this mandate consented to
  *   it: another profile of the same mandate, on a host of its choosing, would send it there;
+ * - a token of a connection the mandate made itself, unless the run that reads is that mandate
+ *   ({@link memberConnectionReader}): the owner's run reaches this profile too, by its host, and
+ *   the account is the mandate's, not the owner's;
+ * - a token of a connection the mandate made itself, in a plan's run, unless the owner's stamp
+ *   of that plan lists the connection and it is still the one listed ({@link planConnectionState});
+ *   in the mandate's own session they work as before;
  * - any other name, unless the owner released it to `via`.
  *
  * Without `via` (a bare `secret:` reference) no name is readable: there is no profile a release
@@ -764,10 +813,14 @@ export function mandateMayRead(
       const by = p.oauth_grant?.connected_by;
       const firstConsent = writing && by === undefined;
       if (by !== tag && !firstConsent) return false;
+      // And only for the person who connected it: the view asks with the profile's author, the
+      // reader is the run's principal (an owner's run reads this profile too). A first consent
+      // has no connection yet that is someone's: whoever's exchange it is records theirs.
+      if (by !== undefined && !memberConnectionReader(p, ctx.principal, writing ? 'write' : 'read', ctx.ends)) return false;
       ownToken = true;
     }
   }
-  return ownToken || isReleased();
+  return (ownToken && via !== undefined && planMayUse(via)) || isReleased();
 }
 
 /** The names a profile reads as a credential: everything but the client id, which is public. */
@@ -936,7 +989,178 @@ export function connectionWaits(profile: ApiProfile, ends: Pick<MandateEnds, 'is
   return mandateId === undefined || ends === null || !ends.isLive(mandateId);
 }
 
-/** Whether the view below hides `name` from `profile`: always false for a profile the owner wrote. */
+/**
+ * Whether `reader` is the person who made `profile`'s connection with their own login, and so the
+ * one its tokens may reach. `read`: the same tag as the consent and the same grant, both known.
+ * `write` (the first consent, or a later grant of the same address connecting its profile again):
+ * the profile's author, under a grant that is live now; the consent it replaces may be another
+ * grant's. A side that is not known never matches, so a mandate login without a grant reaches
+ * nothing.
+ */
+export function memberConnectionReader(
+  profile: ApiProfile,
+  reader: RequestPrincipal,
+  mode: 'read' | 'write',
+  ends: Pick<MandateEnds, 'isLive'> | null,
+): boolean {
+  if (reader.kind !== 'mandate' || reader.mandateId === undefined) return false;
+  const tag = principalTag(reader);
+  const consented = profile.oauth_grant?.connected_by === tag && profile.oauth_grant.connected_mandate_id === reader.mandateId;
+  if (mode === 'read') return consented;
+  // Writing: the one who connected it renews it, also on a profile whose author an owner's save
+  // removed before such saves were refused; the author connects it again under a later grant.
+  return (consented || profile.created_by === tag) && ends !== null && ends.isLive(reader.mandateId);
+}
+
+/** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` exists only there, never in the store. */
+export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
+  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined }) | undefined;
+};
+
+/**
+ * A profile as `reader` sees it over the profile routes (`GET /api/api-profiles` and `…/:id`):
+ * without the grant's fingerprints, and without the provider account the consent signed in with
+ * (`oauth_grant.account`) unless the reader gave that consent. The account is a personal detail
+ * of whoever connected, the verified address of an OpenID Connect sign-in among them; a helper
+ * does not need the owner's for its work. Who connected (`connected_by`) stays for everyone.
+ * The owner sees every account; a mandate only the one of a connection it made with its own
+ * login ({@link memberConnectionReader}, `read`: same tag and same grant, both known); the
+ * control plane's bearer none. A grant whose account was left out says so (`account_withheld`),
+ * so the page does not read it as an account the engine never recorded.
+ */
+export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ProfileForReader {
+  const shown = withoutFingerprints(profile);
+  const grant = shown.oauth_grant;
+  if (grant?.account === undefined) return shown;
+  switch (reader.kind) {
+    case 'owner': return shown;
+    case 'mandate': if (memberConnectionReader(profile, reader, 'read', null)) return shown; break;
+    case 'cp-admin': break;
+    default: return unhandledPrincipal(reader);
+  }
+  const { account: _account, ...rest } = grant;
+  return { ...shown, oauth_grant: { ...rest, account_withheld: true } };
+}
+
+/**
+ * Whether `name` is a token of a connection a member made with their own login that `ctx` may
+ * not have: asked of the profile that HOLDS the name (its grant's names), not of the profile a
+ * read goes through, since another profile may share that grant's refresh slot. Inside a plan's
+ * run a member's connection reaches the run only when the plan's stamp lists it, as
+ * `mandateMayRead` has it for the member's own.
+ */
+function heldFromReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string, ctx: ReadCtx, writing: boolean): boolean {
+  for (const holder of apiStore.knownProfiles()) {
+    if (!isMandateConnection(holder) || !grantTokenNames(holder).has(name)) continue;
+    if (!planMayUse(holder) || !memberConnectionReader(holder, ctx.principal, writing ? 'write' : 'read', ctx.ends)) return true;
+  }
+  return false;
+}
+
+/**
+ * What a request through `profile` says when it would carry a token of a connection someone
+ * else made with their own login, or null when that is not the case. Two shapes, because the way
+ * out differs: while that person's access lasts, the connection is theirs and cannot be taken
+ * over; once it has ended, the owner takes it over in the chat. Only the owner can do either, so
+ * any other reader is told only that it is not used here.
+ */
+export function memberConnectionRefusal(
+  profile: ApiProfile,
+  reader: RequestPrincipal,
+  ends: Pick<MandateEnds, 'isLive'> | null,
+  mode: 'read' | 'write' = 'read',
+): string | null {
+  if (!isMandateConnection(profile)) return null;
+  const by = profile.oauth_grant!.connected_by!;
+  const own = reader.kind === 'mandate' && principalTag(reader) === by;
+  const inPlan = planConnectionState(profile);
+  if (own && (inPlan === 'no-plan' || inPlan === 'listed') && memberConnectionReader(profile, reader, mode, ends)) return null;
+  const person = singleLine(by.slice(MANDATE_TAG_PREFIX.length));
+  const { provider, shown } = connectionShown(profile);
+  const lead = `${person} set up this connection (${provider}, profile ${shown}) with their own login`;
+  // A plan's run acting for that person uses it only as the owner's stamp of the plan lists it;
+  // a plan's run acting for anyone else reaches it no more than any other reader.
+  if (inPlan !== 'no-plan') {
+    const ownPlan = own && memberConnectionReader(profile, reader, mode, ends);
+    if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`;
+    if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`;
+    return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session.`;
+  }
+  // The same person under a later access: the connection was made under the earlier one.
+  if (own) return `This connection (${provider}, profile ${shown}) was set up under an earlier access of ${person}'s, so it is not used now. Connect it again with api_setup action "connect".`;
+  if (reader.kind !== 'owner') return `${lead}, so it is not used in this session.`;
+  if (!connectionWaits(profile, ends)) {
+    return `${lead}, so lynox does not use it for you. Take it over in the chat once ${person}'s access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects ${person}).`;
+  }
+  return `${lead}. To let lynox use it for you, take it over: in the chat, ask to take over the connection ${shown} and confirm with "Allow".`;
+}
+
+/**
+ * What a token exchange through `via` says when `via` reads the refresh slot of `holder`, a
+ * connection a member made with their own login (the two share a grant through a built-in
+ * provider). The exchange would store that login's new tokens under `via`, a profile that is not
+ * the member's connection, where the view no longer holds them from anyone. So it is refused for
+ * every reader; the member renews through their own profile.
+ */
+export function sharedRefreshRefusal(holder: ApiProfile, via: ApiProfile): string {
+  const person = singleLine(holder.oauth_grant!.connected_by!.slice(MANDATE_TAG_PREFIX.length));
+  const { provider, shown } = connectionShown(holder);
+  return `${connectionShown(via).shown} reads the refresh token of the connection ${person} set up with their own login (${provider}, profile ${shown}), so it does not renew it: the new tokens would be stored under a profile that is not that connection. Renew it through profile ${shown}.`;
+}
+
+/**
+ * Where a connection's tokens go and what they may do, as one digest: the same fields as
+ * {@link credentialBearing}, which a save that moves a credential to another destination changes.
+ * A plan's stamp records it per listed connection, so a connection pointed elsewhere after the
+ * stamp no longer matches. Not the token itself: a refresh keeps it.
+ */
+export function bindingOf(profile: ApiProfile): string {
+  return createHash('sha256').update(credentialBearing(profile)).digest('hex');
+}
+
+/**
+ * How the plan this code runs in stands to `profile`'s connection: `no-plan` outside a plan's
+ * run; inside one, `listed` when the owner's stamp of the plan lists it under the grant and the
+ * destination it has now, `changed` when the stamp lists the profile but under another grant or
+ * destination (connected again, or pointed elsewhere), `unlisted` otherwise. The one reader of
+ * the plan's run context: every rule that differs inside a plan asks here.
+ */
+export function planConnectionState(profile: ApiProfile): 'no-plan' | 'listed' | 'unlisted' | 'changed' {
+  if (currentPlanOf() === undefined) return 'no-plan';
+  const entry = currentPlanStamp()?.find((e) => e.profile === profile.id);
+  if (entry === undefined) return 'unlisted';
+  const grant = profile.oauth_grant?.grant_id;
+  return grant !== undefined && entry.grant === grant && entry.binding === bindingOf(profile) ? 'listed' : 'changed';
+}
+
+/** Whether the plan this code runs in, if any, may use `profile`'s connection. */
+function planMayUse(profile: ApiProfile): boolean {
+  const state = planConnectionState(profile);
+  return state === 'no-plan' || state === 'listed';
+}
+
+export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
+  const presetId = profile.auth?.oauth?.preset_id;
+  return {
+    provider: singleLine((presetId !== undefined ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? hostLabel(profile.base_url)),
+    // The id too: one the import held back is read from a file, where it can carry a line break.
+    shown: `${JSON.stringify(singleLine(profile.name))} (id ${singleLine(profile.id)})`,
+  };
+}
+
+function hostLabel(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return 'its provider';
+  }
+}
+
+/**
+ * Whether the view below hides `name` from `profile`. A profile the owner wrote hides nothing,
+ * except the tokens of a connection a mandate made with its own login, on this profile or on one
+ * whose grant this profile shares: those reach only that mandate ({@link heldFromReader}).
+ */
 export function hiddenFromProfile(
   store: SecretStoreLike,
   profile: ApiProfile,
@@ -945,6 +1169,7 @@ export function hiddenFromProfile(
   ctx: ReadCtx,
   writing = false,
 ): boolean {
+  if (heldFromReader(apiStore, name, ctx, writing)) return true;
   if (!isMandateAuthored(profile)) return false;
   return !mandateMayRead(store, apiStore, profile.created_by!, name, profile, ctx, writing);
 }
@@ -977,7 +1202,8 @@ export function withheldText(names: readonly string[], offBase = false): string 
 
 /**
  * The vault as the engine reads it for `profile` in a run of `ctx.principal`. A profile the
- * owner wrote gets the store unchanged, in a mandate's run as well. `GET
+ * owner wrote gets the store unchanged, in a mandate's run as well, unless a mandate connected a
+ * profile of this instance with its own login ({@link hiddenFromProfile}). `GET
  * /api/bulk/runs/:id/targets` serves a mandate the before-images of a bulk run under `reads`,
  * and a test in `http-api.test.ts` couples that stance to this read.
  */
@@ -987,7 +1213,7 @@ export function secretsForProfile(
   apiStore: Pick<ApiStore, 'knownProfiles'>,
   ctx: ReadCtx,
 ): SecretStoreLike {
-  if (!isMandateAuthored(profile)) return store;
+  if (!isMandateAuthored(profile) && !apiStore.knownProfiles().some(isMandateConnection)) return store;
   const hidden = (name: string): boolean => hiddenFromProfile(store, profile, apiStore, name, ctx);
   return new Proxy(store, {
     get(target, prop, receiver) {

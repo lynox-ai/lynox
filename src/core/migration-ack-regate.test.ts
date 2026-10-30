@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -9,6 +9,7 @@ import { ApiStore, type ApiProfile } from './api-store.js';
 import { MigrationExporter } from './migration-export.js';
 import { MigrationImporter } from './migration-import.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
+import { corruptFileLeftInPlace } from './sqlite-constants.js';
 import {
   generateEphemeralKeypair,
   serializePublicKey,
@@ -279,7 +280,7 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
     seedEngineDb(srcDir, ackedProfile());
     process.env['LYNOX_BILLING_TIER'] = 'starter'; // managed signal ON
 
-    // The re-gate runs LAST, after data + secrets are in. A strip failure must
+    // The re-gate runs on engine.db's staged copy. A strip failure must
     // propagate out of restore() (the operator retries; regate is idempotent),
     // NOT be swallowed into a "success" that leaves the un-disclosed ack in place.
     const spy = vi.spyOn(ApiStore, 'regateMigratedApiConnections').mockImplementation(() => {
@@ -288,6 +289,30 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
     try {
       expect(() => runMigration(srcDir, dstDir)).toThrow(/regate boom/);
       expect(spy).toHaveBeenCalledOnce();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('says what happened to a staged copy that looks corrupt, not the advice for a data directory', () => {
+    const srcDir = tmp();
+    const dstDir = tmp();
+    seedEngineDb(srcDir, ackedProfile());
+    process.env['LYNOX_BILLING_TIER'] = 'starter'; // managed signal ON
+
+    // What the store throws when the staged copy fails its check at this point: its advice is
+    // about a data directory, which the staged copy is not.
+    const spy = vi.spyOn(ApiStore, 'regateMigratedApiConnections').mockImplementation(() => {
+      throw corruptFileLeftInPlace('engine.db.migration-tmp', new Error('database disk image is malformed'));
+    });
+    try {
+      let thrown: unknown;
+      try { runMigration(srcDir, dstDir); } catch (err) { thrown = err; }
+      const message = (thrown as Error).message;
+      expect(message).toContain('The restored engine.db could not be prepared for this instance (database disk image is malformed)');
+      expect(message).toContain('the staged copy was dropped and the engine.db in place was not replaced');
+      expect(message).not.toContain('restore it from a backup');
+      expect(readdirSync(dstDir).filter((f) => f.includes('migration-tmp'))).toEqual([]);
     } finally {
       spy.mockRestore();
     }
@@ -333,5 +358,162 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
     expect(after?.custom_endpoint_ack).toBeUndefined();
     expect(isEndpointAcked(after?.custom_endpoint_ack, TOKEN_URL)).toBe(false);
     expect(after?.auth?.oauth?.token_url).toBe(TOKEN_URL); // rest of the profile survives
+  });
+
+  // The restore route has no rollback: what a step wrote stays when a later one throws. So an
+  // ack the managed destination does not inherit must never land, not be removed at the end.
+  describe('a restore that throws after the data landed leaves no migrated ack behind', () => {
+    const RAW_PLAIN = '{"id":"plain","name":"Plain","description":"No ack","base_url":"https://api.anthropic.com"}';
+    const RAW_BROKEN = '{"id":"broken", not json';
+
+    /** Flat `apis/` profiles in the source: one with an ack, one without, one that does not parse, one nested. */
+    function seedApis(dir: string): void {
+      mkdirSync(join(dir, 'apis', 'sub'), { recursive: true });
+      writeFileSync(join(dir, 'apis', 'flat.json'), JSON.stringify(ackedProfile({ id: 'flat' })));
+      writeFileSync(join(dir, 'apis', 'plain.json'), RAW_PLAIN);
+      writeFileSync(join(dir, 'apis', 'broken.json'), RAW_BROKEN);
+      writeFileSync(join(dir, 'apis', 'sub', 'nested.json'), JSON.stringify(ackedProfile({ id: 'nested' })));
+      writeFileSync(join(dir, 'apis', 'notes.txt'), JSON.stringify(ackedProfile({ id: 'notes' })));
+    }
+
+    /** Migrate with step 5b (after the databases and apis/ are written) throwing. */
+    function migrateThrowingLate(srcDir: string, dstDir: string): void {
+      const spy = vi.spyOn(ApiStore, 'stripStoreConnectionsOnImport').mockImplementation(() => {
+        throw new Error('late step boom');
+      });
+      try {
+        expect(() => runMigration(srcDir, dstDir)).toThrow(/late step boom/);
+        expect(spy).toHaveBeenCalledOnce();
+      } finally {
+        spy.mockRestore();
+      }
+    }
+
+    /** What the next boot reads from apis/: the import into connections, then the load. */
+    function importedAck(dstDir: string, id: string): ApiProfile['custom_endpoint_ack'] | 'missing' {
+      const engine = new EngineDb(join(dstDir, 'boot-engine.db'), DST_VAULT_KEY);
+      try {
+        const cs = new ConnectionStore(engine);
+        const store = new ApiStore();
+        store.importFromDirectoryIfNeeded(join(dstDir, 'apis'), cs);
+        store.loadFromConnections(cs);
+        const p = store.knownProfiles().find((x) => x.id === id);
+        return p === undefined ? 'missing' : p.custom_endpoint_ack;
+      } finally {
+        engine.close();
+      }
+    }
+
+    it('managed: engine.db lands without the ack', () => {
+      const srcDir = tmp();
+      const dstDir = tmp();
+      seedEngineDb(srcDir, ackedProfile());
+      process.env['LYNOX_BILLING_TIER'] = 'starter';
+
+      migrateThrowingLate(srcDir, dstDir);
+
+      const after = readProfile(dstDir, DST_VAULT_KEY, 'customapi');
+      expect(after?.name).toBe('Custom API'); // the database did land
+      expect(after?.custom_endpoint_ack).toBeUndefined();
+    });
+
+    it('managed: the apis/ profiles land without the ack, and the next import takes none', () => {
+      const srcDir = tmp();
+      const dstDir = tmp();
+      seedApis(srcDir);
+      process.env['LYNOX_BILLING_TIER'] = 'starter';
+
+      migrateThrowingLate(srcDir, dstDir);
+
+      const flat = JSON.parse(readFileSync(join(dstDir, 'apis', 'flat.json'), 'utf-8')) as ApiProfile;
+      expect(flat.custom_endpoint_ack).toBeUndefined();
+      expect(flat.base_url).toBe('https://custom.example.com'); // the rest of the profile stays
+      // Removing the broken file opens the import; it then takes the profile, without an ack.
+      rmSync(join(dstDir, 'apis', 'broken.json'));
+      expect(importedAck(dstDir, 'flat')).toBeUndefined();
+    });
+
+    it('managed: a file without an ack, one that does not parse, a nested one and a non-.json one land byte for byte', () => {
+      const srcDir = tmp();
+      const dstDir = tmp();
+      seedApis(srcDir);
+      process.env['LYNOX_BILLING_TIER'] = 'starter';
+
+      migrateThrowingLate(srcDir, dstDir);
+
+      expect(readFileSync(join(dstDir, 'apis', 'plain.json'), 'utf-8')).toBe(RAW_PLAIN);
+      expect(readFileSync(join(dstDir, 'apis', 'broken.json'), 'utf-8')).toBe(RAW_BROKEN);
+      // Not a file the import reads, so not one this pass rewrites.
+      expect(readFileSync(join(dstDir, 'apis', 'sub', 'nested.json'), 'utf-8')).toBe(readFileSync(join(srcDir, 'apis', 'sub', 'nested.json'), 'utf-8'));
+      expect(readFileSync(join(dstDir, 'apis', 'notes.txt'), 'utf-8')).toBe(readFileSync(join(srcDir, 'apis', 'notes.txt'), 'utf-8'));
+    });
+
+    it('control, self-hosted: the same throw leaves both acks in place, as the same data owner', () => {
+      const srcDir = tmp();
+      const dstDir = tmp();
+      seedEngineDb(srcDir, ackedProfile());
+      seedApis(srcDir);
+      delete process.env['LYNOX_BILLING_TIER'];
+      delete process.env['LYNOX_MANAGED_MODE'];
+
+      migrateThrowingLate(srcDir, dstDir);
+
+      expect(readProfile(dstDir, DST_VAULT_KEY, 'customapi')?.custom_endpoint_ack).toEqual(ACK);
+      rmSync(join(dstDir, 'apis', 'broken.json'));
+      expect(importedAck(dstDir, 'flat')).toEqual(ACK);
+    });
+
+    it('managed: a re-gate that fails keeps the engine.db in place and leaves no staged copy', () => {
+      const srcDir = tmp();
+      const dstDir = tmp();
+      seedEngineDb(srcDir, ackedProfile());
+      seedEngineDb(dstDir, ackedProfile({ id: 'already', custom_endpoint_ack: undefined }), DST_VAULT_KEY);
+      process.env['LYNOX_BILLING_TIER'] = 'starter';
+
+      const real = ApiStore.regateMigratedApiConnections.bind(ApiStore);
+      const spy = vi.spyOn(ApiStore, 'regateMigratedApiConnections').mockImplementation((path: string, key: string) => {
+        real(path, key);
+        throw new Error('regate boom');
+      });
+      try {
+        expect(() => runMigration(srcDir, dstDir)).toThrow(/regate boom/);
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(readProfile(dstDir, DST_VAULT_KEY, 'already')?.name).toBe('Custom API');
+      expect(readProfile(dstDir, DST_VAULT_KEY, 'customapi')).toBeUndefined();
+      expect(readdirSync(dstDir).filter((f) => f.includes('migration-tmp'))).toEqual([]);
+    });
+
+    it('managed: a WAL left next to the staged copy by an attempt that died is not replayed onto it', () => {
+      const srcDir = tmp();
+      const dstDir = tmp();
+      seedEngineDb(srcDir, ackedProfile());
+      process.env['LYNOX_BILLING_TIER'] = 'starter';
+
+      // A WAL with committed frames of another database, under the staged copy's name.
+      const other = join(tmp(), 'other.db');
+      const db = new Database(other);
+      try {
+        db.pragma('journal_mode = WAL');
+        db.pragma('wal_autocheckpoint = 0');
+        db.exec('CREATE TABLE stale (x TEXT)');
+        for (let i = 0; i < 50; i++) db.prepare('INSERT INTO stale (x) VALUES (?)').run('x'.repeat(500));
+        copyFileSync(`${other}-wal`, join(dstDir, 'engine.db.migration-tmp-wal'));
+      } finally {
+        db.close();
+      }
+
+      runMigration(srcDir, dstDir);
+
+      expect(readProfile(dstDir, DST_VAULT_KEY, 'customapi')?.name).toBe('Custom API');
+      const check = new Database(join(dstDir, 'engine.db'), { readonly: true });
+      try {
+        expect(check.prepare("SELECT name FROM sqlite_master WHERE name = 'stale'").get()).toBeUndefined();
+      } finally {
+        check.close();
+      }
+    });
   });
 });

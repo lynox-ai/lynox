@@ -8,6 +8,7 @@ import type { ThreadStore } from './thread-store.js';
 import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
 import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
+import { stripHidden } from './hidden-text.js';
 
 /** Why a run lacks an answer it asked for. */
 export type UnansweredBecause = 'expired' | 'not_asked' | 'thread_deleted';
@@ -131,7 +132,8 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     // No `trigger_id`: neither the re-arm nor the expiry sweep may find this question (§4.4).
     let promptId: string;
     try {
-      promptId = store.insertAskUser(deps.runId, question, options, undefined, storedSegments, promptOriginOf(meta), undefined, {
+      // Read later, from a notification, by someone who did not watch the run.
+      promptId = store.insertQuestion({ blocked: meta?.blocked === true, attended: false }, deps.runId, question, options, undefined, storedSegments, promptOriginOf(meta), undefined, {
         principal: deps.principal,
         handRun: deps.handRun,
       });
@@ -238,9 +240,11 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       // A resumable conversation starts with a user turn and alternates, as an escalation
       // thread does (`escalation.ts`).
       const last = threads.getMessages(id, { apiOnly: true }).at(-1)?.role ?? null;
+      // The turns the model reads when the owner answers, without the characters that render as
+      // nothing (`hidden-text.ts`): the schedule's title may have been written by someone else.
       const seeds: BetaMessageParam[] = [];
-      if (last === null || last === 'assistant') seeds.push({ role: 'user', content: [{ type: 'text', text: this.#deps.title }] });
-      seeds.push({ role: 'assistant', content: [{ type: 'text', text }] });
+      if (last === null || last === 'assistant') seeds.push({ role: 'user', content: [{ type: 'text', text: stripHidden(this.#deps.title) }] });
+      seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(text) }] });
       const count = threads.getThread(id)?.message_count ?? 0;
       threads.appendMessages(id, seeds, threads.getNextSeq(id), { message_count: count + seeds.length });
       threads.updateThread(id, { is_unread: true });

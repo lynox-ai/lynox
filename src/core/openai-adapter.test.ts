@@ -1367,7 +1367,7 @@ describe('OpenAIAdapter', () => {
     // every suppression test was written against it. These two cover the model the
     // presets actually route to, so removing the dead row later cannot delete the only
     // coverage of the live path.
-    const FAST_LIVE = 'accounts/fireworks/models/deepseek-v4p1-flash';
+    const FAST_LIVE = 'accounts/fireworks/models/deepseek-v4p1-flash-1017';
 
     it('suppresses on the LIVE fast slot, not only on the withdrawn one', async () => {
       const body = await captureBody(FAST_LIVE, undefined, 512);

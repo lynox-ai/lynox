@@ -49,11 +49,13 @@ vi.mock('./observability.js', () => ({
 
 import { Agent } from './agent.js';
 import { EngineDb } from './engine-db.js';
-import { Containment } from './containment.js';
+import { Containment, CONTAINED_WRITE_REFUSAL } from './containment.js';
 import { createToolContext } from './tool-context.js';
 
 const REFUSAL = 'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds stays in this chat. '
   + 'Work that does not need the store\'s data belongs in a new chat.';
+const OTHER_SERVICE = 'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, so it reaches no other service. '
+  + 'Tell the user in one sentence that this chat only reads now, and that they can open a chat where this works with "Plan in a new chat" (you cannot open it for them).';
 
 function tool(name: string): ToolEntry {
   return {
@@ -68,7 +70,7 @@ let containment: Containment;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'lynox-contained-dispatch-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
-  containment = new Containment(engineDb.getDb());
+  containment = new Containment(engineDb.getDb(), null);
   containment.contain({ kind: 'thread', id: 'chat-shop' }, { kind: 'api', connectionId: 'shop-a' });
 });
 afterEach(() => {
@@ -115,8 +117,73 @@ describe('dispatch in a contained chat', () => {
   it('refuses http_request to a host that is not the store\'s', async () => {
     const http = tool('http_request');
     const { agent } = agentWith([http], { current: 'chat-shop' });
-    expect(String((await dispatch(agent, 'http_request', { url: 'https://api.example.com/x' })).content)).toContain(REFUSAL);
+    expect(String((await dispatch(agent, 'http_request', { url: 'https://api.example.com/x' })).content)).toContain(OTHER_SERVICE);
     expect(http.handler).not.toHaveBeenCalled();
+  });
+
+  it('refuses a write to the store itself before the prompt and the handler, with the write\'s own answer', async () => {
+    const http = tool('http_request');
+    const { agent, prompt } = agentWith([http], { current: 'chat-shop' });
+    const r = await dispatch(agent, 'http_request', { url: 'https://acme.myshopify.com/admin/api/2025-10/webhooks.json', method: 'POST', body: '{"webhook":{"address":"https://x.example"}}' });
+    expect(r.is_error).toBe(true);
+    expect(String(r.content)).toContain(CONTAINED_WRITE_REFUSAL);
+    expect(prompt).not.toHaveBeenCalled();
+    expect(http.handler).not.toHaveBeenCalled();
+  });
+
+  it('streams each refusal with its reason, for the chat\'s view to key on', async () => {
+    const http = tool('http_request');
+    const plan = tool('bulk_plan');
+    const send = tool('mail_send');
+    const { agent } = agentWith([http, plan, send], { current: 'chat-shop' });
+    const events: Array<Record<string, unknown>> = [];
+    agent.onStream = (e) => { events.push(e as unknown as Record<string, unknown>); };
+    await dispatch(agent, 'http_request', { url: 'https://acme.myshopify.com/admin/api/2025-10/products/1.json', method: 'PUT', body: '{}' });
+    await dispatch(agent, 'bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com' });
+    await dispatch(agent, 'mail_send', {});
+    expect(events.filter((e) => e['type'] === 'tool_result').map((e) => [e['name'], e['contained'], e['isError'], e['toolUseId']])).toEqual([
+      ['http_request', 'contained_write', true, 'tu-http_request'],
+      ['bulk_plan', 'contained_plan', true, 'tu-bulk_plan'],
+      ['mail_send', 'contained_call', true, 'tu-mail_send'],
+    ]);
+    expect(plan.handler).not.toHaveBeenCalled();
+  });
+
+  it('streams no reason for a call in another chat (control)', async () => {
+    const plan = tool('bulk_plan');
+    const { agent } = agentWith([plan], { current: 'chat-free' });
+    const events: Array<Record<string, unknown>> = [];
+    agent.onStream = (e) => { events.push(e as unknown as Record<string, unknown>); };
+    await dispatch(agent, 'bulk_plan', {});
+    expect(plan.handler).toHaveBeenCalledTimes(1);
+    expect(events.some((e) => 'contained' in e)).toBe(false);
+  });
+
+  it('refuses a keyword lookup at another service after the store was read, and runs it in a new chat', async () => {
+    const http = tool('http_request');
+    const lookup = { url: 'https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live', method: 'POST', body: '[{"keywords":["wasserfilter"]}]' };
+    const { agent, prompt } = agentWith([http], { current: 'chat-shop' });
+    const events: Array<Record<string, unknown>> = [];
+    agent.onStream = (e) => { events.push(e as unknown as Record<string, unknown>); };
+    const r = await dispatch(agent, 'http_request', lookup);
+    expect(r.is_error).toBe(true);
+    expect(String(r.content)).toContain(OTHER_SERVICE);
+    expect(events.filter((e) => e['type'] === 'tool_result').map((e) => e['contained'])).toEqual(['contained_call']);
+    expect(prompt).not.toHaveBeenCalled();
+    expect(http.handler).not.toHaveBeenCalled();
+    const fresh = agentWith([http], { current: 'chat-new' });
+    expect((await dispatch(fresh.agent, 'http_request', lookup)).is_error).not.toBe(true);
+    expect(fresh.prompt).toHaveBeenCalledTimes(1);
+    expect(http.handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs a read of the store (through its prompt), and the same write in another chat (controls)', async () => {
+    const http = tool('http_request');
+    const { agent } = agentWith([http], { current: 'chat-shop' });
+    expect((await dispatch(agent, 'http_request', { url: 'https://acme.myshopify.com/admin/api/2025-10/shop.json' })).is_error).not.toBe(true);
+    const free = agentWith([http], { current: 'chat-free' });
+    expect((await dispatch(free.agent, 'http_request', { url: 'https://acme.myshopify.com/admin/api/2025-10/webhooks.json', method: 'POST', body: '{}' })).is_error).not.toBe(true);
+    expect(http.handler).toHaveBeenCalledTimes(2);
   });
 
   it('holds a spawned child, which only knows the chat it runs for', async () => {

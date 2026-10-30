@@ -13,6 +13,11 @@ import { containsEvictionMarker } from './artifact-eviction.js';
 
 const SAFE_ID = /^[a-f0-9-]{8}$/;
 
+/** Whether `id` has the shape of an artifact id: a row may name it then, and `save` keeps it. */
+export function isArtifactId(id: unknown): id is string {
+  return typeof id === 'string' && SAFE_ID.test(id);
+}
+
 /** How many prior versions to retain per artifact. A small ring — enough to
  *  recover from an accidental clobber (the "v2 → v7 wrong-name" case) without
  *  growing the store unbounded. Oldest beyond this are pruned on each save. */
@@ -47,7 +52,7 @@ export interface Artifact extends ArtifactMeta {
   /** Populated ONLY when save() overwrote an existing artifact. Lets the
    *  caller surface the overwrite (and a recovery path) instead of silently
    *  replacing good content — the "v2 → v7 wrong-name clobber" failure mode
-   *  (rafael 2026-06-04, lynox Marktanalyse). Absent on create. */
+   *  (2026-06-04, lynox Marktanalyse). Absent on create. */
   overwrite?: ArtifactOverwrite;
 }
 
@@ -264,7 +269,7 @@ export class ArtifactStore {
     if (existing) {
       // Update existing artifact. Snapshot the prior content to a one-level
       // backup BEFORE overwriting so an accidental full-rewrite is recoverable
-      // (rafael 2026-06-04: a later session clobbered a good version with no
+      // (2026-06-04: a later session clobbered a good version with no
       // trace). Best-effort — a missing/unreadable prior file never blocks.
       const previousVersion = existing.version;
       let previousBytes = 0;

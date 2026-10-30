@@ -95,6 +95,7 @@ vi.mock('./agent.js', () => {
     RunAbortedError: MockRunAbortedError,
     ToolLoopBreakError: MockToolLoopBreakError,
     ContinuationLoopError: MockContinuationLoopError,
+    ThinkingOnlyLoopError: class MockThinkingOnlyLoopError extends MockContinuationLoopError {},
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;
@@ -147,6 +148,8 @@ vi.mock('./agent.js', () => {
     this.setKnowledgeContext = mockSetKnowledgeContext;
     // @ts-expect-error mock constructor
     this.setBriefing = vi.fn();
+    // @ts-expect-error mock constructor
+    this.setSecretsBriefing = vi.fn();
     // @ts-expect-error mock constructor
     this.promptUser = undefined;
     // @ts-expect-error mock constructor
@@ -358,6 +361,9 @@ vi.mock('./artifact-store.js', () => ({
 
 vi.mock('./data-store.js', () => ({
   CRM_OVERLAP_NAMES: new Set(['contacts', 'companies', 'people', 'deals', 'interactions']),
+  SYSTEM_COLUMNS: new Set(['_id', '_created_at', '_updated_at', '_source_grants', '_source_run_id']),
+  SOURCE_COLUMNS: ['_source_grants', '_source_run_id'],
+  rowStampOf: () => ({ grants: null, runId: null }),
   DataStore: vi.fn().mockImplementation(function () {
     // @ts-expect-error mock constructor
     this.listCollections = vi.fn().mockReturnValue([
@@ -373,6 +379,8 @@ vi.mock('./data-store.js', () => ({
     this.deleteCollection = vi.fn();
     // @ts-expect-error mock constructor
     this.dropEmptyCrmOverlaps = vi.fn().mockReturnValue([]);
+    // @ts-expect-error mock constructor
+    this.ensureSourceColumns = vi.fn().mockReturnValue({ migrated: [], missing: [], invalid: [], failed: [] });
   }),
 }));
 
@@ -451,7 +459,8 @@ vi.mock('./run-history.js', () => ({
     this.sweepStuckRuns = vi.fn().mockReturnValue(0);
     // @ts-expect-error mock constructor
     this.getDb = vi.fn().mockReturnValue({
-      prepare: vi.fn().mockReturnValue({ run: vi.fn(), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
+      // `run` answers as better-sqlite3 does: a write's RunResult.
+      prepare: vi.fn().mockReturnValue({ run: vi.fn().mockReturnValue({ changes: 1, lastInsertRowid: 0 }), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
       exec: vi.fn(),
       transaction: vi.fn().mockImplementation((fn: unknown) => fn),
     });
@@ -870,7 +879,7 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
 
-    // The dogfooded run (rafael, prod 2026-08-24) sat parked on a prompt for 15 h
+    // The dogfooded run (own production instance, 2026-08-24) sat parked on a prompt for 15 h
     // and reached the ledger with cost_usd = 0 / tokens 0-0 while the UI chip
     // showed $0.10 / 32k tokens for the same turn. The cause was NOT "the failure
     // path forgets to book" — it books thoroughly, and has since 2026-06-05. It
@@ -1087,6 +1096,34 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(plain!.connectionId).toBeUndefined();
       expect(plain!.connectionCreatedAt).toBeUndefined();
       expect(plain!.grantId).toBeUndefined();
+    });
+
+    it('passes the call\'s outcome, contract, lift and filing through to the ledger row (PRD 3f-1b-α)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({
+          toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: true, toolUseId: 'tu-1',
+          contract: { state: 'governing', grantId: 'g-accepted' }, grant: { grantId: 'g-accepted', entry: 'v1' },
+          filed: { outcome: 'queued', approvalId: 'ap-1' },
+        });
+        agent?.recordToolCall?.({ toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, isError: false, toolUseId: undefined });
+        throw new Error('stop after two calls');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('stop after two calls');
+
+      const rows = vi.mocked(engine.getRunHistory()!.insertToolCall).mock.calls.map(c => c[0]);
+      expect(rows.find(p => p.toolName === 'http_request')).toEqual(expect.objectContaining({
+        isError: true, contract: { state: 'governing', grantId: 'g-accepted' }, lift: { grantId: 'g-accepted', entry: 'v1' },
+        filed: { outcome: 'queued', approvalId: 'ap-1' },
+      }));
+      // CONTROL: a call without facts writes none, and its outcome still travels.
+      const plain = rows.find(p => p.toolName === 'read_file');
+      expect(plain).toEqual(expect.objectContaining({ isError: false }));
+      expect(plain!.contract).toBeUndefined();
+      expect(plain!.lift).toBeUndefined();
+      expect(plain!.filed).toBeUndefined();
     });
 
     it('passes the id of the tool_use block through to the ledger row', async () => {
@@ -1435,6 +1472,46 @@ describe('Engine + Session (Orchestrator)', () => {
       // Briefing is set during init, we just verify setBriefing was called
       const agent = session.getAgent();
       expect(agent).toBeDefined();
+    });
+
+    // The vault listing travels next to the briefing, not inside it: the agent decides per turn
+    // whether it goes in (an owner's turn only). Consumed with the briefing after the first turn.
+    it('hands the vault listing to the agent apart from the briefing, and clears it after the first turn', async () => {
+      // A real boot: the store reads a secret from the environment, the engine keeps its listing.
+      vi.stubEnv('LYNOX_SECRET_CRM_TOKEN', 'crm-token-value-abcdwxyz');
+      try {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      expect(engine.getSecretsBriefing()).toContain('secret:CRM_TOKEN (***wxyz)');
+      expect(engine.getBriefing() ?? '').not.toContain('CRM_TOKEN');
+      vi.mocked(Agent).mockClear();
+      const session = engine.createSession();
+
+      const config = vi.mocked(Agent).mock.calls.at(-1)![0] as { briefing?: string; secretsBriefing?: string };
+      expect(config.secretsBriefing).toContain('secret:CRM_TOKEN (***wxyz)');
+      expect(config.briefing ?? '').not.toContain('CRM_TOKEN');
+
+      mockSend.mockResolvedValueOnce('first response');
+      await session.run('first task');
+      const agent = session.getAgent() as unknown as { setSecretsBriefing: ReturnType<typeof vi.fn> };
+      expect(agent.setSecretsBriefing).toHaveBeenCalledWith(undefined);
+      } finally { vi.unstubAllEnvs(); }
+    });
+
+    // The listing alone, with no briefing beside it, is consumed too: else an owner's every turn
+    // would carry it again.
+    it('consumes the listing after the first turn when there is no briefing beside it', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      vi.spyOn(engine, 'getBriefing').mockReturnValue(undefined);
+      vi.spyOn(engine, 'getTaskBriefing').mockReturnValue(undefined);
+      vi.spyOn(engine, 'getSecretsBriefing').mockReturnValue('<secrets>secret:CRM_TOKEN (***wxyz)</secrets>');
+      const session = engine.createSession();
+
+      mockSend.mockResolvedValueOnce('first response');
+      await session.run('first task');
+      const agent = session.getAgent() as unknown as { setSecretsBriefing: ReturnType<typeof vi.fn> };
+      expect(agent.setSecretsBriefing).toHaveBeenCalledWith(undefined);
     });
 
     it('keeps the main agent on the configured tier — no per-turn auto-downgrade', async () => {
@@ -2421,6 +2498,17 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(mockShutdownHook).toHaveBeenCalled();
     });
 
+    it('shutdown() runs the next hooks when one throws before returning its promise', async () => {
+      const later = vi.fn().mockResolvedValue(undefined);
+      const { engine, session } = await createEngineAndSession();
+      engine.registerHooks({ onShutdown: () => { throw new Error('thrown before a promise'); } });
+      engine.registerHooks({ async onShutdown() { await later(); } });
+
+      await expect(session.shutdown()).resolves.toBeUndefined();
+
+      expect(later).toHaveBeenCalled();
+    });
+
     it('getModelTier() returns configured model', async () => {
       const { session } = await createEngineAndSession({ model: 'balanced' });
       expect(session.getModelTier()).toBe('balanced');
@@ -3177,7 +3265,7 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
     it('is provider-agnostic — under Mistral/openai the fast tier resolves to the Mistral small model, never a hardcoded Haiku', async () => {
-      // Model-agnosticity proof (rafael follow-up): the summarizer must ride the
+      // Model-agnosticity proof (owner follow-up): the summarizer must ride the
       // `fast` TIER through `resolveTierModel(getActiveProvider())`, not a
       // hardcoded Anthropic id. Force the active provider to openai + the Mistral
       // tier-map (exactly what a managed-EU / BYOK-Mistral tenant bootstraps) and
@@ -3537,6 +3625,29 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(groupOf(after, 'run-a')).toBe('run-a');
       expect(groupOf(after, 'helper-a')).toBe('run-a');
       expect((title()![2] as Ctx).runGroupId).toBe('run-a');
+    });
+
+    // A summary of another thread runs as an internal run in a session of its own. Its prompt is
+    // that thread's history, so it gets no title, and no second model call for one.
+    it('an internal run in a fresh session gets no title (control: a first user turn does)', async () => {
+      const { engine } = await createEngineAndSession();
+      stubTitleStream(engine);
+      const summary = engine.createSession();
+      const llmTitle = vi.spyOn(Object.getPrototypeOf(summary) as { _generateLLMTitle: () => Promise<void> }, '_generateLLMTitle');
+      const updates = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      mockSend.mockResolvedValueOnce('summary text');
+      // The run completes, so it reached the point where a first turn is titled.
+      expect(await summary.run('Summarize this conversation concisely.\n\nuser: the price of Bergtee', { noTools: true, internal: true })).toBe('summary text');
+      expect(llmTitle).not.toHaveBeenCalled();
+      // Nor a title derived from its prompt.
+      expect(updates.mock.calls.some(([id, u]) => id === summary.sessionId && 'title' in (u as object))).toBe(false);
+      updates.mockRestore();
+      const chat = engine.createSession();
+      mockSend.mockResolvedValueOnce('ok');
+      await chat.run('Plan the Q3 budget');
+      expect(llmTitle).toHaveBeenCalledTimes(1);
+      expect(llmTitle.mock.calls[0]?.[0]).toBe('Plan the Q3 budget');
+      llmTitle.mockRestore();
     });
 
     it('two runs are two groups, also when the second is started from inside the first', async () => {

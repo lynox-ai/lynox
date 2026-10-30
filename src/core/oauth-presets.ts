@@ -29,6 +29,65 @@
  * extension point: production callers pass nothing.
  */
 
+/**
+ * The words around a preset's customer text on the consent page, in the text's language. Each
+ * one is binding customer text like the paragraphs, so it comes from here as approved. Absent,
+ * the page keeps its English frame and lists the raw scope ids.
+ */
+export interface ConsentFrame {
+  /** The page title. */
+  readonly title: string;
+  /** The line before the list of write access. */
+  readonly scopesIntro: string;
+  /**
+   * The line right after that list, saying what a write access covers. Required: the names
+   * follow the provider's own breadth ("contacts: write access"), and only this line says
+   * what that means.
+   */
+  readonly scopesNote: string;
+  /** The button; clicking it is the confirmation. */
+  readonly button: string;
+  /** A line after the button, when there is one. */
+  readonly afterButton?: string;
+}
+
+/** A preset's customer text before a connect that asks for write access. */
+export interface ConsentNotice {
+  readonly lang: string;
+  readonly writeScopes: readonly string[];
+  readonly paragraphs: readonly string[];
+  readonly frame?: ConsentFrame;
+  /**
+   * A readable name for each of `writeScopes`, shown in the list instead of the id. Comes
+   * with `frame`: a frame in the text's language over raw ids, or names under an English
+   * frame, would mix the two (a test holds every preset to that).
+   */
+  readonly scopeNames?: Readonly<Record<string, string>>;
+}
+
+/**
+ * What is wrong with a customer text's frame, empty when nothing is: a frame without names or
+ * names without a frame, a write scope without a readable name, a name for a scope the text does
+ * not cover, two scopes under one name, an empty title, line or button. A test holds every
+ * preset to it.
+ */
+export function consentFrameProblems(notice: ConsentNotice): string[] {
+  if (!notice.frame || !notice.scopeNames) {
+    return notice.frame || notice.scopeNames ? ['frame and scopeNames come together'] : [];
+  }
+  const names = notice.scopeNames;
+  const frame = notice.frame;
+  const named = notice.writeScopes.map((s) => names[s]?.trim()).filter((n): n is string => !!n);
+  return [
+    ...notice.writeScopes.filter((s) => !names[s]?.trim()).map((s) => `no readable name for ${s}`),
+    ...Object.keys(names).filter((s) => !notice.writeScopes.includes(s)).map((s) => `a name for ${s}, which is no write scope of this text`),
+    ...(new Set(named).size === named.length ? [] : ['two write scopes share a name']),
+    ...(['title', 'scopesIntro', 'scopesNote', 'button'] as const)
+      .filter((field) => !frame[field].trim())
+      .map((field) => `the frame's ${field} is empty`),
+  ];
+}
+
 /** One value a preset needs from the profile, e.g. Shopify's shop name. */
 export interface OAuthPresetParam {
   /** Field name inside `auth.oauth.preset_params`. */
@@ -41,6 +100,27 @@ export interface OAuthPresetParam {
   readonly pattern: RegExp;
   /** Said to the user when the value is missing or refused. */
   readonly describe: string;
+  /**
+   * The provider reads the value without regard to case. Saving a profile then writes it in
+   * lower case, so a name typed as the person sees it is kept rather than refused. The
+   * derivation still refuses anything `pattern` does not match.
+   */
+  readonly caseInsensitive?: true;
+}
+
+/**
+ * `params` with each value its preset reads without regard to case in lower case. Other names and
+ * values are returned as they are; the derivation decides whether they are acceptable.
+ */
+export function normalizedPresetParams<T extends Readonly<Record<string, unknown>>>(preset: OAuthPreset, params: T): T {
+  const out: Record<string, unknown> = { ...params };
+  for (const spec of preset.params) {
+    const value = out[spec.name];
+    // ASCII only: `toLowerCase` maps some non-ASCII letters onto ASCII ones (the Kelvin sign onto
+    // `k`), which would turn a value the pattern refuses into one it accepts.
+    if (spec.caseInsensitive === true && typeof value === 'string') out[spec.name] = value.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  }
+  return out as T;
 }
 
 /**
@@ -96,6 +176,13 @@ export interface OAuthPreset {
    */
   readonly requiredScopes: readonly string[];
   /**
+   * The OpenID Connect issuer of the provider, for a preset whose token endpoint answers with an
+   * `id_token`. Set, the connect callback reads the account the person signed in with from that
+   * token (`oauth-account.ts`), and only when the token names this issuer. Absent: the account
+   * comes from somewhere else or is not known.
+   */
+  readonly oidcIssuer?: string;
+  /**
    * The scopes a profile may add, as an enumerated allowlist. Anything not named here or in
    * `requiredScopes` is refused, including a scope the provider introduces later: a profile is
    * written by the agent, so this list, not the profile, is the limit of what can be asked for.
@@ -112,11 +199,7 @@ export interface OAuthPreset {
    * else: on a page of the connect route, which sends the person on only after they confirm it
    * there (`server/http-api.ts`). Not in the answer to the model, because the model retells.
    */
-  readonly consentNotice?: {
-    readonly lang: string;
-    readonly writeScopes: readonly string[];
-    readonly paragraphs: readonly string[];
-  };
+  readonly consentNotice?: ConsentNotice;
   // The four fields below describe how a provider wants its requests shaped.
   /**
    * How the scopes are to be joined on the authorize link. Absent: a space, as OAuth 2.0 says
@@ -145,6 +228,19 @@ export interface OAuthPreset {
    * {@link ./oauth-callback-hmac.ts}.
    */
   readonly callbackVerification?: 'shopify-hmac';
+  /**
+   * The provider grants exactly what the link asks for, or less, unless the app at the provider
+   * holds more: a grant beyond the ask is then worth saying on the callback page. Absent for a
+   * provider that adds scopes of its own to every answer (an identity provider's defaults), where
+   * the comparison would say so on every connect.
+   */
+  readonly compareGrantedScope?: true;
+  /**
+   * The provider's API version the engine's own requests name, where the provider versions its
+   * API in the path. Absent: none. A provider that answers an unknown version with another one
+   * (Shopify falls forward to the oldest supported) makes this a pin, not a default.
+   */
+  readonly adminApiVersion?: string;
 }
 
 /** The scope parameter of the authorize link: the scopes, joined the way the preset says. */
@@ -200,6 +296,8 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     apiHosts: ['api.bexio.com'],
     authorizePath: '/realms/bexio/protocol/openid-connect/auth',
     tokenPath: '/realms/bexio/protocol/openid-connect/token',
+    // `issuer` of the same discovery document (read again 2026-10-20).
+    oidcIssuer: 'https://auth.bexio.com/realms/bexio',
     params: [],
     // bexio issues a refresh token only for `offline_access`; without it the access token
     // cannot be renewed. `openid` is the protocol scope of its OpenID Connect endpoint.
@@ -212,7 +310,10 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // (`presetScopeRequest`), so a profile that names none stays read-only. A write to the
     // account is asked on its own (`http_request`), and no contract grants one, because one of
     // these scopes covers creating, changing, cancelling, booking a payment, issuing and sending
-    // alike. The exception is a bulk run in one of its measured forms, which the person approves
+    // alike. That list is our reading: bexio documents each of these five scopes as "Write
+    // access to <resource>", with read access to the same resource granted along (docs.bexio.com,
+    // API Scopes, read 2026-10-21), and does not say what a write scope leaves out, deleting
+    // included. The exception is a bulk run in one of its measured forms, which the person approves
     // as a whole before it starts (`bulk-external.ts`).
     allowedScopes: [
       'email', 'profile',
@@ -239,6 +340,24 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
         'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
         'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
       ],
+      // The page around the text, approved 2026-10-21 (reviewed first), under the same
+      // rule: a changed word needs a new approval. The names follow bexio's own breadth, which
+      // documents each of these scopes as write access to its resource and does not say what
+      // that leaves out, so the line under the list says what it covers.
+      frame: {
+        title: 'Schreibrechte für bexio bestätigen',
+        scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
+        scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Das Recht ist damit breiter als das, was lynox damit tut.',
+        button: 'Zustimmen und weiter zu bexio',
+        afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
+      },
+      scopeNames: {
+        contact_edit: 'Kontakte: Schreibzugriff',
+        note_edit: 'Notizen: Schreibzugriff',
+        task_edit: 'Aufgaben: Schreibzugriff',
+        kb_offer_edit: 'Offerten: Schreibzugriff',
+        kb_invoice_edit: 'Rechnungen: Schreibzugriff',
+      },
     },
   },
   {
@@ -257,7 +376,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     tokenPath: '/admin/oauth/access_token',
     // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not
     // starting with a hyphen. Shopify itself admits upper case; the boundary does not.
-    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]*$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case' }],
+    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]*$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
     requiredScopes: [],
     // Read only. `read_all_orders` stays out: Shopify grants it only on request. Write scopes
     // come with the bulk form, not with the connection.
@@ -266,6 +385,10 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     tokenHeaderName: 'X-Shopify-Access-Token',
     tokenBodyFormat: 'form',
     callbackVerification: 'shopify-hmac',
+    compareGrantedScope: true,
+    // "Latest stable" on shopify.dev when read on 2026-10-13, supported until 2027-10-16. The
+    // bulk run's GraphQL reads name it (`shopify-graphql.ts`); moving it is a reviewed change.
+    adminApiVersion: '2026-10',
   },
 ]);
 const BACKING = new Map(REGISTER_ENTRIES.map((p) => [p.id, Object.freeze(p)] as const));
@@ -566,4 +689,35 @@ export function presetRegisterOf(entries: readonly OAuthPreset[]): PresetRegiste
     get: (id: string): OAuthPreset | undefined => map.get(id),
     ids: (): string[] => [...map.keys()].sort(),
   });
+}
+
+/**
+ * The scopes a token answer's `scope` names (comma- or space-separated there), in its order, or
+ * `undefined` when the answer names none, an empty `scope` included. The connect callback and a
+ * renewal both record this as the grant's `granted_scope`.
+ */
+export function scopesOfAnswer(scope: unknown): string[] | undefined {
+  if (typeof scope !== 'string') return undefined;
+  const named = scope.split(/[\s,]+/).filter((s) => s !== '');
+  return named.length > 0 ? named : undefined;
+}
+
+/**
+ * The scopes a connection asks for, for a built-in provider whose grants are worth comparing
+ * ({@link OAuthPreset.compareGrantedScope}): the provider's required scopes plus the profile's
+ * own, possibly none. `undefined` when there is nothing to compare a grant with: any other
+ * profile, whose provider may add scopes of its own, and a scope the provider refuses, which
+ * never made a link.
+ */
+export function askedScopes(oauth: { readonly preset_id?: string | undefined; readonly scope?: string | undefined }): string[] | undefined {
+  const preset = OAUTH_PRESETS.get(oauth.preset_id ?? '');
+  if (preset?.compareGrantedScope !== true) return undefined;
+  const requested = presetScopeRequest(preset, oauth.scope);
+  return 'scopes' in requested ? [...requested.scopes] : undefined;
+}
+
+/** What `granted` holds that `asked` does not, in the order granted, each once. */
+export function scopesBeyondAsked(granted: readonly string[], asked: readonly string[]): string[] {
+  const known = new Set(asked);
+  return [...new Set(granted.filter((s) => !known.has(s)))];
 }

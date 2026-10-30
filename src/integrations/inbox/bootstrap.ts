@@ -21,7 +21,7 @@ import {
   wrapAnthropicAsLLMCaller,
 } from './classifier/llm.js';
 import { createMistralEuLLMCaller, DEFAULT_MISTRAL_MODEL } from './classifier/llm-mistral.js';
-import type { ClassifierQueue } from './classifier/queue.js';
+import { DrainedForRestoreError, DrainedForShutdownError, type ClassifierQueue } from './classifier/queue.js';
 import { runColdStartForAccount } from './cold-start-adapter.js';
 import type { NotificationRouter } from '../../core/notification-router.js';
 import { createInboxNotifier } from './notifier.js';
@@ -82,7 +82,17 @@ export interface InboxRuntime {
    *  consumers (handleRefreshItemBody) can apply the same masking the
    *  classifier did at classify time. */
   sensitiveMode: SensitiveMode;
-  shutdown(): Promise<void>;
+  /**
+   * Drains the queue. With `deadLetterBacklog`, mails still waiting are not classified but
+   * surfaced unclassified (the migration restore, which must not wait for a backlog). With
+   * `within`, the process is about to be killed: the queue classifies until `classifyUntil` and
+   * surfaces the rest unclassified, cutting off running jobs at `cutOffAt` (see
+   * `ClassifierQueue.drainWithin`), and the counts go to stderr.
+   */
+  shutdown(options?: {
+    deadLetterBacklog?: boolean | undefined;
+    within?: { classifyUntil: number; cutOffAt: number } | undefined;
+  }): Promise<void>;
 }
 
 export interface BootstrapInboxOptions {
@@ -214,7 +224,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     // Also bridge to RunHistory so the "$X today" status-bar (which reads
     // from /api/history/cost/daily) reflects classifier spend, not just
     // interactive chat. Without this, every classifier call costs real
-    // money the user can't see — and that's the bug rafael flagged.
+    // money the user can't see — and that's the bug the owner flagged.
     if (opts.runHistory) {
       try {
         // A future refactor must NOT also route classifier calls through
@@ -382,9 +392,17 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     onOutboundReconcile,
     runColdStart,
     sensitiveMode: opts.sensitiveMode ?? 'skip',
-    shutdown: async () => {
+    shutdown: async (shutdownOpts) => {
       reminderPoller?.stop();
-      await queue.drain();
+      const within = shutdownOpts?.within;
+      if (within && shutdownOpts?.deadLetterBacklog !== true) {
+        const queued = queue.depth;
+        const { deadLetteredWaiting, cutOffRunning } = await queue.drainWithin({ ...within, reason: new DrainedForShutdownError() });
+        // Also at zero: the line is how a stop with a backlog becomes countable at all.
+        process.stderr.write(`[lynox] inbox on shutdown: ${String(queued)} mails queued, ${String(deadLetteredWaiting)} surfaced unclassified, ${String(cutOffRunning)} cut off while classifying\n`);
+        return;
+      }
+      await queue.drain(shutdownOpts?.deadLetterBacklog === true ? { deadLetterPending: new DrainedForRestoreError() } : {});
     },
   };
 }

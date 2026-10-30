@@ -28,6 +28,8 @@ import { scanToolResult } from '../../core/output-guard.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
+import { runInCallSlot } from '../../core/call-connection.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
@@ -91,6 +93,8 @@ function createMockAgent(
     // (a non-allowlisted egress host cannot be saved without a real human).
     promptUser,
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       apiStore: apiStore ?? null,
       vaultNameBindings: bindingsAsMigrated(apiStore),
       dataStore: null,
@@ -746,6 +750,17 @@ describe('api_setup tool', () => {
       expect(existsSync(filePath)).toBe(false);
     });
 
+    it('runs the erasure sweep once the person allowed the delete, and not when they declined', async () => {
+      const agent = createMockAgent(new ApiStore());
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      const sweep = vi.fn();
+      const withSweep = { ...agent, toolContext: { ...agent.toolContext, connectionErasureSweep: sweep } };
+      expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, { ...withSweep, promptUser: async () => 'Deny' })).toContain('declined');
+      expect(sweep).not.toHaveBeenCalled();
+      expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, { ...withSweep, promptUser: async () => 'Allow' })).toContain('Deleted');
+      expect(sweep).toHaveBeenCalledTimes(1);
+    });
+
     it('reports missing profile', async () => {
       // A present-but-empty store is the realistic path (in the engine the store
       // is always wired); deleting an unknown id reports "not found".
@@ -827,6 +842,28 @@ describe('api_setup tool', () => {
       expect(result).toContain('Created API profile');
       expect(store.get('shop-admin')?.auth?.oauth?.client_id_key).toBe('SHOPIFY_CLIENT_ID');
       expect(store.get('shop-admin')?.auth?.oauth?.client_secret_key).toBe('SHOPIFY_CLIENT_SECRET');
+    });
+
+    it('stores a store name typed in capitals as the lower-case store it is', async () => {
+      const store = new ApiStore();
+      const result = await save(store, shopify({ preset_params: { shop: 'Acme' } }));
+      expect(result).toContain('Created API profile');
+      expect(store.get('shop-admin')?.auth?.oauth?.preset_params).toEqual({ shop: 'acme' });
+    });
+
+    it('still refuses a vault reference as the store, though lower case would hide its name', async () => {
+      const store = new ApiStore();
+      const result = await save(store, shopify({ preset_params: { shop: 'secret:SHOP_KEY' } }));
+      expect(result).toContain('a vault reference cannot be a provider parameter');
+      expect(store.get('shop-admin')).toBeUndefined();
+    });
+
+    it('stores it in lower case on an update too', async () => {
+      const store = new ApiStore();
+      expect(await save(store, shopify())).toContain('Created API profile');
+      const result = await apiSetupTool.handler({ action: 'update', profile: shopify({ preset_params: { shop: 'ACME' } }) }, createMockAgent(store, undefined, async () => 'Allow')) as string;
+      expect(result).not.toContain('Error');
+      expect(store.get('shop-admin')?.auth?.oauth?.preset_params).toEqual({ shop: 'acme' });
     });
 
     it('control: an oauth2 profile without a built-in provider keeps names of its own', async () => {
@@ -1810,6 +1847,207 @@ describe('api_setup tool', () => {
     ): void {
       mockedExtract.mockResolvedValue({ data, inputTokens: 1000, outputTokens: 200, costUsd, ...resolved });
     }
+
+    describe('a stop of the run ends the bootstrap', () => {
+      /** Each fetch's signal, so a test can check it aborts with the call. */
+      function spyFetchSignals(respond: (url: string) => Response): { signals: Map<string, AbortSignal | undefined>; spy: ReturnType<typeof vi.spyOn> } {
+        const signals = new Map<string, AbortSignal | undefined>();
+        const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          signals.set(url, init?.signal ?? undefined);
+          return respond(url);
+        });
+        return { signals, spy };
+      }
+
+      it('hands the call signal to the extraction', async () => {
+        const fetchSpy = mockFetchOk('<html><body>Docs</body></html>');
+        stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+        try {
+          const call = new AbortController();
+          await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ));
+          expect(mockedExtract.mock.calls[0]?.[0]?.signal).toBe(call.signal);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      });
+
+      it('stopped during the extraction: throws the stop and books the bound on the session cap', async () => {
+        const fetchSpy = mockFetchOk('<html><body>Docs</body></html>');
+        const call = new AbortController();
+        mockedExtract.mockImplementation(async () => {
+          call.abort();
+          throw new llmHelper.ExtractionStoppedError({ upperBoundUsd: 0.25, estimateUsd: 0.05, fromSnapshot: false });
+        });
+        try {
+          const agent = createMockAgent(new ApiStore());
+          agent.sessionCounters.costUSD = 0.5;
+          const onAfterRun = vi.fn();
+          (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
+            getHooks: () => [{ onAfterRun }], getContext: () => undefined,
+          };
+          await expect(runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            agent,
+          ))).rejects.toMatchObject({ name: 'AbortError' });
+          expect(agent.sessionCounters.costUSD).toBeCloseTo(0.75, 10);
+          // The bound is for the session cap only: no tenant debit.
+          expect(onAfterRun).not.toHaveBeenCalled();
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      });
+
+      it('the docs fetch ends with the call', async () => {
+        const call = new AbortController();
+        const { signals, spy } = spyFetchSignals(() => new Response('<html><body>Docs</body></html>', { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } }));
+        stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+        try {
+          await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ));
+          const signal = signals.get('https://docs.example.com/api');
+          expect(signal?.aborted).toBe(false);
+          call.abort();
+          expect(signal?.aborted).toBe(true);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('a linked section ends with the call', async () => {
+        const call = new AbortController();
+        const { signals, spy } = spyFetchSignals(url => url === 'https://docs.example.com/api'
+          ? new Response('<html><body><a href="/v3/rate-limits">Rate limits</a></body></html>', { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } })
+          : new Response('RATE_LIMIT_BODY', { status: 200, statusText: 'OK' }));
+        stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+        try {
+          await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ));
+          const signal = signals.get('https://docs.example.com/v3/rate-limits');
+          expect(signal?.aborted).toBe(false);
+          call.abort();
+          expect(signal?.aborted).toBe(true);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('the OpenAPI fetch ends with the call', async () => {
+        const call = new AbortController();
+        const spec = { openapi: '3.0.1', info: { title: 'Fake API' }, servers: [{ url: 'https://api.fake.com/v1' }], paths: { '/users': { get: { summary: 'List users' } } } };
+        const { signals, spy } = spyFetchSignals(() => new Response(JSON.stringify(spec), { status: 200, statusText: 'OK' }));
+        try {
+          const result = await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' },
+            createMockAgent(new ApiStore()),
+          ));
+          expect(result).toContain('Bootstrapped draft profile');
+          const signal = signals.get('https://api.fake.com/openapi.json');
+          expect(signal?.aborted).toBe(false);
+          call.abort();
+          expect(signal?.aborted).toBe(true);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('a docs fetch stopped with the run reports the stop, not a failed fetch', async () => {
+        const call = new AbortController();
+        const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          call.abort();
+          throw new DOMException('This operation was aborted', 'AbortError');
+        });
+        try {
+          await expect(runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ))).rejects.toMatchObject({ name: 'AbortError', message: 'api_setup bootstrap was stopped before its draft was built' });
+          expect(mockedExtract).not.toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('a stop during a linked section fetches and records no further section', async () => {
+        const call = new AbortController();
+        const fetched: string[] = [];
+        const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          fetched.push(url);
+          if (url === 'https://docs.example.com/api') {
+            return new Response('<html><body><a href="/v3/rate-limits">Rate limits</a><a href="/v3/pricing">Pricing details</a></body></html>', { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } });
+          }
+          call.abort();
+          throw new DOMException('This operation was aborted', 'AbortError');
+        });
+        // The real helper refuses a stopped call before sending it.
+        mockedExtract.mockRejectedValue(new llmHelper.ExtractionStoppedError(undefined));
+        try {
+          await expect(runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ))).rejects.toMatchObject({ name: 'AbortError' });
+          // The landing page and the one section that was in flight; the second never starts.
+          expect(fetched).toHaveLength(2);
+          expect(fetched[0]).toBe('https://docs.example.com/api');
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('the docs fetch hitting its own time limit is a failed fetch while the call runs on', async () => {
+        const call = new AbortController();
+        // What the 15 s timer produces: an AbortError while the call signal is live.
+        const spy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new DOMException('This operation was aborted', 'AbortError'));
+        try {
+          const result = await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ));
+          expect(result).toContain('Error: docs fetch failed for');
+          expect(mockedExtract).not.toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('the OpenAPI fetch hitting its own time limit is an unreadable spec while the call runs on', async () => {
+        const call = new AbortController();
+        const spy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new DOMException('This operation was aborted', 'AbortError'));
+        try {
+          const result = await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' },
+            createMockAgent(new ApiStore()),
+          ));
+          expect(result).toContain('Error: could not parse OpenAPI spec from');
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('an OpenAPI fetch stopped with the run reports the stop, not an unreadable spec', async () => {
+        const call = new AbortController();
+        const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          call.abort();
+          throw new DOMException('This operation was aborted', 'AbortError');
+        });
+        try {
+          await expect(runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' },
+            createMockAgent(new ApiStore()),
+          ))).rejects.toMatchObject({ name: 'AbortError', message: 'api_setup bootstrap was stopped before its draft was built' });
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
 
     it('reports a network refusal on the docs-page path without the host it names', async () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
@@ -3213,10 +3451,16 @@ describe('api_setup tool', () => {
       // Simulate a session that has already spent its HTTP budget.
       (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const rateSpy = vi.spyOn(store, 'checkRateLimit');
 
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+      // Refused before the token host's rate bucket is consumed (row 1005); the call below the
+      // limit in 'reserves fetch_token's POST before it goes out' shows the bucket is consumed there.
+      expect(rateSpy).not.toHaveBeenCalled();
+      rateSpy.mockRestore();
 
-      expect(result).toMatch(/session HTTP request limit/i);
+      // ux U-010 for fetch_token, written out: the profile is stored, so the way on is to continue it.
+      expect(result).toBe('Blocked: this conversation or run has reached its limit of 100 HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.');
       expect(fetchSpy).not.toHaveBeenCalled(); // blocked BEFORE the client_secret POST
     });
 
@@ -3614,6 +3858,29 @@ describe('api_setup tool', () => {
       expect(result).toMatch(/Token exchange OK/i);
       expect(fetchSpy).toHaveBeenCalled();
       fetchSpy.mockRestore();
+    });
+
+    // Row 1005: reserved before the POST, as http_request does, so an exchange that fails after it
+    // went out still counts against the budget.
+    it('reserves fetch_token\'s POST before it goes out, so a failed exchange stays charged', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({ OAUTH_ID: 'id', OAUTH_SECRET: 'sec' }));
+      store.register({
+        id: 'allowlisted_oauth', name: 'Allowlisted OAuth', base_url: 'https://api.openai.com/v1', description: 'Allowlisted OAuth profile.',
+        auth: { type: 'oauth2', vault_keys: ['OAUTH_ID', 'OAUTH_SECRET'], oauth: { token_url: 'https://api.anthropic.com/oauth/token', grant_type: 'client_credentials', client_id_key: 'OAUTH_ID', client_secret_key: 'OAUTH_SECRET', body_format: 'json' } },
+        endpoints: [{ method: 'POST', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('socket hang up'));
+      const rateSpy = vi.spyOn(store, 'checkRateLimit');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'allowlisted_oauth' }, agent);
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(result).toContain('failed');
+      expect((agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests).toBe(1);
+      expect(rateSpy).toHaveBeenCalledTimes(1);
+      fetchSpy.mockRestore();
+      rateSpy.mockRestore();
     });
 
     it('does the token exchange and stores the access_token in the vault', async () => {

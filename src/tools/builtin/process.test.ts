@@ -8,12 +8,17 @@ import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
 import type { IAgent, ProcessRecord, LynoxUserConfig, PlannedPipeline } from '../../types/index.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
+import { WorkflowStore } from '../../core/workflow-store.js';
+import { runInCallSlot } from '../../core/call-connection.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 // === Mock process-capture (the Haiku extraction step) ===
 
 const captureProcessMock = vi.fn();
-vi.mock('../../core/process-capture.js', () => ({
+vi.mock('../../core/process-capture.js', async (importOriginal) => ({
   captureProcess: (...args: unknown[]) => captureProcessMock(...args),
+  processCaptureStopped: (await importOriginal<typeof import('../../core/process-capture.js')>()).processCaptureStopped,
 }));
 
 const SAMPLE_RECORD: ProcessRecord = {
@@ -66,6 +71,8 @@ function makeAgent(
 ): IAgent {
   const toolContext = createToolContext(userConfig);
   toolContext.runHistory = runHistory as never;
+  // A mandate's writes leave rows in the actor trail and are refused without one.
+  toolContext.auditLog = testAuditLog().log;
   return {
     name: 'test',
     model: 'test-model',
@@ -74,6 +81,7 @@ function makeAgent(
     onStream: null,
     currentRunId: 'run-abc',
     toolContext,
+    principal: OWNER_PRINCIPAL,
     ...overrides,
   } as unknown as IAgent;
 }
@@ -111,6 +119,12 @@ describe('save_workflow — session source', () => {
     expect(pipeline!.steps[1]!.input_from).toEqual(['step-0']);
     // Persisted to pipeline_runs so the Saved Workflows library finds it.
     expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves under the principal of the turn (engine.db v45 authorship)', async () => {
+    const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+    await saveWorkflowTool.handler({ name: 'Test' }, makeAgent({ currentThreadId: 'thread-1', principal: eva }, mockHistory));
+    expect(mockHistory.insertPlannedPipeline.mock.calls[0]?.[1]).toBe(eva);
   });
 
   it('does NOT confirm the saved workflow — a tool call is not a person', async () => {
@@ -288,6 +302,63 @@ describe('save_workflow — retryable extraction failure', () => {
   });
 });
 
+describe('save_workflow — a stop of the run saves nothing', () => {
+  let mockHistory: ReturnType<typeof makeMockRunHistory>;
+
+  beforeEach(() => {
+    _resetPipelineStore();
+    mockHistory = makeMockRunHistory();
+    captureProcessMock.mockReset();
+  });
+
+  function expectNothingSaved(): void {
+    expect(mockHistory.insertPlannedPipeline).not.toHaveBeenCalled();
+    expect(mockHistory.insertProcess).not.toHaveBeenCalled();
+  }
+
+  it('hands the signal of the call to the extraction', async () => {
+    captureProcessMock.mockResolvedValue(structuredClone(SAMPLE_RECORD));
+    const call = new AbortController();
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    await runInCallSlot({ abort: call }, () => saveWorkflowTool.handler({ name: 'Report' }, agent));
+    expect((captureProcessMock.mock.calls[0]?.[3] as { signal?: AbortSignal }).signal).toBe(call.signal);
+  });
+
+  it('stopped during the extraction: throws AbortError instead of asking for a retry, and saves nothing', async () => {
+    const call = new AbortController();
+    captureProcessMock.mockImplementation(async () => {
+      call.abort();
+      throw new DOMException('This operation was aborted', 'AbortError');
+    });
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    await expect(runInCallSlot({ abort: call }, () => saveWorkflowTool.handler({ name: 'Report' }, agent)))
+      .rejects.toMatchObject({ name: 'AbortError', message: 'save_workflow was stopped before the workflow was saved' });
+    expectNothingSaved();
+  });
+
+  it('stopped after the reply arrived but before the writes: saves nothing', async () => {
+    const call = new AbortController();
+    captureProcessMock.mockImplementation(async () => {
+      call.abort();
+      return structuredClone(SAMPLE_RECORD);
+    });
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    await expect(runInCallSlot({ abort: call }, () => saveWorkflowTool.handler({ name: 'Report' }, agent)))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expectNothingSaved();
+  });
+
+  it('not stopped: the same call in a slot saves as before', async () => {
+    captureProcessMock.mockResolvedValue(structuredClone(SAMPLE_RECORD));
+    const call = new AbortController();
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await runInCallSlot({ abort: call }, () => saveWorkflowTool.handler({ name: 'Report' }, agent));
+    expect((JSON.parse(result) as { source: string }).source).toBe('session');
+    expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
+    expect(mockHistory.insertProcess).toHaveBeenCalledTimes(1);
+  });
+});
+
 // =====================================================================
 // Source B — promote an existing plan_task workflow (workflow_id given)
 // =====================================================================
@@ -342,6 +413,37 @@ describe('save_workflow — workflow_id source', () => {
     // unconfirmed" and the assertion passes for the wrong reason.
     expect(getPipeline(savedId)).toBeDefined();
     expect(getPipeline(savedId)?.confirmedAt).toBeUndefined();
+  });
+
+  it('saves and promotes under the principal of the turn (engine.db v45 authorship)', async () => {
+    const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+    storePipeline('plan-789', makePlan());
+    await saveWorkflowTool.handler({ name: 'Saved Ad Report', workflow_id: 'plan-789' }, makeAgent({ principal: eva }, mockHistory));
+    expect(mockHistory.insertPlannedPipeline.mock.calls[0]?.[1]).toBe(eva);
+    // …and names the source, so the copy carries the source's mandate mark.
+    expect(mockHistory.insertPlannedPipeline.mock.calls[0]?.[2]).toBe('plan-789');
+  });
+
+  it('a copy the owner promotes from a mandate\'s plan answers for that mandate (engine.db v45)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-promote-mark-'));
+    const history = new RunHistory(join(dir, 'h.db'));
+    const engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
+    try {
+      const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+      history.insertPlannedPipeline(makePlan(), eva);
+      engine.getDb().prepare("UPDATE workflows SET created_at = '2026-03-21 12:00:00' WHERE id = 'plan-789'").run();
+      storePipeline('plan-789', makePlan());
+      const result = await saveWorkflowTool.handler({ name: 'Saved Ad Report', workflow_id: 'plan-789' }, makeAgent({}, history));
+      const { workflow_id: copyId } = JSON.parse(result) as { workflow_id: string };
+      expect(new WorkflowStore(engine).authorship(copyId)).toMatchObject({
+        createdBy: null, mandateEditor: 'mandate:eva@firm.example', mandateEditorId: 'grant-eva', mandateEditedAt: '2026-03-21 12:00:00',
+      });
+    } finally {
+      try { engine.close(); } catch { /* already closed */ }
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('drops a stamp the SOURCE carries, instead of spreading it into the copy', async () => {

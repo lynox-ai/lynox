@@ -9,7 +9,7 @@ import type { ProvenanceKind } from '../types/index.js';
  * derived provenance tier, and the untrusted signal. A retrieval-only shadow log can
  * never see a tier that is never WRITTEN, so §10.3 ("does tool_verified ever fire?") is
  * unanswerable without this, and the Wave-1.3 acceptance ("`external_unverified` did not
- * spike on rafael") needs the write distribution over time, not just a point-in-time
+ * spike on our own instance") needs the write distribution over time, not just a point-in-time
  * `GROUP BY` (which the persisted `source_channel`/`source_type` columns also allow).
  *
  * Mirrors `retrieval-shadow-log.ts` exactly: default OFF (gated on the same

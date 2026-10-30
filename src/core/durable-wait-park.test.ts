@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -10,7 +11,7 @@ import { TaskManager } from './task-manager.js';
 import { maskSecretsAndPatterns } from './secret-store.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
-import type { NotificationRouter } from './notification-router.js';
+import type { DeliverySummary, NotificationRouter } from './notification-router.js';
 
 /**
  * THE PARK, driven through the real wiring (PRD-DURABLE-WAIT-STATE §0, wave 2).
@@ -152,6 +153,10 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       getUserConfig: () => (opts?.maxToolResultChars !== undefined ? { max_tool_result_chars: opts.maxToolResultChars } : {}),
       workerRunModelOverride: () => ({}),
       escalateToUser: () => null,
+      // A task's question hands its delivery here; no hooks on this engine.
+      escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
 
     const router = {
@@ -306,7 +311,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
     expect(row?.trigger_id).toBe('trg-1');
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -326,7 +331,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(trigger?.status).toBe('waiting');
     expect(trigger?.waiting_until).toBe(DOCTORED);
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -340,7 +345,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const far = new Date(Date.now() + 48 * 3600_000).toISOString();
     expect(h.manager.getExpiredWaitingTriggers(far).map(t => t.id)).toEqual(['trg-1']);
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -359,7 +364,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // and the run is still genuinely waiting — not parked is not the same as
     // not waiting, which is the whole point of the fallback.
     expect(h.prompts.getPending('thread-park')?.status).toBe('pending');
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -370,7 +375,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     await h.parked;
     expect(h.history.getTrigger('trg-1')?.status).toBe('waiting');
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
     await waitUntil('the run to un-park', () => h.history.getTrigger('trg-1')?.status !== 'waiting');
 
@@ -387,7 +392,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(h.manager.endWait('trg-1', 'open')).toBe(false);   // the sweep and the run both fire
     expect(h.history.getTrigger('trg-1')?.status).toBe('failed');
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -407,7 +412,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(after?.status).toBe('completed');
     expect(after?.waiting_until).toBeUndefined();
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -427,7 +432,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(after?.status).toBe('completed');
     expect(after?.waiting_until).toBeUndefined();
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -449,7 +454,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
     expect(h.history.getTrigger('trg-1')?.waiting_until).toBe(parkedUntil);
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -476,7 +481,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
     expect(h.dispatches()).toBe(1);
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -495,7 +500,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // The run still gets recorded — only the STATUS is withheld.
     expect(h.history.getTrigger('trg-2')?.last_run_result).toBe('done');
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -513,7 +518,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(h.history.getTrigger('trg-4')?.status).toBe('waiting');
     expect(h.history.getTrigger('trg-4')?.last_run_status).toBe('failed');
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -525,7 +530,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
     expect(h.history.getTrigger('trg-1')?.status).toBe('waiting');
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -540,7 +545,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
     expect(h.history.getTrigger('trg-3')?.status).toBe('completed');
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -582,7 +587,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // The count is the only signal that a settle DID something; nothing reads it
     // in production, so without this it could return a constant.
     expect(h.prompts.expirePendingForTrigger('trg-1')).toBe(0); // already settled
-    expect(h.prompts.answerUser(promptId, 'too late')).toBe(false);
+    expect(h.prompts.answerUser(promptId, 'too late', OWNER_PRINCIPAL)).toBe(false);
 
     await h.run;
   });
@@ -656,7 +661,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     lost.mockRestore();
     recorded.mockRestore();
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -680,7 +685,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     stderr.mockRestore();
     expect(wrote.some(line => line.includes('wait sweep failed'))).toBe(true);
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -720,7 +725,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(h.history.getTrigger('one-shot')?.next_run_at).toBeUndefined();
     expect(h.manager.getDueTriggers().map(t => t.id)).not.toContain('one-shot');
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -733,7 +738,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(h.manager.listTriggers({ status: 'waiting' }).map(t => t.id)).toEqual(['trg-1']);
     expect(h.manager.listTriggers({ status: 'open' }).map(t => t.id)).not.toContain('trg-1');
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
   });
 
@@ -761,7 +766,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     });
     h.history.updateTrigger(id, { status: 'waiting', waitingUntil: '2099-01-01T00:00:00.000Z' });
     const promptId = h.prompts.insertAskUser(thread, q, undefined, undefined, undefined, undefined, id);
-    expect(h.prompts.answerUser(promptId, a), 'fixture guard: the answer must land').toBe(true);
+    expect(h.prompts.answerUser(promptId, a, OWNER_PRINCIPAL), 'fixture guard: the answer must land').toBe(true);
     return promptId;
   }
 
@@ -789,7 +794,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     await h.parked;
     const recorded = vi.spyOn(h.manager, 'recordTaskRun');
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await waitUntil('the run to finish', () => recorded.mock.calls.length > 0);
 
     expect(recorded.mock.calls[0]?.[2]).toBe('success');
@@ -836,7 +841,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(parkedAfter?.waiting_until).toBeTruthy();
 
     // ── the restart: a new loop over the same stores, and the answer arrives
-    expect(h.prompts.answerUser(promptId, 'Acme'),
+    expect(h.prompts.answerUser(promptId, 'Acme', OWNER_PRINCIPAL),
       'an expired row cannot be answered — this is false if the shutdown drained it').toBe(true);
     const next = new WorkerLoop(h.engine, h.router, 60_000);
     await next.tick();
@@ -924,7 +929,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     await h.parked;
     const promptId = h.promptIdOf()!;
 
-    expect(h.prompts.answerUser(promptId, 'Acme')).toBe(true);
+    expect(h.prompts.answerUser(promptId, 'Acme', OWNER_PRINCIPAL)).toBe(true);
     h.loop.stop();
     await waitUntil('the run to unwind', () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
 
@@ -1002,7 +1007,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // ⚠ And the first process really has to be GONE, not just stopped: its run holds the
     // trigger's lease until `executeTask`'s `finally`, so without waiting for it the
     // second call is refused by the LEASE and the test would pass against any guard.
-    expect(h.prompts.answerUser(promptId, 'Acme')).toBe(true);
+    expect(h.prompts.answerUser(promptId, 'Acme', OWNER_PRINCIPAL)).toBe(true);
     expect(h.prompts.releaseTrigger(promptId)).toBe(true);
     h.loop.stop();
     await waitUntil('the first run to release its lease', () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
@@ -1143,7 +1148,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     await h.parked;
     const q1 = h.promptIdOf()!;
 
-    h.prompts.answerUser(q1, 'Acme');
+    h.prompts.answerUser(q1, 'Acme', OWNER_PRINCIPAL);
     await waitUntil('the run to consume the answer', () => h.prompts.getById(q1)?.trigger_id === null);
 
     expect(h.prompts.getById(q1)?.status).toBe('answered');   // still answered
@@ -1308,7 +1313,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     await h.parked;
     const before = h.history.getTrigger('trg-1')?.next_run_at;
 
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme', OWNER_PRINCIPAL);
     await h.run;
     await waitUntil('the run to record its result', () => h.history.getTrigger('trg-1')?.last_run_at !== undefined);
 

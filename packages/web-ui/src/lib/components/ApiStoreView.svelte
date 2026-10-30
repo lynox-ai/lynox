@@ -1,15 +1,28 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
-	import { t, tf } from '../i18n.svelte.js';
+	import { getLocale, t, tf } from '../i18n.svelte.js';
 	import { apiDeleteNotice } from '../utils/api-delete-notice.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
+	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
+	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
+	import { connectHref } from '../oauth-connect-path.js';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
-	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; }
+	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown }; }
+
+	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
+	function connectionText(line: ConnectionLine): string {
+		const who = line.by.kind === 'you' ? t('apis.connected_by_you')
+			: line.by.kind === 'owner' ? t('apis.connected_by_owner')
+			: tf('apis.connected_by', { who: line.by.kind === 'helper' ? line.by.address : line.by.tag });
+		const account = line.withheld ? t('apis.account_withheld')
+			: line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
+		return `${who} · ${account}`;
+	}
 
 	// A profile on a built-in provider gets its app credentials through its own form, not the chat.
 	function onBuiltInProvider(p: ApiProfile): boolean {
@@ -33,6 +46,25 @@
 	let error = $state('');
 	// What the last delete left in the vault, one sentence per kind (see `apiDeleteNotice`).
 	let left = $state<string[]>([]);
+	// The pending erasures a provider's revocation started, by profile id. Owner-only: a mandate's
+	// page gets a refusal and shows no notice; so does any other failure.
+	let notices = $state<Map<string, ProviderNotice>>(new Map());
+	// The time the notices are read against, moved on each minute: a hold or a deadline that passes
+	// while the page is open takes the way out and the dates away without a reload.
+	let now = $state(new Date());
+	$effect(() => {
+		const timer = setInterval(() => { now = new Date(); }, 60_000);
+		return () => clearInterval(timer);
+	});
+
+	async function loadNotices() {
+		try {
+			const res = await fetch(`${getApiBase()}/connections/records`);
+			notices = res.ok ? noticesByProfile(await res.json()) : new Map();
+		} catch {
+			notices = new Map();
+		}
+	}
 
 	async function loadProfiles() {
 		loading = true;
@@ -89,7 +121,7 @@
 		void goto('/app');
 	}
 
-	$effect(() => { void loadProfiles(); /* catches and sets its error */ });
+	$effect(() => { void loadProfiles(); /* catches and sets its error */ void loadNotices(); });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
@@ -134,6 +166,7 @@
 								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
+							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
 							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
 						</button>
 						<button onclick={() => manageInChat(profile)}
@@ -149,6 +182,44 @@
 							{t('apis.delete')}
 						</button>
 					</div>
+					{#if revocationView(profile.oauth_grant, notices.get(profile.id), now)}
+						{@const view = revocationView(profile.oauth_grant, notices.get(profile.id), now)!}
+						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-revoked">
+							{#if view.kind === 'revoked' || view.kind === 'pending'}
+								{@const since = view.kind === 'revoked' ? view.revokedAt : view.notice.revokedAt}
+								{#if since}<p>{tf('apis.revoked_on', { date: localDay(since, getLocale()) })}</p>{/if}
+							{/if}
+							<!-- First the dates and the way out with its button; the long text below, closed. -->
+							{#if view.notice}
+								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
+								{#if view.kind === 'revoked' && view.avertable}
+									<p data-testid="api-erasure-avert">{t('apis.erasure_notice_avert')}</p>
+								{:else if view.kind === 'reconnected' && view.avertable}
+									<p data-testid="api-erasure-avert">{tf('apis.erasure_reconnected_avert', { who: view.who })}</p>
+								{:else if view.kind === 'connectedAgain'}
+									<p data-testid="api-erasure-avert">{t('apis.erasure_connected_again_avert')}</p>
+								{/if}
+							{/if}
+							{#if view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
+								<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
+								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
+									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+							{/if}
+							{#if view.notice && view.kind !== 'pending'}
+								{@const dates = { revoked: localDay(view.notice.revokedAt, getLocale()), earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) }}
+								<details data-testid="api-erasure-details">
+									<summary class="cursor-pointer text-text-subtle hover:text-text">{t('apis.erasure_details')}</summary>
+									{#if view.kind === 'revoked'}
+										<p class="mt-2" data-testid="api-erasure-notice">{tf('apis.erasure_notice', dates)} {t('apis.erasure_notice_tail')}</p>
+									{:else if view.kind === 'reconnected'}
+										<p class="mt-2" data-testid="api-erasure-reconnected">{tf('apis.erasure_reconnected_notice', { ...dates, who: view.who })}</p>
+									{:else if view.kind === 'connectedAgain'}
+										<p class="mt-2" data-testid="api-erasure-connected-again">{tf('apis.erasure_connected_again_notice', dates)}</p>
+									{/if}
+								</details>
+							{/if}
+						</div>
+					{/if}
 					{#if onBuiltInProvider(profile)}
 						<div class="border-t border-border px-4 py-3">
 							<PresetClientForm profileId={profile.id} />

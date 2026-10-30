@@ -1,4 +1,4 @@
-// Mail body reflow — the 2026-08-14 dogfood symptom: a mail authored by the
+// Mail body reflow — a symptom seen in our own use on 2026-08-14: a mail authored by the
 // agent rendered in Apple Mail with breaks mid-sentence/mid-word. Root cause
 // (diagnosed on the wire path, not guessed): lynox sends text/plain with
 // whatever line breaks the model emitted, and LLM output is typically

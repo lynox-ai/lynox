@@ -45,13 +45,25 @@ const ROTATED = /^(.+\.jsonl)\.1$/;
 /** `atomic-write.ts`: `${filePath}.${pid}.${uuid8}.tmp`, left behind by a crash between write and rename. */
 const ATOMIC_TEMP = /^(.+)\.\d+\.[0-9a-f]{8}\.tmp$/;
 /**
+ * `migration-export.ts` / `migration-import.ts`: `<db>.migration-tmp`, the copy a migration stages
+ * beside a database it moves, left behind by a crash. Both write and remove it within one
+ * synchronous call. The server constructs them; so does `scripts/test-migration-e2e.ts`, whose
+ * export in its own process may lose its copy to an erasure running at the same time (it then
+ * fails, and leaves nothing). The copy is of a store the erasure empties, so it goes as an atomic
+ * temp of such a store does. A writer across an await would need this decision taken again.
+ */
+const MIGRATION_TEMP = /^(.+)\.migration-tmp$/;
+/**
  * Residue the engine itself writes beside a store, anchored to the exact names its writers
- * produce: the recovery copies of `engine-db.ts` / `run-history.ts` and the rotation backup
- * of `secret-vault.ts`. Anchored on purpose — an unanchored pattern would match a user's
- * own `thesis.bak-2024` in a broad data dir.
+ * produce: the recovery copies of `engine-db.ts` / `run-history.ts` (also of the staged copy a
+ * migration restore re-gates, and of any of the four databases a restore moves aside because
+ * SQLite cannot open it, `migration-import.ts`) and the rotation backup of
+ * `secret-vault.ts`. Anchored on purpose — an unanchored pattern would match a user's own
+ * `thesis.bak-2024` in a broad data dir.
  */
 const ENGINE_RESIDUE = [
-  /^(engine|history)\.db\.corrupt-\d+$/,
+  /^(engine|history|datastore|agent-memory)\.db\.corrupt-\d+$/,
+  /^engine\.db\.migration-tmp\.corrupt-\d+$/,
   /^vault\.db\.rotate-bak$/,
 ];
 /** Written by operating systems and tools into any directory they touch; no user content. */
@@ -105,17 +117,28 @@ const BY_NAME = new Map(DATA_DIR_INVENTORY.map(e => [e.name, e]));
 
 const isResidue = (name: string): boolean => ENGINE_RESIDUE.some(re => re.test(name));
 
+/** The database whose migration copy `name` is ({@link MIGRATION_TEMP}), or null. */
+const migrationTempOf = (name: string): string | null => {
+  const m = MIGRATION_TEMP.exec(name);
+  const db = m === null ? undefined : BY_NAME.get(m[1]!);
+  return db !== undefined && db.kind === 'sqlite' && db.migrate ? db.name : null;
+};
+
 export function classifyEntry(name: string, opts: { readonly externalWorkspace?: boolean } = {}): EntryClass {
   if (name === WORKSPACE && opts.externalWorkspace === true) return { kind: 'leftover' };
   const entry = BY_NAME.get(name);
   if (entry) return { kind: 'declared', entry };
   if (OS_LITTER.has(name)) return { kind: 'litter' };
   if (isResidue(name)) return { kind: 'residue' };
+  const staged = migrationTempOf(name);
+  if (staged !== null) return { kind: 'temp', of: staged };
   const side = SIDECAR.exec(name);
   if (side) {
     const base = side[1]!;
     if (BY_NAME.get(base)?.kind === 'sqlite') return { kind: 'sidecar', of: base };
     if (isResidue(base)) return { kind: 'residue' };
+    const stagedBase = migrationTempOf(base);
+    if (stagedBase !== null) return { kind: 'temp', of: stagedBase };
   }
   const rotated = ROTATED.exec(name);
   if (rotated && BY_NAME.get(rotated[1]!)?.kind === 'file') return { kind: 'sidecar', of: rotated[1]! };

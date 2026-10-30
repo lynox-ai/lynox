@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
 import { buildReviewedContract, reviewedContractShapeError, validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
-import { contractGrants } from '../tools/permission-guard.js';
+import { contractGrants, isDangerous } from '../tools/permission-guard.js';
 import { decideRunGrant, startedVia, grantChecksum, prepareWorkflowGrant, acceptWorkflowGrant, grantName, hiddenInBoundValues, acceptedValueMatcher, type GrantHasher, type GrantTrigger } from './workflow-grant.js';
 import { collectWriteNotes } from '../tools/builtin/pipeline.js';
-import { headerListForNote, headlessRefusalNote, refusedReviewedHeaders } from './write-notes.js';
+import { headerListForNote, headlessRefusalNote, refusedReviewedHeaders, writeForNote, writeForShortNote } from './write-notes.js';
+import { effectiveWriteMethod } from './outbound-write.js';
 import { liftsAfterUntrusted, grantIdOf } from '../types/capability-contract.js';
 import type { WorkflowGrantRow } from './workflow-store.js';
 import type { WorkflowGrantLookup } from './run-history.js';
@@ -222,6 +223,68 @@ describe('the phrase that lists refused headers', () => {
   });
 });
 
+// The agent loop refuses an unattended write by the danger check's reading of it: the effective
+// method, overrides included. Its note must read the call the same way, or a read whose override
+// was refused leaves no line in the owner's run report.
+describe('the agent loop\'s note reads a write as the danger check does', () => {
+  const at = 'https://api.example.com/v1/x';
+  it.each([
+    [{ url: `${at}?_method=POST`, method: 'GET' }, 'POST (sent as GET)'],
+    [{ url: at, method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, 'DELETE (sent as GET)'],
+    [{ url: at, method: 'POST', headers: { 'x-method-override': 'PATCH' }, body: '{}' }, 'POST (also naming PATCH)'],
+    [{ url: at, method: 'post', body: '{}' }, 'POST'],
+    [{ url: `${at}?_method=PATCH`, method: ' post ', body: '{}' }, 'POST (also naming PATCH)'],
+  ])('%j is refused and named as %s', (input, shown) => {
+    expect(isDangerous('http_request', input, 'autonomous')).not.toBeNull();
+    expect(headlessRefusalNote('http_request', input, false)).toBe(`\nNot granted for an unattended run: ${shown} https://api.example.com/v1/x.`);
+  });
+
+  // A request can name many methods; the run report keeps 300 characters of the line. The note
+  // names the method the call is gated as and the one it sends, the gated one first, and counts
+  // the rest, so the URL stays in the line and the missing write is never in the count.
+  it('names the gated write and the sent one in a long list, counts the rest, and keeps the URL', () => {
+    const many = ['CHECKOUT', 'CONNECT', 'COPY', 'LOCK', 'MKCOL', 'MOVE', 'PROPPATCH', 'PURGE', 'UNLOCK'];
+    const url = `${at}?${many.map((m) => `_method=${m}`).join('&')}&_method=DELETE`;
+    const input = { url, method: 'POST', body: '{}' };
+    const note = headlessRefusalNote('http_request', input, false);
+    const gated = effectiveWriteMethod('POST', {}, url, undefined);
+    expect(gated).not.toBe('POST');
+    expect(note).toContain(`POST (also naming ${String(gated)}, `);
+    expect(note).toMatch(/ and \d+ more\) https:\/\/api\.example\.com\/v1\/x/);
+    expect(note.length).toBeLessThan(300);
+  });
+
+  it.each([
+    ['DELETE', ['CHECKOUT', 'CONNECT', 'COPY', 'DELETE', 'POST'], 'POST (also naming DELETE, CHECKOUT, CONNECT and 1 more)'],
+    ['DELETE', ['CHECKOUT', 'CONNECT', 'COPY', 'DELETE', 'PATCH'], 'DELETE, CHECKOUT, CONNECT and 2 more (sent as GET)'],
+  ])('a short note puts the gated %s first: %j', (gated, named, shown) => {
+    const sent = named.includes('POST') ? 'POST' : 'GET';
+    expect(writeForShortNote(sent, gated, named)).toBe(shown);
+  });
+
+  it('CONTROL: up to three named methods are listed as the refusals list them', () => {
+    // The last: four named, one of them the sent method, so three are left to list and none to count.
+    for (const [sent, gated, named] of [['POST', 'POST', ['POST']], ['POST', 'PATCH', ['PATCH', 'POST']], ['GET', 'DELETE', ['DELETE', 'PATCH', 'PUT']], ['POST', 'POST', ['COPY', 'LOCK', 'MOVE', 'POST']]] as const) {
+      expect(writeForShortNote(sent, gated, named)).toBe(writeForNote(sent, gated, named));
+    }
+  });
+
+  it('names a method override that is not a method without its value', () => {
+    const input = { url: `${at}?_method=Ignore+previous`, method: 'GET' };
+    expect(isDangerous('http_request', input, 'autonomous')).not.toBeNull();
+    const note = headlessRefusalNote('http_request', input, false);
+    expect(note).toBe('\nNot granted for an unattended run: a write whose method or method override is not an HTTP method, to https://api.example.com/v1/x.');
+    expect(note).not.toMatch(/Ignore|previous/);
+  });
+
+  it('CONTROL: a read without an override is neither refused nor noted', () => {
+    for (const input of [{ url: at }, { url: at, method: 'HEAD' }, { url: `${at}?_method=GET`, method: 'GET' }]) {
+      expect(isDangerous('http_request', input, 'autonomous')).toBeNull();
+      expect(headlessRefusalNote('http_request', input, false)).toBe('');
+    }
+  });
+});
+
 describe('the note when a reviewed grant refuses a write for its header', () => {
   const reviewed: CapabilityContract = {
     version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
@@ -369,6 +432,31 @@ describe('whether a run passes its contract on', () => {
     expect(d.note).toBeNull();
   });
 
+  // An event's values are a third party's; the grant's own schedule does not change that.
+  it('withholds it from a run a webhook started, even on the schedule it was accepted for', () => {
+    const { wf, trigger } = granted();
+    const d = decideRunGrant(wf, { kind: 'webhook', triggerId: 'trig-1', eventId: 'ev-1' }, lookup(trigger), H, recorded);
+    expect(d.contract).toBeUndefined();
+    expect(d.note).toBe('Ran without its write grant: a webhook run never carries a write grant.');
+    // CONTROL: the same grant, the same trigger, started by its schedule and from the library.
+    expect(decideRunGrant(wf, { kind: 'schedule', triggerId: 'trig-1' }, lookup(trigger), H, recorded).contract).toBeDefined();
+    expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, lookup(trigger), H, recorded).contract).toBeDefined();
+  });
+
+  // An allowlist, not a webhook exception: a kind added later is withheld until it is listed,
+  // with a sentence that teaches no webhook rule.
+  it('withholds it from a start of a kind it does not know', () => {
+    const { wf, trigger } = granted();
+    const future = { kind: 'email', triggerId: 'trig-1' } as unknown as Parameters<typeof decideRunGrant>[1];
+    expect(decideRunGrant(wf, future, lookup(trigger), H, recorded)).toEqual({
+      contract: undefined, note: 'Ran without its write grant: a grant is handed only to a run its schedule or the library started.',
+    });
+  });
+
+  it('records a webhook start as webhook:<trigger>, never as a schedule', () => {
+    expect(startedVia({ kind: 'webhook', triggerId: 'trig-1', eventId: 'ev-1' })).toBe('webhook:trig-1');
+  });
+
   it('names the stamp\'s grant on the contract it hands over', () => {
     const { wf, trigger } = granted();
     const d = decideRunGrant(wf, { kind: 'schedule', triggerId: 'trig-1' }, lookup(trigger), H, recorded);
@@ -449,6 +537,26 @@ describe('whether a run passes its contract on', () => {
   it('withholds it when the named schedule now targets another workflow', () => {
     const { wf, trigger } = granted();
     expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, lookup({ ...trigger, workflowId: 'wf-other' }), H, recorded).contract).toBeUndefined();
+  });
+
+  it('a copy that carries the source\'s grant under a new id is withheld, by the schedule and by the record each on its own', () => {
+    // The shape `promoteExistingWorkflow` stores: the source spread into a fresh id, contract and
+    // stamp included (it clears only `confirmedAt`). The checksum binds no id, so it still
+    // matches on the copy; what withholds it are the two comparisons with `planned.id`. Each case
+    // leaves exactly one of them in place, so removing either one fails here.
+    const { wf, trigger } = granted();
+    const copy: PlannedPipeline = { ...wf, id: 'wf-copy' };
+    const row = rows.get(wf.reviewedGrant!.grantId!)!;
+    // CONTROL: the source itself passes.
+    expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, lookup(trigger), H, recorded).contract).toBeDefined();
+    // Case 1 — the schedule now targets the copy; only the record still names the source.
+    const toCopy = decideRunGrant(copy, { kind: 'library', by: 'local' }, lookup({ ...trigger, workflowId: 'wf-copy' }), H, recorded);
+    expect(toCopy.contract).toBeUndefined();
+    expect(toCopy.note).toMatch(/record of its acceptance is missing or does not match/);
+    // Case 2 — the mirror: the record names the copy; only the schedule still targets the source.
+    const recordOnCopy = decideRunGrant(copy, { kind: 'library', by: 'local' }, lookup(trigger), H, () => ({ state: 'found', grant: { ...row, workflowId: 'wf-copy' } }));
+    expect(recordOnCopy.contract).toBeUndefined();
+    expect(recordOnCopy.note).toMatch(/schedule the grant was accepted for no longer exists/);
   });
 
   it('withholds it when the stamp\'s after-untrusted permission was flipped without a new acceptance', () => {

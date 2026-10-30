@@ -372,6 +372,87 @@ describe('a grant shared through a provider with two API hosts (fixture provider
     expect(await referenced(store, VAULT, 'https://collector.example/x', 'TWO_A_ACCESS_TOKEN')).toContain('would send TWO_A_ACCESS_TOKEN');
     expect(sent).toHaveLength(0);
   });
+
+  // The reader exchanges for real, then an update ends the sharing or moves the reader's base.
+  // What the exchange minted came from the owner's account, so the update empties it first, and
+  // nothing the reader sends next carries it. Each case has a control on the same updated profile
+  // with the value put back, so the transport assert can fail on that profile, and it is asserted
+  // before what the reply and the vault say.
+  describe('an update that ends the sharing or moves the reader, after a real exchange', () => {
+    const MINTED = value('minted', 'access');
+    /** The reader as `api_setup` takes it: a profile on a built-in provider names the provider's app (the stored one names its own pair). */
+    const updated = (base: string, over: OAuthOver = {}): ApiProfile => ofPreset('twohost', 'two-b', base, { client_id_key: 'TWOHOST_CLIENT_ID', client_secret_key: 'TWOHOST_CLIENT_SECRET', ...over });
+    const carries = (s: Sent): boolean => JSON.stringify(s.headers).includes(MINTED) || s.body.includes(MINTED);
+    const exchanged = async (output?: string): Promise<{ store: ApiStore; vault: Vault }> => {
+      const store = fromDirectory([owner(), reader()]);
+      const { TWO_B_ACCESS_TOKEN: _held, ...rest } = VAULT;
+      const vault = vaultOf(rest);
+      const input = output === undefined ? { action: 'fetch_token', id: 'two-b' } : { action: 'fetch_token', id: 'two-b', output_secret_name: output };
+      expect(await tool(store, vault, input)).toContain('Token exchange OK');
+      expect(vault.resolve(output ?? 'TWO_B_ACCESS_TOKEN')).toBe(MINTED);
+      sent = [];
+      return { store, vault };
+    };
+
+    it.each(['https://api.two.example/v1/x', 'https://api.two.example/v2/x'])('control: without an update, the engine attaches the minted token at %s', async (url) => {
+      const { store, vault } = await exchanged();
+      await attached(store, vault.snapshot(), url);
+      expect(sent.filter(carries)).toHaveLength(1);
+    });
+
+    // The reader holds an access token of its own as well, so the request passes the engine's
+    // attach and goes out: only the referenced value is in question.
+    const OWN = value('b', 'own', 'access');
+    const withOwn = (vault: Vault): Record<string, string> => ({ ...vault.snapshot(), TWO_B_ACCESS_TOKEN: OWN });
+
+    it('control: without an update, a secret: reference to the written name carries the minted token', async () => {
+      const { store, vault } = await exchanged('TWO_B_OUT');
+      await referenced(store, withOwn(vault), 'https://api.two.example/v1/x', 'TWO_B_OUT');
+      expect(sent).toHaveLength(1);
+      expect(sent.filter(carries)).toHaveLength(1);
+    });
+
+    const updates = [
+      ['without refresh_token_key, which ends the sharing', () => updated('https://api.two.example/v1')],
+      ['to another base on its API host, still sharing', () => updated('https://api.two.example/v2', { refresh_token_key: 'TWO_A_REFRESH_TOKEN' })],
+    ] as const;
+
+    it.each(updates)('control: after an update %s, the attach would carry the token if it were still there', async (_label, next) => {
+      const { store, vault } = await exchanged();
+      await tool(store, vault, { action: 'update', profile: next() });
+      vault.set('TWO_B_ACCESS_TOKEN', MINTED);
+      await attached(store, vault.snapshot(), `${next().base_url}/x`);
+      expect(sent.filter(carries)).toHaveLength(1);
+    });
+
+    it.each(updates)('an update %s empties the minted token first, and the attach then sends nothing', async (_label, next) => {
+      const { store, vault } = await exchanged();
+      const result = await tool(store, vault, { action: 'update', profile: next() });
+      await attached(store, vault.snapshot(), `${next().base_url}/x`);
+      expect(sent).toHaveLength(0);
+      expect(result, result).toContain('the tokens it held were removed first');
+      expect(vault.resolve('TWO_B_ACCESS_TOKEN')).toBeNull();
+    });
+
+    it('control: after the update, a secret: reference to the written name would carry the token if it were still there', async () => {
+      const { store, vault } = await exchanged('TWO_B_OUT');
+      await tool(store, vault, { action: 'update', profile: updated('https://api.two.example/v1') });
+      vault.set('TWO_B_OUT', MINTED);
+      await referenced(store, withOwn(vault), 'https://api.two.example/v1/x', 'TWO_B_OUT');
+      expect(sent.filter(carries)).toHaveLength(1);
+    });
+
+    it('a name the exchange wrote is emptied too, and a secret: reference to it then sends nothing', async () => {
+      const { store, vault } = await exchanged('TWO_B_OUT');
+      const result = await tool(store, vault, { action: 'update', profile: updated('https://api.two.example/v1') });
+      const answer = await referenced(store, withOwn(vault), 'https://api.two.example/v1/x', 'TWO_B_OUT');
+      expect(sent.filter(carries)).toHaveLength(0);
+      // Refused because the value is gone; this check runs before the attach and the destination are asked.
+      expect(answer).toContain('referenced secret(s) the vault doesn\'t have: \\"TWO_B_OUT\\"');
+      expect(result, result).toContain('the tokens it held were removed first');
+      expect(vault.resolve('TWO_B_OUT')).toBeNull();
+    });
+  });
 });
 
 // ── conditions 1 and 2 of sharing, on the owner's and the register's side ──
@@ -456,7 +537,8 @@ describe('a reader on a foreign base with the owner\'s refresh slot, token_url a
     it.each(orders)('is not registered, read %s, and fetch_token sends nothing', async (_order, order) => {
       const store = load(order([owner(), sub()]));
       expect(store.get('sub')).toBeUndefined();
-      expect(await tool(store, vaultOf(VAULT), { action: 'fetch_token', id: 'sub' })).not.toContain('Token exchange OK');
+      // The boot held it back, so there is no profile to exchange for: the refusal says so, not some later step.
+      expect(await tool(store, vaultOf(VAULT), { action: 'fetch_token', id: 'sub' })).toBe('Error: API profile "sub" not found. Create it first with action=create.');
       expect(sent).toHaveLength(0);
     });
   });

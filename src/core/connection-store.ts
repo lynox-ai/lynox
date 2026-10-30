@@ -1,5 +1,8 @@
+import { randomBytes } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
+import { cancelHeldProviderRecords, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
+import { EPOCH_START_SQL, currentGrantSql } from './grant-ledger.js';
 
 /**
  * ConnectionStore — the S4b write/read layer over the engine.db `connections`
@@ -34,6 +37,17 @@ export interface ConnectionRow {
   configJson: string;
   vaultKeys: string[];
   status: string;
+  /**
+   * The grant the row is created with. Stored by the INSERT, and by an update only while the row
+   * has none: a later grant on the same row never moves where its epoch starts.
+   */
+  firstGrantId?: string | null | undefined;
+  /**
+   * The opaque id a mandate's row in the instance trail names an API profile by (`apf_` + 16 hex),
+   * for an INSERT of a `kind = 'api'` row only; another kind gets none. Omitted, the INSERT makes a
+   * fresh one. An update never changes an id the row already has, and gives one to a row without.
+   */
+  trailId?: string | undefined;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;
 }
@@ -62,6 +76,11 @@ function parseVaultKeys(raw: string): string[] {
   }
 }
 
+/** A fresh opaque id for an API profile: `apf_` and 16 hex, a label with no secret value. */
+export function newApiTrailId(): string {
+  return `apf_${randomBytes(8).toString('hex')}`;
+}
+
 export class ConnectionStore {
   private readonly db: Database.Database;
 
@@ -78,11 +97,25 @@ export class ConnectionStore {
    * `subject_id` FK-guards implicitly: engine.db runs `foreign_keys = ON`, so a
    * non-null `subjectId` pointing at an absent subject throws — but the api
    * kind always passes `null` (no org binding yet), so that path isn't hit.
+   *
+   * `first_grant_id` (where the connection's epoch starts) takes only a grant the ledger holds for
+   * this id as a beginning (`EPOCH_START_REASONS`): a grant copied in with a file from another
+   * engine, or one the ledger records for another connection, is written as NULL. A start already
+   * held stays. One that is empty or not a beginning of this id is filled only while the row has
+   * no line of its own yet, that is while the grant it carried before this write is not one the
+   * ledger holds for this id (a profile imported with another engine's grant, or with none): the
+   * boot's `backfill` or `split` grant then becomes its start. A row that has a line of its own and
+   * an empty start keeps it empty — the migration left it so because where it began cannot be told
+   * (`epochStartByTimeSql`) — so a `new` grant minted in the middle of its life never becomes one.
    */
   upsert(row: ConnectionRow): void {
+    const given = row.firstGrantId ?? null;
+    const first = given !== null && this.db.prepare(
+      `SELECT 1 FROM connection_grants WHERE ? = grant_id AND connection_id = ? AND kind = 'api' AND reason IN (${EPOCH_START_SQL})`,
+    ).get(given, row.id) !== undefined ? given : null;
     this.db.prepare(`
-      INSERT INTO connections (id, kind, name, subject_id, direction, config_json, vault_keys, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, kind, name, subject_id, direction, config_json, vault_keys, status, first_grant_id, trail_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         kind = excluded.kind,
         name = excluded.name,
@@ -91,6 +124,13 @@ export class ConnectionStore {
         config_json = excluded.config_json,
         vault_keys = excluded.vault_keys,
         status = excluded.status,
+        first_grant_id = CASE
+          WHEN EXISTS (SELECT 1 FROM connection_grants g WHERE connections.first_grant_id = g.grant_id
+            AND g.connection_id = connections.id AND g.kind = 'api' AND g.reason IN (${EPOCH_START_SQL})) THEN connections.first_grant_id
+          WHEN NOT EXISTS (SELECT 1 FROM connection_grants p WHERE p.connection_id = connections.id AND p.kind = 'api'
+            AND ${currentGrantSql('connections.config_json')} = p.grant_id) THEN excluded.first_grant_id
+          END,
+        trail_id = COALESCE(connections.trail_id, excluded.trail_id),
         updated_at = datetime('now')
     `).run(
       row.id,
@@ -101,7 +141,31 @@ export class ConnectionStore {
       row.configJson,
       JSON.stringify(row.vaultKeys),
       row.status,
+      first,
+      row.kind === 'api' ? row.trailId ?? newApiTrailId() : null,
     );
+  }
+
+  /** The opaque id of the API profile `slug`, or undefined. Only `kind = 'api'`: another kind's
+   *  row under the same id is never named as the profile. */
+  trailIdOf(slug: string): string | undefined {
+    const row = this.db.prepare("SELECT trail_id FROM connections WHERE id = ? AND kind = 'api'").get(slug) as { trail_id: string | null } | undefined;
+    return row?.trail_id ?? undefined;
+  }
+
+  /** The slug of the API profile with the opaque id `trailId`, or undefined once it is deleted. */
+  slugOfTrailId(trailId: string): string | undefined {
+    const row = this.db.prepare("SELECT id FROM connections WHERE trail_id = ? AND kind = 'api'").get(trailId) as { id: string } | undefined;
+    return row?.id;
+  }
+
+  /**
+   * Gives every API profile row without an opaque id one; the boot runs it each time. The migration
+   * runs once, and a row an older binary writes after a pin back would otherwise stay without.
+   * Returns how many it filled.
+   */
+  fillApiTrailIds(): number {
+    return this.db.prepare("UPDATE connections SET trail_id = 'apf_' || lower(hex(randomblob(8))) WHERE trail_id IS NULL AND kind = 'api'").run().changes;
   }
 
   /**
@@ -166,6 +230,35 @@ export class ConnectionStore {
       : this.db.prepare('DELETE FROM connections WHERE id = ? AND kind = ?');
     const result = kind === undefined ? stmt.run(id) : stmt.run(id, kind);
     return result.changes > 0;
+  }
+
+  /**
+   * Delete an `api` connection and write the record of its removal in the same transaction
+   * (PRD source-connection R8-3): the record is written only when the row is there, while it
+   * still is, so it can read the row's epoch. Either both land or neither does.
+   */
+  removeApiWithRecord(id: string, kind: ConnectionRecordKind, now: Date, onSuperseded?: (recordIds: readonly number[]) => void): boolean {
+    return this.db.transaction(() => {
+      if (this.db.prepare("SELECT 1 FROM connections WHERE id = ? AND kind = 'api'").get(id) === undefined) return false;
+      // A provider's erasure still held is superseded only by an owner's erasure, which covers the
+      // epoch. A closing record erases nothing, so the provider's stays held and runs.
+      // `onSuperseded` writes their audit rows in this transaction.
+      if (kind === 'erasure') {
+        const superseded = cancelHeldProviderRecords(this.db, id, now);
+        if (superseded.length > 0) onSuperseded?.(superseded);
+      }
+      writeConnectionRecord(this.db, id, kind, now);
+      return this.remove(id, 'api');
+    })();
+  }
+
+  /**
+   * The engine.db connection, for the one writer of a provider's record that is not a delete
+   * (`ApiStore.markRevokedWithRecord`), which stores the refusal and the record in one
+   * transaction. @internal — the source guard pins who calls the record writer with it.
+   */
+  recordDb(): Database.Database {
+    return this.db;
   }
 
   private _map(row: ConnectionDbRow): ConnectionRow {

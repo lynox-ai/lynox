@@ -12,7 +12,7 @@ import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js
 import type { SessionCounters } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { loadAgentDef } from './agent-registry.js';
-import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
+import { buildStepContext, contextForEventRun, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
 import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
@@ -24,10 +24,15 @@ import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
+import { sourceRefusal, type RunSource } from './run-source.js';
+import { childFilingContext } from '../core/approval-filing.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
 export interface RunManifestOptions {
+  /** What the run executes, and so whose access it depends on (`run-source.ts`). Required, with
+   *  no default, so every caller decides; `runManifest` refuses a source that may not run. */
+  source: RunSource;
   agentsDir?: string | undefined;
   /** The run's id, minted by the caller instead of here. A route that holds a claim on
    *  this run has to know the id BEFORE the run starts — the claim is taken first, and a
@@ -130,6 +135,16 @@ export interface RunManifestOptions {
    */
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
   /**
+   * Keep the run's params out of what a step agent reads (its `context`), while the step's task
+   * and captured call still resolve from them, and fence every earlier step's output it reads.
+   * Set for a run a webhook event started: its params are a third party's values, and a step
+   * should meet them only where its task names them, fenced as untrusted;
+   * an earlier step's output can carry them on. A step that needs a value its task does
+   * not name no longer has it: nothing makes that step fail, so its agent may go on without it.
+   * The workflow has to name the value in the task.
+   */
+  paramsKeptFromSteps?: boolean | undefined;
+  /**
    * How a run under an accepted grant was started (`startedVia` of its origin, which
    * `runGuardedSavedWorkflow` hands to `runSavedWorkflow`), written to
    * `pipeline_runs.started_via` beside the contract's grant (`workflow_grant_id`). Top-level only: a nested
@@ -226,6 +241,8 @@ export interface RunManifestOptions {
  * → a headless step with no approver → silent `DANGEROUS_BASH` denial).
  */
 export interface RunCtxInput {
+  /** See `RunManifestOptions.source`. */
+  source: RunSource;
   autonomy: import('../types/index.js').AutonomyLevel | undefined;
   parentTools?: ToolEntry[] | undefined;
   parentToolContext?: import('../types/index.js').ToolContext | undefined;
@@ -241,6 +258,7 @@ export interface RunCtxInput {
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
+  paramsKeptFromSteps?: boolean | undefined;
   startedVia?: string | undefined;
   observeToolCall?: StepToolRecorder | undefined;
   limits?: WorkflowLimits | undefined;
@@ -294,6 +312,7 @@ export interface RunCtxInput {
  */
 export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
   return {
+    source: input.source,
     autonomy: input.autonomy,
     parentTools: input.parentTools,
     parentToolContext: input.parentToolContext,
@@ -308,6 +327,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
     isAcceptedParam: input.isAcceptedParam,
+    paramsKeptFromSteps: input.paramsKeptFromSteps,
     startedVia: input.startedVia,
     observeToolCall: input.observeToolCall,
     limits: input.limits,
@@ -495,8 +515,21 @@ async function assertToolGatesWrappable(manifest: Manifest, agentsDir: string): 
 export function runManifest(
   manifest: Manifest,
   config: LynoxUserConfig,
-  options: RunManifestOptions = {},
+  options: RunManifestOptions,
 ): Promise<RunState> {
+  // Before anything of the run exists: a run that may not start leaves no row and runs no step.
+  // A caller outside the type system (a cast, a test) that names no source is refused the same way,
+  // and so is a source whose check throws (the store of mandate ends is read synchronously): as a
+  // rejection, never a throw out of this non-async function.
+  let refused: string | undefined;
+  try {
+    refused = (options as Partial<RunManifestOptions> | undefined)?.source === undefined
+      ? 'A run must say what it runs, so it did not run.'
+      : sourceRefusal(options.source, options.depth ?? 0);
+  } catch (err: unknown) {
+    return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+  }
+  if (refused !== undefined) return Promise.reject(new Error(refused));
   if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, options);
   const runId = options.runId ?? randomUUID();
   return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...options, runId }));
@@ -597,6 +630,10 @@ async function runManifestInGroup(
     }
   }
   const runId = options.runId ?? randomUUID();
+  // The run a step's filing names as its root: the top-level run, kept by nested ones.
+  if (parentPrompt?.approvalFiling !== undefined && parentPrompt.approvalFiling.rootRunId === undefined) {
+    parentPrompt = { ...parentPrompt, approvalFiling: childFilingContext(parentPrompt.approvalFiling, runId) };
+  }
 
   const state: RunState = {
     runId,
@@ -770,7 +807,7 @@ export async function retryManifest(
   manifest: Manifest,
   previousState: RunState,
   config: LynoxUserConfig,
-  options: RunManifestOptions = {},
+  options: RunManifestOptions,
 ): Promise<RunState> {
   const cachedOutputs = new Map<string, AgentOutput>();
   for (const [id, output] of previousState.outputs) {
@@ -1049,6 +1086,8 @@ async function executeStep(
 
   try {
     const stepContext = buildStepContext(state.globalContext, step, state.outputs, config.pipeline_context_limit);
+    // What the step agent reads; the templates below still resolve from `stepContext`.
+    const agentContext = options.paramsKeptFromSteps === true ? contextForEventRun(stepContext, step) : stepContext;
 
     // Use buildConditionContext for condition evaluation (includes ALL completed outputs)
     const condContext = buildConditionContext(state.globalContext, state.outputs);
@@ -1097,7 +1136,14 @@ async function executeStep(
                 outputJson: call.outputJson,
                 durationMs: call.durationMs,
                 sequenceOrder: toolSeq++,
+                connectionId: call.connection?.id,
+                connectionCreatedAt: call.connection?.createdAt ?? undefined,
+                grantId: call.connection?.grantId ?? undefined,
                 toolUseId: call.toolUseId,
+                isError: call.isError,
+                contract: call.contract,
+                lift: call.grant,
+                filed: call.filed,
               });
             } catch { /* best-effort: observability must never break the run */ }
           }
@@ -1122,7 +1168,7 @@ async function executeStep(
       // resolves `{{params.*}}` with the untrusted-data boundary; the captured
       // `input_template` resolves the same params into the literal call the step
       // agent replays (no boundary — those are tool arguments, not prose).
-      const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext, options.isAcceptedParam) : step.task;
+      const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext, options.isAcceptedParam, options.paramsKeptFromSteps === true) : step.task;
       const resolvedInputTemplate = step.input_template
         ? resolveInputTemplate(step.input_template, stepContext)
         : step.input_template;
@@ -1138,7 +1184,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin, options.parentChangeset);
+      r = await spawnInline(resolvedStep, agentContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin, options.parentChangeset);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -1150,7 +1196,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
+      r = await spawnViaAgent(step, agentDef, agentContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }

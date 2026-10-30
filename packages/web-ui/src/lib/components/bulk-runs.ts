@@ -3,7 +3,7 @@
 // The translator comes in as an argument: i18n is a Svelte module, and these stay testable
 // without the Svelte plugin.
 
-import { hiddenCharIndexes } from '../hidden-chars.js';
+import { visibleText } from '../visible-text.js';
 
 /** The two i18n lookups the helpers need, `t` and `tf` from `i18n.svelte.ts`. */
 export interface BulkI18n {
@@ -24,6 +24,9 @@ export interface BulkRun {
 	applied: number;
 	failed: number;
 	conflicts: number;
+	/** Targets not written because an earlier send reached them without a clear answer; the
+	 *  engine does not send to them again. */
+	sentUnknown: number;
 	undone: number;
 	kind: 'apply' | 'undo';
 	atomic: boolean;
@@ -47,6 +50,8 @@ export interface BulkRun {
 	resumeOpen: number;
 	/** Of those, the most the next pass may write to under the approved maximum. */
 	resumeTries: number;
+	/** Writing targets the owner took out before approving; not counted in `changes`. */
+	deselected: number;
 }
 
 export interface BulkRunDetailData extends BulkRun {
@@ -72,6 +77,17 @@ export interface BulkRunDetailData extends BulkRun {
 	judgeOwnKey: boolean;
 }
 
+/** The word over a halted run's cause. An owner's stop is a stop, not a halt: „angehalten“ is
+ *  the word of a run that ended where its approval, a failure or a limit told it to. */
+export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.head.stopped' | 'bulk.head.halted' {
+	return run.haltKey === 'stoppedByOwner' ? 'bulk.head.stopped' : 'bulk.head.halted';
+}
+
+/** The same distinction for the suffix on a run's phase in the list. */
+export function bulkHaltSuffixKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.stopped_suffix' | 'bulk.halted_suffix' {
+	return run.haltKey === 'stoppedByOwner' ? 'bulk.stopped_suffix' : 'bulk.halted_suffix';
+}
+
 /** The start a waiting run takes: read its targets, read its list, start its judging — or none,
  *  for a judged run no model can judge now. Null for a run that does not wait for a start. */
 export type BulkStartKind = 'read' | 'list' | 'judge' | 'no_judge' | 'judge_own_key';
@@ -91,10 +107,10 @@ export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' |
  *  (`bulk.halt.<key>`). The waiting halts (`awaitingStart`, `listed`) are starts, not restarts. */
 const BULK_RESTART_AS_IS = new Set([
 	'unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized',
-	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap', 'unrecorded',
+	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap', 'unrecorded', 'listReadFailed', 'shopInactive',
 ]);
 /** Halts a restart would meet again on the same targets: the run has to be planned again. */
-const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress']);
+const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff']);
 
 /** How a planned run that halted on a failure goes on: read on, read its list on, judge on, judge
  *  on under a higher spend limit — or not at all (`none`, `no_judge`, `judge_own_key`). Null for a
@@ -149,7 +165,7 @@ export function bulkHaltText(
 /** A write run's halts that writing on moves on from, each with its own sentence on the page. */
 const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
-	'expired', 'failureRate', 'consecutiveFailures',
+	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
@@ -197,7 +213,7 @@ export function bulkResumeText(
 		: i18n.tf(`bulk.halt.${key}`, vars);
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
-		: key === 'blocked' ? `bulk.halt.blocked_before_${tier}`
+		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, kept: null, soFar: null, allows: null };
@@ -239,6 +255,14 @@ export function bulkResumeMax(input: unknown, current: number | null, all: numbe
 	const n = typeof input === 'number' ? input : typeof input === 'string' && /^\d+$/.test(input.trim()) ? Number(input.trim()) : Number.NaN;
 	if (!Number.isInteger(n) || n < 1 || n > all || (current !== null && n <= current)) return null;
 	return n;
+}
+
+/** What the page says about the targets an earlier send reached without a clear answer, or
+ *  null when there are none. It hangs on their number alone: the same on every halt, on a
+ *  finished run, and for every run size. */
+export function bulkSentUnknownText(run: Pick<BulkRun, 'sentUnknown'>, i18n: BulkI18n): string | null {
+	if (run.sentUnknown <= 0) return null;
+	return run.sentUnknown === 1 ? i18n.t('bulk.sent_unknown.one') : i18n.tf('bulk.sent_unknown.many', { count: String(run.sentUnknown) });
 }
 
 /** Whether `/api/config` says this is a managed instance: its config carries `managed` (the
@@ -340,15 +364,9 @@ export function bulkMergeAnswer(
 	return refused(key ?? 'unclear');
 }
 
-/** Text the owner reads before a run acts on it, with every hidden character (`hidden-chars.ts`,
- *  the same file the engine refuses a judge rule by) shown as its code point. Not removed: the
- *  run reads the text as it is, so what the owner reads must be that text too: a removed
- *  character would be one the owner never saw and the model still reads. */
-export function bulkVisibleText(text: string): string {
-	const hidden = new Set(hiddenCharIndexes(text));
-	if (hidden.size === 0) return text;
-	return Array.from(text, (c, i) => (hidden.has(i) ? `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩` : c)).join('');
-}
+/** Text the owner reads before a run acts on it, every hidden character shown as its code point
+ *  (see `visible-text.ts`, which the approval queue shares). */
+export const bulkVisibleText: (text: string) => string = visibleText;
 
 /** The provider that serves a judge call, by name. */
 export function bulkJudgeProviderName(provider: string): string {
@@ -378,11 +396,44 @@ export interface BulkTarget {
 	change: BulkChange;
 	diff: TargetDiff;
 	error: string | null;
+	/** The owner took it out of the write before approving. */
+	deselected: boolean;
+	/** This run wrote it (not found already as planned). Optional: an older engine sends neither. */
+	written?: boolean | undefined;
+	/** A rollback or an undo took this run's write back. */
+	undone?: boolean | undefined;
 }
 
 /** The external host of a run's target system, or null for a local run. */
 export function bulkHostOf(targetSystem: string): string | null {
 	return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
+}
+
+/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`). */
+const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+
+/** Whether an external run writes to a Shopify store. */
+export function bulkIsShopifyHost(host: string | null): boolean {
+	return host !== null && SHOPIFY_STORE_HOST.test(host);
+}
+
+/** The fields a Shopify run writes, each with the i18n key of its readable name. */
+const SHOPIFY_FIELD_KEYS: Readonly<Record<string, string>> = {
+	title: 'bulk.field.shopify.title',
+	descriptionHtml: 'bulk.field.shopify.descriptionHtml',
+	seo_title: 'bulk.field.shopify.seo_title',
+	seo_description: 'bulk.field.shopify.seo_description',
+};
+
+/** The i18n key of a field's readable name on this host, or null: the field is then shown by its own name. */
+export function bulkFieldLabelKey(host: string | null, field: string): string | null {
+	return bulkIsShopifyHost(host) && Object.hasOwn(SHOPIFY_FIELD_KEYS, field) ? SHOPIFY_FIELD_KEYS[field]! : null;
+}
+
+/** Field names as the owner reads them, joined: a readable name where the host has one, else the
+ *  field's own name, shown through {@link bulkVisibleText} — a field name is the planner's text. */
+export function bulkFieldNamesText(host: string | null, fields: readonly string[], label: (key: string) => string): string {
+	return fields.map((f) => { const key = bulkFieldLabelKey(host, f); return key === null ? bulkVisibleText(f) : label(key); }).join(', ');
 }
 
 /** The target system as the owner reads it: the host of an external run, a name otherwise. */
@@ -417,10 +468,124 @@ export function bulkWaitsForStart(run: Pick<BulkRun, 'phase' | 'haltKey'>): bool
 }
 
 /** Whether the run can be taken back now: an apply run that stopped, has something an undo
- *  would take back, and is not at its probe (that has its own way back). */
-export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe'>): boolean {
+ *  would take back, and is not at its probe (that has its own way back). An atomic run is taken
+ *  back whole or not at all, so only once it finished: the engine refuses any other
+ *  (`atomic_partial`), and one that aborted has already rolled back what it could. */
+export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe' | 'atomic'>): boolean {
 	if (run.kind !== 'apply' || run.undoable <= 0 || bulkAtProbe(run)) return false;
+	if (run.atomic) return run.phase === 'done';
 	return run.phase === 'done' || run.phase === 'aborted' || (run.phase === 'writing' && run.haltReason !== null);
+}
+
+/** The halts that end an atomic run in a rollback, each with its own sentence on the page
+ *  (`bulk.halt.<key>`). The incomplete ones name targets, which the page marks. */
+const BULK_ROLLED_BACK = new Set(['atomicRolledBack', 'atomicStoppedRolledBack', 'atomicTimeRolledBack']);
+const BULK_ROLLBACK_INCOMPLETE = new Set(['atomicRollbackIncomplete', 'atomicStoppedRollbackIncomplete', 'atomicTimeRollbackIncomplete']);
+
+/** The page's own sentence for an atomic run that rolled back, and whether the rollback left
+ *  targets to mark. Null for any other run: it keeps the other sentences or the engine's reason.
+ *  A rolled-back run offers no way on: it is aborted, so neither writing on nor an undo applies. */
+export function bulkRollbackText(run: Pick<BulkRun, 'phase' | 'haltKey'>, i18n: BulkI18n): { cause: string; incomplete: boolean } | null {
+	const key = run.haltKey;
+	if (run.phase !== 'aborted' || key === null) return null;
+	const incomplete = BULK_ROLLBACK_INCOMPLETE.has(key);
+	if (!incomplete && !BULK_ROLLED_BACK.has(key)) return null;
+	return { cause: i18n.t(`bulk.halt.${key}`), incomplete };
+}
+
+/** The halts that end an unapproved run before it wrote anything: another judged run took its
+ *  place, or the access that planned it ended. Both leave the run aborted. */
+const BULK_ENDED_UNAPPROVED = new Set(['superseded', 'mandateEnded']);
+
+/** The label key of the button that starts a run waiting for its start, exactly as the page
+ *  shows it; null where the page shows no button (a judge it cannot use, or a list or judge
+ *  the run lacks the data to show). */
+export function bulkStartButtonKey(
+	run: Pick<BulkRunDetailData, 'listFirstPage' | 'judgeServedBy' | 'judgeRule'>,
+	kind: BulkStartKind | null,
+	supersedable: boolean,
+): string | null {
+	if (kind === 'read') return 'bulk.start.read';
+	if (kind === 'list') return run.listFirstPage ? 'bulk.start.list' : null;
+	if (kind === 'judge') return run.judgeServedBy && run.judgeRule ? (supersedable ? 'bulk.start.supersede_yes' : 'bulk.start.judge') : null;
+	return null;
+}
+
+/** The page's own sentences for the halts that neither a restart nor writing on moves past: a
+ *  run waiting for its start, one at a probe it may not write past yet, and one ended before it
+ *  was approved. `cause` replaces the engine's reason; `step` says what the owner does next.
+ *  `startButton`: the label of the start button the page shows ({@link bulkStartButtonKey}),
+ *  null when it shows none. Null on any other halt. */
+export function bulkStateText(
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>,
+	startButton: string | null,
+	i18n: BulkI18n,
+): { cause: string; step: string | null } | null {
+	const key = run.haltKey;
+	if (key === null) return null;
+	if (bulkWaitsForStart(run)) {
+		if (startButton !== null) return { cause: i18n.tf(`bulk.halt.${key}_start`, { button: startButton }), step: null };
+		// No button: a judge the run cannot use has its note on the page; a judge it can use but
+		// no button means the rule went only to the owner, and someone else is looking.
+		return { cause: i18n.t(bulkStartKind(run) === 'judge' ? 'bulk.halt.wait_owner_only' : 'bulk.halt.wait_no_start'), step: null };
+	}
+	// Set only while writing (bulk-apply), where the probe panel can stand.
+	if (key === 'probeRequired' && run.phase === 'writing') {
+		// The probe panel stands only where the server offers a probe confirming can file.
+		return { cause: i18n.t('bulk.halt.probeRequired'), step: i18n.t(bulkAtProbe(run) ? 'bulk.halt.probeRequired_confirm' : 'bulk.halt.probeRequired_replan') };
+	}
+	if (run.phase === 'aborted' && BULK_ENDED_UNAPPROVED.has(key)) return { cause: i18n.t(`bulk.halt.${key}`), step: null };
+	return null;
+}
+
+/** What the page says under "halted because": its own sentence where it has one, else the
+ *  engine's reason. `startButton` as for {@link bulkStateText}. */
+export function bulkHaltCause(
+	run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0] & Parameters<typeof bulkStateText>[0],
+	managed: boolean | null,
+	startButton: string | null,
+	i18n: BulkI18n,
+): string {
+	if (bulkAtProbe(run) && run.haltKey === 'maxTargets') return i18n.t('bulk.halted_after_probe');
+	const own = bulkHaltText(run, managed, i18n)?.cause ?? bulkResumeText(run, managed, i18n)?.cause ?? bulkRollbackText(run, i18n)?.cause;
+	if (own !== undefined) return own;
+	const state = bulkStateText(run, startButton, i18n);
+	if (state !== null) return state.step === null ? state.cause : `${state.cause} ${state.step}`;
+	return run.haltReason ?? '';
+}
+
+/** The address the support halts point to. */
+export const BULK_SUPPORT_EMAIL = 'support@lynox.ai';
+
+/** The halts whose sentence on a managed instance sends the owner to support. */
+const BULK_SUPPORT_HALTS = new Set(['blocked', 'shopifyWriteOff']);
+
+/** A `mailto:` link to support for a halt whose sentence names support, with a subject naming
+ *  the run and its host and nothing else from the run; null on any other halt, on a
+ *  self-hosted instance, and where the page shows no such sentence. */
+export function bulkSupportMailto(
+	run: Pick<BulkRunDetailData, 'id' | 'phase' | 'haltKey' | 'targetSystem' | 'probe' | 'haltReason' | 'probeConfirmed' | 'maxTargets' | 'changes' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>,
+	managed: boolean | null,
+	i18n: BulkI18n,
+): string | null {
+	if (managed === false || run.haltKey === null || !BULK_SUPPORT_HALTS.has(run.haltKey)) return null;
+	// The sentence stands with the way on: a restart for a planned run, writing on for one that wrote.
+	const shown = run.phase === 'planned' ? bulkRestartKind(run) !== null : bulkResumeKind(run) !== null;
+	if (!shown) return null;
+	const subject = i18n.tf('bulk.halt.support_subject', { run: run.id, host: bulkSystemName(run.targetSystem, i18n) });
+	return `mailto:${BULK_SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}`;
+}
+
+/** Whether an atomic run's rollback did not complete, so the page has targets to mark. The page
+ *  then loads every target: a mark on a page the owner never opens would not be seen. */
+export function bulkRollbackIncomplete(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
+	return run.phase === 'aborted' && run.haltKey !== null && BULK_ROLLBACK_INCOMPLETE.has(run.haltKey);
+}
+
+/** Whether the page marks this target: the run's rollback did not complete, and this is a
+ *  target it wrote and did not take back. */
+export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
+	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
 
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;
@@ -432,6 +597,61 @@ export function bulkStep(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | '
 	if (bulkAtProbe(run)) return 3;
 	if (run.phase === 'approved' || run.phase === 'writing') return 4;
 	return 5;
+}
+
+/** The sentence of each reason a Shopify run leaves a target out for (core `BulkInvalidReason`),
+ *  as the i18n key under `bulk.invalid.`. Reasons that read the same share a key. */
+const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
+	not_found: 'not_found', redirect: 'redirect', not_json: 'not_json', read_failed: 'read_failed', bad_url: 'bad_url',
+	secret_in_target: 'secret_in_target', secret_in_after: 'secret_in_after', secret_in_before: 'secret_in_before',
+	mail_api: 'mail_api', field_missing: 'field_missing',
+	before_not_object: 'shape', after_not_object: 'shape', field_not_scalar: 'shape',
+	list_item_no_id: 'list_item', list_item_bad_id: 'list_item', list_item_not_object: 'list_item', list_item_outside_list: 'list_item',
+	list_item_mismatch: 'list_item_mismatch',
+	list_item_truncated: 'list_item_truncated',
+	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
+	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char',
+};
+/** The refusals of taking a target out or putting it back that the owner's page words by
+ *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
+export const BULK_DESELECT_REFUSALS: readonly string[] = ['atomic_undo', 'not_writing', 'not_taken_out'];
+/** Sentences a managed instance follows with a way to support; a self-hosted one has none to name. */
+const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
+	not_json: 'bulk.invalid.persists_support', read_failed: 'bulk.invalid.persists_support', shape: 'bulk.invalid.many_support',
+};
+
+/** What the owner reads under a target lynox leaves out: on a Shopify run what is wrong, that
+ *  lynox does not change it, and the next step; elsewhere the reason by its code and the step
+ *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
+export function bulkInvalidText(reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n): string {
+	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
+	if (key === undefined) return i18n.tf('bulk.invalid.other', { code: bulkVisibleText(reason) });
+	const support = BULK_INVALID_SUPPORT[key];
+	const text = i18n.t(`bulk.invalid.${key}`);
+	return support !== undefined && managed !== false ? `${text} ${i18n.t(support)}` : text;
+}
+
+/** The line above a preview's targets: how many lynox leaves out and the owner took out, and
+ *  whether anything is left to approve. `nothing` disables the approval: the engine would
+ *  refuse it (`nothing_to_apply`), and a button that only fails after the click says less. */
+export function bulkSkippedHead(
+	run: Pick<BulkRun, 'changes' | 'deselected' | 'judge'>,
+	shopify: boolean,
+	i18n: BulkI18n,
+): { text: string | null; nothing: boolean } {
+	const n = run.changes.invalid;
+	const m = run.deselected;
+	const noun = shopify ? 'products' : 'targets';
+	const judged = n > 0 && run.judge !== null ? ` ${i18n.t(shopify ? 'bulk.skipped.judged' : 'bulk.skipped.judged_targets')}` : '';
+	if (bulkWriting(run) === 0) {
+		// "All" holds only where every target is one lynox leaves out.
+		const text = n > 0 && m === 0 && run.changes.unchanged === 0 ? i18n.tf(`bulk.nothing.all_skipped_${noun}`, { n: String(n) }) : i18n.t(`bulk.nothing.${noun}`);
+		return { text: text + judged, nothing: true };
+	}
+	if (n > 0 && m > 0) return { text: i18n.tf(`bulk.skipped.both_${noun}`, { n: String(n), m: String(m) }) + judged, nothing: false };
+	if (n > 0) return { text: i18n.tf(`bulk.skipped.${noun}`, { n: String(n) }) + judged, nothing: false };
+	if (m > 0) return { text: i18n.tf('bulk.skipped.taken_out', { m: String(m) }), nothing: false };
+	return { text: null, nothing: false };
 }
 
 /** A value of a target as the preview shows it: text as it is, anything else as JSON. */

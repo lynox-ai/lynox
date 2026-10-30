@@ -55,9 +55,26 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
     template: over.template ?? true,
   });
 
+  it('reads back who made a workflow and which mandate changed it, by its exact id', () => {
+    const { history } = make();
+    history.insertPlannedPipeline(planned({ id: 'wf-mandate' }), { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'g-eva' });
+    history.insertPlannedPipeline(planned({ id: 'wf-owner' }), null);
+    // The first save names the creator; a later mandate's save names the editor.
+    expect(history.getWorkflowAuthorship('wf-mandate')).toMatchObject({
+      createdBy: 'mandate:eva@kanzlei.example', createdMandateId: 'g-eva', mandateEditor: null,
+    });
+    history.insertPlannedPipeline(planned({ id: 'wf-mandate', name: 'Changed' }), { kind: 'mandate', email: 'jan@treuhand.example', mandateId: 'g-jan' });
+    expect(history.getWorkflowAuthorship('wf-mandate')).toMatchObject({
+      createdBy: 'mandate:eva@kanzlei.example', mandateEditor: 'mandate:jan@treuhand.example', mandateEditorId: 'g-jan',
+    });
+    expect(history.getWorkflowAuthorship('wf-owner')).toMatchObject({ createdBy: null, mandateEditor: null });
+    // Exact id only: a prefix names no row here (the run resolves the id first).
+    expect(history.getWorkflowAuthorship('wf-m')).toBeUndefined();
+  });
+
   it('insert writes DIRECTLY to engine.db; the read comes back from engine.db (no legacy row)', () => {
     const { history, engine, reader } = make('vault-key');
-    history.insertPlannedPipeline(planned({ template: true }));
+    history.insertPlannedPipeline(planned({ template: true }), null);
     // Both the RunHistory read and a direct WorkflowStore read see the same engine.db row.
     const viaHistory = history.getPlannedPipeline('wf-1');
     const viaStore = reader.get('wf-1');
@@ -71,7 +88,7 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('is_template=false for a one-shot plan', () => {
     const { history, engine, reader } = make();
-    history.insertPlannedPipeline(planned({ template: false }));
+    history.insertPlannedPipeline(planned({ template: false }), null);
     expect(reader.get('wf-1')!.isTemplate).toBe(false);
     engine.close();
     history.close();
@@ -79,8 +96,8 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('rename propagates to the engine.db row (column + serialized name)', () => {
     const { history, engine, reader } = make('k');
-    history.insertPlannedPipeline(planned({ name: 'Old' }));
-    expect(history.renamePlannedPipeline('wf-1', 'New')).toBe(true);
+    history.insertPlannedPipeline(planned({ name: 'Old' }), null);
+    expect(history.renamePlannedPipeline('wf-1', 'New', null)).toBe(true);
     expect(reader.get('wf-1')!.name).toBe('New');
     expect((JSON.parse(reader.get('wf-1')!.definitionJson) as { name: string }).name).toBe('New');
     engine.close();
@@ -89,7 +106,7 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('delete removes the engine.db row', () => {
     const { history, engine, reader } = make();
-    history.insertPlannedPipeline(planned());
+    history.insertPlannedPipeline(planned(), null);
     expect(history.deletePlannedPipeline('wf-1')).toBe(true);
     expect(reader.get('wf-1')).toBeUndefined();
     engine.close();
@@ -98,16 +115,17 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('markPipelineExecuted drops the one-shot def from the engine.db library', () => {
     const { history, engine, reader } = make();
-    history.insertPlannedPipeline(planned({ template: false }));
-    history.markPipelineExecuted('wf-1');
+    history.insertPlannedPipeline(planned({ template: false }), null);
+    expect(history.markPipelineExecuted('wf-1'), 'says it removed the one-shot (660b: definition=removed)').toBe(true);
     expect(reader.get('wf-1')).toBeUndefined();
+    expect(history.markPipelineExecuted('wf-1'), 'and says no when there was nothing to remove').toBe(false);
     engine.close();
     history.close();
   });
 
   it('setWorkflowConfirmedAt stamps the engine.db blob', () => {
     const { history, engine, reader } = make('k');
-    history.insertPlannedPipeline(planned());
+    history.insertPlannedPipeline(planned(), null);
     expect(history.setWorkflowConfirmedAt('wf-1', '2026-07-01T12:00:00Z')).toBe(true);
     expect((JSON.parse(reader.get('wf-1')!.definitionJson) as { confirmedAt: string }).confirmedAt)
       .toBe('2026-07-01T12:00:00Z');
@@ -117,8 +135,8 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('getPlannedPipelines lists the engine.db definitions', () => {
     const { history, engine } = make();
-    history.insertPlannedPipeline(planned({ id: 'wf-a', name: 'A' }));
-    history.insertPlannedPipeline(planned({ id: 'wf-b', name: 'B' }));
+    history.insertPlannedPipeline(planned({ id: 'wf-a', name: 'A' }), null);
+    history.insertPlannedPipeline(planned({ id: 'wf-b', name: 'B' }), null);
     const ids = history.getPlannedPipelines(100).map(w => w.id).sort();
     expect(ids).toEqual(['wf-a', 'wf-b']);
     engine.close();
@@ -131,7 +149,7 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
     // Unlike the S3a additive mirror (which swallowed), the write-cutover surfaces
     // the failure: there is no legacy row to fall back to, so silent success would
     // lose the definition.
-    expect(() => history.insertPlannedPipeline(planned())).toThrow();
+    expect(() => history.insertPlannedPipeline(planned(), null)).toThrow();
     history.close();
   });
 
@@ -144,8 +162,8 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
     // nowhere to write. A WRITE must throw a clear error rather than silently
     // no-op into false success (the caller would be told "saved" while nothing
     // persisted). READS still degrade to empty (under-fires the safe direction).
-    expect(() => history.insertPlannedPipeline(planned())).toThrow(/engine\.db verb store unavailable/);
-    expect(() => history.renamePlannedPipeline('wf-1', 'x')).toThrow(/engine\.db verb store unavailable/);
+    expect(() => history.insertPlannedPipeline(planned(), null)).toThrow(/engine\.db verb store unavailable/);
+    expect(() => history.renamePlannedPipeline('wf-1', 'x', null)).toThrow(/engine\.db verb store unavailable/);
     expect(() => history.deletePlannedPipeline('wf-1')).toThrow(/engine\.db verb store unavailable/);
     expect(history.getPlannedPipeline('wf-1')).toBeUndefined();
     expect(history.getPlannedPipelines(100)).toEqual([]);
@@ -232,7 +250,7 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     history.insertPlannedPipeline({
       id, name: 'W', goal: 'g', steps: [], reasoning: 'r',
       estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
-    });
+    }, null);
   }
 
   it('insertTrigger writes the mapped engine.db row (source, condition_json, params_json)', () => {
@@ -435,11 +453,14 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     history.close();
   });
 
-  it('getTriggersByPipelineId EXCLUDES disabled + completed refs (destructive-edit guard)', () => {
+  it('getTriggersByPipelineId EXCLUDES disabled, completed and stopped refs (destructive-edit guard)', () => {
     const { history, engine } = make();
     seedWorkflow(history, 'wf-c');
     history.insertTrigger(trig({ id: 'active-ref', taskType: 'pipeline', pipelineId: 'wf-c' }));
     history.insertTrigger(trig({ id: 'done-ref', taskType: 'pipeline', pipelineId: 'wf-c', status: 'completed' }));
+    // A stopped one-shot will not run again, so editing its workflow changes nothing it does.
+    history.insertTrigger(trig({ id: 'stopped-ref', taskType: 'pipeline', pipelineId: 'wf-c' }));
+    history.updateTrigger('stopped-ref', { status: 'stopped' });
     history.insertTrigger(trig({ id: 'off-ref', taskType: 'pipeline', pipelineId: 'wf-c' }));
     history.setTriggerEnabled('off-ref', false);
     const ids = history.getTriggersByPipelineId('wf-c').map(t => t.id);
@@ -758,6 +779,8 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
       INSERT INTO schema_version (version) VALUES (43);
       -- a real v43 db has threads (created v22); v46 ALTERs it. Minimal stub for the v44/v45/v46 migration test.
       CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+      -- and thread_messages (created v22); v67 reads it (conversation_grants fill). Minimal stub.
+      CREATE TABLE IF NOT EXISTS thread_messages (thread_id TEXT);
       -- a real v43 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
       -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
@@ -820,7 +843,7 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     // ran six other test files and found this only through a review. The roster above is
     // the reason to keep it that way: it is a list of what the schema IS, maintained
     // because the number beside it refuses to be wrong.
-    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     // v45 landed the relocated metrics table:
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'").get())
       .toEqual({ name: 'metrics' });

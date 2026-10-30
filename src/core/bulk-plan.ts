@@ -11,9 +11,10 @@
 import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { DataStore } from './data-store.js';
-import { coercePlainColumnValue } from './data-store.js';
+import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import { getFileAreaDir, isPathWithin, resolveFileAreaPath } from './workspace.js';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
+import { namesSidecarLabel } from './workspace-root.js';
 import { openRead, statEntry, WorkspaceAccessError } from './workspace-fd.js';
 import type { BeforeImage, PlannedTarget } from './bulk-ledger.js';
 
@@ -39,7 +40,7 @@ export class BulkSourceError extends Error {}
 
 export interface SourceRow { target: string; after: unknown }
 
-const META_FIELDS = new Set(['_id', '_created_at', '_updated_at']);
+const META_FIELDS = SYSTEM_COLUMNS;
 
 const tooManyTargets = (): BulkSourceError =>
   new BulkSourceError(`The source has more than ${String(BULK_MAX_TARGETS)} targets.`);
@@ -261,7 +262,7 @@ export function bulkFileKey(target: string): string | null {
   // Under the workspace's real path, as a key was before: the same however the root is spelled.
   let real = base.ws;
   try {
-    real = realpathSync(base.ws);
+    if (!namesSidecarLabel(base.ws)) real = realpathSync(base.ws);
   } catch {
     /* the held directory is reached by its fd; the name is only the key's spelling */
   }

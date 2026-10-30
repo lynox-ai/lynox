@@ -175,6 +175,7 @@ import { RunHistory } from './run-history.js';
 import { ThreadStore } from './thread-store.js';
 import { DataStore } from './data-store.js';
 import { SubjectStore, makeSubjectColumnBridge } from './subject-store.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 describe('KnowledgeLayer erase → orphan-subject reap', () => {
   const provider = new LocalProvider();
@@ -259,7 +260,7 @@ describe('KnowledgeLayer erase → orphan-subject reap', () => {
       name: 'kunden', scope: { type: 'context', id: '' },
       columns: [{ name: 'firma', type: 'subject', subjectKind: 'organization' }, { name: 'note', type: 'string' }],
     });
-    ds!.insertRecords({ collection: 'kunden', records: [{ firma: 'Tabelle GmbH', note: 'x' }] });
+    ds!.insertRecords({ collection: 'kunden', records: [{ firma: 'Tabelle GmbH', note: 'x' }], stamp: TEST_STAMP });
     expect(ds!.hasRecordsForSubject(org)).toBe(true);       // the bridge resolved the name to THIS id
 
     expect(await layer.eraseByPattern('CRM table')).toBe(1);

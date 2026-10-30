@@ -7,6 +7,7 @@
  * payload, a repair pass so that cap degrades instead of failing, and a narrow error vocabulary.
  */
 import { OutwardReadUnrecorded } from '../../core/audit-log.js';
+import { currentCallSignal, joinCallSignal } from '../../core/call-connection.js';
 import { fetchWithValidatedRedirects, readBodyLimited } from '../../tools/builtin/http.js';
 import type { ToolContext } from '../../core/tool-context.js';
 
@@ -49,6 +50,11 @@ export async function fetchIcsFeed(
   // path, which is the credential. What it throws stops the read and is passed on as thrown.
   onRead?: ((host: string) => void) | undefined,
 ): Promise<FetchIcsResult> {
+  // A stop of the run ends the read (`joinCallSignal`). It leaves as an AbortError, not as one
+  // of the messages below: "could not be reached" would tell the model the calendar is down,
+  // when the truth is that the run was stopped and the read can simply be repeated.
+  const call = currentCallSignal();
+  const stopped = (): Error => new DOMException('the calendar read was stopped', 'AbortError');
   let response: Response;
   try {
     if (onRead) onRead(new URL(url).hostname);
@@ -57,7 +63,7 @@ export async function fetchIcsFeed(
       {
         method: 'GET',
         headers: { Accept: 'text/calendar, text/plain;q=0.9, */*;q=0.5' },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: joinCallSignal(AbortSignal.timeout(FETCH_TIMEOUT_MS)),
       },
       // `discovery`, not `full-control`: this is a read of a subscribed feed, the same shape as
       // fetching a page, and it should stay reachable under a `guarded` egress policy without
@@ -70,6 +76,7 @@ export async function fetchIcsFeed(
   } catch (err) {
     // A read that could not be recorded says so; its message carries no address.
     if (err instanceof OutwardReadUnrecorded) throw err;
+    if (call?.aborted === true) throw stopped();
     // Network failure, timeout, or a host the egress policy refused. The distinction matters to
     // an operator reading logs and not to the model, which needs exactly one fact: the calendar
     // could not be reached, so "nothing scheduled" is not a safe conclusion.
@@ -87,6 +94,7 @@ export async function fetchIcsFeed(
   try {
     ({ text, truncated } = await readBodyLimited(response, MAX_ICS_BYTES));
   } catch {
+    if (call?.aborted === true) throw stopped();
     // Reading the body is a second chance to fail — a socket dropped mid-stream, a decode
     // error — and it sits after the headers arrived, so leaving it outside the guard made the
     // "every error is one of ours" claim above false for exactly the errors nobody tests.

@@ -1,11 +1,14 @@
 import Database from 'better-sqlite3';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { renameSync } from 'node:fs';
-import { hkdfSync, randomBytes, createCipheriv, createDecipheriv, createHash, createHmac } from 'node:crypto';
+import { hkdfSync, randomBytes, createCipheriv, createHash, createHmac } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
+import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
 import { ensureDirSync } from './atomic-write.js';
-import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
+import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
+import { MANDATE_TAG_PREFIX } from './request-principal.js';
+import { epochStartByTimeSql } from './grant-ledger.js';
 
 /**
  * EngineDb — the consolidated per-tenant subject-graph store (Foundation Rework v2, S0).
@@ -48,7 +51,6 @@ const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
  * stores.
  */
 const STORE_BINDING_HKDF_INFO = 'lynox-engine-store-binding';
-const ENCRYPTED_PREFIX = 'enc:';
 
 function getDefaultDbPath(): string {
   return join(getLynoxDir(), 'engine.db');
@@ -512,7 +514,7 @@ const MIGRATIONS: string[] = [
   // human `confirmed_at` before it is due / dispatched; anything created by other
   // than an explicit human action lands unconfirmed (fail-closed — the store
   // default is NULL, the human HTTP route stamps, the agent tool never does).
-  // GRANDFATHER (rafael decision): every EXISTING run_agent trigger predates the
+  // GRANDFATHER (owner decision): every EXISTING run_agent trigger predates the
   // gate and was operator-created (pre-customer, no injected schedules) → stamp it
   // confirmed so the one-time behaviour change never pauses the operator's own live
   // schedules; the gate protects only NEW agent-created triggers. Scoped to
@@ -1266,7 +1268,341 @@ const MIGRATIONS: string[] = [
    ALTER TABLE bulk_targets ADD COLUMN write_grant_id TEXT;
    ALTER TABLE bulk_runs ADD COLUMN first_connection_id TEXT;
    ALTER TABLE bulk_runs ADD COLUMN first_grant_id TEXT;`,
+  // v44: which mandate set a trigger up and which mandate changed it last, with the mandate's id
+  // (PRD customer-granted-operator-access §3.9). A plan a mandate made runs as that mandate, and a
+  // mandate is only live under its id (`principalHasEnded`): the tag alone (`created_by`,
+  // `edited_by`) names a person, not the grant. `created_mandate_id` is set once, with the creator
+  // tag. `mandate_editor[_id]` is the last MANDATE that changed the trigger, kept apart from
+  // `edited_by` because the owner's stamp writes itself there (`TriggerStore.setConfirmedAt`);
+  // neither the stamp nor an owner's edit touches it. A row from before this version keeps NULL
+  // ids, and a mandate without an id counts as ended: its plan waits for the owner, never runs on
+  // as the owner. No lookup by email: the same person can hold a second mandate.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (44);
+   ALTER TABLE triggers ADD COLUMN created_mandate_id TEXT;
+   ALTER TABLE triggers ADD COLUMN mandate_editor TEXT;
+   ALTER TABLE triggers ADD COLUMN mandate_editor_id TEXT;
+   UPDATE triggers SET mandate_editor = edited_by WHERE substr(edited_by, 1, ${MANDATE_TAG_PREFIX.length}) = '${MANDATE_TAG_PREFIX}';`,
+  // v45: the same for workflows, and when a mandate last changed either.
+  // `workflows.created_by` is the creating request's tag (NULL for
+  // the owner and the engine, as on triggers made by the agent tool), set only by the INSERT: a
+  // later save never touches it, so a mandate that edits the owner's workflow becomes its editor,
+  // not its creator. `mandate_editor[_id]` and `mandate_edited_at` are the last MANDATE that
+  // changed it, written by a mandate's save or rename only. `mandate_edited_at` is the time a
+  // mandate's plan is compared against; without an edit, `created_at` is, when `created_by` is a
+  // mandate. No backfill: nothing stored names a workflow's author, and a trigger edit from before
+  // this version has no time. Such a trigger has a mandate editor without an id, which already
+  // counts as ended.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (45);
+   ALTER TABLE workflows ADD COLUMN created_by TEXT;
+   ALTER TABLE workflows ADD COLUMN created_mandate_id TEXT;
+   ALTER TABLE workflows ADD COLUMN mandate_editor TEXT;
+   ALTER TABLE workflows ADD COLUMN mandate_editor_id TEXT;
+   ALTER TABLE workflows ADD COLUMN mandate_edited_at TEXT;
+   ALTER TABLE triggers ADD COLUMN mandate_edited_at TEXT;`,
+  // v46: a target found already holding its planned value, to which this run never sent its
+  // write verb (`found_unsent`). It takes no place of the cap on targets that receive the verb,
+  // is no probe, and is not taken back by an undo: the run did not change it. Only a run created
+  // from this version on can tell (`unsent_tracked`): in a run from before `write_sent` (v18) a
+  // loop may have sent the verb and died unrecorded, leaving `write_sent = 0`, so a run that
+  // exists at this migration keeps counting such a target as sent.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (46);
+   ALTER TABLE bulk_runs ADD COLUMN unsent_tracked INTEGER NOT NULL DEFAULT 1;
+   UPDATE bulk_runs SET unsent_tracked = 0;
+   ALTER TABLE bulk_targets ADD COLUMN found_unsent INTEGER NOT NULL DEFAULT 0;`,
+  // v47: inbound webhooks. A trigger's route token is kept only as its SHA-256
+  // (`route_token_hash`), found by exact match through a unique index before a body byte is
+  // read. `inbound_events` is the ledger of verified deliveries: `dedup_key` comes from the
+  // signed bytes and is unique per instance, so one signed body is recorded once, whichever
+  // trigger it reaches. A row keeps the delivery's evidence headers, never the body. No boot
+  // sweep touches it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (47);
+   ALTER TABLE triggers ADD COLUMN route_token_hash TEXT;
+   CREATE UNIQUE INDEX idx_triggers_route_token ON triggers(route_token_hash) WHERE route_token_hash IS NOT NULL;
+   CREATE TABLE inbound_events (
+     id           TEXT PRIMARY KEY,
+     trigger_id   TEXT NOT NULL,
+     dedup_key    TEXT NOT NULL UNIQUE,
+     received_at  TEXT NOT NULL,
+     state        TEXT NOT NULL CHECK (state IN ('received', 'running', 'done', 'failed', 'dropped')),
+     reason       TEXT,
+     run_id       TEXT,
+     values_json  TEXT,
+     headers_json TEXT NOT NULL DEFAULT '{}',
+     updated_at   TEXT NOT NULL
+   );
+   CREATE INDEX idx_inbound_events_trigger ON inbound_events(trigger_id, state, received_at);`,
+  // v48: the approval queue (`core/approval-store.ts`). An entry is a mail a run nobody watches
+  // handed to its owner; `payload_json` is customer data, written through `enc()`, and has no
+  // UPDATE path, nor have `origin_json` and `checksum`. `dedup_key` and `family_key` are keyed
+  // hashes, because the plain keys hold recipients and subjects. The partial unique index makes
+  // two concurrent filings of the same mail one while either is waiting, running or of unknown
+  // outcome. `origin_json`'s source has no CHECK: a new source needs no migration, and a row
+  // with a source this engine does not know is read but never executed. The trigger holds what
+  // an entry binds — kind, payload, origin, checksum, keys, creator and lifetime — against any
+  // UPDATE; its one exception is the tombstone, which empties the payload of an `unknown` entry
+  // and keeps the rest (`tombstoned_at`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (48);
+   CREATE TABLE approval_entries (
+     id             TEXT PRIMARY KEY,
+     kind           TEXT NOT NULL CHECK (kind IN ('mail_reply', 'mail_send')),
+     payload_json   TEXT NOT NULL,
+     origin_json    TEXT NOT NULL,
+     dedup_key      TEXT NOT NULL,
+     family_key     TEXT,
+     checksum       TEXT NOT NULL,
+     binding        TEXT NOT NULL CHECK (binding IN ('keyed', 'unkeyed')),
+     created_by     TEXT,
+     mandate_id     TEXT,
+     status         TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'executing', 'done', 'failed', 'unknown', 'rejected', 'expired')),
+     held_reason    TEXT,
+     held_at        TEXT,
+     created_at     TEXT NOT NULL,
+     expires_at     TEXT NOT NULL,
+     decided_at     TEXT,
+     decided_by     TEXT,
+     decided_reason TEXT,
+     claimed_at     TEXT,
+     executed_at    TEXT,
+     attempts       INTEGER NOT NULL DEFAULT 0,
+     result_json    TEXT,
+     purge_after    TEXT,
+     tombstoned_at  TEXT
+   );
+   CREATE UNIQUE INDEX idx_approval_entries_active ON approval_entries(dedup_key)
+     WHERE status IN ('pending', 'approved', 'executing', 'unknown');
+   CREATE INDEX idx_approval_entries_dedup ON approval_entries(dedup_key, status);
+   CREATE INDEX idx_approval_entries_family ON approval_entries(family_key, status) WHERE family_key IS NOT NULL;
+   CREATE INDEX idx_approval_entries_status ON approval_entries(status, created_at);
+   CREATE INDEX idx_approval_entries_purge ON approval_entries(purge_after) WHERE purge_after IS NOT NULL;
+   CREATE TRIGGER approval_entries_written_once BEFORE UPDATE ON approval_entries
+   WHEN OLD.id IS NOT NEW.id OR OLD.kind IS NOT NEW.kind OR OLD.origin_json IS NOT NEW.origin_json
+     OR OLD.checksum IS NOT NEW.checksum OR OLD.binding IS NOT NEW.binding
+     OR OLD.dedup_key IS NOT NEW.dedup_key OR OLD.family_key IS NOT NEW.family_key
+     OR OLD.created_by IS NOT NEW.created_by OR OLD.mandate_id IS NOT NEW.mandate_id
+     OR OLD.created_at IS NOT NEW.created_at OR OLD.expires_at IS NOT NEW.expires_at
+     OR (OLD.payload_json IS NOT NEW.payload_json
+         AND NOT (NEW.payload_json = '' AND OLD.status = 'unknown' AND NEW.status = 'unknown' AND NEW.tombstoned_at IS NOT NULL))
+   BEGIN SELECT RAISE(ABORT, 'approval entries bind what was filed: it is written once'); END;`,
+  // v49: erasure by connection, cut 1 (PRD-SOURCE-CONNECTION revision 8, E2).
+  // `connections.first_grant_id` is the grant the row was created with: set by the INSERT, and
+  // by an update only while it is still NULL, so a `new` grant minted later on the same row (the
+  // corrected save of a profile the boot held back) does not start a new epoch. A row from before
+  // this version takes its connection's latest `new` or `backfill` grant. That can be later than
+  // the grant the row was created with, when a held-back profile was saved again before this
+  // version: its earlier grants then fall outside, and are not erased. Taking an earlier grant
+  // instead could reach a connection removed earlier under the same id, whose rows are not this
+  // one's. A row with neither stays NULL and covers nothing.
+  // `connection_records` holds one row per removed `api` connection, written in the delete's
+  // transaction: `erasure` from the `api_setup` delete, `closing` from every other. An erasure
+  // record fixes the grants it covers (`covered_grants_json`); every record keeps the grants the
+  // removal ended (`ended_grants_json`), so a connection brought back with one of them covers
+  // nothing and no earlier record reaches its rows. `history_state` is the run-history
+  // store's state, and only `done` is ever shown as erased. `runs_active_json` is the runs that
+  // were active at its first sweep, NULL until then. `label` is the connection's name, blanked
+  // when a closing record is written and when an erasure record is done. `wal_scrub_pending` is
+  // set when a store becomes done and cleared once a WAL checkpoint went through, so a blocked
+  // checkpoint is tried again by the next pass. No foreign key: a record
+  // outlives the connection row it names. The owner's erasure empties it with every other table.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (49);
+   ALTER TABLE connections ADD COLUMN first_grant_id TEXT;
+   UPDATE connections SET first_grant_id = (
+     SELECT g.grant_id FROM connection_grants g
+      WHERE g.connection_id = connections.id AND g.kind = 'api' AND g.reason IN ('new', 'backfill')
+      ORDER BY g.rowid DESC LIMIT 1
+   ) WHERE kind = 'api';
+   CREATE TABLE connection_records (
+     id                  INTEGER PRIMARY KEY,
+     kind                TEXT NOT NULL CHECK (kind IN ('erasure', 'closing')),
+     connection_id       TEXT NOT NULL,
+     label               TEXT,
+     covered_grants_json TEXT NOT NULL DEFAULT '[]',
+     ended_grants_json   TEXT NOT NULL DEFAULT '[]',
+     runs_active_json    TEXT,
+     history_state       TEXT NOT NULL CHECK (history_state IN ('pending', 'done', 'not reached', 'failed', 'late')),
+     created_at          TEXT NOT NULL,
+     deadline            TEXT NOT NULL,
+     done_at             TEXT,
+     wal_scrub_pending   INTEGER NOT NULL DEFAULT 0
+   );
+   CREATE INDEX idx_connection_records_connection ON connection_records(connection_id);`,
+  // v50: where a connection's epoch starts, by time (supersedes v49's fill, which took the latest
+  // beginning grant). The rule is `epochStartByTimeSql`, the one the store's write reads too.
+  // It recomputes every `api` row: a row written since v49 got its start in the INSERT's
+  // transaction, which this rule finds again (unless an earlier connection under the same id began
+  // within two seconds of it: then it stays empty); a row from before v49 that took a later grant (a
+  // held-back profile saved again) gets the grant it was created with; a start this ledger does not
+  // hold for the id (a file copied from another engine) gives way to the row's own beginning, or to
+  // empty until the boot gives it one.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (50);
+   UPDATE connections SET first_grant_id = ${epochStartByTimeSql('connections.id', 'connections.created_at', 'connections.config_json')}
+   WHERE kind = 'api';`,
+  // v51 — the connections the owner's stamp of a plan lists (`plan-stamp.ts`). Empty for every
+  // stamp written before: such a plan uses none of a member's own connections, as before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (51);
+   ALTER TABLE triggers ADD COLUMN stamp_connections TEXT;`,
+  // v52: a removal record says what started it. `cause` is `owner_delete` for every record a
+  // delete wrote (all records before this version) and `provider_revoked` for one a provider's
+  // refusal of the stored grant wrote; `revoked_grant` is that grant. A provider's erasure is held
+  // until `hold_until` (the sweep does not read it before), and the owner can cancel it while it is
+  // held (`cancelled`, `cancelled_at`). `kept_after_hold` counts, without content, the calls of the
+  // covered grants from runs after the hold that the erasure leaves (NULL until its first pass).
+  // SQLite cannot alter a CHECK, so the table is rebuilt with
+  // every row. One live provider erasure per refused grant: a cancelled one does not count, and a
+  // `closing` record does not block a later erasure.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (52);
+   CREATE TABLE connection_records_v52 (
+     id                  INTEGER PRIMARY KEY,
+     kind                TEXT NOT NULL CHECK (kind IN ('erasure', 'closing')),
+     connection_id       TEXT NOT NULL,
+     label               TEXT,
+     covered_grants_json TEXT NOT NULL DEFAULT '[]',
+     ended_grants_json   TEXT NOT NULL DEFAULT '[]',
+     runs_active_json    TEXT,
+     history_state       TEXT NOT NULL CHECK (history_state IN ('pending', 'done', 'not reached', 'failed', 'late', 'cancelled')),
+     created_at          TEXT NOT NULL,
+     deadline            TEXT NOT NULL,
+     done_at             TEXT,
+     wal_scrub_pending   INTEGER NOT NULL DEFAULT 0,
+     cause               TEXT NOT NULL DEFAULT 'owner_delete' CHECK (cause IN ('owner_delete', 'provider_revoked')),
+     hold_until          TEXT,
+     cancelled_at        TEXT,
+     revoked_grant       TEXT,
+     kept_after_hold     INTEGER
+   );
+   INSERT INTO connection_records_v52 (id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending)
+     SELECT id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending FROM connection_records;
+   DROP TABLE connection_records;
+   ALTER TABLE connection_records_v52 RENAME TO connection_records;
+   CREATE INDEX idx_connection_records_connection ON connection_records(connection_id);
+   CREATE UNIQUE INDEX idx_connection_records_provider_erasure ON connection_records(connection_id, revoked_grant)
+     WHERE kind = 'erasure' AND cause = 'provider_revoked' AND history_state <> 'cancelled';`,
+  // v53 — the last id a Shopify list read has recorded (`bulk-shopify.ts`). Its pages are asked
+  // for by id (`id:>N`), not by page number, so a read that goes on in a later tick starts after
+  // it. 0 before the first page, and on every other run.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
+   ALTER TABLE bulk_runs ADD COLUMN list_last_id INTEGER NOT NULL DEFAULT 0;`,
+
+  // v54: how many sends to a bulk target ended without a clear answer (`unknown_sends`). Each
+  // send adds one before it leaves, and only that send's own refusal takes it back, so one
+  // unclear send keeps the target from being sent to again. A target sent to before this
+  // version and not written has an answer nobody recorded: it counts as one unclear send. That
+  // includes a target v18 marked sent for a `write_failed` from before v18, which may have failed
+  // before anything left; counting it unclear errs towards not sending twice.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
+   ALTER TABLE bulk_targets ADD COLUMN unknown_sends INTEGER NOT NULL DEFAULT 0;
+   UPDATE bulk_targets SET unknown_sends = 1 WHERE write_sent = 1 AND applied_at IS NULL;`,
+  // v55: the name a grant was last shown under is read from the actor trail by grant id
+  // (`AuditLog.displayNameOf`). Only rows that carry a name are indexed, so a grant none of whose
+  // rows carries one is answered from the index instead of a walk over the whole trail.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (55);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_mandate_display ON audit_log(mandate_id, id) WHERE actor_display IS NOT NULL;`,
+
+  // v56 (owner's view of the actor trail): `plan_run` is the key a plan's run shares with every row
+  // written within it (the correlation id of its `plan:run` rows), so the view shows a run as one
+  // entry. `trail_form` is set on every row written from now on; the view shows only those, since
+  // a row from before could name a person for a read made after that person's access had ended.
+  // Existing rows keep both NULL: nothing is backfilled, and the update trigger stays.
+  // The view reads a run, a bulk run and a step whole by these keys, and the table is never pruned,
+  // so each gets an index; without one every page of the view scans the whole table.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (56);
+   ALTER TABLE audit_log ADD COLUMN plan_run TEXT;
+   ALTER TABLE audit_log ADD COLUMN trail_form INTEGER;
+   CREATE INDEX IF NOT EXISTS idx_audit_log_plan_run ON audit_log(plan_run);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_correlation ON audit_log(correlation_id);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_action_run ON audit_log(action, run_id);`,
+
+  // v57: a plan's pause after a mandate it depends on has provably ended (`plan-pause.ts`).
+  // `paused_at` carries the state (NULL: not paused), `paused_due_at` the run it was due for,
+  // `paused_for` who ended (JSON, one entry per mandate), `pause_noticed_at` whether the owner
+  // was told (NULL: not yet). Added whether or not the pause is switched on; unused they stay NULL.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (57);
+   ALTER TABLE triggers ADD COLUMN paused_at INTEGER;
+   ALTER TABLE triggers ADD COLUMN paused_due_at TEXT;
+   ALTER TABLE triggers ADD COLUMN paused_for TEXT;
+   ALTER TABLE triggers ADD COLUMN pause_noticed_at INTEGER;`,
+
+  // v58: the link domains the owner allows a judged run's verdicts to add (`start_domains`,
+  // encrypted JSON), given at the start that begins the judge. NULL on every run before this
+  // version and on every run started without one; the approval checksum names it only where set.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
+   ALTER TABLE bulk_runs ADD COLUMN start_domains TEXT;`,
+
+  // v59 (PRD shopify-preset §20.2 item 4): a target the owner takes out of a previewed run before
+  // approving it. It keeps its after-state and is not written; the ledger's one definition of a
+  // writing target excludes it. NULL for every existing target: nothing is deselected.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
+   ALTER TABLE bulk_targets ADD COLUMN deselected_at TEXT;`,
+
+  // v60: the owner's takeover of a paused plan (`plan-takeover.ts`). Each side of a plan — a
+  // trigger, a workflow — keeps the mandate marks the owner took over, as the mark stood:
+  // (tag, grant id, time) for the creator and for the last mandate editor. A mark equal to its
+  // covered copy is no member (`planMandate`); a new mandate edit clears the editor's copy in
+  // the same statement, so it is a member again. `covered_at` is when (unix seconds), for display.
+  // `paused_db_at` is the pause in the database's own clock (`unixepoch('now')`), the clock the
+  // marks are written in, so the takeover can tell a mark made after the pause (`plan-takeover.ts`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (60);
+   ALTER TABLE triggers ADD COLUMN paused_db_at INTEGER;
+   ALTER TABLE triggers ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_at INTEGER;
+   ALTER TABLE workflows ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_at INTEGER;`,
+  // v61: the webhook drain's columns. `attempt_id` names the
+  // run a `running` event belongs to, so the outcome of a run whose attempt was superseded
+  // writes nothing. `reported_at` is set once a dropped or failed event was reported to the owner,
+  // `unknown_reported_at` once a `running` event left behind by a lost process was reported as
+  // of unknown outcome — each is reported once.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (61);
+   ALTER TABLE inbound_events ADD COLUMN attempt_id TEXT;
+   ALTER TABLE inbound_events ADD COLUMN reported_at TEXT;
+   ALTER TABLE inbound_events ADD COLUMN unknown_reported_at TEXT;`,
+  // v62: the index the drain's sweeps read by, state and age across all triggers each tick. Its
+  // own migration, so that a database that already ran the one before it gets it too.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (62);
+   CREATE INDEX IF NOT EXISTS idx_inbound_events_state_received ON inbound_events(state, received_at);`,
+  // v63 (660a-1c S-2): an opaque id for each API profile, `apf_` and 16 hex, that a mandate's row
+  // in the instance trail names instead of the slug the model chose (which can carry a name). Only
+  // `kind = 'api'` rows get one; the boot fills any a row is still missing (`fillApiTrailIds`).
+  // `randomblob` is enough: the id is a label with no secret value.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (63);
+   ALTER TABLE connections ADD COLUMN trail_id TEXT;
+   UPDATE connections SET trail_id = 'apf_' || lower(hex(randomblob(8))) WHERE trail_id IS NULL AND kind = 'api';
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_trail_id ON connections(trail_id);`,
+  // v64: the owner's advance warning before a mandate's known end (`plan-pause.ts`). One row per
+  // plan, mandate and end: a plan the mandate joins after the warning gets its own, and an
+  // extension (a new end) warns again. `claimed_at` is when a process took it, `delivered_at` when
+  // a channel of the owner accepted the warning; only a delivered row makes a pause say "warned".
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (64);
+   CREATE TABLE IF NOT EXISTS plan_advance_warnings (
+     trigger_id TEXT NOT NULL REFERENCES triggers(id) ON DELETE CASCADE,
+     mandate_id TEXT NOT NULL,
+     ends_at INTEGER NOT NULL,
+     claimed_at INTEGER NOT NULL,
+     delivered_at INTEGER,
+     PRIMARY KEY (trigger_id, mandate_id, ends_at)
+   );`,
 ];
+
+export interface EngineDbOptions {
+  /**
+   * What a database that looks corrupt gets. `throw` (the default): the failure is thrown with
+   * what the operator can do, the handle closed and the file left where it is. Any opener but the
+   * boot edits a database something else then uses (a script against a live data directory, a
+   * restore), where an empty one in its place would pass for the real one. `recreate`: it is set
+   * aside as `<path>.corrupt-<ms>` and an empty one is opened in its place — only for the boot,
+   * which must start.
+   */
+  onCorruption?: 'recreate' | 'throw' | undefined;
+}
 
 /**
  * Low-level SQLite wrapper for the consolidated engine.db (subject graph).
@@ -1282,12 +1618,12 @@ export class EngineDb {
   private _decWarnedNoKey = false;
   private _decWarnedFailCount = 0;
 
-  constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
+  constructor(dbPath?: string | undefined, encryptionKey?: string | undefined, options: EngineDbOptions = {}) {
     const path = dbPath ?? getDefaultDbPath();
     this.dbPath = path;
     ensureDirSync(dirname(path));
     this.db = null!; // assigned by _openOrRecreate
-    this._openOrRecreate(path);
+    this._openOrRecreate(path, options.onCorruption ?? 'throw');
 
     // Derive engine-db encryption key via HKDF from the vault key (D2: parity
     // with history.db). Distinct salt+info so engine.db and history.db never
@@ -1377,14 +1713,27 @@ export class EngineDb {
    * corruption and trigger the wipe-and-recreate path, which would silently destroy
    * the real subject-graph data of a reads-ON tenant while the engine boots "healthy".
    */
-  private _openOrRecreate(path: string): void {
+  private _openOrRecreate(path: string, onCorruption: 'recreate' | 'throw'): void {
     let db = new Database(path);
+    let reported = false;
     try {
       const result = db.pragma('integrity_check') as { integrity_check: string }[];
       if (result[0]?.integrity_check !== 'ok') {
+        reported = true;
         throw new Error(`integrity_check: ${result[0]?.integrity_check ?? 'unknown'}`);
       }
     } catch (err) {
+      // Only what corruption looks like is set aside: the check reporting a fault, or SQLite
+      // finding no database or a malformed image. Anything else (a file another process holds
+      // past the wait, an I/O fault) fails the open loud and keeps the file.
+      if (!(reported || isCorruptionError(err))) {
+        try { db.close(); } catch { /* best-effort */ }
+        throw err;
+      }
+      if (onCorruption === 'throw') {
+        try { db.close(); } catch { /* best-effort */ }
+        throw corruptFileLeftInPlace(basename(path), err);
+      }
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ Engine database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);
       try { db.close(); } catch { /* best-effort */ }
@@ -1520,9 +1869,19 @@ export class EngineDb {
    * @internal — see {@link enc}.
    */
   tryDec(text: string): string | null {
-    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
-    const out = this.dec(text);
-    return out === text ? null : out;
+    if (!text) return text;
+    const r = this.decStrict(text);
+    if (!r.ok) this._warnUndecryptable(r.kind);
+    return r.ok ? r.text : null;
+  }
+
+  /**
+   * Decrypt text from storage and say whether it worked ({@link strictDecrypt}). For a reader that
+   * passes the text on: unlike {@link dec}, a value it cannot read never comes back as its text.
+   * @internal — see {@link enc}.
+   */
+  decStrict(text: string): StrictDecryptResult {
+    return strictDecrypt(text, this._encKey);
   }
 
   /**
@@ -1530,28 +1889,23 @@ export class EngineDb {
    * @internal — see {@link enc}.
    */
   dec(text: string): string {
-    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
-    if (!this._encKey) {
+    // A NULL column read at run time passes through, as it always has.
+    if (!text) return text;
+    const r = this.decStrict(text);
+    if (r.ok) return r.text;
+    this._warnUndecryptable(r.kind);
+    return text;
+  }
+
+  private _warnUndecryptable(kind: 'no_key' | 'failed'): void {
+    if (kind === 'no_key') {
       if (!this._decWarnedNoKey) {
         this._decWarnedNoKey = true;
         process.stderr.write('⚠ Engine: encrypted data found but no encryption key set — data unreadable\n');
       }
-      return text;
-    }
-    try {
-      const buf = Buffer.from(text.slice(ENCRYPTED_PREFIX.length), 'base64');
-      const iv = buf.subarray(0, CRYPTO_IV_LENGTH);
-      const tag = buf.subarray(CRYPTO_IV_LENGTH, CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const data = buf.subarray(CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const decipher = createDecipheriv(CRYPTO_ALGORITHM, this._encKey, iv, { authTagLength: CRYPTO_TAG_LENGTH });
-      decipher.setAuthTag(tag);
-      return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
-    } catch {
-      if (this._decWarnedFailCount < 3) {
-        this._decWarnedFailCount++;
-        process.stderr.write('⚠ Engine: decryption failed for encrypted record — wrong key or corrupted data\n');
-      }
-      return text;
+    } else if (this._decWarnedFailCount < 3) {
+      this._decWarnedFailCount++;
+      process.stderr.write('⚠ Engine: decryption failed for encrypted record — wrong key or corrupted data\n');
     }
   }
 }

@@ -5,7 +5,7 @@
  * call api.mistral.ai. Without this check, the only signal of a depleted
  * account / expired key was the user clicking the speaker button, getting
  * a generic toast, and the operator hunting stderr for the actual reason.
- * Rafael hit exactly that on 2026-04-24 — Mistral budget had bottomed out
+ * The owner hit exactly that on 2026-04-24 — Mistral budget had bottomed out
  * and TTS silently failed in production.
  *
  * This module hits GET /v1/models once at startup with a 5 s timeout and

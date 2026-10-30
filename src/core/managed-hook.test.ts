@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createManagedHook } from './managed-hook.js';
+import { createManagedHook, SHUTDOWN_FLUSH_BUDGET_MS } from './managed-hook.js';
 import type { RunContext } from './engine.js';
 
 const CTX = { modelTier: 'balanced' } as unknown as RunContext;
@@ -149,6 +149,147 @@ describe('managed-hook usage-drop is loud (M1)', () => {
     expect(logs.length).toBe(1);
     expect(logs[0]).toContain('25c'); // the exact un-debited amount surfaced
     stderrSpy.mockRestore();
+  });
+
+  /**
+   * A shutdown that starts while a flush is sending. `flush()` returns at once while
+   * another one runs, so before this the shutdown neither waited for that batch nor
+   * counted it: with `pending` empty its retry loop did not run at all, the process
+   * exited, and a batch that failed was lost without a word.
+   */
+  describe('a flush still in flight at shutdown', () => {
+    const usagePosts = (spy: ReturnType<typeof vi.fn>): Array<Array<{ run_id: string }>> =>
+      spy.mock.calls
+        .filter(([url]) => String(url).includes('/internal/usage/') && !String(url).endsWith('/status'))
+        .map(([, opts]) => (JSON.parse(String((opts as { body: string }).body)) as { runs: Array<{ run_id: string }> }).runs);
+
+    /** Ten 1c runs: the tenth starts a flush (batch size 10) that is still sending. */
+    function queueTenAndStartFlush(hook: ReturnType<typeof createManagedHook>): void {
+      for (let i = 0; i < 10; i++) hook.onAfterRun?.(`run-${i}`, 0.01, CTX);
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      // `AbortSignal.timeout` runs on a timer the fake clock does not drive; this one does.
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        const c = new AbortController();
+        setTimeout(() => { c.abort(new Error(`timed out after ${String(ms)} ms`)); }, ms);
+        return c.signal;
+      });
+    });
+
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    it('waits for it, and retries its batch when it fails', async () => {
+      let failFirst!: (err: Error) => void;
+      const fetchSpy = vi.fn()
+        .mockReturnValueOnce(new Promise((_, reject) => { failFirst = reject; }))
+        .mockResolvedValue({ ok: true, json: async () => ({ allowed: true }) });
+      vi.stubGlobal('fetch', fetchSpy);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      const hook = createManagedHook();
+      queueTenAndStartFlush(hook);
+      expect(usagePosts(fetchSpy)).toHaveLength(1);
+
+      let done = false;
+      const shutdown = hook.onShutdown!().then(() => { done = true; });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(done).toBe(false); // still waiting for the flush in flight
+      failFirst(new Error('cp hiccup'));
+      await vi.advanceTimersByTimeAsync(0);
+      await shutdown;
+
+      const posts = usagePosts(fetchSpy);
+      expect(posts).toHaveLength(2);
+      expect(posts[1]!.map(r => r.run_id)).toEqual(posts[0]!.map(r => r.run_id));
+      expect(dropLogs(stderrSpy, 'DROP')).toHaveLength(0);
+    });
+
+    // The next two take the fallback: a real request ends at its own 15 s timeout, so only
+    // one that ignores its abort signal is still sending when the budget runs out.
+    it('counts it as lost when it is still sending at the end of the budget', async () => {
+      // A request that never settles, also not on its abort signal.
+      vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise(() => { /* never */ })));
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      const hook = createManagedHook();
+      queueTenAndStartFlush(hook);
+
+      let done = false;
+      const shutdown = hook.onShutdown!().then(() => { done = true; });
+      await vi.advanceTimersByTimeAsync(SHUTDOWN_FLUSH_BUDGET_MS - 1);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(done).toBe(true);
+      await shutdown;
+
+      const logs = dropLogs(stderrSpy, 'shutdown-unflushed');
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toContain('10 report(s), 10c');
+    });
+
+    it('takes the wait out of the budget: the retries get only what is left', async () => {
+      // The flush in flight fails after 40 s; every retry hangs until its own timeout.
+      let failFirst!: (err: Error) => void;
+      const fetchSpy = vi.fn()
+        .mockReturnValueOnce(new Promise((_, reject) => { failFirst = reject; }))
+        .mockImplementation((_url: string, opts: { signal: AbortSignal }) => new Promise((_, reject) => {
+          opts.signal.addEventListener('abort', () => { reject(opts.signal.reason as Error); });
+        }));
+      vi.stubGlobal('fetch', fetchSpy);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      const hook = createManagedHook();
+      queueTenAndStartFlush(hook);
+
+      let done = false;
+      const shutdown = hook.onShutdown!().then(() => { done = true; });
+      await vi.advanceTimersByTimeAsync(40_000);
+      failFirst(new Error('cp hiccup'));
+      await vi.advanceTimersByTimeAsync(SHUTDOWN_FLUSH_BUDGET_MS - 40_000);
+      expect(done).toBe(true); // 48 s in all, not 40 s plus three full attempts
+      await shutdown;
+
+      expect(vi.mocked(AbortSignal.timeout).mock.calls.at(-1)![0]).toBeLessThanOrEqual(8_000);
+      const logs = dropLogs(stderrSpy, 'shutdown-unflushed');
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toContain('10 report(s), 10c');
+    });
+
+    it('waits for a flush that a run finishing during the shutdown starts', async () => {
+      // The first attempt fails at once. During the pause after it, a run finishes and
+      // its tenth report starts a flush of its own; that one fails a few seconds later.
+      let failSecond!: (err: Error) => void;
+      const fetchSpy = vi.fn()
+        .mockRejectedValueOnce(new Error('cp down'))
+        .mockReturnValueOnce(new Promise((_, reject) => { failSecond = reject; }))
+        .mockResolvedValue({ ok: true, json: async () => ({ allowed: true }) });
+      vi.stubGlobal('fetch', fetchSpy);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      const hook = createManagedHook();
+      for (let i = 0; i < 3; i++) hook.onAfterRun?.(`early-${i}`, 0.01, CTX);
+
+      let done = false;
+      const shutdown = hook.onShutdown!().then(() => { done = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(usagePosts(fetchSpy)).toHaveLength(1); // first attempt, failed, batch back in `pending`
+      for (let i = 0; i < 7; i++) hook.onAfterRun?.(`late-${i}`, 0.01, CTX);
+      expect(usagePosts(fetchSpy)).toHaveLength(2); // the run's own flush, now sending
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(done).toBe(false); // still waiting for that flush
+      failSecond(new Error('cp hiccup'));
+      await vi.advanceTimersByTimeAsync(0);
+      await shutdown;
+
+      const posts = usagePosts(fetchSpy);
+      expect(posts).toHaveLength(3);
+      expect(posts[2]!.map(r => r.run_id).sort()).toEqual(posts[1]!.map(r => r.run_id).sort());
+      expect(posts[2]).toHaveLength(10);
+      expect(dropLogs(stderrSpy, 'DROP')).toHaveLength(0);
+    });
   });
 });
 

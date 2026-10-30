@@ -279,6 +279,7 @@ describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)'
   it('fireworks pins exactly this picker list — no tier tag', () => {
     const entry = getCatalogEntryByKey('fireworks')!;
     expect((entry.tier_models ?? []).map((m) => m.id)).toEqual([
+      'accounts/fireworks/models/deepseek-v4p1-flash-1017',
       'accounts/fireworks/models/deepseek-v4p1-flash',
       'accounts/fireworks/models/glm-5p3',
       'accounts/fireworks/models/kimi-k3',
@@ -430,7 +431,7 @@ describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
 describe('mainChatTierLabels (composer picker — name-enrichment + hide)', () => {
   it('anthropic: per-tier labels, balanced defaults to the configured Sonnet 4.6', () => {
     const entry = getCatalogForProvider('anthropic')!;
-    // Labels carry the registry context window (rafael 2026-08-09: every model
+    // Labels carry the registry context window (2026-08-09: every model
     // picker states the window — "· 200k" / "· 1M").
     expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
       fast: 'Haiku 4.5 · 200k',

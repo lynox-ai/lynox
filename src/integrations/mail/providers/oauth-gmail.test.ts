@@ -1068,3 +1068,44 @@ describe('OAuthGmailProvider — watch', () => {
     expect(emitted[0]?.subject).toBe('overlap');
   });
 });
+
+// A stop of the run ends Gmail's reads in flight, never a send that started. Each case runs inside a
+// call slot, stops the call afterwards, and looks at the signal each request carried.
+describe('OAuthGmailProvider — a stopped run', () => {
+  async function signalsAfterStop(run: (p: OAuthGmailProvider) => Promise<unknown>): Promise<Array<{ url: string; method: string; signal: AbortSignal }>> {
+    const { runInCallSlot } = await import('../../../core/call-connection.js');
+    fetchMock.mockImplementation(async (url: string) => {
+      if (String(url).includes('/profile')) return respondJson({ emailAddress: 'user@example.org' });
+      if (String(url).includes('/messages/send')) return respondJson({ id: 'sent-1' });
+      return respondJson({ messages: [] });
+    });
+    const call = new AbortController();
+    await runInCallSlot({ abort: call }, () => run(new OAuthGmailProvider(makeAccount(), makeAuth())));
+    call.abort();
+    return fetchMock.mock.calls.map((c) => {
+      const init = (c[1] ?? {}) as RequestInit;
+      return { url: String(c[0]), method: init.method ?? 'GET', signal: init.signal as AbortSignal };
+    });
+  }
+
+  it('a list ends with the call', async () => {
+    const sent = await signalsAfterStop((p) => p.list());
+    expect(sent.length).toBeGreaterThan(0);
+    for (const s of sent) expect(s.signal.aborted, s.url).toBe(true);
+  });
+
+  it('a send that started is not ended by the stop', async () => {
+    const sent = await signalsAfterStop((p) => p.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }));
+    const post = sent.filter((s) => s.method === 'POST');
+    expect(post.length, 'the send went out').toBe(1);
+    expect(post[0]!.signal.aborted, 'the send keeps running').toBe(false);
+  });
+
+  it('outside a call a read keeps its own limit only', async () => {
+    fetchMock.mockImplementation(async () => respondJson({ messages: [] }));
+    await new OAuthGmailProvider(makeAccount(), makeAuth()).list();
+    const signal = (fetchMock.mock.calls[0]![1] as RequestInit).signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal!.aborted).toBe(false);
+  });
+});

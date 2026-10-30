@@ -42,6 +42,9 @@ const THREAD_SCOPED = [
 	// A count of what is waiting in the PREVIOUS conversation is exactly the wrong thing to
 	// leave on screen; `resumeThread` re-fetches it for the new one.
 	'threadPending',
+	// Where a chat opened with "Plan in a new chat" came from, and its input text: set by
+	// `planInNewChat` AFTER its own `newChat()`, so no other chat may inherit them.
+	'containedOrigin', 'containedPrefillText',
 ] as const;
 
 /**

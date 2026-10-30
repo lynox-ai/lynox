@@ -1,5 +1,6 @@
 import type { ThreadStore } from './thread-store.js';
 import { isMandateTag } from './request-principal.js';
+import { stripHidden } from './hidden-text.js';
 import { summarizeDelivery, type DeliverySummary, type NotificationMessage, type NotificationRouter } from './notification-router.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
@@ -95,11 +96,13 @@ export function escalateToUser(
   const lastRole = apiMsgs.length > 0 ? apiMsgs[apiMsgs.length - 1]!.role : null;
   const startSeq = threadStore.getNextSeq(threadId);
   const currentCount = threadStore.getThread(threadId)?.message_count ?? 0;
+  // The turns the model reads when the owner replies, without the characters that render as
+  // nothing (`hidden-text.ts`): a plan's title and a run's error can carry text someone else wrote.
   const seeds: BetaMessageParam[] = [];
   if (lastRole === null || lastRole === 'assistant') {
-    seeds.push({ role: 'user', content: [{ type: 'text', text: opts.title }] });
+    seeds.push({ role: 'user', content: [{ type: 'text', text: stripHidden(opts.title) }] });
   }
-  seeds.push({ role: 'assistant', content: [{ type: 'text', text: opts.body }] });
+  seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(opts.body) }] });
   threadStore.appendMessages(threadId, seeds, startSeq, { message_count: currentCount + seeds.length });
   // Re-mark unread + bump updated_at → floats to the top of the thread list.
   threadStore.updateThread(threadId, { is_unread: true });

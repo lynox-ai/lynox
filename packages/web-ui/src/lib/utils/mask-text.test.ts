@@ -34,6 +34,13 @@ describe('maskText — shared shapes', () => {
   });
 });
 
+describe('maskText — the mask itself', () => {
+  it('shows no character of a short match, and the last four of a long one', () => {
+    expect(maskText('token ' + 'gh' + 'p_' + 'abcdefghij' + ' end')).toBe('token *** end');
+    expect(maskText('token ' + 'gh' + 'p_' + 'abcdefghijklmnop1234' + ' end')).toBe('token ***1234 end');
+  });
+});
+
 describe('web UI secret scanners on adversarial input', () => {
   const PREFIXES = ['sk-' + 'ant-', 'sk-', 'tv' + 'ly-', 'ey' + 'J', 'gh' + 'p_', 'AK' + 'IA', 'xo' + 'xb-', 'ya' + '29.', '99999:', '9'];
   const units: string[] = [];

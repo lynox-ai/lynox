@@ -1,7 +1,7 @@
 import { getApiBase } from '../config.svelte.js';
 import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
 import {
 	recordToolCall,
@@ -25,9 +25,10 @@ import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
+import { containedPrefill } from './contained-way-out.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
-import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
+import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
@@ -74,6 +75,13 @@ export type { KnowledgeWriteChip } from './knowledge-chip.js';
 export interface ChatMessage {
 	role: 'user' | 'assistant';
 	content: string;
+	/** The user typed or dictated this text in the composer. Only such text goes across to a new
+	 *  chat from one that only reads (`containedPrefill`); a text the app composed does not.
+	 *  Client-only: a chat loaded from the server carries no mark. */
+	typed?: boolean;
+	/** Set on the answer of the run that made this chat read-only; the line under it says so.
+	 *  Client-only: a chat loaded from the server carries no mark. */
+	containedNotice?: boolean;
 	toolCalls?: ToolCallInfo[];
 	/** Ordered blocks for interleaved rendering (text ↔ tool calls) */
 	blocks?: ContentBlock[];
@@ -129,7 +137,7 @@ export interface ChatMessage {
 	 *  engine sends a structured code (not prose) so the UI renders a localized
 	 *  banner; `detail` is a sanitized provider-error snippet. Present only on
 	 *  rows the render projection flagged as notes (reload path). */
-	note?: { code: string; detail?: string };
+	note?: { code: string; detail?: string; approval?: { id: string; outcome: string } };
 	/** ISO timestamp the server persisted this message at (`created_at`), carried
 	 *  through the render projection so the UI can show a subtle per-message time.
 	 *  Optional/undefined-safe: older persisted rows + not-yet-reconciled live
@@ -270,7 +278,7 @@ interface PersistedChat {
 	queues?: Record<string, { id: string; task: string }[]>;
 	/** Per-thread "deferred follow-ups" tray: the un-taken siblings of a pill the
 	 *  user clicked, kept visible + clickable so a second matching suggestion
-	 *  isn't lost when taking the first (rafael 2026-07-17). Plain {label,task}
+	 *  isn't lost when taking the first (2026-07-17). Plain {label,task}
 	 *  JSON — persisted exactly like `queues`, no payload concern. */
 	/**
 	 * Retired 2026-08-08 with the deferred-follow-ups tray. Kept on the READ
@@ -404,7 +412,7 @@ function persistChatNow(): void {
 	if (sessionId) {
 		root.threads[sessionId] = messages;
 		// Persist the pending send-queue alongside the messages so a reload
-		// mid-stream doesn't strand a queued turn (rafael 2026-06-04). File-
+		// mid-stream doesn't strand a queued turn (2026-06-04). File-
 		// bearing entries are dropped here — see PersistedChat.queues.
 		const fileless = messageQueue
 			.filter((q) => !q.files || q.files.length === 0)
@@ -435,6 +443,9 @@ export interface ChangesetFileInfo {
 	diff: string;
 	added: number;
 	removed: number;
+	/** False when `diff` holds a note instead of a diff (a file too large to compare): the counts are 0
+	 *  and say nothing. Absent from an engine before it: compared. */
+	compared?: boolean;
 }
 
 const persisted = loadPersistedChat();
@@ -592,6 +603,12 @@ let changesetLoading = $state(false);
 let skipExtraction = $state(false);
 /** The open chat read data through a store connection (`contained` on the thread). */
 let threadContained = $state(false);
+/** This new chat was opened from a contained one with "Plan in a new chat": the old chat's id,
+ *  sent as the context of the first run, and whether the prefill lost hidden characters. Cleared
+ *  once that run is sent, and by any other chat. */
+let containedOrigin = $state<{ id: string; removedHidden: boolean } | null>(null);
+/** The input text for that chat, until its first run. */
+let containedPrefillText = $state<string | null>(null);
 let retryStatus = $state<{ attempt: number; maxAttempts: number; reason?: 'retry' | 'busy' } | null>(null);
 // Controller for the 409 "busy" poll loop — shared so abortRun() and a
 // thread switch can cut it short without waiting for the 3s tick or the
@@ -737,7 +754,7 @@ if (typeof window !== 'undefined') {
  * evicted the in-memory session OR was restarted, the next /run call returns
  * 404; without the threadId, recovery would create a brand-new sessionId →
  * agent with zero history → user sees old thread in UI but agent can't see it
- * (2026-05-18 staging QA from rafael prod).
+ * (2026-05-18 staging QA from our own production instance).
  */
 export async function ensureSession(resumeThreadId?: string | null): Promise<string> {
 	if (sessionId) return sessionId;
@@ -814,11 +831,15 @@ export interface RunOptions {
 	 * or "💬 N im Chat" (kind 'mail-batch', carrying N selected item ids) — opens
 	 * a fresh chat referencing the object(s) being worked on. The server resolves
 	 * the ref into a context preamble it prepends to this first message, so the
-	 * agent has the object(s) loaded without the user pasting them.
+	 * agent has the object(s) loaded without the user pasting them. Kind
+	 * 'approval' is a queued mail the owner moved to chat to change it.
 	 */
 	context?:
-		| { kind: 'workflow' | 'run' | 'mail'; id: string }
+		| { kind: 'workflow' | 'run' | 'mail' | 'approval'; id: string }
 		| { kind: 'mail-batch'; ids: string[] };
+	/** The text is what the user typed or dictated in the composer. Client-only, never sent:
+	 *  it marks the message `typed` (see `ChatMessage.typed`). */
+	typed?: boolean;
 }
 
 /**
@@ -851,7 +872,7 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const display = displayText ?? task;
 		const fileNames = files?.map((f) => f.name).join(', ');
 		const id = newQueueId();
-		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true, queueId: id, createdAt: new Date().toISOString() });
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, ...(runOptions?.typed === true ? { typed: true } : {}), queued: true, queueId: id, createdAt: new Date().toISOString() });
 		messageQueue.push({ id, task, files, ...(runOptions ? { runOptions } : {}) });
 		// Flush immediately so a reload before the next persist tick (or before
 		// the run ends) can recover the queued turn instead of losing it.
@@ -1199,7 +1220,8 @@ let _resendProbeInFlight = false;
 /**
  * Before a failed turn is sent again, ask the server whether a turn is still running in this
  * thread. If one is, it is not sent again: the user is told and the running turn's stream is
- * attached. Resolves whether to send; never rejects.
+ * attached. A scheduled run's question waiting there holds it back too: the user is told and
+ * the question's card is brought back. Resolves whether to send; never rejects.
  */
 async function askBeforeResend(): Promise<boolean> {
 	if (_resendProbeInFlight || isStreaming) return false;
@@ -1207,11 +1229,14 @@ async function askBeforeResend(): Promise<boolean> {
 	// No session yet: the failed turn never reached one, so nothing can be running.
 	if (!sid) return true;
 	_resendProbeInFlight = true;
-	let running: boolean;
+	let live: ReattachTarget | null;
+	let scheduledQuestion: boolean;
 	try {
 		const res = await fetch(`${getApiBase()}/runs/active`);
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		running = selectReattachTarget(await res.json(), sid) !== null;
+		const body: unknown = await res.json();
+		live = selectReattachTarget(body, sid);
+		scheduledQuestion = scheduledQuestionWaits(body, sid);
 	} catch {
 		// Not "nothing is running": the question could not be asked, so nothing is sent.
 		if (sessionId === sid) addToast(t('chat.error_connection'), 'error', 6000);
@@ -1221,8 +1246,16 @@ async function askBeforeResend(): Promise<boolean> {
 	}
 	// The thread changed, or a turn started meanwhile: that is now the turn in charge.
 	if (sessionId !== sid || isStreaming) return false;
-	if (!running) return true;
-	addToast(t('chat.still_running'), 'info', 6000);
+	if (live === null && scheduledQuestion) {
+		// A scheduled run's question has no stream to attach: the way on is to answer it, so
+		// its card is brought back rather than a turn sent past it.
+		addToast(t('chat.question_waiting'), 'info', 6000);
+		void checkPendingPrompt();
+		return false;
+	}
+	if (live === null) return true;
+	// A run that waits for the user's answer is not working: the way on is to answer it.
+	addToast(t(live.status === 'awaiting_input' ? 'chat.question_waiting' : 'chat.still_running'), 'info', 6000);
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its
@@ -1241,7 +1274,8 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	if (!await askBeforeResend()) return;
 	msg.failed = false;
 	msg.sendUnconfirmed = false;
-	await sendMessage(text);
+	// A typed message sent again is still the user's own words.
+	await sendMessage(text, undefined, undefined, msg.typed === true ? { typed: true } : undefined);
 }
 
 async function _runTurn(task: string, files: FileAttachment[] | undefined, displayText: string | undefined, runOptions: RunOptions | undefined, queueId: string | undefined, turn: TurnStart): Promise<void> {
@@ -1283,7 +1317,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		userMsgIdx = queuedIdx;
 	} else {
 		const fileNames = files?.map((f) => f.name).join(', ');
-		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, createdAt: new Date().toISOString() });
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, ...(runOptions?.typed === true ? { typed: true } : {}), createdAt: new Date().toISOString() });
 		userMsgIdx = messages.length - 1;
 	}
 	turn.userMsg = messages[userMsgIdx] ?? null;
@@ -1314,6 +1348,15 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	if (runOptions?.effort) payload['effort'] = runOptions.effort;
 	if (runOptions?.thinking) payload['thinking'] = runOptions.thinking;
 	if (runOptions?.context) payload['context'] = runOptions.context;
+	// The first run of a chat opened with "Plan in a new chat" carries where it came from: the
+	// engine turns that into a fixed sentence pointing at a bulk run, and reads nothing by it.
+	// Kept until the server takes the run: a first send that fails goes again with it. The
+	// prefill is spent once sent, so a later navigation does not put it back beside the failed
+	// turn's retry.
+	else if (containedOrigin) {
+		payload['context'] = { kind: 'contained-origin', id: containedOrigin.id };
+		containedPrefillText = null;
+	}
 	// User's local IANA timezone — server threads it into the per-turn
 	// `[Now: …]` marker so scheduled times render in user wallclock, not UTC.
 	if (USER_TIMEZONE) payload['tz'] = USER_TIMEZONE;
@@ -1328,7 +1371,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	// recreate via the resume path and retry. Without `resumeThreadId`, the
 	// backend would mint a fresh empty session and the agent would see zero
 	// history despite the UI showing all prior messages (2026-05-18 staging
-	// QA: F-404-Recovery from rafael prod). Distinct from 401 which is a
+	// QA: F-404-Recovery from our own prod instance). Distinct from 401 which is a
 	// cookie-level auth failure handled below.
 	if (res.status === 404) {
 		const previousThreadId = sid;
@@ -1494,6 +1537,11 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	}
 
 	turn.streaming = true;
+	// The server took the run, and with it where this chat came from: no later run carries it.
+	// (The prefill was spent when the payload took the origin.)
+	if (payload['context'] !== undefined && (payload['context'] as { kind?: unknown }).kind === 'contained-origin') {
+		containedOrigin = null;
+	}
 	const reader = res.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = '';
@@ -1759,7 +1807,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 
 	// Refresh thread list so sidebar reflects updated ordering
 	void loadThreads();
-	void refreshThreadContained();
+	void refreshThreadContained({ afterRun: true, answer: turn.assistantMsg });
 
 	// The first-turn auto-title is written server-side asynchronously (a fast-tier
 	// LLM call landing ~1-3s after the run ends), so the loadThreads above — and the
@@ -1839,7 +1887,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		// brand-new chat's user message is persisted by now (message_count ≥ 1),
 		// but the nav list otherwise only refreshes at run END, so a new chat
 		// stayed invisible (and its live run-status dot couldn't show) for the
-		// whole first turn (rafael 2026-06-05). One-shot, so it's one extra
+		// whole first turn (2026-06-05). One-shot, so it's one extra
 		// thread-list fetch per run.
 		void loadThreads();
 	}
@@ -2114,7 +2162,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// result server-side (otherwise the model couldn't have produced
 			// its final reply). Anything still flagged `running` here is a
 			// UI-side ghost — leaving it spinning forever after the answer is
-			// already on screen is the bug rafael reported on 2026-05-15
+			// already on screen is the bug the owner reported on 2026-05-15
 			// (api_setup ✓ visible but inner http_request still spinning).
 			//
 			// Index-drift invariant: `msg` was resolved at the top of
@@ -2319,7 +2367,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// covers LLM cost only.
 			const merged = mergeDoneUsage(msg.usage, data['usage']);
 			if (merged) msg.usage = merged;
-			// Silent-turn guard (rafael 2026-05-29): a run that the engine
+			// Silent-turn guard (2026-05-29): a run that the engine
 			// fail-closes BEFORE the LLM (stale managed-credit status, budget
 			// reached, content-policy block) never streams a text/tool block —
 			// it returns a short reason string that the HTTP API forwards as
@@ -2889,6 +2937,9 @@ async function fetchChangeset(): Promise<void> {
 	finally { changesetLoading = false; }
 }
 
+/** The most file names the "not restored" message lists before it counts the rest. */
+const NOT_RESTORED_SHOWN = 5;
+
 export async function submitChangesetReview(
 	action: 'accept' | 'rollback' | 'partial',
 	rolledBackFiles?: string[],
@@ -2900,8 +2951,9 @@ export async function submitChangesetReview(
 		body['rolledBackFiles'] = rolledBackFiles;
 	}
 	let status: number;
+	let res: Response;
 	try {
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset/review`, {
+		res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset/review`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(body),
@@ -2914,7 +2966,24 @@ export async function submitChangesetReview(
 	}
 	pendingChangeset = null;
 	pendingChangesetRunId = null;
-	if (status >= 200 && status < 300) return;
+	if (status >= 200 && status < 300) {
+		// A rollback leaves a file as it is when it was replaced or linked since the review, or
+		// could not be written. Closing the review without a word would read as all restored.
+		const notRestored = await res.json().then(
+			(j: unknown) => (j as { notRestored?: unknown } | null)?.notRestored,
+			() => undefined,
+		);
+		const names = Array.isArray(notRestored) ? notRestored.filter((f): f is string => typeof f === 'string') : [];
+		if (names.length > 0) {
+			// The person has to act on this list: it stays until they close it, and names at most five.
+			const shown = names.slice(0, NOT_RESTORED_SHOWN).join(', ');
+			const files = names.length > NOT_RESTORED_SHOWN
+				? tf('changeset.not_restored_more', { files: shown, n: String(names.length - NOT_RESTORED_SHOWN) })
+				: shown;
+			addToast(tf('changeset.not_restored', { files }), 'error', null);
+		}
+		return;
+	}
 	// The answer did nothing. Closing the review silently would read as done: say so, and show
 	// what is pending now. 409 is the review of an earlier run, or a run in progress.
 	addToast(t(status === 409 ? 'changeset.review_refused' : 'changeset.review_failed'), 'info', 5000);
@@ -3163,14 +3232,49 @@ export function getThreadContained() {
  * Whether the open chat is contained now: a run may have contained it since it was opened (a
  * store request). Read from the thread itself, not the list, which holds only its first page.
  */
-async function refreshThreadContained(): Promise<void> {
+async function refreshThreadContained(opts: { afterRun?: boolean; answer?: ChatMessage | null } = {}): Promise<void> {
 	const sid = sessionId;
 	if (!sid || threadContained) return;
 	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
 	if (!res?.ok || sessionId !== sid) return;
 	const data = (await res.json().catch(() => null)) as { thread?: { contained?: boolean } | null } | null;
-	// Checked again after the body: the user may have switched chats while it arrived.
-	if (sessionId === sid && data?.thread?.contained === true) threadContained = true;
+	// Checked again after the body: the user may have switched chats while it arrived, and a
+	// second read that started meanwhile may have seen it first.
+	if (sessionId !== sid || data?.thread?.contained !== true || threadContained) return;
+	threadContained = true;
+	// The run that just ended made this chat read-only: say so in the history, once, under its
+	// answer. A mark on that answer, not a message of its own: the history keeps the server's
+	// length, and the answer stays the last message, which its follow-ups hang on. The run's own
+	// answer, by object: the last assistant message may be a compaction note or a queued run's
+	// answer by now. A run whose answer is gone (an empty one is removed), and a chat opened as
+	// contained, get no line; the bar above the input says it.
+	const answer = opts.answer;
+	if (opts.afterRun === true && answer && messages.indexOf(answer) >= 0) {
+		answer.containedNotice = true;
+		persistChat();
+	}
+}
+
+export function getContainedOrigin(): { id: string; removedHidden: boolean } | null {
+	return containedOrigin;
+}
+
+/** The input text "Plan in a new chat" left for the composer, until the chat's first run. */
+export function getContainedPrefill(): string | null {
+	return containedPrefillText;
+}
+
+/**
+ * "Plan in a new chat": open a new chat whose input holds the user's own words from this one,
+ * unsent, and whose first run tells the engine it came from a chat that only reads.
+ */
+export function planInNewChat(): void {
+	const from = sessionId;
+	if (!from || !threadContained) return;
+	const prefill = containedPrefill(messages);
+	newChat();
+	containedOrigin = { id: from, removedHidden: prefill.removedHidden };
+	containedPrefillText = prefill.text;
 }
 export async function toggleSkipExtraction(): Promise<void> {
 	const sid = sessionId;
@@ -3247,6 +3351,8 @@ export function newChat() {
 	changesetLoading = false;
 	skipExtraction = false;
 	threadContained = false;
+	containedOrigin = null;
+	containedPrefillText = null;
 	chatError = null;
 	// Detach the interrupted-run banner too — it belongs to the thread we just
 	// left, not the empty new chat (the state otherwise leaks across as a stale
@@ -3507,7 +3613,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 		// The run may have contained the chat, and this finally runs on done, a stop and an
 		// error alike. After a dropped stream it reads too early: the run may still be going.
 		// Reads the chat open now, so a switch in between is harmless.
-		void refreshThreadContained();
+		void refreshThreadContained({ afterRun: true, answer: assistantIdx >= 0 ? messages[assistantIdx] ?? null : null });
 		// Drop an empty placeholder (run had already finished / produced nothing).
 		if (assistantIdx >= 0 && !messages[assistantIdx]?.content && !messages[assistantIdx]?.blocks?.length) {
 			messages.splice(assistantIdx, 1);
@@ -3596,6 +3702,8 @@ export async function resumeThread(threadId: string): Promise<void> {
 	changesetLoading = false;
 	skipExtraction = false;
 	threadContained = false;
+	containedOrigin = null;
+	containedPrefillText = null;
 	// Restore any pending send-queue for this thread (durable across reload).
 	messageQueue = loadPersistedQueue(threadId);
 	// Restore the deferred-follow-ups tray for this thread (durable across reload).
@@ -3701,7 +3809,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 				blocks?: ContentBlock[];
 				toolCalls?: ToolCallInfo[];
 				usage?: UsageInfo;
-				note?: { code: string; detail?: string };
+				note?: { code: string; detail?: string; approval?: { id: string; outcome: string } };
 				created_at?: string;
 			}
 			const msgData = (await msgRes.json()) as {
@@ -3893,7 +4001,7 @@ export async function reconcileThread(): Promise<void> {
 			blocks?: ContentBlock[];
 			toolCalls?: ToolCallInfo[];
 			usage?: UsageInfo;
-			note?: { code: string; detail?: string };
+			note?: { code: string; detail?: string; approval?: { id: string; outcome: string } };
 			created_at?: string;
 		}
 		const data = (await res.json()) as {

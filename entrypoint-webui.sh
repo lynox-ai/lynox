@@ -54,8 +54,8 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
     mkdir -p "$HOME/.lynox"
     printf '%s' "$LYNOX_HTTP_SECRET" > "$TOKEN_FILE"
     chmod 600 "$TOKEN_FILE"
-    # POSIX-compatible 8-char preview — entrypoint runs under BusyBox `sh` in
-    # the lynox image, which does not support bash's ${VAR:0:8} substring
+    # POSIX-compatible 8-char preview — entrypoint runs under dash (`/bin/sh` of the
+    # node:22-slim image), which does not support bash's ${VAR:0:8} substring
     # expansion (was emitting `Bad substitution` on every fresh boot, leaving
     # users with no token preview at all — pre-HN-launch P0 fix).
     TOKEN_PREVIEW=$(printf '%s' "$LYNOX_HTTP_SECRET" | head -c 8)
@@ -72,13 +72,67 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   fi
 fi
 
-# Auto-generate vault key if not set (persist to volume)
-if [ -z "${LYNOX_VAULT_KEY:-}" ]; then
+# Auto-generate vault key if not set (persist to volume). A new key is generated only where
+# it cannot replace or sit beside one that data was encrypted under:
+# - not when the data dir already holds a vault. The engine then decides as it does without
+#   this script: it reads the key from $ENV_FILE if it can, then the data dir's vault.key, and
+#   never generates a key over an existing vault (`ensureVaultKey`).
+# - not into a .env that is not a regular file with mode 600, or that names LYNOX_VAULT_KEY
+#   outside a comment line although the reader above took no key from it (an empty value, an
+#   indented line, a byte-order mark, a space before `=`). The start stops instead. A second key line would split the readers: the installer reads the first key line
+#   and takes an empty one for "no key" (`readVaultKeyFromRecoveryFile`), so it would write a
+#   new key over the one appended here.
+# - the key is appended, so other lines in the file stay.
+# The data dir follows the engine's rule (`lynoxDirFor`): LYNOX_DATA_DIR, then LYNOX_DIR, an
+# empty value counting as unset.
+DATA_DIR="${LYNOX_DATA_DIR:-${LYNOX_DIR:-$HOME/.lynox}}"
+if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -e "$DATA_DIR/vault.db" ]; then
+  if [ ! -e "$DATA_DIR/vault.key" ]; then
+    echo "" >&2
+    echo "  WARNING: this start found no vault key, and $DATA_DIR/vault.db already exists." >&2
+    echo "  No new key was generated: it could not open what is encrypted there." >&2
+    echo "  If lynox then logs \"Encrypted vault found but LYNOX_VAULT_KEY is not set\" or" >&2
+    echo "  \"History: encrypted data found but no encryption key set\", or your chats, saved" >&2
+    echo "  connections and API keys are missing, set LYNOX_VAULT_KEY to the key this install was" >&2
+    echo "  created with (docker run -e, or the compose .env), or put it in $ENV_FILE with mode 600." >&2
+    echo "" >&2
+  fi
+elif [ -z "${LYNOX_VAULT_KEY:-}" ]; then
+  ENV_REFUSED=""
+  if [ -L "$ENV_FILE" ]; then
+    ENV_REFUSED="it is a symbolic link"
+  elif [ -e "$ENV_FILE" ] && [ ! -f "$ENV_FILE" ]; then
+    ENV_REFUSED="it is not a regular file"
+  elif [ -e "$ENV_FILE" ]; then
+    case "$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo unknown)" in
+      600)
+        # Any mention outside a comment counts, not only the shapes a reader takes a key from:
+        # the three readers (this script, the engine, the installer) differ in what they trim.
+        # -a: a NUL byte anywhere would make grep treat the file as binary and print nothing.
+        if grep -a -v '^[[:space:]]*#' "$ENV_FILE" 2>/dev/null | grep -a -q 'LYNOX_VAULT_KEY'; then
+          ENV_REFUSED="it names LYNOX_VAULT_KEY in a line this start cannot read a key from"
+        fi
+        ;;
+      400) ENV_REFUSED="it is read-only (mode 400), and this start read no key from it" ;;
+      *) ENV_REFUSED="its mode is not 600 or 400, so it was not read" ;;
+    esac
+  fi
+  if [ -n "$ENV_REFUSED" ]; then
+    echo "" >&2
+    echo "  ERROR: no vault key is set, and no new key can be written to $ENV_FILE: $ENV_REFUSED." >&2
+    echo "  A new key there could replace or sit beside the one your data is encrypted under, so" >&2
+    echo "  lynox does not start. Set LYNOX_VAULT_KEY, or make the file a regular file with mode 600" >&2
+    echo "  (chmod 600) that holds the key on one line: LYNOX_VAULT_KEY=<key>." >&2
+    echo "" >&2
+    exit 1
+  fi
   LYNOX_VAULT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64'))")
   export LYNOX_VAULT_KEY
   mkdir -p "$HOME/.lynox"
-  printf 'LYNOX_VAULT_KEY=%s\n' "$LYNOX_VAULT_KEY" > "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
+  # A new file is created with mode 600; an existing one is appended to only at mode 600.
+  # The leading newline keeps the key off a last line that has none (`FOO=bar` would become
+  # `FOO=barLYNOX_VAULT_KEY=…`, which no reader takes a key from).
+  (umask 077 && printf '\nLYNOX_VAULT_KEY=%s\n' "$LYNOX_VAULT_KEY" >> "$ENV_FILE")
   echo "  Vault key generated and saved to volume."
   echo "  Save it to a password manager: Settings → Config → Security"
   echo ""

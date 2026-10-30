@@ -1,5 +1,6 @@
 import type { RequestPrincipal } from '../core/request-principal.js';
-import type { GrantLift } from '../core/call-connection.js';
+import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
+import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { Agent } from '../core/agent.js';
@@ -20,6 +21,8 @@ import type { PromptBudget } from './prompt-budget.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.js';
 import { describeTurnUntrusted } from '../core/untrusted-signals.js';
 import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
+import { ConversationGrants } from '../core/conversation-grants.js';
+import { escapeHiddenInJson } from '../core/hidden-text.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
@@ -98,6 +101,14 @@ export interface RunTaint {
    * unchanged for runs that never spawn a step.
    */
   live?: Set<TaintPeer>;
+  /**
+   * The conversation's grant set (PRD connection-attribution A5), the same object the calling
+   * agent holds, so every step adds to the conversation that started the run. A run with no
+   * calling conversation (a schedule) gets its own set, held for the run only: at its start when
+   * its parameters seed `unknown` (`headlessRunTaint`), else at its first step.
+   * Optional and filled lazily for the same reason as {@link live}. Read through {@link runGrantSet}.
+   */
+  grants?: ConversationGrants;
 }
 
 /** A live step agent the run can arm mid-flight — the one capability the
@@ -107,8 +118,16 @@ export interface TaintPeer {
 }
 
 /** Build a run's taint accumulator, seeded from the calling agent (or clean when headless). */
-export function newRunTaint(caller?: UntrustedSignals | undefined): RunTaint {
-  return { seeded: caller ? describeTurnUntrusted(caller) : 'none', earned: 'none' };
+export function newRunTaint(caller?: (UntrustedSignals & { readonly conversationGrants?: ConversationGrants | undefined }) | undefined): RunTaint {
+  const taint: RunTaint = { seeded: caller ? describeTurnUntrusted(caller) : 'none', earned: 'none' };
+  if (caller?.conversationGrants !== undefined) taint.grants = caller.conversationGrants;
+  return taint;
+}
+
+/** The grant set a run's step agents add to: the calling conversation's, or the run's own. */
+export function runGrantSet(taint: RunTaint | undefined): ConversationGrants | undefined {
+  if (taint === undefined) return undefined;
+  return taint.grants ??= ConversationGrants.detached();
 }
 
 /** Whether any signal — seed or step-earned — puts this run on the untrusted side. */
@@ -311,6 +330,13 @@ export type StepToolRecorder = (call: {
   isError: boolean;
   /** The write grant that let this call's write through; absent means no grant did (`GrantLift`). */
   grant?: GrantLift | undefined;
+  /** Where the call stood toward the run's contract (`CallContract`); absent when the event carried none. */
+  contract?: CallContract | undefined;
+  /** How the call's filing for the owner's approval ended (`CallFiled`); absent when it filed nothing. */
+  filed?: CallFiled | undefined;
+  /** The connection and grant the call resolved its URL to, from the result event; absent when
+   *  nothing was resolved (`CallConnection`). */
+  connection?: CallConnection | undefined;
   /** The id of the `tool_use` block this call answers: the result event's own
    *  id, not the id the pairing matched. A required key, so a producer cannot
    *  leave it out by accident; `undefined` only where the event carried none. */
@@ -381,8 +407,11 @@ export function createStepStreamHandler(opts: {
         inputJson: boundedJson(matched?.input),
         outputJson: boundedJson(event.result),
         durationMs: matched ? Math.max(0, Date.now() - matched.start) : 0,
-        isError: event.isError === true,
+        isError: event.isError === true || event.softFailure === true,
         ...(event.grant !== undefined ? { grant: { ...event.grant } } : {}),
+        ...(event.contract !== undefined ? { contract: { ...event.contract } } : {}),
+        ...(event.filed !== undefined ? { filed: { ...event.filed } } : {}),
+        ...(event.connection !== undefined ? { connection: { ...event.connection } } : {}),
         toolUseId: event.toolUseId,
       });
     }
@@ -400,6 +429,10 @@ export interface SubAgentPromptHandles {
   parentAskUserPrompt?: PromptUserFn | undefined;
   parentPromptTabs?: PromptTabsFn | undefined;
   parentPromptSecret?: PromptSecretFn | undefined;
+  /** What a run nobody watches files with (`approval-filing.ts`): set by `runSavedWorkflow` for a
+   *  trigger's run alone, never derived from the prompt callbacks, so a run a chat started (its
+   *  `run_workflow`) has none. Every step agent of the run, nested ones included, gets it. */
+  approvalFiling?: import('../core/approval-filing.js').ApprovalFilingContext | undefined;
   promptBudget?: PromptBudget | undefined;
   /** Name of the workflow whose steps these callbacks serve. Stamped onto every
    *  prompt a step raises so the dialog can say which workflow asked — see
@@ -925,6 +958,8 @@ export async function spawnViaAgent(
   const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
+    // By reference: what this step fetches is in the run's set before a later step writes.
+    conversationGrants: runGrantSet(runTaint),
     name: step.agent,
     // The review of the chat that started the workflow: the step's writes are in it.
     changesetManager: parentChangeset,
@@ -982,6 +1017,7 @@ export async function spawnViaAgent(
     askUserPrompt: holdingTimeoutWhileAsking(promptCallbacks.askUserPrompt, stepTimeout),
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
+    approvalFiling: parentPrompt?.approvalFiling,
     userTimezone,
     // Inherited, so anything THIS step spawns is reachable by the same abort.
     abortScope,
@@ -1063,7 +1099,9 @@ export function buildReplayInstruction(
   const lines = [
     'Execute exactly this tool call and return its result. Do not add, omit, rename, or reinterpret any argument, and do not call any other tool first or instead.',
     `Tool: ${tool}`,
-    `Input (JSON): ${JSON.stringify(inputTemplate)}`,
+    // A character that renders as nothing is written as its escape: the same JSON to the tool,
+    // and no instruction the model reads but nobody sees (an imported workflow's arguments).
+    `Input (JSON): ${escapeHiddenInJson(JSON.stringify(inputTemplate))}`,
   ];
   const trimmed = description?.trim();
   if (trimmed) {
@@ -1192,6 +1230,28 @@ export async function spawnInline(
   // the surface, so a readOnly step lands on (declared ∩ surface ∩ allowTools), which
   // is narrower than the surface either way.
   const roleGrantsFullParent = resolved?.allowTools !== undefined && resolved.readOnly !== true;
+  // A run for a mandate gets that mandate's tools (`toolLockFor`), so the parent set lacks what
+  // the lock withholds, and the filter below would drop such a tool from the step without a
+  // word: the step runs and cannot do what it was written to do. Refused here instead, by name
+  // and reason, for a tool the step names. Only the lock's own withholdings count: a name the
+  // parent lacks for any other reason (the owner turned it off, a role of an enclosing step
+  // bounds it, a flag leaves it unregistered) is dropped as before. A role's grant is a ceiling,
+  // not a request, so a withheld tool in it narrows the step as it narrows the mandate's own
+  // agents (`collector` lists `read_file` among nine). The pattern writers the lock also holds
+  // back (`MANDATE_PATTERN_WRITE_TOOLS`) are dropped, not refused: they are registered only beside
+  // the legacy memory, so on the engines a mandate signs in to the step names a tool that is not
+  // there, and the planners still offer `memory_update` for steps.
+  const lock = principal !== undefined ? toolLockFor(principal) : null;
+  if (lock !== null) {
+    const named = [...(step.tools ?? []), ...(step.tool !== undefined ? [step.tool] : [])];
+    const withheld = [...new Set(named.filter(n => !lock.has(n) && Object.hasOwn(MANDATE_WITHHELD_TOOLS, n)))];
+    if (withheld.length > 0) {
+      throw new Error(
+        `Step "${step.id}" needs ${withheld.map(n => `${n} (${MANDATE_WITHHELD_TOOLS[n]})`).join(', ')}, which this `
+        + `run does not get: it runs for a person with delegated access, with that person's tools.`,
+      );
+    }
+  }
   // The full parent set still holds a named-only tool back unless the step itself names it.
   const filteredParent = roleGrantsFullParent
     ? parentTools.filter(t => !INLINE_NAMED_ONLY_TOOLS.has(t.definition.name) || stepToolNames.has(t.definition.name))
@@ -1287,6 +1347,8 @@ export async function spawnInline(
   const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
+    // By reference: what this step fetches is in the run's set before a later step writes.
+    conversationGrants: runGrantSet(runTaint),
     name: step.id,
     // The review of the chat that started the workflow: the step's writes are in it.
     changesetManager: parentChangeset,
@@ -1331,6 +1393,7 @@ export async function spawnInline(
     askUserPrompt: holdingTimeoutWhileAsking(promptCallbacks.askUserPrompt, stepTimeout),
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
+    approvalFiling: parentPrompt?.approvalFiling,
     userTimezone,
     // Parent-memory wiring: PR #548 added memory_* to INLINE_CORE_TOOLS but
     // a sub-agent constructed without `memory:` has `agent.memory === null`,
@@ -1530,6 +1593,8 @@ export async function spawnPipeline(
 
   const startTime = Date.now();
   const state = await runManifest(subManifest, config, {
+    // Part of the run that holds this step, whose source was checked when it started.
+    source: { kind: 'nested' },
     parentTools: pool,
     depth: depth + 1,
     parentPrompt,

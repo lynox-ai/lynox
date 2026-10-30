@@ -32,7 +32,9 @@ GET /health
 GET /api/health
 ```
 
-Returns `{"status":"ok"}`. No auth required, useful for Docker health checks.
+Returns `{"status":"ok", …}`. No auth required, useful for Docker health checks.
+
+`status` is `"degraded"`, still with HTTP 200, when the engine started without one of its databases (`engine.db` or `history.db` could not be opened). The engine keeps running without it; the container log says which store failed and why (`[lynox] EngineDb init failed: …` or `[lynox] RunHistory init failed: …`). The other databases (for example the data store or the vault) are not part of this check.
 
 ### Sessions
 
@@ -307,7 +309,7 @@ GET  /api/datastore/:collection   # Collection records
 
 ```
 GET  /api/vault/key               # Retrieve vault key
-POST /api/vault/rotate            # Rotate vault key
+POST /api/vault/rotate            # Not available: answers 409, the key stays as it is
 ```
 
 ### Auth

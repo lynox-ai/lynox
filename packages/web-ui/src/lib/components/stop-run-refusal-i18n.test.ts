@@ -84,7 +84,7 @@ describe('the schedules view can stop a run', () => {
 
   it('the refresh after a stop or a start is quiet — the list is not swapped for the loading line', () => {
     expect(stopHandler()).toContain('await loadTriggers(true);');
-    expect(VIEW).toMatch(/async function loadTriggers\(quiet = false\) \{\s*if \(!quiet\) loading = true;/);
+    expect(VIEW).toMatch(/async function loadTriggers\(quiet = false\) \{\s*const load = \+\+nextLoad;\s*if \(!quiet\) \{ loading = true;/);
   });
 
   it('every 409 of the route carries one of the codes, and the view switches on each', () => {
@@ -120,7 +120,7 @@ describe('the schedules view can stop a run', () => {
     // A stop is requested, not completed; the route never answers `stopped: true`.
     const line = i18nLine('triggers.stop_requested');
     expect(line).toMatch(/angefordert/);
-    expect(line).not.toMatch(/angehalten\.|wurde beendet|has stopped|was stopped/);
+    expect(line).not.toMatch(/angehalten\.|gestoppt\.|wurde beendet|has stopped|was stopped/);
     // and it says the RUN may finish, not only the step it is in: between model calls a
     // stop reaches nothing, so the whole run can complete.
     expect(line).toMatch(/Der Lauf kann/);
