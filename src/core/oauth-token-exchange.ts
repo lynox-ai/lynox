@@ -28,8 +28,10 @@
  *   itself would be a second place where a flow is defined.
  * - **Rate limiting.** The `fetch_token` path charges the session HTTP budget
  *   and consumes the profile's per-host bucket; a route has no session. Both
- *   are the caller's, and `onRequestSent` is the one hook this needs — it
- *   fires after the response arrives, exactly where the tool incremented.
+ *   are the caller's. `fetch_token` reserves its request before it calls this
+ *   (row 1005). `onRequestSent`, which fires after the response arrives, has no
+ *   caller since then; it stays with its tests for a caller that charges on
+ *   arrival.
  * - **What a non-2xx MEANS.** A 400 is `invalid_grant` to one caller and a
  *   misconfigured client to another. This returns the status and the text.
  *
@@ -271,8 +273,8 @@ export async function exchangeToken(
       undefined, undefined, undefined, undefined, pass),
       wallTimeout,
     ]);
-    // After the response, not before it: this is what the tool counted, and a
-    // refused egress never reached the provider to be charged for.
+    // After the response, not before it: a refused egress never reached the
+    // provider. `fetch_token` no longer uses this; it reserves before the call.
     onRequestSent?.();
     const read = await Promise.race([
       readBodyLimited(response, TOKEN_BODY_MAX_BYTES),

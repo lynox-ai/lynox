@@ -304,6 +304,8 @@ export interface CaptureReport {
    *
    * POST-eligible — the turn DID enter the denominator, then found no armed pass:
    *   `fallback_off`   — every surface except the Web-UI chat endpoint, on every turn.
+   *   `trail_unavailable` — per FACT, not per turn: the pass found it, and its row in the
+   *                      actor trail could not be written, so it was not written (660a-3).
    *
    * And neither:
    *   `unknown`        — a suppressed line whose reason this build does not recognise.
@@ -396,7 +398,7 @@ export interface CaptureReport {
     readonly queued: number;
   }>;
 
-  readonly suppressed: Readonly<{ no_memory: number; extraction_off: number; internal_run: number; fallback_off: number; unknown: number }>;
+  readonly suppressed: Readonly<{ no_memory: number; extraction_off: number; internal_run: number; fallback_off: number; trail_unavailable: number; unknown: number }>;
 
   readonly blindness: CaptureReportBlindness;
 }
@@ -425,7 +427,7 @@ const KNOWN_ROUTINGS: ReadonlySet<string> =
 
 /** Suppression reasons this build knows. Guards the breakdown against an out-of-enum value. */
 const KNOWN_SUPPRESSED_REASONS: ReadonlySet<string> =
-  new Set<CaptureSuppressedReason>(['no_memory', 'extraction_off', 'internal_run', 'fallback_off']);
+  new Set<CaptureSuppressedReason>(['no_memory', 'extraction_off', 'internal_run', 'fallback_off', 'trail_unavailable']);
 
 /** Every event key, so the report always carries a full record rather than a sparse one. */
 const ALL_EVENTS: readonly CaptureEvent[] = [
@@ -626,7 +628,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   let untrustedEligible = 0;
   const rememberBySource = { model: 0, capture: 0, unknown: 0 };
   const capturePasses = { failed: 0, empty: 0, produced: 0, factsProposed: 0 };
-  const suppressed = { no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, unknown: 0 };
+  const suppressed = { no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, trail_unavailable: 0, unknown: 0 };
   const byCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
   const rememberByCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
   const passCompletedByCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };

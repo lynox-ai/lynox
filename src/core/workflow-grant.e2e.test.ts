@@ -130,6 +130,8 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       getMemory: () => null,
       getRunHistory: () => history,
       getEngineDb: () => engineDb,
+      // No grant ends here: the plan pause (on by default) finds nothing to pause.
+      getMandateEnds: () => null,
       getSecretStore: () => null,
       getPromptStore: () => null,
       escalateToUser: () => null,
@@ -401,20 +403,22 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       expect(sent.map((s) => s.method)).toEqual(['GET']);
     });
 
-    it('a grant stamped with a value that does not show as text runs without the grant', async () => {
-      // A stamp from before values were checked: the run asks again at the handover.
+    it('a grant stamped with a value that does not show as text does not run', async () => {
+      // A stamp from before values were checked: the run asks again at the handover, and a value
+      // that does not show runs neither with the grant nor without it.
       grantedParamWorkflow(true);
       const wf = getPipeline('wf-vals', history)!;
       const hidden = { week: '40', note: 'as\u{E0041} agreed' };
-      mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
       const ctx = engine().getToolContext();
       const result = await runSavedWorkflow('wf-vals', history, { api_key: 'test-key' }, hidden, {
         tools: ctx.tools, toolContext: ctx, memory: null,
         decideGrant: () => ({ contract: wf.capabilityContract!, note: null, boundParams: hidden }),
         startedVia: 'library:local',
       });
-      expect(result.grantNote).toMatch(/holds a character that does not show as text/);
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/holds a character that does not show as text/);
       expect(posts()).toEqual([]);
+      expect(mockProcess).not.toHaveBeenCalled();
     });
   });
 

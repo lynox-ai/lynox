@@ -941,6 +941,23 @@ describe('SECRET_SHAPES — the shared credential shape list', () => {
     expect(performance.now() - started).toBeLessThan(5_000);
   }, 60_000);
 
+  // Shopify calls its tokens opaque strings and documents no body alphabet, and its refresh
+  // token (`shprt_`) came after the first list. Bodies of letters and digits, not hex only.
+  it.each(['at', 'ss', 'pa', 'ca', 'rt'])('recognises a Shopify shp%s_ value whose body is not hex', (kind) => {
+    const shopify = SECRET_SHAPES.find((s) => s.label === 'Shopify token')!;
+    const value = 'shp' + kind + '_' + 'zZ9'.repeat(11);
+    expect(shopify.pattern.test(value)).toBe(true);
+    expect(maskSecretPatterns(`token ${value} end`)).not.toContain(value);
+  });
+
+  // Decided, not missed: a token without a prefix (Shopify's own examples show
+  // `f85632530bf277ec9ac6f649fc327f17`) matches no shape, since an ETag or a content hash
+  // has the same 32 hex digits. A stored token is held to its connection by its vault name.
+  it('leaves a bare 32-hex value to no vendor shape', () => {
+    const bare = 'f8563253' + '0bf277ec' + '9ac6f649' + 'fc327f17';
+    expect(SECRET_SHAPES.filter((s) => s.kind === 'vendor' && s.pattern.test(bare)).map((s) => s.label)).toEqual([]);
+  });
+
   it('keeps the generic catcher last — short-text callers drop the final entry', () => {
     expect(SECRET_SHAPES[SECRET_SHAPES.length - 1]!.kind).toBe('generic');
     expect(SECRET_SHAPES.filter((s) => s.kind === 'generic')).toHaveLength(1);
@@ -956,7 +973,7 @@ describe('SECRET_SHAPES — the shared credential shape list', () => {
   // Glued after `_`, a JSON escape or a URL escape, a shape matches when its body carries a
   // digit, so the witnesses start their body with two.
   const withDigits = (label: string, w: string): string => {
-    const prefix = w.match(/^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|[sr]k_(?:live|test)_|github_pat_|gh[pousr]_|AKIA|AIza|xox[bpoasr]-|shp(?:at|ss|pa|ca)_|ya29\.)/)![0];
+    const prefix = w.match(/^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|[sr]k_(?:live|test)_|github_pat_|gh[pousr]_|AKIA|AIza|xox[bpoasr]-|shp(?:at|ss|pa|ca|rt)_|ya29\.)/)![0];
     expect(prefix, label).toBeTruthy();
     return prefix + '42' + w.slice(prefix.length + 2);
   };

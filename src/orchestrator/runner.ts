@@ -12,7 +12,7 @@ import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js
 import type { SessionCounters } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { loadAgentDef } from './agent-registry.js';
-import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
+import { buildStepContext, contextForEventRun, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
 import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
@@ -135,6 +135,16 @@ export interface RunManifestOptions {
    */
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
   /**
+   * Keep the run's params out of what a step agent reads (its `context`), while the step's task
+   * and captured call still resolve from them, and fence every earlier step's output it reads.
+   * Set for a run a webhook event started: its params are a third party's values, and a step
+   * should meet them only where its task names them, fenced as untrusted;
+   * an earlier step's output can carry them on. A step that needs a value its task does
+   * not name no longer has it: nothing makes that step fail, so its agent may go on without it.
+   * The workflow has to name the value in the task.
+   */
+  paramsKeptFromSteps?: boolean | undefined;
+  /**
    * How a run under an accepted grant was started (`startedVia` of its origin, which
    * `runGuardedSavedWorkflow` hands to `runSavedWorkflow`), written to
    * `pipeline_runs.started_via` beside the contract's grant (`workflow_grant_id`). Top-level only: a nested
@@ -248,6 +258,7 @@ export interface RunCtxInput {
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
+  paramsKeptFromSteps?: boolean | undefined;
   startedVia?: string | undefined;
   observeToolCall?: StepToolRecorder | undefined;
   limits?: WorkflowLimits | undefined;
@@ -316,6 +327,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
     isAcceptedParam: input.isAcceptedParam,
+    paramsKeptFromSteps: input.paramsKeptFromSteps,
     startedVia: input.startedVia,
     observeToolCall: input.observeToolCall,
     limits: input.limits,
@@ -1074,6 +1086,8 @@ async function executeStep(
 
   try {
     const stepContext = buildStepContext(state.globalContext, step, state.outputs, config.pipeline_context_limit);
+    // What the step agent reads; the templates below still resolve from `stepContext`.
+    const agentContext = options.paramsKeptFromSteps === true ? contextForEventRun(stepContext, step) : stepContext;
 
     // Use buildConditionContext for condition evaluation (includes ALL completed outputs)
     const condContext = buildConditionContext(state.globalContext, state.outputs);
@@ -1154,7 +1168,7 @@ async function executeStep(
       // resolves `{{params.*}}` with the untrusted-data boundary; the captured
       // `input_template` resolves the same params into the literal call the step
       // agent replays (no boundary — those are tool arguments, not prose).
-      const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext, options.isAcceptedParam) : step.task;
+      const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext, options.isAcceptedParam, options.paramsKeptFromSteps === true) : step.task;
       const resolvedInputTemplate = step.input_template
         ? resolveInputTemplate(step.input_template, stepContext)
         : step.input_template;
@@ -1170,7 +1184,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin, options.parentChangeset);
+      r = await spawnInline(resolvedStep, agentContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin, options.parentChangeset);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -1182,7 +1196,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
+      r = await spawnViaAgent(step, agentDef, agentContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }

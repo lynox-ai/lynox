@@ -2981,7 +2981,7 @@ describe('history.db v58 — who created a to-do', () => {
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare('SELECT id, title, created_by FROM tasks').get()).toEqual({ id: 'old1', title: 'kept', created_by: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(69);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 });
@@ -3003,7 +3003,7 @@ describe('history.db v59 — why a question was closed', () => {
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare("SELECT id, status, closed_reason FROM pending_prompts WHERE id = 'p-old'").get()).toEqual({ id: 'p-old', status: 'pending', closed_reason: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(69);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 });
@@ -3026,7 +3026,7 @@ describe('history.db v60 — which mandate asked a question', () => {
     try {
       expect(after.getDb().prepare("SELECT id, status, created_by, mandate_id FROM pending_prompts WHERE id = 'p-old'").get())
         .toEqual({ id: 'p-old', status: 'pending', created_by: 'mandate:old@example.org', mandate_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(69);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 });
@@ -3056,7 +3056,7 @@ describe('history.db v65 — the grant a call went out under', () => {
         .toEqual({ connection_id: 'shop', grant_id: null });
       const cols = (after.getDb().prepare("SELECT name FROM pragma_index_info('idx_run_tool_calls_connection_grant') ORDER BY seqno").all() as { name: string }[]).map((r) => r.name);
       expect(cols).toEqual(['connection_id', 'grant_id']);
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(69);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 
@@ -3108,7 +3108,7 @@ describe('history.db v66 — the tool_use block a call row records', () => {
     try {
       expect(after.getDb().prepare("SELECT connection_id, grant_id, tool_use_id FROM run_tool_calls WHERE id = 'c-old'").get())
         .toEqual({ connection_id: 'shop', grant_id: 'g-1', tool_use_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(69);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 
@@ -3171,7 +3171,7 @@ describe('history.db v68 — who answered a question', () => {
     try {
       expect(after.getDb().prepare("SELECT answer, status, answered_by, answered_mandate_id FROM pending_prompts WHERE id = 'p-old'").get())
         .toEqual({ answer: 'B', status: 'answered', answered_by: null, answered_mandate_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(69);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
     } finally { after.close(); }
   });
 

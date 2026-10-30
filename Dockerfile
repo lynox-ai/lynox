@@ -192,6 +192,16 @@ RUN groupadd -g 1001 lynox && useradd -u 1001 -g lynox -m -s /bin/sh lynox \
 RUN groupadd -g 1002 lynox-ws && usermod -aG lynox-ws lynox \
     && mkdir -p /run/lynox-exec && chown root:root /run/lynox-exec && chmod 0755 /run/lynox-exec
 
+# The workspace anchor in sidecar mode (PRD shell-sidecar-activation D0, D2). The template mounts
+# the workspace volume at /run/lynox-anchor/ws; the entrypoint's root stage opens it as fd 3 and
+# then drops to 1001, which can no longer reach it by name: the parent is root 0700. The engine
+# reaches the tree only through that fd (`shell-isolation.ts`). The tree itself is 1001 0755, the
+# owner and mode start check (b) asks for, so a fresh named volume starts that way. Unused when
+# the image runs without the sidecar.
+RUN mkdir -p /run/lynox-anchor/ws \
+    && chown root:root /run/lynox-anchor && chmod 0700 /run/lynox-anchor \
+    && chown 1001:1001 /run/lynox-anchor/ws && chmod 0755 /run/lynox-anchor/ws
+
 WORKDIR /app
 
 # The code belongs to root and the runtime user only reads it, so the process cannot

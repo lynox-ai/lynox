@@ -24,8 +24,9 @@ import type { AuditLog } from './audit-log.js';
 import { newCorrelationId } from './audit-log.js';
 import { APPROVAL_CLAIM_STALE_MS, APPROVAL_RETRY_DELAY_MS, type ApprovalEntry, type ApprovalKind, type ApprovalStatus, type ApprovalStore, type FinishOutcome } from './approval-store.js';
 import { principalOfPrompt } from './prompt-store.js';
-import { isOwnerPrincipal, principalHasEnded, type RequestPrincipal } from './request-principal.js';
-import { buildDisplayNoteContent } from './render-projection.js';
+import { isMandateTag, isOwnerPrincipal, principalHasEnded, type RequestPrincipal } from './request-principal.js';
+import { approvalOutcome } from './approval-view.js';
+import { buildApprovalNoteContent } from './render-projection.js';
 import type { ThreadStore } from './thread-store.js';
 import type { MailContext } from '../integrations/mail/context.js';
 import type { MailAddress } from '../integrations/mail/provider.js';
@@ -67,6 +68,12 @@ export interface ApprovalExecutorDeps {
 export type TickResult = null | { id: string; status: ApprovalStatus };
 
 type Settled = { outcome: FinishOutcome; result: Record<string, unknown> };
+
+/** Who decided an entry, as a row may name them: `owner`, `mandate`, or `unknown`. Exported for its test. */
+export function deciderKind(decidedBy: string | null): 'owner' | 'mandate' | 'unknown' {
+  if (decidedBy === 'owner') return 'owner';
+  return decidedBy !== null && isMandateTag(decidedBy) ? 'mandate' : 'unknown';
+}
 
 /** A send failure that proves nothing went out and would not change on its own. */
 const FAILS_FOR_GOOD: ReadonlySet<SendCoreFailureStatus> = new Set<SendCoreFailureStatus>([
@@ -229,7 +236,9 @@ export class ApprovalExecutor {
       log,
       principal,
       action: entry.kind === 'mail_reply' ? 'mail_reply:reply' : 'mail_send:send',
-      target: `approval ${entry.id}: ${entry.kind}, ${String(recipients)} recipient${recipients === 1 ? '' : 's'}, approved by ${entry.decidedBy ?? 'unknown'}`,
+      // Who approved by kind only: the decider is a principal tag, and a mandate's carries its
+      // address, which does not belong in a target. The view reads the decider from the entry.
+      target: `approval ${entry.id}: ${entry.kind}, ${String(recipients)} recipient${recipients === 1 ? '' : 's'}, approved by ${deciderKind(entry.decidedBy)}`,
       correlationId: newCorrelationId(),
       runId: entry.origin?.runId,
     };
@@ -259,8 +268,12 @@ export class ApprovalExecutor {
     const code = status === 'done' ? 'approval_sent' : status === 'unknown' ? 'approval_unknown' : 'approval_failed';
     try {
       if (threads.getThread(threadId) === undefined) return;
+      // The outcome as the approvals page reads it from the stored entry, so the chat names the
+      // same reason as the page it leads to.
+      const stored = this.deps.store.get(entry.id);
+      const outcome = (stored !== null ? approvalOutcome(stored) : null) ?? 'other';
       const count = threads.getMessageCount(threadId);
-      threads.appendDisplayNotes(threadId, [{ role: 'assistant', content: buildDisplayNoteContent(code) }], threads.getNextSeq(threadId));
+      threads.appendDisplayNotes(threadId, [{ role: 'assistant', content: buildApprovalNoteContent(code, { id: entry.id, outcome }) }], threads.getNextSeq(threadId));
       threads.updateThread(threadId, { message_count: count + 1 });
     } catch { /* the note is a courtesy; the entry's status is the record */ }
   }

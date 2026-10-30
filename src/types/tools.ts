@@ -7,6 +7,7 @@ import type { AutonomyLevel, CostSnapshot } from './modes.js';
 import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
 import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { ContainedRefusalReason } from '../core/containment.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -54,6 +55,21 @@ export interface ToolEntry<TInput = unknown> {
    * generic "sends external mail" warning.
    */
   requiresConfirmation?: boolean | undefined;
+  /**
+   * `secret:NAME` references in this tool's input travel as written: the engine does not resolve
+   * them before the handler runs. Two kinds of tool declare it:
+   *
+   * - a tool that stores its input (a workflow it imports or edits): resolving would store a
+   *   plaintext credential where a reference belongs;
+   * - a tool that hands work to a child agent (`spawn_agent`, `run_workflow`): the child resolves
+   *   what it needs through its own store, under its own scope and consent, where it uses it.
+   *   Resolved here, the plaintext would travel in the child's task text, into its prompt and
+   *   its run history.
+   *
+   * Declared on the tool, not kept as a list of names: a tool that newly builds a child agent
+   * must declare it, and `secret-refs-verbatim.test.ts` fails when one does not.
+   */
+  secretRefs?: 'verbatim' | undefined;
   /**
    * The tool can hand its write to the approval queue (`Agent.fileApproval`): in a run that
    * may file, the danger check lets an askable call through, and the handler files at its
@@ -226,8 +242,10 @@ export type StreamEvent =
    *  `contract`: where the call stood toward the run's contract (`CallContract`). `filed`: how its filing for
    *  the owner's approval ended (`CallFiled`). Both reach the step's row the same way.
    *  `softFailure`: the call failed in a way the model reads as a plain result (`ToolSoftFailure`), so `isError`
-   *  stays unset, as in the model's own view and in a reloaded thread. The step recorder writes it as an error. */
-  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; softFailure?: true | undefined }
+   *  stays unset, as in the model's own view and in a reloaded thread. The step recorder writes it as an error.
+   *  `contained`: the call was refused because the chat read data through a store connection
+   *  (`ContainedRefusal.reason`); the chat's view keys its "plan in a new chat" button on it. */
+  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; softFailure?: true | undefined; contained?: ContainedRefusalReason | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`

@@ -13,7 +13,9 @@ const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
 // Mock fs for token persistence
-vi.mock('node:fs', () => ({
+vi.mock('node:fs', async (orig) => ({
+  // The real open flags: the workspace primitive reads them when it loads (through the tool context).
+  constants: (await orig<typeof import('node:fs')>()).constants,
   existsSync: vi.fn().mockReturnValue(false),
   readFileSync: vi.fn().mockReturnValue('{}'),
   statSync: vi.fn().mockReturnValue({ mode: 0o100600 }),

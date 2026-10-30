@@ -184,4 +184,85 @@ describe('ConnectionStore (Foundation Rework v2 — S4b)', () => {
     store.remove('cn-src');
     expect((engine.getDb().prepare("SELECT source_connection_id AS s FROM triggers WHERE id='tr1'").get() as { s: string | null }).s).toBeNull();
   });
+
+  // 660a-1c S-2: a mandate's row in the instance trail names an API profile by this opaque id,
+  // never by its slug. The id is the row's own: a save never changes it, a row without one gets one.
+  describe('the opaque id of an API profile', () => {
+    const APF = /^apf_[0-9a-f]{16}$/;
+    const raw = (engine: EngineDb, id: string): string | null =>
+      (engine.getDb().prepare('SELECT trail_id AS t FROM connections WHERE id = ?').get(id) as { t: string | null }).t;
+
+    it('an API row gets one on insert and keeps it across saves, whatever a later save passes', () => {
+      const { store, engine } = make();
+      store.upsert(baseRow());
+      const first = store.trailIdOf('cn1');
+      expect(first).toMatch(APF);
+      store.upsert(baseRow({ name: 'Stripe EU' }));
+      store.upsert(baseRow({ trailId: 'apf_00000000000000aa' }));
+      expect(store.trailIdOf('cn1')).toBe(first);
+      expect(raw(engine, 'cn1')).toBe(first);
+    });
+
+    it('takes the id the caller made for a new row', () => {
+      const { store } = make();
+      store.upsert(baseRow({ trailId: 'apf_00000000000000aa' }));
+      expect(store.trailIdOf('cn1')).toBe('apf_00000000000000aa');
+    });
+
+    it('a row without one gets one on its next save, and from the boot\'s fill', () => {
+      const { store, engine } = make();
+      store.upsert(baseRow());
+      store.upsert(baseRow({ id: 'cn2' }));
+      engine.getDb().exec('UPDATE connections SET trail_id = NULL');
+      store.upsert(baseRow({ trailId: 'apf_00000000000000bb' }));
+      expect(store.trailIdOf('cn1'), 'the save heals it, with the id it was given').toBe('apf_00000000000000bb');
+      expect(raw(engine, 'cn2'), 'precondition: the other row is still without').toBeNull();
+      expect(store.fillApiTrailIds()).toBe(1);
+      expect(store.trailIdOf('cn2')).toMatch(APF);
+      expect(store.fillApiTrailIds(), 'a second fill changes nothing').toBe(0);
+    });
+
+    it('another kind gets none, from a save or from the fill', () => {
+      const { store, engine } = make();
+      store.upsert(baseRow({ id: 'mail-1', kind: 'mail', trailId: 'apf_00000000000000cc' }));
+      expect(raw(engine, 'mail-1')).toBeNull();
+      expect(store.fillApiTrailIds()).toBe(0);
+      expect(raw(engine, 'mail-1')).toBeNull();
+    });
+
+    it('reads only an API row: another kind under the same slug is never named as the profile', () => {
+      const { store, engine } = make();
+      store.upsert(baseRow({ id: 'mueller-crm', kind: 'mail' }));
+      engine.getDb().exec("UPDATE connections SET trail_id = 'apf_00000000000000dd' WHERE id = 'mueller-crm'");
+      expect(store.trailIdOf('mueller-crm')).toBeUndefined();
+      expect(store.slugOfTrailId('apf_00000000000000dd')).toBeUndefined();
+      // The control: the same slug as an API row is read.
+      store.upsert(baseRow({ id: 'shop', trailId: 'apf_00000000000000ee' }));
+      expect(store.trailIdOf('shop')).toBe('apf_00000000000000ee');
+      expect(store.slugOfTrailId('apf_00000000000000ee')).toBe('shop');
+    });
+
+    it('the migration gives every existing API row its own id and no other kind one, and holds them unique', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-conn-mig-'));
+      tmpDirs.push(dir);
+      const path = join(dir, 'engine.db');
+      const before = new EngineDb(path, '');
+      const conn = new ConnectionStore(before);
+      conn.upsert(baseRow({ id: 'a1' }));
+      conn.upsert(baseRow({ id: 'a2' }));
+      conn.upsert(baseRow({ id: 'm1', kind: 'mail' }));
+      // A database from before v63: the column, its index and its version taken back out.
+      before.getDb().exec('DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 63;');
+      before.close();
+      const after = new EngineDb(path, '');
+      engines.push(after);
+      const rows = after.getDb().prepare('SELECT id, trail_id AS t FROM connections ORDER BY id').all() as Array<{ id: string; t: string | null }>;
+      expect(rows.map((r) => r.id)).toEqual(['a1', 'a2', 'm1']);
+      expect(rows[0]!.t).toMatch(APF);
+      expect(rows[1]!.t).toMatch(APF);
+      expect(rows[0]!.t).not.toBe(rows[1]!.t);
+      expect(rows[2]!.t).toBeNull();
+      expect(() => after.getDb().prepare("UPDATE connections SET trail_id = ? WHERE id = 'a2'").run(rows[0]!.t), 'the index holds the ids unique').toThrow(/UNIQUE/);
+    });
+  });
 });

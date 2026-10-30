@@ -8,15 +8,22 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
-import { errorText, errorTextReduced } from './error-egress.js';
+import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planMandate, planMembers, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
+import { isFeatureEnabled } from './features.js';
+import { InboundEventStore, type EventOutcome, type InboundEventRecord } from './inbound-events.js';
+import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
+import { ConnectionStore } from './connection-store.js';
+import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
+import type { PlannedPipeline } from '../types/pipeline.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
-import type { RequestPrincipal } from './request-principal.js';
+import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
 import { runAsPlanOf, type StampEntry } from './plan-run-context.js';
 import { planOfTrigger, stampFromRow } from './plan-stamp.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, claimPauseNotices, pausePlanNow, pausedAtNow, planPauseOn } from './plan-pause.js';
 import { filingContextFor } from './approval-filing.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -26,8 +33,9 @@ import { readBodyCapped, stripUntrustedSeparators, collapseToSingleLine } from '
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
-import { inquiryOptions } from './notification-router.js';
-import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect } from '../types/index.js';
+import { inquiryOptions, summarizeDelivery } from './notification-router.js';
+import { stripHidden } from './hidden-text.js';
+import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
@@ -137,12 +145,17 @@ const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access,
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 
+/** Every effect that runs a bulk run: what `stopBulkTasks` stops when bulk runs go off. A record
+ *  over the union, so an effect added to `BulkTriggerEffect` does not compile until listed here. */
+const BULK_EFFECT_KEYS: Record<BulkTriggerEffect, true> = { bulk_apply: true, bulk_undo: true, bulk_preview: true, bulk_judge: true };
+const BULK_EFFECTS: ReadonlySet<string> = new Set(Object.keys(BULK_EFFECT_KEYS));
+
 /**
  * The run lease (engine.db v16): a running trigger renews it every heartbeat, and a lease
  * not renewed for {@link LEASE_TTL_MS} lapses. The heartbeat is a timer, not a hook per
  * tool call — one LLM turn may take ~40 minutes with its retries, and `ask_user`,
- * `spawn_agent` and `run_workflow` are unbounded. A timer cannot fire while a synchronous
- * tool (`bash` runs `execSync`, with no upper bound on its timeout) blocks the event loop,
+ * `spawn_agent` and `run_workflow` are unbounded. A timer cannot fire while synchronous
+ * work blocks the event loop (`bash` ran `execSync` until it ran its command asynchronously),
  * which is why the lease is long. A lease that lapses under a live run is reported as
  * interrupted by whichever process finds it, and the run is not started a second time —
  * except for an effect that resumes after loss ({@link RESUMES_AFTER_LOSS}), which another
@@ -157,8 +170,48 @@ const LEASE_TTL_MS = 15 * 60_000;
  *  the schedule's status `failed`. */
 const INTERRUPTED_RESULT =
   'The engine stopped while this run was in progress. It is recorded as interrupted and not resumed or run again by itself, because what it had already done would happen a second time.';
-/** What a run that did not start because a mandate its plan depends on has ended reads as. */
-const PLAN_ENDED_RESULT = 'This schedule, or the workflow it runs, was set up or changed by someone whose access has ended, so it does not run.';
+/** How long an event that did not run keeps its values. Nothing runs it again today. */
+const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
+/** What the owner is told of an event that was not run, or whose run did not complete: lynox's own sentences. */
+export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger does not accept events, so these events are not run. Look at the trigger under Automation.';
+export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves, so it was not run.';
+export const EVENT_RUN_FAILED = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual.';
+export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
+/** Why a mandate's trigger the owner has not confirmed did not run. */
+const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
+export const EVENT_MAPPING_REFUSED = 'Not run: in this workflow, a value from the event decides what a step runs with, not only what its task says. Change the workflow so event values appear only in a step\'s task text, or ask lynox in a chat to find the step. Later events run once that is changed; this one does not run again.';
+export const EVENT_STOPPED = 'An event\'s run was stopped on your instruction. It does not run again.';
+export const EVENT_OUTCOME_UNKNOWN = 'An event was being run when the engine stopped. It may have run, and it is not run again by itself. Check whether it took effect before you do the same by hand.';
+
+/** The mapped values the ledger kept for an event, or none. */
+function eventValues(valuesJson: string | null): Record<string, string | number | boolean> {
+  if (valuesJson === null) return {};
+  try {
+    const kept = JSON.parse(valuesJson) as { values?: unknown };
+    return kept.values !== null && typeof kept.values === 'object' ? kept.values as Record<string, string | number | boolean> : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * An event's outcome, as the run set it where it ended ({@link SlotEvent.outcome}); a run that
+ * ended without setting one failed. A reason is kept to 500 characters. Nothing is read from
+ * the trigger's row or from an error's wording.
+ */
+export function outcomeOfRun(entry: Pick<ActiveTask, 'event'>): EventOutcome {
+  const set = entry.event?.outcome;
+  if (set === undefined) return { state: 'failed', reason: 'The run ended without a recorded outcome.' };
+  return set.state === 'done' ? set : { ...set, reason: set.reason.slice(0, 500) };
+}
+
+/** Why a webhook run of a workflow that asks its owner did not start. */
+export const WEBHOOK_ASKS_RESULT = 'Not run: this workflow asks you a question while it runs, and a run started by a webhook event cannot wait for an answer. Change the workflow so it does not ask; later events then run, this one does not run again.';
+
+/** A failed event's reasons that are lynox's own sentences, and so may be pushed as they are. */
+const OWN_FAILURE_REASONS: ReadonlySet<string> = new Set([EVENT_VALUES_UNREADABLE, EVENT_STOPPED, WEBHOOK_ASKS_RESULT, ACCESS_ENDED_RESULT]);
+/** A failed event's reasons the owner hears of from the paused plan's notice (`plan-pause.ts`), once. */
+const TOLD_BY_PAUSE: ReadonlySet<string> = new Set([PLAN_ENDED_RESULT, ACCESS_ENDED_PAUSED_RESULT]);
 /** How each end of a run is recorded and announced (`recordAndNotify`). */
 const RUN_END_LOOK = {
   success: { status: 'success', mark: '\u2713', priority: 'normal' },
@@ -304,6 +357,12 @@ export interface RunStarterSlot {
   ended?: RunEndStatus | undefined;
   /** The member-connection lines this run noted, for a record made outside its context (the catch). */
   memberNotes?: ReadonlySet<string> | undefined;
+  /** The event a webhook run is for ({@link SlotEvent}); its outcome is set as the run ends. */
+  event?: SlotEvent | undefined;
+  /** Stopped because a mandate its plan depends on ended, or its plan was paused (`plan-pause.ts`). */
+  accessEnded?: boolean | undefined;
+  /** Recorded as a paused plan's run: the schedule kept, and the tick tells the owner. */
+  endedPaused?: boolean | undefined;
 }
 
 /** What a run's end is recorded as (`TaskManager.recordTaskRun`). */
@@ -320,12 +379,43 @@ export interface WorkerTaskContext {
   run?: RunStarterSlot | undefined;
 }
 
+/**
+ * The event a webhook run is for. A run of a due trigger has none,
+ * and then nothing in its frame differs: the event is read at two places only, the workflow's
+ * inputs and the outcome written before the lease is given up.
+ */
+export interface SlotEvent {
+  readonly eventId: string;
+  readonly attemptId: string;
+  /** The values mapped out of the event, as the ledger kept them. */
+  readonly values: Readonly<Record<string, string | number | boolean>>;
+  /** Every parameter the trigger's mapping fills, whether this event had a value for it or not. */
+  readonly mappedNames: readonly string[];
+  /**
+   * How the run ended for the event, set where it ended: `dropped` by a refusal before
+   * the workflow ran that holds until the owner acts, otherwise `done` or `failed` from the
+   * runner's own result. The first one set stands. Never read back from the trigger.
+   */
+  outcome?: EventOutcome | undefined;
+  /** Writes the event's outcome. Called before the lease is given up. */
+  settle(entry: ActiveTask): void;
+}
+
+/** Set the outcome of a webhook run's event once; a later end does not overwrite it. */
+function endEvent(slot: RunStarterSlot | undefined, outcome: EventOutcome): void {
+  if (slot?.event !== undefined && slot.event.outcome === undefined) slot.event.outcome = outcome;
+}
+
 /** Active task state: abort control, the PAUSABLE execution deadline, and the
  *  store id of the prompt this task is currently parked on. */
 export interface ActiveTask {
   controller: AbortController;
+  /** The event this run is for, when the webhook drain started it ({@link SlotEvent}). */
+  event?: SlotEvent | undefined;
   /** The member-connection lines the run noted, set at its dispatch (`RunStarterSlot.memberNotes`). */
   memberNotes?: ReadonlySet<string> | undefined;
+  /** The key of the run's trail (`plan_run`), set once its start row is written; a plan's run only. */
+  planRun?: string | undefined;
   /**
    * The run's effect, so a stop that reaches nothing can say what it was.
    *
@@ -363,6 +453,10 @@ export interface ActiveTask {
    * other direction.
    */
   stopRequested?: boolean | undefined;
+  /** See {@link RunStarterSlot.accessEnded}. */
+  accessEnded?: boolean | undefined;
+  /** See {@link RunStarterSlot.endedPaused}. */
+  endedPaused?: boolean | undefined;
   /**
    * Aborted by `stopTask` and by nothing else — the owner's stop as a signal of its own.
    *
@@ -446,7 +540,7 @@ export interface ActiveTask {
 export type RunTriggerNowOutcome =
   | { ok: true }
   | { ok: false; reason: 'already_running'; leaseUntil?: string }
-  | { ok: false; reason: 'not_found' | 'awaiting_answer' | 'awaits_owner_stamp' };
+  | { ok: false; reason: 'not_found' | 'awaiting_answer' | 'awaits_owner_stamp' | 'runs_on_events' | 'paused' };
 
 export type StopHandle = 'wait' | 'session' | 'signal';
 
@@ -621,6 +715,14 @@ export class WorkerLoop {
   }
 
   /**
+   * The trail key of the plan run of `taskId` in flight, or undefined when none is. The owner's
+   * view asks by run, not by schedule: a run whose end row was lost is not the one running now.
+   */
+  runningPlanRun(taskId: string): string | undefined {
+    return this.activeTasks.get(taskId)?.planRun;
+  }
+
+  /**
    * Whether `taskId` has a run in flight that a stop can end — the question the schedules
    * view asks before it offers "Stop run". False when nothing runs, and for the two effects
    * nothing in the run ever reads an abort (`backup`, `notify`: `executeTask` hands them no
@@ -668,6 +770,7 @@ export class WorkerLoop {
     result: string,
     status: RunEndStatus,
     run?: RunStarterSlot | null,
+    opts?: { readonly keepSchedule: true },
   ): boolean {
     // A request of this run that would have carried someone else's own login was refused: its
     // line goes under the result, and what ends as a success halts (`withMemberNotes`).
@@ -682,7 +785,21 @@ export class WorkerLoop {
     if (slot !== undefined) slot.ended = status;
     const live = this.#runSlotOf(id);
     if (live !== undefined) live.ended = status;
-    return tm?.recordTaskRun(id, result, status, ...(startedByOther(slot) ? [{ noRetry: true }] : [])) ?? false;
+    // A run stopped because its plan's access ended says so, not "on your instruction"; and when
+    // its plan is paused, or a member's end is proven now, it keeps its schedule (`plan-pause.ts`).
+    if (status === 'stopped' && slot?.accessEnded === true && planPauseOn()) {
+      const paused = this.#pauseForStop(id);
+      result = paused ? ACCESS_ENDED_PAUSED_RESULT : ACCESS_ENDED_RESULT;
+      if (paused) {
+        opts = { keepSchedule: true };
+        slot.endedPaused = true;
+      }
+    }
+    // A webhook run's event takes the end where nothing more specific was set: lynox's own
+    // sentence, or the masked error of a run that threw.
+    endEvent(slot ?? live, status === 'success' ? { state: 'done' } : { state: 'failed', reason: result });
+    const record = { ...(startedByOther(slot) ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
+    return tm?.recordTaskRun(id, result, status, ...(Object.keys(record).length > 0 ? [record] : [])) ?? false;
   }
 
   /**
@@ -771,6 +888,74 @@ export class WorkerLoop {
   }
 
 
+  /**
+   * The gate's pause: true when the run was refused because its plan is paused, or because a
+   * member's end is proven and the plan was paused just now; recorded with the schedule kept and
+   * not pushed. False when the pause is off or nothing is proven — the gate then goes on as on
+   * main, where an unproven end is refused through the `stopped` path and nothing sticks.
+   */
+  #gatePause(task: TriggerRecord, ended: boolean): boolean {
+    if (!planPauseOn()) return false;
+    const db = this.engine.getEngineDb()?.getDb();
+    const ends = this.engine.getMandateEnds();
+    if (db === undefined || ends === null) return false;
+    const tm = this.engine.getTaskManager();
+    if (pausedAtNow(db, task.id) !== null) {
+      this.#recordRun(tm, task.id, PLAN_ENDED_RESULT, 'stopped', undefined, { keepSchedule: true });
+      return true;
+    }
+    if (!ended) return false;
+    try {
+      if (pausePlanNow(db, task.id, (id) => ends.endRow(id), this.#closedPromptOf(task.id)) !== true) return false;
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox:worker] could not pause "${task.title}" (${task.id}), refused without it: ${processErrorText(err)}\n`);
+      return false;
+    }
+    this.#recordRun(tm, task.id, PLAN_ENDED_RESULT, 'stopped', undefined, { keepSchedule: true });
+    return true;
+  }
+
+  /** Whether the plan of a run stopped for its access is paused now, pausing it if an end is proven. */
+  #pauseForStop(id: string): boolean {
+    if (!planPauseOn()) return false;
+    const db = this.engine.getEngineDb()?.getDb();
+    const ends = this.engine.getMandateEnds();
+    if (db === undefined || ends === null) return false;
+    try {
+      return pausedAtNow(db, id) !== null || pausePlanNow(db, id, (m) => ends.endRow(m), this.#closedPromptOf(id)) === true;
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox:worker] could not pause ${id} after its access ended: ${processErrorText(err)}\n`);
+      return false;
+    }
+  }
+
+  /** Whether the plan of a running entry is paused now, read fresh. Off with the pause. */
+  #pausedNow(id: string): boolean {
+    if (!planPauseOn()) return false;
+    const db = this.engine.getEngineDb()?.getDb();
+    return db !== undefined && pausedAtNow(db, id) !== null;
+  }
+
+  /** Whether the plan's latest question was closed because a mandate ended (`PausedFor.closedPrompt`). */
+  #closedPromptOf(id: string): boolean {
+    try {
+      return this.engine.getPromptStore()?.getLatestForTrigger(id)?.closed_reason === 'mandate_ended';
+    } catch {
+      return false;
+    }
+  }
+
+  /** The trigger's row read again by its exact id; the record given when it cannot be read. */
+  #freshRecord(task: TriggerRecord): TriggerRecord {
+    if (!planPauseOn()) return task;
+    try {
+      const fresh = this.engine.getTaskManager()?.getTrigger(task.id);
+      return fresh !== undefined && fresh.id === task.id ? fresh : task;
+    } catch {
+      return task;
+    }
+  }
+
   /** Whether a mandate the run's plan depends on has ended (`principalHasEnded`). */
   #planHasEnded(entry: ActiveTask, isLive: (mandateId: string) => boolean = (id) => this.engine.getMandateEnds()?.isLive(id) ?? false): boolean {
     return entry.planMembers.some((m) => principalHasEnded(m, isLive));
@@ -783,12 +968,17 @@ export class WorkerLoop {
    * grant was live when the run was let in; a sweep finds a run only once it is registered,
    * and one that lands before the run's session exists has nothing to abort.
    */
-  #stopIfStarterEnded(entry: ActiveTask | undefined, starter: RequestPrincipal | undefined): void {
-    const isLive = (id: string): boolean => this.engine.getMandateEnds()?.isLive(id) ?? false;
+  #stopIfStarterEnded(entry: ActiveTask | undefined, starter: RequestPrincipal | undefined, id?: string): void {
+    const isLive = (mid: string): boolean => this.engine.getMandateEnds()?.isLive(mid) ?? false;
     const starterEnded = starter !== undefined && principalHasEnded(starter, isLive);
-    if (!starterEnded && !(entry !== undefined && this.#planHasEnded(entry, isLive))) return;
+    // A plan paused while its run went on stops too, even when an extension made its member live again.
+    const planEnded = entry !== undefined && (this.#planHasEnded(entry, isLive) || (id !== undefined && this.#pausedNow(id)));
+    if (!starterEnded && !planEnded) return;
     // The entry only records it as a stop; the decision needs none.
-    if (entry !== undefined) entry.stopRequested = true;
+    if (entry !== undefined) {
+      entry.stopRequested = true;
+      if (planEnded) entry.accessEnded = true;
+    }
     throw new RunAbortedError();
   }
 
@@ -805,7 +995,26 @@ export class WorkerLoop {
     const stopped: string[] = [];
     for (const [taskId, active] of [...this.activeTasks]) {
       const starterEnded = active.starter !== undefined && principalHasEnded(active.starter, isLive);
-      if (!starterEnded && !this.#planHasEnded(active, isLive)) continue;
+      const planEnded = this.#planHasEnded(active, isLive) || this.#pausedNow(taskId);
+      if (!starterEnded && !planEnded) continue;
+      if (planEnded) active.accessEnded = true;
+      if (this.stopTask(taskId).kind === 'requested') stopped.push(taskId);
+    }
+    return stopped;
+  }
+
+  /**
+   * Stop every running bulk task (writing, undoing, reading or judging a run): bulk runs were
+   * just turned off (`Engine._applyBulkSwitch`). Through {@link stopTask}, as the owner's stop,
+   * so a writing run ends between two targets — an atomic one rolled back, any other halted
+   * where it stood and resumable once bulk runs are on again. A task that has not reached its
+   * handler yet reads no abort; it finds no ledger there and is skipped. Returns the ids a stop
+   * was requested for.
+   */
+  stopBulkTasks(): string[] {
+    const stopped: string[] = [];
+    for (const [taskId, active] of [...this.activeTasks]) {
+      if (!BULK_EFFECTS.has(active.effect)) continue;
       if (this.stopTask(taskId).kind === 'requested') stopped.push(taskId);
     }
     return stopped;
@@ -924,6 +1133,9 @@ export class WorkerLoop {
     if (!taskManager) return { ok: false, reason: 'not_found' };
     const trigger = taskManager.getTrigger(triggerId);
     if (!trigger) return { ok: false, reason: 'not_found' };
+    // A paused plan (`plan-pause.ts`) waits for its takeover, by hand as well: refused before
+    // anything is recorded, read fresh.
+    if (this.#pausedNow(trigger.id)) return { ok: false, reason: 'paused' };
     // A proposal a mandate made waits for the owner's stamp (PRD customer-granted-operator-
     // access §3.12). Refused here, before any run is recorded: the dispatch backstop would
     // refuse it too, but by recording a failed run, and a one-shot proposal recorded as
@@ -933,6 +1145,9 @@ export class WorkerLoop {
     if (mandateNeedsOwnerStamp(trigger) && !handRunCovers(this.#handRunDoor.peek(marker, trigger.id), trigger)) {
       return { ok: false, reason: 'awaits_owner_stamp' };
     }
+    // A webhook trigger runs with an event's values. Started
+    // by hand it would have none, and run with the trigger's own instead.
+    if (trigger.source === 'webhook') return { ok: false, reason: 'runs_on_events' };
     if (this.activeTasks.has(trigger.id)) return this.#alreadyRunning(trigger.id);
     // ⛔ A trigger with an OPEN QUESTION is running too, and after a restart
     // `activeTasks` cannot say so. In-process the guard above covers it; in the next
@@ -1037,7 +1252,10 @@ export class WorkerLoop {
       const taskManager = this.engine.getTaskManager();
       if (!taskManager) return;
 
-      const dueTasks = taskManager.getDueTriggers();
+      // A webhook trigger runs only from its events, through the drain. One that reached this
+      // list (a `next_run_at` from a synced row) would run with the trigger's own params, an
+      // untainted seed and a `schedule` origin that may hold a grant.
+      const dueTasks = taskManager.getDueTriggers().filter((t) => t.source !== 'webhook');
 
       // §0 E5/A12 — the SECOND query, and the only thing in the engine that can
       // still see a parked trigger. `getDueTriggers` excludes `waiting` by
@@ -1116,6 +1334,16 @@ export class WorkerLoop {
             process.stderr.write(
               `[lynox:worker] prompt settle failed for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
             );
+          }
+          // A paused plan's wait, or one whose member's end is proven now, ends paused rather than
+          // `failed`: the wait is over, the schedule is kept for the takeover (`plan-pause.ts`).
+          if (this.#pauseForStop(parked.id)) {
+            try {
+              if (taskManager.endWait(parked.id, 'open')) this.#recordRun(taskManager, parked.id, PLAN_ENDED_RESULT, 'stopped', null, { keepSchedule: true });
+            } catch (err: unknown) {
+              process.stderr.write(`[lynox:worker] could not end the paused wait of ${parked.id}: ${processErrorText(err)}\n`);
+            }
+            continue;
           }
           // A proposal's wait came from a test run by hand: it ends back where it was, not
           // `failed`. Outside any run, so this asks the ROW.
@@ -1198,6 +1426,24 @@ export class WorkerLoop {
       } catch (err: unknown) {
         process.stderr.write(
           `[lynox:worker] consent reminder failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+
+      // The owner's notice of paused plans (`plan-pause.ts`), in the reminder's order: only with a
+      // channel, claimed before it is sent, so two processes on one file send it once and none is
+      // used up while no channel is registered. At boot the worker starts before the server
+      // registers its push channel, so a pause from the boot sweep is told on the first tick that
+      // has a channel — usually the second. Fenced like the reminder.
+      try {
+        if (planPauseOn() && this.notificationRouter.hasChannels()) {
+          const db = this.engine.getEngineDb()?.getDb();
+          if (db !== undefined) {
+            for (const message of claimPauseNotices(db)) void this.notificationRouter.notify(message);
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:worker] paused-plan notice failed: ${processErrorText(err)}\n`,
         );
       }
 
@@ -1330,11 +1576,192 @@ export class WorkerLoop {
         // otherwise shrink the tenant's daily headroom for the process lifetime.
         void this.executeTask(task, capUSD).finally(() => releasePersistentBudget(reservation.reservedUSD));
       }
+      // After the due triggers, and on its own: a drain that throws leaves the next tick's
+      // due triggers as they were. No signal from the receiver wakes it, so an event waits
+      // for the next tick at most.
+      try {
+        this.#drainWebhooks(taskManager);
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:worker] webhook drain: ${processErrorText(err)}\n`);
+      }
     } catch {
       // Best-effort — don't crash the loop
     } finally {
       this.ticking = false;
     }
+  }
+
+  /**
+   * The webhook drain: at most one recorded event per webhook
+   * trigger per tick is run, as a run of its trigger, under the trigger's lease. Off with the
+   * feature switch; then it does not read the table.
+   *
+   * Per trigger, in this order (the due loop's order):
+   *   1. Its dropped events are reported to the owner, each once.
+   *   2. A run of it in this process → nothing more now.
+   *   3. Checked live before anything is reserved: a trigger `findAcceptingWebhook` no longer
+   *      returns, or that is gone, has all its waiting events dropped; otherwise its oldest
+   *      waiting event is dropped if it is a Shopify event whose shop is no longer the connection's.
+   *   4. Budget reserved, then the lease taken; a lease another process holds, or one a lost
+   *      run left behind (`interrupted`, which a trigger without a next run never yields),
+   *      gives both back and runs nothing.
+   *   5. Under the lease, a `running` event nobody reported is reported once as of unknown
+   *      outcome — it may have run — and is not run again by itself.
+   *   6. The oldest event moves to `running` under a new attempt id, and the run starts in the
+   *      frame every run of a trigger shares ({@link SlotEvent}); its outcome is written before
+   *      the lease is given up.
+   */
+  #drainWebhooks(taskManager: NonNullable<ReturnType<Engine['getTaskManager']>>): void {
+    if (!isFeatureEnabled('inbound-webhooks')) return;
+    const engineDb = this.engine.getEngineDb();
+    if (!engineDb) return;
+    const ledger = new InboundEventStore(engineDb);
+    const triggers = new TriggerStore(engineDb);
+    const connections = new ConnectionStore(engineDb);
+    const windowStart = new Date(Date.now() - EVENT_VALUES_KEPT_MS).toISOString();
+    ledger.sweepValues(windowStart);
+    ledger.tombstoneRows(windowStart);
+    for (const triggerId of ledger.triggersWithWork()) {
+      // One trigger that throws (a store error, a row that does not read) must not hold up the
+      // triggers after it in every tick.
+      try {
+        const title = taskManager.getTrigger(triggerId)?.title ?? 'A webhook trigger';
+        // A report for each event that did not end done; a done one is not told. Dropped
+        // events are told together per reason, with their number: a trigger switched off with a
+        // queue, or a sender with the route token and many signed bodies, would otherwise push
+        // once per event. A failed one is told on its own.
+        const dropped = new Map<string, number>();
+        // The summaries go out even when a later claim throws: a dropped event already marked
+        // reported is told by nothing else.
+        try {
+          for (const ended of ledger.unreportedEnds(triggerId)) {
+            if (!ledger.markReported(ended.id)) continue;
+            if (ended.state === 'dropped') {
+              const why = ended.reason ?? 'no reason recorded';
+              dropped.set(why, (dropped.get(why) ?? 0) + 1);
+              continue;
+            }
+            // A drop's reason is one of lynox's sentences, and so are some failures'; any other
+            // failure's reason can hold the run's error, which may carry a third party's text, so
+            // that one stays on the event and is not pushed.
+            // A mapping refusal opens with lynox's sentence and goes on with the owner's own
+            // workflow; only the sentence is told.
+            const said = ended.reason === null ? EVENT_RUN_FAILED
+              : OWN_FAILURE_REASONS.has(ended.reason) ? ended.reason
+              : ended.reason.startsWith(EVENT_MAPPING_REFUSED) ? EVENT_MAPPING_REFUSED
+              : EVENT_RUN_FAILED;
+            // The owner who stopped the run asked for it, and is not told of it again; nor of a run
+            // its paused plan ended, which the pause's notice tells. The reason stays on the event.
+            if (said === EVENT_STOPPED || TOLD_BY_PAUSE.has(ended.reason ?? '')) continue;
+            this.#sayEvent(triggerId, title, said);
+          }
+        } finally {
+          for (const [why, count] of dropped) {
+            this.#sayEvent(triggerId, title, count === 1 ? `An event was not run: ${why}` : `${String(count)} events were not run: ${why}`);
+          }
+        }
+        if (this.activeTasks.has(triggerId)) continue;
+        const event = ledger.oldestReceived(triggerId);
+        const accepting = triggers.findAcceptingWebhook(triggerId);
+        const trigger = taskManager.getTrigger(triggerId);
+        if (accepting === undefined || trigger === undefined || trigger.id !== triggerId) {
+          // All at once, and reported by the next pass, like every drop.
+          if (event !== undefined) ledger.dropWaiting(triggerId, EVENT_TRIGGER_NOT_LIVE);
+          continue;
+        }
+        if (event !== undefined && this.#eventShopMoved(accepting, event, connections)) {
+          ledger.drop(event.id, EVENT_SHOP_MOVED);
+          continue;
+        }
+        const lost = ledger.unreportedRunning(triggerId);
+        if (event === undefined && lost.length === 0) continue;
+
+        const grant = reservationEstimate(trigger);
+        const reservation = reservePersistentBudget(grant);
+        if (!reservation.allowed) {
+          this.sayBudgetDeferred(trigger, reservation.reason ?? 'budget admission refused');
+          continue;
+        }
+        let lease: ReturnType<WorkerLoop['takeLease']>;
+        try {
+          lease = this.takeLease(triggerId);
+        } catch (err: unknown) {
+          // Not held up by the trigger's catch below with the reservation still taken.
+          releasePersistentBudget(reservation.reservedUSD);
+          throw err;
+        }
+        if (lease !== 'claimed') {
+          releasePersistentBudget(reservation.reservedUSD);
+          if (lease === 'interrupted') {
+            // Fails closed: never read as `claimed`. The lease is ours now; give it back.
+            process.stderr.write(`[lynox:worker] "${trigger.title}" (${triggerId}) webhook trigger reported a lost run on its lease; no event run\n`);
+            try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
+          }
+          continue;
+        }
+        let started = false;
+        try {
+          for (const stale of lost) {
+            if (ledger.markUnknownReported(stale.id)) {
+              this.#sayEvent(triggerId, trigger.title, EVENT_OUTCOME_UNKNOWN);
+            }
+          }
+          if (event === undefined) continue;
+          const attemptId = randomUUID();
+          if (!ledger.begin(event.id, attemptId)) continue;
+          // Values that cannot be read now (another vault key) are not run as none: the event fails.
+          // Its values are kept for a while, but nothing runs it again.
+          if (event.valuesUnreadable) {
+            ledger.finish(event.id, attemptId, { state: 'failed', reason: EVENT_VALUES_UNREADABLE });
+            continue;
+          }
+          const slotEvent: SlotEvent = {
+            eventId: event.id,
+            attemptId,
+            values: eventValues(event.valuesJson),
+            // The names the trigger maps now, and every name the event's values were recorded
+            // under: the spec can change after receipt, and the recorded values are what runs.
+            mappedNames: [...new Set([...Object.keys(parseWebhookSpec(accepting.conditionJson)?.mapping ?? {}), ...Object.keys(eventValues(event.valuesJson))])],
+            settle: (entry) => {
+              ledger.finish(event.id, attemptId, outcomeOfRun(entry));
+            },
+          };
+          started = true;
+          // The row read again now that the lease is held, as `executeTask` does: an owner's takeover
+          // of the plan may have committed since the read above.
+          // run-group-starter: fires once, when this run settles; it only frees the run's budget reservation and reports no spend.
+          void this.#runInSlot(this.#freshRecord(trigger), null, false, undefined, slotEvent).finally(() => releasePersistentBudget(reservation.reservedUSD));
+        } finally {
+          if (!started) {
+            releasePersistentBudget(reservation.reservedUSD);
+            try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:worker] webhook drain failed for trigger ${triggerId}: ${processErrorText(err)}\n`);
+      }
+    }
+  }
+
+  /**
+   * Whether a Shopify event names another shop than the trigger's connection serves now. The
+   * header is not signed — Shopify's HMAC covers the body only — and is worth comparing only
+   * because the receiver checked it against the same connection when it recorded the event; a
+   * receiver that stopped checking would make this test worthless without failing it.
+   */
+  #eventShopMoved(trigger: WebhookReceiverRow, event: InboundEventRecord, connections: ConnectionStore): boolean {
+    if (parseWebhookSpec(trigger.conditionJson)?.verifier !== 'shopify-hmac') return false;
+    const shopHost = trigger.sourceConnectionId === null ? null : connectionShopHost(connections.get(trigger.sourceConnectionId));
+    let named: unknown;
+    try { named = (JSON.parse(event.headersJson) as Record<string, unknown>)[SHOPIFY_SHOP_HEADER]; } catch { named = undefined; }
+    return shopHost === null || typeof named !== 'string' || named.toLowerCase() !== shopHost;
+  }
+
+  /** One report of an event to the owner, outside any run: lynox's own sentence, never an error's text. */
+  #sayEvent(triggerId: string, title: string, sentence: string): void {
+    process.stderr.write(`[lynox:worker] "${title}" (${triggerId}) ${sentence}\n`);
+    if (!this.notificationRouter.hasChannels()) return;
+    void this.notificationRouter.notify({ title: `\u26a0 ${title}`, body: sentence, taskId: triggerId, priority: 'normal' });
   }
 
   /**
@@ -1379,7 +1806,12 @@ export class WorkerLoop {
    * paths that do not reserve (the manual "Run now" below, and any direct caller). Null
    * keeps each executor's own constant, so an unreserved run behaves exactly as before.
    */
-  private async executeTask(task: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker): Promise<void> {
+  private async executeTask(record: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker): Promise<void> {
+    // Who a plan depends on is read from the row as it is now, not as `getDue` returned it: the
+    // owner's takeover (`plan-takeover.ts`) can commit in between, and every reader below — the
+    // stamp checks, the plan's members and whom it acts for, the gate, the trail, the watch's
+    // reader — would otherwise decide on the marks it covered. Off with the pause, as on main.
+    const task = this.#freshRecord(record);
     // The one-time door (PRD customer-granted-operator-access §3.12 point 6): a marker
     // minted by a request for THIS trigger is the second disjunct of both stamp checks
     // below, and it is used up here, by the dispatch that sees it. Nothing passes them
@@ -1408,6 +1840,16 @@ export class WorkerLoop {
   }
 
   async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter?: RequestPrincipal): Promise<void> {
+    return this.#runInSlot(task, capUSD, handRun, starter, undefined);
+  }
+
+  /**
+   * The frame of every run of a trigger: its deadline, its entry in `activeTasks`, the lease
+   * heartbeat, the gates, the dispatch, the recorded end, and the lease given up last. A run of
+   * a due trigger and a webhook run share it whole ({@link SlotEvent} says where they differ),
+   * so a gate or a stop added here holds for both.
+   */
+  async #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
@@ -1457,7 +1899,7 @@ export class WorkerLoop {
     // is known from the row; the workflow's is read inside the run, before the access gate.
     const entry: ActiveTask = {
       controller, ownerStop: new AbortController(), effect: task.effect, pauseDeadline, resumeDeadline, handRun, starter,
-      planMembers: planMembers(planMandate(task), undefined).members,
+      planMembers: planMembers(planMandate(planAuthorshipOf(task)), undefined).members, event,
     };
     this.activeTasks.set(task.id, entry);
     // A renewal fails for two reasons, and only one is another process: the row can also
@@ -1508,7 +1950,8 @@ export class WorkerLoop {
         // `run_workflow` would otherwise run on the stamp of the workflow it names. The
         // owner's triggers never reach this (their tags are `owner` or absent).
         if (mandateNeedsOwnerStamp(task) && !handRun) {
-          this.recordAndNotify(task, 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.', false);
+          endEvent(entry, { state: 'dropped', reason: MANDATE_UNSTAMPED_RESULT });
+          this.recordAndNotify(task, MANDATE_UNSTAMPED_RESULT, false);
           return;
         }
         // Access gate, for every effect and every start (the schedule, a hand start by the owner
@@ -1517,7 +1960,7 @@ export class WorkerLoop {
         // under the owner's stamp for someone whose access ended.
         // Only a workflow run reads anything more; every other effect stays as synchronous here
         // as it was.
-        const plan = effect === 'run_workflow' ? await this.#planMembersOf(task) : planMembers(planMandate(task), undefined);
+        const plan = effect === 'run_workflow' ? await this.#planMembersOf(task) : planMembers(planMandate(planAuthorshipOf(task)), undefined);
         if (effect === 'run_workflow') {
           entry.planMembers = plan.members;
           if ('unreadable' in plan && plan.unreadable) {
@@ -1526,7 +1969,17 @@ export class WorkerLoop {
             return;
           }
         }
-        if (this.#planHasEnded(entry)) {
+        const ended = this.#planHasEnded(entry);
+        // The pause (`plan-pause.ts`) sticks where the end above would not: read AFTER the
+        // liveness above and fresh from engine.db, not from the record `getDue` returned. Another
+        // process on the same file can commit a login that extends the grant together with the
+        // pause between the two; in this order the gate sees one or the other. Recorded with the
+        // schedule kept, and not pushed: the tick tells the owner, once.
+        // A webhook run's event ends there, failed with the pause's reason and its values kept for
+        // the retention window; the pause's notice tells the owner.
+        if (this.#gatePause(task, ended)) return;
+        if (ended) {
+          endEvent(entry, { state: 'dropped', reason: PLAN_ENDED_RESULT });
           // A mandate's end does not undo itself, so a schedule meets this at every time it is due.
           // The owner hears it once; the later ones are recorded without a push.
           if (task.last_run_status === 'stopped' && task.last_run_result === PLAN_ENDED_RESULT) {
@@ -1560,6 +2013,7 @@ export class WorkerLoop {
             return;
           }
           trail = opened;
+          entry.planRun = opened.key;
         }
         const dispatch = async (): Promise<void> => {
           switch (effect) {
@@ -1580,8 +2034,8 @@ export class WorkerLoop {
               // The run reads the owner's stop (`ownerStop`) before each step and ends its step
               // agents on it, so it has a stop handle — set at the hand-over.
               entry.readsSignal = true;
-              this.#stopIfStarterEnded(entry, starter);
-              await this.executePipeline(task, starter, entry.ownerStop.signal);
+              this.#stopIfStarterEnded(entry, starter, task.id);
+              await this.executePipeline(task, starter, entry.ownerStop.signal, entry.event);
               break;
             case 'run_agent':
               // Consent gate (triggers-consent) — DEFENSE-IN-DEPTH backstop to the
@@ -1656,7 +2110,7 @@ export class WorkerLoop {
         }
         // Outermost, so every request of the run — whichever effect, whichever plan — notes a
         // refused member connection where `#recordRun` and the notification read it.
-        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp) : dispatch()));
+        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp, trail?.key) : dispatch()));
         entry.memberNotes = collected.notes;
         await collected.done;
       });
@@ -1769,7 +2223,9 @@ export class WorkerLoop {
       // both), so what ends here is the RUN, not necessarily the trigger. The word and
       // the follow-ups differ because the reader's next move does: "Explain why this
       // failed" is the wrong offer for a run that did what it was told.
-      if (!willRetry && this.notificationRouter.hasChannels()) {
+      // A webhook run's failure is told once, by the drain from its event, not here too; a paused
+      // plan's stop is told by the tick's notice, once (`plan-pause.ts`).
+      if (!willRetry && entry.event === undefined && entry.endedPaused !== true && this.notificationRouter.hasChannels()) {
         const stopped = status === 'stopped';
         // The push leaves the instance: a contained run's error goes out as class and status
         // only (`error-egress.ts`). A timeout keeps its text, which lynox wrote itself (above).
@@ -1784,10 +2240,10 @@ export class WorkerLoop {
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
           followUps: stopped
-            ? [{ label: 'Run again', task: task.description ?? task.title }]
+            ? [{ label: 'Run again', task: stripHidden(task.description ?? task.title) }]
             : [
-              { label: 'Retry', task: task.description ?? task.title },
-              { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${pushedMsg}` },
+              { label: 'Retry', task: stripHidden(task.description ?? task.title) },
+              { label: 'Explain', task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${stripHidden(pushedMsg)}` },
             ],
         });
       }
@@ -1805,9 +2261,38 @@ export class WorkerLoop {
       // After the result is recorded, so `next_run_at` has moved before the row is free.
       clearInterval(heartbeat);
       try {
-        this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
-      } catch { /* a lease left behind lapses on its own */ }
+        // An event's outcome is written while the lease still holds ([L1]): a drain of another
+        // process cannot take the event up between the run's end and its row. A settle that
+        // fails leaves the row `running`, which the next drain reports as of unknown outcome;
+        // it never keeps the lease.
+        if (event !== undefined) {
+          try {
+            event.settle(entry);
+          } catch (err: unknown) {
+            process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) could not record the outcome of event ${event.eventId}: ${processErrorText(err)}\n`);
+          }
+        }
+      } finally {
+        try {
+          this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
+        } catch { /* a lease left behind lapses on its own */ }
+      }
     }
+  }
+
+  /**
+   * The ledger a bulk tick works on, and the stop it reads. While bulk runs are on: the live
+   * ledger and the run's own signal. While they are OFF (`Engine._applyBulkSwitch`, or a boot
+   * after the control plane removed the flag): the switched-off ledger with the owner's stop
+   * already given, so the tick ends the run exactly as `stopBulkTasks` ends a running one — an
+   * atomic run rolled back, any other halted where it stood — and writes nothing. Skipping
+   * instead would leave a run that was waiting between ticks unhalted with its trigger spent,
+   * and an atomic one half written. Null ledger only without engine.db.
+   */
+  private bulkTick(signal: AbortSignal, ownerStopped: () => boolean): { ledger: ReturnType<Engine['getBulkLedger']>; signal: AbortSignal; ownerStopped: () => boolean } {
+    const live = this.engine.getBulkLedger();
+    if (live) return { ledger: live, signal, ownerStopped };
+    return { ledger: this.engine.getBulkLedgerSwitchedOff?.() ?? null, signal: AbortSignal.abort(), ownerStopped: () => true };
   }
 
   /**
@@ -1816,14 +2301,14 @@ export class WorkerLoop {
    * trigger — a halt waits for a human to resume it through the approval route, and so
    * does the owner's stop, which ends the run between two targets.
    */
-  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
-    const ledger = this.engine.getBulkLedger();
+  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect, liveSignal: AbortSignal, liveStopped: () => boolean): Promise<void> {
+    const { ledger, signal, ownerStopped } = this.bulkTick(liveSignal, liveStopped);
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
     }
     const { runBulkEffect, bulkWriterFor, BULK_RETRY_DELAY_MS } = await import('./bulk-apply.js');
-    const { externalWriter, parseBulkContract, writeMethodOf } = await import('./bulk-external.js');
+    const { externalRunWriter } = await import('./bulk-external-writer.js');
     const dataStore = this.engine.getDataStore();
     // Built only for an external run: a local run needs none of the stores it reads.
     const external = ledger.getRunForApply(task.bulk_run_id)?.targetSystem.startsWith('http:') === true;
@@ -1831,18 +2316,15 @@ export class WorkerLoop {
     const { namedTarget, newCorrelationId } = await import('./audit-log.js');
     const { externalHostOf } = await import('./bulk-ledger.js');
     const trailTools = { namedTarget, newCorrelationId, externalHostOf };
-    // Read only for an external run, like the client: a local run writes no trail.
-    const auditLog = external ? this.engine.getAuditLog() : null;
+    // Read for every run a delegated session planned, inside the instance too (660b): its trail
+    // needs it, and a trail without a log refuses the call. The owner's own run writes none.
+    const delegated = ledger.getRunForApply(task.bulk_run_id)?.delegatedPlanner;
+    const auditLog = delegated !== null && delegated !== undefined && !isOwnerPrincipal(delegated) ? this.engine.getAuditLog() : null;
     let outcome: Awaited<ReturnType<typeof runBulkEffect>>;
     try {
       outcome = await runBulkEffect(task.bulk_run_id, effect, {
         ledger,
-        writerFor: (run) => bulkWriterFor(run, dataStore, (r) => {
-          const client = clientFor(r);
-          const contract = parseBulkContract(r.contractJson);
-          const method = contract ? writeMethodOf(contract) : null;
-          return client && method ? externalWriter(client, { method }) : null;
-        }),
+        writerFor: (run) => bulkWriterFor(run, dataStore, (r) => externalRunWriter(r, ledger, clientFor)),
         signal,
         ownerStopped,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
@@ -1883,8 +2365,8 @@ export class WorkerLoop {
    * (the host budget, a rate limit, a 429, a stopped tick) is re-armed for when it may
    * go on; every other outcome ends the trigger — a halt waits for the owner's resume.
    */
-  private async executeBulkPreview(task: TriggerRecord, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
-    const ledger = this.engine.getBulkLedger();
+  private async executeBulkPreview(task: TriggerRecord, liveSignal: AbortSignal, liveStopped: () => boolean): Promise<void> {
+    const { ledger, signal, ownerStopped } = this.bulkTick(liveSignal, liveStopped);
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
@@ -1956,8 +2438,8 @@ export class WorkerLoop {
    * waits (a 429 or 5xx, the host budget, a stopped tick) is re-armed for when it may go on; every
    * other outcome ends the trigger — a halt waits for the owner's start.
    */
-  private async executeBulkJudge(task: TriggerRecord, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
-    const ledger = this.engine.getBulkLedger();
+  private async executeBulkJudge(task: TriggerRecord, liveSignal: AbortSignal, liveStopped: () => boolean): Promise<void> {
+    const { ledger, signal, ownerStopped } = this.bulkTick(liveSignal, liveStopped);
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
@@ -2046,18 +2528,17 @@ export class WorkerLoop {
    * Null when the contract is unreadable or the stores are missing — the run then halts
    * as unavailable rather than sending anything.
    */
-  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'targetSystem' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints, shopifyRead?: import('../tools/permission-guard.js').ShopifyReadPhase) => import('./bulk-external.js').ExternalClient | null> {
+  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'targetSystem' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints, shopifyRead?: import('../tools/permission-guard.js').ShopifyReadPhase, shopifyApply?: import('../tools/permission-guard.js').ShopifyApplyPhase) => import('./bulk-external.js').ExternalClient | null> {
     const { externalClient, parseBulkContract } = await import('./bulk-external.js');
     const { httpTarget, outwardReadRecorder } = await import('./audit-log.js');
-    const { withListQuery, withShopifyRead } = await import('../tools/permission-guard.js');
-    const { externalHostOf } = await import('./bulk-ledger.js');
+    const { bulkRunContract } = await import('./bulk-external-writer.js');
     const { attachStoredCredential, connectedAccountProfiles, detectSecretInContent, isWriteMethod } = await import('../tools/builtin/http.js');
     const { resolveGuardedAckHosts } = await import('./tool-context.js');
     const apiStore = this.engine.getApiStore();
     const secretStore = this.engine.getSecretStore();
     const toolContext = this.engine.getToolContext();
     const auditLog = this.engine.getAuditLog();
-    return (run, listQuery, shopifyRead) => {
+    return (run, listQuery, shopifyRead, shopifyApply) => {
       const stored = parseBulkContract(run.contractJson);
       if (!stored || !apiStore || !secretStore) return null;
       // A list page's query is granted only on a copy made here, in memory, from the stored
@@ -2065,18 +2546,8 @@ export class WorkerLoop {
       // run's reads likewise, by the exact bodies the engine sends (`withShopifyRead`), from
       // what the preview took from this run's ledger rows. The two copies are never combined:
       // each drops the other's grant.
-      let contract = stored;
-      try {
-        if (shopifyRead !== undefined) {
-          const host = externalHostOf(run.targetSystem);
-          if (host === null) return null;
-          contract = withShopifyRead(stored, host, shopifyRead);
-        } else if (listQuery !== undefined) {
-          contract = withListQuery(stored, listQuery);
-        }
-      } catch {
-        return null;
-      }
+      const contract = bulkRunContract(stored, run.targetSystem, { listQuery, shopifyRead, shopifyApply });
+      if (contract === null) return null;
       return externalClient({
         contract,
         hostPolicy: toolContext,
@@ -2184,6 +2655,12 @@ export class WorkerLoop {
     if (answered !== undefined && asker?.kind === 'mandate'
       && !(asker.mandateId !== undefined && (this.engine.getMandateEnds()?.isLive(asker.mandateId) ?? false))) {
       this.engine.getPromptStore()?.releaseTrigger(answered.id);
+      // An asker who is a member of the plan pauses it once its end is proven (`plan-pause.ts`).
+      const askerIsMember = this.activeTasks.get(task.id)?.planMembers.some((m) => principalTag(m) === principalTag(asker)) === true;
+      if (handStarter === undefined && askerIsMember && this.#pauseForStop(task.id)) {
+        this.#recordRun(this.engine.getTaskManager(), task.id, PLAN_ENDED_RESULT, 'stopped', { starter: asker }, { keepSchedule: true });
+        return;
+      }
       if (handStarter === undefined) {
         this.#recordRun(this.engine.getTaskManager(), task.id, MANDATE_ENDED_RESULT, 'failed', { starter: asker });
         process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was answered under an access that has since ended — not run\n`);
@@ -2384,6 +2861,10 @@ export class WorkerLoop {
       // the box carries the field names the question lists, never the values.
       const offBoxText = flattenPrompt(offBoxPrompt(rawQuestion));
       const offBoxQuestion = secretStore ? secretStore.maskAll(offBoxText) : offBoxText;
+      // Whether the question reached anyone goes onto the trigger and, through the engine as a
+      // workflow question's does, to the hooks: on a managed instance a push that reached nobody
+      // then mails the owner a fixed text that names neither the question nor the task.
+      const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id));
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
         body: offBoxQuestion,
@@ -2395,6 +2876,8 @@ export class WorkerLoop {
         data: { threadId: session.sessionId, promptId },
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
+      }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
+        process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });
       try {
         const taskSignal = active?.controller.signal;
@@ -2555,9 +3038,15 @@ export class WorkerLoop {
       }
     };
 
-    const base = task.description && task.description.trim() !== task.title.trim()
-      ? `Task: ${task.title}\n\n${task.description}`
-      : `Task: ${task.title}`;
+    // Without the characters that render as nothing (`hidden-text.ts`): the model's write tools
+    // refuse them, but a plan confirmed before, or saved through another path, carries them, and a hidden clause in its
+    // text would reach the model as part of the task. Stripped, not refused, so a plan that holds
+    // a stray one from a paste keeps running on what its owner can see.
+    const title = stripHidden(task.title);
+    const description = task.description ? stripHidden(task.description) : task.description;
+    const base = description && description.trim() !== title.trim()
+      ? `Task: ${title}\n\n${description}`
+      : `Task: ${title}`;
     // §0 A10: the answer goes into the INPUT, named alongside the question it
     // answers. Without this the re-armed run asks the same thing again and parks
     // again — a loop on the wait's own period, which is a worse outcome than the
@@ -2622,7 +3111,7 @@ export class WorkerLoop {
 
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
-    this.#stopIfStarterEnded(active, starter);
+    this.#stopIfStarterEnded(active, starter, task.id);
     const result = await session.run(prompt, { triggerOrigin: task.source, ...(runAs ? { principal: runAs } : {}) });
 
     // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
@@ -2719,8 +3208,8 @@ export class WorkerLoop {
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
         data: { threadId: session.sessionId },
         followUps: [
-          { label: 'Details', task: `Show me more details about: ${task.title}` },
-          { label: 'Run again', task: task.description ?? task.title },
+          { label: 'Details', task: `Show me more details about: ${stripHidden(task.title)}` },
+          { label: 'Run again', task: stripHidden(task.description ?? task.title) },
         ],
       });
     }
@@ -2728,7 +3217,7 @@ export class WorkerLoop {
 
   /** Execute a pipeline task — always orchestrated via the DAG engine (D9). */
   private async executePipeline(
-    task: TriggerRecord, starter: RequestPrincipal | undefined, ownerStop: AbortSignal,
+    task: TriggerRecord, starter: RequestPrincipal | undefined, ownerStop: AbortSignal, event?: SlotEvent,
   ): Promise<void> {
     const runAs = this.#runAs(task.id, starter);
     // What the run is handed for a stop: the OWNER'S signal (`ActiveTask.ownerStop`), not
@@ -2778,6 +3267,7 @@ export class WorkerLoop {
     // has nobody to ask here.
     const asksItsOwner = planned.mode === 'interactive' && asksOnlyViaAskUser(planned.steps);
     if (planned.mode !== 'autonomous' && !asksItsOwner) {
+      endEvent(this.#runSlotOf(task.id), { state: 'dropped', reason: `Workflow "${planned.id}" is marked '${planned.mode}' and may ask for more than an answer, which a run started by an event has nobody to give.` });
       throw new Error(
         `Pipeline "${planned.id}" is marked '${planned.mode}' and may ask for more than an answer (ask_secret / ask_human), ` +
         `which a scheduled run has nobody to give: remove those steps, or run it from a chat session.`,
@@ -2810,12 +3300,25 @@ export class WorkerLoop {
         return;
       }
       tm?.setEnabled?.(task.id, false);
+      // For a webhook trigger the owner must hear this: from now on its deliveries are refused,
+      // and the provider's clock towards deleting the subscription runs.
+      endEvent(this.#runSlotOf(task.id), { state: 'dropped', reason: `Workflow "${planned.id}" needs first-run confirmation, so this trigger was switched off and refuses deliveries. Schedule it from the workflow library to confirm it, then switch the trigger on again.` });
       this.#recordRun(
         tm,
         task.id,
         `Not run: workflow "${planned.id}" needs first-run confirmation. Schedule it from the workflow library (the consent step confirms it) — the schedule has been disabled.`,
         'failed',
       );
+      return;
+    }
+
+    // A webhook run does not wait on a question: the question's
+    // text would come from a third party's event and ask the owner to agree to it, and a
+    // trigger with no schedule has nothing that wakes it after the answer. Refused before
+    // anything ran; the event keeps its values for the retention window, and is not run again.
+    if (event !== undefined && asksItsOwner) {
+      endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: WEBHOOK_ASKS_RESULT });
+      this.#recordRun(this.engine.getTaskManager(), task.id, WEBHOOK_ASKS_RESULT, 'failed');
       return;
     }
 
@@ -2859,21 +3362,35 @@ export class WorkerLoop {
     const questions = asksItsOwner ? this.#workflowQuestions(task, runAs, active, ownerStop, scope) : undefined;
     // Seeded from what the session that created this task had taken in: the run has no session
     // of its own, and its params came from that one.
-    const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, scheduledParams, {
-      seed: storedUntrustedCause(task.created_untrusted),
+    // A webhook run takes all three from its event, never from the trigger: the event's values
+    // as its params, a third party's content as its seed, and
+    // the event as its origin, which never carries a write grant (`decideRunGrant`).
+    const seed = event !== undefined ? 'external-tool' as const : storedUntrustedCause(task.created_untrusted);
+    const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, event !== undefined ? { ...event.values } : scheduledParams, {
+      seed,
       // Which schedule fired: a workflow's write grant holds for the schedule it was
       // accepted with and for no other (`decideRunGrant`).
-      origin: { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
+      origin: event !== undefined
+        ? { kind: 'webhook', triggerId: task.id, eventId: event.eventId }
+        : { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
       // Its steps hand a mail to the owner instead of being refused one, by hand too: a
       // workflow has no thread to ask in.
+      // A webhook run's filing names the event that caused it, so the entry says which one.
       approvalFiling: filingContextFor(() => this.engine.getApprovalStore(), {
-        source: 'workflow', triggerId: task.id, principal: runAs,
-        createdUntrusted: storedUntrustedCause(task.created_untrusted) !== 'none',
+        source: event !== undefined ? 'webhook' : 'workflow', triggerId: task.id, principal: runAs,
+        ...(event !== undefined ? { eventId: event.eventId } : {}),
+        createdUntrusted: seed !== 'none',
       }),
       // Whom the run is for — the mandate its plan acts for, or who started it by hand: the
       // workflow's steps get only the tools that principal's lock allows (PRD §3.13 E4 — the
       // build site is here, not a session).
       ...(runAs ? { principal: runAs } : {}),
+      // A mapped value reaches only a step's task text, where it is fenced as untrusted; asked
+      // by the runner of the workflow exactly as it read it, so no edit falls in between.
+      ...(event !== undefined ? { checkWorkflow: (p: PlannedPipeline) => {
+        const where = mappedValueOutsideTaskText(p.steps, event.mappedNames);
+        return where === null ? null : `${EVENT_MAPPING_REFUSED} ${where}`;
+      } } : {}),
       stopSignal: ownerStop,
       abortScope: scope,
       // The run's id is set here when it may ask: its questions and its thread carry it.
@@ -2891,6 +3408,11 @@ export class WorkerLoop {
     // leaves a completed run, and that is what it is recorded as. And on the owner's signal,
     // so a step whose own error happens to read the same is still recorded as a failure.
     if (result.ok && result.error === WORKFLOW_STOPPED_ERROR && ownerStop.aborted) {
+      // A stop because an access the plan depends on ended is not the owner's: the event says so.
+      // With the pause on, the run's record sets its reason (`#recordRun`).
+      const stopped = this.#runSlotOf(task.id);
+      if (stopped?.accessEnded !== true) endEvent(stopped, { state: 'failed', reason: EVENT_STOPPED, runId: result.runId });
+      else if (!planPauseOn()) endEvent(stopped, { state: 'failed', reason: ACCESS_ENDED_RESULT, runId: result.runId });
       this.#recordRun(this.engine.getTaskManager(), task.id,
         `Workflow stopped on your instruction (run ${result.runId ?? 'unknown'}).`, 'stopped');
       return;
@@ -2908,10 +3430,14 @@ export class WorkerLoop {
     }
 
     if (!result.ok) {
+      endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: result.error ?? 'The workflow run was refused.', runId: result.runId });
       // Surface conversion / validation / not-found / not-template errors as
       // typed throws so the existing executeTask catch routes them through
       // Bugsink + recordTaskRun like any other task failure.
-      throw new Error(result.error ?? `Pipeline ${task.pipeline_id} execution failed`);
+      // A refusal that names stored text carries its fixed wording too: a push from a contained
+      // instance then says why the run did not start, not only that it failed.
+      const message = result.error ?? `Pipeline ${task.pipeline_id} execution failed`;
+      throw result.fixedError !== undefined ? new FixedTextError(message, result.fixedError) : new Error(message);
     }
 
     // What the owner must read even when every step completed: a write the run was
@@ -2921,6 +3447,9 @@ export class WorkerLoop {
     const grantLines = [...(result.grantNote !== undefined ? [result.grantNote] : []), ...(result.writeNotes ?? [])];
     const grantReport = grantLines.length > 0 ? `\n${grantLines.map((l) => `• ${l}`).join('\n')}` : '';
     const success = result.status === 'completed';
+    endEvent(this.#runSlotOf(task.id), success
+      ? { state: 'done', runId: result.runId }
+      : { state: 'failed', reason: `The workflow ended ${result.status ?? 'unknown'}.${result.error ? ` ${result.error}` : ''}`, runId: result.runId });
     if (success) {
       // Still a success: the run completed. Marking it failed would retry the whole run
       // (repeating its other effects) and flip the trigger's status, on every instance.
@@ -2933,6 +3462,10 @@ export class WorkerLoop {
     // thread loaded with the run's context — the user opens it + fixes in chat
     // (Slice C adds the retry/diagnose tools that act on the reply).
     this.#recordRun(this.engine.getTaskManager(), task.id, `Pipeline ${result.status ?? 'unknown'}${grantReport}`, 'failed');
+    // A webhook run's failure is told by the drain, from its event, and opens no chat thread:
+    // its error can carry a third party's text, which a thread would hand the owner's next
+    // turn as the assistant's own.
+    if (event !== undefined) return;
     const stepDetail = (result.stepErrors ?? [])
       .filter(s => s.error)
       .map(s => `• ${s.stepId}: ${s.error}`)
@@ -3074,6 +3607,10 @@ export class WorkerLoop {
     const notes = currentMemberNotes();
     const told = withMemberNotes(resultSummary, look.status, notes);
     const toldLook = RUN_END_LOOK[told.status];
+    // A webhook run is told by the drain, once per event and only when it did not succeed: a
+    // push per order would be noise, and its success is in the run history, where the
+    // owner looks for it.
+    if (this.#runSlotOf(task.id)?.event !== undefined) return;
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
       void this.notificationRouter.notify({
         title: `${toldLook.mark} ${task.title}`,
@@ -3228,9 +3765,11 @@ export class WorkerLoop {
     const contentForPrompt = currentSignal.length > WATCH_CONTENT_CHARS
       ? currentSignal.slice(0, WATCH_CONTENT_CHARS) + ' […truncated]'
       : currentSignal;
+    // The URL as stored, without the characters that render as nothing (`hidden-text.ts`): the
+    // model's write tool refuses them, but a watch saved before, or through another path, carries them.
     const analysisPrompt = isFirstRun
-      ? `You are monitoring ${config.url} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
-      : `You are monitoring ${config.url} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
+      ? `You are monitoring ${stripHidden(config.url)} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
+      : `You are monitoring ${stripHidden(config.url)} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
 
     // noTools: this turn embeds up to 8 KB of the WATCHED PAGE — content the
     // user did not author and an attacker may control (a monitored forum, a
@@ -3240,7 +3779,7 @@ export class WorkerLoop {
     // a non-critical dangerous tool would AUTO-GRANT — see permission-guard
     // _detectDanger). Removing the capability beats gating it. Same mechanism the
     // compaction summarizer uses for the same "pure summarize" shape.
-    this.#stopIfStarterEnded(stopEntry, starter);
+    this.#stopIfStarterEnded(stopEntry, starter, task.id);
     const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', ...(runAs ? { principal: runAs } : {}) });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
@@ -3280,6 +3819,11 @@ export class WorkerLoop {
  * what is read was chosen by whoever planned it. `null` for the owner's own run. A GraphQL
  * read is a `POST` to one endpoint for every product, so its row also names the form and the
  * value bound into it (`detail`).
+ *
+ * No row names a token host, because a run renews no OAuth token: its attach builds an agent from
+ * the stores alone, and `mayRenewOAuthUnattended` refuses it three times over — it has no
+ * `sessionCounters`, no `toolContext` and no `getAvailableTools` (`attachStoredCredential`, `http.ts`). A run that may
+ * renew needs a row for the exchange first (`bulk-preview.test.ts`, "a preview never renews").
  */
 export function bulkReadRecorder(
   run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'delegatedPlanner'>,
@@ -3308,7 +3852,9 @@ export function bulkReadRecorder(
  * the one who approved it (only the owner can approve). One row before the call, one after with
  * how many targets were written; the rows name the host, never what is written. The run renews
  * no OAuth token (its credential attach has no agent, so `mayRenewOAuthUnattended` says no), so
- * no other host is in play. `null` for the owner's own run and for a run inside the instance.
+ * no other host is in play. A run inside the instance (660b) writes the same pair, naming the
+ * store (`files`, `data_store`) instead of a host: a call writes many targets, so the row names
+ * none of them, and a table's name is content. `null` for the owner's own run only.
  */
 export function bulkRunTrail(
   run: import('./bulk-ledger.js').BulkRunForApply,
@@ -3321,8 +3867,11 @@ export function bulkRunTrail(
 ): import('./bulk-apply.js').BulkRunTrail | null {
   const planner = run.delegatedPlanner;
   const host = tools.externalHostOf(run.targetSystem);
-  if (planner === null || isOwnerPrincipal(planner) || host === null) return null;
-  const named: ReadonlyArray<readonly [string, string | number | undefined]> = [['host', host], ['approved_by', 'owner']];
+  if (planner === null || isOwnerPrincipal(planner)) return null;
+  // Not a writer the engine knows: no writer is built for it, so the run halts before this is
+  // asked (`bulkWriterFor`); were it asked, the row is written all the same.
+  const where: readonly [string, string] = host !== null ? ['host', host] : ['store', run.targetSystem === 'workspace' ? 'files' : run.targetSystem === 'data_store' ? 'data_store' : 'other'];
+  const named: ReadonlyArray<readonly [string, string | number | undefined]> = [where, ['approved_by', 'owner']];
   const action = run.kind === 'undo' ? 'bulk:undo' : 'bulk:apply';
   const correlationId = tools.newCorrelationId();
   const write = (phase: import('./audit-log.js').AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
@@ -3331,9 +3880,11 @@ export function bulkRunTrail(
   };
   return {
     begin: () => { write('attempt', []); },
-    end: (outcome, written, failed) => {
+    end: (outcome, written, failed, planned) => {
       try {
-        write(outcome === 'done' ? 'done' : outcome === 'pending' ? 'returned' : 'failed', [['outcome', outcome], ['written', written ?? 'unread'], ['failed', failed ?? 'unread']]);
+        // `planned`: the window halted where its approval told it to, with no failed write, so the
+        // owner's view can tell "waits for you" from a halt with a reason.
+        write(outcome === 'done' ? 'done' : outcome === 'pending' ? 'returned' : 'failed', [['outcome', outcome], ['written', written ?? 'unread'], ['failed', failed ?? 'unread'], ['planned', planned ? 'yes' : undefined]]);
       } catch { /* the row before stands alone, as a write's attempt row does */ }
     },
   };
@@ -3351,6 +3902,8 @@ export interface PlanRunTrail {
   begin: () => void;
   /** The end row, with the status the run was recorded as; undefined when none was. Never throws. */
   end: (status: RunEndStatus | undefined) => void;
+  /** The key every row of the run carries (`plan_run`): the correlation id of these two rows. */
+  readonly key: string;
 }
 
 /**
@@ -3368,13 +3921,16 @@ export function planRunTrail(
   const correlationId = newCorrelationId();
   const named: ReadonlyArray<readonly [string, string | number | undefined]> = [
     ['trigger', taskId], ['approved_by', 'owner'], ['started', byHand !== undefined ? 'hand' : 'schedule'],
-    ['by', byHand !== undefined ? principalTag(byHand) : undefined],
+    // Who started it by kind only (`owner`, `mandate`), never by address: the row's actor columns
+    // name the person, and no address belongs in a target.
+    ['by', byHand?.kind],
   ];
   const write = (phase: import('./audit-log.js').AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
     if (auditLog === null) throw new Error('no audit log');
-    auditLog.record({ principal: planOf, action: 'plan:run', target: namedTarget([...named, ...more]), phase, correlationId });
+    auditLog.record({ principal: planOf, action: 'plan:run', target: namedTarget([...named, ...more]), phase, correlationId, planRun: correlationId });
   };
   return {
+    key: correlationId,
     begin: () => { write('attempt', []); },
     end: (status) => {
       const phase = status === 'success' ? 'done' : status === 'failed' || status === 'timeout' || status === undefined ? 'failed' : 'returned';
@@ -3387,14 +3943,14 @@ export function planRunTrail(
 
 /**
  * Who a watch's read is recorded for, or null for the owner's own watch: the mandate the run
- * is for (its plan's, or the delegated session that started it by hand), else one the record
- * names as its last editor, else
- * the one that set it up. Not `edited_by` alone: the owner's stamp writes itself there
+ * is for (its plan's, or the delegated session that started it by hand), else the mandate the
+ * plan names (`planMandate`: its last mandate editor, else its mandate creator, neither if the
+ * owner took them over). Not `edited_by`: the owner's stamp writes itself there
  * (`TriggerStore.setConfirmedAt`), and a watch a mandate set up runs on schedule only after
  * that stamp.
  */
-export function watchReader(task: Pick<TriggerRecord, 'created_by' | 'edited_by'>, starter: RequestPrincipal | undefined): RequestPrincipal | null {
+export function watchReader(task: PlanAuthorshipRow, starter: RequestPrincipal | undefined): RequestPrincipal | null {
   if (starter !== undefined && !isOwnerPrincipal(starter)) return starter;
-  if (isMandateTag(task.edited_by)) return principalFromTag(task.edited_by);
-  return isMandateTag(task.created_by) ? principalFromTag(task.created_by) : null;
+  // The plan's own mandate, as the gate reads it: a mark the owner took over is none.
+  return planMandate(planAuthorshipOf(task))?.principal ?? null;
 }

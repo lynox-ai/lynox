@@ -2568,9 +2568,22 @@ describe('step agents are built for the run\'s principal (PRD customer-granted-o
   it.each([
     [['bash'], /needs bash \(a shell in the engine process\)/],
     [['read_file', 'task_list'], /needs read_file \(opens any absolute path outside a workspace\), which this run does not get/],
+    // Withheld from a mandate: the focus is the instance's, not one session's.
+    [['memory_focus'], /needs memory_focus \(sets the knowledge focus for every session of the instance\), which this run does not get/],
   ])('refuses a step naming %j in a run for a mandate, before any agent is built', async (tools, message) => {
     await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', tools }, MANDATE)).rejects.toThrow(message);
     expect(vi.mocked(Agent)).not.toHaveBeenCalled();
+  });
+
+  // 660a-2: the pattern writers the lock holds back are dropped, not refused — on the engines a
+  // mandate signs in to they are not registered, and the planners still offer memory_update. That
+  // the step cannot call one where it is registered is the step agent's own lock, which it gets
+  // from the mandate it is built for (`mandate-tool-lock.test.ts`, `mandate-inside-writes.test.ts` (c)).
+  it('runs a mandate\'s step naming a pattern writer instead of refusing it, built for the mandate', async () => {
+    mockSend.mockResolvedValueOnce('done');
+    await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', tools: ['memory_update', 'task_list'] }, MANDATE)).resolves.toBeDefined();
+    expect(vi.mocked(Agent)).toHaveBeenCalledTimes(1);
+    expect((vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
   });
 
   it('refuses a step whose single `tool` is withheld, as it refuses one in `tools`', async () => {

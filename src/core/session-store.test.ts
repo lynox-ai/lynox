@@ -137,6 +137,7 @@ describe('SessionStore', () => {
           run: vi.fn().mockImplementation(runImpl),
         })),
         getThreadStore: vi.fn().mockReturnValue(threadStore),
+        getToolContext: vi.fn().mockReturnValue({ containment: { isContained: () => false } }),
         getSecretStore: vi.fn().mockReturnValue({
           maskSecrets: (s: string) => s.replace(/sk-\w+/g, '«masked»'),
         }),
@@ -160,6 +161,51 @@ describe('SessionStore', () => {
       new SessionStore().getOrCreate('long', engine);
       await new Promise(r => setTimeout(r, 20)); // let the fire-and-forget settle
       expect(updateThread).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resume summary of a contained or private thread', () => {
+    // A long thread (> VERBATIM_THRESHOLD, no stored summary), as above, whose summary run is counted.
+    function engineFor(opts: { contained?: boolean; skipExtraction?: number }): { engine: Engine; run: ReturnType<typeof vi.fn>; createSession: ReturnType<typeof vi.fn> } {
+      const records = Array.from({ length: 90 }, (_, i) => ({ role: i % 2 === 0 ? 'user' : 'assistant', content_json: JSON.stringify(`msg ${i}`) }));
+      const run = vi.fn().mockResolvedValue('recap');
+      const createSession = vi.fn().mockImplementation(() => ({ loadMessages: vi.fn(), setSkipMemoryExtraction: vi.fn(), run }));
+      const engine = {
+        createSession,
+        getThreadStore: vi.fn().mockReturnValue({
+          getThread: vi.fn().mockReturnValue({ id: 'long', title: 't', model_tier: 'balanced', context_id: null, summary: null, skip_extraction: opts.skipExtraction ?? 0 }),
+          getMessages: vi.fn().mockReturnValue(records),
+          updateThread: vi.fn(),
+        }),
+        getSecretStore: vi.fn().mockReturnValue(null),
+        getToolContext: vi.fn().mockReturnValue({
+          containment: { isContained: ({ threadId }: { threadId?: string }) => opts.contained === true && threadId === 'long' },
+        }),
+      } as unknown as Engine;
+      return { engine, run, createSession };
+    }
+
+    it('starts no summary session for a contained thread', async () => {
+      const { engine, run, createSession } = engineFor({ contained: true });
+      new SessionStore().getOrCreate('long', engine);
+      await new Promise(r => setTimeout(r, 20));
+      expect(createSession).toHaveBeenCalledTimes(1); // the resumed chat only
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('starts no summary session for a private thread', async () => {
+      const { engine, run, createSession } = engineFor({ skipExtraction: 1 });
+      new SessionStore().getOrCreate('long', engine);
+      await new Promise(r => setTimeout(r, 20));
+      expect(createSession).toHaveBeenCalledTimes(1);
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('still summarizes a thread that is neither (control)', async () => {
+      const { engine, run, createSession } = engineFor({});
+      new SessionStore().getOrCreate('long', engine);
+      await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+      expect(createSession).toHaveBeenCalledTimes(2);
     });
   });
 

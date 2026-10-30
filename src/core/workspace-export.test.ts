@@ -10,6 +10,7 @@ import {
   stageArchive, sweepExportStaging, tarOverheadFor, writeWorkspaceArchive, type WorkspaceManifest,
 } from './workspace-export.js';
 import { copyOut, openAnchor, closeAnchor } from './workspace-fd.js';
+import { resetShellIsolationForTest, setShellIsolationForTest, type ShellIsolation } from './shell-isolation.js';
 
 /** A reader for what this writer produces: ustar headers plus pax `x` headers. */
 interface ReadEntry { name: string; ustarName: string; type: string; data: Buffer }
@@ -212,6 +213,72 @@ describe('workspace export', () => {
     expect((await writeWorkspaceArchive(dir, out)).present).toBe(false);
     expect(readTar(readFileSync(out)).map(e => e.name)).toEqual([ARCHIVE_MANIFEST_NAME]);
     expect(describeWorkspace(dir).present).toBe(false);
+  });
+
+  describe('in sidecar mode (PRD shell-sidecar-activation D7, walkers 5 and 6)', () => {
+    const sidecar = { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as unknown as ShellIsolation;
+    const plant = (): void => {
+      mkdirSync(ws(), { recursive: true });
+      writeFileSync(join(ws(), 'report.md'), 'WORKSPACE-CONTENT');
+    };
+    const omitted = { reason: 'sidecar', source: 'control-plane' };
+    afterEach(() => { resetShellIsolationForTest(); });
+
+    it('describeWorkspace walks nothing, and records the omission with the control plane as source', () => {
+      plant();
+      const m = describeWorkspace(dir, sidecar);
+      expect(m.omitted).toEqual(omitted);
+      expect(m.files).toEqual([]);
+      expect(m.present).toBe(true);
+      expect(m.may_be_incomplete).toBe(true);
+      // Control: the same tree in local mode is listed, so the empty list above is the mode's doing.
+      expect(describeWorkspace(dir, { kind: 'local' }).files.map(f => f.path)).toEqual(['report.md']);
+      expect(describeWorkspace(dir, { kind: 'local' }).omitted).toBeUndefined();
+    });
+
+    it('writeWorkspaceArchive copies nothing: the archive holds only the manifest that records the omission', async () => {
+      plant();
+      const out = join(dir, 'w.tar');
+      const m = await writeWorkspaceArchive(dir, out, sidecar);
+      expect(m.omitted).toEqual(omitted);
+      const entries = readTar(readFileSync(out));
+      expect(entries.map(e => e.name)).toEqual([ARCHIVE_MANIFEST_NAME]);
+      expect((JSON.parse(entries[0]!.data.toString()) as WorkspaceManifest).omitted).toEqual(omitted);
+      expect(readFileSync(out).includes('WORKSPACE-CONTENT')).toBe(false);
+      // Control: in local mode the same tree is archived.
+      const local = join(dir, 'l.tar');
+      await writeWorkspaceArchive(dir, local, { kind: 'local' });
+      expect(readTar(readFileSync(local)).map(e => e.name)).toContain('workspace/report.md');
+    });
+
+    it.skipIf(isRoot)('does not reach a pool directory at chmod 000 at all (the PRD D7 test form)', async () => {
+      mkdirSync(join(ws(), 'pool-1001'), { recursive: true });
+      writeFileSync(join(ws(), 'pool-1001', 'x.txt'), 'x');
+      chmodSync(join(ws(), 'pool-1001'), 0o000);
+      const described = describeWorkspace(dir, sidecar);
+      expect(described.omitted).toEqual(omitted);
+      expect(described.unreadable).toEqual([]);
+      const archived = await writeWorkspaceArchive(dir, join(dir, 'w.tar'), sidecar);
+      expect(archived.omitted).toEqual(omitted);
+      expect(archived.unreadable).toEqual([]);
+      // Control: the walk in local mode does meet the locked directory.
+      expect(describeWorkspace(dir, { kind: 'local' }).unreadable).toEqual([{ path: 'pool-1001', code: 'EACCES' }]);
+    });
+
+    it('hands out a new manifest each call: changing one does not change the next', async () => {
+      const first = describeWorkspace(dir, sidecar);
+      first.files.push({ path: 'x', size: 1 });
+      first.skipped.push('y');
+      expect(describeWorkspace(dir, sidecar).files).toEqual([]);
+      expect((await writeWorkspaceArchive(dir, join(dir, 'w.tar'), sidecar)).skipped).toEqual([]);
+    });
+
+    it('both read the process mode when no mode is handed in', async () => {
+      plant();
+      setShellIsolationForTest(sidecar);
+      expect(describeWorkspace(dir).omitted).toEqual(omitted);
+      expect((await writeWorkspaceArchive(dir, join(dir, 'w.tar'))).omitted).toEqual(omitted);
+    });
   });
 
   it('stages each request in its own 0700 directory and refuses an archive path that exists', async () => {
