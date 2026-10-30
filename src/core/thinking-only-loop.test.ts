@@ -134,6 +134,21 @@ describe('thinking-only truncation loop (996)', () => {
     await expect(agent.send('second')).resolves.toBe('two');
   });
 
+  it('a truncated turn that holds only a cut-off tool call is not a thinking-only turn', async () => {
+    // The tool call is discarded (never dispatched), but the turn did act: the thinking prompt
+    // ("no tool call", "do not start it over") would be untrue, and the stop belongs to the
+    // other guard. Two such turns in a row keep the plain continuation.
+    const cutCall = (): unknown => ({
+      content: [{ type: 'tool_use', id: 'tu_cut', name: 'write_file', input: { path: '/tmp/x', content: 'x'.repeat(1000) } }],
+      stop_reason: 'max_tokens',
+      usage: { input_tokens: 100, output_tokens: 16_000 },
+    });
+    scripted([cutCall(), cutCall(), answer('done')]);
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await expect(agent.send('write the file')).resolves.toBe('done');
+    expect(continuations(agent)).toEqual([MAX_TOKENS_CONTINUATION_PROMPT, MAX_TOKENS_CONTINUATION_PROMPT]);
+  });
+
   it('a long thinking turn that is not cut off is an ordinary answer', async () => {
     scripted([{ content: [{ type: 'thinking', thinking: 'x'.repeat(50_000), signature: 's' }, { type: 'text', text: 'done' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 15_999 } }]);
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
