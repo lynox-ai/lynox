@@ -62,7 +62,7 @@ import { isProvisionedInstance } from '../core/wire-capture.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
 import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
 import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
-import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
+import { containedThreadStates, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
 import type { RunRecord } from '../core/run-history.js';
@@ -367,6 +367,18 @@ export function withdrawPromptOnAbort(
 /** What a chat opened from a contained one may promise for a store change, as this instance runs
  *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
  *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
+/**
+ * A thread's read-only state as the owner sees it. `contained` is what enforcement holds: also
+ * true when the record could not be read. `contained_unknown` says that it could not, and so
+ * that the chat may never have read store data: `provisioned` on an instance the control plane
+ * set up (its support can look), `self-hosted` otherwise (its own logs say why).
+ */
+function containedFields(states: { contained: Set<string>; unknown: Set<string> }, id: string): { contained: boolean; contained_unknown?: 'provisioned' | 'self-hosted' } {
+  if (states.contained.has(id)) return { contained: true };
+  if (states.unknown.has(id)) return { contained: true, contained_unknown: isProvisionedInstance() ? 'provisioned' : 'self-hosted' };
+  return { contained: false };
+}
+
 function containedWayOutOf(engine: Engine): ContainedWayOutState {
   const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? undefined;
   return {
@@ -5810,8 +5822,8 @@ export class LynoxHTTPApi {
       const threads = threadStore.listThreads({ limit, includeArchived });
       // `contained`: the chat read data through a store connection (`core/containment.ts`), so
       // private mode stays on and it can only read and explain. Fail-closed, like the refusals.
-      const contained = containedThreads(engine.getToolContext().containment, threads.map((t) => t.id));
-      jsonResponse(res, 200, { threads: threads.map((t) => ({ ...t, contained: contained.has(t.id) })) });
+      const states = containedThreadStates(engine.getToolContext().containment, threads.map((t) => t.id));
+      jsonResponse(res, 200, { threads: threads.map((t) => ({ ...t, ...containedFields(states, t.id) })) });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id', async (_req, res, params) => {
@@ -5825,7 +5837,8 @@ export class LynoxHTTPApi {
       // "gone" from "exists" without the noise. PATCH/DELETE below keep their
       // 404 — mutating a nonexistent thread IS an error.
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
-      jsonResponse(res, 200, { thread: { ...thread, contained: threadIsContained(engine.getToolContext().containment, thread.id) } });
+      const states = containedThreadStates(engine.getToolContext().containment, [thread.id]);
+      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id) } });
     }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
@@ -5841,9 +5854,12 @@ export class LynoxHTTPApi {
       // record, fail-closed — a record that cannot be read refuses. Refused before anything
       // else in the request is applied, so the answer is the whole truth.
       if (skipExtraction === false) {
-        const { threadIsContained } = await import('../core/containment.js');
-        if (threadIsContained(engine.getToolContext().containment, params['id']!)) {
-          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.', 'contained');
+        // One read decides and says which of the two, for the owner's text: a record that could
+        // not be read names where to look.
+        const { contained, contained_unknown } = containedFields(containedThreadStates(engine.getToolContext().containment, [params['id']!]), params['id']!);
+        if (contained) {
+          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.', 'contained',
+            contained_unknown !== undefined ? { contained_unknown } : undefined);
           return;
         }
       }
