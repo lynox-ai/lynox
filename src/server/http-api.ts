@@ -368,12 +368,6 @@ export function withdrawPromptOnAbort(
  *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
  *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
 /**
- * A thread's read-only state as the owner sees it. `contained` is what enforcement holds: also
- * true when the record could not be read. `contained_unknown` says that it could not, and so
- * that the chat may never have read store data: `provisioned` on an instance the control plane
- * set up (its support can look), `self-hosted` otherwise (its own logs say why).
- */
-/**
  * {@link containedFields} for workflow runs, from the chat each was started from: a run's outputs
  * carry what that chat read. A run no chat started (a plan, the library) carries nothing here.
  */
@@ -392,6 +386,12 @@ function runContainedFields(
   };
 }
 
+/**
+ * A thread's read-only state as the owner sees it. `contained` is what enforcement holds: also
+ * true when the record could not be read. `contained_unknown` says that it could not, and so
+ * that the chat may never have read store data: `provisioned` on an instance the control plane
+ * set up (its support can look), `self-hosted` otherwise (its own logs say why).
+ */
 function containedFields(states: { contained: Set<string>; unknown: Set<string> }, id: string): { contained: boolean; contained_unknown?: 'provisioned' | 'self-hosted' } {
   if (states.contained.has(id)) return { contained: true };
   if (states.unknown.has(id)) return { contained: true, contained_unknown: isProvisionedInstance() ? 'provisioned' : 'self-hosted' };
@@ -7885,7 +7885,9 @@ export class LynoxHTTPApi {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const steps = history.getPipelineStepResults(params['id']!);
-      jsonResponse(res, 200, { steps });
+      // The outputs themselves: marked as the run is, for a client that reads only these.
+      const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins([params['id']!]));
+      jsonResponse(res, 200, { steps, ...fieldsOf(params['id']!) });
     }, READS));
 
     // ── Saved Workflows library (PRD §6.8 / D13) ──

@@ -36,14 +36,21 @@ describe('GET /api/workflows and /api/workflows/:id mark a run from a contained 
     return await res.json() as Record<string, unknown>;
   }
   /** The mark fields of a run, in the detail and in the list; `absent` where a field is left out. */
+  const field = (o: Record<string, unknown>, k: string): unknown => (k in o ? o[k] : 'absent');
+  /** The mark of a run in the detail, the list and the step outputs; `absent` where a field is left out. */
   async function marks(runId: string): Promise<{ detail: [unknown, unknown]; list: [unknown, unknown] }> {
-    const field = (o: Record<string, unknown>, k: string): unknown => (k in o ? o[k] : 'absent');
     const d = await get(`/api/workflows/${runId}`);
     const l = ((await get('/api/workflows?limit=500'))['runs'] as Array<Record<string, unknown>>).find((r) => r['id'] === runId)!;
+    const s = await get(`/api/workflows/${runId}/steps`);
+    // The step outputs carry the same mark as the detail.
+    expect([field(s, 'contained'), field(s, 'contained_unknown')]).toEqual([field(d, 'contained'), field(d, 'contained_unknown')]);
     return { detail: [field(d, 'contained'), field(d, 'contained_unknown')], list: [field(l, 'contained'), field(l, 'contained_unknown')] };
   }
-  function addRun(id: string, originThreadId?: string): void {
-    engine().getRunHistory()!.insertPipelineRun({ id, manifestName: `wf-${id}`, status: 'completed', manifestJson: '{}', ...(originThreadId !== undefined ? { originThreadId } : {}) });
+  function addRun(id: string, originThreadId?: string, parentRunId?: string): void {
+    engine().getRunHistory()!.insertPipelineRun({
+      id, manifestName: `wf-${id}`, status: 'completed', manifestJson: '{}',
+      ...(originThreadId !== undefined ? { originThreadId } : {}), ...(parentRunId !== undefined ? { parentRunId } : {}),
+    });
   }
 
   beforeAll(async () => {
@@ -89,6 +96,29 @@ describe('GET /api/workflows and /api/workflows/:id mark a run from a contained 
     expect(await marks('run-shop-0001')).toEqual({ detail: [true, 'absent'], list: [true, 'absent'] });
     expect(await marks('run-free-0001')).toEqual({ detail: ['absent', 'absent'], list: ['absent', 'absent'] });
     expect(await marks('run-none-0001')).toEqual({ detail: ['absent', 'absent'], list: ['absent', 'absent'] });
+  });
+
+  it('a nested run carries its own origin and is marked in its detail; an empty origin is no chat', async () => {
+    const ts = engine().getThreadStore()!;
+    ts.createThread('w-nest', { title: 'nest' });
+    engine().getToolContext().containment!.contain({ kind: 'thread', id: 'w-nest' }, { kind: 'api', connectionId: 'shop-acme' });
+    addRun('run-parent-01', 'w-nest');
+    addRun('run-child-001', 'w-nest', 'run-parent-01');
+    const d = await get('/api/workflows/run-child-001');
+    expect([field(d, 'contained'), field(d, 'contained_unknown')]).toEqual([true, 'absent']);
+    // An empty origin is not a chat, even though an empty container counts as contained.
+    addRun('run-empty-001', '');
+    expect(await marks('run-empty-001')).toEqual({ detail: ['absent', 'absent'], list: ['absent', 'absent'] });
+  });
+
+  it('the detail found by a prefix of the id is marked by the run it found', async () => {
+    const ts = engine().getThreadStore()!;
+    ts.createThread('w-pref', { title: 'pref' });
+    engine().getToolContext().containment!.contain({ kind: 'thread', id: 'w-pref' }, { kind: 'api', connectionId: 'shop-acme' });
+    addRun('run-prefix-full-0001', 'w-pref');
+    const d = await get('/api/workflows/run-prefix-full');
+    expect(d['id']).toBe('run-prefix-full-0001');
+    expect(field(d, 'contained')).toBe(true);
   });
 
   it('a record that cannot be read marks the run as a failed check, by instance; a run from no chat stays unmarked', async () => {

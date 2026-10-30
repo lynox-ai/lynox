@@ -79,6 +79,16 @@ const badgeOf = (id: string): string | null => {
 const note = (): string | null => target.querySelector('[data-run-contained-note]')?.textContent?.trim() ?? null;
 
 describe('WorkflowsView: a run started from a chat that only reads', () => {
+	it('the sentence follows the detail the engine sent, not the list row', async () => {
+		runs = [run('r-late')];
+		await render();
+		expect(badgeOf('r-late')).toBeNull();
+		// The chat was contained after the list was read: the detail says so.
+		runs = [run('r-late', { contained: true })];
+		await open('r-late');
+		expect(note()).toBe(t('workflow.run_contained_note'));
+	});
+
 	it('control: a run without the mark shows neither the mark nor the sentence', async () => {
 		runs = [run('r-free')];
 		await render();
