@@ -135,6 +135,18 @@ describe('continuation-loop break', () => {
       expect(mockProcess).toHaveBeenCalledTimes(6);
     });
 
+    it('each message starts the count over', async () => {
+      // Two blank turns, then an answer; the next message begins with two blank turns again.
+      const answer = (t: string): unknown => ({ content: [{ type: 'text', text: t }], stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 50 } });
+      const turns = [cutCall(), thinkingOnly(), answer('Erster.'), cutCall(), thinkingOnly(), answer('Zweiter.')];
+      let n = 0;
+      mockProcess.mockImplementation(() => Promise.resolve(turns[n++]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      await expect(agent.send('first')).resolves.toBe('Erster.');
+      await expect(agent.send('second')).resolves.toBe('Zweiter.');
+      expect(mockProcess).toHaveBeenCalledTimes(6);
+    });
+
     it('a tool dispatched in between starts the count over', async () => {
       const turns = [cutCall(), thinkingOnly(),
         { content: [{ type: 'tool_use', id: 'tu_ok', name: 'probe', input: {} }], stop_reason: 'tool_use', usage: { input_tokens: 100, output_tokens: 50 } },
