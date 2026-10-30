@@ -158,7 +158,8 @@ export interface ChatInboxReader {
 export interface ContainedWayOutState {
   /** Bulk runs run on this instance (`core/bulk-switch.ts › bulkRunsOn`). */
   readonly bulkRuns: boolean;
-  /** Who turns bulk runs on: the owner through the config, or the control plane (`bulkRunsSource`). */
+  /** Who can turn bulk runs on here: the owner through the config, also on a pool tier the
+   *  control plane has opened them on, or the control plane (`bulkRunsTurnedOnBy`). */
   readonly bulkRunsBy: 'config' | 'control-plane';
   /** A bulk run may read a Shopify store (`core/bulk-shopify.ts › shopifyBulkReadEnabled`). */
   readonly shopifyBulk: boolean;
@@ -190,8 +191,8 @@ export const CONTAINED_ORIGIN_CONTEXT = ORIGIN_HEAD + ORIGIN_STORE_BY_BULK_RUN +
 
 /** What is missing and who can turn it on, as clauses after „Tell the user … that“: the Shopify
  *  read first, then bulk runs, each with the one who can turn it on where there is a way, and
- *  support once. The owner turns bulk runs on through the config alone: no settings switch and no
- *  tool does it yet, so that clause names no place. */
+ *  support once. Bulk runs the owner can turn on get a clause that names no place: the line above
+ *  the input names the settings switch (`contained-way-out.ts › originLineKeys`). */
 function enableClauses(state: ContainedWayOutState): string[] {
   const clauses: string[] = [];
   const support = 'they can write to support@lynox.ai to have them enabled';

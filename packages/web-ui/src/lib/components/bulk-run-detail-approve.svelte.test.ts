@@ -248,3 +248,67 @@ describe('an atomic run that rolled back', () => {
 		expect(buttonByText(t('bulk.undo.prepare'))).toBeUndefined();
 	});
 });
+
+// A halt the page has its own sentence for shows it, and a halt that sends the owner to support
+// offers a mail with the run and host already in the subject.
+describe('the sentence and the way on for a halt', () => {
+	const mailtos = (): HTMLAnchorElement[] => [...target.querySelectorAll('a')].filter((a) => a.getAttribute('href')?.startsWith('mailto:'));
+
+	it('offers a mail to support next to a planned run\'s blocked-host sentence', async () => {
+		run = makeRun({ phase: 'planned', haltKey: 'blocked', haltReason: 'engine English' });
+		await render();
+		const [link, ...rest] = mailtos();
+		expect(rest).toHaveLength(0);
+		expect(link!.textContent?.trim()).toBe(t('bulk.halt.support_mail'));
+		const href = new URL(link!.getAttribute('href')!);
+		expect(href.pathname).toBe('support@lynox.ai');
+		expect(href.searchParams.get('subject')).toContain('r1');
+		expect(href.searchParams.get('subject')).toContain('demo.myshopify.com');
+		// The address stays readable in the sentence: without a mail program the link does nothing.
+		expect(target.textContent).toContain('support@lynox.ai');
+	});
+
+	it('offers it too where writing on waits for Shopify writes to be turned on', async () => {
+		run = makeRun({ phase: 'writing', haltKey: 'shopifyWriteOff', haltReason: 'engine English', probeConfirmed: true, applied: 1 });
+		await render();
+		expect(mailtos()).toHaveLength(1);
+	});
+
+	it('offers no mail on a halt whose sentence does not send the owner to support', async () => {
+		run = makeRun({ phase: 'planned', haltKey: 'unavailable', haltReason: 'engine English' });
+		await render();
+		expect(mailtos()).toHaveLength(0);
+	});
+
+	it('names the start button a waiting run shows, by the button\'s own label', async () => {
+		run = makeRun({ phase: 'planned', haltKey: 'awaitingStart', haltReason: 'engine English' });
+		await render();
+		const label = t('bulk.start.read');
+		expect(buttonByText(label)).toBeDefined();
+		expect(target.textContent).toContain(t('bulk.halt.awaitingStart_start').replace('{button}', label));
+		expect(target.textContent).not.toContain('engine English');
+	});
+
+	it('at a probe the server offers, names the panel\'s own button', async () => {
+		run = makeRun({ phase: 'writing', haltKey: 'probeRequired', haltReason: 'engine English', applied: 1, probe: { key: 'gid://shopify/Product/1', fields: ['title'] } });
+		await render();
+		expect(buttonByText(t('bulk.probe.continue'))).toBeDefined();
+		expect(target.textContent).toContain(t('bulk.halt.probeRequired_confirm'));
+		expect(target.textContent).not.toContain('engine English');
+	});
+
+	it('tells someone other than the owner that only the owner can start a judged run', async () => {
+		run = makeRun({ phase: 'planned', haltKey: 'awaitingStart', haltReason: 'engine English', judge: {} as BulkRunDetailData['judge'],
+			judgeServedBy: { provider: 'anthropic', label: 'm' } as unknown as BulkRunDetailData['judgeServedBy'], judgeRule: null });
+		await render();
+		expect(target.textContent).toContain(t('bulk.halt.wait_owner_only'));
+		expect(buttonByText(t('bulk.start.judge'))).toBeUndefined();
+	});
+
+	it('at a probe the server does not offer, says to plan again instead of naming a button', async () => {
+		run = makeRun({ phase: 'writing', haltKey: 'probeRequired', haltReason: 'engine English', applied: 1, probe: null });
+		await render();
+		expect(target.textContent).toContain(t('bulk.halt.probeRequired_replan'));
+		expect(target.textContent).not.toContain('engine English');
+	});
+});

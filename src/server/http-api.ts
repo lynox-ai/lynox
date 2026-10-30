@@ -60,7 +60,7 @@ import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js'
 import { eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
-import { bulkRunsSource } from '../core/bulk-switch.js';
+import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
 import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
 import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
@@ -371,7 +371,7 @@ function containedWayOutOf(engine: Engine): ContainedWayOutState {
   const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? undefined;
   return {
     bulkRuns: engine.getBulkLedger() !== null,
-    bulkRunsBy: bulkRunsSource(tier),
+    bulkRunsBy: bulkRunsTurnedOnBy(tier, engine.getEngineDb() !== null),
     shopifyBulk: shopifyBulkReadEnabled(),
     managed: tier !== undefined && tier !== '',
   };
@@ -7058,7 +7058,7 @@ export class LynoxHTTPApi {
     }, READS);
 
     // ── Config ──
-    this.addStatic('user', 'GET /api/config', async (_req, res) => {
+    this.addStatic('user', 'GET /api/config', async (req, res) => {
       const { readUserConfig, loadConfig: loadEffectiveConfig } = await import('../core/config.js');
       const config = readUserConfig();
       // The loader's OWN output. `readUserConfig()` above is the raw file;
@@ -7166,6 +7166,9 @@ export class LynoxHTTPApi {
           // Whether a bulk run may read a Shopify store: the second half of what a chat opened from
           // a read-only one may promise (`chat-context.ts › storeChangeByBulkRun`).
           shopify: shopifyBulkReadEnabled(),
+          // Whose session asks, as in `/api/approvals`: a mandate does not see the owner's switch,
+          // so the line of a chat opened from a read-only one says the owner turns it on.
+          viewer: approvalScopeOf(this._principalOf(req))?.viewer ?? 'none',
         };
       }
       // model-presets W4: the per-preset "Modell-Strategie" signal the settings
