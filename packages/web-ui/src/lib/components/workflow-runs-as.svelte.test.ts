@@ -88,7 +88,7 @@ describe('a run refused because that person\'s access ended', () => {
 		await open({ ...WF, runs_as: { person: 'eva@kanzlei.example', ended: true } }, { status: 403, body: { error: 'engine sentence', code: 'author_ended', runs_as: 'eva@kanzlei.example' } });
 		await pressRun();
 		const text = target.textContent ?? '';
-		expect(text).toContain('eva@kanzlei.example hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet.');
+		expect(text).toContain('eva@kanzlei.example hat den Workflow „Monthly report“ angelegt oder zuletzt geändert, und ihr Zugang ist beendet.');
 		// Not a copy: a copy keeps the mark of the steps it holds and is refused again (`upsertCopy`).
 		expect(text).toContain('auch nicht als Kopie');
 		expect(text).toContain('bitte lynox, dafür einen neuen Workflow zu schreiben, statt diesen zu kopieren oder zu ändern.');
@@ -98,7 +98,7 @@ describe('a run refused because that person\'s access ended', () => {
 	it('without a name says "a person with access"', async () => {
 		await open(WF, { status: 403, body: { error: 'engine sentence', code: 'author_ended', runs_as: null } });
 		await pressRun();
-		expect(target.textContent ?? '').toContain('Eine Person mit Zugang hat diesen Workflow angelegt');
+		expect(target.textContent ?? '').toContain('Eine Person mit Zugang hat den Workflow „Monthly report“ angelegt');
 	});
 
 	it('CONTROL: another refusal still shows the engine\'s sentence', async () => {

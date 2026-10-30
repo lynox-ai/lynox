@@ -523,10 +523,12 @@
 				const msg = (await res.json().catch(() => null)) as { error?: string; code?: string; runs_as?: string | null } | null;
 				// The person who shaped it has left (1055, ux U-063): name them and the way out, a new
 				// workflow from the chat, rather than the engine's sentence.
+				// Named, because the message stands above the list, apart from the workflow's card.
+				const name = workflows.find((w) => w.id === id)?.name ?? id;
 				error = msg?.code === 'author_ended'
 					? (typeof msg.runs_as === 'string' && msg.runs_as !== ''
-						? tf('workflow_library.author_ended', { person: msg.runs_as })
-						: t('workflow_library.author_ended_unnamed'))
+						? tf('workflow_library.author_ended', { person: msg.runs_as, name })
+						: tf('workflow_library.author_ended_unnamed', { name }))
 					: msg?.error ?? t('workflow_library.run_failed');
 				notice = '';
 				return;
