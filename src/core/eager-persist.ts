@@ -94,7 +94,7 @@ export interface FailedTurnDisplayInput {
    *  one would surface the internal compaction prompt as a user message in the
    *  thread (a system prompt leaking into the visible history). */
   internal?: boolean | undefined;
-  /** A stop (`run_interrupted` / `tool_loop_break` / `thinking_loop`) whose completed prefix the
+  /** A stop (`run_interrupted` / `tool_loop_break` / `thinking_loop` / `continuation_loop`) whose completed prefix the
    *  agent KEPT in its context (`Agent.takeInterruptKeep`). The disk then keeps
    *  the same prefix: only the rows after it turn display-only, the kept messages
    *  not yet on disk are written as API rows, and the note is flagged so a reload

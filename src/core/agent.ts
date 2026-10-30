@@ -3003,9 +3003,8 @@ export class Agent implements IAgent {
         // the continuation cap. Neither shape gave the model anything to build on: the thinking
         // is stripped, the cut-off call is discarded. Three in a row with no tool dispatched
         // between them is a loop. Decided on what stays in the history, as `thinkingOnly` is: a
-        // server tool's blocks or a redacted thinking block are something to build on.
-        // A server tool call is no more than a cut-off `tool_use` on its own: what the model can
-        // build on is its result block, which is not blank and so decides a turn that has one.
+        // server tool's result block or a redacted thinking block is something to build on. A
+        // server tool call without its result is no more than a cut-off `tool_use`.
         const blank = contentForHistory.every((b) => (b.type === 'text' && b.text.trim().length === 0)
           || b.type === 'tool_use' || b.type === 'server_tool_use');
         if (!blank || toolsDelta > 0) this._blankTruncatedStreak = 0;

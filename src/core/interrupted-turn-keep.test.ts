@@ -435,6 +435,16 @@ describe('completedPrefixEnd', () => {
     ] };
     expect(completedPrefixEnd([q, two, res('a')], 0)).toBe(1);
   });
+  it('cuts a turn whose server tool call has no result, and keeps one that has it', () => {
+    const cont: BetaMessageParam = { role: 'user', content: 'continue' };
+    const cutSearch: BetaMessageParam = { role: 'assistant', content: [{ type: 'server_tool_use', id: 's1', name: 'web_search', input: { query: 'q' } }] };
+    const searched: BetaMessageParam = { role: 'assistant', content: [
+      { type: 'server_tool_use', id: 's2', name: 'web_search', input: { query: 'q' } },
+      { type: 'web_search_tool_result', tool_use_id: 's2', content: [] },
+    ] };
+    expect(completedPrefixEnd([q, use('a'), res('a'), cutSearch, cont], 0)).toBe(3);
+    expect(completedPrefixEnd([q, use('a'), res('a'), searched, cont], 0)).toBe(5);
+  });
   it('starts at the question, not before it', () => {
     expect(completedPrefixEnd([{ role: 'user', content: 'old' }, { role: 'assistant', content: 'x' }, q, use('a'), res('a')], 2)).toBe(5);
   });

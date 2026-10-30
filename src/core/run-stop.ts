@@ -112,6 +112,16 @@ function toolUseIds(msg: BetaMessageParam): string[] {
   return ids;
 }
 
+/** Whether `msg` holds a server tool call whose result block is not in it. The server runs the
+ *  call and returns the result in the same message; a call cut off before that never ran, and
+ *  a context that keeps it orphaned is one the API may refuse. */
+function hasOrphanServerCall(msg: BetaMessageParam): boolean {
+  if (!Array.isArray(msg.content)) return false;
+  const results = new Set<string>();
+  for (const b of msg.content) if (b.type.endsWith('_tool_result') && 'tool_use_id' in b) results.add(b.tool_use_id);
+  return msg.content.some((b) => b.type === 'server_tool_use' && !results.has(b.id));
+}
+
 function toolResultIds(msg: BetaMessageParam): Set<string> {
   const ids = new Set<string>();
   if (!Array.isArray(msg.content)) return ids;
@@ -122,7 +132,7 @@ function toolResultIds(msg: BetaMessageParam): Set<string> {
 /**
  * End (exclusive) of a stopped run's completed prefix: the question at
  * `questionIdx`, then every (assistant, user) pair whose tool calls all have
- * their results. The first pair that is not complete, and everything after it,
+ * their results, and whose server tool calls carry theirs. The first pair that is not complete, and everything after it,
  * is the unfinished step.
  */
 export function completedPrefixEnd(messages: readonly BetaMessageParam[], questionIdx: number): number {
@@ -130,7 +140,7 @@ export function completedPrefixEnd(messages: readonly BetaMessageParam[], questi
   while (i + 1 < messages.length) {
     const a = messages[i]!;
     const u = messages[i + 1]!;
-    if (a.role !== 'assistant' || u.role !== 'user') break;
+    if (a.role !== 'assistant' || u.role !== 'user' || hasOrphanServerCall(a)) break;
     const results = toolResultIds(u);
     if (!toolUseIds(a).every((id) => results.has(id))) break;
     i += 2;
