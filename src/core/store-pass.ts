@@ -79,8 +79,8 @@ const ACCESS_TOKEN_REFUSAL = 'a store pass does not reach the store\'s access to
 /** What the model is told to do after a refusal of the path or the address: stop and say so (ux U-086). */
 const TELL_NO_TOKENS = '; tell the user that lynox does not create or read access tokens through the connected store';
 /** The token word in a body: named, so a text that only contains it can be found and changed (ux U-086). */
-const BODY_TOKEN_REFUSAL = 'the body contains access_token or accessToken (any case, also inside text such as a description): '
-  + ACCESS_TOKEN_REFUSAL + '. If it is only text, tell the user which field contains it; the request cannot be sent while it does';
+const BODY_TOKEN_REFUSAL = 'the body contains access_token or accessToken (any case): ' + ACCESS_TOKEN_REFUSAL + TELL_NO_TOKENS
+  + '. Only if the word is part of the user\'s own text, such as a description, tell the user which field contains it; the request cannot be sent while it does';
 const PERSISTED_ADDRESS_REFUSAL = 'the address asks for a persisted query';
 const PERSISTED_BODY_REFUSAL = 'the body asks for a persisted query';
 const ENCODED_REFUSAL = 'the body is sent encoded (Content-Encoding)';

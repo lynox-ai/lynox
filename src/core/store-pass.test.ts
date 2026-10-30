@@ -295,7 +295,7 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
     await expect(send(`${GRAPHQL}?extensions=%7B%22persistedQuery%22%3A1%7D`, { [H]: TOKEN }, pass())).rejects.toThrow(AGAIN);
     // The token word in a body is named, with what to do when it is only text.
     await expect(post(GRAPHQL, JSON.stringify({ query: 'mutation { productUpdate(product: { id: "1", descriptionHtml: "accessToken" }) { product { id } } }' })))
-      .rejects.toThrow(/If it is only text, tell the user which field contains it; the request cannot be sent while it does\. Do not retry it with changed headers or a changed address\.$/);
+      .rejects.toThrow(/Only if the word is part of the user's own text, such as a description, tell the user which field contains it; the request cannot be sent while it does\. Do not retry it with changed headers or a changed address\.$/);
     expect(sent).toHaveLength(0);
   });
 
