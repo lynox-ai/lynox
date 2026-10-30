@@ -56,7 +56,8 @@ describe('env-ABI: a required var a switch lets the control plane leave out', ()
       { ...base, name: 'R_NONE', requiredForTier: ['managed'], notRequiredWhenOn: 'SW_MISSING' },
       { ...base, name: 'R_KIND', requiredForTier: ['managed'], notRequiredWhenOn: 'SW_OPAQUE' },
       { ...base, name: 'R_TIER', notRequiredWhenOn: 'SW_BOOL' },
-      { ...base, name: 'R_SELF', requiredForTier: ['managed'], notRequiredWhenOn: 'R_SELF' },
+      // A bool row lifting itself passes every other check.
+      { ...base, name: 'R_SELF', valueKind: 'bool', requiredForTier: ['managed'], notRequiredWhenOn: 'R_SELF' },
       { ...base, name: 'R_UNEMITTED', requiredForTier: ['managed'], notRequiredWhenOn: 'SW_OPERATOR' },
       { ...base, name: 'R_ALWAYS', emitPolicy: 'always', requiredForTier: ['managed'], notRequiredWhenOn: 'SW_BOOL' },
     ] as unknown as EnvRegistryRow[];
