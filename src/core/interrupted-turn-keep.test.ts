@@ -238,7 +238,10 @@ describe('a stopped run keeps its completed prefix', { timeout: 60_000 }, () => 
     expect(JSON.stringify(live)).toContain('a large data set');
     expect(readRunStop(live.at(-1)!)?.code).toBe('thinking_loop');
     expect(JSON.stringify(apiRows(engine, session))).toBe(JSON.stringify(live));
-    expect(reload(engine, session)).toEqual(live);
+    const reloaded = reload(engine, session);
+    expect(reloaded).toEqual(live);
+    // Said outright, not only through toEqual's symbol keys: the reload puts the stop back.
+    expect(readRunStop(reloaded.at(-1)!)?.code).toBe('thinking_loop');
     expect(outgoingTexts(applyRunStops(live)).at(-1)).toBe(runStopText({ code: 'thinking_loop' }));
     // Its own text, not the generic interruption: the model reads why the run stopped.
     expect(runStopText({ code: 'thinking_loop' })).toContain('spent the whole output limit on thinking');
