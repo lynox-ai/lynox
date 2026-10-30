@@ -450,6 +450,11 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         const { getPipeline } = await import('./pipeline.js');
         const planned = getPipeline(input.workflow_id, agent.toolContext.runHistory);
         if (planned) {
+          // A schedule acts for whichever of it and its workflow changed last, so a mandate may
+          // schedule only its own workflows and the owner's.
+          const { foreignWorkflowScheduleRefusal } = await import('../../core/plan-stamp.js');
+          const foreign = foreignWorkflowScheduleRefusal(agent.principal, planned.id, agent.toolContext.runHistory);
+          if (foreign !== null) return `Error: workflow ${planned.id}: ${foreign}`;
           const unschedulable = !isSchedulableWorkflow(planned)
             ? `is '${planned.mode}' and may ask for something other than an answer from its owner; a schedule runs an 'autonomous' workflow, or one whose only question tool is ask_user. Remove its ask_secret / ask_human steps before scheduling it.`
             : planned.template !== true

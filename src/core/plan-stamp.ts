@@ -4,7 +4,7 @@ import { isMandateConnection } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import type { StampEntry } from './plan-run-context.js';
 import { bindingOf, memberConnectionReader } from './profile-secret-view.js';
-import { planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, type RequestPrincipal } from './request-principal.js';
+import { isOwnerPrincipal, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { RunHistory } from './run-history.js';
 import type { TriggerRecord } from '../types/index.js';
 
@@ -140,4 +140,30 @@ export async function planOfTrigger(
   } catch {
     return only(true);
   }
+}
+
+export const FOREIGN_WORKFLOW_SCHEDULE_REFUSAL =
+  'Not scheduled: another person with delegated access set up or last changed this workflow, so only they or the owner may schedule it.';
+export const UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL =
+  'Not scheduled: could not read who set up this workflow.';
+
+/**
+ * Why `principal` may not put a schedule on the workflow `workflowId` (its exact id), or null when
+ * it may. A schedule on a workflow acts for whichever of the two changed last (`planMembers`), so a
+ * mandate's schedule on a workflow another mandate set up or last changed would let its runs act
+ * for that other mandate. The owner may schedule any workflow; a mandate its own and the owner's.
+ * A workflow whose authorship cannot be read is refused to anyone but the owner.
+ */
+export function foreignWorkflowScheduleRefusal(principal: RequestPrincipal, workflowId: string, runHistory: RunHistory | null | undefined): string | null {
+  if (isOwnerPrincipal(principal)) return null;
+  let a: ReturnType<RunHistory['getWorkflowAuthorship']>;
+  try {
+    a = runHistory?.getWorkflowAuthorship(workflowId);
+  } catch {
+    a = undefined;
+  }
+  if (a === undefined) return UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL;
+  const mark = planMandate(planAuthorshipOfWorkflow(a));
+  if (mark === undefined || principalTag(mark.principal) === principalTag(principal)) return null;
+  return FOREIGN_WORKFLOW_SCHEDULE_REFUSAL;
 }

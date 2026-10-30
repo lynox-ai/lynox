@@ -660,6 +660,36 @@ describe('Task Tools', () => {
 
     // To-dos: a mandate's turn reaches only those it created — see 'a mandate's turn and its
     // to-dos' below, which runs with the to-do reads on either store.
+    it('task_create schedules only the mandate\'s own workflows and the owner\'s', async () => {
+      const other: RequestPrincipal = { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' };
+      // The same address under a renewed grant is the same mandate.
+      const renewed: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'grant-2' };
+      const save = (id: string, by: RequestPrincipal | null): void => {
+        history.insertPlannedPipeline({
+          id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+        }, by);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      save('wf-other', other);
+      save('wf-own', renewed);
+      save('wf-owner', null);
+      save('wf-taken', renewed);
+      save('wf-taken', other);
+      const schedule = (id: string, by: RequestPrincipal): Promise<string> =>
+        taskCreateTool.handler({ title: `On ${id}`, assignee: 'lynox', workflow_id: id, schedule: '0 9 * * 1' }, makeAgent(undefined, by));
+      const scheduled = (id: string): boolean => tm.listTriggers({}).some((x) => x.pipeline_id === id);
+
+      expect(await schedule('wf-other', mandate)).toMatch(/^Error: workflow wf-other: Not scheduled: another person with delegated access/);
+      expect(await schedule('wf-taken', mandate)).toMatch(/^Error: workflow wf-taken: Not scheduled/);
+      expect(scheduled('wf-other')).toBe(false);
+      expect(scheduled('wf-taken')).toBe(false);
+      expect(await schedule('wf-own', mandate)).toContain('Workflow task created');
+      expect(await schedule('wf-owner', mandate)).toContain('Workflow task created');
+      // The owner schedules any workflow.
+      expect(await schedule('wf-other', OWNER_PRINCIPAL)).toContain('Workflow task created');
+      expect(scheduled('wf-other')).toBe(true);
+    });
+
     it('control: a mandate\'s task_create assigned to lynox makes a schedule', async () => {
       const result = await taskCreateTool.handler({ title: 'Mandate run', assignee: 'lynox' }, makeAgent(undefined, mandate));
       expect(result).toMatch(/^Task created: /);
