@@ -733,6 +733,18 @@ describe('Task Tools', () => {
       expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent())).toContain('Workflow task created');
     });
 
+    it('task_create schedules the workflow its exact id names, not a longer one that starts with it', async () => {
+      const save = (id: string, by: RequestPrincipal | null): void => {
+        history.insertPlannedPipeline({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, by);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      // The longer id first, so a lookup in insertion order meets it before the exact one.
+      save('wf-exact-1x', { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' });
+      save('wf-exact-1', mandate);
+      expect(await taskCreateTool.handler({ title: 'Exact', assignee: 'lynox', workflow_id: 'wf-exact-1', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate))).toContain('Workflow task created');
+      expect(tm.listTriggers({}).find((x) => x.title === 'Exact')!.pipeline_id).toBe('wf-exact-1');
+    });
+
     it('task_create tells a mandate a stored workflow it cannot read apart from a missing one', async () => {
       history.insertPlannedPipeline({ id: 'wf-garbled', name: 'g', goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, mandate);
       engine.getDb().prepare("UPDATE workflows SET definition_json = '{' WHERE id = 'wf-garbled'").run();

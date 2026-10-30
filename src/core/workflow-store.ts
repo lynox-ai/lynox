@@ -435,9 +435,11 @@ export class WorkflowStore {
    */
   getPlanned(id: string): { id: string; manifest_json: string } | undefined {
     if (id === '') return undefined;
+    // The exact id first: a longer id that only starts with it must not answer for it, or a schedule
+    // checked and bound to that answer would target another workflow than the one named.
     const row = this.db.prepare(
-      "SELECT id, definition_json FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' LIMIT 1",
-    ).get(id, likePrefix(id)) as { id: string; definition_json: string } | undefined;
+      "SELECT id, definition_json FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' ORDER BY id = ? DESC LIMIT 1",
+    ).get(id, likePrefix(id), id) as { id: string; definition_json: string } | undefined;
     if (!row) return undefined;
     return { id: row.id, manifest_json: row.definition_json };
   }
