@@ -55,6 +55,9 @@
 		// A mandate built or changed it and the owner has not stamped what it now is (register 242).
 		// Absent from an engine before the stamp: then nothing waits.
 		awaitsStamp?: boolean;
+		// Whom Run runs it as, when that is a person the owner let in (1055): the email, and whether
+		// their access ended, which refuses the run. Sent to the owner only; absent for the owner's own.
+		runs_as?: { person: string; ended: boolean };
 	}
 
 	let workflows = $state<SavedWorkflow[]>([]);
@@ -517,8 +520,16 @@
 				// and spending. Discarding the key there is what lets the next click pay for
 				// the whole workflow a second time.
 				keepKey = !attemptIsOver({ httpStatus: res.status });
-				const msg = (await res.json().catch(() => null)) as { error?: string } | null;
-				error = msg?.error ?? t('workflow_library.run_failed');
+				const msg = (await res.json().catch(() => null)) as { error?: string; code?: string; runs_as?: string | null } | null;
+				// The person who shaped it has left (1055, ux U-063): name them and the way out, a new
+				// workflow from the chat, rather than the engine's sentence.
+				// Named, because the message stands above the list, apart from the workflow's card.
+				const name = workflows.find((w) => w.id === id)?.name ?? id;
+				error = msg?.code === 'author_ended'
+					? (typeof msg.runs_as === 'string' && msg.runs_as !== ''
+						? tf('workflow_library.author_ended', { person: msg.runs_as, name })
+						: tf('workflow_library.author_ended_unnamed', { name }))
+					: msg?.error ?? t('workflow_library.run_failed');
 				notice = '';
 				return;
 			}
@@ -672,6 +683,11 @@
 										<span data-testid="stamp-badge" class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-1.5 text-warning">
 											<Icon name="warning" size="xs" />
 											{t('workflow_library.stamp.awaits')}
+										</span>
+									{/if}
+									{#if wf.runs_as}
+										<span data-testid="runs-as-badge" class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 break-all">
+											{tf('workflow_library.runs_as', { person: wf.runs_as.person })}
 										</span>
 									{/if}
 								</div>

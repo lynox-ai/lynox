@@ -1,4 +1,4 @@
-import type { RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
 import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
@@ -1241,7 +1241,10 @@ export async function spawnInline(
   // back (`MANDATE_PATTERN_WRITE_TOOLS`) are dropped, not refused: they are registered only beside
   // the legacy memory, so on the engines a mandate signs in to the step names a tool that is not
   // there, and the planners still offer `memory_update` for steps.
-  const lock = principal !== undefined ? toolLockFor(principal) : null;
+  // Absent is the owner only because `spawnInline` is public API; the engine's own runs always
+  // pass one (`buildRunCtx`). The lock is asked either way, so the owner's null comes from
+  // `toolLockFor`, not from a branch that skips it.
+  const lock = toolLockFor(principal ?? OWNER_PRINCIPAL);
   if (lock !== null) {
     const named = [...(step.tools ?? []), ...(step.tool !== undefined ? [step.tool] : [])];
     const withheld = [...new Set(named.filter(n => !lock.has(n) && Object.hasOwn(MANDATE_WITHHELD_TOOLS, n)))];

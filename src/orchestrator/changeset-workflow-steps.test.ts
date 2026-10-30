@@ -1,3 +1,4 @@
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -102,6 +103,8 @@ function makeParent(review: ChangesetWriter | undefined): IAgent {
   ctx.tools = [observedWrite];
   return {
     toolContext: ctx,
+    // A real agent always has one; a workflow run takes it as whom it is for (1055).
+    principal: OWNER_PRINCIPAL,
     getAvailableTools: () => ctx.tools,
     currentThreadId: 't-1',
     userTimezone: 'UTC',

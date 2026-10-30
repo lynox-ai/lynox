@@ -293,7 +293,7 @@ describe('WorkerLoop', () => {
     );
     expect(session.run).toHaveBeenCalledWith(
       'Task: Daily Report\n\nGenerate the daily report',
-      { triggerOrigin: 'cron' },
+      { triggerOrigin: 'cron', principal: OWNER_PRINCIPAL },
     );
   });
 
@@ -317,7 +317,7 @@ describe('WorkerLoop', () => {
 
     expect(session.run).toHaveBeenCalledWith(
       'Task: Daily Report\n\nGenerate the daily report',
-      { triggerOrigin: 'cron' },
+      { triggerOrigin: 'cron', principal: OWNER_PRINCIPAL },
     );
   });
 
@@ -869,7 +869,8 @@ describe('WorkerLoop', () => {
       const { loop, session, engine, rows } = setup(makeTask({ id: 'po-own' }));
       await loop.tick();
       await vi.advanceTimersByTimeAsync(0);
-      expect(engine.createSession).toHaveBeenCalledWith(expect.not.objectContaining({ principal: expect.anything() }));
+      // Named as the owner, not left out (1055): an absent principal no longer stands for the owner.
+      expect(engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: OWNER_PRINCIPAL }));
       expect(session.run).toHaveBeenCalled();
       expect(planRows(rows)).toEqual([]);
     });
@@ -2203,7 +2204,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith('Task: Daily Report', { triggerOrigin: 'cron' });
+    expect(session.run).toHaveBeenCalledWith('Task: Daily Report', { triggerOrigin: 'cron', principal: OWNER_PRINCIPAL });
   });
 
   it('does not duplicate the title when description equals title', async () => {
@@ -2220,7 +2221,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith('Task: Daily Report', { triggerOrigin: 'cron' });
+    expect(session.run).toHaveBeenCalledWith('Task: Daily Report', { triggerOrigin: 'cron', principal: OWNER_PRINCIPAL });
   });
 
   // ---- 13. resolveTaskInput resolves pending input ----
@@ -5008,8 +5009,8 @@ describe('hand runs carry the starter\'s principal', () => {
     const own = runAgentRow({ created_by: 'owner', confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
     const o = setup(own);
     await (o.loop as unknown as Exec).executeTask(own, null);
-    expect(sessionOptsOf(o.engine)?.['principal']).toBeUndefined();
-    expect(runOptsOf(o.session)?.['principal']).toBeUndefined();
+    expect(sessionOptsOf(o.engine)?.['principal']).toEqual(OWNER_PRINCIPAL);
+    expect(runOptsOf(o.session)?.['principal']).toEqual(OWNER_PRINCIPAL);
   });
 
   it('a watch started by the mandate builds its analysis session for the mandate', async () => {
