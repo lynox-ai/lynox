@@ -646,9 +646,12 @@ describe('Agent', () => {
       // exhausted and the turn still produced nothing visible. Exactly 11
       // queued: the initial turn + maxContinuations(10) continuations — over-
       // queuing would leak into the next test (clearAllMocks keeps the queue).
+      // Two empty turns in a row stop the run (ThinkingOnlyLoopError, 996), so the empty turns
+      // alternate with turns cut off inside a tool call (no text either; the call is discarded,
+      // which is not a thinking-only turn). The last one is empty.
       for (let i = 0; i < 11; i++) {
         mockProcess.mockResolvedValueOnce({
-          content: [],
+          content: i % 2 === 0 ? [] : [{ type: 'tool_use', id: `tu_cut_${String(i)}`, name: 'write_file', input: {} }],
           stop_reason: 'max_tokens',
           usage: { input_tokens: 100, output_tokens: 16_000 },
         });
