@@ -297,6 +297,8 @@ export const BULK_UNKEYED_CHECKSUM_NOTE =
  * writes the kind in an unmeasured form and has no probe of its own.
  */
 export type BulkProbeCause = 'none' | 'wrong_form' | 'filed_measured' | 'other_run' | 'own_missing';
+/** `kind`: the resource path the probe is filed under (`/products/`), or for a Shopify run its
+ *  write form (`shopify_product`), which is the kind its probe is filed under; never prefixed. */
 export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
 /**
  * Where an approved run stands towards a probe of its own, read from its targets: `write_one`,
@@ -305,7 +307,8 @@ export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
  * would file a row this run does not hold (not confirmed yet, or another run's confirmation has
  * since taken the row); `too_many`, more
  * than one target applied, so it can no longer be a probe; `already_first`, its one applied target
- * already held the value, was not written, and is no probe. Null where none of these is known:
+ * is recorded as already holding the value, so it is no probe (a send of this run's that got no
+ * clear answer may have set it). Null where none of these is known:
  * a run not approved yet, one whose probe is confirmed already, or one whose single applied target
  * is neither. A fact about the run, not advice: whether a step helps also depends on `missing`.
  */
