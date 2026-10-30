@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * on the O_PATH anchor fails here with EBADF, as it would in the container.
  */
 const chowns = vi.hoisted(() => [] as number[]);
-const chownFails = vi.hoisted(() => ({ on: false }));
+const chownFails = vi.hoisted(() => ({ on: false, onCall: undefined as ((fd: number) => void) | undefined }));
 // The group each inode was given, as fstat reports it back: the real call ran with the runner's
 // own group. `reported: false` reports the real group instead.
 const chownedTo = vi.hoisted(() => ({ map: new Map<number, number>(), reported: true }));
@@ -21,6 +21,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ...real,
     fchownSync: (fd: number, uid: number, gid: number): void => {
       chowns.push(gid);
+      chownFails.onCall?.(fd);
       if (chownFails.on) throw Object.assign(new Error('EPERM: operation not permitted, fchown'), { code: 'EPERM' });
       real.fchownSync(fd, uid, process.getgid!());
       chownedTo.map.set(real.fstatSync(fd).ino, gid);
@@ -38,13 +39,15 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-const { chmodSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } = await import('node:fs');
+const { chmodSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } = await import('node:fs');
 const { tmpdir } = await import('node:os');
 const { join } = await import('node:path');
 const { resetShellIsolationForTest, setShellIsolationForTest, WORKSPACE_LABEL } = await import('./shell-isolation.js');
 const { anchorFromFd, closeAnchor, openFds } = await import('./workspace-fd.js');
 const { ensureContextWorkspace, _resetCache } = await import('./workspace.js');
 const { WorkspaceRootError } = await import('./workspace-root.js');
+
+const fstatModeOf = (fd: number): number => fstatSync(fd).mode & 0o7777;
 
 // The layout's values as literals: an expectation that imports the constant moves with it.
 const GROUP = 1002;
@@ -66,6 +69,7 @@ describe('the context directory in shell sidecar mode (W1)', () => {
     _resetCache();
     chowns.length = 0;
     chownFails.on = false;
+    chownFails.onCall = undefined;
     chmod.fails = false;
     chmod.dropsSetgid = false;
     chownedTo.map.clear();
@@ -131,10 +135,23 @@ describe('the context directory in shell sidecar mode (W1)', () => {
     expect(() => ensureContextWorkspace(ctx('ctx1', `${WORKSPACE_LABEL}/ctx1`))).toThrow(/not 0o2770 and 1002/);
   });
 
-  it('a failed fchmod stops the start, naming the call', () => {
+  it('a failed fchmod stops the start, naming the call, and leaves no fd open', () => {
+    // An existing folder: the walk opens it without a call of its own, so the failure is this step's.
+    mkdirSync(join(tree, 'ctx1'));
     chmod.fails = true;
+    const before = openFds().length;
     expect(() => ensureContextWorkspace(ctx('ctx1', `${WORKSPACE_LABEL}/ctx1`)))
       .toThrow(/cannot be made ready from fd 3 \(EPERM: operation not permitted, fchmod\)/);
+    expect(openFds().length).toBe(before);
+  });
+
+  it('a new folder is never group-open before it has the group', () => {
+    // fchown is the first call that changes the folder; at that moment it must still be 0700.
+    const modes: number[] = [];
+    chownFails.on = true;
+    chownFails.onCall = (fd: number) => modes.push(fstatModeOf(fd));
+    expect(() => ensureContextWorkspace(ctx('ctx1', `${WORKSPACE_LABEL}/ctx1`))).toThrow(/fchown/);
+    expect(modes).toEqual([0o700]);
   });
 
   it('a file or a symlink at the context directory stops the start and stays as it is', () => {

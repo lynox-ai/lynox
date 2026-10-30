@@ -67,6 +67,7 @@ describe('Engine boot in sidecar mode', () => {
   afterEach(async () => {
     for (const e of engines) { try { await e.shutdown(); } catch { /* best effort */ } }
     engines.length = 0;
+    chownedTo.clear();
     closeWorkspaceBase();
     _resetWorkspaceAccess();
     _resetCache();
