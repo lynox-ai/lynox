@@ -27,6 +27,7 @@ import { getPricing } from './pricing.js';
 import { refuseExternalAfter } from './bulk-external.js';
 import { checkMarkup, htmlFieldsOfListForm, plainTextMarkupOf } from './bulk-html.js';
 import type { BulkListSourceForm } from './bulk-list.js';
+import { checkSeoAfter } from './seo-text.js';
 import { hiddenCharIndexes } from './hidden-chars.js';
 import { BULK_MAX_TARGET_BYTES, mapToColumns, type dataStoreColumns } from './bulk-plan.js';
 import { judgeCallSchema, judgeFields, judgeMaxOutputTokens, judgedTargets, type JudgeRule } from './bulk-judge-rule.js';
@@ -367,10 +368,15 @@ export interface VerdictTextRun {
  *   HTML, so none does, and a judge steered by a target cannot add a script or a link there;
  * - any other text field may hold each hidden character at most as often as its before-image
  *   (M5, counted per code point: a rewrite moves positions).
+ * Before all of these, a title or SEO field of the list form goes through `checkSeoAfter`
+ * (§23): it may hold no link, address or `<`, and its reason wins over `markup_in_text`.
  */
 export function verdictTextRefusal(
   after: Readonly<Record<string, unknown>>, before: Readonly<Record<string, unknown>>, run: VerdictTextRun,
 ): BulkInvalidReason | null {
+  const own = run.storeHost === null ? run.startDomains : [run.storeHost, ...run.startDomains];
+  const seo = checkSeoAfter(run.listForm, after, before, own);
+  if (!seo.ok) return seo.reason;
   const html = htmlFieldsOfListForm(run.listForm);
   for (const [field, value] of Object.entries(after)) {
     if (typeof value !== 'string') continue;
