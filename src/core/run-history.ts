@@ -3237,6 +3237,11 @@ export class RunHistory {
     persistence.insertPipelineRun(this.db, params);
   }
 
+  /** {@link getPipelineRunOrigin} for several runs at once: only the runs a chat started. */
+  getPipelineRunOrigins(ids: readonly string[]): Map<string, string> {
+    return persistence.getPipelineRunOrigins(this.db, ids);
+  }
+
   /**
    * The chat a pipeline run was started from, by its exact id: `null` for a run no chat
    * started (or an older row), `undefined` for no such run. Not part of {@link getPipelineRun},

@@ -366,9 +366,25 @@ export function withdrawPromptOnAbort(
   return () => { signal.removeEventListener('abort', withdraw); };
 }
 
-/** What a chat opened from a contained one may promise for a store change, as this instance runs
- *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
- *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
+/**
+ * {@link containedFields} for workflow runs, from the chat each was started from: a run's outputs
+ * carry what that chat read. A run no chat started (a plan, the library) carries nothing here.
+ */
+function runContainedFields(
+  containment: Containment | null,
+  origins: ReadonlyMap<string, string>,
+): (runId: string) => { contained?: true; contained_unknown?: 'provisioned' | 'self-hosted' } {
+  const threads = [...new Set(origins.values())];
+  const states = containedThreadStates(containment, threads);
+  return (runId) => {
+    const origin = origins.get(runId);
+    if (origin === undefined) return {};
+    const f = containedFields(states, origin);
+    if (!f.contained) return {};
+    return f.contained_unknown !== undefined ? { contained: true, contained_unknown: f.contained_unknown } : { contained: true };
+  };
+}
+
 /**
  * A thread's read-only state as the owner sees it. `contained` is what enforcement holds: also
  * true when the record could not be read. `contained_unknown` says that it could not, and so
@@ -381,6 +397,9 @@ function containedFields(states: { contained: Set<string>; unknown: Set<string> 
   return { contained: false };
 }
 
+/** What a chat opened from a contained one may promise for a store change, as this instance runs
+ *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
+ *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
 function containedWayOutOf(engine: Engine): ContainedWayOutState {
   const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? undefined;
   return {
@@ -7838,7 +7857,8 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const runs = history.getRecentPipelineRuns(limit);
-      jsonResponse(res, 200, { runs });
+      const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins(runs.map((r) => r.id)));
+      jsonResponse(res, 200, { runs: runs.map((r) => ({ ...r, ...fieldsOf(r.id) })) });
     }, READS);
 
     this.addStatic('user', 'GET /api/workflows/stats/steps', async (req, res) => {
@@ -7864,14 +7884,17 @@ export class LynoxHTTPApi {
       if (!requireService(res, history, 'History')) return;
       const run = history.getPipelineRun(params['id']!);
       if (!run) { errorResponse(res, 404, 'Pipeline run not found'); return; }
-      jsonResponse(res, 200, run);
+      const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins([run.id]));
+      jsonResponse(res, 200, { ...run, ...fieldsOf(run.id) });
     }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/steps', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const steps = history.getPipelineStepResults(params['id']!);
-      jsonResponse(res, 200, { steps });
+      // The outputs themselves: marked as the run is, for a client that reads only these.
+      const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins([params['id']!]));
+      jsonResponse(res, 200, { steps, ...fieldsOf(params['id']!) });
     }, READS));
 
     // ── Saved Workflows library (PRD §6.8 / D13) ──
