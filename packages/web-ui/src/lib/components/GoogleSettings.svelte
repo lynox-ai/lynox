@@ -101,7 +101,7 @@
 	let pendingClaimNonce = $state<string | null>(null);
 	/** What the lookup said about the parked claim; `null` while it has not answered. */
 	let pendingClaimPreview = $state<ClaimPreview | null>(null);
-	const claimCopy = $derived(claimConfirmCopy(pendingClaimPreview, t));
+	const claimCopy = $derived(claimConfirmCopy(pendingClaimPreview, t, getGoogleStatus()?.authenticated === true));
 
 	function parkClaim(nonce: string): void {
 		pendingClaimNonce = nonce;

@@ -37,12 +37,15 @@ let component: Record<string, unknown> | undefined;
 /** Paths of every POST, in order. */
 let posts: Array<{ path: string; body: unknown }>;
 let releasePreview: (r: Response) => void;
+/** What `/api/google/status` answers. */
+let status: Record<string, unknown>;
 
 beforeEach(() => {
 	setLocale('en');
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	posts = [];
+	status = {};
 	window.history.replaceState({}, '', '/app/settings/channels/google?google_oauth=nonce-9');
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
@@ -52,6 +55,7 @@ beforeEach(() => {
 				return new Promise<Response>((resolve) => { releasePreview = resolve; });
 			}
 		}
+		if (u.endsWith('/google/status')) return new Response(JSON.stringify(status), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
 	}));
 });
@@ -112,13 +116,29 @@ describe('the Google claim confirmation', () => {
 		expect(posts[1]?.body).toEqual({ claim_nonce: 'nonce-9' });
 	});
 
+	// Only a brokered instance hears "unnamed" from the control plane.
 	it('offers no Connect when the grant names no account', async () => {
+		status = { available: true, authenticated: false, managed_broker: true, broker_available: true };
 		await render();
 		releasePreview(answer({ unnamed: true }));
 		await settle();
 		expect(target.textContent).toContain('We could not confirm which one it is');
 		expect(hasButton('Connect')).toBe(false);
 		expect(hasButton('Cancel')).toBe(true);
+		expect(target.textContent).toContain('cancel and start it again with “Connect with Google”');
+		expect(hasButton('Connect with Google')).toBe(true);
+	});
+
+	// Connected, the page shows Disconnect and no Connect with Google: the hint names the way that exists.
+	it('on an instance already connected, the hint for an unnamed grant goes through Disconnect', async () => {
+		status = { available: true, authenticated: true, managed_broker: true, broker_available: true };
+		await render();
+		releasePreview(answer({ unnamed: true }));
+		await settle();
+		expect(target.textContent).toContain('Cancel. The account connected so far stays connected.');
+		expect(target.textContent).not.toContain('cancel and start it again');
+		expect(hasButton('Connect with Google')).toBe(false);
+		expect(hasButton('Disconnect')).toBe(true);
 	});
 
 	it('says it cannot name the account when there is no answer to go by, and still lets the user decide', async () => {

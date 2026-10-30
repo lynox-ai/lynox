@@ -7,7 +7,9 @@ import type { ClaimPreview } from './google.svelte.js';
  * - still looking: says so, and Connect waits;
  * - named: names the account, and Connect is offered;
  * - unnamed: the control plane answered and the grant names no account. Whoever
- *   runs the consent can arrange that, so Connect is not offered at all;
+ *   runs the consent can arrange that, so Connect is not offered at all. The way
+ *   out differs with `connected`: an instance with Google connected shows no
+ *   Connect button, so its hint says to disconnect first;
  * - unknown (no answer to go by): says it cannot name the account, and leaves the
  *   decision to the user, as before the lookup existed.
  *
@@ -24,7 +26,7 @@ export interface ClaimConfirmCopy {
 
 const SLOT = '{email}';
 
-export function claimConfirmCopy(preview: ClaimPreview | null, translate: (key: string) => string): ClaimConfirmCopy {
+export function claimConfirmCopy(preview: ClaimPreview | null, translate: (key: string) => string, connected = false): ClaimConfirmCopy {
 	if (preview === null) {
 		return { before: translate('settings.google.claim_looking'), email: null, after: '', hintKey: 'settings.google.claim_confirm_hint', confirm: 'disabled' };
 	}
@@ -40,7 +42,8 @@ export function claimConfirmCopy(preview: ClaimPreview | null, translate: (key: 
 		};
 	}
 	if (preview.kind === 'unnamed') {
-		return { before: translate('settings.google.claim_unnamed'), email: null, after: '', hintKey: 'settings.google.claim_unnamed_hint', confirm: 'hidden' };
+		const hintKey = connected ? 'settings.google.claim_unnamed_hint_connected' : 'settings.google.claim_unnamed_hint';
+		return { before: translate('settings.google.claim_unnamed'), email: null, after: '', hintKey, confirm: 'hidden' };
 	}
 	return { before: translate('settings.google.claim_confirm'), email: null, after: '', hintKey: 'settings.google.claim_confirm_hint', confirm: 'enabled' };
 }

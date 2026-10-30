@@ -103,6 +103,19 @@ describe('claimConfirmCopy', () => {
 		expect(copy.email).toBeNull();
 		expect(sentence(copy)).toMatch(/We could not confirm which one it is, so it cannot be connected here/);
 		expect(copy.confirm).toBe('hidden');
+		expect(t(copy.hintKey)).toMatch(/^If you started this yourself, cancel and start it again with “Connect with Google”/);
+	});
+
+	// A connected instance shows no Connect button, only Disconnect: the way out goes through it.
+	it('tells an instance that is already connected to disconnect first, not to press a button it does not show', () => {
+		const copy = claimConfirmCopy({ kind: 'unnamed' }, t, true);
+		expect(copy.confirm).toBe('hidden');
+		expect(copy.hintKey).toBe('settings.google.claim_unnamed_hint_connected');
+		expect(t(copy.hintKey)).toMatch(/^Cancel\. The account connected so far stays connected\. .*first use “Disconnect”/);
+		// The other states do not depend on it.
+		for (const p of [null, { kind: 'named', email: 'owner@example.com' }, { kind: 'unknown' }] as const) {
+			expect(claimConfirmCopy(p, t, true)).toEqual(claimConfirmCopy(p, t, false));
+		}
 	});
 
 	it('falls back to saying it cannot name the account when there is no answer', () => {
@@ -115,7 +128,7 @@ describe('claimConfirmCopy', () => {
 	it('has every text in both languages, and the named one has its slot', () => {
 		for (const locale of ['de', 'en'] as const) {
 			setLocale(locale);
-			for (const key of ['settings.google.claim_looking', 'settings.google.claim_confirm_named', 'settings.google.claim_confirm_named_hint', 'settings.google.claim_unnamed', 'settings.google.claim_unnamed_hint']) {
+			for (const key of ['settings.google.claim_looking', 'settings.google.claim_confirm_named', 'settings.google.claim_confirm_named_hint', 'settings.google.claim_unnamed', 'settings.google.claim_unnamed_hint', 'settings.google.claim_unnamed_hint_connected', 'settings.google.claim_confirm_hint']) {
 				expect(t(key)).not.toBe(key);
 			}
 			expect(t('settings.google.claim_confirm_named').split('{email}')).toHaveLength(2);
