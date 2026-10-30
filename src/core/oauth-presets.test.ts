@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   OAUTH_PRESETS,
+  askedScopes,
   consentFrameProblems,
+  normalizedPresetParams,
+  scopesBeyondAsked,
+  scopesOfAnswer,
   derivePresetEndpoints,
   presetIds,
   presetNotFollowed,
@@ -90,7 +94,9 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
       // And `presetClientKeys` and `isPresetClientSecretName`: they derive vault names from a preset's id;
       // `presetClientSecretGuidance` only phrases a sentence around a name.
       // And `consentFrameProblems`: it reads a preset's customer text and lists what is missing.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'consentFrameProblems', 'derivePresetEndpoints', 'isPresetClientSecretName', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName'].sort(),
+      // `normalizedPresetParams` returns a copy of a profile's values as its preset reads them;
+      // `askedScopes`, `scopesOfAnswer` and `scopesBeyondAsked` read scopes and add no preset.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'askedScopes', 'consentFrameProblems', 'derivePresetEndpoints', 'isPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
     );
   });
 
@@ -549,5 +555,61 @@ describe('what a preset says about the request shape, and what a preset that say
     expect(presetTokenHeaderName(shopify)).toBe('X-Shopify-Access-Token');
     expect(presetTokenBodyFormat(shopify, 'json')).toBe('form');
     expect(shopify.callbackVerification).toBe('shopify-hmac');
+  });
+});
+
+describe('a store name typed as the person sees it', () => {
+  const shopify = OAUTH_PRESETS.get('shopify')!;
+
+  it('is kept in lower case, which is the store Shopify reads', () => {
+    expect(normalizedPresetParams(shopify, { shop: 'My-Store' })).toEqual({ shop: 'my-store' });
+    expect(derivePresetEndpoints('shopify', normalizedPresetParams(shopify, { shop: 'My-Store' }))).toMatchObject({ host: 'my-store.myshopify.com' });
+  });
+
+  it('still reaches the derivation, which refuses what the pattern does not match', () => {
+    expect(derivePresetEndpoints('shopify', normalizedPresetParams(shopify, { shop: 'My Store' }))).toMatchObject({ kind: 'bad-param' });
+  });
+
+  it('leaves a name the provider does not read without case as written', () => {
+    const preset: OAuthPreset = { ...shopify, params: [{ name: 'shop', pattern: /^[A-Za-z]+$/, describe: 'x' }] };
+    expect(normalizedPresetParams(preset, { shop: 'Acme' })).toEqual({ shop: 'Acme' });
+  });
+
+  it('lowers ASCII only, so a letter that lowers onto an ASCII one is still refused', () => {
+    // U+212A KELVIN SIGN lowers to "k" under toLowerCase.
+    expect(normalizedPresetParams(shopify, { shop: 'ac\u212Ame' })).toEqual({ shop: 'ac\u212Ame' });
+    expect(derivePresetEndpoints('shopify', normalizedPresetParams(shopify, { shop: 'ac\u212Ame' }))).toMatchObject({ kind: 'bad-param' });
+  });
+
+  it('leaves names the preset does not have, and values that are not text, as they are', () => {
+    expect(normalizedPresetParams(shopify, { shop: 'ACME', other: 'KEEP', n: 3 })).toEqual({ shop: 'acme', other: 'KEEP', n: 3 });
+  });
+});
+
+describe('the scopes a grant holds and the scopes a connection asks for', () => {
+  it('reads an answer separated by commas or spaces, and none when the answer names none', () => {
+    expect(scopesOfAnswer('read_products,read_orders')).toEqual(['read_products', 'read_orders']);
+    expect(scopesOfAnswer('read_products read_orders')).toEqual(['read_products', 'read_orders']);
+    expect(scopesOfAnswer(undefined)).toBeUndefined();
+    expect(scopesOfAnswer('')).toBeUndefined();
+    expect(scopesOfAnswer(' , ')).toBeUndefined();
+    expect(scopesOfAnswer(['read_products'])).toBeUndefined();
+  });
+
+  it('asks a built-in provider for its link\'s scopes, possibly none', () => {
+    expect(askedScopes({ preset_id: 'shopify', scope: 'read_orders' })).toEqual(['read_orders']);
+    expect(askedScopes({ preset_id: 'shopify' })).toEqual([]);
+  });
+
+  it('has nothing to compare for a scope the provider refuses, a provider that adds scopes of its own, or a profile of no provider', () => {
+    expect(askedScopes({ preset_id: 'shopify', scope: 'write_products' })).toBeUndefined();
+    expect(askedScopes({ preset_id: 'bexio', scope: 'contact_show' })).toBeUndefined();
+    expect(askedScopes({})).toBeUndefined();
+    expect(askedScopes({ scope: 'a b' })).toBeUndefined();
+  });
+
+  it('names what a grant holds beyond the ask, once each, and nothing for a narrower one', () => {
+    expect(scopesBeyondAsked(['read_products', 'write_products', 'write_products'], ['read_products', 'read_orders'])).toEqual(['write_products']);
+    expect(scopesBeyondAsked(['read_products'], ['read_products', 'read_orders'])).toEqual([]);
   });
 });

@@ -432,6 +432,31 @@ describe('whether a run passes its contract on', () => {
     expect(d.note).toBeNull();
   });
 
+  // An event's values are a third party's; the grant's own schedule does not change that.
+  it('withholds it from a run a webhook started, even on the schedule it was accepted for', () => {
+    const { wf, trigger } = granted();
+    const d = decideRunGrant(wf, { kind: 'webhook', triggerId: 'trig-1', eventId: 'ev-1' }, lookup(trigger), H, recorded);
+    expect(d.contract).toBeUndefined();
+    expect(d.note).toBe('Ran without its write grant: a webhook run never carries a write grant.');
+    // CONTROL: the same grant, the same trigger, started by its schedule and from the library.
+    expect(decideRunGrant(wf, { kind: 'schedule', triggerId: 'trig-1' }, lookup(trigger), H, recorded).contract).toBeDefined();
+    expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, lookup(trigger), H, recorded).contract).toBeDefined();
+  });
+
+  // An allowlist, not a webhook exception: a kind added later is withheld until it is listed,
+  // with a sentence that teaches no webhook rule.
+  it('withholds it from a start of a kind it does not know', () => {
+    const { wf, trigger } = granted();
+    const future = { kind: 'email', triggerId: 'trig-1' } as unknown as Parameters<typeof decideRunGrant>[1];
+    expect(decideRunGrant(wf, future, lookup(trigger), H, recorded)).toEqual({
+      contract: undefined, note: 'Ran without its write grant: a grant is handed only to a run its schedule or the library started.',
+    });
+  });
+
+  it('records a webhook start as webhook:<trigger>, never as a schedule', () => {
+    expect(startedVia({ kind: 'webhook', triggerId: 'trig-1', eventId: 'ev-1' })).toBe('webhook:trig-1');
+  });
+
   it('names the stamp\'s grant on the contract it hands over', () => {
     const { wf, trigger } = granted();
     const d = decideRunGrant(wf, { kind: 'schedule', triggerId: 'trig-1' }, lookup(trigger), H, recorded);

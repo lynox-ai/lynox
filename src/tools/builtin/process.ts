@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 import { INLINE_NAMED_ONLY_TOOLS } from '../../orchestrator/runtime-adapter.js';
+import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
@@ -199,16 +200,20 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
   // (LRU, lost on restart); the engine.db workflows row is what the Saved
   // Workflows library reads.
   // The copy holds the source's steps, so it carries the source's mandate mark too.
-  runHistory.insertPlannedPipeline(reusable, agent.principal, existing.id);
-  storePipeline(reusableId, reusable);
+  const sourceId = existing.id;
+  return withInstanceWrite(agent, { site: 'save_workflow#copy', kind: 'create', store: 'workflows', target: () => [['workflow', reusableId], ['from', sourceId]], main: ['pipeline'] }, (w) => {
+    w.run('pipeline', () => runHistory.insertPlannedPipeline(reusable, agent.principal, existing.id), ifReturned);
+    w.created('pipeline', reusableId);
+    storePipeline(reusableId, reusable);
 
-  return JSON.stringify({
-    workflow_id: reusableId,
-    name: reusable.name,
-    steps: reusable.steps.length,
-    source: 'workflow_id',
-    next: `Call run_workflow with workflow_id "${reusableId}" to run this workflow. It is saved and reusable.`,
-  }, null, 2);
+    return JSON.stringify({
+      workflow_id: reusableId,
+      name: reusable.name,
+      steps: reusable.steps.length,
+      source: 'workflow_id',
+      next: `Call run_workflow with workflow_id "${reusableId}" to run this workflow. It is saved and reusable.`,
+    }, null, 2);
+  });
 }
 
 /**
@@ -336,21 +341,24 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // succeeded. Then the ProcessRecord for lineage/audit (D11 — internal,
     // never agent-facing); stamping the promotion link last keeps the
     // ProcessRecord consistent with the pipeline that exists.
-    runHistory.insertPlannedPipeline(planned, agent.principal);
-    storePipeline(pipelineId, planned);
-    record.promotedToPipelineId = pipelineId;
-    runHistory.insertProcess(record);
+    return withInstanceWrite(agent, { site: 'save_workflow#session', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]], main: ['pipeline'] }, (w) => {
+      w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, agent.principal), ifReturned);
+      w.created('pipeline', pipelineId);
+      storePipeline(pipelineId, planned);
+      record.promotedToPipelineId = pipelineId;
+      runHistory.insertProcess(record);
 
-    const paramNames = record.parameters.map(p => p.name);
-    return JSON.stringify({
-      workflow_id: pipelineId,
-      name: record.name,
-      steps: pipelineSteps.length,
-      parameters: paramNames,
-      estimated_cost: `$${costEstimate.totalCostUsd.toFixed(4)}`,
-      source: 'session',
-      next: `Call run_workflow with workflow_id "${pipelineId}" to run this workflow. It is saved and reusable.`,
-    }, null, 2);
+      const paramNames = record.parameters.map(p => p.name);
+      return JSON.stringify({
+        workflow_id: pipelineId,
+        name: record.name,
+        steps: pipelineSteps.length,
+        parameters: paramNames,
+        estimated_cost: `$${costEstimate.totalCostUsd.toFixed(4)}`,
+        source: 'session',
+        next: `Call run_workflow with workflow_id "${pipelineId}" to run this workflow. It is saved and reusable.`,
+      }, null, 2);
+    });
   } catch (err) {
     logErrorChain('save_workflow:promote', err);
     return `Error: Could not save the workflow (${getErrorMessage(err)}). No workflow was saved.`;

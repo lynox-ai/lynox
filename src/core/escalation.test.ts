@@ -39,6 +39,19 @@ describe('escalateToUser (the Agent→User escalation primitive, Slice B3)', () 
     router = { notify } as unknown as NotificationRouter;
   });
 
+  it('seeds the turns the model reads without the characters that render as nothing', () => {
+    // A plan's title and a run's error can carry text someone else wrote, saved before the write
+    // paths refused these characters: a tag-spelled clause after the visible text.
+    const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    escalateToUser(store, router, { key: 'task-h', title: `✗ Report${hidden}`, body: `Your scheduled workflow "Report${hidden}" didn't complete.`, data: { taskId: 'task-h' } });
+    const msgs = store.getMessages('escalation-task-h');
+    expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant']);
+    const seeded = JSON.stringify(msgs);
+    expect(seeded).toContain('✗ Report');
+    expect(seeded).toContain('Your scheduled workflow');
+    expect(seeded).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+  });
+
   it('opens an unread thread keyed by source, seeds the context, and pushes the threadId as a wakeup', () => {
     const r = escalateToUser(store, router, { key: 'task-1', title: '✗ Report', body: 'Step 3 failed: bad path', data: { taskId: 'task-1' } });
     expect(r).toEqual({ threadId: 'escalation-task-1' });

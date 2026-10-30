@@ -41,6 +41,10 @@ export interface JudgeRule {
   /** The tier that places the judge's call: which provider serves it, and the gate and booking.
    *  The model is set per provider (`JUDGE_MODELS`), not by the tier. Default `fast`. */
   tier: ModelTier;
+  /** The verdict's shape. `envelope`: `{ keep, after }`, where `keep: true` leaves the target as it
+   *  is without the model repeating it. Absent: the flat verdict over F, as every rule planned
+   *  before the envelope was stored; such a rule keeps its hash, and its run its checksum. */
+  verdict?: 'envelope' | undefined;
 }
 
 /** Targets with a verdict a write can use: not invalid (before the judge or by its answer), and
@@ -165,7 +169,24 @@ export function normalizeJudgeRule(input: unknown, opts: { idField?: string | un
   const tierRaw = input['tier'];
   const tier = tierRaw === undefined ? 'fast' : normalizeTier(typeof tierRaw === 'string' ? tierRaw : '');
   if (tier === undefined) throw new BulkSourceError('judge.tier must be fast, balanced or deep.');
-  return { rule, schema, tier };
+  return { rule, schema, tier, verdict: 'envelope' };
+}
+
+/** The schema the judge's call is bound by: the rule's own over F, or around it the envelope
+ *  `{ keep, after }`. `after` keeps F's `required` and `additionalProperties: false`, so a verdict
+ *  that changes a target names every field of F and no other; only `keep` is required, because
+ *  a kept target needs no `after` (a missing one on `keep: false` is refused after the call). */
+export function judgeCallSchema(rule: Pick<JudgeRule, 'schema' | 'verdict'>): ExtractSchema {
+  if (rule.verdict !== 'envelope') return rule.schema;
+  return {
+    type: 'object',
+    properties: {
+      keep: { type: 'boolean' },
+      after: { type: 'object', properties: rule.schema.properties, required: rule.schema.required ?? [], additionalProperties: false },
+    },
+    required: ['keep'],
+    additionalProperties: false,
+  };
 }
 
 /**
@@ -186,6 +207,9 @@ export function judgeAfterBound(schema: ExtractSchema): number {
         break;
       case 'boolean':
         bytes += 5;
+        break;
+      case 'object':
+        bytes += judgeAfterBound(prop as unknown as ExtractSchema);
         break;
       default:
         bytes += NUMBER_BYTES;

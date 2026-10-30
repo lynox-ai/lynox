@@ -103,7 +103,7 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
     ts.createThread('t-unread', { title: 'x' });
     ts.updateThread('t-unread', { skip_extraction: true });
     const real = ctx.containment;
-    ctx.containment = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
+    ctx.containment = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never, null);
     try {
       expect(await patch('t-unread', { skip_extraction: false })).toBe(409);
       // An unreadable record is not proof the chat read the store, and the answer says so.

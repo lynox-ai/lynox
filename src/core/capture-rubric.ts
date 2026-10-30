@@ -42,21 +42,26 @@ export interface RubricScore {
   notes: string[];
 }
 
-// Any `{{ … }}` placeholder; we then classify the inner content. At run time a
-// saved workflow resolves a placeholder ONLY when it is exactly `{{params.X}}`
-// and X is a declared (scalar) param — `resolveInputTemplate` → `getByPath`
-// returns the param value. EVERYTHING else is left verbatim and never resolves:
+// Any `{{ … }}` placeholder; we then classify the inner content. At run time
+// `resolveInputTemplate` → `getByPath` resolves a placeholder against the step's
+// context: `{{params.X}}` for a declared (scalar) param, and `{{S.result}}` for a
+// step S in this step's `input_from` — that one RAW into the call's input, so an
+// earlier step's output (whatever it read) chooses a tool argument. This rubric
+// scores `params` references only; for it, everything else is a reference that
+// cannot re-run with new values:
 //  - a DOTTED form `{{params.X.sub}}` — X is a scalar, so `.sub` is undefined
 //    (this is why the rubric must NOT anchor the regex on `}}` after the word,
 //    the trap the first cut fell into);
-//  - a bare `{{Y}}` / `{{Y.sub}}` — no `params` prefix, nothing to resolve
-//    against (a de-namespacing glue bug or a model hallucination).
+//  - a bare `{{Y}}` / `{{Y.sub}}` — no `params` prefix: unresolved unless Y is a
+//    step in `input_from` (a de-namespacing glue bug or a model hallucination
+//    otherwise).
 const PLACEHOLDER = /\{\{(.*?)\}\}/g;
 const EXACT_PARAM = /^\s*params\.([a-zA-Z0-9_]+)\s*$/;
 
 /** Classify every placeholder in a step (its prose task AND its literal
  *  input_template) into the declared-param base names it correctly references
- *  vs. the inner contents that can NEVER resolve at run time. */
+ *  vs. the inner contents that are not a declared param (see above: a step
+ *  output reference is one of those, and does resolve). */
 function placeholdersInStep(step: { task?: string | undefined; input_template?: Record<string, unknown> | undefined }): { params: Set<string>; unresolvable: Set<string> } {
   const params = new Set<string>();
   const unresolvable = new Set<string>();

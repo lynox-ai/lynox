@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, APPROVAL_RETRY_DELAY_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_MAX_ATTEMPTS, type ApprovalFiling, type MailReplyPayload, type MailSendPayload } from './approval-store.js';
-import { ApprovalExecutor, APPROVAL_SEND_DEADLINE_MS } from './approval-executor.js';
+import { deciderKind, ApprovalExecutor, APPROVAL_SEND_DEADLINE_MS } from './approval-executor.js';
 import type { AuditEntry, AuditLog } from './audit-log.js';
 import { InMemoryMailRegistry } from '../integrations/mail/tools/registry.js';
 import { configureMailRateLimits, recordMailSend, resetMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
@@ -110,7 +110,7 @@ const replyPayload = (over: Partial<MailReplyPayload> = {}): MailReplyPayload =>
 
 let runN = 0;
 /** File an entry and approve it, as the filer and the decide route would. */
-function approved(filing: ApprovalFiling, who: { createdBy?: string | null; mandateId?: string | null } = {}): string {
+function approved(filing: ApprovalFiling, who: { createdBy?: string | null; mandateId?: string | null; decider?: string } = {}): string {
   runN++;
   const out = store.file({
     filing, origin: { source: 'task', triggerId: 'trg-1', runId: `run-${String(runN)}`, rootRunId: `run-${String(runN)}`, threadId: 'th-1' },
@@ -118,7 +118,7 @@ function approved(filing: ApprovalFiling, who: { createdBy?: string | null; mand
   });
   if (!out.ok) throw new Error(`filing refused: ${out.reason}`);
   const entry = store.get(out.id)!;
-  const decided = store.decide(out.id, { action: 'approve', checksum: entry.checksum }, 'owner', now);
+  const decided = store.decide(out.id, { action: 'approve', checksum: entry.checksum }, who.decider ?? 'owner', now);
   if (!decided.ok) throw new Error(`approval refused: ${decided.reason}`);
   // Entries are tried in the order they were approved.
   advance(1_000);
@@ -128,6 +128,24 @@ function approved(filing: ApprovalFiling, who: { createdBy?: string | null; mand
 const send = (over: Partial<MailSendPayload> = {}): ApprovalFiling => ({ kind: 'mail_send', payload: sendPayload(over) });
 const reply = (over: Partial<MailReplyPayload> = {}): ApprovalFiling => ({ kind: 'mail_reply', payload: replyPayload(over) });
 const reason = (id: string): unknown => (JSON.parse(store.get(id)!.resultJson ?? 'null') as { reason?: unknown } | null)?.reason;
+
+describe('who approved, as a send row names them', () => {
+  it('by kind only: a mandate\'s tag carries its address, which never reaches the row', () => {
+    expect(deciderKind('owner')).toBe('owner');
+    expect(deciderKind('mandate:eva@kanzlei.example')).toBe('mandate');
+    expect(deciderKind(null)).toBe('unknown');
+    expect(deciderKind('someone')).toBe('unknown');
+  });
+
+  it('writes a decider whose tag holds an address by kind, also on the send row itself', async () => {
+    // Approving is the owner's act, so a mandate's tag is not expected here; were one there, the
+    // row would still not carry its address.
+    const id = approved(send(), { decider: 'mandate:eva@kanzlei.example' });
+    await executor().tick();
+    expect(trail[0]!.target).toBe(`approval ${id}: mail_send, 1 recipient, approved by mandate`);
+    expect(trail.map((e) => e.target).join(' ')).not.toContain('eva@');
+  });
+});
 
 describe('the executor sends an approved mail once, as it was filed', () => {
   it('mail_send: one send with the stored recipients and body, done, a trail row on each side, a note in the thread', async () => {
@@ -144,7 +162,7 @@ describe('the executor sends an approved mail once, as it was filed', () => {
     expect(trail[0]!.action).toBe('mail_send:send');
     expect(trail[0]!.target).toBe(`approval ${id}: mail_send, 2 recipients, approved by owner`);
     expect(trail[0]!.target).not.toContain('bob@');
-    expect(notes).toEqual([{ threadId: 'th-1', content: { _lynox_note: { code: 'approval_sent' } } }]);
+    expect(notes).toEqual([{ threadId: 'th-1', content: { _lynox_note: { code: 'approval_sent', approval: { id, outcome: 'sent' } } } }]);
     // A second tick has nothing left to send.
     expect(await executor().tick()).toBeNull();
     expect(provider.send).toHaveBeenCalledTimes(1);
@@ -217,7 +235,8 @@ describe('what the executor checks again before it sends', () => {
     expect(await executor().tick()).toEqual({ id, status: 'failed' });
     expect(provider.send).not.toHaveBeenCalled();
     expect(reason(id)).toBe('checksum');
-    expect(notes[0]!.content).toEqual({ _lynox_note: { code: 'approval_failed' } });
+    // The note names the entry and the reason the approvals page shows for it.
+    expect(notes[0]!.content).toEqual({ _lynox_note: { code: 'approval_failed', approval: { id, outcome: 'checksum' } } });
   });
 
   it('a mail a mandate filed is not sent once that mandate has ended', async () => {
@@ -288,7 +307,22 @@ describe('what the executor checks again before it sends', () => {
     advance(10 * 60_000);
     expect(await executor().tick()).toBeNull();
     expect(provider.send).toHaveBeenCalledTimes(1);
-    expect(notes.at(-1)!.content).toEqual({ _lynox_note: { code: 'approval_unknown' } });
+    expect(notes.at(-1)!.content).toEqual({ _lynox_note: { code: 'approval_unknown', approval: { id, outcome: 'send_threw' } } });
+  });
+
+  it('a throw that escapes the send\'s own handling after the send began also ends unknown, never retried', async () => {
+    // `failed` must mean nothing went out: an entry whose send began never ends `failed` or goes back
+    // to `approved`. Here the send's own catch throws too (reading the error throws once), so the
+    // throw reaches the outer guard while the send is marked as begun.
+    const id = approved(reply());
+    let reads = 0;
+    const hostile = { toString(): string { reads++; if (reads === 1) throw new Error('unreadable'); return 'late'; } };
+    provider.send.mockRejectedValueOnce(hostile);
+    expect(await executor().tick()).toEqual({ id, status: 'unknown' });
+    expect(reason(id)).toBe('send_threw');
+    advance(10 * 60_000);
+    expect(await executor().tick()).toBeNull();
+    expect(provider.send).toHaveBeenCalledTimes(1);
   });
 
   it('a mail_send whose provider fails ends unknown', async () => {

@@ -78,7 +78,7 @@ describe('Engine boot — erasure by connection', () => {
     store.setGrantLedger(new GrantLedger(before.getDb()));
     expect(store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } }).ok).toBe(true);
     const grant = store.get('shop')!.oauth_grant!.grant_id!;
-    before.getDb().exec('ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
+    before.getDb().exec('DROP INDEX IF EXISTS idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; ALTER TABLE inbound_events DROP COLUMN attempt_id; ALTER TABLE inbound_events DROP COLUMN reported_at; ALTER TABLE inbound_events DROP COLUMN unknown_reported_at; ALTER TABLE bulk_targets DROP COLUMN deselected_at; ALTER TABLE triggers DROP COLUMN paused_db_at; ALTER TABLE triggers DROP COLUMN covered_created_by; ALTER TABLE triggers DROP COLUMN covered_created_id; ALTER TABLE triggers DROP COLUMN covered_created_at; ALTER TABLE triggers DROP COLUMN covered_edited_by; ALTER TABLE triggers DROP COLUMN covered_edited_id; ALTER TABLE triggers DROP COLUMN covered_edited_at; ALTER TABLE triggers DROP COLUMN covered_at; ALTER TABLE workflows DROP COLUMN covered_created_by; ALTER TABLE workflows DROP COLUMN covered_created_id; ALTER TABLE workflows DROP COLUMN covered_created_at; ALTER TABLE workflows DROP COLUMN covered_edited_by; ALTER TABLE workflows DROP COLUMN covered_edited_id; ALTER TABLE workflows DROP COLUMN covered_edited_at; ALTER TABLE workflows DROP COLUMN covered_at; ALTER TABLE bulk_runs DROP COLUMN start_domains; ALTER TABLE triggers DROP COLUMN paused_at; ALTER TABLE triggers DROP COLUMN paused_due_at; ALTER TABLE triggers DROP COLUMN paused_for; ALTER TABLE triggers DROP COLUMN pause_noticed_at; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
     before.close();
     landCall(dir, grant);
 
@@ -151,7 +151,7 @@ describe('Engine boot — erasure by connection', () => {
       expect(store.save(store.get('shop')!, undefined, { newConsent: true, actor: OWNER_PRINCIPAL }).ok).toBe(true);
       const db = engine.getEngineDb()!.getDb();
       const id = erasureRecords(db, 'shop')[0]!.id;
-      expect(db.prepare("SELECT actor_kind AS a, target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all()).toEqual([{ a: 'owner', t: `shop ${id} consent` }]);
+      expect(db.prepare("SELECT actor_kind AS a, target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all()).toEqual([{ a: 'owner', t: `${store.trailIdOf('shop')} ${id} consent` }]);
     } finally {
       restore();
     }
