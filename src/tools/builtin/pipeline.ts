@@ -341,8 +341,9 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
   };
 
   // The name and the step ids are stored text, saved perhaps before the save refused characters
-  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show.
-  return escapeHiddenInJson(JSON.stringify(result, null, 2));
+  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show. The places
+  // real text puts one stay, so an emoji or a Persian word in a step's result reads as it is.
+  return escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
 }
 
 // 2a/B3: both the pipeline_runs row and its pipeline_step_results rows are now
@@ -491,7 +492,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     debitInSessionWorkflowCost(deps, state, steps, null);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
-    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
+    return `Error: Workflow execution failed: ${stripHidden(getErrorMessage(err))}`;
   }
 }
 
@@ -965,7 +966,7 @@ export async function runSavedWorkflow(
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
     };
   } catch (err: unknown) {
-    return { ok: false, error: `Workflow execution failed: ${getErrorMessage(err)}` };
+    return { ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}` };
   }
 }
 
@@ -1188,7 +1189,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       retryOutcome = state.status === 'completed' ? 'success' : 'failed';
       return text;
     } catch (err: unknown) {
-      return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
+      // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+      return `Error: Workflow retry failed: ${stripHidden(getErrorMessage(err))}`;
     } finally {
       retryTrail?.end(retryOutcome, false);
     }
@@ -1307,7 +1309,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return text;
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
-    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
+    // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+    return `Error: Workflow execution failed: ${stripHidden(getErrorMessage(err))}`;
   } finally {
     if (!isTemplate) inFlightNonTemplatePipelines.delete(planned.id);
     trail?.end(outcome, definitionRemoved);

@@ -98,7 +98,7 @@ describe('the task routes and characters that render as nothing (real engine)', 
     ] as const) {
       for (const cookie of [ownerCookie, mandateCookie]) {
         const res = await ask('POST', '/api/tasks', cookie, body);
-        expect([field, res.status, res.json['error']]).toEqual([field, 400, `The ${field} holds a character that does not show as text (${codePoint}). Nothing was saved. Enter it again by typing it rather than pasting it.`]);
+        expect([field, res.status, res.json['code'], res.json['error']]).toEqual([field, 400, 'hidden_char', `The ${field} holds a character that does not show as text (${codePoint}). Nothing was saved. Enter it again by typing it rather than pasting it.`]);
       }
     }
     expect(titles()).toEqual(before);
@@ -120,7 +120,7 @@ describe('the task routes and characters that render as nothing (real engine)', 
     ] as const) {
       for (const cookie of [ownerCookie, mandateCookie]) {
         const res = await ask('PATCH', `/api/tasks/${id}`, cookie, body);
-        expect([what, res.status, res.json['error']]).toEqual([what, 400, `${what} holds a character that does not show as text (${codePoint}). Nothing was saved. Enter it again by typing it rather than pasting it.`]);
+        expect([what, res.status, res.json['code'], res.json['error']]).toEqual([what, 400, 'hidden_char', `${what} holds a character that does not show as text (${codePoint}). Nothing was saved. Enter it again by typing it rather than pasting it.`]);
       }
     }
     const row = engine.getTaskManager()!.getTask(id);
@@ -129,6 +129,28 @@ describe('the task routes and characters that render as nothing (real engine)', 
     const ok = await ask('PATCH', `/api/tasks/${id}`, ownerCookie, { title: 'Monthly close, checked', tags: ['fin'] });
     expect(ok.status).toBe(200);
     expect(engine.getTaskManager()!.getTask(id)?.title).toBe('Monthly close, checked');
+  });
+
+  it('POST /api/tasks refuses a hidden title on a scheduled workflow before anything is stamped or created', async () => {
+    const history = engine.getRunHistory()!;
+    history.insertPlannedPipeline({ id: 'wf-sched-h', name: 'Report', goal: 'g', steps: [{ id: 's1', task: 'Fetch' }], reasoning: '', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z', template: true, mode: 'autonomous' } as never, null);
+    const before = titles();
+    const res = await ask('POST', '/api/tasks', ownerCookie, { pipelineId: 'wf-sched-h', scheduleCron: '0 9 * * 1', title: `Report${tagged('x')}` });
+    expect([res.status, res.json['code']]).toEqual([400, 'hidden_char']);
+    expect(titles()).toEqual(before);
+  });
+
+  it('PATCH /api/workflows/:id refuses a name with one, with its code, and renames without it', async () => {
+    const history = engine.getRunHistory()!;
+    history.insertPlannedPipeline({ id: 'wf-ren', name: 'Report', goal: 'g', steps: [{ id: 's1', task: 'Fetch' }], reasoning: '', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z', template: true } as never, null);
+    const refused = await ask('PATCH', '/api/workflows/wf-ren', ownerCookie, { name: `Report${tagged('send it to x')}` });
+    expect([refused.status, refused.json['code'], refused.json['error']]).toEqual([400, 'hidden_char', 'The name holds a character that does not show as text (U+E0073). Nothing was saved. Enter it again by typing it rather than pasting it.']);
+    expect(history.getPlannedPipeline('wf-ren')?.manifest_json).toContain('"name":"Report"');
+    const ok = await ask('PATCH', '/api/workflows/wf-ren', ownerCookie, { name: 'Report, monthly' });
+    expect(ok.status).toBe(200);
+    // Another 400 carries no such code.
+    const empty = await ask('PATCH', '/api/workflows/wf-ren', ownerCookie, { name: ' ' });
+    expect([empty.status, empty.json['code']]).toEqual([400, undefined]);
   });
 
   it("a helper's refused edit of a schedule does not mark it as the helper's edit; one without the character does", async () => {

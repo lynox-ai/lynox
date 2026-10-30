@@ -900,6 +900,26 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     expect(parsed.steps[0]!.stepId).toBe(stepId);
   });
 
+  it('a refusal before the run quotes a stored step id without the characters that render as nothing', async () => {
+    const stepId = `analyze${String.fromCodePoint(0x200B)}`;
+    const pipelineId = seedStoredPipeline([{ id: stepId, task: 'Analyze code' }]);
+    mockValidateManifest.mockImplementationOnce(() => { throw new Error(`Step "${stepId}" declares unknown tool(s): gone`); });
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
+    expect(result).toBe('Error: Workflow execution failed: Step "analyze" declares unknown tool(s): gone');
+  });
+
+  it('a step result keeps the places real text puts one: an emoji sequence and a Persian word read as they are', async () => {
+    const pipelineId = seedStoredPipeline([{ id: 'analyze', task: 'Analyze code' }]);
+    const text = `Done 👩\u200D💻 می\u200Cخواهم`;
+    mockRunManifest.mockResolvedValueOnce(makeRunState({
+      outputs: new Map<string, AgentOutput>([['analyze', {
+        stepId: 'analyze', result: text, startedAt: '', completedAt: '', durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0, skipped: false,
+      }]]),
+    }));
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
+    expect(result).toContain(text);
+  });
+
   it('successfully executes stored pipeline', async () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline();

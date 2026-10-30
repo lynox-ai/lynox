@@ -400,11 +400,21 @@ function approvalChatReaderOf(
  * writes these fields here, and the plan's text reaches the model later. `null` when it may be saved.
  */
 function hiddenInTaskText(b: Record<string, unknown>): string | null {
-  const hit = findHiddenChar({ title: b['title'], description: b['description'], assignee: b['assignee'], tags: b['tags'] });
-  if (hit === null) return null;
-  const field = hit.path.startsWith('tags') ? 'A tag' : `The ${hit.path}`;
-  return `${field} holds a character that does not show as text (${hit.codePoint}). Nothing was saved. Enter it again by typing it rather than pasting it.`;
+  for (const [key, field] of [['title', 'The title'], ['description', 'The description'], ['assignee', 'The assignee'], ['tags', 'A tag']] as const) {
+    const hit = findHiddenChar(b[key]);
+    if (hit !== null) return hiddenRefusal(field, hit.codePoint);
+  }
+  return null;
 }
+
+/** The 400 a person reads for text with a character that renders as nothing: the field and the
+ *  character, never the text. Answered with {@link HIDDEN_CHAR_CODE}, which a client tells it by. */
+function hiddenRefusal(field: string, codePoint: string): string {
+  return `${field} holds a character that does not show as text (${codePoint}). Nothing was saved. Enter it again by typing it rather than pasting it.`;
+}
+
+/** The `code` of that 400: the web UI shows its own sentence for it, and `save_failed` for any other. */
+export const HIDDEN_CHAR_CODE = 'hidden_char';
 
 function isValidMailPort(n: number): boolean {
   return Number.isInteger(n) && n >= 1 && n <= 65535;
@@ -8318,6 +8328,10 @@ export class LynoxHTTPApi {
       if (name.trim().length > 200) {
         errorResponse(res, 400, 'name too long (max 200 characters)'); return;
       }
+      // The name reaches the model in every run and edit of the workflow; the save refuses such a
+      // character, and a rename does not pass through the save.
+      const hiddenName = findHiddenChar(name);
+      if (hiddenName !== null) { errorResponse(res, 400, hiddenRefusal('The name', hiddenName.codePoint), HIDDEN_CHAR_CODE); return; }
       const renamed = history.renamePlannedPipeline(params['id']!, name.trim(), this._principalOf(req));
       if (!renamed) { errorResponse(res, 404, 'Workflow not found'); return; }
       // Evict the in-memory cache so a later run reflects the new name.
@@ -8420,7 +8434,7 @@ export class LynoxHTTPApi {
       const dueDate = typeof b['dueDate'] === 'string' && b['dueDate'].length > 0 ? b['dueDate'] : undefined;
       const pipelineId = typeof b['pipelineId'] === 'string' && b['pipelineId'].length > 0 ? b['pipelineId'] : undefined;
       const hidden = hiddenInTaskText(b);
-      if (hidden !== null) { errorResponse(res, 400, hidden); return; }
+      if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
 
       // Slice B2: schedule a saved workflow on cron — the promote-to-cron consent
       // action. Validates the workflow is autonomous, binds + constrains the
@@ -8545,7 +8559,7 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown>;
       // Before the mark below: a refused edit is no mandate's edit.
       const hidden = hiddenInTaskText(b);
-      if (hidden !== null) { errorResponse(res, 400, hidden); return; }
+      if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
       // Checked here rather than left to `update`, which throws: a thrown error answers
       // 500, and a refused request must not mark the trigger as a mandate's edit either.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {

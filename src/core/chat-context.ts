@@ -6,6 +6,7 @@ import type { ThreadStore } from './thread-store.js';
 import { stripUntrustedSeparators } from './sanitize.js';
 import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
 import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
+import { stripHidden } from './hidden-text.js';
 
 const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
@@ -262,10 +263,12 @@ export interface ChatApprovalReader {
  * + NBSP), the C0 control range + DEL (`\x00-\x1f`, `\x7f`), AND the C1 control
  * range `\x80-\x9f` — which contains U+0085 (NEL, Next Line), a line-break char
  * that `\s` and the C0 class both MISS (release-harden 2026-06-24). A plain
- * `[\r\n]` class misses all of the above.
+ * `[\r\n]` class misses all of the above. Characters that render as nothing (`hidden-text.ts`)
+ * are dropped first: a stored name, step id or error from before the save refused them would
+ * otherwise carry an instruction no one sees into the chat.
  */
 function oneLine(s: string, max: number): string {
-  const flat = s.replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
+  const flat = stripHidden(s).replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 

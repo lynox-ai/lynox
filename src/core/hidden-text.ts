@@ -83,9 +83,10 @@ export function hiddenInRunValues(params: Readonly<Record<string, unknown>>): st
 }
 
 /** `json` (as `JSON.stringify` writes it) with every hidden character written as a `\uXXXX` escape:
- *  the same JSON to whoever parses it, and visible to a model that reads it. */
-export function escapeHiddenInJson(json: string): string {
-  const at = hiddenCharIndexes(json, { inPlace: false });
+ *  the same JSON to whoever parses it, and visible to a model that reads it. With `inPlace`, the
+ *  places real text puts one (an emoji sequence, ZWNJ between letters) stay as they are. */
+export function escapeHiddenInJson(json: string, opts: { inPlace?: boolean } = {}): string {
+  const at = hiddenCharIndexes(json, { inPlace: opts.inPlace ?? false });
   if (at.length === 0) return json;
   const escape = new Set(at);
   return Array.from(json).map((c, i) => escape.has(i)
