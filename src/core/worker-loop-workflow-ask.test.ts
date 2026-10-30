@@ -447,7 +447,7 @@ describe('a scheduled workflow question on an instance the control plane runs', 
   const escalationPosts = (spy: ReturnType<typeof vi.fn>) =>
     spy.mock.calls.filter(([url]) => String(url).endsWith('/escalation'));
 
-  it('one whose push reached nobody is reported to the control plane, as an escalation is', async () => {
+  it('one whose push reached nobody is reported to the control plane as a question', async () => {
     const { engine, fetchSpy } = await bootManaged();
     const h = makeHarness({ reporter: engine.escalationReporter.bind(engine), pushOutcome: 'failed' });
     wf.step = askingStep([]);
@@ -459,6 +459,8 @@ describe('a scheduled workflow question on an instance the control plane runs', 
     const posts = escalationPosts(fetchSpy);
     expect(posts).toHaveLength(1);
     expect(String(posts[0]![0])).toBe('https://cp.test/internal/usage/inst-wfq/escalation');
+    // A question, not an escalation: the control plane mails that a run is waiting for an answer.
+    expect(JSON.parse(String((posts[0]![1] as { body: string }).body))).toEqual({ kind: 'question' });
   });
 
   it('one whose push reached the owner is not reported', async () => {
