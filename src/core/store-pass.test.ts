@@ -260,10 +260,9 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
       .rejects.toThrow(ONE_JSON);
     // A Content-Type is held to the list on a read as well.
     await expect(send(`${ORIGIN}/admin/api/2025-10/shop.json`, { [H]: TOKEN, 'Content-Type': 'text/plain' }, pass())).rejects.toThrow(ONE_JSON);
+    // A body with no Content-Type: Rack reads a POST without one as a form.
+    await expect(post(GRAPHQL, document, {})).rejects.toThrow(ONE_JSON);
     expect(sent).toHaveLength(0);
-    // A body with no Content-Type is not read as a form, and goes out.
-    await expect(post(GRAPHQL, document, {})).resolves.toHaveProperty('status', 200);
-    expect(sent).toHaveLength(1);
   });
 
   it('looks for the word in the text as sent too, where resolving an escape eats the letters after it', async () => {

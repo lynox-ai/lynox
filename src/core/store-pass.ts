@@ -141,7 +141,8 @@ const asciiTrim = (value: string): string => value.replace(/^[ \t]+|[ \t]+$/g, '
  * the store decodes it, names and values. The body check reads the body as JSON in UTF-8, so a
  * body sent compressed, or labelled as anything other than one of {@link JSON_CONTENT_TYPES}, is
  * refused: a form type would let the store read the same bytes as a query, and a charset as other
- * text. A body with no `Content-Type` is not read as a form.
+ * text. A body with no `Content-Type` is refused as well ({@link storePassBodyRefusal}): Rack reads
+ * a POST without one as a form.
  */
 function credentialRequestRefusal(url: URL, headers: Record<string, string>): string | null {
   if (url.search !== '') {
@@ -275,13 +276,13 @@ export function storePassRefusal(url: URL, headers: Record<string, string>, pass
  * hop sends, as bytes. An exchange pass is spent here, by the first request that passes. A
  * credential request's body is JSON, and its text, escapes resolved, names no access token and
  * asks for no persisted query. JSON's escapes are the ones resolved, so its keys and strings are
- * read as decoded. A credential body goes with at most one `Content-Type`, a JSON one
+ * read as decoded. A credential body goes with exactly one `Content-Type`, a JSON one
  * ({@link storePassRefusal} refuses any other); `headers` are the hop's.
  */
 export function storePassBodyRefusal(pass: StorePass, body: Buffer | undefined, headers: Record<string, string>): string | null {
   if (pass.kind !== 'exchange') {
     if (body === undefined || body.length === 0) return null;
-    if (contentTypesOf(headers).length > 1) return 'a request under a store pass sends one Content-Type, application/json';
+    if (contentTypesOf(headers).length !== 1) return 'a request under a store pass sends one Content-Type, application/json';
     const text = body.toString('utf8');
     try {
       JSON.parse(text);
