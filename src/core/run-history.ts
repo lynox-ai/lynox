@@ -3242,6 +3242,10 @@ export class RunHistory {
    * started (or an older row), `undefined` for no such run. Not part of {@link getPipelineRun},
    * whose row the run API sends as it is.
    */
+  getPipelineRunOrigins(ids: readonly string[]): Map<string, string> {
+    return persistence.getPipelineRunOrigins(this.db, ids);
+  }
+
   getPipelineRunOrigin(id: string): string | null | undefined {
     return persistence.getPipelineRunOrigin(this.db, id);
   }

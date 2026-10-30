@@ -373,6 +373,25 @@ export function withdrawPromptOnAbort(
  * that the chat may never have read store data: `provisioned` on an instance the control plane
  * set up (its support can look), `self-hosted` otherwise (its own logs say why).
  */
+/**
+ * {@link containedFields} for workflow runs, from the chat each was started from: a run's outputs
+ * carry what that chat read. A run no chat started (a plan, the library) carries nothing here.
+ */
+function runContainedFields(
+  containment: Containment | null,
+  origins: ReadonlyMap<string, string>,
+): (runId: string) => { contained?: true; contained_unknown?: 'provisioned' | 'self-hosted' } {
+  const threads = [...new Set(origins.values())];
+  const states = containedThreadStates(containment, threads);
+  return (runId) => {
+    const origin = origins.get(runId);
+    if (origin === undefined) return {};
+    const f = containedFields(states, origin);
+    if (!f.contained) return {};
+    return f.contained_unknown !== undefined ? { contained: true, contained_unknown: f.contained_unknown } : { contained: true };
+  };
+}
+
 function containedFields(states: { contained: Set<string>; unknown: Set<string> }, id: string): { contained: boolean; contained_unknown?: 'provisioned' | 'self-hosted' } {
   if (states.contained.has(id)) return { contained: true };
   if (states.unknown.has(id)) return { contained: true, contained_unknown: isProvisionedInstance() ? 'provisioned' : 'self-hosted' };
@@ -7831,7 +7850,8 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const runs = history.getRecentPipelineRuns(limit);
-      jsonResponse(res, 200, { runs });
+      const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins(runs.map((r) => r.id)));
+      jsonResponse(res, 200, { runs: runs.map((r) => ({ ...r, ...fieldsOf(r.id) })) });
     }, READS);
 
     this.addStatic('user', 'GET /api/workflows/stats/steps', async (req, res) => {
@@ -7857,7 +7877,8 @@ export class LynoxHTTPApi {
       if (!requireService(res, history, 'History')) return;
       const run = history.getPipelineRun(params['id']!);
       if (!run) { errorResponse(res, 404, 'Pipeline run not found'); return; }
-      jsonResponse(res, 200, run);
+      const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins([run.id]));
+      jsonResponse(res, 200, { ...run, ...fieldsOf(run.id) });
     }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/steps', async (_req, res, params) => {
