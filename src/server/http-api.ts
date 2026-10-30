@@ -109,6 +109,8 @@ import type { WorkerLoop } from '../core/worker-loop.js';
 import type {
   HealthBody,
   UsageSummaryResponse,
+  OAuthClaimPreviewRequest,
+  OAuthClaimPreviewResponse,
   OAuthClaimRequest,
   OAuthClaimResponse,
   OAuthDeclineCode,
@@ -11023,6 +11025,73 @@ export class LynoxHTTPApi {
         }
       });
     }, ownerOnly('claim the managed Google connection'));
+
+    // Which Google account a parked claim belongs to, so the confirmation can
+    // name it before anything is claimed and the owner confirms a known account.
+    //
+    // It reads and never claims; the control plane answers from the same pending
+    // grant without consuming it. Only the address comes back, never a token.
+    //
+    // Three answers, and the difference between the last two is the point:
+    // - `{ email }`: the control plane named the account;
+    // - `{ unnamed: true }`: it answered, and the grant has no usable address.
+    //   Whoever runs the consent can arrange that (an account without a verified
+    //   address), so the dialog does not let this be confirmed at all;
+    // - `{}`: no answer to go by (an older control plane without the route, an
+    //   expired or unknown nonce, a network error). The dialog falls back to
+    //   saying it cannot name the account. That a live grant cannot be steered
+    //   here rests on the control plane: it mints the nonce only after storing the
+    //   grant, and its preview route must answer from the same row as the claim.
+    //
+    // An address counts only if it is not blank and has an `@` (after trimming): a
+    // blank one would show an empty name next to "Only confirm if this is your
+    // account". This is a sanity check, not validation. A 200 that does not parse
+    // is treated like a 200 without an address. What each answer lets the user do
+    // is decided in the dialog (`claimConfirmCopy`).
+    this.addStatic('user', 'POST /api/google/claim-managed/preview', async (_req, res, _params, body) => {
+      // Same gate and order as the claim: a preview on an instance that cannot
+      // claim would only name an account it could never connect.
+      const google = await engine.ensureGoogleAuth();
+      if (!requireService(res, google, 'Google auth')) return;
+
+      const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+      const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'];
+      const httpSecret = process.env['LYNOX_HTTP_SECRET'];
+      if (!controlPlaneUrl || !instanceId || !httpSecret) {
+        errorResponse(res, 400, 'Not a managed instance or missing control plane config');
+        return;
+      }
+
+      const parsed = body as Record<string, unknown> | undefined;
+      const claimNonce = typeof parsed?.['claim_nonce'] === 'string' ? parsed['claim_nonce'] : '';
+      if (!claimNonce) {
+        errorResponse(res, 400, 'Missing claim_nonce');
+        return;
+      }
+
+      let answer: { email: string } | { unnamed: true } | Record<string, never> = {};
+      try {
+        const previewRes = await cpFetch(controlPlaneUrl, '/internal/oauth/google/claim-preview', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-instance-secret': httpSecret,
+          },
+          body: JSON.stringify({
+            instance_id: instanceId,
+            claim_nonce: claimNonce,
+          } satisfies OAuthClaimPreviewRequest),
+        }, google.hostPolicy);
+        if (previewRes.ok) {
+          const data = (await previewRes.json().catch(() => null)) as OAuthClaimPreviewResponse | null;
+          const email = typeof data?.email === 'string' ? data.email.trim() : '';
+          answer = email.includes('@') ? { email } : { unnamed: true };
+        }
+      } catch {
+        // Unknown, not an error: the dialog still works without the address.
+      }
+      jsonResponse(res, 200, answer);
+    }, ownerOnly('see which Google account a pending connection belongs to'));
 
     // ── API-profile OAuth: the authorization-code round-trip (W1b) ────────
     //

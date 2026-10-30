@@ -1753,8 +1753,32 @@ const translations: Record<string, Record<Locale, string>> = {
 		en: 'A Google account is waiting to be connected to this instance. Connect it?',
 	},
 	'settings.google.claim_confirm_hint': {
-		de: 'Nur bestätigen, wenn du die Verbindung gerade selbst gestartet hast. Welches Konto es ist, können wir hier nicht anzeigen — wer den Link geschickt hat, könnte ein fremdes Konto verbinden.',
-		en: 'Only confirm if you started this yourself. We cannot show you which account it is — whoever sent you the link could be connecting theirs.',
+		de: 'Nur bestätigen, wenn du die Verbindung gerade selbst gestartet hast. Welches Konto es ist, können wir hier nicht anzeigen. Wer dir einen Link schickt, könnte damit sein eigenes Konto verbinden.',
+		en: 'Only confirm if you started this yourself. We cannot show you which account it is. Someone who sends you a link could use it to connect their own account.',
+	},
+	'settings.google.claim_confirm_named': {
+		de: 'Das Google-Konto {email} wartet darauf, mit dieser Instanz verbunden zu werden. Verbinden?',
+		en: 'The Google account {email} is waiting to be connected to this instance. Connect it?',
+	},
+	'settings.google.claim_confirm_named_hint': {
+		de: 'Nur bestätigen, wenn das dein Konto ist und du die Verbindung gerade selbst gestartet hast. Wer dir einen Link schickt, könnte sein eigenes Konto verbinden.',
+		en: 'Only confirm if this is your account and you started this yourself. Someone who sends you a link could use it to connect their own account.',
+	},
+	'settings.google.claim_looking': {
+		de: 'Ein Google-Konto wartet darauf, mit dieser Instanz verbunden zu werden. Wir sehen nach, welches es ist …',
+		en: 'A Google account is waiting to be connected to this instance. Checking which one it is …',
+	},
+	'settings.google.claim_unnamed': {
+		de: 'Ein Google-Konto wartet darauf, mit dieser Instanz verbunden zu werden. Wir konnten nicht bestätigen, welches es ist, deshalb lässt es sich hier nicht verbinden.',
+		en: 'A Google account is waiting to be connected to this instance. We could not confirm which one it is, so it cannot be connected here.',
+	},
+	'settings.google.claim_unnamed_hint_connected': {
+		de: 'Brich ab. Dein bisher verbundenes Konto bleibt verbunden. Hast du die Verbindung selbst gestartet und willst ein anderes Konto verbinden, trenne zuerst mit „Verbindung trennen“ und verbinde dann mit „Mit Google verbinden“ neu. Nimm dafür ein Google-Konto, dessen E-Mail-Adresse bestätigt ist.',
+		en: 'Cancel. The account connected so far stays connected. If you started this yourself and want to connect another account, first use “Disconnect”, then connect again with “Connect with Google”. Use a Google account whose email address is verified.',
+	},
+	'settings.google.claim_unnamed_hint': {
+		de: 'Wenn du die Verbindung selbst gestartet hast, brich ab und starte sie mit „Mit Google verbinden“ neu. Passiert es wieder, nimm ein Google-Konto, dessen E-Mail-Adresse bestätigt ist. Hast du sie nicht gestartet, brich ab.',
+		en: 'If you started this yourself, cancel and start it again with “Connect with Google”. If it happens again, use a Google account whose email address is verified. If you did not start it, cancel.',
 	},
 	'settings.google.claim_confirm_yes': { de: 'Verbinden', en: 'Connect' },
 	'settings.google.claim_confirm_no': { de: 'Abbrechen', en: 'Cancel' },
