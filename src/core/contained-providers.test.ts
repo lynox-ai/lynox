@@ -238,6 +238,10 @@ describe('profiles and the judge', () => {
       const behindProxy = { api_base_url: 'https://proxy.example/v1' } as Parameters<typeof judgeModelId>[0];
       setTierSetResolver({ tierSet: { fast: { provider: 'anthropic', model_id: JUDGE_MODELS.anthropic, api_key: POOL_ANTHROPIC } } as TierSet });
       expect(judgeModelId(behindProxy, 'fast', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
+      // A slot of the instance's own provider with a base of its own gets its own client: that base
+      // is where it goes, not the instance's.
+      setTierSetResolver({ tierSet: { fast: { provider: 'anthropic', model_id: JUDGE_MODELS.anthropic, api_base_url: 'https://proxy.example/v1' } } as TierSet });
+      expect(judgeModelId({} as Parameters<typeof judgeModelId>[0], 'fast', 'anthropic')).toBeNull();
     } finally {
       setTierSetResolver({ routingMode: 'standard', tierSet: null });
     }

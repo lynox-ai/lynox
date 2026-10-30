@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, statSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { FIREWORKS_API_BASE } from './tier-presets.js';
 
 // We mock node:os and node:process to control homedir and cwd
 const tmpBase = mkdtempSync(join(tmpdir(), 'lynox-config-'));
@@ -189,6 +190,28 @@ describe('Config', () => {
       const cfg = loadConfig();
       expect(cfg.worker_profile).toBeUndefined();
       expect(cfg.model_profiles ?? {}).toEqual({});
+    });
+
+    it('keeps a Fireworks worker profile with the control plane\'s key', async () => {
+      const poolKey = ['fw', 'pool', 'value'].join('-');
+      const saved = { tier: process.env['LYNOX_BILLING_TIER'], key: process.env['FIREWORKS_API_KEY'] };
+      try {
+        process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+        process.env['LYNOX_BILLING_TIER'] = 'managed';
+        process.env['FIREWORKS_API_KEY'] = poolKey;
+        process.env['LYNOX_WORKER_PROFILE'] = 'worker';
+        process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+          worker: { provider: 'openai', api_base_url: FIREWORKS_API_BASE, api_key: poolKey, model_id: 'accounts/fireworks/models/gpt-oss-120b' },
+          fallback: MISTRAL_WORKER,
+        });
+        const { loadConfig } = await import('./config.js');
+        const cfg = loadConfig();
+        expect(cfg.worker_profile).toBe('worker');
+        expect(Object.keys(cfg.model_profiles ?? {})).toEqual(['worker']);
+      } finally {
+        if (saved.tier === undefined) delete process.env['LYNOX_BILLING_TIER']; else process.env['LYNOX_BILLING_TIER'] = saved.tier;
+        if (saved.key === undefined) delete process.env['FIREWORKS_API_KEY']; else process.env['FIREWORKS_API_KEY'] = saved.key;
+      }
     });
 
     it('keeps the Mistral worker profile without the switch', async () => {
