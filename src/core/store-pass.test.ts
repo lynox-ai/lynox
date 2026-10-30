@@ -251,15 +251,26 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
       { 'Content-Type': 'application/json; charset*=utf-7\'\'' },
       { 'Content-Type': 'application/x-www-form-urlencoded' },
       { 'Content-Type': 'application/json', 'content-type': 'application/json' },
-      {},
+      { 'Content-Type': ' application/json' },
     ]) {
       await expect(post(GRAPHQL, document, headers), JSON.stringify(headers)).rejects.toThrow(ONE_JSON);
     }
     // A JSON body that a form type would read as a query naming the token.
     await expect(post(GRAPHQL, '{"x":"&query=%7Bshop%7Bstorefront%41ccessTokens%7D%7D&y="}', { 'Content-Type': 'application/x-www-form-urlencoded' }))
       .rejects.toThrow(ONE_JSON);
-    // Without a body there is nothing to read: a read sends no Content-Type, or the JSON one.
+    // A Content-Type is held to the list on a read as well.
     await expect(send(`${ORIGIN}/admin/api/2025-10/shop.json`, { [H]: TOKEN, 'Content-Type': 'text/plain' }, pass())).rejects.toThrow(ONE_JSON);
+    expect(sent).toHaveLength(0);
+    // A body with no Content-Type is not read as a form, and goes out.
+    await expect(post(GRAPHQL, document, {})).resolves.toHaveProperty('status', 200);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('looks for the word in the text as sent too, where resolving an escape eats the letters after it', async () => {
+    await expect(post(GRAPHQL, JSON.stringify({ query: '{ shop { name } }', variables: { v: '\\u{0000005c}u\\u{61}accesstoken' } })))
+      .rejects.toThrow(/the body names an access token/);
+    await expect(send(`${GRAPHQL}?v=${encodeURIComponent('\\u{0000005c}u\\u{61}accesstoken')}`, { [H]: TOKEN }, pass()))
+      .rejects.toThrow(/the address names an access token/);
     expect(sent).toHaveLength(0);
   });
 

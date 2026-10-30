@@ -90,8 +90,8 @@ const UNICODE_ESCAPE = /(?<!\\)\\+u(?:\{0*([0-9a-fA-F]{1,6})\}|([0-9a-fA-F]{4}))
  * `text` with every unicode escape resolved, again and again until nothing changes (at most eight
  * rounds). A document nested in a GraphQL string literal (`bulkOperationRunQuery(query: "…")`) is
  * decoded once more by the store, so one round of JSON decoding does not show what it names.
- * Resolving an escape that is really an escaped backslash can change the text of a value, but
- * never hides a field name: no escape stands directly before a name.
+ * Resolving an escape that is really an escaped backslash can eat the letters after it, so the
+ * words are looked for in the text as sent as well ({@link namesAccessToken}).
  */
 function resolveEscapes(text: string): string {
   let current = text;
@@ -108,15 +108,19 @@ function resolveEscapes(text: string): string {
 
 /**
  * Whether `text` names an access token (`accessToken`, `access_token`, any case), with its escapes
- * resolved. A GraphQL field name has no escapes, and an alias or a fragment carries it
+ * resolved and as sent. A GraphQL field name has no escapes, and an alias or a fragment carries it
  * as written, so a document that selects a token field names it here. The response is not read:
  * a token the store returns under another name is not seen.
  */
 export function namesAccessToken(text: string): boolean {
-  return TOKEN_WORD.test(resolveEscapes(text));
+  return TOKEN_WORD.test(text) || TOKEN_WORD.test(resolveEscapes(text));
 }
 
-/** Whether `text`, its escapes resolved, asks for a persisted query: a document the store runs without its being sent. */
+/**
+ * Whether `text`, its escapes resolved, asks for a persisted query: a document the store runs
+ * without its being sent. Unlike `access`, the word starts with a letter that is no hex digit, so
+ * resolving an escape cannot eat its first letters.
+ */
 function asksPersisted(text: string): boolean {
   return PERSISTED_WORD.test(resolveEscapes(text));
 }
@@ -129,11 +133,15 @@ function contentTypesOf(headers: Record<string, string>): string[] {
   return Object.entries(headers).filter(([name]) => name.trim().toLowerCase() === 'content-type').map(([, value]) => value);
 }
 
+/** `value` without ASCII spaces and tabs at its ends: a no-break space is sent as written, as in `http.ts`. */
+const asciiTrim = (value: string): string => value.replace(/^[ \t]+|[ \t]+$/g, '');
+
 /**
  * Why a credential request's query or headers may not go out, or `null`. The query is read as
  * the store decodes it, names and values. The body check reads the body as JSON in UTF-8, so a
- * body sent compressed, or as anything other than one of {@link JSON_CONTENT_TYPES}, is refused:
- * a form type would let the store read the same bytes as a query, and a charset as other text.
+ * body sent compressed, or labelled as anything other than one of {@link JSON_CONTENT_TYPES}, is
+ * refused: a form type would let the store read the same bytes as a query, and a charset as other
+ * text. A body with no `Content-Type` is not read as a form.
  */
 function credentialRequestRefusal(url: URL, headers: Record<string, string>): string | null {
   if (url.search !== '') {
@@ -146,7 +154,7 @@ function credentialRequestRefusal(url: URL, headers: Record<string, string>): st
   }
   const types = contentTypesOf(headers);
   // Two of them are refused with a body ({@link storePassBodyRefusal}); without one they say nothing.
-  if (types.some((type) => !JSON_CONTENT_TYPES.has(type.trim().toLowerCase()))) {
+  if (types.some((type) => !JSON_CONTENT_TYPES.has(asciiTrim(type).toLowerCase()))) {
     return 'a request under a store pass sends one Content-Type, application/json';
   }
   return null;
@@ -267,13 +275,13 @@ export function storePassRefusal(url: URL, headers: Record<string, string>, pass
  * hop sends, as bytes. An exchange pass is spent here, by the first request that passes. A
  * credential request's body is JSON, and its text, escapes resolved, names no access token and
  * asks for no persisted query. JSON's escapes are the ones resolved, so its keys and strings are
- * read as decoded. A credential body goes with a JSON `Content-Type` ({@link storePassRefusal}
- * refuses any other); `headers` are the hop's.
+ * read as decoded. A credential body goes with at most one `Content-Type`, a JSON one
+ * ({@link storePassRefusal} refuses any other); `headers` are the hop's.
  */
 export function storePassBodyRefusal(pass: StorePass, body: Buffer | undefined, headers: Record<string, string>): string | null {
   if (pass.kind !== 'exchange') {
     if (body === undefined || body.length === 0) return null;
-    if (contentTypesOf(headers).length !== 1) return 'a request under a store pass sends one Content-Type, application/json';
+    if (contentTypesOf(headers).length > 1) return 'a request under a store pass sends one Content-Type, application/json';
     const text = body.toString('utf8');
     try {
       JSON.parse(text);
