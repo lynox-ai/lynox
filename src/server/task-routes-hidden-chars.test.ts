@@ -130,4 +130,19 @@ describe('the task routes and characters that render as nothing (real engine)', 
     expect(ok.status).toBe(200);
     expect(engine.getTaskManager()!.getTask(id)?.title).toBe('Monthly close, checked');
   });
+
+  it("a helper's refused edit of a schedule does not mark it as the helper's edit; one without the character does", async () => {
+    const id = 'hidden-sched';
+    engine.getRunHistory()!.insertTrigger({
+      id, title: 'Weekly', source: 'cron', effect: 'notify', scheduleCron: '0 9 * * 1', nextRunAt: '2027-01-04T09:00:00.000Z',
+      confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner',
+    });
+    const marks = (): unknown => engine.getEngineDb()!.getDb().prepare('SELECT mandate_editor FROM triggers WHERE id = ?').get(id);
+    const refused = await ask('PATCH', `/api/tasks/${id}`, mandateCookie, { title: `Weekly${tagged('x')}` });
+    expect(refused.status).toBe(400);
+    expect(marks()).toEqual({ mandate_editor: null });
+    const ok = await ask('PATCH', `/api/tasks/${id}`, mandateCookie, { title: 'Weekly, Monday' });
+    expect(ok.status, 'positive control: the helper may edit it').toBe(200);
+    expect(marks()).toEqual({ mandate_editor: 'mandate:ida@example.invalid' });
+  });
 });
