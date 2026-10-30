@@ -89,9 +89,10 @@ export interface ProviderIncidentRequest {
  *  - `'question'`   — a scheduled run (a task or a workflow) asked its owner a
  *    question and waits for the answer.
  *
- * Read by the control plane to accept a notice and pick its text. An engine
- * sends `'question'` only to a control plane that lists it here: an older one
- * answers an unknown kind with 400, and then no mail goes out at all.
+ * Read by the control plane to accept a notice and pick its text. A control
+ * plane that predates a kind answers it with 400, and then no mail goes out at
+ * all; the engine cannot tell, so a new kind is deployed on the control plane
+ * before any engine sends it.
  */
 export const ESCALATION_NOTICE_KINDS = ['escalation', 'question'] as const;
 export type EscalationNoticeKind = typeof ESCALATION_NOTICE_KINDS[number];

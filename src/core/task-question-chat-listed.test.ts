@@ -139,7 +139,8 @@ describe('a background task that asks its owner', { timeout: 60_000 }, () => {
     void loop.tick();
     await waitUntil('the question to go out', () => seen !== undefined);
 
-    expect(seen).toEqual({ listed: true, messageCount: expect.any(Number) as number, waiting: true });
+    expect(seen!.listed).toBe(true);
     expect(seen!.messageCount).toBeGreaterThan(0);
+    expect(seen!.waiting).toBe(true);
   });
 });
