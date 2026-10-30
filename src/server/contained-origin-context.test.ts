@@ -31,6 +31,7 @@ vi.mock('../core/chat-context.js', async (importOriginal) => {
 });
 
 const { LynoxHTTPApi } = await import('./http-api.js');
+const { originLineKeys } = await import('../../packages/web-ui/src/lib/stores/contained-way-out.js');
 const { reloadConfig } = await import('../core/config.js');
 
 describe('the run route takes a contained-origin context (real engine)', () => {
@@ -147,8 +148,12 @@ describe('the run route takes a contained-origin context (real engine)', () => {
       const res = await fetch(`${baseUrl}/api/config`, { headers: { Authorization: `Bearer ${SECRET}` } });
       return ((await res.json()) as Record<string, unknown>)['bulk_runs'] as Record<string, unknown>;
     };
-    // What the line above the input reads as "the owner's to turn on" (`contained-way-out.ts`).
-    const uiOwnerWay = (b: Record<string, unknown>): boolean => b['source'] === 'config' || b['allowed'] === true;
+    // What the line above the input names as the way for bulk runs, read by the UI's own reader.
+    const uiOwnerWay = (b: Record<string, unknown>): boolean => {
+      const keys = originLineKeys(true, { managed: 'managed', bulk_runs: b });
+      expect(keys.includes('contained.way_setting')).not.toBe(keys.includes('contained.way_support'));
+      return keys.includes('contained.way_setting');
+    };
     process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'] = 'true';
     process.env['LYNOX_BILLING_TIER'] = 'managed';
     process.env['LYNOX_FEATURE_BULK_RUNS'] = '1';

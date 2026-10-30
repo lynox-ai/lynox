@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { containedPrefill, containedReason, originLineKeys, refusalOffersNewChat, PREFILL_MAX_MESSAGES } from './contained-way-out.js';
 import { recordToolResult, recordToolCall, type AttributionState } from './chat-attribution.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const typed = (content: string) => ({ role: 'user', content, typed: true });
 
@@ -134,6 +136,28 @@ describe('the line of a chat opened from one that only reads', () => {
 		expect(originLineKeys(true, cfg({ ...opened, allowed: 'true', shopify: true }, 'managed'))).toEqual([OFF, 'contained.way_support', DRAFT]);
 	});
 
+	it('names no switch where the engine database did not open: the switch is locked there', () => {
+		expect(originLineKeys(true, cfg({ on: false, source: 'config', allowed: false, db: false, shopify: true }))).toEqual([OFF, DRAFT]);
+		expect(originLineKeys(true, cfg({ on: false, source: 'config', allowed: false, db: false, shopify: false }))).toEqual([OFF, 'contained.way_flag', DRAFT]);
+		// A pool tier without the database is not open to the owner: support, as before.
+		expect(originLineKeys(true, cfg({ on: false, source: 'control-plane', allowed: false, db: false, shopify: true }, 'managed'))).toEqual([OFF, 'contained.way_support', DRAFT]);
+		// An engine older than `db` reads as it did.
+		expect(originLineKeys(true, cfg({ on: false, source: 'config', shopify: true }))).toEqual([OFF, SETTING, DRAFT]);
+	});
+
+	it('tells a mandate\'s session that the owner turns it on, and the owner\'s session where', () => {
+		const mandate = { viewer: 'mandate' };
+		expect(originLineKeys(true, cfg({ on: false, source: 'config', db: true, shopify: true, ...mandate }))).toEqual([OFF, 'contained.way_setting_mandate', DRAFT]);
+		expect(originLineKeys(true, cfg({ on: false, source: 'config', db: true, shopify: false, ...mandate }))).toEqual([OFF, 'contained.way_flag_mandate', 'contained.way_setting_mandate', DRAFT]);
+		expect(originLineKeys(true, cfg({ on: false, source: 'control-plane', allowed: true, db: true, shopify: true, ...mandate }, 'managed'))).toEqual([OFF, 'contained.way_setting_mandate', DRAFT]);
+		// Support is support for everyone.
+		expect(originLineKeys(true, cfg({ on: false, source: 'control-plane', allowed: false, shopify: false, ...mandate }, 'managed'))).toEqual([OFF, 'contained.way_support', DRAFT]);
+		// The owner, a session the engine cannot name, and an engine older than `viewer` get the owner's sentences.
+		for (const viewer of ['owner', 'none', undefined, 'Mandate']) {
+			expect(originLineKeys(true, cfg({ on: false, source: 'config', db: true, shopify: false, viewer })), String(viewer)).toEqual([OFF, 'contained.way_flag', SETTING, DRAFT]);
+		}
+	});
+
 	it('gives no line when the config could not be read', () => {
 		expect(originLineKeys(false, null)).toEqual([]);
 		expect(originLineKeys(false, cfg({ on: true, source: 'config', shopify: true }))).toEqual([]);
@@ -141,5 +165,23 @@ describe('the line of a chat opened from one that only reads', () => {
 		// The flag alone is not enough: a field that is not exactly true reads as off.
 		expect(originLineKeys(true, cfg({ on: 'true', source: 'config', shopify: true }))).toEqual([OFF, SETTING, DRAFT]);
 		expect(originLineKeys(true, cfg({ on: 'true', source: 'control-plane', shopify: true }, 'managed'))).toEqual([OFF, 'contained.way_support', DRAFT]);
+	});
+});
+
+describe('the sentences that name who turns bulk runs on (ux U-053 and its follow-up)', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf-8');
+	const entry = (key: string): string => {
+		const lines = source.split('\n').filter((l) => l.trimStart().startsWith(`'${key}':`));
+		expect(lines, key).toHaveLength(1);
+		return lines[0]!;
+	};
+	it.each([
+		['contained.way_setting', 'Massenläufe schaltest du in den Einstellungen unter „Tool-Berechtigungen“ ein.', 'You turn on bulk runs in Settings under “Tool permissions”.'],
+		['contained.way_setting_mandate', 'Massenläufe kann nur der Inhaber einschalten, in den Einstellungen unter „Tool-Berechtigungen“.', 'Only the owner can turn on bulk runs, in Settings under “Tool permissions”.'],
+		['contained.way_flag_mandate', 'Das Lesen von Shopify-Shops in Massenläufen kann nur der Inhaber in der Konfiguration der Instanz freischalten (LYNOX_FEATURE_SHOPIFY_BULK_READ).', "Only the owner can enable reading Shopify stores in bulk runs, in the instance\\'s configuration (LYNOX_FEATURE_SHOPIFY_BULK_READ)."],
+	])('%s', (key, de, en) => {
+		const line = entry(key);
+		expect(line).toContain(`de: '${de}'`);
+		expect(line).toContain(`en: '${en}'`);
 	});
 });

@@ -7035,7 +7035,7 @@ export class LynoxHTTPApi {
     }, READS);
 
     // ── Config ──
-    this.addStatic('user', 'GET /api/config', async (_req, res) => {
+    this.addStatic('user', 'GET /api/config', async (req, res) => {
       const { readUserConfig, loadConfig: loadEffectiveConfig } = await import('../core/config.js');
       const config = readUserConfig();
       // The loader's OWN output. `readUserConfig()` above is the raw file;
@@ -7143,6 +7143,9 @@ export class LynoxHTTPApi {
           // Whether a bulk run may read a Shopify store: the second half of what a chat opened from
           // a read-only one may promise (`chat-context.ts › storeChangeByBulkRun`).
           shopify: shopifyBulkReadEnabled(),
+          // Whose session asks, as in `/api/approvals`: a mandate does not see the owner's switch,
+          // so the line of a chat opened from a read-only one says the owner turns it on.
+          viewer: approvalScopeOf(this._principalOf(req))?.viewer ?? 'none',
         };
       }
       // model-presets W4: the per-preset "Modell-Strategie" signal the settings
