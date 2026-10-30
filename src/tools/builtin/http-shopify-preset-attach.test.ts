@@ -12,9 +12,13 @@ vi.mock('../../core/shopify-host.js', async (importActual) => ({
   isShopifyAdminUrl: () => false,
 }));
 
-const { attachStoredCredential } = await import('./http.js');
+const { attachStoredCredential, httpRequestTool } = await import('./http.js');
 
 const TOKEN = 'shpat-store-value';
+
+const STORE_PATH_REFUSAL = 'Error: api_profile "shop-acme" is the connection of a Shopify store, and its token goes only to the store\'s API: paths under /admin/, with every slash written out. '
+  + 'This request goes to another path on the store, so nothing was sent. Other paths there are served by others than the store\'s API (an app\'s pages under /apps/, for example), '
+  + 'and lynox does not send the store\'s token to them. Do not retry it, and do not set a credential yourself; make the request to the API path for what you need.';
 
 function shopProfile(base: string, shop: string, over: Record<string, unknown> = {}): ApiProfile {
   const host = new URL(base).hostname;
@@ -36,6 +40,26 @@ async function attach(url: string, profile: ApiProfile): Promise<{ attached: Awa
     principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),
   }, { bulkRunId: 'run-1' });
   return { attached, headers, read };
+}
+
+/** One `http_request` from a chat, through the tool's handler: the answer the model reads. */
+async function chatRequest(url: string, profile: ApiProfile): Promise<string> {
+  const store = new ApiStore();
+  expect(store.register(profile)).toBe(true);
+  const vault: Record<string, string> = { [accessTokenKey('shop-acme')]: TOKEN };
+  const agent = {
+    principal: OWNER_PRINCIPAL,
+    sessionCounters: { httpRequests: 0 },
+    secretStore: { resolve: (n: string) => vault[n] ?? null, resolveSecretRefs: (x: unknown) => x, listNames: () => Object.keys(vault) },
+    promptUser: async () => 'Allow',
+    getAvailableTools: () => [{ definition: { name: 'http_request' } }],
+    toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+  };
+  try {
+    return String(await httpRequestTool.handler({ url, method: 'GET' }, agent as never));
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
 }
 
 describe('a Shopify preset profile behind the store check', () => {
@@ -74,6 +98,19 @@ describe('a Shopify preset profile behind the store check', () => {
     const { headers } = await attach(url, shopProfile('https://acme.myshopify.com', 'acme'));
     expect(headers).toEqual({});
   });
+
+  // What the model reads in a chat: the general text says the token goes "to its base_url", and
+  // these paths are on the base.
+  it.each([
+    ['an app proxy path', 'https://acme.myshopify.com/apps/some-app/x'],
+    ['admin without its slash', 'https://acme.myshopify.com/admin'],
+    ['admin in other case', 'https://acme.myshopify.com/ADMIN/api/2025-10/shop.json'],
+    ['an encoded climb out of admin', 'https://acme.myshopify.com/admin/..%2fapps/x'],
+    ['an encoded backslash', 'https://acme.myshopify.com/admin/..%5Capps/x'],
+  ])('tells a chat that the store\'s token goes to its API paths only, for %s', async (_label, url) => {
+    expect(await chatRequest(url, shopProfile('https://acme.myshopify.com', 'acme'))).toBe(STORE_PATH_REFUSAL);
+  });
+
 
   it('attaches nothing to another port of the store', async () => {
     const { headers } = await attach('https://acme.myshopify.com:8443/admin/api/2025-10/shop.json', shopProfile('https://acme.myshopify.com', 'acme'));

@@ -809,6 +809,33 @@ describe('api_setup tool', () => {
     });
   });
 
+  // A profile with a pasted token on a store: while the store exchange is off it is saved (and
+  // every request through it gets the closed text); once it is on, it is pointed at the preset.
+  describe('a profile of its own on a Shopify store', () => {
+    const pasted: ApiProfile = {
+      id: 'shop-pasted', name: 'Shop', base_url: 'https://acme.myshopify.com/admin/api/2026-04', description: 'The admin API of one store',
+      auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+    };
+    const save = (store: ApiStore): Promise<string> =>
+      apiSetupTool.handler({ action: 'create', profile: pasted }, createMockAgent(store, undefined, async () => 'Allow')) as Promise<string>;
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it('is refused and pointed at the preset while the store exchange is on', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+      const store = new ApiStore();
+      expect(await save(store)).toBe('Validation error: Invalid profile: the API of Shopify is connected only through this engine\'s built-in "shopify" provider, which shows the user what lynox may do there before a write access and asks every write with what it sends. '
+        + 'A profile with another sign-in, a pasted token included, would reach the same account past both. Use auth.type "oauth2" with auth.oauth.preset_id "shopify" and auth.oauth.preset_params naming '
+        + 'shop (the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case), then api_setup action "connect".');
+      expect(store.get('shop-pasted')).toBeUndefined();
+    });
+
+    it('is not refused for that reason while the store exchange is off', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '0');
+      const result = await save(new ApiStore());
+      expect(result).not.toContain('built-in "shopify" provider');
+    });
+  });
+
   // A built-in provider's app lives under the names its id derives, and the owner enters it in
   // the profile's connection form, which writes only those. A save fills them in or refuses others.
   describe('the app names of a built-in provider', () => {
