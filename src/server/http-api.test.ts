@@ -4,7 +4,7 @@ import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
-import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
@@ -17873,7 +17873,8 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
   // The provider signs its redirect with the client secret (`sec-1` below), and the signed shop
   // has to be the store the profile's own parameter derives. All of it before the code is spent.
   const PROFILE = 'shop-acme';
-  const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+  // A fresh state per test: the callback spends each one (`spendProfileOAuthState`).
+  let STATE = randomUUID();
   const VERIFIER = 'v'.repeat(43);
   const CLIENT_SECRET = 'sec-1';
 
@@ -17898,6 +17899,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
   let origGetEngineDb: unknown;
   const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
   beforeEach(() => {
+    STATE = randomUUID();
     previousDataDir = process.env['LYNOX_DATA_DIR'];
     dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauth-shopify-'));
     process.env['LYNOX_DATA_DIR'] = dataDir;
@@ -17951,6 +17953,20 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(req.bodyFormat).toBe('form');
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'read_orders']);
     expect(store.get(PROFILE)?.oauth_grant?.origin).toBe('callback');
+  });
+
+  it('a second callback with the same state sends no exchange and asks for no exchange pass, though its cookie and signature still hold', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    exchangePassFor.calls = [];
+    const { cookie } = await arrange();
+    const query = signed(good());
+    expect((await call(query, cookie)).status).toBe(200);
+    expect([mockExchangeToken.mock.calls.length, exchangePassFor.calls.length]).toEqual([1, 1]);
+    // Whoever kept the cookie's value and the URL replays both: refused like any invalid round-trip.
+    const replay = await call(query, cookie);
+    expect(replay.status).toBe(400);
+    expect(await replay.text()).toContain('This authorization link is no longer valid.');
+    expect([mockExchangeToken.mock.calls.length, exchangePassFor.calls.length]).toEqual([1, 1]);
   });
 
   it('asks for the exchange pass over the verified store and the body it sends, and hands the pass to the exchange (B4)', async () => {
@@ -18197,7 +18213,8 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   // being looked at.
 
   const PROFILE = 'crm-api';
-  const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+  // A fresh state per test: the callback spends each one (`spendProfileOAuthState`).
+  let STATE = randomUUID();
   const VERIFIER = 'v'.repeat(43);
 
   async function arrange(opts: {
@@ -18281,6 +18298,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   let rateBefore = new Map<string, number>();
 
   beforeEach(() => {
+    STATE = randomUUID();
     rateBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count]));
     previousDataDir = process.env['LYNOX_DATA_DIR'];
     dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauth-callback-'));
@@ -18375,7 +18393,9 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       db.close();
       quiet?.mockRestore();
     }
-    // Twin: the same refusal on a profile that is not revoked keeps the page it had.
+    // Twin: the same refusal on a profile that is not revoked keeps the page it had. A state of
+    // its own: the first callback spent the one before.
+    STATE = randomUUID();
     const second = await arrange();
     vi.spyOn(second.store, 'save').mockReturnValue({ ok: false, reason: 'refused for the test' });
     const quiet2 = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
