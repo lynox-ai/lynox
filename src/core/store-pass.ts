@@ -67,7 +67,7 @@ export const STORE_SCOPES_PATH = '/admin/oauth/access_scopes.json';
  */
 export function credentialPathRefusal(path: string): string | null {
   if (path === STORE_SCOPES_PATH) return null;
-  if (!/^\/admin(?:\/[a-z0-9_.-]+)+$/.test(path)) return 'the request is not for the Admin API: an Admin API path is lowercase, with no repeated or trailing slash';
+  if (!/^\/admin(?:\/[a-z0-9_.-]+)+$/.test(path)) return 'the request is not for the Admin API';
   if (path.split('/').some((segment) => segment.startsWith('oauth'))) return 'a store pass does not reach the store\'s OAuth endpoints';
   return null;
 }
