@@ -3004,11 +3004,10 @@ export class Agent implements IAgent {
         // is stripped, the cut-off call is discarded. Three in a row with no tool dispatched
         // between them is a loop. Decided on what stays in the history, as `thinkingOnly` is: a
         // server tool's blocks or a redacted thinking block are something to build on.
-        // A server tool call cut off before its result came is discarded work, like a cut-off
-        // `tool_use`: only one whose result block is in the same turn is something to build on.
-        const serverResults = new Set(contentForHistory.flatMap((b) => (b.type.endsWith('_tool_result') && 'tool_use_id' in b ? [b.tool_use_id] : [])));
-        const blank = contentForHistory.every((b) => (b.type === 'text' && b.text.trim().length === 0) || b.type === 'tool_use'
-          || (b.type === 'server_tool_use' && !serverResults.has(b.id)));
+        // A server tool call is no more than a cut-off `tool_use` on its own: what the model can
+        // build on is its result block, which is not blank and so decides a turn that has one.
+        const blank = contentForHistory.every((b) => (b.type === 'text' && b.text.trim().length === 0)
+          || b.type === 'tool_use' || b.type === 'server_tool_use');
         if (!blank || toolsDelta > 0) this._blankTruncatedStreak = 0;
         if (blank && ++this._blankTruncatedStreak >= 3) throw new ContinuationLoopError('');
         if (prefix.trim().length === 0) {
