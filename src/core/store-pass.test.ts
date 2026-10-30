@@ -175,6 +175,87 @@ describe('with a pass', () => {
   });
 });
 
+describe('a credential pass does not reach the store\'s access tokens', () => {
+  const GRAPHQL = `${ORIGIN}/admin/api/2025-10/graphql.json`;
+  const JSON_TYPE = { 'Content-Type': 'application/json' };
+  const post = (url: string, body: string, headers: Record<string, string> = JSON_TYPE): Promise<Response> =>
+    fetchPinned(url, { method: 'POST', headers: { [H]: TOKEN, ...headers }, body }, pass());
+  const query = (document: string): string => JSON.stringify({ query: document });
+
+  it('refuses the REST paths that mint, list or revoke a token, by every method', async () => {
+    for (const path of [
+      '/admin/api/2025-10/storefront_access_tokens.json',
+      '/admin/api/2025-10/storefront_access_tokens/1.json',
+      '/admin/storefront_access_tokens.json',
+      '/admin/access_tokens/delegate.json',
+      '/admin/api/2025-10/access_tokens/delegate.json',
+    ]) {
+      for (const method of ['GET', 'POST', 'DELETE']) {
+        await expect(fetchPinned(`${ORIGIN}${path}`, { method, headers: { [H]: TOKEN } }, pass()), `${method} ${path}`)
+          .rejects.toThrow(/does not reach the store's access tokens/);
+      }
+    }
+    expect(sent).toHaveLength(0);
+  });
+
+  it('refuses a GraphQL document that names a token field, however it is written', async () => {
+    const documents: [string, string][] = [
+      ['mutation, delegate', query('mutation { delegateAccessTokenCreate(input: { delegateAccessScope: ["read_products"] }) { delegateAccessToken { accessToken } } }')],
+      ['mutation, storefront', query('mutation { storefrontAccessTokenCreate(input: { title: "x" }) { storefrontAccessToken { accessToken } } }')],
+      ['read', query('{ shop { storefrontAccessTokens(first: 1) { nodes { accessToken } } } }')],
+      ['alias', query('query { a: storefrontAccessTokens(first: 1) { nodes { t: id } } }')],
+      ['fragment', query('query { shop { ...f } } fragment f on Shop { storefrontAccessTokens(first: 1) { nodes { id } } }')],
+      ['node by id', query('query($id: ID!) { node(id: $id) { ... on StorefrontAccessToken { accessToken } } }')],
+      ['JSON escape', '{"query":"{ shop { storefront\\u0041ccessTokens(first: 1) { nodes { id } } } }"}'],
+      ['nested document, escaped in its string literal',
+        '{"query":"mutation{bulkOperationRunQuery(query:\\"{shop{storefront\\\\u0041ccessTokens{edges{node{\\\\u0061ccessToken}}}}}\\"){bulkOperation{id}}}"}'],
+      ['nested, braced escape', query('mutation { bulkOperationRunQuery(query: "{ shop { storefront\\u{41}ccessTokens { edges { node { id } } } } }") { bulkOperation { id } } }')],
+      ['in the variables', JSON.stringify({ query: 'query($q: String!) { shop { name } }', variables: { q: 'access_token' } })],
+      ['in a key', '{"query":"{ shop { name } }","variables":{"accessToken":1}}'],
+    ];
+    for (const [label, body] of documents) {
+      await expect(post(GRAPHQL, body), label).rejects.toThrow(/the body names an access token/);
+    }
+    expect(sent).toHaveLength(0);
+  });
+
+  it('refuses a GraphQL document in the address', async () => {
+    for (const url of [
+      `${GRAPHQL}?query=${encodeURIComponent('{ shop { storefrontAccessTokens(first: 1) { nodes { id } } } }')}`,
+      `${GRAPHQL}?query=%7Bshop%7Bstorefront%41ccessTokens%7D%7D`,
+    ]) {
+      await expect(send(url, { [H]: TOKEN }, pass()), url).rejects.toThrow(/the address names an access token/);
+    }
+    await expect(send(`${GRAPHQL}?extensions=%7B%22persistedQuery%22%3A1%7D`, { [H]: TOKEN }, pass())).rejects.toThrow(/persisted query/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('refuses a persisted query, a body that is not JSON, and a body it could not read as sent', async () => {
+    await expect(post(GRAPHQL, '{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"ab"}}}')).rejects.toThrow(/persisted query/);
+    await expect(post(GRAPHQL, '{"extensions":{"persisted\\u0051uery":{"version":1,"sha256Hash":"ab"}}}')).rejects.toThrow(/persisted query/);
+    await expect(post(GRAPHQL, '{/**/"query":"{ shop { storefrontAccessTokens { nodes { id } } } }"}')).rejects.toThrow(/sends its body as JSON/);
+    await expect(post(GRAPHQL, '{ shop { name } }', { 'Content-Type': 'application/graphql' })).rejects.toThrow(/sends its body as JSON/);
+    await expect(post(GRAPHQL, query('{ shop { name } }'), { 'Content-Type': 'application/json; charset=utf-16' })).rejects.toThrow(/charset other than UTF-8/);
+    await expect(post(GRAPHQL, query('{ shop { name } }'), { ...JSON_TYPE, 'Content-Encoding': 'gzip' })).rejects.toThrow(/sent encoded/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('sends what names no token: a read, a write, a REST call, an empty body, UTF-8 named and identity', async () => {
+    const bodies = [
+      query('{ shop { name } }'),
+      query('mutation { productUpdate(product: { id: "gid://shopify/Product/1", title: "Tokens of access" }) { product { id } } }'),
+      JSON.stringify({ query: 'query($id: ID!) { product(id: $id) { id title } }', variables: { id: 'gid://shopify/Product/1' } }),
+    ];
+    for (const body of bodies) await expect(post(GRAPHQL, body), body).resolves.toHaveProperty('status', 200);
+    await expect(post(`${ORIGIN}/admin/api/2025-10/products/1.json`, JSON.stringify({ product: { title: 'x' } }), { 'Content-Type': 'application/json; charset=UTF-8', 'Content-Encoding': 'identity' }))
+      .resolves.toHaveProperty('status', 200);
+    await expect(fetchPinned(`${ORIGIN}/admin/api/2025-10/products/1.json`, { method: 'DELETE', headers: { [H]: TOKEN }, body: '' }, pass()))
+      .resolves.toHaveProperty('status', 200);
+    await expect(send(`${ORIGIN}/admin/api/2025-10/products.json?limit=5&fields=id,title`, { [H]: TOKEN }, pass())).resolves.toHaveProperty('status', 200);
+    expect(sent).toHaveLength(bodies.length + 3);
+  });
+});
+
 describe('every redirect hop is checked under the pass', () => {
   it('a same-store redirect out of /admin/ never carries the token there', async () => {
     respond = (url) => (url.includes('/admin/') ? { status: 302, headers: { location: '/apps/evil' } } : { status: 200 });

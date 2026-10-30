@@ -2404,8 +2404,10 @@ async function attachEngineManagedAuth(
       if (origin === null || typeof bound !== 'string' || digest === null || !digestsEqual(digest, bound)) {
         return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".` };
       }
-      // Step 6b, the containment and the pass: after every refusal above, so a refused request
-      // records nothing and contains nothing (`mintStorePassFor`).
+      // Step 6b, the containment and the pass: after every refusal above, so a request refused
+      // there records nothing and contains nothing (`mintStorePassFor`). The pass's own checks
+      // (path, encoding, access tokens, `store-pass.ts`) run at the send, after this: a request
+      // they refuse has contained the chat without anything sent, the safe direction.
       const minted = await mintStorePassFor(toolContext!, container, { kind: 'api', connectionId: profile.id }, origin, oauthSlot, oauthValue);
       if ('refusal' in minted) return { refusal: `Error: ${minted.refusal}` };
       return { ...put(oauthSlot, oauthValue), pass: minted.pass };

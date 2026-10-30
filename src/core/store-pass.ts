@@ -14,6 +14,8 @@
  *    in front of the store could route to another path;
  *  - for a credential pass, the path has the shape of an Admin API call
  *    ({@link credentialPathRefusal}) and stays out of the store's OAuth endpoints;
+ *  - for a credential pass, the request names no access token: not in a path segment, not in
+ *    the query, not in the body, which is JSON sent as it is ({@link namesAccessToken});
  *  - no header re-targets the request (`Host`, `X-Original-URL`, `X-Forwarded-*`, …), on a
  *    read as on a write;
  *  - exactly one header of the credential set is sent, it is the pass's header, and its
@@ -69,6 +71,69 @@ export function credentialPathRefusal(path: string): string | null {
   if (path === STORE_SCOPES_PATH) return null;
   if (!/^\/admin(?:\/[a-z0-9_.-]+)+$/.test(path)) return 'the request is not for the Admin API';
   if (path.split('/').some((segment) => segment.startsWith('oauth'))) return 'a store pass does not reach the store\'s OAuth endpoints';
+  if (path.split('/').some((segment) => segment.includes('access_token'))) return ACCESS_TOKEN_REFUSAL;
+  return null;
+}
+
+const ACCESS_TOKEN_REFUSAL = 'a store pass does not reach the store\'s access tokens';
+const TOKEN_WORD = /access_?token/i;
+const PERSISTED_WORD = /persistedquery/i;
+/** A `\uXXXX` or `\u{X…}` escape behind any number of backslashes: JSON's and GraphQL's string escapes. */
+const UNICODE_ESCAPE = /\\+u(?:\{([0-9a-fA-F]{1,6})\}|([0-9a-fA-F]{4}))/g;
+
+/**
+ * `text` with every unicode escape resolved, again and again until nothing changes (at most eight
+ * rounds). A document nested in a GraphQL string literal (`bulkOperationRunQuery(query: "…")`) is
+ * decoded once more by the store, so one round of JSON decoding does not show what it names.
+ * Resolving an escape that is really an escaped backslash only finds more, never less.
+ */
+function resolveEscapes(text: string): string {
+  let current = text;
+  for (let round = 0; round < 8; round++) {
+    const next = current.replace(UNICODE_ESCAPE, (_, braced: string | undefined, plain: string | undefined) => {
+      const code = Number.parseInt(braced ?? plain ?? '', 16);
+      return code <= 0x10ffff ? String.fromCodePoint(code) : '�';
+    });
+    if (next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
+/**
+ * Whether `text` names an access token (`accessToken`, `access_token`, any case), as it is or with
+ * its escapes resolved. A GraphQL field name has no escapes, and an alias or a fragment carries it
+ * as written, so a document that selects a token field names it here. The response is not read:
+ * a token the store returns under another name is not seen.
+ */
+export function namesAccessToken(text: string): boolean {
+  return TOKEN_WORD.test(resolveEscapes(text));
+}
+
+/** Whether `text`, its escapes resolved, asks for a persisted query: a document the store runs without its being sent. */
+function asksPersisted(text: string): boolean {
+  return PERSISTED_WORD.test(resolveEscapes(text));
+}
+
+/**
+ * Why a credential request's query or headers may not go out, or `null`. The query is read as
+ * the store decodes it, names and values; a body sent compressed or in a charset other than UTF-8 is refused, because the
+ * body check reads it as UTF-8 text.
+ */
+function credentialRequestRefusal(url: URL, headers: Record<string, string>): string | null {
+  if (url.search !== '') {
+    const pieces = [...url.searchParams].flat();
+    if (pieces.some(namesAccessToken)) return 'the address names an access token: ' + ACCESS_TOKEN_REFUSAL;
+    if (pieces.some(asksPersisted)) return 'the address asks for a persisted query';
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    const lower = name.trim().toLowerCase();
+    if (lower === 'content-encoding' && value.trim().toLowerCase() !== 'identity') return 'the body is sent encoded (Content-Encoding)';
+    if (lower === 'content-type') {
+      const charset = /;\s*charset\s*=\s*"?([^";\s]*)/i.exec(value)?.[1];
+      if (charset !== undefined && charset.toLowerCase() !== 'utf-8') return 'the body is sent in a charset other than UTF-8';
+    }
+  }
   return null;
 }
 
@@ -164,7 +229,7 @@ export function storePassRefusal(url: URL, headers: Record<string, string>, pass
     if (method.toUpperCase() !== 'POST') return 'an exchange pass sends only the token exchange';
   } else {
     if (!path.startsWith(STORE_PASS_PATH_PREFIX)) return 'the request is not for the Admin API';
-    const refused = credentialPathRefusal(path);
+    const refused = credentialPathRefusal(path) ?? credentialRequestRefusal(url, headers);
     if (refused !== null) return refused;
   }
   if (path.includes('%') || path.includes(';')) return 'the path carries an encoded character or a matrix segment';
@@ -184,10 +249,24 @@ export function storePassRefusal(url: URL, headers: Record<string, string>, pass
 
 /**
  * Why the body of a hop may not go out under `pass`, or `null` when it may. `body` is what the
- * hop sends, as bytes. An exchange pass is spent here, by the first request that passes.
+ * hop sends, as bytes. An exchange pass is spent here, by the first request that passes. A
+ * credential request's body is JSON, and its text, escapes resolved, names no access token and
+ * asks for no persisted query. JSON's escapes are the ones resolved, so its keys and strings are
+ * read as decoded.
  */
 export function storePassBodyRefusal(pass: StorePass, body: Buffer | undefined): string | null {
-  if (pass.kind !== 'exchange') return null;
+  if (pass.kind !== 'exchange') {
+    if (body === undefined || body.length === 0) return null;
+    const text = body.toString('utf8');
+    try {
+      JSON.parse(text);
+    } catch {
+      return 'a request under a store pass sends its body as JSON';
+    }
+    if (namesAccessToken(text)) return 'the body names an access token: ' + ACCESS_TOKEN_REFUSAL;
+    if (asksPersisted(text)) return 'the body asks for a persisted query';
+    return null;
+  }
   if (spent.has(pass)) return 'an exchange pass sends one request, and it has sent it';
   if (body === undefined || !sameDigest(digestOf(body), pass.bodyDigest)) return 'the body sent is not the token exchange that was verified';
   spent.add(pass);
