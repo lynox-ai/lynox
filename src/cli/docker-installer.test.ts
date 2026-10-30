@@ -766,7 +766,7 @@ describe('which user each container runs as', () => {
     expect(INSTALLER_SRC).toMatch(/await execFileAsync\('docker', args, \{ timeout: 300_000 \}\);\s*\} catch \(err: unknown\) \{[\s\S]{0,300}const failure = helperFailure\(stderr, hostIds, dataDir\);\s*if \(failure\.command\) \{\s*refuse\(failure\.reason, failure\.command\);[\s\S]{0,120}return;/);
     expect(INSTALLER_SRC).toContain("vaultExists: listable && readdirSync(dataDir).some((name) => name.endsWith('.db')),");
     // The terms marker is written under the name freshDataDirProblem lets through: one constant for both.
-    expect(INSTALLER_SRC).toContain('const flagPath = join(lynoxDir, TOS_MARKER);');
+    expect(INSTALLER_SRC).toContain('const flagPath = tosMarkerPath(lynoxDir);');
     // Root: a fresh dir is judged by freshDataDirProblem, everything else by the pre-check.
     expect(INSTALLER_SRC).toMatch(/if \(chown === 'direct'\) \{[\s\S]{0,200}freshDataDirProblem\(dataDir, homedir\(\)\)[\s\S]{0,400}\} else \{\s*const blocked = precheckDataDir\(/);
     expect(INSTALLER_SRC).toMatch(/\/\/ SearXNG runs as the image's user too when installing as root\.\n\s*if \(asRoot\) \{/);

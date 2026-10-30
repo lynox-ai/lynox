@@ -38,6 +38,14 @@ export const IMAGE_IDS: Ids = { uid: 1001, gid: 1001 };
 /** The marker the installer writes into `<home>/.lynox` once the terms are accepted, before the data dir is judged. */
 export const TOS_MARKER = '.tos-accepted-1';
 
+/**
+ * Where the installer writes {@link TOS_MARKER}. Built here, beside the constant, so the data-dir
+ * scan (data-dir-coverage.test.ts) sees the name it declares in the inventory.
+ */
+export function tosMarkerPath(lynoxDir: string): string {
+  return join(lynoxDir, TOS_MARKER);
+}
+
 /** What a fresh data dir may already hold: what the installer itself writes there before handing it over. */
 const FRESH_FILES: readonly string[] = ['.env', TOS_MARKER];
 
