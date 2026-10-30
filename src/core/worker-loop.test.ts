@@ -2643,6 +2643,45 @@ describe('WorkerLoop', () => {
     expect((thrown as Error).message).toMatch(/parameter "who"/);
   });
 
+  it('executePipeline refuses a parameter name with a hidden character with the name\'s own fixed text', async () => {
+    vi.useRealTimers();
+    // The save takes a ZWNJ between letters in a parameter; a run reads names strictly.
+    const task = makeTask({ id: 'pipe-task-hidden-name', pipeline_id: 'pipeline-hidden-name', effect: 'run_workflow', pipeline_params: JSON.stringify({ 'w\u200Cho': 'regulars' }) });
+    const planned = JSON.stringify({
+      id: 'pipeline-hidden-name', name: 'Weekly offer', goal: 'send the offer',
+      steps: [{ id: 's1', task: 'send the offer to {{w\u200Cho}}' }],
+      reasoning: 'plan', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z', parameters: [{ name: 'w\u200Cho', description: 'who gets it' }],
+    });
+    const engine = {
+      getTaskManager: vi.fn(() => makeTaskManager()),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getSecretStore: vi.fn(() => null),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })),
+      getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-hidden-name', manifest_json: planned })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const { _resetPipelineStore } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    const { FixedTextError } = await import('./error-egress.js');
+    const { HIDDEN_RUN_NAME_REFUSAL } = await import('./hidden-text.js');
+
+    const thrown = await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+      .executePipeline(task, ...NO_STOP()).then(() => null, (e: unknown) => e);
+    expect(thrown).toBeInstanceOf(FixedTextError);
+    expect((thrown as InstanceType<typeof FixedTextError>).fixedText).toBe(HIDDEN_RUN_NAME_REFUSAL);
+  });
+
   // T1-5 acceptance test — the actual headline bug:
   //   a workflow scheduled via task_create(workflow_id, schedule)
   //   executes on its first WorkerLoop tick AND the template row stays

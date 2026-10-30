@@ -3038,8 +3038,8 @@ export class WorkerLoop {
       }
     };
 
-    // Without the characters that render as nothing (`hidden-text.ts`): the write paths refuse
-    // them now, but a plan confirmed before that still carries them, and a hidden clause in its
+    // Without the characters that render as nothing (`hidden-text.ts`): the model's write tools
+    // refuse them, but a plan confirmed before, or saved through another path, carries them, and a hidden clause in its
     // text would reach the model as part of the task. Stripped, not refused, so a plan that holds
     // a stray one from a paste keeps running on what its owner can see.
     const title = stripHidden(task.title);

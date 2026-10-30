@@ -5,7 +5,7 @@
  * (U+E0000–U+E007F) spells ASCII invisibly, and zero-width and bidi characters hide or reorder
  * what follows. When the owner asks for such a plan to be set up again, the model may copy the
  * text, and the owner's own plan needs no stamp, so the hidden part would run unchecked. The
- * write paths refuse such text instead; the injection scan cannot stand in for this, because it
+ * model's write tools refuse such text instead; the injection scan cannot stand in for this, because it
  * folds these characters away before it matches (`data-boundary.ts`), so a tag-spelled sentence
  * reads to it as nothing at all.
  *
@@ -86,7 +86,8 @@ export function escapeHiddenInJson(json: string): string {
     : c).join('');
 }
 
-/** `text` without its hidden characters, for text that was stored before the write paths refused them. */
+/** `text` without its hidden characters, for stored text the model's write tools did not check: saved
+ *  before they refused them, or through another path. */
 export function stripHidden(text: string): string {
   const at = hiddenCharIndexes(text);
   if (at.length === 0) return text;
