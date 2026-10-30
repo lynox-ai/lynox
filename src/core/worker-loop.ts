@@ -2243,7 +2243,7 @@ export class WorkerLoop {
             ? [{ label: 'Run again', task: stripHidden(task.description ?? task.title) }]
             : [
               { label: 'Retry', task: stripHidden(task.description ?? task.title) },
-              { label: 'Explain', task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${pushedMsg}` },
+              { label: 'Explain', task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${stripHidden(pushedMsg)}` },
             ],
         });
       }
@@ -3766,7 +3766,7 @@ export class WorkerLoop {
       ? currentSignal.slice(0, WATCH_CONTENT_CHARS) + ' […truncated]'
       : currentSignal;
     // The URL as stored, without the characters that render as nothing (`hidden-text.ts`): the
-    // write path refuses them now, a watch saved before still carries them.
+    // model's write tool refuses them, but a watch saved before, or through another path, carries them.
     const analysisPrompt = isFirstRun
       ? `You are monitoring ${stripHidden(config.url)} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
       : `You are monitoring ${stripHidden(config.url)} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;

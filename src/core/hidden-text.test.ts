@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { findHiddenChar, hiddenCharRefusal, hiddenInRunValues, escapeHiddenInJson } from './hidden-text.js';
+import { findHiddenChar, fixedRunRefusal, hiddenCharRefusal, hiddenInRunValues, escapeHiddenInJson, HIDDEN_RUN_NAME_REFUSAL, HIDDEN_RUN_VALUE_FIXED } from './hidden-text.js';
 import { buildReplayInstruction } from '../orchestrator/runtime-adapter.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
@@ -75,6 +75,13 @@ describe('a run\'s bound values', () => {
     expect(hiddenInRunValues({ who: `regulars${tagged('x')}` })).toBe('The value of parameter "who" holds a character that does not show as text. Enter the value again without it.');
     expect(hiddenInRunValues({ list: [`a${ZWSP}`] })).toMatch(/parameter "list"/);
     expect(hiddenInRunValues({ [`w\u200Cho`]: 'x' })).toMatch(/^A parameter name holds/);
+  });
+
+  it('has fixed words for a sink that may not quote stored text: the name\'s refusal as it is, a value\'s without the name', () => {
+    expect(fixedRunRefusal(hiddenInRunValues({ [`w\u200Cho`]: 'x' })!)).toBe(HIDDEN_RUN_NAME_REFUSAL);
+    const value = fixedRunRefusal(hiddenInRunValues({ who: `regulars${tagged('x')}` })!);
+    expect(value).toBe(HIDDEN_RUN_VALUE_FIXED);
+    expect(value).not.toContain('who');
   });
 });
 

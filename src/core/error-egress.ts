@@ -5,7 +5,8 @@
  * reads it whole into the message; the Anthropic SDK carries it in `message`). In a contained
  * container that body can quote what the run read from a store, so there an error leaves as its
  * class and HTTP status only, as `judgeErrorForTracker` already reports bulk-judge failures
- * (PRD-SHOPIFY-CONTAINMENT-ERASURE E4).
+ * (PRD-SHOPIFY-CONTAINMENT-ERASURE E4). The one exception is a `FixedTextError`: its fixed text,
+ * which lynox wrote and which quotes nothing, leaves instead of the class.
  *
  * Which errors: a sink that knows its thread or bulk run asks `Containment.isContained`. A sink
  * that does not (the HTTP catch-all, the process-wide handlers) reduces every error once the
@@ -40,7 +41,8 @@ export function providerStatus(err: unknown): number | null {
 
 /**
  * Class and HTTP status of an error, and nothing it carries. A name is kept only when it is an
- * identifier, as a class name is; one built from text (spaces, punctuation) reads `Error`.
+ * identifier, as a class name is; one built from text (spaces, punctuation) reads `Error`. A
+ * `FixedTextError` reads its fixed text, which lynox wrote and which quotes nothing.
  */
 export function reducedErrorText(err: unknown): string {
   // A getter on `name`, `status` or `message` that throws would carry its own text into the

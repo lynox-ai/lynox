@@ -746,8 +746,8 @@ export class TaskManager {
     parts.push(counts.join(', ') + '.');
 
     // Every session reads this, the unattended run of a plan too, and a plan's text may have been
-    // written by someone else: without the characters that render as nothing (`hidden-text.ts`),
-    // which the write paths refuse now but a plan saved before still carries.
+    // written by someone else: without the characters that render as nothing (`hidden-text.ts`).
+    // The model's write tools refuse them, but a plan saved before, or through another path, carries them.
     for (const t of summary.overdue) {
       const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${stripHidden(t.scope_id)})`;
       const assignee = t.assignee ? ` [${stripHidden(t.assignee)}]` : '';

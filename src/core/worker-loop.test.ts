@@ -1996,6 +1996,24 @@ describe('WorkerLoop', () => {
     expect(msg.followUps?.[1]?.task).toContain('order #1042');
   });
 
+  it('the Explain chip, which becomes the owner\'s turn when tapped, carries the error without the characters that render as nothing', async () => {
+    // A runner error can quote a stored step id or workflow name; this one carries a tag-spelled clause.
+    const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const engine = makeEngine({ taskManager: tm, session: makeSession(new Error(`Step "fetch${hidden}" failed`)), containment: { isContained: () => false } });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { followUps?: { label: string; task: string }[] };
+    const explain = msg.followUps?.find((f) => f.label === 'Explain')?.task ?? '';
+    expect(explain).toContain('Error: Step "fetch" failed');
+    expect(explain).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+  });
+
   it('on an instance that holds an exact connection, a thread that is not contained keeps its text', async () => {
     // The push has a container key, so it asks the store rather than the instance: unlike the
     // keyless sinks (the HTTP catch-all, the agent's stderr lines), it reduces only what is contained.

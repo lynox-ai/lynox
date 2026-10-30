@@ -52,15 +52,24 @@ export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   return null;
 }
 
-/** The run refusal of `hiddenInRunValues` without the parameter's name, which is stored text: what
- *  a reduced sink (a push from a contained instance) may say. */
+/** The run refusal of `hiddenInRunValues` for a name. It quotes nothing, so a reduced sink (a push
+ *  from a contained instance) may say it as it is. */
+export const HIDDEN_RUN_NAME_REFUSAL = 'A parameter name holds a character that does not show as text. Rename the parameter in the workflow.';
+
+/** The run refusal of `hiddenInRunValues` for a value, without the parameter's name, which is
+ *  stored text: what a reduced sink may say. */
 export const HIDDEN_RUN_VALUE_FIXED = 'A value this workflow runs with holds a character that does not show as text. Enter the value again without it.';
+
+/** The words a reduced sink may say for a refusal of `hiddenInRunValues`. */
+export function fixedRunRefusal(refusal: string): string {
+  return refusal === HIDDEN_RUN_NAME_REFUSAL ? HIDDEN_RUN_NAME_REFUSAL : HIDDEN_RUN_VALUE_FIXED;
+}
 
 /** Why a run's bound values may not run, or `null`. The same class as the save, so a value the
  *  save took (an emoji, a Persian word, a line break) runs too. A name takes no in-place character. */
 export function hiddenInRunValues(params: Readonly<Record<string, unknown>>): string | null {
   for (const [name, value] of Object.entries(params)) {
-    if (hiddenCharIndexes(name, { inPlace: false }).length > 0) return 'A parameter name holds a character that does not show as text. Rename the parameter in the workflow.';
+    if (hiddenCharIndexes(name, { inPlace: false }).length > 0) return HIDDEN_RUN_NAME_REFUSAL;
     if (findHiddenChar(value) !== null) return `The value of parameter "${name}" holds a character that does not show as text. Enter the value again without it.`;
   }
   return null;
