@@ -135,6 +135,25 @@ describe('continuation-loop break', () => {
       expect(mockProcess).toHaveBeenCalledTimes(6);
     });
 
+    it('a turn whose server tool ran, with no text, is not blank', async () => {
+      // A web search's blocks stay in the history: the model has something to build on.
+      const searched = (): unknown => ({
+        content: [
+          { type: 'server_tool_use', id: 'srv_1', name: 'web_search', input: { query: 'q' } },
+          { type: 'web_search_tool_result', tool_use_id: 'srv_1', content: [] },
+        ],
+        stop_reason: 'max_tokens',
+        usage: { input_tokens: 100, output_tokens: 8192 },
+      });
+      const turns = [cutCall(), thinkingOnly(), searched(), cutCall(), thinkingOnly(),
+        { content: [{ type: 'text', text: 'Gefunden.' }], stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 50 } }];
+      let n = 0;
+      mockProcess.mockImplementation(() => Promise.resolve(turns[n++]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      await expect(agent.send('search it')).resolves.toBe('Gefunden.');
+      expect(mockProcess).toHaveBeenCalledTimes(6);
+    });
+
     it('each message starts the count over', async () => {
       // Two blank turns, then an answer; the next message begins with two blank turns again.
       const answer = (t: string): unknown => ({ content: [{ type: 'text', text: t }], stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 50 } });

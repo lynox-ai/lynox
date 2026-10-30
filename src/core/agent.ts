@@ -2996,8 +2996,9 @@ export class Agent implements IAgent {
         // that alternate between the two, or repeat the cut-off call alone, passed both until
         // the continuation cap. Neither shape gave the model anything to build on: the thinking
         // is stripped, the cut-off call is discarded. Three in a row with no tool dispatched
-        // between them is a loop.
-        const blank = extractText(response.content).trim().length === 0;
+        // between them is a loop. Decided on what stays in the history, as `thinkingOnly` is: a
+        // server tool's blocks or a redacted thinking block are something to build on.
+        const blank = contentForHistory.every((b) => (b.type === 'text' && b.text.trim().length === 0) || b.type === 'tool_use');
         if (!blank || toolsDelta > 0) this._blankTruncatedStreak = 0;
         if (blank && ++this._blankTruncatedStreak >= 3) throw new ContinuationLoopError('');
         if (prefix.trim().length === 0) {
