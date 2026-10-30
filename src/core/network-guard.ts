@@ -800,7 +800,7 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
   const body = await materialiseBody(init.body);
   if (pass !== undefined) {
     // After the body is bytes: the exchange's pass names those bytes, and is spent here.
-    const bodyRefusal = storePassBodyRefusal(pass, body);
+    const bodyRefusal = storePassBodyRefusal(pass, body, headers);
     if (bodyRefusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${bodyRefusal}. Do not retry it with changed headers or a changed address.`);
   }
 

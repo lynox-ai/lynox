@@ -237,10 +237,40 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
     await expect(post(GRAPHQL, '{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"ab"}}}')).rejects.toThrow(/persisted query/);
     await expect(post(GRAPHQL, '{"extensions":{"persisted\\u0051uery":{"version":1,"sha256Hash":"ab"}}}')).rejects.toThrow(/persisted query/);
     await expect(post(GRAPHQL, '{/**/"query":"{ shop { storefrontAccessTokens { nodes { id } } } }"}')).rejects.toThrow(/sends its body as JSON/);
-    await expect(post(GRAPHQL, '{ shop { name } }', { 'Content-Type': 'application/graphql' })).rejects.toThrow(/sends its body as JSON/);
-    await expect(post(GRAPHQL, query('{ shop { name } }'), { 'Content-Type': 'application/json; charset=utf-16' })).rejects.toThrow(/charset other than UTF-8/);
     await expect(post(GRAPHQL, query('{ shop { name } }'), { ...JSON_TYPE, 'Content-Encoding': 'gzip' })).rejects.toThrow(/sent encoded/);
     expect(sent).toHaveLength(0);
+  });
+
+  it('sends a body only as one Content-Type, application/json', async () => {
+    const ONE_JSON = /sends one Content-Type, application\/json/;
+    const document = query('{ shop { name } }');
+    for (const headers of [
+      { 'Content-Type': 'application/graphql' },
+      { 'Content-Type': 'application/json; charset=utf-16' },
+      { 'Content-Type': 'application/json; charset=utf-8; charset=utf-7' },
+      { 'Content-Type': 'application/json; charset*=utf-7\'\'' },
+      { 'Content-Type': 'application/x-www-form-urlencoded' },
+      { 'Content-Type': 'application/json', 'content-type': 'application/json' },
+      {},
+    ]) {
+      await expect(post(GRAPHQL, document, headers), JSON.stringify(headers)).rejects.toThrow(ONE_JSON);
+    }
+    // A JSON body that a form type would read as a query naming the token.
+    await expect(post(GRAPHQL, '{"x":"&query=%7Bshop%7Bstorefront%41ccessTokens%7D%7D&y="}', { 'Content-Type': 'application/x-www-form-urlencoded' }))
+      .rejects.toThrow(ONE_JSON);
+    // Without a body there is nothing to read: a read sends no Content-Type, or the JSON one.
+    await expect(send(`${ORIGIN}/admin/api/2025-10/shop.json`, { [H]: TOKEN, 'Content-Type': 'text/plain' }, pass())).rejects.toThrow(ONE_JSON);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('reads an escape with leading zeros in braces, and a long run of backslashes in one pass', async () => {
+    await expect(post(GRAPHQL, '{"query":"mutation{bulkOperationRunQuery(query:\\"{shop{storefront\\\\u{00000041}ccessTokens{edges{node{id}}}}}\\"){bulkOperation{id}}}"}'))
+      .rejects.toThrow(/the body names an access token/);
+    const run = JSON.stringify({ query: '{ shop { name } }', variables: { v: '\\'.repeat(200_000) } });
+    const started = performance.now();
+    await expect(post(GRAPHQL, run)).resolves.toHaveProperty('status', 200);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(sent).toHaveLength(1);
   });
 
   it('sends what names no token: a read, a write, a REST call, an empty body, UTF-8 named and identity', async () => {
