@@ -302,15 +302,16 @@ export type BulkProbeCause = 'none' | 'wrong_form' | 'filed_measured' | 'other_r
 export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
 /**
  * Where an approved run stands towards a probe of its own, read from its targets: `write_one`,
- * nothing applied yet, so writing on under a maximum of one writes the probe; `confirm`, its one
+ * nothing applied and nothing sent yet, so writing on under a maximum of one writes the probe; `confirm`, its one
  * applied target is a probe the owner can confirm ({@link BulkLedger.probeKey}), and confirming it
  * would file a row this run does not hold (not confirmed yet, or another run's confirmation has
  * since taken the row); `too_many`, more
  * than one target applied, so it can no longer be a probe; `already_first`, its one applied target
  * is recorded as already holding the value, so it is no probe (a send of this run's that got no
  * clear answer may have set it). Null where none of these is known:
- * a run not approved yet, one whose probe is confirmed already, or one whose single applied target
- * is neither. A fact about the run, not advice: whether a step helps also depends on `missing`.
+ * a run not approved yet, one whose probe is confirmed already, one whose single applied target
+ * is neither, or one that applied nothing but sent a write that got no clear answer: that send
+ * takes the one place a maximum of one allows ({@link sentCount}), and lynox does not send it again. A fact about the run, not advice: whether a step helps also depends on `missing`.
  */
 export type BulkProbeStep = 'write_one' | 'confirm' | 'too_many' | 'already_first';
 /** Why a run may not go past one target, and where it stands. */
@@ -1798,7 +1799,7 @@ export class BulkLedger {
       // As {@link probeCandidate}: a target found already holding its value was not written.
       'SELECT result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 LIMIT 2',
     ).all(run.id) as { result: string | null }[];
-    if (applied.length === 0) return 'write_one';
+    if (applied.length === 0) return this.sentCount(run.id) === 0 ? 'write_one' : null;
     if (applied.length > 1) return 'too_many';
     const candidate = this.probeCandidate(run.id);
     if (candidate !== null && candidate !== 'not_found') return this.probeToConfirm(run.id) === null ? null : 'confirm';

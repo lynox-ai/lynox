@@ -1194,6 +1194,28 @@ describe('the write verb and the one-target probe', () => {
     }
   });
 
+  it('a run whose only send got no clear answer is not told to write one: it sends nothing more', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      // Nothing applied and nothing sent: writing on writes the probe.
+      expect(ledger.probeBlockFor(runId)?.step).toBe('write_one');
+      // The first send got no clear answer: it takes the one place, and lynox does not send it again.
+      ledger.markSent(runId, 0);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH')).toEqual([]);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, sentUnknown: 1, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: null });
+      expect(ledger.resume(runId, { checksum, maxTargets: 3 })).toMatchObject({ ok: false, reason: 'probe_required', probe: { step: null } });
+    } finally {
+      restore();
+    }
+  });
+
   it('runs past its cap over targets that already hold their value, sending them no write', async () => {
     const s = shop();
     const restore = serve(s);
