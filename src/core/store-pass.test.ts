@@ -217,7 +217,7 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
       ['in a key', '{"query":"{ shop { name } }","variables":{"accessToken":1}}'],
     ];
     for (const [label, body] of documents) {
-      await expect(post(GRAPHQL, body), label).rejects.toThrow(/the body contains access_token or accessToken/);
+      await expect(post(GRAPHQL, body), label).rejects.toThrow(/the body names an access token/);
     }
     expect(sent).toHaveLength(0);
   });
@@ -267,7 +267,7 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
 
   it('looks for the word in the text as sent too, where resolving an escape eats the letters after it', async () => {
     await expect(post(GRAPHQL, JSON.stringify({ query: '{ shop { name } }', variables: { v: '\\u{0000005c}u\\u{61}accesstoken' } })))
-      .rejects.toThrow(/the body contains access_token or accessToken/);
+      .rejects.toThrow(/the body names an access token/);
     await expect(send(`${GRAPHQL}?v=${encodeURIComponent('\\u{0000005c}u\\u{61}accesstoken')}`, { [H]: TOKEN }, pass()))
       .rejects.toThrow(/the address names an access token/);
     expect(sent).toHaveLength(0);
@@ -275,7 +275,7 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
 
   it('reads an escape with leading zeros in braces, and a long run of backslashes in one pass', async () => {
     await expect(post(GRAPHQL, '{"query":"mutation{bulkOperationRunQuery(query:\\"{shop{storefront\\\\u{00000041}ccessTokens{edges{node{id}}}}}\\"){bulkOperation{id}}}"}'))
-      .rejects.toThrow(/the body contains access_token or accessToken/);
+      .rejects.toThrow(/the body names an access token/);
     const run = JSON.stringify({ query: '{ shop { name } }', variables: { v: '\\'.repeat(200_000) } });
     const started = performance.now();
     await expect(post(GRAPHQL, run)).resolves.toHaveProperty('status', 200);
@@ -293,9 +293,9 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
     await expect(post(GRAPHQL, '{ shop { name } }')).rejects.toThrow(AGAIN);
     await expect(post(GRAPHQL, '{"extensions":{"persistedQuery":{"version":1}}}')).rejects.toThrow(AGAIN);
     await expect(send(`${GRAPHQL}?extensions=%7B%22persistedQuery%22%3A1%7D`, { [H]: TOKEN }, pass())).rejects.toThrow(AGAIN);
-    // The token word in a body is named, with what to do when it is only text.
+    // A body that names a token: stop, and say that such a text is refused as well (ux U-086).
     await expect(post(GRAPHQL, JSON.stringify({ query: 'mutation { productUpdate(product: { id: "1", descriptionHtml: "accessToken" }) { product { id } } }' })))
-      .rejects.toThrow(/Only if the word is part of the user's own text, such as a description, tell the user which field contains it; the request cannot be sent while it does\. Do not retry it with changed headers or a changed address\.$/);
+      .rejects.toThrow(/and that a request whose text names one is refused as well\. Do not retry it with changed headers or a changed address\.$/);
     expect(sent).toHaveLength(0);
   });
 
