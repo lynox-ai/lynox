@@ -517,17 +517,20 @@ export function bulkStartButtonKey(
  *  `startButton`: the label of the start button the page shows ({@link bulkStartButtonKey}),
  *  null when it shows none. Null on any other halt. */
 export function bulkStateText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>,
 	startButton: string | null,
 	i18n: BulkI18n,
 ): { cause: string; step: string | null } | null {
 	const key = run.haltKey;
 	if (key === null) return null;
 	if (bulkWaitsForStart(run)) {
-		if (startButton === null) return { cause: i18n.t('bulk.halt.wait_no_start'), step: null };
-		return { cause: i18n.tf(`bulk.halt.${key}_start`, { button: startButton }), step: null };
+		if (startButton !== null) return { cause: i18n.tf(`bulk.halt.${key}_start`, { button: startButton }), step: null };
+		// No button: a judge the run cannot use has its note on the page; a judge it can use but
+		// no button means the rule went only to the owner, and someone else is looking.
+		return { cause: i18n.t(bulkStartKind(run) === 'judge' ? 'bulk.halt.wait_owner_only' : 'bulk.halt.wait_no_start'), step: null };
 	}
-	if (key === 'probeRequired' && (run.phase === 'approved' || run.phase === 'writing')) {
+	// Set only while writing (bulk-apply), where the probe panel can stand.
+	if (key === 'probeRequired' && run.phase === 'writing') {
 		// The probe panel stands only where the server offers a probe confirming can file.
 		return { cause: i18n.t('bulk.halt.probeRequired'), step: i18n.t(bulkAtProbe(run) ? 'bulk.halt.probeRequired_confirm' : 'bulk.halt.probeRequired_replan') };
 	}

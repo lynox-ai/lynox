@@ -668,10 +668,15 @@ describe('going on from a run that halted', () => {
 		const planned = { phase: 'planned' as const };
 		const read = bulkStartButtonKey({ listFirstPage: null, judgeServedBy: null, judgeRule: null }, 'read', false);
 		expect(read).toBe('bulk.start.read');
-		expect(bulkStateText(any('awaitingStart', planned), DE.t(read!), DE)).toEqual({ cause: 'Der Lauf wartet darauf, dass du ihn mit „Ziele lesen“ startest.', step: null });
+		expect(bulkStateText(any('awaitingStart', planned), DE.t(read!), DE)).toEqual({ cause: 'Starte den Lauf mit „Ziele lesen“.', step: null });
 		expect(bulkStateText(any('listed', planned), EN.t('bulk.start.list'), EN)).toEqual({ cause: 'Review the targets, then start with “Read the list”.', step: null });
 		for (const haltKey of ['awaitingStart', 'listed']) {
-			expect(bulkStateText(any(haltKey, planned), null, DE), haltKey).toEqual({ cause: de['bulk.halt.wait_no_start'], step: null });
+			// No button because the judge cannot be used: the page shows a note saying why.
+			expect(bulkStateText(any(haltKey, { ...planned, judge: {} as BulkRunDetailData['judge'], judgeServedBy: null }), null, DE), haltKey).toEqual({ cause: de['bulk.halt.wait_no_start'], step: null });
+			expect(bulkStateText(any(haltKey, { ...planned, judge: {} as BulkRunDetailData['judge'], judgeOwnKey: true }), null, DE), haltKey).toEqual({ cause: de['bulk.halt.wait_no_start'], step: null });
+			// A usable judge and still no button: its rule went to the owner only, and no note stands.
+			expect(bulkStateText(any(haltKey, { ...planned, judge: {} as BulkRunDetailData['judge'], judgeServedBy: { provider: 'anthropic', label: 'm' } as unknown as BulkRunDetailData['judgeServedBy'] }), null, EN), haltKey)
+				.toEqual({ cause: en['bulk.halt.wait_owner_only'], step: null });
 		}
 		// The label is the button's: none where the page shows none.
 		const served = { provider: 'anthropic', label: 'm' } as unknown as BulkRunDetailData['judgeServedBy'];
@@ -682,6 +687,8 @@ describe('going on from a run that halted', () => {
 		expect(bulkStartButtonKey({ listFirstPage: null, judgeServedBy: served, judgeRule: rule }, 'judge', true)).toBe('bulk.start.supersede_yes');
 		expect(bulkStartButtonKey({ listFirstPage: null, judgeServedBy: served, judgeRule: null }, 'judge', false)).toBeNull();
 		for (const kind of ['judge_own_key', 'no_judge', null] as const) expect(bulkStartButtonKey({ listFirstPage: null, judgeServedBy: served, judgeRule: rule }, kind, false), String(kind)).toBeNull();
+		// The probe sentence belongs to a run halted while writing; one that ended there is not asked to confirm.
+		expect(bulkStateText(any('probeRequired', { phase: 'aborted', probe: PROBE }), null, DE)).toBeNull();
 		// A run that waits for nothing has none of these sentences.
 		expect(bulkStateText(any('awaitingStart', { phase: 'writing' }), 'x', DE)).toBeNull();
 	});
