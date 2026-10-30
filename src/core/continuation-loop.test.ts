@@ -37,7 +37,7 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, ContinuationLoopError } from './agent.js';
+import { Agent, ContinuationLoopError, ThinkingOnlyLoopError } from './agent.js';
 
 const STUCK_PREFIX = 'Ich speichere die CSV-Datei und analysiere sie strukturiert mit Python.';
 
@@ -95,5 +95,58 @@ describe('continuation-loop break', () => {
     // the run. That is exactly why the prod loop burned 5 minutes: without the
     // detector, cap exhaustion is the ONLY stop.
     expect(mockProcess).toHaveBeenCalledTimes(11);
+  });
+
+  describe('blank truncated turns: no text, cut off in thinking or inside a tool call', () => {
+    const thinkingOnly = (): unknown => ({ content: [], stop_reason: 'max_tokens', usage: { input_tokens: 100, output_tokens: 8192 } });
+    const cutCall = (): unknown => ({
+      content: [{ type: 'tool_use', id: 'tu_cut', name: 'write_file', input: {} }],
+      stop_reason: 'max_tokens',
+      usage: { input_tokens: 100, output_tokens: 8192 },
+    });
+
+    it('turns alternating between the two shapes stop at the third, not at the cap', async () => {
+      // Each shape resets the other guard: the thinking count (not thinking-only) and the prefix
+      // guard (blank prefix). This alternation used to reach the continuation cap.
+      let n = 0;
+      mockProcess.mockImplementation(() => Promise.resolve(n++ % 2 === 0 ? thinkingOnly() : cutCall()));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      const err = await agent.send('write the report').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ContinuationLoopError);
+      expect(err).not.toBeInstanceOf(ThinkingOnlyLoopError);
+      expect(mockProcess).toHaveBeenCalledTimes(3);
+    });
+
+    it('the same cut-off call alone, with no text, stops at the third', async () => {
+      mockProcess.mockImplementation(() => Promise.resolve(cutCall()));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      await expect(agent.send('write the report')).rejects.toThrow(ContinuationLoopError);
+      expect(mockProcess).toHaveBeenCalledTimes(3);
+    });
+
+    it('a turn with text in between starts the count over', async () => {
+      // blank, blank, text, blank, blank, then the answer: never three blank in a row.
+      const turns = [cutCall(), thinkingOnly(), truncatedResponse('Ich schreibe den Bericht.'), cutCall(), thinkingOnly(),
+        { content: [{ type: 'text', text: 'Der Bericht.' }], stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 50 } }];
+      let n = 0;
+      mockProcess.mockImplementation(() => Promise.resolve(turns[n++]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      await expect(agent.send('write the report')).resolves.toBe('Der Bericht.');
+      expect(mockProcess).toHaveBeenCalledTimes(6);
+    });
+
+    it('a tool dispatched in between starts the count over', async () => {
+      const turns = [cutCall(), thinkingOnly(),
+        { content: [{ type: 'tool_use', id: 'tu_ok', name: 'probe', input: {} }], stop_reason: 'tool_use', usage: { input_tokens: 100, output_tokens: 50 } },
+        cutCall(), thinkingOnly(),
+        { content: [{ type: 'text', text: 'Fertig.' }], stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 50 } }];
+      let n = 0;
+      mockProcess.mockImplementation(() => Promise.resolve(turns[n++]));
+      const probe = { definition: { name: 'probe', description: 'probe', input_schema: { type: 'object' as const, properties: {} } }, handler: vi.fn().mockResolvedValue('ok') };
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [probe as never] });
+      await expect(agent.send('write the report')).resolves.toBe('Fertig.');
+      expect(probe.handler).toHaveBeenCalledTimes(1);
+      expect(mockProcess).toHaveBeenCalledTimes(6);
+    });
   });
 });
