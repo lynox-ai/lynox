@@ -30,6 +30,7 @@ import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { runToken } from '../../scripts/model-fitness/probe-freshness.mjs';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const args = Object.fromEntries(
@@ -39,9 +40,20 @@ const DATA_DIR = args['data-dir'];
 const LABEL = args['label'] ?? 'unlabelled';
 const BASE = args['base'] ?? 'http://127.0.0.1:3199';
 const REPEATS = Number(args['repeats'] ?? 1);
+// A provider stream that stalls never ends the turn, and without a bound one stalled case held
+// a whole run for its outer timeout. A case past this bound reports ERR and the run goes on.
+const CASE_MS = Number(args['case-timeout'] ?? 300) * 1000;
 if (!DATA_DIR) { console.error('need --data-dir (the engine\'s LYNOX_DATA_DIR)'); process.exit(2); }
 
 const fx = JSON.parse(readFileSync(join(HERE, 'capture-fitness-fixtures.json'), 'utf8'));
+// `--shapes N4-run-instruction,S5-standing-rule` runs only those, for an A/B on one change. A
+// name that matches no shape stops the run: silently running fewer shapes reads as a pass.
+if (args['shapes']) {
+  const want = args['shapes'].split(',');
+  const unknown = want.filter((id) => !fx.shapes.some((s) => s.id === id));
+  if (unknown.length > 0) { console.error(`unknown shape(s): ${unknown.join(', ')}`); process.exit(2); }
+  fx.shapes = fx.shapes.filter((s) => want.includes(s.id));
+}
 // Per-RUN identity. The store dedups an active write against the same SUBJECT, so fixed
 // entity names meet the previous run's active rows: the case still counts as a capture (the
 // tool was called) but stops becoming knowledge — it deflates the line below labelled "the
@@ -81,19 +93,35 @@ const sinkPath = join(DATA_DIR, 'capture-telemetry.jsonl');
 const sinkLines = () => (existsSync(sinkPath) ? readFileSync(sinkPath, 'utf8').trim().split('\n').filter(Boolean) : []);
 
 async function runOne(text) {
-  const before = sinkLines().length;
+  // Events are matched to the case by THREAD, not by sink position. A case cut off by the
+  // timeout keeps running in the engine, and its late write landed after the next case's
+  // starting line count — scored as that case's capture. The session id is the thread id.
+  const threadId = randomUUID();
+  const started = Date.now();
   const s = await fetch(`${BASE}/api/sessions`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId }),
   }).then(r => r.json());
   const res = await fetch(`${BASE}/api/sessions/${s.sessionId}/run`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ task: text }),
+    signal: AbortSignal.timeout(CASE_MS),
   });
   // Drain the SSE stream so the turn completes before we read the sink.
   const reader = res.body.getReader();
   for (;;) { const { done } = await reader.read(); if (done) break; }
   await new Promise(r => setTimeout(r, 1200));   // the sink append is fire-and-forget
-  const fresh = sinkLines().slice(before).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  const ended = Date.now();
+  const all = sinkLines().map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(e => e !== null);
+  const fresh = all.filter(e => e.thread === threadId);
+  // No event for the thread means the match failed, not that the model stayed silent — and
+  // silent is the PASS on a negative shape, so it must not be the default.
+  if (fresh.length === 0) throw new Error(`no telemetry for thread ${threadId}`);
+  // A `remember` made by a spawned sub-agent carries no thread. Cases run one after another, so
+  // within this case's window it is this case's — unless an earlier case timed out and is still
+  // running. Then the write is misplaced: a MISS on a negative shape, a false HIT on a capture
+  // shape. Read the written texts after a run with timeouts.
+  const orphans = all.filter(e => e.event === 'remember_invoked' && !e.thread && e.ts >= started && e.ts <= ended);
+  fresh.push(...orphans);
   const writes = fresh.filter(e => e.event === 'remember_invoked');
   return {
     eligible: fresh.some(e => e.event === 'capture_eligible'),
