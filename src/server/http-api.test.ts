@@ -141,6 +141,8 @@ const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: '
 const mockHistoryGetPlannedPipelines = vi.fn().mockReturnValue([]);
 const mockHistoryRenamePlannedPipeline = vi.fn().mockReturnValue(true);
 const mockHistoryDeletePlannedPipeline = vi.fn().mockReturnValue(true);
+// Who made a workflow (1055): undefined = no row, which the real runner refuses as unreadable.
+const mockHistoryGetWorkflowAuthorship = vi.fn().mockReturnValue(undefined);
 const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
 const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
@@ -311,6 +313,7 @@ vi.mock('../core/engine.js', () => ({
       getPlannedPipelines: mockHistoryGetPlannedPipelines,
       renamePlannedPipeline: mockHistoryRenamePlannedPipeline,
       deletePlannedPipeline: mockHistoryDeletePlannedPipeline,
+      getWorkflowAuthorship: mockHistoryGetWorkflowAuthorship,
       setWorkflowConfirmedAt: mockSetWorkflowConfirmedAt,
       getTask: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
@@ -11656,6 +11659,68 @@ describe('LynoxHTTPApi', () => {
       expect(body.status).toBe('completed');
       // No body → no re-target params (4th arg undefined); 5th = engine runtime.
       expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything(), undefined, expect.anything());
+    });
+
+    describe('the Run button runs a workflow as whoever shaped it (1055, decision A)', () => {
+      const MID = 'grant-eva';
+      const mandateMade = {
+        createdBy: 'mandate:eva@kanzlei.example', createdMandateId: MID, createdAt: '2026-10-01 00:00:00',
+        mandateEditor: null, mandateEditorId: null, mandateEditedAt: null,
+        coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null,
+        coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
+      };
+      const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+      let origEnds: unknown;
+      let live = true;
+      beforeEach(() => {
+        origEnds = engineRef()['getMandateEnds'];
+        live = true;
+        engineRef()['getMandateEnds'] = () => ({ record: (): void => {}, isLive: (id: string): boolean => live && id === MID });
+        mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-1', status: 'completed' });
+      });
+      afterEach(() => { engineRef()['getMandateEnds'] = origEnds; mockHistoryGetWorkflowAuthorship.mockReturnValue(undefined); });
+      const runtimeOf = (): Record<string, unknown> => mockRunSavedWorkflow.mock.calls.at(-1)![4] as Record<string, unknown>;
+
+      it('runs a live mandate\'s workflow as that mandate when the owner presses Run', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+        expect(res.status).toBe(200);
+        expect(mockHistoryGetWorkflowAuthorship).toHaveBeenCalledWith('wf-1');
+        expect(runtimeOf()['principal']).toMatchObject({ kind: 'mandate', email: 'eva@kanzlei.example', mandateId: MID });
+      });
+
+      it('runs the owner\'s own workflow as the owner (control)', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: null, createdMandateId: null });
+        const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+        expect(res.status).toBe(200);
+        expect(runtimeOf()['principal']).toEqual({ kind: 'owner' });
+      });
+
+      it('refuses once that mandate\'s access ended, naming the person, and starts nothing', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        live = false;
+        const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+        expect(res.status).toBe(403);
+        const body = await res.json() as { code?: string; runs_as?: unknown };
+        expect(body.code).toBe('author_ended');
+        expect(body.runs_as).toBe('eva@kanzlei.example');
+        expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+      });
+
+      it('lists whom each workflow runs as for the owner, and whether that person\'s access ended', async () => {
+        mockHistoryGetPlannedPipelines.mockReturnValue([
+          { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },
+          { id: 'wf-o', manifest_name: 'O', manifest_json: JSON.stringify({ template: true, name: 'O', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-20T00:00:00Z' },
+        ]);
+        mockHistoryGetWorkflowAuthorship.mockImplementation((id: string) => (id === 'wf-m' ? mandateMade : undefined));
+        live = false;
+        const res = await jsonFetch('/api/workflows/library');
+        const body = await res.json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+        expect(body.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true });
+        expect(body.workflows.find((w) => w.id === 'wf-o')).not.toHaveProperty('runs_as');
+        mockHistoryGetWorkflowAuthorship.mockReset();
+        mockHistoryGetPlannedPipelines.mockReturnValue([]);
+      });
     });
 
     // A library Run has no trigger, so its steps file no mail for approval and keep being

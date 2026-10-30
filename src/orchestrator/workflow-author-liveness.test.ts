@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { IAgent, LynoxUserConfig, PlannedPipeline, ToolEntry } from '../types/index.js';
 import type { WorkflowAuthorship } from '../core/workflow-store.js';
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 
 /**
  * A saved workflow a mandate made or last changed runs only while that mandate's grant is live,
@@ -99,7 +100,7 @@ function chat(principal?: IAgent['principal']): IAgent {
     getAvailableTools: () => ctx.tools,
     currentThreadId: 't-1',
     userTimezone: 'UTC',
-    ...(principal ? { principal } : {}),
+    principal: principal ?? OWNER_PRINCIPAL,
     noteUntrustedData: vi.fn(),
     noteForeignContent: vi.fn(),
   } as unknown as IAgent;
@@ -213,7 +214,7 @@ describe("a saved workflow a mandate shaped runs only while that mandate's grant
 describe('runSavedWorkflow — the Run button, the HTTP run route and a schedule', () => {
   function runtime() {
     const ctx = engineContext();
-    return { tools: ctx.tools, toolContext: ctx };
+    return { tools: ctx.tools, toolContext: ctx, principal: OWNER_PRINCIPAL };
   }
 
   it("does not run a mandate's workflow once its grant ended", async () => {
@@ -237,7 +238,7 @@ describe('runSavedWorkflow — the Run button, the HTTP run route and a schedule
   it('a caller without the engine context cannot tell a mandate live, so the workflow does not run', async () => {
     authorship = BEAS;
     const ctx = engineContext();
-    const result = await runSavedWorkflow(WF, ctx.runHistory, config);
+    const result = await runSavedWorkflow(WF, ctx.runHistory, config, undefined, { principal: OWNER_PRINCIPAL });
     expect(result).toEqual({ ok: false, error: `Workflow execution failed: ${WORKFLOW_ENDED_REFUSAL}` });
     expect(mockProcess).not.toHaveBeenCalled();
   });

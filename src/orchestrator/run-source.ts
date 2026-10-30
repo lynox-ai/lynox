@@ -8,7 +8,7 @@
  * does not compile until it decides.
  */
 import type { MandateEnds } from '../core/mandate-ends.js';
-import { planAuthorshipOfWorkflow, planMandate, planMembers, principalHasEnded, type RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, planAuthorshipOfWorkflow, planMandate, planMembers, principalHasEnded, type RequestPrincipal } from '../core/request-principal.js';
 import type { WorkflowAuthorship } from '../core/workflow-store.js';
 
 export type RunSource =
@@ -53,6 +53,19 @@ export function savedWorkflowSource(
   if (a === undefined) return { kind: 'saved', workflowId, authors: 'unreadable', ends: ends ?? null };
   const mark = planMandate(planAuthorshipOfWorkflow(a));
   return { kind: 'saved', workflowId, authors: planMembers(undefined, mark).members, ends: ends ?? null };
+}
+
+/**
+ * Whom a run of a saved workflow is for when no plan names one: the mandate that made or last
+ * changed it, as a plan on that workflow runs (`planMembers`), else the owner. The library's Run
+ * button asks this, so the owner pressing it runs a mandate's workflow under that mandate's lock,
+ * the same as its schedule does (1055, decision A). The mandate's lock is never wider than the
+ * owner's. Unreadable authorship gives the owner here, and the run is refused by `sourceRefusal`
+ * before any step.
+ */
+export function workflowRunsAs(a: WorkflowAuthorship | undefined): RequestPrincipal {
+  if (a === undefined) return OWNER_PRINCIPAL;
+  return planMembers(undefined, planMandate(planAuthorshipOfWorkflow(a))).of ?? OWNER_PRINCIPAL;
 }
 
 /** Why a run of this source must not start, or undefined when it may. `depth` is the run's

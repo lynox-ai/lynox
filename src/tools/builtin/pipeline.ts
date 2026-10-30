@@ -463,7 +463,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
       // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-      principal: deps.parentAgent?.principal,
+      principal: deps.parentAgent.principal,
       parentActiveScopes: deps.parentAgent?.activeScopes,
       // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
       // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -560,9 +560,12 @@ export interface PipelineDeps {
    * seed). Only the SEED direction lives here: the way BACK is already covered,
    * stronger, by the handler's unconditional `agent.noteUntrustedData?.()`
    * after every run (H-002/CORE-9 — any delegated run taints the caller).
-   * Absent for headless callers → the run starts clean.
+   * Required: it is also whom the run is for. Its principal builds every step agent and
+   * picks the lock, so a run with no agent would have no one to run as, and the owner is not
+   * a default this path may fill in (1055). A headless run goes through `runSavedWorkflow`,
+   * which takes its principal explicitly.
    */
-  parentAgent?: IAgent | undefined;
+  parentAgent: IAgent;
 }
 
 /** Outcome of a Saved-Workflows-library "Run" action. */
@@ -750,15 +753,17 @@ export async function runSavedWorkflow(
   workflowId: string,
   runHistory: RunHistory | null,
   config: LynoxUserConfig,
-  params?: Record<string, unknown> | undefined,
-  runtime?: {
+  params: Record<string, unknown> | undefined,
+  runtime: {
     tools?: ToolEntry[] | undefined;
     toolContext?: ToolContext | undefined;
     memory?: IMemory | null | undefined;
     /** What the session that scheduled this run had taken in (see `TriggerRecord.created_untrusted`). */
     seed?: UntrustedCause | undefined;
-    /** Who started the run, when a request did; its steps are built for it (PRD D1). Absent = the owner. */
-    principal?: import('../../core/request-principal.js').RequestPrincipal | undefined;
+    /** Whom the run is for; its steps are built for it (PRD D1). Required, and the owner is
+     *  passed as `OWNER_PRINCIPAL`: a headless run has no agent to take it from, so a missing
+     *  one must not quietly read as the owner (1055). */
+    principal: import('../../core/request-principal.js').RequestPrincipal;
     /**
      * Whether this run passes the workflow's contract on (`decideRunGrant`), asked with the
      * workflow exactly as this function read it. Absent = no contract, whatever is stored:
@@ -799,7 +804,7 @@ export async function runSavedWorkflow(
      *  steps keep being refused a mail. Not part of `buildRunCtx`, which a chat's
      *  `run_workflow` shares. */
     approvalFiling?: import('../../core/approval-filing.js').ApprovalFilingContext | undefined;
-  } | undefined,
+  },
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
     return { ok: false, error: 'Run history is not available.' };
@@ -914,7 +919,7 @@ export async function runSavedWorkflow(
       runHistory,
       parentTools: runtime?.tools,
       parentToolContext: runtime?.toolContext,
-      principal: runtime?.principal,
+      principal: runtime.principal,
       parentMemory: runtime?.memory ?? null,
       // The decided contract — never the stored one directly — authorises this
       // headless run's declared outbound writes (enforced per-tool-call at
@@ -990,12 +995,11 @@ export interface WorkflowRunTrail {
  * workflow's id is whatever its file said. Exported for its test.
  */
 export function workflowRunTrail(
-  principal: RequestPrincipal | undefined,
+  principal: RequestPrincipal,
   auditLog: AuditLog | null,
   run: { workflowId: string; oneShot: boolean; retry: boolean },
 ): WorkflowRunTrail | null {
-  // No agent: internal code, which runs as the owner (an agent always has a principal).
-  const p = principal ?? OWNER_PRINCIPAL;
+  const p = principal;
   if (isOwnerPrincipal(p) || currentPlanRun(p) !== undefined) return null;
   const correlationId = newCorrelationId();
   const named: ReadonlyArray<readonly [string, string | number | undefined]> = [
@@ -1020,8 +1024,8 @@ export function workflowRunTrail(
 }
 
 /** Run `fn` under a workflow run's key when there is a trail; as it is otherwise. */
-function underWorkflowRun<T>(trail: WorkflowRunTrail | null, principal: RequestPrincipal | undefined, fn: () => T): T {
-  return trail === null ? fn() : runAsWorkflowRun(principal ?? OWNER_PRINCIPAL, trail.key, fn);
+function underWorkflowRun<T>(trail: WorkflowRunTrail | null, principal: RequestPrincipal, fn: () => T): T {
+  return trail === null ? fn() : runAsWorkflowRun(principal, trail.key, fn);
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
@@ -1103,7 +1107,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }
     }
 
-    const retryTrail = workflowRunTrail(deps.parentAgent?.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true });
+    const retryTrail = workflowRunTrail(deps.parentAgent.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true });
     if (retryTrail !== null) {
       try { retryTrail.begin(); } catch { return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }
@@ -1144,13 +1148,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       const prevGrants = prev.runTaint?.grants;
       if (prevGrants !== undefined) for (const id of prevGrants.members()) retryGrants?.add(id);
       else retryGrants?.add(UNKNOWN_GRANT);
-      const state = await underWorkflowRun(retryTrail, deps.parentAgent?.principal, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
+      const state = await underWorkflowRun(retryTrail, deps.parentAgent.principal, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
         source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
         autonomy: deps.autonomy,
         parentTools: deps.tools,
         parentToolContext: deps.toolContext,
         // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-        principal: deps.parentAgent?.principal,
+        principal: deps.parentAgent.principal,
         parentActiveScopes: deps.parentAgent?.activeScopes,
         // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
         // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -1250,7 +1254,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     validateManifest(manifest);
     // Before the run is marked run, with no await since the executed-guard above: a one-shot whose
     // start cannot be recorded stays unrun, and a second call cannot slip in between (660b).
-    trail = workflowRunTrail(deps.parentAgent?.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false });
+    trail = workflowRunTrail(deps.parentAgent.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false });
     if (trail !== null) {
       try { trail.begin(); } catch { trail = null; return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }
@@ -1264,13 +1268,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const runTaint = newRunTaint(deps.parentAgent);
-    const state = await underWorkflowRun(trail, deps.parentAgent?.principal, () => runManifest(manifest, deps.config, buildRunCtx({
+    const state = await underWorkflowRun(trail, deps.parentAgent.principal, () => runManifest(manifest, deps.config, buildRunCtx({
       source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
       autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
       // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-      principal: deps.parentAgent?.principal,
+      principal: deps.parentAgent.principal,
       parentActiveScopes: deps.parentAgent?.activeScopes,
       // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
       // abort is dead code for workflows: registration is conditional on a scope, and nothing
