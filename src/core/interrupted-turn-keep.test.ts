@@ -32,10 +32,11 @@ vi.mock('./stream.js', () => ({
   }),
 }));
 
-import { Agent, RunAbortedError, ToolLoopBreakError } from './agent.js';
+import { Agent, RunAbortedError, ThinkingOnlyLoopError, ToolLoopBreakError } from './agent.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { SessionStore } from './session-store.js';
+import { THINKING_ONLY_CONTINUATION_PROMPT } from './render-projection.js';
 import { readRunStop, runStopText, runStopFromNoteRow, applyRunStops, withRunStop, completedPrefixEnd } from './run-stop.js';
 import type { Session } from './session.js';
 import type { ToolEntry } from '../types/index.js';
@@ -214,6 +215,33 @@ describe('a stopped run keeps its completed prefix', { timeout: 60_000 }, () => 
     expect(runStopText(stop!)).toContain('Do not repeat that call');
     expect(runStopText(stop!)).not.toContain('probe_tool');
     expect(runStopText(stop!)).not.toContain('wrong');
+  });
+
+  it('thinking loop after tool work: the question and the fetched data stay, disk and reload agree (996)', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    handler.mockResolvedValue('a large data set');
+    const thinkingOnly = { content: [{ type: 'thinking' as const, thinking: 'going through it', signature: 's' }], stop_reason: 'max_tokens', usage: { input_tokens: 100, output_tokens: 16_000 } };
+    mockProcess
+      .mockResolvedValueOnce(toolUse('tu_fetch', { what: 'data' }))
+      .mockResolvedValueOnce(thinkingOnly)
+      .mockResolvedValueOnce(thinkingOnly);
+
+    await expect(session.run('evaluate the data')).rejects.toBeInstanceOf(ThinkingOnlyLoopError);
+
+    const live = session.getAgent()!.getMessages();
+    // The question, the fetch pair, and the first thinking-only turn with its continuation
+    // stay (a complete pair); the second thinking-only turn, which ended the run, goes. The
+    // stop rides on that continuation, so the model reads both what happened and the stop.
+    expect(live).toHaveLength(5);
+    expect(live[4]!.content).toBe(THINKING_ONLY_CONTINUATION_PROMPT);
+    expect(JSON.stringify(live)).toContain('a large data set');
+    expect(readRunStop(live.at(-1)!)?.code).toBe('thinking_loop');
+    expect(JSON.stringify(apiRows(engine, session))).toBe(JSON.stringify(live));
+    expect(reload(engine, session)).toEqual(live);
+    expect(outgoingTexts(applyRunStops(live)).at(-1)).toBe(runStopText({ code: 'thinking_loop' }));
+    // Its own text, not the generic interruption: the model reads why the run stopped.
+    expect(runStopText({ code: 'thinking_loop' })).toContain('spent the whole output limit on thinking');
   });
 
   it('a stop before the send still puts the question into the context, on disk and live', async () => {

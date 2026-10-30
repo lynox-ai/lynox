@@ -2727,6 +2727,13 @@ export class Agent implements IAgent {
         && this._keepCompletedPrefix(userTurn, { code: 'tool_loop_break', detail: loopBreakDetail(err.loopKey) })) {
         throw err;
       }
+      // The same for a thinking loop: it typically comes after real tool work (a large fetch,
+      // then the evaluation), and the note asks the user to go on in smaller steps — which needs
+      // the question and the fetched data still in the context.
+      if (err instanceof ThinkingOnlyLoopError
+        && this._keepCompletedPrefix(userTurn, { code: 'thinking_loop' })) {
+        throw err;
+      }
       this.messages.length = Math.min(snapshot, this.messages.length);
       this._persistedMark = Math.min(this._persistedMark, this.messages.length);
       throw err;
@@ -2975,8 +2982,10 @@ export class Agent implements IAgent {
         // only once. Its thinking is stripped from the history, so a second one in a row cannot
         // build on the first: the model restarts the same reasoning and is cut off again (996).
         // A tool dispatched in between is progress and starts the count over.
-        const thinkingOnly = extractText(response.content).trim().length === 0
-          && !response.content.some((b) => b.type === 'tool_use');
+        // Decided on what stays in the history: a turn whose kept blocks are all blank text
+        // left the model nothing. A server tool's blocks (web search, tool search) or a
+        // redacted thinking block stay, so such a turn is not thinking-only.
+        const thinkingOnly = contentForHistory.every((b) => b.type === 'text' && b.text.trim().length === 0);
         if (!thinkingOnly || toolsDelta > 0) this._thinkingOnlyStreak = 0;
         if (thinkingOnly && ++this._thinkingOnlyStreak >= 2) throw new ThinkingOnlyLoopError();
         if (prefix.trim().length === 0) {
