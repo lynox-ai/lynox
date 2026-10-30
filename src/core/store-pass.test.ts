@@ -209,6 +209,7 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
       ['JSON escape', '{"query":"{ shop { storefront\\u0041ccessTokens(first: 1) { nodes { id } } } }"}'],
       ['nested document, escaped in its string literal',
         '{"query":"mutation{bulkOperationRunQuery(query:\\"{shop{storefront\\\\u0041ccessTokens{edges{node{\\\\u0061ccessToken}}}}}\\"){bulkOperation{id}}}"}'],
+      ['an escape that writes the backslash of the next one', '{"query":"{ shop { storefront\\\\u005cu0041ccessTokens { nodes { id } } } }"}'],
       ['nested, braced escape', query('mutation { bulkOperationRunQuery(query: "{ shop { storefront\\u{41}ccessTokens { edges { node { id } } } } }") { bulkOperation { id } } }')],
       ['in the variables', JSON.stringify({ query: 'query($q: String!) { shop { name } }', variables: { q: 'access_token' } })],
       ['in a key', '{"query":"{ shop { name } }","variables":{"accessToken":1}}'],

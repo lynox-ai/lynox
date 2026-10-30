@@ -78,8 +78,8 @@ export function credentialPathRefusal(path: string): string | null {
 const ACCESS_TOKEN_REFUSAL = 'a store pass does not reach the store\'s access tokens';
 const TOKEN_WORD = /access_?token/i;
 const PERSISTED_WORD = /persistedquery/i;
-/** A `\uXXXX` or `\u{X…}` escape behind any number of backslashes: JSON's and GraphQL's string escapes. */
-const UNICODE_ESCAPE = /\\+u(?:\{([0-9a-fA-F]{1,6})\}|([0-9a-fA-F]{4}))/g;
+/** A `\uXXXX` or `\u{X…}` escape: JSON's and GraphQL's string escapes. A backslash before it is left, which changes nothing here. */
+const UNICODE_ESCAPE = /\\u(?:\{([0-9a-fA-F]{1,6})\}|([0-9a-fA-F]{4}))/g;
 
 /**
  * `text` with every unicode escape resolved, again and again until nothing changes (at most eight
