@@ -117,6 +117,15 @@ describe('continuation-loop break', () => {
       expect(mockProcess).toHaveBeenCalledTimes(3);
     });
 
+    it('two thinking-only turns after a cut-off call stop as a thinking loop, the more specific guard', async () => {
+      const turns = [cutCall(), thinkingOnly(), thinkingOnly()];
+      let n = 0;
+      mockProcess.mockImplementation(() => Promise.resolve(turns[n++]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      await expect(agent.send('write the report')).rejects.toBeInstanceOf(ThinkingOnlyLoopError);
+      expect(mockProcess).toHaveBeenCalledTimes(3);
+    });
+
     it('the same cut-off call alone, with no text, stops at the third', async () => {
       mockProcess.mockImplementation(() => Promise.resolve(cutCall()));
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
