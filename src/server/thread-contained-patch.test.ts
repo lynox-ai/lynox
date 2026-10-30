@@ -86,6 +86,8 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
     expect(await patch('t-contained', { skip_extraction: false, title: 'renamed' })).toBe(409);
     // The page tells this refusal apart from any other by its code.
     expect((JSON.parse(lastBody) as { code?: unknown }).code).toBe('contained');
+    // A record that says so is no failed check.
+    expect(JSON.parse(lastBody) as Record<string, unknown>).not.toHaveProperty('contained_unknown');
     expect(ts.getThread('t-contained')?.skip_extraction).toBe(1);
     // Refused whole: nothing else in the request was applied either.
     expect(ts.getThread('t-contained')?.title).toBe('contained');
@@ -108,6 +110,8 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
       expect(await patch('t-unread', { skip_extraction: false })).toBe(409);
       // An unreadable record is not proof the chat read the store, and the answer says so.
       expect(lastBody).toContain('This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.');
+      // …and says which, for the owner's text: a self-hosted instance, so its logs.
+      expect((JSON.parse(lastBody) as { contained_unknown?: unknown }).contained_unknown).toBe('self-hosted');
       expect(ts.getThread('t-unread')?.skip_extraction).toBe(1);
     } finally {
       ctx.containment = real;

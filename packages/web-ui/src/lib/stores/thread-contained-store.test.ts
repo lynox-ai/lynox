@@ -11,31 +11,35 @@ const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.u
 
 describe('the open chat\'s `contained` flag in the chat store', () => {
 	it('is cleared on a new chat and on opening another thread, beside private mode', () => {
-		expect(src.split('\tskipExtraction = false;\n\tthreadContained = false;\n').length - 1).toBe(2);
+		expect(src.split('\tskipExtraction = false;\n\tthreadContained = false;\n\tthreadContainedUnknown = null;\n').length - 1).toBe(2);
 	});
 
 	it('is read from the thread when it is opened', () => {
-		expect(src).toContain('threadContained = threadData.thread.contained === true;');
+		expect(src).toContain('threadContained = threadData.thread.contained === true;\n\t\t\t\tthreadContainedUnknown = threadContained ? readContainedUnknown(threadData.thread.contained_unknown) : null;');
 	});
 
 	it('is set when the server refuses to switch private mode off because the chat is contained', () => {
-		expect(src).toContain("if ('contained' in failure && failure.contained) threadContained = true;");
+		expect(src).toContain("if ('contained' in failure && failure.contained) {\n\t\t\tthreadContained = true;\n\t\t\tthreadContainedUnknown = failure.unknown ?? null;");
 	});
 
-	it('is re-read from the open thread after a run, which may have contained it', () => {
-		// The end of a run sent from this page.
-		expect(src).toMatch(/\/\/ Refresh thread list so sidebar reflects updated ordering\n\tvoid loadThreads\(\);\n\tvoid refreshThreadContained\(\{ afterRun: true, answer: turn\.assistantMsg \}\);/);
-		// A re-attach that found no live run, the offline probe and a mount end in reconcileThread.
-		expect(src).toMatch(/export async function reconcileThread\(\): Promise<void> \{\n\tconst tid = sessionId;\n\tif \(!tid\) return;\n(\t\/\/[^\n]*\n)*\tvoid refreshThreadContained\(\);/);
-		// A re-attach to a live run (reload, tab switch, take-over) reads it in its finally, outside
-		// the condition that reconciles only a run that ended with `done`.
-		const finallyStart = src.indexOf('\t} finally {\n\t\ttry { await reader.cancel(); } catch { /* already closed */ }');
-		const reconcileGate = src.indexOf('if (completedNormally && streamEpoch === myEpoch && gen === _resumeGeneration) {', finallyStart);
-		// At the finally's own depth (two tabs, a newline before), not nested in a branch above.
-		const call = src.indexOf('\n\t\tvoid refreshThreadContained({ afterRun: true, answer: assistantIdx >= 0 ? messages[assistantIdx] ?? null : null });\n', finallyStart);
-		expect(finallyStart).toBeGreaterThan(-1);
-		expect(call).toBeGreaterThan(finallyStart);
-		expect(call).toBeLessThan(reconcileGate);
+	it('is re-read at the one place every run end reaches', () => {
+		// `runEnded` is the one reader; nothing else asks the thread whether it is contained now.
+		expect(src.match(/refreshThreadContained\(/g)).toHaveLength(2); // the definition and runEnded's call
+		expect(src).toContain('function runEnded(answer: ChatMessage | null): void {\n\tvoid refreshThreadContained({ afterRun: true, answer });\n}');
+		// `endStreaming` is the only way to clear `isStreaming` and reaches it; the two resets of a
+		// new or reopened chat are not run ends and stay as they are.
+		expect(src).toContain('function endStreaming(answer: ChatMessage | null = null): void {\n\tisStreaming = false;\n\trunEnded(answer);\n}');
+		const fnOf = (at: number): string => {
+			const m = [...src.slice(0, at).matchAll(/\n(?:export )?(?:async )?function (\w+)/g)].at(-1);
+			return m?.[1] ?? '';
+		};
+		const clears = [...src.matchAll(/isStreaming = false;/g)].map((m) => fnOf(m.index!));
+		expect(clears.sort()).toEqual(['endStreaming', 'newChat', 'resumeThread']);
+		// Where no stream was open, the run's end is said directly: a re-attach that found the run
+		// finished (404), a re-attach that lost ownership, and a reconcile.
+		expect(src).toContain('if (!res.ok || !res.body) { runEnded(null); return; }');
+		expect(src).toMatch(/export async function reconcileThread\(\): Promise<void> \{\n\tconst tid = sessionId;\n\tif \(!tid\) return;\n(\t\/\/[^\n]*\n)*\trunEnded\(null\);/);
+		expect(src).toContain('\t\t\tendStreaming(answer);\n\t\t\tstreamingActivity = \'idle\';\n\t\t\tstreamingToolName = null;\n\t\t\tstreamingToolPhase = null;\n\t\t} else {\n\t\t\trunEnded(answer);\n\t\t}');
 	});
 
 	it('a reply for a chat the user has since left does not land on the one now open', () => {

@@ -96,19 +96,32 @@ export class Containment {
    * {@link isContained}: an empty id, or a read that throws, counts as contained.
    */
   containedThreadIds(threadIds: readonly string[]): Set<string> {
+    const { contained, unknown } = this.threadStates(threadIds);
+    for (const id of unknown) contained.add(id);
+    return contained;
+  }
+
+  /**
+   * {@link containedThreadIds} split by why: `contained` the threads a row records (or an empty
+   * id), `unknown` those counted contained only because the record could not be read — a read
+   * that throws, or no engine.db on a provisioned instance. Enforcement takes both; only what
+   * the owner is told differs.
+   */
+  threadStates(threadIds: readonly string[]): { contained: Set<string>; unknown: Set<string> } {
     const named = threadIds.filter((id) => id !== '');
     const contained = new Set<string>(threadIds.filter((id) => id === ''));
-    if (named.length === 0) return contained;
+    const unknownRest = (): Set<string> => new Set(named.filter((id) => !contained.has(id)));
+    if (named.length === 0) return { contained, unknown: new Set() };
     try {
       if (this.mirror !== null) for (const id of this.mirror.threadIds(named)) contained.add(id);
-      if (this.db === null) return isProvisionedInstance() ? new Set(threadIds) : contained;
+      if (this.db === null) return { contained, unknown: isProvisionedInstance() ? unknownRest() : new Set() };
       const rows = this.db
         .prepare(`SELECT DISTINCT container_id AS id FROM contained WHERE container_kind = 'thread' AND container_id IN (${named.map(() => '?').join(',')})`)
         .all(...named) as Array<{ id: string }>;
       for (const row of rows) contained.add(row.id);
-      return contained;
+      return { contained, unknown: new Set() };
     } catch {
-      return new Set(threadIds);
+      return { contained, unknown: unknownRest() };
     }
   }
 
@@ -238,6 +251,16 @@ export function threadIsContained(store: Containment | null, threadId: string): 
 export function containedThreads(store: Containment | null, threadIds: readonly string[]): Set<string> {
   if (store === null) return isProvisionedInstance() ? new Set(threadIds) : new Set();
   return store.containedThreadIds(threadIds);
+}
+
+/**
+ * {@link containedThreads} split by why ({@link Containment.threadStates}): without a store on a
+ * provisioned instance every thread is `unknown`, not `contained`. The routes that show the
+ * owner a chat's state read this; enforcement reads {@link containedThreads}.
+ */
+export function containedThreadStates(store: Containment | null, threadIds: readonly string[]): { contained: Set<string>; unknown: Set<string> } {
+  if (store === null) return { contained: new Set(), unknown: isProvisionedInstance() ? new Set(threadIds) : new Set() };
+  return store.threadStates(threadIds);
 }
 
 /**
