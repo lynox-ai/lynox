@@ -53,6 +53,9 @@ async function boot(managed: boolean): Promise<Booted> {
   vi.stubEnv('LYNOX_DATA_DIR', dir);
   vi.stubEnv('LYNOX_HTTP_SECRET', SECRET);
   vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+  // A mandate is let in only on the durable memory tools, as on the fleet: without them the
+  // mandate test would meet that refusal before the owner gate it is about.
+  vi.stubEnv('LYNOX_DURABLE_MEMORY_ENABLED', 'true');
   if (managed) {
     vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-claim-preview');
     vi.stubEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', CP);
