@@ -131,7 +131,7 @@ describe('with a pass', () => {
       '/admin/api/2025-10/shopify_payments/balance.json',
       '/admin/products.json',
     ];
-    for (const path of paths) await send(`${ORIGIN}${path}`, { [H]: TOKEN }, pass());
+    for (const path of paths) await expect(send(`${ORIGIN}${path}`, { [H]: TOKEN }, pass()), path).resolves.toHaveProperty('status', 200);
     expect(sent.map((s) => new URL(s.url).pathname)).toEqual(paths);
   });
 
