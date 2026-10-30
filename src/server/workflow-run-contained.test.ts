@@ -35,7 +35,6 @@ describe('GET /api/workflows and /api/workflows/:id mark a run from a contained 
     expect(res.status).toBe(200);
     return await res.json() as Record<string, unknown>;
   }
-  /** The mark fields of a run, in the detail and in the list; `absent` where a field is left out. */
   const field = (o: Record<string, unknown>, k: string): unknown => (k in o ? o[k] : 'absent');
   /** The mark of a run in the detail, the list and the step outputs; `absent` where a field is left out. */
   async function marks(runId: string): Promise<{ detail: [unknown, unknown]; list: [unknown, unknown] }> {

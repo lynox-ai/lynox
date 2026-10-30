@@ -364,9 +364,6 @@ export function withdrawPromptOnAbort(
   return () => { signal.removeEventListener('abort', withdraw); };
 }
 
-/** What a chat opened from a contained one may promise for a store change, as this instance runs
- *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
- *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
 /**
  * {@link containedFields} for workflow runs, from the chat each was started from: a run's outputs
  * carry what that chat read. A run no chat started (a plan, the library) carries nothing here.
@@ -398,6 +395,9 @@ function containedFields(states: { contained: Set<string>; unknown: Set<string> 
   return { contained: false };
 }
 
+/** What a chat opened from a contained one may promise for a store change, as this instance runs
+ *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
+ *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
 function containedWayOutOf(engine: Engine): ContainedWayOutState {
   const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? undefined;
   return {
