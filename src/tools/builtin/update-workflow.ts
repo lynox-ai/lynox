@@ -5,6 +5,7 @@ import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/hum
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
 import { validateContractAgainstSteps } from '../../orchestrator/contract-validation.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { stripHidden } from '../../core/hidden-text.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface UpdateWorkflowInput {
@@ -117,7 +118,8 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     }
     const seen = new Set<string>();
     for (const s of steps) {
-      if (seen.has(s.id)) return `Error: Duplicate step id "${s.id}" after the edit.`;
+      // An id the edit kept may be stored text from before the save refused hidden characters.
+      if (seen.has(s.id)) return `Error: Duplicate step id "${stripHidden(s.id)}" after the edit.`;
       seen.add(s.id);
     }
 

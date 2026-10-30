@@ -586,7 +586,12 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ name })
 			});
-			if (!res.ok) { error = t('common.save_failed'); return; }
+			if (!res.ok) {
+				// The field stays open, so the owner can type the name again (ux U-077).
+				const body = await res.json().catch(() => null) as { code?: unknown } | null;
+				error = body?.code === 'hidden_char' ? t('workflow_library.rename_hidden_char') : t('common.save_failed');
+				return;
+			}
 			editingId = null;
 			editName = '';
 			await loadWorkflows();
