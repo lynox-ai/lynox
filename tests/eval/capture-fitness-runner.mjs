@@ -39,6 +39,9 @@ const DATA_DIR = args['data-dir'];
 const LABEL = args['label'] ?? 'unlabelled';
 const BASE = args['base'] ?? 'http://127.0.0.1:3199';
 const REPEATS = Number(args['repeats'] ?? 1);
+// A provider stream that stalls never ends the turn, and without a bound one stalled case held
+// a whole run for its outer timeout. A case past this bound reports ERR and the run goes on.
+const CASE_MS = Number(args['case-timeout'] ?? 300) * 1000;
 if (!DATA_DIR) { console.error('need --data-dir (the engine\'s LYNOX_DATA_DIR)'); process.exit(2); }
 
 const fx = JSON.parse(readFileSync(join(HERE, 'capture-fitness-fixtures.json'), 'utf8'));
@@ -96,6 +99,7 @@ async function runOne(text) {
   const res = await fetch(`${BASE}/api/sessions/${s.sessionId}/run`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ task: text }),
+    signal: AbortSignal.timeout(CASE_MS),
   });
   // Drain the SSE stream so the turn completes before we read the sink.
   const reader = res.body.getReader();
