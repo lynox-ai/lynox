@@ -91,7 +91,7 @@ describe('a run refused because that person\'s access ended', () => {
 		expect(text).toContain('eva@kanzlei.example hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet.');
 		// Not a copy: a copy keeps the mark of the steps it holds and is refused again (`upsertCopy`).
 		expect(text).toContain('auch nicht als Kopie');
-		expect(text).toContain('bitte lynox, ihn neu zu schreiben, nicht zu kopieren.');
+		expect(text).toContain('bitte lynox, dafür einen neuen Workflow zu schreiben, statt diesen zu kopieren oder zu ändern.');
 		expect(text).not.toContain('engine sentence');
 	});
 
