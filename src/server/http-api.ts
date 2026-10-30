@@ -8330,7 +8330,7 @@ export class LynoxHTTPApi {
       }
       // The name reaches the model in every run and edit of the workflow; the save refuses such a
       // character, and a rename does not pass through the save.
-      const hiddenName = findHiddenChar(name);
+      const hiddenName = findHiddenChar(name.trim());
       if (hiddenName !== null) { errorResponse(res, 400, hiddenRefusal('The name', hiddenName.codePoint), HIDDEN_CHAR_CODE); return; }
       const renamed = history.renamePlannedPipeline(params['id']!, name.trim(), this._principalOf(req));
       if (!renamed) { errorResponse(res, 404, 'Workflow not found'); return; }

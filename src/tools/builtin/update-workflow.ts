@@ -181,13 +181,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
         w.run('pipeline', () => runHistory.insertPlannedPipeline(updated, agent.principal), ifReturned);
       });
     } catch (err: unknown) {
-      const message = getErrorMessage(err);
-      // A step id kept from the stored workflow cannot be written again in other words: the way
-      // out is to remove that step by the id the model sees and add it again under a new one.
-      const keptId = /— steps\[\d+\]\.id contains/.test(message)
-        ? ' If that step id comes from the stored workflow, remove the step by the id you see and add it again under a new id.'
-        : '';
-      return `Error: Could not save the edited workflow: ${message}${keptId}`;
+      return `Error: Could not save the edited workflow: ${getErrorMessage(err)}`;
     }
     forgetPipeline(planned.id);
 

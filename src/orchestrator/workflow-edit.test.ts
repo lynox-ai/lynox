@@ -11,16 +11,6 @@ function steps(): InlinePipelineStep[] {
 }
 
 describe('applyModifications (shared workflow-step mutation)', () => {
-  it('finds a stored step whose id holds a character that renders as nothing by the id the model sees; an exact id comes first', () => {
-    const ZWSP = String.fromCodePoint(0x200B);
-    const steps: InlinePipelineStep[] = [{ id: `fetch${ZWSP}`, task: 'Fetch' }, { id: 'fetch', task: 'Other' }, { id: `send${ZWSP}`, task: 'Send', input_from: [`fetch${ZWSP}`] }];
-    expect(applyModifications(steps, [{ action: 'update_task', step_id: 'fetch', value: 'Exact' }])).toBeNull();
-    expect(steps.map((s) => s.task)).toEqual(['Fetch', 'Exact', 'Send']);
-    expect(applyModifications(steps, [{ action: 'remove', step_id: 'send' }, { action: 'update_task', step_id: `fetch${ZWSP}`, value: 'Kept' }])).toBeNull();
-    expect(steps.map((s) => s.id)).toEqual([`fetch${ZWSP}`, 'fetch']);
-    expect(applyModifications(steps, [{ action: 'remove', step_id: 'nope' }])).toBe('Error: Step "nope" not found for removal.');
-  });
-
   it('applies an ordered batch — add then remove the same id is valid', () => {
     const s = steps();
     const mods: StepModification[] = [

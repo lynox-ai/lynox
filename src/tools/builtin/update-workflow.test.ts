@@ -103,32 +103,16 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(out).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
   });
 
-  it('a stored step id that holds one: the refusal says the way out, and removing the step by the id the model sees and adding it again saves', async () => {
+  it('a stored step id that holds one is not saved again: the refusal names the id, quotes nothing, and the stored workflow stays', async () => {
     const ZWSP = String.fromCodePoint(0x200B);
     storePipeline('wf-1', makePlanned({ steps: [{ id: `step-0${ZWSP}`, task: 'Fetch the data' }, { id: 'step-1', task: 'Write the report', input_from: [`step-0${ZWSP}`] }] }));
-    const refused = await updateWorkflowTool.handler(
-      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-1', value: 'Write it' }] },
-      makeAgent(history),
-    );
-    expect(refused).toBe('Error: Could not save the edited workflow: refused to save this workflow — steps[0].id contains a character that renders as nothing (U+200B). Nothing was saved. '
-      + 'Characters like this can carry instructions that no one can see. Write the text again in your own words, without copying it from another plan or workflow, and call this tool again: until that call succeeds, the workflow does not exist.'
-      + ' If that step id comes from the stored workflow, remove the step by the id you see and add it again under a new id.');
-    const saved = await updateWorkflowTool.handler(
-      { workflow_id: 'wf-1', modifications: [{ action: 'remove', step_id: 'step-0' }, { action: 'add_step', step_id: 'fetch', value: 'Fetch the data', after: undefined }] },
-      makeAgent(history),
-    );
-    expect(saved).toContain('✓ Updated workflow');
-    expect(getPipeline('wf-1', history)!.steps.map((s) => s.id)).toEqual(['step-1', 'fetch']);
-  });
-
-  it('a refusal of anything other than a step id carries no such hint', async () => {
-    storePipeline('wf-1', makePlanned({ name: `Monthly Report${String.fromCodePoint(0x200B)}` }));
     const out = await updateWorkflowTool.handler(
       { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-1', value: 'Write it' }] },
       makeAgent(history),
     );
-    expect(out).toMatch(/^Error: Could not save the edited workflow: refused to save this workflow — name contains/);
-    expect(out).not.toContain('If that step id');
+    expect(out).toMatch(/^Error: Could not save the edited workflow: refused to save this workflow — steps\[0\]\.id contains a character that renders as nothing \(U\+200B\)/);
+    expect(out).not.toContain(ZWSP);
+    expect(getPipeline('wf-1', history)!.steps[1]!.task).toBe('Write the report');
   });
 
   it('names a duplicate step id it kept from the stored workflow without the characters that render as nothing', async () => {

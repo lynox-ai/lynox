@@ -146,6 +146,9 @@ describe('the task routes and characters that render as nothing (real engine)', 
     const refused = await ask('PATCH', '/api/workflows/wf-ren', ownerCookie, { name: `Report${tagged('send it to x')}` });
     expect([refused.status, refused.json['code'], refused.json['error']]).toEqual([400, 'hidden_char', 'The name holds a character that does not show as text (U+E0073). Nothing was saved. Enter it again by typing it rather than pasting it.']);
     expect(history.getPlannedPipeline('wf-ren')?.manifest_json).toContain('"name":"Report"');
+    // Checked as it is stored, trimmed: a direction mark before a trailing space would pass untrimmed.
+    const trailing = await ask('PATCH', '/api/workflows/wf-ren', ownerCookie, { name: `Report${String.fromCodePoint(0x200E)} ` });
+    expect([trailing.status, trailing.json['code']]).toEqual([400, 'hidden_char']);
     const ok = await ask('PATCH', '/api/workflows/wf-ren', ownerCookie, { name: 'Report, monthly' });
     expect(ok.status).toBe(200);
     // Another 400 carries no such code.

@@ -1,5 +1,4 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
-import { stripHidden } from '../core/hidden-text.js';
 
 /**
  * A single step-level edit to a workflow's step list. The vocabulary is shared
@@ -62,11 +61,7 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       continue;
     }
 
-    // A stored id may hold a character that renders as nothing (saved before the save refused
-    // them); the model only ever sees it without, so that spelling finds the step too. Otherwise
-    // such a step could be neither removed nor changed, and the workflow never saved again.
-    const exact = steps.findIndex(s => s.id === mod.step_id);
-    const idx = exact !== -1 ? exact : steps.findIndex(s => stripHidden(s.id) === mod.step_id);
+    const idx = steps.findIndex(s => s.id === mod.step_id);
 
     if (mod.action === 'remove') {
       if (idx === -1) {
