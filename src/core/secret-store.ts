@@ -221,8 +221,12 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   // Slack (xoxo + xoxr added — webhook + refresh-token prefixes)
   { label: 'Slack token', kind: 'vendor', pattern: credentialShape(String.raw`xox[bpoasr]-`, String.raw`[A-Za-z0-9-]{10,}`) },
   // Shopify (admin / app-secret / partner / custom — added 2026-05-18 after
-  // a Shopify integration flow leaked the prefix into the agent transcript)
-  { label: 'Shopify token', kind: 'vendor', pattern: credentialShape(String.raw`shp(at|ss|pa|ca)_`, String.raw`[A-Fa-f0-9]{20,}`) },
+  // a Shopify integration flow leaked the prefix into the agent transcript;
+  // refresh token `shprt_` added 2026-10-27). Shopify documents these values
+  // as opaque, so the body takes letters and digits, not hex only. A token
+  // with no prefix (Shopify's own examples show one) has no shape to match:
+  // a bare 32-hex value is what an ETag or a content hash looks like too.
+  { label: 'Shopify token', kind: 'vendor', pattern: credentialShape(String.raw`shp(at|ss|pa|ca|rt)_`, String.raw`[A-Za-z0-9]{20,}`) },
   // JWT (three base64-url segments) — catches OAuth ID tokens etc. Matched in linear time,
   // see `jwt-scan.ts`; the regex it equals is `JWT_SHAPE.regex`.
   { label: 'JWT token', kind: 'jwt', pattern: new LinearJwtRegExp(JWT_SHAPE) },
@@ -833,6 +837,15 @@ export class SecretStore implements SecretStoreLike {
    */
   canPersist(): boolean {
     return this.vault !== null;
+  }
+
+  /**
+   * True when the vault file holds a row under `name`, decryptable or not. A
+   * write-once marker checks this rather than `resolve()`: under a different
+   * LYNOX_VAULT_KEY the row exists and does not resolve.
+   */
+  hasVaultRow(name: string): boolean {
+    return this.vault?.has(name) ?? false;
   }
 
   /**

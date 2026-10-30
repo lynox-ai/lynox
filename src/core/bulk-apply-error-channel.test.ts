@@ -47,6 +47,8 @@ it('a bulk write that throws: the run result and the notification carry a fixed 
     getSecretStore: () => null, getDataStore: () => null, getApiStore: () => null, getToolContext: () => ({ containment: null }),
     getBackupManager: () => null, getHooks: () => [], getContext: () => null,
     getBulkLedger: () => ({ getRunForApply: () => ({ targetSystem: 'data_store' }) }),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   const router = {
     hasChannels: () => true,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, sanitizeNoteDetail, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT } from './render-projection.js';
+import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, buildApprovalNoteContent, sanitizeNoteDetail, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT, THINKING_ONLY_CONTINUATION_PROMPT } from './render-projection.js';
 import type { ThreadMessageRecord } from './thread-store.js';
 
 function rec(seq: number, role: string, content: unknown): ThreadMessageRecord {
@@ -463,6 +463,31 @@ describe('projectMessages — B-full failure notes', () => {
     expect(out[0]?.blocks).toBeUndefined();
   });
 
+  it('projects the entry and outcome of a note about an approved mail', () => {
+    const id = '0b6f1f9e-3c1a-4d6e-9c2a-6f0e4b1d2a33';
+    const out = projectMessages([rec(0, 'assistant', buildApprovalNoteContent('approval_failed', { id, outcome: 'account_changed' }))]);
+    expect(out[0]?.note).toEqual({ code: 'approval_failed', approval: { id, outcome: 'account_changed' } });
+    // The longest id and code that are kept.
+    const long = projectMessages([rec(0, 'assistant', buildApprovalNoteContent('approval_failed', { id: 'a'.repeat(64), outcome: 'b'.repeat(40) }))]);
+    expect(long[0]?.note?.approval).toEqual({ id: 'a'.repeat(64), outcome: 'b'.repeat(40) });
+  });
+
+  it('drops an approval reference that is not an entry id and an outcome code, and keeps the note', () => {
+    for (const approval of [
+      { id: 'a/../b', outcome: 'checksum' },
+      { id: 'a"><img src=x>', outcome: 'checksum' },
+      { id: 'a b', outcome: 'checksum' },
+      { id: 'abc', outcome: 'Checksum!' },
+      { id: 42, outcome: 'checksum' },
+      { id: 'a'.repeat(65), outcome: 'checksum' },
+      { id: 'abc', outcome: 'a'.repeat(41) },
+      'abc',
+    ]) {
+      const out = projectMessages([rec(0, 'assistant', { _lynox_note: { code: 'approval_failed', approval } })]);
+      expect(out[0]?.note).toEqual({ code: 'approval_failed' });
+    }
+  });
+
   it('projects a note without detail', () => {
     const out = projectMessages([rec(0, 'assistant', buildDisplayNoteContent('run_blocked'))]);
     expect(out[0]?.note).toEqual({ code: 'run_blocked' });
@@ -652,5 +677,16 @@ describe('max_tokens continuation prompt', () => {
     ];
     const out = projectMessages(similar.map((t, i) => rec(i + 1, 'user', t)));
     expect(out.map((m) => m.content)).toEqual(similar);
+  });
+  it('the continuation after a thinking-only turn is dropped the same way (996)', () => {
+    const STORED_THINKING = 'Your previous turn spent its whole output limit on thinking and produced no answer and no tool call. That thinking is not kept, so do not start it over. Act now: call a tool, or answer with what you have.';
+    expect(THINKING_ONLY_CONTINUATION_PROMPT).toBe(STORED_THINKING);
+    const out = projectMessages([
+      rec(1, 'user', 'go'),
+      rec(2, 'assistant', [{ type: 'text', text: '[…]' }]),
+      rec(3, 'user', STORED_THINKING),
+      rec(4, 'assistant', [{ type: 'text', text: 'Answer.' }]),
+    ], { mergeTurns: false });
+    expect(out.filter((m) => m.role === 'user').map((m) => m.content)).toEqual(['go']);
   });
 });

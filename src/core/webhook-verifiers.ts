@@ -14,6 +14,10 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { connectionRowToProfile } from './api-store.js';
+import type { ConnectionRow } from './connection-store.js';
+import { presetStoreHost } from './oauth-presets.js';
+import type { InlinePipelineStep } from '../types/pipeline.js';
 
 export type WebhookVerifierKind = 'shopify-hmac' | 'shared-token';
 
@@ -223,4 +227,49 @@ export function verifySharedToken(header: string | undefined, storedHash: string
 export function bodyDedupKey(kind: WebhookVerifierKind, triggerId: string, body: Buffer): string {
   const digest = createHash('sha256').update(body).digest('hex');
   return kind === 'shopify-hmac' ? `shopify-hmac:sha256:${digest}` : `shared-token:${triggerId}:sha256:${digest}`;
+}
+
+/**
+ * The shop a Shopify connection serves, or `null` when the row is no Shopify connection or cannot
+ * be read. What the receiver checks a delivery's shop header against, and the drain again before
+ * the run, since the connection can be connected to another shop in between.
+ */
+export function connectionShopHost(row: ConnectionRow | undefined): string | null {
+  if (row === undefined || row.kind !== 'api') return null;
+  try {
+    const profile = connectionRowToProfile(row);
+    return profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === 'shopify' ? presetStoreHost(profile) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where a webhook run's step would execute with something an event can choose outside its task
+ * text, or `null` when nothing does. Only a step's
+ * `task` fences a value as untrusted; a captured call's `input_template` and every other field
+ * resolve a placeholder raw into what a tool executes with, so a third party would choose a URL,
+ * a path or an argument. Refused there: a mapped param, the whole `params` object, and any
+ * reference that is not to `params` at all — an earlier step's output (`{{s1.result}}`), which an
+ * event's text can steer. An unmapped param is the owner's own value.
+ */
+export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[], mappedNames: readonly string[]): string | null {
+  const mapped = new Set(mappedNames);
+  for (const step of steps) {
+    const { task: _task, ...rest } = step;
+    const text = JSON.stringify(rest);
+    for (const m of text.matchAll(/\{\{([^}]+)\}\}/g)) {
+      // Split as the resolver does (`getByPath`, on `.` only): `{{params[0].result}}` names the
+      // context key `params[0]`, not `params`.
+      const segments = m[1]!.trim().split('.').map((x) => x.trim());
+      if (segments[0] !== 'params') {
+        return `Step "${step.id}" uses "{{${m[1]!.trim()}}}" outside its task text. In a run an event started, an earlier step's output can carry the event's text, and there it would choose what the step executes with. Refer to it only in a step's task text.`;
+      }
+      const name = segments[1];
+      if (name === undefined || mapped.has(name)) {
+        return `Step "${step.id}" uses the event value ${name === undefined ? 'params' : `"${name}"`} outside its task text, where a sender of events would choose what the step executes with. A mapped value may only be used in a step's task text.`;
+      }
+    }
+  }
+  return null;
 }

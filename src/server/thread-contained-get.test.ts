@@ -98,7 +98,7 @@ describe('GET /api/threads and /api/threads/:id carry `contained` (real engine)'
     ts.createThread('g-unread', { title: 'x' });
     ts.updateThread('g-unread', { message_count: 1 });
     const real = ctx.containment;
-    ctx.containment = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
+    ctx.containment = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never, null);
     try {
       expect(await one('g-unread')).toBe(true);
       expect((await listed()).get('g-unread')).toBe(true);

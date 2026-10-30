@@ -7,6 +7,7 @@ import type {
   RelationRecord,
   ContradictionInfo,
   KnowledgeStoreResult,
+  KnowledgeCreatedCounts,
   KnowledgeRetrievalResult,
   KnowledgeGraphStats,
   KnowledgeGcResult,
@@ -64,6 +65,22 @@ const TIER_RAISE_REFUSED = Symbol('tier-raise-refused');
  */
 interface MirrorTierDivergence extends TierDivergenceReport {
   readonly existingId: string;
+}
+
+/** Nothing created: the count of a write that stored nothing new. */
+function noneCreated(): KnowledgeCreatedCounts {
+  return { entities: 0, relations: 0, subjects: 0 };
+}
+
+/**
+ * `made` added into `into`. Called only once the transaction that made them has committed: a
+ * count taken inside it would outlive a rollback (both mirrors catch and swallow their own
+ * failures), the same reason the divergences above are emitted after it returns.
+ */
+function addCreated(into: KnowledgeCreatedCounts, made: Partial<KnowledgeCreatedCounts>): void {
+  into.entities += made.entities ?? 0;
+  into.relations += made.relations ?? 0;
+  into.subjects += made.subjects ?? 0;
 }
 
 /**
@@ -333,7 +350,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   ): Promise<KnowledgeStoreResult> {
     const trimmedText = text.trim();
     if (trimmedText.length < 5) {
-      return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+      return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false, created: noneCreated() };
     }
 
     // Provenance is DERIVED from evidence at the store boundary and persisted alongside
@@ -358,7 +375,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // 1. Embed the text
     const embedding = options?.reuseEmbedding ?? await this.embeddingProvider.embed(trimmedText);
     if (options?.cancelled?.()) {
-      return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+      return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false, created: noneCreated() };
     }
 
     // 2. Dedup check — but bypass dedup when contradiction signals are present.
@@ -397,7 +414,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         if (this.memoryWriteTrustGate && wouldRaise) {
           const raisedId = this._raiseTier(candidate, trimmedText, namespace, scope, derivedTier, embeddingModel, embedding, options);
           if (raisedId !== null) {
-            return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true };
+            return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true, created: noneCreated() };
           }
           // `null` = the backstop refused the retire and the raise rolled back whole (see
           // `_raiseTier`). Return here rather than falling through to the no-op-confirm
@@ -410,7 +427,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           // `_mirrorConfidence` follows. Recall ranking reads both, so that is a foothold
           // on what gets recalled, handed to the one write we decided not to trust. Nothing
           // happens instead, which is what a refusal should mean.
-          return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
+          return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true, created: noneCreated() };
         }
 
         // Wave 0 (memory_scoring_v2): a dedup hit is a PLAIN no-op — no confirm.
@@ -426,7 +443,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           // affects the authoritative legacy confirm above.
           this._mirrorConfidence(candidate.id, 'confirm');
         }
-        return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
+        return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true, created: noneCreated() };
       }
       // Fall through to contradiction detection
     }
@@ -440,7 +457,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         this.embeddingProvider, embedding,
       );
       if (options?.cancelled?.()) {
-        return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+        return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false, created: noneCreated() };
       }
     }
 
@@ -534,13 +551,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // call; the stub/subject persistence always runs.
     let resolvedEntities: EntityRecord[] = [];
     let resolvedRelations: RelationRecord[] = [];
+    // What this write creates in the graph, for a derived write's outcome row (660a-3).
+    const created = noneCreated();
     const extractGate = this.meteredHost && this.anthropicClient
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
     // The legacy row above is committed. If the switch flipped during the gate, its purge
     // already removed that row (it runs synchronously with the flag write); writing the
     // stub now would leave one no purge can reach — purges find stubs through legacy ids.
-    if (options?.cancelled?.()) return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+    if (options?.cancelled?.()) return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false, created: noneCreated() };
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;
 
     // Slice B (Context-Hierarchy Scoping): if this memory's source thread is anchored
@@ -574,7 +593,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       try {
         extracted = await this._extractAndPersistToSubjects(
           trimmedText, namespace, scope, memoryId, embedding, stubEvidence, contradictions, createdAt, extractionAllowed,
-          threadAnchorSubjectId, options?.cancelled,
+          threadAnchorSubjectId, created, options?.cancelled,
         );
       } catch (err: unknown) {
         this._reportMirrorParityLoss('store', memoryId, err);
@@ -607,14 +626,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         const legacy = this.useV2Extractor
           && this.anthropicClient
           && shouldExtractV2(trimmedText, namespace)
-          ? await this._extractAndPersistV2(trimmedText, scope, memoryId, options?.cancelled)
-          : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId, options?.cancelled);
+          ? await this._extractAndPersistV2(trimmedText, scope, memoryId, created, options?.cancelled)
+          : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId, created, options?.cancelled);
         resolvedEntities = legacy.resolvedEntities;
         resolvedRelations = legacy.resolvedRelations;
         costUsd = legacy.costUsd;
         if (legacy.cancelled) {
           if (extractGate && this.meteredHost && costUsd) reportMeteredCost(this.meteredHost, extractGate.runId, costUsd, 'fast');
-          return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+          return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false, created: noneCreated() };
         }
       }
 
@@ -628,7 +647,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           this._mirrorToSubjectGraph(
             memoryId, trimmedText, namespace, scope, stubEvidence,
             resolvedEntities, resolvedRelations, contradictions, embedding, createdAt,
-            threadAnchorSubjectId,
+            threadAnchorSubjectId, created,
           );
         } catch (err: unknown) {
           process.stderr.write(
@@ -643,7 +662,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     if (extractGate && this.meteredHost && extracted.costUsd) {
       reportMeteredCost(this.meteredHost, extractGate.runId, extracted.costUsd, 'fast');
     }
-    if (extracted.cancelled) return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+    if (extracted.cancelled) return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false, created: noneCreated() };
 
     // 10. Publish event
     if (channels.knowledgeGraph.hasSubscribers) {
@@ -657,7 +676,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
     return {
       memoryId, entities: resolvedEntities, relations: resolvedRelations,
-      contradictions, stored: true, deduplicated: false,
+      contradictions, stored: true, deduplicated: false, created,
     };
   }
 
@@ -667,11 +686,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     namespace: MemoryNamespace,
     scope: MemoryScopeRef,
     memoryId: string,
+    /** Counted into once the transaction has committed: entities and edges inserted. */
+    created: KnowledgeCreatedCounts,
     cancelled?: (() => boolean) | undefined,
   ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined; cancelled?: true }> {
     const extraction = await extractEntities(trimmedText, namespace, this.anthropicClient);
     if (cancelled?.()) return { resolvedEntities: [], resolvedRelations: [], costUsd: extraction.costUsd, cancelled: true };
 
+    const made = noneCreated();
     const persisted = this.db.transaction(() => {
       const entities: EntityRecord[] = [];
       const entityIdMap = new Map<string, string>();
@@ -691,6 +713,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
             canonicalName: ext.name, entityType: ext.type,
             aliases: [ext.name], scopeType: scope.type, scopeId: scope.id,
           });
+          made.entities++;
           entity = {
             id, canonicalName: ext.name, entityType: ext.type, aliases: [ext.name],
             description: '', scopeType: scope.type, scopeId: scope.id,
@@ -709,7 +732,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         const fromId = entityIdMap.get(rel.from.toLowerCase());
         const toId = entityIdMap.get(rel.to.toLowerCase());
         if (fromId && toId && fromId !== toId) {
+          // A plain INSERT, never an upsert: every edge it writes is new.
           this.db.createRelation(fromId, toId, rel.relationType, rel.description, memoryId);
+          made.relations++;
           relations.push({
             fromEntityId: fromId, toEntityId: toId,
             relationType: rel.relationType, description: rel.description,
@@ -721,6 +746,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       this.db.updateCooccurrencesBatch([...entityIdMap.values()]);
       return { resolvedEntities: entities, resolvedRelations: relations };
     });
+    addCreated(created, made);
     return { ...persisted, costUsd: extraction.costUsd };
   }
 
@@ -729,11 +755,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     trimmedText: string,
     scope: MemoryScopeRef,
     memoryId: string,
+    /** Counted into once the transaction has committed: entities and edges inserted. */
+    created: KnowledgeCreatedCounts,
     cancelled?: (() => boolean) | undefined,
   ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined; cancelled?: true }> {
     const extraction = await extractEntitiesV2(trimmedText, this.anthropicClient!);
     if (cancelled?.()) return { resolvedEntities: [], resolvedRelations: [], costUsd: extraction.costUsd, cancelled: true };
 
+    const made = noneCreated();
     const persisted = this.db.transaction(() => {
       const entities: EntityRecord[] = [];
       const entityIdMap = new Map<string, string>();
@@ -756,6 +785,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
             aliases: [ext.canonicalName, ...ext.aliases],
             scopeType: scope.type, scopeId: scope.id,
           });
+          made.entities++;
           entity = {
             id, canonicalName: ext.canonicalName, entityType: ext.type,
             aliases: [ext.canonicalName, ...ext.aliases],
@@ -776,6 +806,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         const toId = entityIdMap.get(rel.object.toLowerCase());
         if (fromId && toId && fromId !== toId) {
           this.db.createRelation(fromId, toId, rel.predicate, '', memoryId);
+          made.relations++;
           relations.push({
             fromEntityId: fromId, toEntityId: toId,
             relationType: rel.predicate, description: '',
@@ -788,6 +819,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       this.db.updateCooccurrencesBatch([...entityIdMap.values()]);
       return { resolvedEntities: entities, resolvedRelations: relations };
     });
+    addCreated(created, made);
     return { ...persisted, costUsd: extraction.costUsd };
   }
 
@@ -936,11 +968,19 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     embedding: number[],
     createdAt: string | undefined,
     threadAnchorSubjectId: string | null,
+    /**
+     * Counted into once the transaction has committed: the subjects it minted. Not its edges.
+     * Before the cutover the count of new edges is the legacy write's: every row it inserts into
+     * agent-memory.db `relations`. The `relationships` this mirror upserts in engine.db, new ones
+     * included, are not counted, so `new_relations` there says what the legacy graph gained.
+     */
+    created: KnowledgeCreatedCounts,
   ): void {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
     const memoryGraph = this.memoryGraphStore!;
     const diverged: MirrorTierDivergence[] = [];
+    const made = noneCreated();
 
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST. It only flips OLD memories' stubs and is
@@ -985,6 +1025,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           channels.subjectAmbiguous.publish({ kind, candidateCount: resolution.candidateIds.length });
           continue;
         }
+        // The resolver's own flag: an alias folded into an existing subject is not new.
+        if (resolution.created) made.subjects++;
         const subjectId = resolution.id;
         entityToSubject.set(e.id, subjectId);
         subjectIds.push(subjectId);
@@ -1046,6 +1088,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
       memoryGraph.bumpCooccurrences(subjectIds);
     })();
+    addCreated(created, made);
     this._emitMirrorDivergences(diverged, namespace);
   }
 
@@ -1078,6 +1121,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     createdAt: string | undefined,
     extractionAllowed: boolean,
     threadAnchorSubjectId: string | null,
+    /** Counted into once the subject write has committed: subjects minted and edges inserted. */
+    created: KnowledgeCreatedCounts,
     cancelled?: (() => boolean) | undefined,
   ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined; cancelled?: true }> {
     // Normalize both extractor shapes to one name-keyed form. The aliases carried
@@ -1105,7 +1150,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
     const { resolvedEntities, resolvedRelations } = this._writeSubjectsFromExtraction(
       memoryId, trimmedText, namespace, scope, options, entities, relations, contradictions, embedding, createdAt,
-      threadAnchorSubjectId,
+      threadAnchorSubjectId, created,
     );
     return { resolvedEntities, resolvedRelations, ...(costUsd === undefined ? {} : { costUsd }) };
   }
@@ -1145,6 +1190,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     embedding: number[],
     createdAt: string | undefined,
     threadAnchorSubjectId: string | null,
+    /** Counted into once the transaction has committed: subjects minted and edges inserted. */
+    created: KnowledgeCreatedCounts,
   ): { resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[] } {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
@@ -1153,6 +1200,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const resolvedRelations: RelationRecord[] = [];
     const stamp = createdAt ?? new Date().toISOString();
     const diverged: MirrorTierDivergence[] = [];
+    const made = noneCreated();
 
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST (flips OLD stubs; independent of this memory's subjects).
@@ -1192,6 +1240,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           channels.subjectAmbiguous.publish({ kind, candidateCount: resolution.candidateIds.length });
           continue;
         }
+        if (resolution.created) made.subjects++;
         const subjectId = resolution.id;
         nameToSubject.set(e.name.toLowerCase(), subjectId);
         subjectIds.push(subjectId);
@@ -1232,11 +1281,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         const fromSid = nameToSubject.get(r.from.toLowerCase());
         const toSid = nameToSubject.get(r.to.toLowerCase());
         if (!fromSid || !toSid || fromSid === toSid) continue;
-        relationships.createRelationship({
+        // An upsert on the triple: only an edge this call inserted is new.
+        const edge = relationships.createRelationshipReporting({
           fromSubjectId: fromSid, toSubjectId: toSid,
           kind: r.kind, description: r.description,
           sourceMemoryId: memoryId, confidence: r.confidence,
         });
+        if (edge.created) made.relations++;
         resolvedRelations.push({
           fromEntityId: fromSid, toEntityId: toSid, relationType: r.kind,
           description: r.description, confidence: r.confidence,
@@ -1248,6 +1299,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
       memoryGraph.bumpCooccurrences(subjectIds);
     })();
+    addCreated(created, made);
     this._emitMirrorDivergences(diverged, namespace);
 
     return { resolvedEntities, resolvedRelations };
@@ -1529,6 +1581,31 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }));
   }
 
+  /**
+   * {@link getEntityRelations} for the data export: the relations of a deleted
+   * source memory are included and marked `sourceDeleted`, since what is still
+   * stored belongs in the export until the reap removes it. Same store choice and cap.
+   */
+  async getEntityRelationsForExport(entityId: string): Promise<Array<RelationRecord & { sourceDeleted: boolean }>> {
+    const limit = 50;
+    if (this.subjectGraphEnabled && this.relationshipStore) {
+      try {
+        return this.relationshipStore.getRelationshipsForSubjectForExport(entityId, limit)
+          .map(r => ({ ...this._relRowToRelationRecord(r), sourceDeleted: r.source_deleted === 1 }));
+      } catch (err: unknown) { this._logReadFallback('getEntityRelationsForExport', err); }
+    }
+    return this.db.getEntityRelationsForExport(entityId, limit).map(r => ({
+      fromEntityId: r.from_entity_id,
+      toEntityId: r.to_entity_id,
+      relationType: r.relation_type,
+      description: r.description,
+      confidence: r.confidence,
+      sourceMemoryId: r.source_memory_id ?? '',
+      createdAt: r.created_at,
+      sourceDeleted: r.source_deleted === 1,
+    }));
+  }
+
   // === Subject-graph read mappers (S1d — flag-gated, additive) ===
 
   /**
@@ -1555,7 +1632,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * posture — store PRESERVES the legacy row and continues; deactivate and erase
    * RE-THROW so a half-completed erasure is never reported as done.
    */
-  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'erase' | 'purge', ref: string, err: unknown): void {
+  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'supersede' | 'erase' | 'purge', ref: string, err: unknown): void {
     process.stderr.write(
       `[lynox:mirror-parity] CRITICAL ${op} ${ref}: engine.db diverged from legacy under memory_graph_reads — ${err instanceof Error ? err.message : String(err)}\n`,
     );
@@ -1680,6 +1757,43 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     );
   }
 
+  /**
+   * Retire the original of a move (`memory_promote`): the memories matching `pattern`
+   * in `scope` are deactivated now, like {@link deactivateByPattern}, and their ids
+   * returned so {@link markMoved} can name the copy as their successor once it is
+   * stored. Until then — or for good, if no copy is stored — they read as removed.
+   */
+  async retireForMove(pattern: string, namespace: MemoryNamespace, scope: MemoryScopeRef): Promise<string[]> {
+    const ids = this.db.deactivateMemoriesByPatternInScope(pattern, namespace, scope.type, scope.id);
+    if (this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.deactivateByIds(ids);
+      } catch (err: unknown) {
+        this._reportMirrorParityLoss('deactivate', `${ids.length} id(s) for a move`, err);
+        throw err;
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Name the stored copy as the successor of a move's retired original, in both
+   * stores, so the original reads as replaced rather than removed. The lineage is
+   * recorded whatever the copy's tier: the retirement itself was decided by the move,
+   * this only says where the fact went.
+   */
+  markMoved(ids: string[], successorId: string): void {
+    this.db.markReplaced(ids, successorId);
+    if (this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.markReplaced(ids, successorId);
+      } catch (err: unknown) {
+        this._reportMirrorParityLoss('supersede', `${ids.length} id(s) for a move`, err);
+        throw err;
+      }
+    }
+  }
+
   async deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number> {
     const ids = this.db.deactivateMemoriesByPattern(pattern, namespace);
     // S5b'-c: mirror the deactivation onto the engine.db stubs (the authoritative
@@ -1704,10 +1818,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // NOTE — this is loud only for a caller that AWAITS + propagates. As of the erasure
     // PR: `memory_delete` (the agent's SOFT curation path) awaits this and surfaces a
     // partial failure; the hard GDPR erase (MemoryFacade.delete) uses eraseByPattern, not
-    // this method. The one remaining swallower is `memory_promote` (`void …catch(()=>{})`)
-    // — deliberate: promotion is a MOVE (the fact survives at the target scope), so a
-    // lingering old-scope stub is a duplicate, never a privacy leak, and no half-erasure
-    // is falsely reported as done.
+    // this method. A promotion retires its original through `retireForMove`, which keeps
+    // the same posture: promotion is a MOVE (the fact survives at the target scope), so
+    // its caller swallows a failure — a lingering old-scope stub is a duplicate, never a
+    // privacy leak, and no half-erasure is falsely reported as done.
     if (this.memoryGraphStore) {
       try {
         this.memoryGraphStore.deactivateByIds(ids);
@@ -1781,12 +1895,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   async updateMemoryText(
     oldText: string, newText: string, namespace: MemoryNamespace, scope: MemoryScopeRef,
   ): Promise<boolean> {
+    return (await this.updateMemoryTextReporting(oldText, newText, namespace, scope)).changed;
+  }
+
+  /**
+   * {@link updateMemoryText}, with what its re-extraction created: the count a derived write's
+   * outcome row carries (`derived#memory_update`, 660a-3).
+   */
+  async updateMemoryTextReporting(
+    oldText: string, newText: string, namespace: MemoryNamespace, scope: MemoryScopeRef,
+  ): Promise<{ changed: boolean; created: KnowledgeCreatedCounts }> {
+    const created = noneCreated();
     // Re-embed the new text so the persisted vector matches it. Without this the
     // memory keeps embed(oldText) while its text is new, so `findSimilarMemories`
     // scores the changed memory against a stale vector (recall silently wrong).
     const embedding = await this.embeddingProvider.embed(newText);
     const id = this.db.updateMemoryText(oldText, newText, namespace, embedding);
-    if (!id) return false;
+    if (!id) return { changed: false, created };
 
     // Privacy/recall parity: refresh the engine.db stub's text + embedding under the
     // WRITE flag (subject_graph_enabled) — NOT the read flag — so a correction/redaction
@@ -1823,7 +1948,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // its SOURCE thread's anchor (not the current thread; this is an edit, not a new
       // write) so re-extraction doesn't silently revert the primary subject to the heuristic.
       const threadAnchorSubjectId = this._readThreadAnchor(this.db.getMemorySourceThread(id));
-      const extracted = await this._extractAndPersistToSubjects(newText, namespace, scope, id, embedding, undefined, [], createdAt, extractionAllowed, threadAnchorSubjectId);
+      const extracted = await this._extractAndPersistToSubjects(newText, namespace, scope, id, embedding, undefined, [], createdAt, extractionAllowed, threadAnchorSubjectId, created);
       if (extractGate && this.meteredHost && extracted.costUsd) {
         reportMeteredCost(this.meteredHost, extractGate.runId, extracted.costUsd, 'fast');
       }
@@ -1833,12 +1958,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         reportMeteredCost(this.meteredHost, extractGate.runId, extraction.costUsd, 'fast');
       }
       for (const ext of extraction.entities) {
-        const entity = await this.entityResolver.resolve(ext.name, ext.type, [scope], { createIfMissing: true });
+        const entity = await this.entityResolver.resolve(ext.name, ext.type, [scope], { createIfMissing: true, onCreate: () => { created.entities++; } });
         if (entity) this.db.createMention(id, entity.id);
       }
     }
 
-    return true;
+    return { changed: true, created };
   }
 
   // === Maintenance ===

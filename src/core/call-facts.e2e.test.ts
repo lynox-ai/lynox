@@ -146,6 +146,7 @@ describe('a scheduled workflow under a grant writes each call\'s facts onto its 
       getSecretStore: () => null,
       getPromptStore: () => null,
       escalateToUser: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
   }
 
