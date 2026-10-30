@@ -139,6 +139,7 @@ import { bulkRunsOn } from './bulk-switch.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
 import { NotificationRouter, type DeliverySummary } from './notification-router.js';
+import type { EscalationNoticeKind } from '../contract/http.js';
 import { escalateToUser as runEscalation, type EscalateOpts } from './escalation.js';
 import { WorkerLoop } from './worker-loop.js';
 import { Session, sessionInitialTier, resolveNamedProfile } from './session.js';
@@ -179,12 +180,13 @@ export interface LynoxHooks {
   onBeforeCreateAgent?(tools: ToolEntry[]): ToolEntry[];
   onAfterRun?(runId: string, costUsd: number, context: RunContext): void;
   onShutdown?(): Promise<void>;
-  /** A wakeup to the owner has answered, an escalation's or a scheduled workflow's question:
-   *  whether anyone was told. Called through `Engine.escalationReporter`, after the caller's
-   *  own `onReported`, each hook in its own try/catch, and only while the owner has not
-   *  switched `escalation_mail` off. The managed hook reports an undelivered one to the
-   *  control plane, which may mail the owner. */
-  onEscalationReported?(delivery: DeliverySummary): void;
+  /** A wakeup to the owner has answered, an escalation's or a scheduled run's question:
+   *  whether anyone was told, and which of the two it was (`kind`). Called through
+   *  `Engine.escalationReporter`, after the caller's own `onReported`, each hook in its own
+   *  try/catch, and only while the owner has not switched `escalation_mail` off, for either
+   *  kind. The managed hook reports an undelivered one to the control plane, which may mail
+   *  the owner the text for that kind. */
+  onEscalationReported?(delivery: DeliverySummary, kind: EscalationNoticeKind): void;
 }
 
 export interface AccumulatedUsage {
@@ -3029,10 +3031,15 @@ export class Engine {
 
   /**
    * What to call once a wakeup to the owner has answered: the caller's own record, then the
-   * hooks' `onEscalationReported`. `escalateToUser` uses it, and so does a scheduled workflow's
-   * question (`WorkflowQuestions`), so the hooks hear of both the same way.
+   * hooks' `onEscalationReported`. `escalateToUser` uses it with `'escalation'`; a scheduled
+   * run's question (a task's, a workflow's) with `'question'`, so the control plane mails that
+   * a run is waiting rather than that something failed. The caller's record is the same for
+   * both: the kind goes to the hooks only.
    */
-  escalationReporter(caller?: (delivery: DeliverySummary) => void): (delivery: DeliverySummary) => void {
+  escalationReporter(
+    caller?: (delivery: DeliverySummary) => void,
+    kind: EscalationNoticeKind = 'escalation',
+  ): (delivery: DeliverySummary) => void {
     // The caller's record and the hooks each run in their own try/catch: a caller whose record
     // throws must not keep the hooks from hearing of an escalation that reached nobody, and a
     // hook that throws must not cost the caller its record. The switch is read when the wakeup
@@ -3046,7 +3053,7 @@ export class Engine {
       if (this.userConfig.escalation_mail === false) return;
       for (const hook of this._hooks) {
         if (!hook.onEscalationReported) continue;
-        try { hook.onEscalationReported(delivery); } catch (err: unknown) {
+        try { hook.onEscalationReported(delivery, kind); } catch (err: unknown) {
           process.stderr.write(`[escalation] a hook failed on the delivery: ${err instanceof Error ? err.message : String(err)}\n`);
         }
       }

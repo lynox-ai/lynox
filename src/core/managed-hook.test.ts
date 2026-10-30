@@ -1282,7 +1282,7 @@ describe('managed-hook escalation notice', () => {
   it('reports an escalation that reached nobody: one POST, the class and nothing else', async () => {
     const spy = routingFetch('balance');
     const hook = await hookOn(spy);
-    hook.onEscalationReported?.('not_delivered');
+    hook.onEscalationReported?.('not_delivered', 'escalation');
     await flushMicrotasks();
 
     const calls = noticeCalls(spy);
@@ -1294,13 +1294,23 @@ describe('managed-hook escalation notice', () => {
     expect(JSON.parse(String(init.body))).toEqual({ kind: 'escalation' });
   });
 
+  it('reports a run waiting for an answer as a question, so the CP mails that text', async () => {
+    const spy = routingFetch('balance');
+    const hook = await hookOn(spy);
+    hook.onEscalationReported?.('not_delivered', 'question');
+    await flushMicrotasks();
+    const calls = noticeCalls(spy);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(String(calls[0]![1].body))).toEqual({ kind: 'question' });
+  });
+
   it('reports `no_channel` too, and never a delivered one', async () => {
     const spy = routingFetch('balance');
     const hook = await hookOn(spy);
-    hook.onEscalationReported?.('delivered');
+    hook.onEscalationReported?.('delivered', 'escalation');
     await flushMicrotasks();
     expect(noticeCalls(spy)).toHaveLength(0);
-    hook.onEscalationReported?.('no_channel');
+    hook.onEscalationReported?.('no_channel', 'escalation');
     await flushMicrotasks();
     expect(noticeCalls(spy)).toHaveLength(1);
   });
@@ -1308,9 +1318,31 @@ describe('managed-hook escalation notice', () => {
   it('reports on a hosted instance too: the gate is the hook, not the spend gate', async () => {
     const spy = routingFetch('unfunded');
     const hook = await hookOn(spy);
-    hook.onEscalationReported?.('not_delivered');
+    hook.onEscalationReported?.('not_delivered', 'escalation');
     await flushMicrotasks();
     expect(noticeCalls(spy)).toHaveLength(1);
+  });
+
+  it('holds each kind on its own: a failure a minute ago does not hold back a waiting question', async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const spy = routingFetch('balance');
+    const hook = await hookOn(spy);
+
+    hook.onEscalationReported?.('not_delivered', 'escalation');
+    now += 60_000;
+    hook.onEscalationReported?.('not_delivered', 'question');
+    await flushMicrotasks();
+    expect(noticeCalls(spy).map(([, init]) => JSON.parse(String(init.body)) as unknown)).toEqual([
+      { kind: 'escalation' }, { kind: 'question' },
+    ]);
+
+    // Each kind still holds its own burst.
+    now += 60_000;
+    hook.onEscalationReported?.('not_delivered', 'question');
+    hook.onEscalationReported?.('not_delivered', 'escalation');
+    await flushMicrotasks();
+    expect(noticeCalls(spy)).toHaveLength(2);
   });
 
   it('holds a burst to one POST per ten minutes, and keeps the hold when the POST failed', async () => {
@@ -1319,18 +1351,18 @@ describe('managed-hook escalation notice', () => {
     const spy = routingFetch('balance', false);
     const hook = await hookOn(spy);
 
-    hook.onEscalationReported?.('not_delivered');
+    hook.onEscalationReported?.('not_delivered', 'escalation');
     await flushMicrotasks();
     expect(noticeCalls(spy)).toHaveLength(1);
 
     // Failed, and still held: a CP without the route must not get a POST per escalation.
     now += 10 * 60_000 - 1;
-    hook.onEscalationReported?.('not_delivered');
+    hook.onEscalationReported?.('not_delivered', 'escalation');
     await flushMicrotasks();
     expect(noticeCalls(spy)).toHaveLength(1);
 
     now += 1;
-    hook.onEscalationReported?.('not_delivered');
+    hook.onEscalationReported?.('not_delivered', 'escalation');
     await flushMicrotasks();
     expect(noticeCalls(spy)).toHaveLength(2);
   });
