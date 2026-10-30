@@ -52,6 +52,13 @@ export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   return null;
 }
 
+/** The first hidden character in a name (a step's id, a key), which takes none of the places real
+ *  text may carry one, or `null`. */
+export function findHiddenInName(name: string, path: string): HiddenChar | null {
+  const at = hiddenCharIndexes(name, { inPlace: false });
+  return at.length === 0 ? null : { path, codePoint: codePointAt(name, at[0]!) };
+}
+
 /** The run refusal of `hiddenInRunValues` for a name. It quotes nothing, so a reduced sink (a push
  *  from a contained instance) may say it as it is. */
 export const HIDDEN_RUN_NAME_REFUSAL = 'A parameter name holds a character that does not show as text. Rename the parameter in the workflow.';
@@ -76,9 +83,10 @@ export function hiddenInRunValues(params: Readonly<Record<string, unknown>>): st
 }
 
 /** `json` (as `JSON.stringify` writes it) with every hidden character written as a `\uXXXX` escape:
- *  the same JSON to whoever parses it, and visible to a model that reads it. */
-export function escapeHiddenInJson(json: string): string {
-  const at = hiddenCharIndexes(json, { inPlace: false });
+ *  the same JSON to whoever parses it, and visible to a model that reads it. With `inPlace`, the
+ *  places real text puts one (an emoji sequence, ZWNJ between letters) stay as they are. */
+export function escapeHiddenInJson(json: string, opts: { inPlace?: boolean } = {}): string {
+  const at = hiddenCharIndexes(json, { inPlace: opts.inPlace ?? false });
   if (at.length === 0) return json;
   const escape = new Set(at);
   return Array.from(json).map((c, i) => escape.has(i)

@@ -2170,6 +2170,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.run': { de: 'Ausführen', en: 'Run' },
 	'workflow_library.running': { de: 'Läuft...', en: 'Running...' },
 	'workflow_library.rename': { de: 'Umbenennen', en: 'Rename' },
+	// ux U-077: only for the refusal coded `hidden_char`; every other failure stays `common.save_failed`.
+	'workflow_library.rename_hidden_char': { de: 'Der Name enthält ein Zeichen, das nicht als Text erscheint. Gespeichert ist nichts. Lösch den Namen und tipp ihn neu ein, statt ihn einzufügen.', en: 'The name holds a character that does not show as text. Nothing was saved. Delete the name and type it again rather than pasting it.' },
 	'workflow_library.edit_in_chat': { de: 'Bearbeiten', en: 'Edit' },
 	'workflow_library.edit_in_chat_prompt': { de: 'Ich möchte diesen gespeicherten Workflow bearbeiten:', en: "I'd like to edit this saved workflow:" },
 	'workflow_library.delete': { de: 'Löschen', en: 'Delete' },

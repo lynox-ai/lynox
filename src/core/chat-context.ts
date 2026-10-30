@@ -6,6 +6,7 @@ import type { ThreadStore } from './thread-store.js';
 import { stripUntrustedSeparators } from './sanitize.js';
 import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
 import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
+import { stripHidden } from './hidden-text.js';
 
 const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
@@ -270,6 +271,14 @@ function oneLine(s: string, max: number): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
+/** {@link oneLine} for a stored workflow's or run's text (name, step id, task, error), without the
+ *  characters that render as nothing (`hidden-text.ts`): text saved before the save refused them
+ *  would otherwise carry an instruction no one sees into the chat. Not for mail fields, whose
+ *  values the model echoes back to the mail tools. */
+function storedLine(s: string, max: number): string {
+  return oneLine(stripHidden(s), max);
+}
+
 /**
  * Resolve a context reference to a preamble string, or null when it can't be
  * loaded (no run history, unknown id, or a non-template one-shot run that isn't
@@ -530,11 +539,11 @@ export function resolveChatContext(
     }
     if (wf.template !== true) return null; // only saved workflows are editable
     const steps = (wf.steps ?? [])
-      .map((s, i) => `  ${i + 1}. [${oneLine(s.id, MAX_STEP_ID_CHARS)}] ${oneLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
+      .map((s, i) => `  ${i + 1}. [${storedLine(s.id, MAX_STEP_ID_CHARS)}] ${storedLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
       .join('\n');
     return (
       `[Loaded saved workflow for editing — id: ${wf.id}]\n` +
-      `Name: "${oneLine(wf.name, MAX_NAME_CHARS)}"\n` +
+      `Name: "${storedLine(wf.name, MAX_NAME_CHARS)}"\n` +
       `Mode: ${wf.mode ?? 'autonomous'}${contractNote(wf.capabilityContract)}\n` +
       `Steps:\n${steps}\n\n` +
       `To change it, call update_workflow_steps with workflow_id "${wf.id}". ` +
@@ -559,7 +568,7 @@ export function resolveChatContext(
   }
   const stepResults = runHistory.getPipelineStepResults(run.id);
   const trace = stepResults
-    .map(s => `  [${s.status}] ${oneLine(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${oneLine(s.error, MAX_ERR_CHARS)}` : ''}`)
+    .map(s => `  [${s.status}] ${storedLine(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${storedLine(s.error, MAX_ERR_CHARS)}` : ''}`)
     .join('\n');
   const hasFailure = run.status === 'failed' || stepResults.some(s => s.status === 'failed' || s.error);
   // Only point at the editable workflow if it still exists — a run can outlive a
@@ -570,8 +579,8 @@ export function resolveChatContext(
   const readerContained = reader?.threadId !== undefined && reader.threadId !== '' && threadIsContained(reader.containment, reader.threadId);
   return (
     `[Loaded workflow run — id: ${run.id}]\n` +
-    `Workflow: "${oneLine(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
-    `Status: ${run.status}${run.error ? `\nError: ${oneLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
+    `Workflow: "${storedLine(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
+    `Status: ${run.status}${run.error ? `\nError: ${storedLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
     (trace ? `Steps:\n${trace}\n` : '') +
     (hasFailure
       ? readerContained
