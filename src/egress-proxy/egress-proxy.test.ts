@@ -3,7 +3,7 @@ import { Socket, connect, createServer, type AddressInfo, type Server } from 'no
 import { connect as tlsConnect } from 'node:tls';
 import type { Server as HttpServer } from 'node:http';
 import { MAX_EXEC_TIMEOUT_MS } from '../shell-sidecar/protocol.js';
-import { CredentialRegistry, DENIAL_REASONS, DENIAL_RETENTION_MS, MAX_CREDS, MAX_DENIED_HOST_CHARS, MAX_DENIALS_PER_CRED, MAX_TTL_S, type TunnelHandle } from './registry.js';
+import { CredentialRegistry, DENIAL_REASONS, hostInSet, DENIAL_RETENTION_MS, MAX_CREDS, MAX_DENIED_HOST_CHARS, MAX_DENIALS_PER_CRED, MAX_TTL_S, type TunnelHandle } from './registry.js';
 import { MAX_HELLO_BYTES, credentialFromHeader, isExactHostname, isHelloRetryRequest, parseAuthority, parseClientHello, parseDenyIps, parseRegistration, pickAddress } from './policy.js';
 import { ShellProxy, bearerMatches, createAdminServer, type ProxyLimits } from './server.js';
 import { interfaceAddress, secretFromEnv } from './main.js';
@@ -1011,5 +1011,19 @@ describe('contract: shell listener', () => {
     await until(() => o.received().length === all.length);
     expect(o.received()).toBe(all);
     expect(r.registry.denials(CRED)).toEqual([]);
+  });
+});
+
+describe('hostInSet', () => {
+  it('matches a host exactly, not a name built around a set member', () => {
+    // Mutation: replace `Set.has` with `endsWith`, a dot-anchored `endsWith`
+    // (subdomains) or `startsWith` → one of the refusals must fail. A shell
+    // call's set can hold an apex domain, and anyone can buy a name that ends
+    // with it.
+    const set = new Set(['example.org']);
+    expect(hostInSet(set, 'example.org')).toBe(true);
+    expect(hostInSet(set, 'evilexample.org')).toBe(false);
+    expect(hostInSet(set, 'sub.example.org')).toBe(false);
+    expect(hostInSet(set, 'example.org.evil.example')).toBe(false);
   });
 });

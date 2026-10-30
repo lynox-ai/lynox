@@ -58,6 +58,7 @@
 		getThreadPendingCount,
 		reviewKnowledge,
 		getThreadContained,
+		getThreadContainedUnknown,
 		getContainedOrigin,
 		getContainedPrefill,
 		planInNewChat,
@@ -78,6 +79,7 @@
 	import { approvalNoteLines } from './approvals.js';
 	import { getApprovalsViewer } from '../stores/approvals.svelte.js';
 	import { originLineKeys, refusalOffersNewChat } from '../stores/contained-way-out.js';
+	import { containedTextKeys } from '../stores/contained-text.js';
 	import { formatCost } from '../format.js';
 	import { knowledgeCauseKey } from '../stores/knowledge-chip.js';
 
@@ -1650,6 +1652,9 @@
 	const ctxBudget = $derived(getContextBudget());
 	const compactionOffer = $derived(getCompactionOffer());
 	const threadContained = $derived(getThreadContained());
+	// Set when the engine could not read whether this chat read store data (`contained-text.ts`):
+	// every chat is locked then, so a new one does not help and is not offered.
+	const threadContainedUnknown = $derived(getThreadContainedUnknown());
 	const containedOrigin = $derived(getContainedOrigin());
 	/** What the line above the input of such a chat may promise, read from the config each time
 	 *  such a chat opens: a bulk run only where this instance runs one that reads a Shopify store.
@@ -3048,9 +3053,9 @@
 							     button, so a refusal in the same answer adds none of its own. -->
 							<div class="flex flex-col gap-2 text-[13px] md:text-[12px] border-l-2 border-warning/50 pl-3 py-1" role="status" data-contained-notice>
 								<p class="text-text-muted"><strong class="font-medium text-text">{t('contained.notice_title')}</strong> {t('contained.notice_body')}</p>
-								{#if threadContained}<div>{@render planNewChatButton()}</div>{/if}
+								{#if threadContained && threadContainedUnknown === null}<div>{@render planNewChatButton()}</div>{/if}
 							</div>
-						{:else if msg.toolCalls?.some(refusalOffersNewChat) && threadContained}
+						{:else if msg.toolCalls?.some(refusalOffersNewChat) && threadContained && threadContainedUnknown === null}
 							<!-- The engine refused a store write or a bulk plan because this chat only
 							     reads. Keyed on the refusal's reason, never on its text; the agent's
 							     sentence names this button. -->
@@ -3757,8 +3762,8 @@
 			<!-- As long as the chat only reads: in the composer, so it shows on touch and at
 			     390px too, where the sidebar icon's tooltip never does. -->
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-bar>
-				<span>{t('contained.bar')}</span>
-				{@render planNewChatButton()}
+				<span>{containedTextKeys('bar', threadContainedUnknown).map((k) => t(k)).join(' ')}</span>
+				{#if threadContainedUnknown === null}{@render planNewChatButton()}{/if}
 			</div>
 		{:else if containedOrigin}
 			<!-- A chat opened with "Plan in a new chat", before its first run. -->

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { bulkRunsOn, bulkRunsSource } from './bulk-switch.js';
+import { bulkRunsOn, bulkRunsSource, bulkRunsTurnedOnBy } from './bulk-switch.js';
 
 /**
  * Who decides whether bulk runs are on: on a managed
@@ -42,5 +42,18 @@ describe('bulkRunsOn', () => {
   it('names who decides', () => {
     for (const tier of POOL) expect(bulkRunsSource(tier)).toBe('control-plane');
     for (const tier of OWNED) expect(bulkRunsSource(tier)).toBe('config');
+  });
+
+  it('names who can turn them on: the owner wherever turning them on takes effect', () => {
+    vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '1');
+    for (const tier of POOL) expect(bulkRunsTurnedOnBy(tier, true)).toBe('config');
+    // A pool tier whose engine database did not open: turning them on would not take effect.
+    for (const tier of POOL) expect(bulkRunsTurnedOnBy(tier, false)).toBe('control-plane');
+    vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+    for (const tier of POOL) expect(bulkRunsTurnedOnBy(tier, true)).toBe('control-plane');
+    for (const tier of OWNED) {
+      expect(bulkRunsTurnedOnBy(tier, true)).toBe('config');
+      expect(bulkRunsTurnedOnBy(tier, false)).toBe('config');
+    }
   });
 });
