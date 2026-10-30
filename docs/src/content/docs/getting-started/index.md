@@ -41,7 +41,7 @@ ANTHROPIC_API_KEY=... npx @lynox-ai/core --non-interactive --accept-terms --prov
 - `--model <id>` is for `mistral` and `openai-compatible`, `--base-url <url>` for `openai-compatible`. `--dir <path>` sets the install directory (default `./lynox`). An existing setup there stops the run unless you pass `--reconfigure`.
 - `LYNOX_HTTP_SECRET` sets the access token; blank means one is generated. `PORT` sets the host port, 1–65535; anything else falls back to 3000. A port in use stops the run.
 
-The run exits `0` only once `GET /api/health` answers. A health check that times out, or any refusal, exits `1`. A missing `--provider`, an unknown argument, a flag without its value, or an installer flag used without `--non-interactive` exits `2` and prints the usage. The access token and vault key are not printed: they are `LYNOX_HTTP_SECRET` and `LYNOX_VAULT_KEY` in `<dir>/.env`. No browser opens.
+Without a key (`--provider none`) lynox starts all the same; AI replies stay off until you add a key in the Web UI under Settings. The run exits `0` only once `GET /api/health` answers. A health check that times out, or any refusal, exits `1`. A missing `--provider`, an unknown argument, a flag without its value, or an installer flag used without `--non-interactive` exits `2` and prints the usage. The access token and vault key are not printed: they are `LYNOX_HTTP_SECRET` and `LYNOX_VAULT_KEY` in `<dir>/.env`. No browser opens.
 
 ### Manual Docker Compose
 

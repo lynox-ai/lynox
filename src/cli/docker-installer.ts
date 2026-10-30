@@ -184,7 +184,8 @@ export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { e
     return { error: '--provider is required: anthropic, mistral, openai-compatible, or none (start without a key).' };
   }
   if (!(INSTALLER_PROVIDERS as readonly string[]).includes(provider)) {
-    return { error: `Unknown --provider "${provider}". Use anthropic, mistral, openai-compatible, or none.` };
+    // The value is not echoed: a key pasted into the wrong place would land in the log.
+    return { error: 'Unknown --provider. Use anthropic, mistral, openai-compatible, or none.' };
   }
   const chosen = provider as InstallerProvider;
   const model = values.get('--model');

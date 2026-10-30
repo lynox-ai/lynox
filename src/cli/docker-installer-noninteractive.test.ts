@@ -46,7 +46,7 @@ describe('parseInstallerArgs', () => {
 
   it('rejects an unknown provider', () => {
     const r = parseInstallerArgs(['--non-interactive', '--provider', 'vertex']);
-    expect(r).toEqual({ error: 'Unknown --provider "vertex". Use anthropic, mistral, openai-compatible, or none.' });
+    expect(r).toEqual({ error: 'Unknown --provider. Use anthropic, mistral, openai-compatible, or none.' });
   });
 
   it('reads the defaults for a keyless install', () => {
@@ -249,7 +249,8 @@ describe('runDockerInstaller exit codes before Docker is touched', () => {
     await runDockerInstaller(['--non-interactive', '--provider', 'vertex']);
     expect(process.exitCode).toBe(2);
     const err = vi.mocked(process.stderr.write).mock.calls.map(c => String(c[0])).join('');
-    expect(err).toContain('Unknown --provider "vertex"');
+    expect(err).toContain('Unknown --provider.');
+    expect(err).not.toContain('vertex');
     expect(err).toContain('--non-interactive --accept-terms --provider');
   });
 
