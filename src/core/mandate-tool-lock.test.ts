@@ -166,6 +166,16 @@ describe('Engine boot — every tool a mandate may use is placed for what it rea
     return all;
   }
 
+  // The booted registry alone has no mail tools (they need an account), so the closed
+  // classification is held here too, over every tool this engine builds.
+  it('classifies every tool this engine builds, the integration tools included', async () => {
+    const all = await surfaceTools();
+    const unplaced = [...all.keys()].filter(n => !MANDATE_TOOL_SURFACE.has(n) && MANDATE_WITHHELD_TOOLS[n] === undefined);
+    expect(unplaced, 'place each new tool on MANDATE_TOOL_SURFACE or MANDATE_WITHHELD_TOOLS').toEqual([]);
+    expect(all.has('mail_connect')).toBe(true);
+    expect(MANDATE_WITHHELD_TOOLS['mail_connect']!.length).toBeGreaterThan(10);
+  });
+
   it('names no tool on the surface that does not exist', async () => {
     const all = await surfaceTools();
     const phantom = [...MANDATE_TOOL_SURFACE].filter(n => !all.has(n));

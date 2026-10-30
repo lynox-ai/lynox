@@ -36,6 +36,18 @@ const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PROMPT_MAX_CHARS = 300;
 
 /**
+ * What a mandate's turn gets instead of a dialog. The dialog would send what the person at the
+ * screen types to the vault route, which only the owner may write, so the key would leave their
+ * hands and be refused. It says who stores keys and what a saved profile does, and it asks for
+ * nothing again: the refusal is prompt surface, and a retry instruction here would teach a loop.
+ */
+export const MANDATE_SECRET_REFUSAL =
+  'Refused: in this session no key or password is entered. Only the owner of this instance stores keys. ' +
+  'A profile you save here asks the owner to release the keys it reads, and until the owner does, the engine ' +
+  'sends nothing under those keys. Tell the user that the owner adds or releases the key; do not ask for it ' +
+  'again, and never ask for it in chat.';
+
+/**
  * What forges a quote rather than filling it: bidi overrides and isolates
  * (a span that reads forwards on screen and backwards in the store, so the
  * quote is no longer a quote) and the zero-width formatters (a box that looks
@@ -130,6 +142,11 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     }
 
     // action: 'collect'
+    // A mandate is refused before anything else, decided like `list` on the principal of this
+    // turn: before the dialog, which would collect a key the vault refuses, and before the name
+    // checks, whose answers name the keys the owner already stores.
+    const principal = agent.principal as IAgent['principal'] | undefined;
+    if (principal === undefined || toolLockFor(principal) !== null) return MANDATE_SECRET_REFUSAL;
     if (!input.name || !input.prompt) {
       return 'Error: ask_secret with action:"collect" needs both `name` and `prompt`. To see what is already stored, call ask_secret with action:"list".';
     }
