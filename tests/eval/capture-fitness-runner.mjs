@@ -30,6 +30,7 @@ import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { runToken } from '../../scripts/model-fitness/probe-freshness.mjs';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const args = Object.fromEntries(
@@ -92,9 +93,12 @@ const sinkPath = join(DATA_DIR, 'capture-telemetry.jsonl');
 const sinkLines = () => (existsSync(sinkPath) ? readFileSync(sinkPath, 'utf8').trim().split('\n').filter(Boolean) : []);
 
 async function runOne(text) {
-  const before = sinkLines().length;
+  // Events are matched to the case by THREAD, not by sink position. A case cut off by the
+  // timeout keeps running in the engine, and its late write landed after the next case's
+  // starting line count — scored as that case's capture. The session id is the thread id.
+  const threadId = randomUUID();
   const s = await fetch(`${BASE}/api/sessions`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId }),
   }).then(r => r.json());
   const res = await fetch(`${BASE}/api/sessions/${s.sessionId}/run`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -105,7 +109,11 @@ async function runOne(text) {
   const reader = res.body.getReader();
   for (;;) { const { done } = await reader.read(); if (done) break; }
   await new Promise(r => setTimeout(r, 1200));   // the sink append is fire-and-forget
-  const fresh = sinkLines().slice(before).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  const fresh = sinkLines().map(l => { try { return JSON.parse(l); } catch { return null; } })
+    .filter(e => e !== null && e.thread === threadId);
+  // No event for the thread means the match failed, not that the model stayed silent — and
+  // silent is the PASS on a negative shape, so it must not be the default.
+  if (fresh.length === 0) throw new Error(`no telemetry for thread ${s.sessionId}`);
   const writes = fresh.filter(e => e.event === 'remember_invoked');
   return {
     eligible: fresh.some(e => e.event === 'capture_eligible'),

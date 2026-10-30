@@ -86,11 +86,21 @@
     {
       "id": "S5-standing-rule",
       "expect": "capture",
-      "why": "The control for N4: the same kind of rule, but the operator says it applies from now on. A change that silences N4 by suppressing every rule fails here.",
+      "why": "The control for N4: the same kind of rule, but the operator says it applies from now on. A change that silences N4 by suppressing every rule fails here. Written with real umlauts like N4, and with entity names of its own, so a rule stored here cannot be recalled into an N4 case of the same run.",
       "cases": [
-        "Ab jetzt gilt fuer alle Produkttexte von Lumen{N} dauerhaft: keine Heilversprechen und keine fremden Markennamen. Halte dich bitte auch in kuenftigen Chats daran.",
-        "Grundsaetzlich und ab sofort: Rechnungen an Nordhain{N} gehen nur noch per Post, nie per E-Mail.",
-        "Eine feste Regel fuer die Zukunft: Kunden von Kaltwerk{N} schreiben wir immer mit Sie an, nie mit Du."
+        "Ab jetzt gilt für alle Produkttexte von Brava{N} dauerhaft: keine Heilversprechen und keine fremden Markennamen. Halte dich bitte auch in künftigen Chats daran.",
+        "Grundsätzlich und ab sofort: Rechnungen an Feldmark{N} gehen nur noch per Post, nie per E-Mail.",
+        "Eine feste Regel für die Zukunft: Kunden von Silvan{N} schreiben wir immer mit Sie an, nie mit Du."
+      ]
+    },
+    {
+      "id": "S6-standing-practice",
+      "expect": "capture",
+      "why": "The second control for N4, and the one S5 cannot be: a standing practice stated on its own, with no request attached and none of the words that mark a rule as lasting ('ab jetzt', 'immer', 'künftig'). A change that keeps only rules carrying those words passes S5 and fails here.",
+      "cases": [
+        "Zur Info: Bei Tannberg{N} siezen wir die Kunden.",
+        "Rechnungen an Quellhof{N} schicken wir per Post, die wollen keine PDFs.",
+        "Morgenrot{N} beliefern wir nur innerhalb der Schweiz."
       ]
     }
   ]
