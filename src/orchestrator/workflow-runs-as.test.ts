@@ -80,6 +80,11 @@ describe('whom a library run of a saved workflow is for', () => {
       save('wf-own', EVA, undefined, 'post it elsewhere');
       expect(check({ id: 'wf-own', confirmedAt: CONFIRMED })).toBe(LIBRARY_RUN_AUTHOR_CHANGED);
     });
+    it('refuses the same person under a later access', () => {
+      save('wf-eva', EVA);
+      const earlier: RequestPrincipal = { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'grant-eva-old' };
+      expect(libraryRunCheck(earlier, (id) => history.getWorkflowAuthorship(id))({ id: 'wf-eva', confirmedAt: CONFIRMED })).toBe(LIBRARY_RUN_AUTHOR_CHANGED);
+    });
     it('refuses a read that is no longer confirmed', () => {
       save('wf-eva', EVA);
       expect(libraryRunCheck(EVA, (id) => history.getWorkflowAuthorship(id))({ id: 'wf-eva' })).toBe(LIBRARY_RUN_UNCONFIRMED);

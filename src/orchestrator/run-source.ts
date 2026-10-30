@@ -8,7 +8,7 @@
  * does not compile until it decides.
  */
 import type { MandateEnds } from '../core/mandate-ends.js';
-import { OWNER_PRINCIPAL, planAuthorshipOfWorkflow, planMandate, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, planAuthorshipOfWorkflow, planMandate, mandateIdOf, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
 import type { WorkflowAuthorship } from '../core/workflow-store.js';
 
 export type RunSource =
@@ -70,7 +70,7 @@ export function workflowRunsAs(a: WorkflowAuthorship | undefined): RequestPrinci
 }
 
 export const LIBRARY_RUN_UNCONFIRMED = 'This workflow was changed after Run was pressed and waits for its steps to be reviewed again, so it did not run.';
-export const LIBRARY_RUN_AUTHOR_CHANGED = 'This workflow was changed by someone else after Run was pressed, so it did not run. Press Run again.';
+export const LIBRARY_RUN_AUTHOR_CHANGED = 'Whom this workflow runs for changed after Run was pressed, or could not be read again, so it did not run. Press Run again.';
 
 /**
  * The check the library's Run hands the runner, asked on the workflow exactly as the runner read
@@ -88,7 +88,9 @@ export function libraryRunCheck(
     if (!planned.confirmedAt) return LIBRARY_RUN_UNCONFIRMED;
     let a: WorkflowAuthorship | undefined;
     try { a = read(planned.id); } catch { a = undefined; }
-    return principalTag(workflowRunsAs(a)) === principalTag(runAs) ? null : LIBRARY_RUN_AUTHOR_CHANGED;
+    const now = workflowRunsAs(a);
+    // The grant too: the same person under a later access is not the one the route decided on.
+    return principalTag(now) === principalTag(runAs) && mandateIdOf(now) === mandateIdOf(runAs) ? null : LIBRARY_RUN_AUTHOR_CHANGED;
   };
 }
 

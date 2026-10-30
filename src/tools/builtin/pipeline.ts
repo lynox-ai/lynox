@@ -997,7 +997,7 @@ export interface WorkflowRunTrail {
 export function workflowRunTrail(
   principal: RequestPrincipal,
   auditLog: AuditLog | null,
-  run: { workflowId: string; oneShot: boolean; retry: boolean },
+  run: { workflowId: string; oneShot: boolean; retry: boolean; startedBy?: 'library' | undefined },
 ): WorkflowRunTrail | null {
   const p = principal;
   if (isOwnerPrincipal(p) || currentPlanRun(p) !== undefined) return null;
@@ -1006,6 +1006,8 @@ export function workflowRunTrail(
     ['workflow', isEngineRowId(run.workflowId) ? run.workflowId : undefined],
     ['one_shot', run.oneShot ? 'yes' : 'no'],
     ['retry', run.retry ? 'yes' : undefined],
+    // The owner pressed Run in the library (1055): the run is the mandate's, the start the owner's.
+    ['started', run.startedBy === 'library' ? 'owner-library' : undefined],
   ];
   const write = (phase: AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
     if (auditLog === null) throw new Error('no audit log');

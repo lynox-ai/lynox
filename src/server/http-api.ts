@@ -8220,7 +8220,7 @@ export class LynoxHTTPApi {
         // connections read as unlisted and are refused (`planConnectionState`), and under a
         // recorded run of its own (the `workflow:run` pair), whose key every row of its steps
         // carries. A start that cannot be recorded does not run. The owner's run has neither.
-        const trail = workflowRunTrail(runAs, engine.getAuditLog() ?? null, { workflowId: claimWorkflowId, oneShot: false, retry: false });
+        const trail = workflowRunTrail(runAs, engine.getAuditLog() ?? null, { workflowId: claimWorkflowId, oneShot: false, retry: false, startedBy: 'library' });
         const run = (): ReturnType<typeof runGuardedSavedWorkflow> => runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
           origin: { kind: 'library', by: this._authOrigin.get(_req) ?? 'unknown' },
           principal: runAs,

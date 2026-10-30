@@ -11739,10 +11739,44 @@ describe('LynoxHTTPApi', () => {
         try {
           expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
         } finally { engineRef()['getAuditLog'] = origLog; }
-        const rows = record.mock.calls.map((c) => c[0] as { principal: { kind: string }; action: string; phase: string; correlationId: string });
+        const rows = record.mock.calls.map((c) => c[0] as { principal: { kind: string }; action: string; phase: string; correlationId: string; target: string });
         const runRows = rows.filter((r) => r.action === 'workflow:run');
         expect(runRows.map((r) => [r.principal.kind, r.phase])).toEqual([['mandate', 'attempt'], ['mandate', 'done']]);
         expect(runRows[0]!.correlationId).toBe(runRows[1]!.correlationId);
+        // The start row says the owner started it from the library, unlike the mandate's own chat run.
+        expect(runRows[0]!.target).toContain('started=owner-library');
+      });
+
+      it('gives the rows the run\'s steps write the key of that run record', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const record = vi.fn();
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record });
+        const { currentPlanRun } = await import('../core/plan-run-context.js');
+        let stepKey: string | undefined;
+        mockRunSavedWorkflow.mockImplementation(async () => {
+          stepKey = currentPlanRun({ kind: 'mandate', email: 'eva@kanzlei.example', mandateId: MID });
+          return { ok: true, runId: 'run-1', status: 'completed' };
+        });
+        try {
+          expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
+        } finally { engineRef()['getAuditLog'] = origLog; }
+        const start = record.mock.calls.map((c) => c[0] as { action: string; correlationId: string }).find((r) => r.action === 'workflow:run');
+        expect(stepKey).toBeDefined();
+        expect(stepKey).toBe(start!.correlationId);
+      });
+
+      it('ends the run record as failed when the run fails', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-1', status: 'failed' });
+        const record = vi.fn();
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record });
+        try {
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+        } finally { engineRef()['getAuditLog'] = origLog; }
+        const phases = record.mock.calls.map((c) => c[0] as { action: string; phase: string }).filter((r) => r.action === 'workflow:run').map((r) => r.phase);
+        expect(phases).toEqual(['attempt', 'failed']);
       });
 
       it('does not run the mandate\'s workflow when its start cannot be recorded', async () => {
@@ -11764,7 +11798,7 @@ describe('LynoxHTTPApi', () => {
         expect(check({ id: 'wf-1', confirmedAt: '2026-10-01T00:00:00Z' })).toBeNull();
         // Someone else's edit after the route looked: the runner's read names another author.
         mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: null, createdMandateId: null });
-        expect(check({ id: 'wf-1', confirmedAt: '2026-10-01T00:00:00Z' })).toContain('changed by someone else');
+        expect(check({ id: 'wf-1', confirmedAt: '2026-10-01T00:00:00Z' })).toContain('changed after Run was pressed');
       });
 
       it('lists whom each workflow runs as for the owner, and whether that person\'s access ended', async () => {
