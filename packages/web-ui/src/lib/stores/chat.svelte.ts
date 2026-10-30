@@ -3273,11 +3273,10 @@ async function refreshThreadContained(opts: { afterRun?: boolean; answer?: ChatM
 	// Checked again after the body: the user may have switched chats while it arrived.
 	if (sessionId !== sid || !data?.thread) return;
 	if (data.thread.contained !== true) {
-		// Only a failed check is taken back; a recorded one stays as the page last read it.
-		if (threadContainedUnknown !== null) {
-			threadContained = false;
-			threadContainedUnknown = null;
-		}
+		// What the engine reads now: a failed check taken back. (A record never ends, so a chat
+		// read as recorded is not asked again above.)
+		threadContained = false;
+		threadContainedUnknown = null;
 		return;
 	}
 	threadContained = true;

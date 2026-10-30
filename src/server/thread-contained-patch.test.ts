@@ -101,6 +101,26 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
     expect(ts.getThread('t-free')?.skip_extraction).toBe(0);
   });
 
+  it('one read decides and names the failed check: a read that fails once is not asked twice', async () => {
+    const ctx = engine().getToolContext();
+    const ts = engine().getThreadStore()!;
+    ts.createThread('t-flaky', { title: 'x' });
+    ts.updateThread('t-flaky', { skip_extraction: true });
+    const real = ctx.containment!;
+    const db = (real as unknown as { db: { prepare: (sql: string) => unknown } }).db;
+    let reads = 0;
+    const flaky = { prepare: (sql: string) => { if (reads++ === 0) throw new Error('disk I/O error'); return db.prepare(sql); } };
+    ctx.containment = new Containment(flaky as never, null);
+    try {
+      // Refused because the first read failed — and the answer says so, rather than a second
+      // read that worked turning it into a refusal without a reason.
+      expect(await patch('t-flaky', { skip_extraction: false })).toBe(409);
+      expect((JSON.parse(lastBody) as { contained_unknown?: unknown }).contained_unknown).toBe('self-hosted');
+    } finally {
+      ctx.containment = real;
+    }
+  });
+
   it('a record that cannot be read refuses', async () => {
     const ctx = engine().getToolContext();
     const ts = engine().getThreadStore()!;
