@@ -80,6 +80,12 @@ describe('whom a library run of a saved workflow is for', () => {
       save('wf-own', EVA, undefined, 'post it elsewhere');
       expect(check({ id: 'wf-own', confirmedAt: CONFIRMED })).toBe(LIBRARY_RUN_AUTHOR_CHANGED);
     });
+    it('refuses an edit by a mandate whose mark names no grant, which the grant alone would not tell apart from the owner', () => {
+      save('wf-own', OWNER_PRINCIPAL);
+      const check = libraryRunCheck(OWNER_PRINCIPAL, (id) => history.getWorkflowAuthorship(id));
+      save('wf-own', { kind: 'mandate', email: 'eva@kanzlei.example' }, undefined, 'post it elsewhere');
+      expect(check({ id: 'wf-own', confirmedAt: CONFIRMED })).toBe(LIBRARY_RUN_AUTHOR_CHANGED);
+    });
     it('refuses the same person under a later access', () => {
       save('wf-eva', EVA);
       const earlier: RequestPrincipal = { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'grant-eva-old' };
