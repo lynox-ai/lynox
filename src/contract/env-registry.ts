@@ -164,7 +164,7 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
 
   // ── Provider key slots (SDK/ecosystem-canonical names) ────────────────────
   { name: 'ANTHROPIC_API_KEY', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' }, note: 'SDK-canonical key slot — managed Anthropic-main. Also consumed inside the Anthropic SDK constructor and via the provider-keys slot map.' },
-  { name: 'MISTRAL_API_KEY', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, notRequiredWhenOn: 'LYNOX_SHOPIFY_EXCHANGE', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' }, note: 'SDK-canonical key slot — worker profile + in-UI switch target; also read via the provider-keys slot map. Not required where LYNOX_SHOPIFY_EXCHANGE is on: an instance that exchanges Shopify tokens is to make no call to Mistral, so the control plane may leave the whole Mistral block out (this key, LYNOX_WORKER_PROFILE and LYNOX_MODEL_PROFILES_JSON).' },
+  { name: 'MISTRAL_API_KEY', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, notRequiredWhenOn: 'LYNOX_SHOPIFY_EXCHANGE', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' }, note: 'SDK-canonical key slot — worker profile + in-UI switch target; also read via the provider-keys slot map. Not required where LYNOX_SHOPIFY_EXCHANGE is on: the control plane may then leave out any of the Mistral block (this key, LYNOX_WORKER_PROFILE, LYNOX_MODEL_PROFILES_JSON). The control plane decides that; this row does not make the engine avoid Mistral. An engine without the key drops the Mistral slot and clears a worker profile that names a missing profile.' },
   { name: 'FIREWORKS_API_KEY', valueKind: 'opaque', emitPolicy: 'when-non-default', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/config.ts' }, note: 'Emitted only when the CP pool holds a Fireworks key (opt-in Efficient preset).' },
   { name: 'LYNOX_MANAGED_FIREWORKS_ENABLED', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'direct', readSite: 'src/core/tier-presets.ts' }, note: 'Unlocks the Fireworks slot for managed; emitted only alongside FIREWORKS_API_KEY (DPA-gated sub-processor).' },
   { name: 'LYNOX_FEATURE_PROACTIVE_DEEP', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep', consumerSite: 'src/core/session.ts' } }, note: 'Fleet opt-in for proactive deep escalation; engine still cost-gates on the deep-slot provider.' },
@@ -225,10 +225,14 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
 ];
 
 /** Fast lookup by var name. */
+export const ENV_REGISTRY_BY_NAME: ReadonlyMap<string, EnvRegistryRow> = new Map(
+  ENV_REGISTRY.map((r) => [r.name, r]),
+);
+
 /**
  * Whether `row`'s var must be present on an instance of `tier` whose emitted env is `env`: the
  * tier is one `requiredForTier` names, and the switch `notRequiredWhenOn` names, if any, is not
- * on. On reads as the engine reads a `bool` var: `1` or `true`, nothing else.
+ * on. The switch counts as on as the engine reads a `bool` var: `1` or `true`, nothing else.
  */
 export function envVarRequired(row: EnvRegistryRow, tier: BillingTier, env: Readonly<Record<string, string | undefined>>): boolean {
   if (!(row.requiredForTier ?? []).includes(tier)) return false;
@@ -236,10 +240,6 @@ export function envVarRequired(row: EnvRegistryRow, tier: BillingTier, env: Read
   const sw = env[row.notRequiredWhenOn];
   return !(sw === '1' || sw === 'true');
 }
-
-export const ENV_REGISTRY_BY_NAME: ReadonlyMap<string, EnvRegistryRow> = new Map(
-  ENV_REGISTRY.map((r) => [r.name, r]),
-);
 
 /**
  * Engine-read `LYNOX_*` vars that are SELF-HOST / operator surface only — the

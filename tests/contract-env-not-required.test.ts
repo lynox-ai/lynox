@@ -6,9 +6,9 @@ import { shopifyExchangeSwitchOn } from '../src/tools/builtin/http.js';
 /**
  * A var the contract requires on a tier may be absent where a switch says the instance does not
  * use what it feeds (`notRequiredWhenOn`, read by `envVarRequired`). The one such switch today
- * is the Shopify token exchange: an instance that exchanges Shopify tokens is to make no call to
- * Mistral, so the control plane may leave out the whole Mistral block, and the emit side's
- * per-tier presence check has to let it.
+ * is the Shopify token exchange: on such an instance the control plane may leave out the Mistral
+ * block, and the emit side's per-tier presence check has to let it. The rows only permit the
+ * omission; nothing here makes the engine avoid Mistral.
  */
 const row = (name: string): EnvRegistryRow => {
   const r = ENV_REGISTRY_BY_NAME.get(name);
@@ -18,15 +18,19 @@ const row = (name: string): EnvRegistryRow => {
 
 const MISTRAL_BLOCK = ['LYNOX_MODEL_PROFILES_JSON', 'LYNOX_WORKER_PROFILE', 'MISTRAL_API_KEY'];
 
-/** What is wrong with each row's `notRequiredWhenOn`: it must name a `bool` row, on a row that requires a tier. */
+/** What is wrong with each row's `notRequiredWhenOn`: it must name another `bool` row the control
+ *  plane emits, on a `tier` row that requires a tier. */
 function switchProblems(rows: readonly EnvRegistryRow[]): string[] {
   const byName = new Map(rows.map((r) => [r.name, r]));
   const problems: string[] = [];
   for (const r of rows) {
     if (r.notRequiredWhenOn === undefined) continue;
     const sw = byName.get(r.notRequiredWhenOn);
-    if (sw === undefined) problems.push(`${r.name}: names no row`);
+    if (r.notRequiredWhenOn === r.name) problems.push(`${r.name}: names itself`);
+    else if (sw === undefined) problems.push(`${r.name}: names no row`);
     else if (sw.valueKind !== 'bool') problems.push(`${r.name}: names a ${sw.valueKind} row`);
+    else if (sw.emitPolicy === 'operator-only' || sw.emitPolicy === 'denylist') problems.push(`${r.name}: names a switch the control plane does not emit`);
+    if (r.emitPolicy !== 'tier') problems.push(`${r.name}: lifted from a '${r.emitPolicy}' row`);
     if ((r.requiredForTier ?? []).length === 0) problems.push(`${r.name}: requires no tier`);
   }
   return problems;
@@ -47,12 +51,17 @@ describe('env-ABI: a required var a switch lets the control plane leave out', ()
     const synthetic = [
       { ...base, name: 'SW_BOOL', valueKind: 'bool', emitPolicy: 'when-true' },
       { ...base, name: 'SW_OPAQUE' },
+      { ...base, name: 'SW_OPERATOR', valueKind: 'bool', emitPolicy: 'operator-only' },
       { ...base, name: 'R_OK', requiredForTier: ['managed'], notRequiredWhenOn: 'SW_BOOL' },
       { ...base, name: 'R_NONE', requiredForTier: ['managed'], notRequiredWhenOn: 'SW_MISSING' },
       { ...base, name: 'R_KIND', requiredForTier: ['managed'], notRequiredWhenOn: 'SW_OPAQUE' },
       { ...base, name: 'R_TIER', notRequiredWhenOn: 'SW_BOOL' },
+      { ...base, name: 'R_SELF', requiredForTier: ['managed'], notRequiredWhenOn: 'R_SELF' },
+      { ...base, name: 'R_UNEMITTED', requiredForTier: ['managed'], notRequiredWhenOn: 'SW_OPERATOR' },
+      { ...base, name: 'R_ALWAYS', emitPolicy: 'always', requiredForTier: ['managed'], notRequiredWhenOn: 'SW_BOOL' },
     ] as unknown as EnvRegistryRow[];
-    expect(switchProblems(synthetic).map((p) => p.split(':')[0])).toEqual(['R_NONE', 'R_KIND', 'R_TIER']);
+    expect(switchProblems(synthetic).map((p) => p.split(':')[0]))
+      .toEqual(['R_NONE', 'R_KIND', 'R_TIER', 'R_SELF', 'R_UNEMITTED', 'R_ALWAYS']);
   });
 
   it('the Mistral block is required on a managed tier while the switch is off, and not once it is on', () => {
@@ -82,8 +91,7 @@ describe('env-ABI: a required var a switch lets the control plane leave out', ()
 
   it('reads the switch as the engine does (`shopifyExchangeSwitchOn`)', () => {
     for (const value of ['1', 'true', '0', 'false', '', 'TRUE', ' 1', 'yes', undefined]) {
-      if (value === undefined) vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', undefined as unknown as string);
-      else vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', value);
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', value);
       const engineOn = shopifyExchangeSwitchOn();
       const lifted = !envVarRequired(row('MISTRAL_API_KEY'), 'managed', { LYNOX_SHOPIFY_EXCHANGE: value });
       expect(lifted, JSON.stringify(value)).toBe(engineOn);
