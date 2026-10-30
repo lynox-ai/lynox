@@ -78,7 +78,7 @@ import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { applyRunStops, completedPrefixEnd, loopBreakDetail, withRunStop, type RunStop } from './run-stop.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
-import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT } from './render-projection.js';
+import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT, THINKING_ONLY_CONTINUATION_PROMPT } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
@@ -383,6 +383,20 @@ export class ContinuationLoopError extends RunAbortedError {
     super('Run stopped: truncated-response continuations repeated without progress');
     this.name = 'ContinuationLoopError';
     this.loopPrefix = loopPrefix;
+  }
+}
+
+/**
+ * Two truncated turns in a row that held only thinking, with no tool dispatched between them.
+ * The second cannot build on the first: the first's thinking was stripped from the history. So
+ * this is a loop with certainty, not a likely one, and the run stops instead of spending the
+ * remaining continuations on the same reasoning.
+ */
+export class ThinkingOnlyLoopError extends ContinuationLoopError {
+  constructor() {
+    super('');
+    this.message = 'Run stopped: two truncated turns in a row held only thinking, with no answer and no tool call';
+    this.name = 'ThinkingOnlyLoopError';
   }
 }
 
@@ -762,6 +776,8 @@ export class Agent implements IAgent {
   private _continuationLoopPrefix = '';
   private _continuationLoopCount = 0;
   private _continuationToolCount = 0;
+  /** Truncated thinking-only turns in a row with no tool dispatched — see the max_tokens branch in _loop. */
+  private _thinkingOnlyStreak = 0;
   private readonly maxContinuations: number;
   private static readonly MAX_RETRIES = 3;
   private static readonly ABSOLUTE_MAX_ITERATIONS = 500;
@@ -2610,6 +2626,7 @@ export class Agent implements IAgent {
     this._continuationLoopPrefix = '';
     this._continuationLoopCount = 0;
     this._continuationToolCount = 0;
+    this._thinkingOnlyStreak = 0;
     this._loopToolCount = 0;
     this._repeatGuard.reset();
     this._sawUntrustedData = false;
@@ -2708,6 +2725,13 @@ export class Agent implements IAgent {
       // model does not take it up again. The ORIGINAL error is rethrown (loopKey).
       if (err instanceof ToolLoopBreakError
         && this._keepCompletedPrefix(userTurn, { code: 'tool_loop_break', detail: loopBreakDetail(err.loopKey) })) {
+        throw err;
+      }
+      // The same for a thinking loop: it typically comes after real tool work (a large fetch,
+      // then the evaluation), and the note asks the user to go on in smaller steps — which needs
+      // the question and the fetched data still in the context.
+      if (err instanceof ThinkingOnlyLoopError
+        && this._keepCompletedPrefix(userTurn, { code: 'thinking_loop' })) {
         throw err;
       }
       this.messages.length = Math.min(snapshot, this.messages.length);
@@ -2954,6 +2978,16 @@ export class Agent implements IAgent {
         // exists for (the whole budget went to extended thinking) — it is NOT
         // loop evidence and must not count. Only a NON-EMPTY identical prefix
         // repeating with zero dispatched tools is the stuck shape.
+        // A turn that held only thinking (no text, no tool call) is the exception above — but
+        // only once. Its thinking is stripped from the history, so a second one in a row cannot
+        // build on the first: the model restarts the same reasoning and is cut off again (996).
+        // A tool dispatched in between is progress and starts the count over.
+        // Decided on what stays in the history: a turn whose kept blocks are all blank text
+        // left the model nothing. A server tool's blocks (web search, tool search) or a
+        // redacted thinking block stay, so such a turn is not thinking-only.
+        const thinkingOnly = contentForHistory.every((b) => b.type === 'text' && b.text.trim().length === 0);
+        if (!thinkingOnly || toolsDelta > 0) this._thinkingOnlyStreak = 0;
+        if (thinkingOnly && ++this._thinkingOnlyStreak >= 2) throw new ThinkingOnlyLoopError();
         if (prefix.trim().length === 0) {
           this._continuationLoopPrefix = '';
           this._continuationLoopCount = 0;
@@ -2969,7 +3003,7 @@ export class Agent implements IAgent {
           if (this.onStream) {
             await this.onStream({ type: 'continuation', iteration: this.continuationCount, max: this.maxContinuations, agent: this.name });
           }
-          this.messages.push({ role: 'user', content: MAX_TOKENS_CONTINUATION_PROMPT });
+          this.messages.push({ role: 'user', content: thinkingOnly ? THINKING_ONLY_CONTINUATION_PROMPT : MAX_TOKENS_CONTINUATION_PROMPT });
           return this._loop();
         }
         // Continuation cap exhausted — surface a clear notice rather than an
