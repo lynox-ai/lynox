@@ -6,6 +6,7 @@
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { timeAgo } from '../utils/time.js';
+	import { runContainedBadgeKey, runContainedNoteKeys, runContainedState } from '../stores/run-contained-text.js';
 
 	// "💬 Fixen" (§4.6): fixing a failed run is chat-with-context, not a bespoke
 	// retry UI. Open a fresh chat seeded with a typed reference to this run; the
@@ -27,6 +28,9 @@
 		step_count: number;
 		error: string | null;
 		started_at: string;
+		/** Started from a chat that only reads (`run-contained-text.ts`). */
+		contained?: boolean;
+		contained_unknown?: string;
 	}
 
 	interface PipelineRunDetail extends PipelineRun {
@@ -169,6 +173,10 @@
 								<span>{formatDuration(run.total_duration_ms)}</span>
 								<span>{formatCost(run.total_cost_usd)}</span>
 								<span>{wfTimeAgo(run.started_at)}</span>
+								{#if runContainedState(run)}
+									{@const rc = runContainedState(run)!}
+									<span class="rounded-full px-2 py-0.5 bg-warning/10 text-warning" data-run-contained>{t(runContainedBadgeKey(rc.unknown))}</span>
+								{/if}
 							</div>
 						</div>
 
@@ -228,6 +236,12 @@
 										<Icon name="chat" size="xs" />
 										{t('workflows.fix_in_chat')}
 									</button>
+								{/if}
+
+								<!-- Started from a chat that only reads: its outputs carry what that chat read. -->
+								{#if runContainedState(selectedRun)}
+									{@const rc = runContainedState(selectedRun)!}
+									<p class="text-xs text-text-muted border-l-2 border-warning/50 pl-3 py-1" role="note" data-run-contained-note>{runContainedNoteKeys(rc.unknown).map((k) => t(k)).join(' ')}</p>
 								{/if}
 
 								<!-- DAG visualization -->
