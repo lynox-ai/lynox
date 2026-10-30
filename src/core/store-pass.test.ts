@@ -99,6 +99,42 @@ describe('with a pass', () => {
     expect(sent).toHaveLength(0);
   });
 
+  it('does not carry the bound token to the store\'s token endpoint in any spelling a URL keeps', async () => {
+    for (const [path, reason] of [
+      ['/admin/oauth/access_token', /OAuth endpoints/],
+      ['/admin//oauth/access_token', /not for the Admin API/],
+      ['/admin/oauth//access_token', /not for the Admin API/],
+      ['/admin/OAuth/access_token', /not for the Admin API/],
+      ['/ADMIN/oauth/access_token', /not for the Admin API/],
+      ['/admin/oauth/access_token.json', /OAuth endpoints/],
+      ['/admin/oauth/access_token/', /not for the Admin API/],
+      ['/admin/api/2025-01/oauth/access_token', /OAuth endpoints/],
+      ['/admin/oauth.json', /OAuth endpoints/],
+      ['/admin/oauth/authorize', /OAuth endpoints/],
+      ['/admin/./oauth/access_token', /OAuth endpoints/],
+      ['/admin/api/../oauth/access_token', /OAuth endpoints/],
+      ['/admin\\oauth/access_token', /OAuth endpoints/],
+    ] as const) {
+      for (const method of ['GET', 'POST']) {
+        await expect(fetchPinned(`${ORIGIN}${path}`, { method, headers: { [H]: TOKEN } }, pass()), `${method} ${path}`).rejects.toThrow(reason);
+      }
+    }
+    expect(sent).toHaveLength(0);
+  });
+
+  it('reaches the Admin API in the shapes it has, and the read of the token\'s own scopes', async () => {
+    const paths = [
+      '/admin/oauth/access_scopes.json',
+      '/admin/api/2025-10/graphql.json',
+      '/admin/api/unstable/graphql.json',
+      '/admin/api/2026-01/products/632910392/images.json',
+      '/admin/api/2025-10/shopify_payments/balance.json',
+      '/admin/products.json',
+    ];
+    for (const path of paths) await expect(send(`${ORIGIN}${path}`, { [H]: TOKEN }, pass()), path).resolves.toHaveProperty('status', 200);
+    expect(sent.map((s) => new URL(s.url).pathname)).toEqual(paths);
+  });
+
   it('refuses a Host header, whether it names another server or the same one', async () => {
     await expect(send(`${ORIGIN}/admin/x`, { [H]: TOKEN, Host: 'other.myshopify.com' }, pass()))
       .rejects.toThrow(/re-targets/);
@@ -310,7 +346,7 @@ describe('the token exchange\'s pass (kind exchange)', () => {
 
   it('an exchange pass does not carry an Admin request, and a credential pass does not carry the exchange as it is sent', async () => {
     await expect(fetchPinned(`${ORIGIN}/admin/x`, { method: 'GET', headers: { [H]: TOKEN } }, xpass())).rejects.toThrow(/only the store's token endpoint/);
-    await expect(post(TOKEN_URL, pass())).rejects.toThrow(/exactly the verified credential/);
+    await expect(post(TOKEN_URL, pass())).rejects.toThrow(/does not reach the store's OAuth endpoints/);
     expect(sent).toHaveLength(0);
   });
 

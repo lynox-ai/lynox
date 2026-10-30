@@ -19,6 +19,7 @@ import { createHash, createHmac, timingSafeEqual, randomUUID, randomBytes } from
 import {
   signProfileOAuthState,
   verifyProfileOAuthState,
+  spendProfileOAuthState,
   PROFILE_OAUTH_STATE_TTL_SEC,
 } from '../core/oauth-state-cookie.js';
 import { createPkcePair } from '../core/oauth-pkce.js';
@@ -11286,9 +11287,14 @@ export class LynoxHTTPApi {
       }
 
       // Cleared BEFORE the exchange, not after. A browser that replays this URL
-      // then arrives without a cookie and is refused above — which does not
-      // stop somebody who kept the value, and is not claimed to.
+      // then arrives without a cookie and is refused above. Somebody who kept the
+      // value is refused here: the state is spent once, before anything is asked
+      // of the provider, with the same page as every other invalid round-trip.
       LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
+      if (!spendProfileOAuthState(signed.state, Math.floor(Date.now() / 1000))) {
+        sendOAuthHtml(res, 400, 'This authorization link is no longer valid. Ask for a new one and try again.');
+        return;
+      }
 
       const apiStore = engine.getApiStore();
       const profile = apiStore?.get(signed.profileId);

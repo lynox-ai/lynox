@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createHmac } from 'node:crypto';
 import {
+  spendProfileOAuthState,
   signProfileOAuthState,
   verifyProfileOAuthState,
   PROFILE_OAUTH_STATE_TTL_SEC,
@@ -239,5 +240,18 @@ describe('who started the connection rides inside the signature (PRD §3.13)', (
       const payload = `${STATE}.bexio.${VERIFIER}.${field}.${String(NOW)}`;
       expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
     }
+  });
+});
+
+describe('a state is spent once', () => {
+  it('the first callback spends it, a second is refused while its cookie could verify, and a spent state is forgotten only after that', () => {
+    const now = 1_800_000_000;
+    expect(spendProfileOAuthState('spent-once', now)).toBe(true);
+    expect(spendProfileOAuthState('spent-once', now)).toBe(false);
+    expect(spendProfileOAuthState('spent-once', now + PROFILE_OAUTH_STATE_TTL_SEC)).toBe(false);
+    // Another state is its own.
+    expect(spendProfileOAuthState('spent-other', now)).toBe(true);
+    // Past the cookie's life the entry goes: no cookie for it verifies any more.
+    expect(spendProfileOAuthState('spent-once', now + PROFILE_OAUTH_STATE_TTL_SEC + 1)).toBe(true);
   });
 });
