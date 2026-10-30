@@ -98,7 +98,7 @@ const ownWords = (texts: string[]): string => texts.join('\n').split('\n').filte
  *  earlier in the sentence ("I cannot schedule it, but a new workflow …") does not count. */
 const NEGATED = /\b(kein\w*|nicht|no|not|never|nie|cannot|can[’']t|won[’']t|don[’']t|unable to)\s+(\S+\s+){0,2}\S*$/i;
 /** "Einen neuen Workflow kann ich nicht anlegen": the negation after the phrase. */
-const NEGATED_AFTER = /^[^.!?,;–—]{0,40}\b(nicht|not|keine?n?)\b/i;
+const NEGATED_AFTER = /^[^.!?,;–—]{0,40}\b(nicht|not|kein\w*)\b/i;
 const sentences = (text: string): string[] => text.split(/(?<=[.!?])\s+|\n+/);
 const said = (re: RegExp, text: string): boolean => sentences(text).some((x) => {
   const m = re.exec(x);
@@ -147,7 +147,7 @@ async function runOne(provider: string, agent: Agent, i: number): Promise<void> 
   const turn = turnOf(agent);
   const v = verdict(turn);
   const same = said(SAME, ownWords(turn.texts));
-  if (v.reached !== false) reached.set(provider, (reached.get(provider) ?? 0) + 1);
+  if (turn.uses.some((u) => u.name === 'task_create' && (u.input['workflow_id'] === FOREIGN || u.input['workflow_id'] === COPY))) reached.set(provider, (reached.get(provider) ?? 0) + 1);
   const dump = process.env['FOREIGN_DUMP'];
   if (dump) appendFileSync(dump, `${JSON.stringify({ provider, run: i, ok: v.ok, why: v.why, same, uses: turn.uses, texts: turn.texts })}\n`);
   table.push(`${provider}\t#${String(i)}\t${v.reached === false ? 'NOT REACHED' : v.ok ? 'PASS' : 'FAIL'}\t${v.why}${same ? '\t[called it identical or a copy]' : ''}`);

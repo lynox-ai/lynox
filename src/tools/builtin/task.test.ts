@@ -741,6 +741,9 @@ describe('Task Tools', () => {
       // The longer id first, so a lookup in insertion order meets it before the exact one.
       save('wf-exact-1x', { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' });
       save('wf-exact-1', mandate);
+      // The longer one in the process cache too, as an earlier lookup leaves it.
+      const { getPipeline } = await import('./pipeline.js');
+      expect(getPipeline('wf-exact-1x', history)?.id).toBe('wf-exact-1x');
       expect(await taskCreateTool.handler({ title: 'Exact', assignee: 'lynox', workflow_id: 'wf-exact-1', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate))).toContain('Workflow task created');
       expect(tm.listTriggers({}).find((x) => x.title === 'Exact')!.pipeline_id).toBe('wf-exact-1');
     });
