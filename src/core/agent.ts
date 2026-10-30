@@ -76,7 +76,7 @@ import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns, maskEngineEnvSecrets } from './secret-store.js';
 import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
-import { applyRunStops, completedPrefixEnd, loopBreakDetail, withRunStop, type RunStop } from './run-stop.js';
+import { applyRunStops, completedPrefixEnd, continuationLoopDetail, loopBreakDetail, withRunStop, type RunStop } from './run-stop.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT, THINKING_ONLY_CONTINUATION_PROMPT } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
@@ -2737,6 +2737,12 @@ export class Agent implements IAgent {
         && this._keepCompletedPrefix(userTurn, { code: 'thinking_loop' })) {
         throw err;
       }
+      // And for a continuation loop: its note, too, asks to go on in smaller steps, and the
+      // completed tool pairs before the cut-off turns are work the next turn can build on.
+      if (err instanceof ContinuationLoopError
+        && this._keepCompletedPrefix(userTurn, { code: 'continuation_loop', detail: continuationLoopDetail(err.loopPrefix) })) {
+        throw err;
+      }
       this.messages.length = Math.min(snapshot, this.messages.length);
       this._persistedMark = Math.min(this._persistedMark, this.messages.length);
       throw err;
@@ -2998,7 +3004,11 @@ export class Agent implements IAgent {
         // is stripped, the cut-off call is discarded. Three in a row with no tool dispatched
         // between them is a loop. Decided on what stays in the history, as `thinkingOnly` is: a
         // server tool's blocks or a redacted thinking block are something to build on.
-        const blank = contentForHistory.every((b) => (b.type === 'text' && b.text.trim().length === 0) || b.type === 'tool_use');
+        // A server tool call cut off before its result came is discarded work, like a cut-off
+        // `tool_use`: only one whose result block is in the same turn is something to build on.
+        const serverResults = new Set(contentForHistory.flatMap((b) => (b.type.endsWith('_tool_result') && 'tool_use_id' in b ? [b.tool_use_id] : [])));
+        const blank = contentForHistory.every((b) => (b.type === 'text' && b.text.trim().length === 0) || b.type === 'tool_use'
+          || (b.type === 'server_tool_use' && !serverResults.has(b.id)));
         if (!blank || toolsDelta > 0) this._blankTruncatedStreak = 0;
         if (blank && ++this._blankTruncatedStreak >= 3) throw new ContinuationLoopError('');
         if (prefix.trim().length === 0) {

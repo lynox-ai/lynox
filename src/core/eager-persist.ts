@@ -9,7 +9,7 @@ import { buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection
 import { getErrorMessage } from './utils.js';
 import type { SendStopCause } from './agent.js';
 import { isInputRequired } from './input-required.js';
-import { isRunStopCode, loopBreakDetail } from './run-stop.js';
+import { continuationLoopDetail, isRunStopCode, loopBreakDetail } from './run-stop.js';
 
 export interface EagerPersistInput {
   /** `null` mirrors `engine.getThreadStore()`'s return type — engine has no
@@ -147,9 +147,12 @@ export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedT
         kept.onPersisted?.(written);
       }
       const loopKey = (error as { loopKey?: unknown }).loopKey;
+      const loopPrefix = (error as { loopPrefix?: unknown }).loopPrefix;
       const note = buildDisplayNoteContent(
         noteCode,
-        noteCode === 'tool_loop_break' && typeof loopKey === 'string' ? loopBreakDetail(loopKey) : undefined,
+        noteCode === 'tool_loop_break' && typeof loopKey === 'string' ? loopBreakDetail(loopKey)
+          : noteCode === 'continuation_loop' && typeof loopPrefix === 'string' ? continuationLoopDetail(loopPrefix)
+          : undefined,
         true,
       );
       const totalCount = threadStore.getMessageCount(sessionId);

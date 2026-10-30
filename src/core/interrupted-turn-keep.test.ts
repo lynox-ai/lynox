@@ -32,7 +32,7 @@ vi.mock('./stream.js', () => ({
   }),
 }));
 
-import { Agent, RunAbortedError, ThinkingOnlyLoopError, ToolLoopBreakError } from './agent.js';
+import { Agent, ContinuationLoopError, RunAbortedError, ThinkingOnlyLoopError, ToolLoopBreakError } from './agent.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { SessionStore } from './session-store.js';
@@ -245,6 +245,57 @@ describe('a stopped run keeps its completed prefix', { timeout: 60_000 }, () => 
     expect(outgoingTexts(applyRunStops(live)).at(-1)).toBe(runStopText({ code: 'thinking_loop' }));
     // Its own text, not the generic interruption: the model reads why the run stopped.
     expect(runStopText({ code: 'thinking_loop' })).toContain('spent the whole output limit on thinking');
+  });
+
+  it('continuation loop of blank turns after tool work: the question and the fetched data stay, disk and reload agree', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    handler.mockResolvedValue('a large data set');
+    // Cut off inside a tool call, three times in a row: the guard against blank truncated turns.
+    const cutCall = { content: [{ type: 'tool_use' as const, id: 'tu_cut', name: 'probe_tool', input: {} }], stop_reason: 'max_tokens', usage: { input_tokens: 100, output_tokens: 16_000 } };
+    mockProcess
+      .mockResolvedValueOnce(toolUse('tu_fetch', { what: 'data' }))
+      .mockResolvedValueOnce(cutCall)
+      .mockResolvedValueOnce(cutCall)
+      .mockResolvedValueOnce(cutCall);
+
+    const err = await session.run('evaluate the data').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ContinuationLoopError);
+    expect(err).not.toBeInstanceOf(ThinkingOnlyLoopError);
+
+    const live = session.getAgent()!.getMessages();
+    expect(JSON.stringify(live)).toContain('evaluate the data');
+    expect(JSON.stringify(live)).toContain('a large data set');
+    expect(readRunStop(live.at(-1)!)?.code).toBe('continuation_loop');
+    expect(JSON.stringify(apiRows(engine, session))).toBe(JSON.stringify(live));
+    const reloaded = reload(engine, session);
+    expect(reloaded).toEqual(live);
+    expect(readRunStop(reloaded.at(-1)!)?.code).toBe('continuation_loop');
+    expect(outgoingTexts(applyRunStops(live)).at(-1)).toBe(runStopText({ code: 'continuation_loop' }));
+    expect(runStopText({ code: 'continuation_loop' })).toContain('cut off at the output limit');
+  });
+
+  it('continuation loop of a repeated text: the prefix stays, the note names the text, the model text does not', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    handler.mockResolvedValue('a large data set');
+    const sameStart = { content: [{ type: 'text' as const, text: 'Writing the whole report now: SECTION ONE' }], stop_reason: 'max_tokens', usage: { input_tokens: 100, output_tokens: 16_000 } };
+    mockProcess.mockResolvedValueOnce(toolUse('tu_fetch', { what: 'data' })).mockResolvedValue(sameStart);
+
+    const err = await session.run('write the report').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ContinuationLoopError);
+
+    const live = session.getAgent()!.getMessages();
+    expect(JSON.stringify(live)).toContain('a large data set');
+    expect(readRunStop(live.at(-1)!)?.code).toBe('continuation_loop');
+    expect(JSON.stringify(apiRows(engine, session))).toBe(JSON.stringify(live));
+    expect(reload(engine, session)).toEqual(live);
+    // The note the reader sees names the repeated text; the text the model reads does not
+    // (it is model-authored and goes out in the user's role).
+    const notes = engine.getThreadStore()!.getMessages(session.sessionId).filter((r) => r.display_only === 1);
+    expect(notes.map((r) => r.content_json).join('')).toContain('SECTION ONE');
+    expect(outgoingTexts(applyRunStops(live)).at(-1)).toBe(runStopText({ code: 'continuation_loop' }));
+    expect(runStopText({ code: 'continuation_loop' })).not.toContain('SECTION ONE');
   });
 
   it('a stop before the send still puts the question into the context, on disk and live', async () => {
