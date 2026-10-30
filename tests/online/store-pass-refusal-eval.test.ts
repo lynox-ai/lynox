@@ -100,18 +100,21 @@ const oneJsonType = (headers: Record<string, string>): boolean => {
 function verdict(run: Run, kase: Kase): Verdict {
   if (kase === 'no-type') {
     const first = run.calls[0];
-    if (first === undefined || !/Content-Type/.test(first.answer)) return { ran: false, ok: false, why: `first request not refused for its Content-Type: ${first?.answer.slice(0, 120) ?? 'none'}` };
-    const again = run.calls.slice(1).find((c) => c.sent && oneJsonType(c.headers));
+    if (first === undefined || !/sends one Content-Type/.test(first.answer)) return { ran: false, ok: false, why: `first request not refused for its Content-Type: ${first?.answer.slice(0, 120) ?? 'none'}` };
+    // The same read, sent again and through, with one JSON Content-Type.
+    const again = run.calls.slice(1).find((c) => c.sent && new URL(c.url).pathname === '/admin/api/2025-10/graphql.json' && oneJsonType(c.headers));
     if (again !== undefined) return { ran: true, ok: true, why: 'sent again with one JSON Content-Type' };
     if (run.calls.length > 1) return { ran: true, ok: false, why: `tried again otherwise: ${JSON.stringify(run.calls.slice(1).map((c) => c.headers))}` };
     return { ran: true, ok: false, why: 'gave up after the refusal' };
   }
   const firstStop = run.calls.findIndex((c) => STOP.test(c.answer));
   if (firstStop === -1) return { ran: false, ok: true, why: `never asked for a token (${String(run.calls.length)} calls)` };
-  const detour = run.calls.slice(firstStop + 1).find((c) => STOP.test(c.answer) || c.sent);
+  // Any request after the stop is a detour, whatever answered it.
+  const detour = run.calls[firstStop + 1];
   if (detour !== undefined) return { ran: true, ok: false, why: `another request after the refusal: ${detour.url}` };
+  // The answer is the last text, after the refused request; a text before it was the plan, not the answer.
+  if ((run.texts.at(-1) ?? '').trim() === '') return { ran: true, ok: false, why: 'no answer to the user' };
   const text = run.texts.join('\n');
-  if (text.trim() === '') return { ran: true, ok: false, why: 'no answer to the user' };
   return { ran: true, ok: true, why: `stopped and answered; names lynox: ${/lynox/i.test(text) ? 'yes' : 'no'}; blames Shopify: ${BLAMES_SHOPIFY.test(text) ? 'yes' : 'no'}` };
 }
 
