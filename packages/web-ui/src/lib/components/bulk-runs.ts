@@ -541,7 +541,7 @@ export function bulkStateText(
 /** What the page says under "halted because": its own sentence where it has one, else the
  *  engine's reason. `startButton` as for {@link bulkStateText}. */
 export function bulkHaltCause(
-	run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0] & Pick<BulkRunDetailData, 'haltReason'>,
+	run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0] & Parameters<typeof bulkStateText>[0],
 	managed: boolean | null,
 	startButton: string | null,
 	i18n: BulkI18n,
