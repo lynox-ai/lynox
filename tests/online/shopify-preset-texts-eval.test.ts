@@ -67,13 +67,15 @@ const CONNECTED_SYSTEM = `${BASE_SYSTEM}
 function connectedProfile(): ApiProfile {
   return {
     id: 'shop-acme', name: 'Acme', base_url: `https://${STORE}`, description: 'The Admin API of the store',
-    auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: SHOP } } },
+    // The app's names as the save derives them: a connection without a client secret is refused
+    // for that before any path is looked at, and the eval would measure that text instead.
+    auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: SHOP }, client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' } },
     custom_endpoint_ack: { accepted: true, hosts: [STORE], accepted_at: '2026-10-30T00:00:00.000Z' },
   } as ApiProfile;
 }
 
 interface Call { tool: string; input: Record<string, unknown>; answer: string }
-interface Run { calls: Call[]; store: InstanceType<typeof ApiStore>; reply?: string }
+interface Run { calls: Call[]; store: InstanceType<typeof ApiStore>; reply?: string; attempts: Call[] }
 
 interface Case {
   label: string;
@@ -85,7 +87,10 @@ interface Case {
   counts: (run: Run) => Record<string, number | boolean>;
 }
 
-const httpCalls = (run: Run): Call[] => run.calls.filter((c) => c.tool === 'http_request');
+// Every http_request the model asked for, read from the conversation: a request the agent refuses
+// before the tool runs (a secret: reference to a store) never reaches the handler, and is exactly
+// the kind this eval counts.
+const httpCalls = (run: Run): Call[] => run.attempts;
 const pathOf = (c: Call): string => { try { return new URL(String(c.input['url'])).pathname; } catch { return ''; } };
 const onStore = (c: Call): boolean => { try { return new URL(String(c.input['url'])).hostname === STORE; } catch { return false; } };
 const ownCredential = (c: Call): boolean => {
@@ -212,7 +217,7 @@ async function runCase(provider: string, make: MakeAgent, c: Case, i: number): P
   const ctx = createToolContext({});
   (ctx as { apiStore: unknown }).apiStore = store;
   (ctx as { vaultNameBindings: unknown }).vaultNameBindings = bindingsAsMigrated(store);
-  const vault = vaultOf(c.connected ? { [accessTokenKey('shop-acme')]: TOKEN } : {});
+  const vault = vaultOf(c.connected ? { [accessTokenKey('shop-acme')]: TOKEN, SHOPIFY_CLIENT_ID: 'eval-client', SHOPIFY_CLIENT_SECRET: ['eval', 'secret', 'value'].join('-') } : {});
   const calls: Call[] = [];
   const agent = make({ tools: toolsFor(calls), system: c.connected ? CONNECTED_SYSTEM : BASE_SYSTEM, toolContext: ctx, secretStore: vault });
   try {
@@ -225,11 +230,18 @@ async function runCase(provider: string, make: MakeAgent, c: Case, i: number): P
   }
   const last = agent.getMessages().at(-1);
   const reply = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? '');
-  const run: Run = { calls, store, reply };
+  const attempts: Call[] = [];
+  for (const m of agent.getMessages()) {
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) continue;
+    for (const b of m.content as Array<{ type?: string; name?: string; input?: unknown }>) {
+      if (b.type === 'tool_use' && b.name === 'http_request') attempts.push({ tool: 'http_request', input: (b.input ?? {}) as Record<string, unknown>, answer: '' });
+    }
+  }
+  const run: Run = { calls, store, reply, attempts };
   const why = c.judge(run);
   const counts = c.counts(run);
   const dump = process.env['PRESET_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, requests: __req, ok: why === null, why, counts, calls, reply: reply.slice(0, 1500) })}\n`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, requests: __req, ok: why === null, why, counts, calls, attempts: attempts.map((a) => a.input), reply: reply.slice(0, 1500) })}\n`);
   table.push(`${provider}\t${c.label}\t#${String(i)}\t${why === null ? 'PASS' : 'FAIL'}\t${why ?? JSON.stringify(counts)}`);
   expect(why, why ?? '').toBeNull();
 }
