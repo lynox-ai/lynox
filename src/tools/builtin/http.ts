@@ -11,7 +11,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -2822,14 +2822,13 @@ function slotReachRefusal(profileId: string, name: string, hostname: string, cli
  * path is not repeated; the model wrote it and knows it.
  */
 function storePathRefusal(profile: ApiProfile, url: string): string | null {
-  if (profile.auth?.type !== 'oauth2') return null;
   const preset = OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '');
   const prefix = preset?.apiPathPrefix;
   if (preset === undefined || prefix === undefined) return null;
   let path: string;
   try { path = new URL(url).pathname; } catch { return null; }
   if (path.startsWith(prefix) && !/%(2f|5c)/i.test(path)) return null;
-  return `Error: api_profile "${profile.id}" is the connection of a ${preset.label} store, and its token goes only to the store's API: paths under ${prefix}, with every slash written out. This request goes to another path on the store, so nothing was sent. Other paths there are served by others than the store's API (an app's pages under /apps/, for example), and lynox does not send the store's token to them. Do not retry it, and do not set a credential yourself; make the request to the API path for what you need.`;
+  return `Error: api_profile "${profile.id}" is the connection of a ${preset.label} store, and its token goes only to the store's API: paths under ${prefix}, with no encoded slash or backslash (%2F, %5C) in the path. This request goes to another path on the store, so nothing was sent. Other paths there are served by others than the store's API (an app's pages under /apps/, for example), and lynox does not send the store's token to them. Do not retry it, and do not set a credential yourself; make the request to the API path for what you need.`;
 }
 
 /** Shared wording — the same refusal for basic and bearer/header. */
@@ -3171,7 +3170,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // nowhere to keep a profile.
       const wayOut = !toolContext?.apiStore
         ? 'This run has no api_profile store, so it cannot write there.'
-        : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
+        : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}"${presetParamsForModel(claimant) === '' ? '' : ` and auth.oauth.preset_params ${presetParamsForModel(claimant)}`}, then connect it with api_setup action "connect".`;
       blockedVerbatim(`Blocked: ${writeShown} to ${service()} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
     }
     // A write to a connected account is shown with everything the request puts on the wire, as

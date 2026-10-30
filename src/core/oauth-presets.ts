@@ -626,11 +626,21 @@ export function presetNotFollowed(
  */
 function presetDerivesHost(preset: OAuthPreset, host: string, register: PresetRegister): boolean {
   if (preset.apiOnDerivedHost !== true || preset.host.kind !== 'template') return false;
-  const [before, after, ...rest] = preset.host.template.split(`{${preset.host.param}}`);
-  if (before === undefined || after === undefined || rest.length > 0) return false;
-  if (host.length <= before.length + after.length || !host.startsWith(before) || !host.endsWith(after)) return false;
-  const derived = derivePresetEndpoints(preset.id, { [preset.host.param]: host.slice(before.length, host.length - after.length) }, register);
-  return !('kind' in derived) && derived.host === host;
+  // One placeholder (`OAuthPresetHost`): the host is the text around it with a value in between,
+  // and the preset's own derivation decides whether that value is one it accepts.
+  const [before = '', after = ''] = preset.host.template.split(`{${preset.host.param}}`);
+  if (!host.startsWith(before) || !host.endsWith(after)) return false;
+  return !('kind' in derivePresetEndpoints(preset.id, { [preset.host.param]: host.slice(before.length, host.length - after.length) }, register));
+}
+
+/**
+ * The parameters a profile of `preset` names in `auth.oauth.preset_params`, as the model is told to
+ * write them: `{"shop": "<shop>"} (shop: …)`. Empty for a preset without any.
+ */
+export function presetParamsForModel(preset: OAuthPreset): string {
+  if (preset.params.length === 0) return '';
+  const shape = `{${preset.params.map((p) => `"${p.name}": "<${p.name}>"`).join(', ')}}`;
+  return `${shape} (${preset.params.map((p) => `${p.name}: ${p.describe}`).join('; ')})`;
 }
 
 /**

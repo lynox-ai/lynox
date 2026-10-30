@@ -23,7 +23,7 @@ import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
@@ -217,8 +217,8 @@ function presetClientIdGuidance(name: string): string {
  *  the engine's own provider, never a value of the profile. */
 function notThroughProvider(provider: OAuthPreset): string {
   // A provider whose host comes from a parameter (Shopify's store) names it, so the next save is not refused for it.
-  const params = provider.params.map((p) => `${p.name} (${p.describe})`);
-  const withParams = params.length === 0 ? '' : ` and auth.oauth.preset_params naming ${params.join(', ')}`;
+  const params = presetParamsForModel(provider);
+  const withParams = params === '' ? '' : ` and auth.oauth.preset_params ${params}`;
   return `the API of ${provider.label} is connected only through this engine's built-in "${provider.id}" provider, which shows the user what lynox may do there before a write access and asks every write with what it sends. A profile with another sign-in, a pasted token included, would reach the same account past both. Use auth.type "oauth2" with auth.oauth.preset_id "${provider.id}"${withParams}, then api_setup action "connect".`;
 }
 
@@ -1844,7 +1844,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   detailedGuidance:
     'connect: pass `id` of a profile whose auth.oauth.preset_id names a built-in provider — the preset supplies the sign-in and token URLs and the scopes it allows, and the engine runs the authorization-code flow, stores the tokens and renews them while it holds a refresh token. Returns a link; SHOW it to the user and let them click it. The engine builds the link and stores what comes back — never ask the user to paste a token for a profile that can connect, and never assemble the link yourself.\n' +
     'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
-    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets the access token auto-attached by the engine, as `Authorization: Bearer …` — do NOT set that header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled. If the API documents its own header for the access token instead of `Authorization: Bearer`, set `auth.header_name` to it on the oauth2 profile: the engine then sends the raw token under that name. A profile of a built-in provider (auth.oauth.preset_id) is signed in with action "connect" instead; its token is attached the way that provider takes it — under the provider\'s own header where it has one, and only to the paths of its API — so set no header for it either.' +
+    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets the access token auto-attached by the engine, as `Authorization: Bearer …`; do NOT set that header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled. If the API documents its own header for the access token instead of `Authorization: Bearer`, set `auth.header_name` to it on the oauth2 profile: the engine then sends the raw token under that name. A profile of a built-in provider (auth.oauth.preset_id) is signed in with action "connect" instead. Its token is attached the way that provider takes it: under the provider\'s own header where it has one, and only to the paths of its API; so set no header for it either.' +
     ' basic + basic_format="user_pass_split": name the two vault keys in `username_key` and `password_key` (or list them in `vault_keys`, username first). The ENGINE combines and Base64-encodes them onto every http_request to this host — do NOT set an Authorization header and do NOT try to encode anything; you never hold the plaintext, only `secret:` references, so you cannot. Use `pre_encoded_b64` only when the credential genuinely arrives already Base64-encoded.' +
     ' bearer / header: name the vault key holding the token in `vault_keys` (first entry; for `header` also set `header_name`, default X-Api-Key). The ENGINE attaches it to every http_request to this host — do NOT set the header yourself and do NOT pass `secret:NAME` in one. Hand-setting it is not merely redundant: the value resolves before the egress scanner runs, so a token shaped like a known credential (a JWT, `ghp_…`, `sk-…`) gets the request blocked as exfiltration. Store the value with ask_secret, then just call http_request.',
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> => {
@@ -2030,7 +2030,11 @@ ${draftJson}
           // engine's own, so it is said, and the way out is to change this profile (one host
           // holds one profile, so a second one for the provider is refused).
           const provider = providerNotFollowed(existing);
-          if (provider) return `Error: the stored profile "${input.id}" cannot be refined: ${notThroughProvider(provider)} Change this profile with api_setup action="update"; reading through it works until then.`;
+          if (provider) {
+            // A store profile reads nothing either: every request to a store needs the preset's connection.
+            const until = provider.apiOnDerivedHost === true ? 'every request through it is refused until then' : 'reading through it works until then';
+            return `Error: the stored profile "${input.id}" cannot be refined: ${notThroughProvider(provider)} Change this profile with api_setup action="update"; ${until}.`;
+          }
           return `Error: the stored profile "${input.id}" does not pass validation on its own, so it cannot be refined. Its values are not repeated here. Replace it with api_setup action="update" and a complete profile.`;
         }
         return `Validation error after refine: ${err}`;
