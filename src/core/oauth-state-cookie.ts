@@ -219,7 +219,8 @@ const spentStates = new Map<string, number>();
  * Mark `state` used: `true` the first time, `false` for any later callback with it while its
  * cookie could still verify. Clearing the cookie stops a browser that replays the URL, not
  * whoever kept the cookie's value; this stops both, in this process. An engine is one process,
- * and a restart forgets the set, which a replay across one can use within the ten minutes.
+ * and a restart forgets the set, which a replay across one can use within the ten minutes; so
+ * does a wall clock set forward past an entry's end and back again.
  */
 export function spendProfileOAuthState(state: string, nowSec: number): boolean {
   for (const [s, until] of spentStates) if (until < nowSec) spentStates.delete(s);
