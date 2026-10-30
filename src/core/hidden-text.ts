@@ -58,7 +58,7 @@ export const HIDDEN_RUN_NAME_REFUSAL = 'A parameter name holds a character that 
 
 /** The run refusal of `hiddenInRunValues` for a value, without the parameter's name, which is
  *  stored text: what a reduced sink may say. */
-export const HIDDEN_RUN_VALUE_FIXED = 'A value this workflow runs with holds a character that does not show as text. Enter the value again without it.';
+export const HIDDEN_RUN_VALUE_FIXED = 'A value this workflow runs with holds a character that does not show as text. Enter it again by typing it rather than pasting it.';
 
 /** The words a reduced sink may say for a refusal of `hiddenInRunValues`. */
 export function fixedRunRefusal(refusal: string): string {
