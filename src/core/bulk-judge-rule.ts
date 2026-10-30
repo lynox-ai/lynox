@@ -140,8 +140,14 @@ function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
 export function normalizeJudgeRule(input: unknown, opts: { idField?: string | undefined } = {}): JudgeRule {
   if (!isPlainObject(input)) throw new BulkSourceError('judge must be an object with rule and schema.');
   const rule = input['rule'];
-  if (typeof rule !== 'string' || rule.trim() === '' || rule.length > JUDGE_MAX_RULE_CHARS) {
+  if (typeof rule !== 'string' || rule.trim() === '') {
     throw new BulkSourceError(`judge.rule must be a text of 1–${String(JUDGE_MAX_RULE_CHARS)} characters.`);
+  }
+  if (rule.length > JUDGE_MAX_RULE_CHARS) {
+    // The counted length, so the model shortens by a number instead of an estimate.
+    throw new BulkSourceError(
+      `judge.rule has ${String(rule.length)} characters; it may have at most ${String(JUDGE_MAX_RULE_CHARS)}. Shorten it by at least ${String(rule.length - JUDGE_MAX_RULE_CHARS)}.`,
+    );
   }
   refuseHidden(rule, 'judge.rule');
   const rawSchema = input['schema'];
