@@ -60,7 +60,7 @@ import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js'
 import { eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
-import { bulkRunsSource } from '../core/bulk-switch.js';
+import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
 import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
 import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
@@ -370,7 +370,7 @@ function containedWayOutOf(engine: Engine): ContainedWayOutState {
   const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? undefined;
   return {
     bulkRuns: engine.getBulkLedger() !== null,
-    bulkRunsBy: bulkRunsSource(tier),
+    bulkRunsBy: bulkRunsTurnedOnBy(tier, engine.getEngineDb() !== null),
     shopifyBulk: shopifyBulkReadEnabled(),
     managed: tier !== undefined && tier !== '',
   };

@@ -5932,6 +5932,8 @@ describe('LynoxHTTPApi', () => {
       host.engine['getEngineDb'] = () => ({});
       vi.stubEnv('LYNOX_BILLING_TIER', tier);
       vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', flag);
+      // Pinned, not left to the shell: `shopify` reads the flag, and one set in the shell would fail this.
+      vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       try {
         for (const on of [false, true]) {
           host.engine['getBulkLedger'] = () => (on ? {} : null);
@@ -5940,17 +5942,23 @@ describe('LynoxHTTPApi', () => {
           const body = await res.json() as Record<string, unknown>;
           expect(body['bulk_runs']).toEqual({ on, ...expected, db: true, shopify: false });
         }
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '1');
+        repayRateWindow();
+        const read = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        expect((read['bulk_runs'] as Record<string, unknown>)['shopify']).toBe(true);
       } finally {
         host.engine['getEngineDb'] = origDb;
         host.engine['getBulkLedger'] = origLedger;
         vi.stubEnv('LYNOX_BILLING_TIER', '');
         vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       }
     });
 
     it('GET /api/config: without engine.db bulk runs cannot be turned on, on any tier', async () => {
       repayRateWindow();
       vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '1');
+      vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       try {
         const res = await jsonFetch('/api/config');
         const body = await res.json() as Record<string, unknown>;
@@ -5963,6 +5971,7 @@ describe('LynoxHTTPApi', () => {
       } finally {
         vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
         vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       }
     });
 
