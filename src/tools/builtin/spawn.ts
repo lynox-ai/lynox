@@ -2007,7 +2007,7 @@ async function executeThinker(
           // A child that died after being refused a key still owes that reason:
           // "it failed" and "it failed after the vault refused it X" send the
           // reader to different repairs.
-          errorText: timedOut ? timeoutReason : (guard !== null ? (err as Error).message : (childAborted ? undefined : appendDeniedKeyNote(formatSpawnError(err), deniedKeys))),
+          errorText: timedOut ? timeoutReason : (guard !== null ? appendDeniedKeyNote((err as Error).message, deniedKeys) : (childAborted ? undefined : appendDeniedKeyNote(formatSpawnError(err), deniedKeys))),
         });
       } catch { /* swallow */ }
     }
