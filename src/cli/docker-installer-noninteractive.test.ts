@@ -3,12 +3,14 @@
 //
 // The full runDockerInstaller() flow needs Docker. What is tested here is every
 // piece that decides the outcome without it: parseInstallerArgs, pollHealth
-// (its timeout is actually tripped, not just configured), startupReport, and
-// the two early exits that happen before Docker is touched.
+// (its timeout is actually tripped, not just configured), startupReport, the
+// early exits before Docker is touched, and the refusals after the Docker check,
+// run against a stand-in `docker` on PATH that logs every call.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,6 +108,26 @@ describe('parseInstallerArgs', () => {
       .toEqual({ error: '--provider needs a value.' });
     expect(parseInstallerArgs(['--non-interactive', '--provider=']))
       .toEqual({ error: '--provider needs a value.' });
+  });
+
+  it('stops on an unknown argument instead of falling back to a default', () => {
+    expect(parseInstallerArgs(['--non-interactive', '--accept-terms', '--provider', 'none', '--dri', '/srv/x']))
+      .toEqual({ error: 'Unknown arguments: --dri, a value without a flag.' });
+    expect(parseInstallerArgs(['--non-interactive', '--provider', 'mistral', '--modle=x']))
+      .toEqual({ error: 'Unknown argument: --modle.' });
+  });
+
+  it('keeps the installer entry words and never echoes a stray value, which may be a key', () => {
+    expect(parseInstallerArgs(['init', '--non-interactive', '--init', '--provider', 'none']))
+      .toEqual({ nonInteractive: true, options: { acceptTerms: false, provider: 'none', dir: './lynox', reconfigure: false } });
+    const secret = `sk-${randomBytes(12).toString('hex')}`;
+    const r = parseInstallerArgs(['--non-interactive', '--provider', 'none', `--api-key=${secret}`, secret]);
+    expect('error' in r && r.error).toBe('Unknown arguments: --api-key, a value without a flag.');
+  });
+
+  it('does not echo a base URL it rejects, since a URL can carry credentials', () => {
+    const r = parseInstallerArgs(['--non-interactive', '--provider', 'openai-compatible', '--base-url', 'user:pw@host']);
+    expect('error' in r && r.error).not.toContain('pw');
   });
 
   it('refuses a value on a switch', () => {
@@ -225,6 +247,15 @@ describe('runDockerInstaller exit codes before Docker is touched', () => {
     expect(err).toContain('--non-interactive --accept-terms --provider');
   });
 
+  it('asks for --accept-terms even when an earlier run on this machine accepted the terms', async () => {
+    mkdirSync(join(home, '.lynox'), { recursive: true });
+    writeFileSync(join(home, '.lynox', '.tos-accepted-1'), 'x\n');
+    await runDockerInstaller(['--non-interactive', '--provider', 'none']);
+    expect(process.exitCode).toBe(1);
+    const out = vi.mocked(process.stdout.write).mock.calls.map(c => String(c[0])).join('');
+    expect(out).toContain('Pass --accept-terms');
+  });
+
   it('exits 1 when the terms were not accepted, and stops before anything else', async () => {
     await runDockerInstaller(['--non-interactive', '--provider', 'none']);
     expect(process.exitCode).toBe(1);
@@ -232,6 +263,90 @@ describe('runDockerInstaller exit codes before Docker is touched', () => {
     expect(out).toContain('Pass --accept-terms');
     // checkDocker always prints one of these; none may appear.
     expect(out).not.toMatch(/Docker not found|Docker daemon is not running|✓\S* Docker \S/);
+  });
+});
+
+describe('runDockerInstaller refusals after the Docker check', () => {
+  let home: string;
+  let bin: string;
+  let dockerLog: string;
+  const saved: Record<string, string | undefined> = {};
+  let savedExitCode: typeof process.exitCode;
+  let server: Server | undefined;
+
+  const output = (): string => vi.mocked(process.stdout.write).mock.calls.map(c => String(c[0])).join('');
+  const dockerCalls = (): string => (existsSync(dockerLog) ? readFileSync(dockerLog, 'utf-8') : '');
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'lynox-installer-ni-'));
+    bin = join(home, 'bin');
+    dockerLog = join(home, 'docker-calls.log');
+    mkdirSync(bin);
+    // Answers the three probes of checkDocker and logs every call.
+    writeFileSync(join(bin, 'docker'), [
+      '#!/bin/sh',
+      `echo "$*" >> '${dockerLog}'`,
+      'case "$*" in',
+      '  "--version") echo "Docker version 27.0.0, build x" ;;',
+      '  "compose version") echo "Docker Compose version v2.29.0" ;;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'));
+    chmodSync(join(bin, 'docker'), 0o755);
+    for (const k of ['HOME', 'PATH', 'PORT', 'ANTHROPIC_API_KEY']) saved[k] = process.env[k];
+    process.env['HOME'] = home;
+    process.env['PATH'] = `${bin}:${saved['PATH'] ?? ''}`;
+    delete process.env['PORT'];
+    delete process.env['ANTHROPIC_API_KEY'];
+    savedExitCode = process.exitCode;
+    process.exitCode = undefined;
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    process.exitCode = savedExitCode;
+    if (server) await new Promise<void>(r => server?.close(() => r()));
+    server = undefined;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('refuses an existing setup without --reconfigure and leaves it untouched', async () => {
+    const dir = join(home, 'inst');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'docker-compose.yml'), 'old\n');
+    await runDockerInstaller(['--non-interactive', '--accept-terms', '--provider', 'none', '--dir', dir]);
+    expect(process.exitCode).toBe(1);
+    expect(output()).toContain('already holds a setup. Pass --reconfigure');
+    expect(readFileSync(join(dir, 'docker-compose.yml'), 'utf-8')).toBe('old\n');
+    expect(dockerCalls()).toContain('--version');
+    expect(dockerCalls()).not.toContain('compose up');
+  });
+
+  it('refuses a missing provider key, naming the variable and the keyless way', async () => {
+    await runDockerInstaller(['--non-interactive', '--accept-terms', '--provider', 'anthropic', '--dir', join(home, 'inst')]);
+    expect(process.exitCode).toBe(1);
+    expect(output()).toContain('Set ANTHROPIC_API_KEY in the environment, or use --provider none');
+    expect(dockerCalls()).not.toContain('compose up');
+  });
+
+  it('stops on a port in use instead of asking for another one', async () => {
+    server = createServer();
+    await new Promise<void>(r => server?.listen(0, '127.0.0.1', () => r()));
+    const addr = server.address();
+    process.env['PORT'] = String(typeof addr === 'object' && addr ? addr.port : 0);
+    await runDockerInstaller(['--non-interactive', '--accept-terms', '--provider', 'none', '--dir', join(home, 'inst')]);
+    expect(process.exitCode).toBe(1);
+    expect(output()).toContain(`Port ${process.env['PORT']} is already in use`);
+    expect(output()).toContain('PORT=3001 npx @lynox-ai/core');
+    expect(output()).not.toContain('Alternative port');
+    expect(dockerCalls()).not.toContain('compose up');
   });
 });
 

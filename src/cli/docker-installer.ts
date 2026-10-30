@@ -9,6 +9,7 @@ import { connect as netConnect } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { stderr, stdin, stdout } from 'node:process';
+import { Readable } from 'node:stream';
 import { createInterface } from 'node:readline/promises';
 import { execFile as execFileCb, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -26,6 +27,7 @@ import {
   dockerModeFromSecurityOptions,
   freshDataDirProblem,
   tosMarkerPath,
+  TOS_VERSION,
   handOverFreshDataDir,
   helperChownArgs,
   helperFailure,
@@ -51,7 +53,9 @@ async function acceptTos(
 ): Promise<boolean> {
   const lynoxDir = join(homedir(), '.lynox');
   const flagPath = tosMarkerPath(lynoxDir);
-  if (existsSync(flagPath)) return true;
+  // A non-interactive run decides by its flag alone, so a marker from an
+  // earlier run on this machine cannot stand in for it.
+  if (acceptFlag === undefined && existsSync(flagPath)) return true;
 
   stdout.write(`\n  ${BOLD}Terms of Service${RESET}\n`);
   stdout.write(`  ${DIM}https://lynox.ai/terms${RESET}\n\n`);
@@ -120,14 +124,15 @@ export const NON_INTERACTIVE_USAGE = [
 ].join('\n');
 
 /**
- * Reads the installer's own flags from the CLI arguments. Arguments it does not
- * know (`init`, `--init`, the engine's own flags) are left alone. Its flags are
- * only valid together with `--non-interactive`; anything else is an error, so a
- * typo stops the run instead of silently falling back to prompts.
+ * Reads the installer's own flags from the CLI arguments. Its flags are only
+ * valid together with `--non-interactive`. An interactive run leaves every other
+ * argument alone; a non-interactive one accepts only `init` / `--init` besides
+ * its flags, so a typo stops the run instead of turning into a default.
  */
 export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { error: string } {
   const values = new Map<string, string>();
   const switches = new Set<string>();
+  const unknown: string[] = [];
   let nonInteractive = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -135,6 +140,7 @@ export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { e
     const eq = arg.indexOf('=');
     const name = eq === -1 ? arg : arg.slice(0, eq);
     if (name === '--non-interactive' && eq === -1) { nonInteractive = true; continue; }
+    if (arg === '--init' || (i === 0 && arg === 'init')) continue;
     if ((SWITCH_FLAGS as readonly string[]).includes(name)) {
       if (eq !== -1) return { error: `${name} takes no value.` };
       switches.add(name);
@@ -146,7 +152,10 @@ export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { e
         return { error: `${name} needs a value.` };
       }
       values.set(name, value);
+      continue;
     }
+    // Only a flag's name is ever echoed: a stray value may be a key.
+    unknown.push(arg.startsWith('-') ? name : 'a value without a flag');
   }
 
   if (!nonInteractive) {
@@ -155,6 +164,12 @@ export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { e
       return { error: `${stray.join(', ')} only work together with --non-interactive.` };
     }
     return { nonInteractive: false };
+  }
+
+  // Without a prompt to fall back on, a misspelt flag would silently become a
+  // default (`--dri` installs into ./lynox), so anything unknown stops the run.
+  if (unknown.length > 0) {
+    return { error: `Unknown argument${unknown.length > 1 ? 's' : ''}: ${[...new Set(unknown)].join(', ')}.` };
   }
 
   const provider = values.get('--provider');
@@ -181,7 +196,8 @@ export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { e
       protocol = new URL(baseUrl).protocol;
     } catch { /* reported below */ }
     if (protocol !== 'http:' && protocol !== 'https:') {
-      return { error: `--base-url "${baseUrl}" is not a valid URL — include the scheme (http:// or https://).` };
+      // The value is not echoed: a URL can carry credentials.
+      return { error: '--base-url is not a valid URL — include the scheme (http:// or https://).' };
     }
   }
 
@@ -826,7 +842,11 @@ export async function runDockerInstaller(args: readonly string[] = []): Promise<
   const ni = parsed.nonInteractive ? parsed.options : undefined;
   let succeeded = false;
 
-  const rl = createInterface({ input: stdin, output: stdout, terminal: stdin.isTTY === true });
+  // A non-interactive run never reads stdin, so it gets an empty input: readline
+  // on a terminal would otherwise swallow Ctrl+C instead of ending the run.
+  const rl = ni
+    ? createInterface({ input: Readable.from([]), output: stdout, terminal: false })
+    : createInterface({ input: stdin, output: stdout, terminal: stdin.isTTY === true });
 
   try {
     stdout.write('\n' + renderGradientArt());
