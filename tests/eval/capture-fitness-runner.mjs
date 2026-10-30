@@ -118,7 +118,8 @@ async function runOne(text) {
   if (fresh.length === 0) throw new Error(`no telemetry for thread ${threadId}`);
   // A `remember` made by a spawned sub-agent carries no thread. Cases run one after another, so
   // within this case's window it is this case's — unless an earlier case timed out and is still
-  // running. Counting it errs toward a MISS on a negative shape, never toward a silent pass.
+  // running. Then the write is misplaced: a MISS on a negative shape, a false HIT on a capture
+  // shape. Read the written texts after a run with timeouts.
   const orphans = all.filter(e => e.event === 'remember_invoked' && !e.thread && e.ts >= started && e.ts <= ended);
   fresh.push(...orphans);
   const writes = fresh.filter(e => e.event === 'remember_invoked');
