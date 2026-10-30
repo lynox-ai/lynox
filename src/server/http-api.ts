@@ -281,8 +281,14 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
  * paused it, and `paused_ended`, how and when each access ended: the view says it in full, where
  * the push had to shorten the name.
  */
-export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
-  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, ...rest } = trigger;
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, ...stored } = trigger;
+  // Whether a wakeup reached the owner, and the step to take when it did not (their push
+  // subscription), are the owner's: a mandate reading them would be told about the owner's
+  // devices as if they were its own, and could act on neither. An absent value leaves the JSON.
+  const rest = isOwnerPrincipal(principal)
+    ? { ...stored, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome }
+    : { ...stored, last_escalation_at: undefined, last_escalation_outcome: undefined };
   if (!planPauseOn()) return rest;
   const paused = isPaused(trigger);
   if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
@@ -305,11 +311,13 @@ export interface PausedEnded {
 }
 
 /**
- * {@link triggerForRoute} for a route that answers a task or a trigger: a row that carries a
- * stored pause column is a trigger and is shaped; anything else goes out as it is.
+ * {@link triggerForRoute} for a route that answers a task or a trigger: a trigger is shaped, a
+ * task goes out as it is. A trigger is told by its `effect`, which a task does not have, and not
+ * by its pause columns: those are left off a row that is not paused, and such a row carries the
+ * owner's escalation fields too.
  */
 export function rowForRoute<T extends object>(row: T, principal: RequestPrincipal): object {
-  return 'paused_at' in row || 'paused_due_at' in row || 'paused_for' in row
+  return 'effect' in row || 'paused_at' in row || 'paused_due_at' in row || 'paused_for' in row
     ? triggerForRoute(row as unknown as TriggerRecord, principal)
     : row;
 }

@@ -1,6 +1,6 @@
 /**
- * What the view says about a trigger's last escalation — a failed scheduled workflow or a
- * watch finding opens a thread and sends a wakeup, and the engine records whether that
+ * What the view says about a trigger's last escalation — a failed scheduled workflow, a watch
+ * finding or a scheduled run's question sends a wakeup, and the engine records whether that
  * wakeup reached anyone (`triggers.last_escalation_outcome`, `summarizeDelivery`).
  *
  * `null` when there is nothing to say: the trigger never escalated, or the payload carries a
