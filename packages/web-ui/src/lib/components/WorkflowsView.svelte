@@ -175,7 +175,7 @@
 								<span>{wfTimeAgo(run.started_at)}</span>
 								{#if runContainedState(run)}
 									{@const rc = runContainedState(run)!}
-									<span class="rounded-full px-2 py-0.5 bg-warning/10 text-warning whitespace-nowrap max-w-full truncate" data-run-contained>{t(runContainedBadgeKey(rc.unknown))}</span>
+									<span class="rounded-full px-2 py-0.5 bg-warning/10 text-warning" data-run-contained>{t(runContainedBadgeKey(rc.unknown))}</span>
 								{/if}
 							</div>
 						</div>
