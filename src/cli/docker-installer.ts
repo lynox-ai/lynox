@@ -850,10 +850,16 @@ export async function runDockerInstaller(): Promise<void> {
     let asRoot = false;
     let hostIds: Ids | undefined;
     let dockerMode: DockerMode = 'rootful';
-    const refuse = (reason: string, command: string): void => {
+    // Every refusal below ends the run with exit 1, so a script that runs the installer sees it.
+    // A command is printed only where one fixes it; otherwise the reason names the step.
+    const refuse = (reason: string, command: string | null = null, note?: string): void => {
       stdout.write(`\n  ${RED}✗${RESET} ${reason}\n`);
-      stdout.write(`  ${DIM}Fix it once, then run this again:${RESET}\n`);
-      stdout.write(`  ${DIM}  ${command}${RESET}\n`);
+      if (command !== null) {
+        stdout.write(`  ${DIM}Fix it once, then run this again:${RESET}\n`);
+        stdout.write(`  ${DIM}  ${command}${RESET}\n`);
+        if (note !== undefined) stdout.write(`  ${DIM}${note}${RESET}\n`);
+      }
+      process.exitCode = 1;
     };
     if (process.platform === 'linux' && typeof process.getuid === 'function' && typeof process.getgid === 'function') {
       dockerMode = await detectDockerMode();
@@ -871,11 +877,7 @@ export async function runDockerInstaller(): Promise<void> {
         // freshDataDirProblem); the pre-check would judge it before that.
         const problem = freshDataDirProblem(dataDir, homedir());
         if (problem) {
-          if (problem.command) {
-            refuse(problem.reason, problem.command);
-          } else {
-            stdout.write(`\n  ${RED}✗${RESET} ${problem.reason}\n`);
-          }
+          refuse(problem.reason, problem.command);
           return;
         }
       } else {
@@ -909,7 +911,7 @@ export async function runDockerInstaller(): Promise<void> {
       vaultExists: listable && readdirSync(dataDir).some((name) => name.endsWith('.db')),
     });
     if (vaultDecision.kind === 'refuse') {
-      refuse(vaultDecision.reason, vaultDecision.command);
+      refuse(vaultDecision.reason, vaultDecision.command, 'The command copies the key without printing it.');
       return;
     }
     const recoveryEnvPath = join(dataDir, '.env');
@@ -944,7 +946,7 @@ export async function runDockerInstaller(): Promise<void> {
       try {
         handOverFreshDataDir(dataDir, homedir());
       } catch (err: unknown) {
-        stdout.write(`\n  ${RED}✗${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+        refuse(err instanceof Error ? err.message : String(err));
         return;
       }
     } else if (chown === 'helper' && hostIds) {
@@ -952,7 +954,7 @@ export async function runDockerInstaller(): Promise<void> {
       try {
         args = helperChownArgs(dataDir);
       } catch (err: unknown) {
-        stdout.write(`\n  ${RED}✗${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+        refuse(err instanceof Error ? err.message : String(err));
         return;
       }
       try {
@@ -962,11 +964,7 @@ export async function runDockerInstaller(): Promise<void> {
           ? (err as { stderr: string }).stderr
           : (err instanceof Error ? err.message : String(err));
         const failure = helperFailure(stderr, hostIds, dataDir);
-        if (failure.command) {
-          refuse(failure.reason, failure.command);
-        } else {
-          stdout.write(`\n  ${RED}✗${RESET} ${failure.reason}\n`);
-        }
+        refuse(failure.reason, failure.command);
         return;
       }
     }
@@ -985,7 +983,7 @@ export async function runDockerInstaller(): Promise<void> {
       try {
         chownFileToImage(join(installDir, 'searxng', 'settings.yml'));
       } catch (err: unknown) {
-        stdout.write(`\n  ${RED}✗${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+        refuse(err instanceof Error ? err.message : String(err));
         return;
       }
     }

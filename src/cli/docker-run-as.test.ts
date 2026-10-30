@@ -295,8 +295,9 @@ describe('on the filesystem', () => {
         .toEqual({ reason: `${join(root, 'nope')} does not exist.`, command: `mkdir -p '${join(root, 'nope')}'` });
       mkdirSync(join(root, 'real'));
       symlinkSync(join(root, 'real'), join(root, '.lynox'));
-      expect(precheckDataDir({ mode: 'rootful', host: ME, engine: ME, dataDir: join(root, '.lynox') })?.reason)
-        .toBe(`${join(root, '.lynox')} is not a directory.`);
+      // No command: none fixes it for the user, so the reason names the step (ux U-082).
+      expect(precheckDataDir({ mode: 'rootful', host: ME, engine: ME, dataDir: join(root, '.lynox') }))
+        .toEqual({ reason: `${join(root, '.lynox')} is not a directory. Move it aside, then run this again.`, command: null });
     });
 
     it('does not judge a rootless engine running as the image user (a subordinate id it does not compute)', () => {
@@ -309,7 +310,8 @@ describe('on the filesystem', () => {
   describe('freshDataDirProblem on a real filesystem (the root-owned cases are in docker-run-as-chown.test.ts)', () => {
     it('refuses any path but <home>/.lynox', () => {
       mkdirSync(join(root, 'other'));
-      expect(freshDataDirProblem(join(root, 'other'), root)?.reason).toMatch(/^Only .*\.lynox is handed/);
+      expect(freshDataDirProblem(join(root, 'other'), root)?.reason)
+        .toBe(`Only ${join(root, '.lynox')} is handed to the image's user, not ${join(root, 'other')}. Run the installer without sudo, or use ${join(root, '.lynox')} as the data directory.`);
       expect(freshDataDirProblem('/', root)?.reason).toMatch(/^Only /);
     });
 

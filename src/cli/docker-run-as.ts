@@ -249,7 +249,7 @@ export function precheckDataDir(opts: {
   readonly host: Ids;
   readonly engine: Ids;
   readonly dataDir: string;
-}): { reason: string; command: string } | null {
+}): { reason: string; command: string | null } | null {
   const { mode, host, engine, dataDir } = opts;
   let st;
   try {
@@ -258,7 +258,7 @@ export function precheckDataDir(opts: {
     return { reason: `${dataDir} does not exist.`, command: `mkdir -p ${shellQuote(dataDir)}` };
   }
   if (st.isSymbolicLink() || !st.isDirectory()) {
-    return { reason: `${dataDir} is not a directory.`, command: `ls -la ${shellQuote(dataDir)}` };
+    return { reason: `${dataDir} is not a directory. Move it aside, then run this again.`, command: null };
   }
   if (mode === 'rootless') return null;
   const writable = (st.uid === engine.uid && (st.mode & 0o300) === 0o300)
@@ -292,7 +292,7 @@ export function freshDataDirProblem(
 ): { readonly reason: string; readonly command: string | null } | null {
   const expected = join(home, '.lynox');
   if (resolve(dataDir) !== resolve(expected)) {
-    return { reason: `Only ${expected} is handed to the image's user, not ${dataDir}.`, command: null };
+    return { reason: `Only ${expected} is handed to the image's user, not ${dataDir}. Run the installer without sudo, or use ${expected} as the data directory.`, command: null };
   }
   if (lstatSync(home).uid !== 0) {
     return { reason: `${home} does not belong to root. Run the installer without sudo, or with sudo -H.`, command: null };
@@ -304,13 +304,13 @@ export function freshDataDirProblem(
   } catch {
     return { reason: `${dataDir} does not exist.`, command: `mkdir -p ${shellQuote(dataDir)}` };
   }
-  if (st.isSymbolicLink() || !st.isDirectory()) return { reason: `${dataDir} is not a real directory.`, command: null };
+  if (st.isSymbolicLink() || !st.isDirectory()) return { reason: `${dataDir} is a link or not a directory. Replace it with a directory, then run this again.`, command: null };
   if (st.uid !== 0) return { reason: `${dataDir} belongs to uid ${String(st.uid)}, not to root or to the image's user.`, command: handBack };
   for (const name of readdirSync(dataDir)) {
     if (!FRESH_FILES.includes(name)) return { reason: `${dataDir} already holds ${name}; only a fresh directory is handed over.`, command: handBack };
     const file = lstatSync(join(dataDir, name));
     if (!file.isFile() || file.nlink > 1) { // lstat: a symlink is never a file
-      return { reason: `${join(dataDir, name)} is not a regular file with one name.`, command: null };
+      return { reason: `${join(dataDir, name)} is a link, not a plain file. Move it out of ${dataDir}, then run this again.`, command: null };
     }
   }
   return null;

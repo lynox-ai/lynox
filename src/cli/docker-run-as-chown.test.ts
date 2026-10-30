@@ -101,27 +101,27 @@ describe('handOverFreshDataDir hands over a fresh data dir only', () => {
 
   it('refuses a .env that is a symlink or has a second name, and touches nothing', () => {
     symlinkSync(join(outside, 'secret'), join(dir, '.env'));
-    expect(freshDataDirProblem(dir, root)).toEqual({ reason: `${join(dir, '.env')} is not a regular file with one name.`, command: null });
-    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/not a regular file/);
+    expect(freshDataDirProblem(dir, root)).toEqual({ reason: `${join(dir, '.env')} is a link, not a plain file. Move it out of ${dir}, then run this again.`, command: null });
+    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/is a link, not a plain file/);
     rmSync(join(dir, '.env'));
     linkSync(join(outside, 'secret'), join(dir, '.env'));
-    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/not a regular file/);
+    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/is a link, not a plain file/);
     expect(touched()).toEqual([]);
   });
 
   it('refuses a terms marker that is a symlink or has a second name, and touches nothing', () => {
     symlinkSync(join(outside, 'secret'), join(dir, TOS_MARKER));
-    expect(freshDataDirProblem(dir, root)).toEqual({ reason: `${join(dir, TOS_MARKER)} is not a regular file with one name.`, command: null });
+    expect(freshDataDirProblem(dir, root)).toEqual({ reason: `${join(dir, TOS_MARKER)} is a link, not a plain file. Move it out of ${dir}, then run this again.`, command: null });
     rmSync(join(dir, TOS_MARKER));
     linkSync(join(outside, 'secret'), join(dir, TOS_MARKER));
-    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/not a regular file/);
+    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/is a link, not a plain file/);
     expect(touched()).toEqual([]);
   });
 
   it('refuses <home>/.lynox when it is a symlink, even to a real directory, and touches nothing', () => {
     rmSync(dir, { recursive: true });
     symlinkSync(outside, dir);
-    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/not a real directory/);
+    expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/is a link or not a directory\. Replace it with a directory, then run this again\./);
     expect(touched()).toEqual([]);
   });
 
