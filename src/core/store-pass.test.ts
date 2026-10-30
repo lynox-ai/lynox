@@ -217,7 +217,7 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
       ['in a key', '{"query":"{ shop { name } }","variables":{"accessToken":1}}'],
     ];
     for (const [label, body] of documents) {
-      await expect(post(GRAPHQL, body), label).rejects.toThrow(/the body names an access token/);
+      await expect(post(GRAPHQL, body), label).rejects.toThrow(/the body contains access_token or accessToken/);
     }
     expect(sent).toHaveLength(0);
   });
@@ -267,7 +267,7 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
 
   it('looks for the word in the text as sent too, where resolving an escape eats the letters after it', async () => {
     await expect(post(GRAPHQL, JSON.stringify({ query: '{ shop { name } }', variables: { v: '\\u{0000005c}u\\u{61}accesstoken' } })))
-      .rejects.toThrow(/the body names an access token/);
+      .rejects.toThrow(/the body contains access_token or accessToken/);
     await expect(send(`${GRAPHQL}?v=${encodeURIComponent('\\u{0000005c}u\\u{61}accesstoken')}`, { [H]: TOKEN }, pass()))
       .rejects.toThrow(/the address names an access token/);
     expect(sent).toHaveLength(0);
@@ -275,12 +275,28 @@ describe('a credential pass does not reach the store\'s access tokens', () => {
 
   it('reads an escape with leading zeros in braces, and a long run of backslashes in one pass', async () => {
     await expect(post(GRAPHQL, '{"query":"mutation{bulkOperationRunQuery(query:\\"{shop{storefront\\\\u{00000041}ccessTokens{edges{node{id}}}}}\\"){bulkOperation{id}}}"}'))
-      .rejects.toThrow(/the body names an access token/);
+      .rejects.toThrow(/the body contains access_token or accessToken/);
     const run = JSON.stringify({ query: '{ shop { name } }', variables: { v: '\\'.repeat(200_000) } });
     const started = performance.now();
     await expect(post(GRAPHQL, run)).resolves.toHaveProperty('status', 200);
     expect(performance.now() - started).toBeLessThan(2_000);
     expect(sent).toHaveLength(1);
+  });
+
+  it('tells the model to stop on a token, and how to send it again on a form it cannot read (ux U-086)', async () => {
+    const STOP = /tell the user that lynox does not create or read access tokens through the connected store\. Do not retry it with changed headers or a changed address\.$/;
+    const AGAIN = /\. Send it again as JSON text with exactly one Content-Type: application\/json header, no Content-Encoding, and the full query text instead of a persisted query\.$/;
+    await expect(send(`${ORIGIN}/admin/api/2025-10/storefront_access_tokens.json`, { [H]: TOKEN }, pass())).rejects.toThrow(STOP);
+    await expect(send(`${GRAPHQL}?query=${encodeURIComponent('{ shop { storefrontAccessTokens { nodes { id } } } }')}`, { [H]: TOKEN }, pass())).rejects.toThrow(STOP);
+    await expect(post(GRAPHQL, query('{ shop { name } }'), {})).rejects.toThrow(AGAIN);
+    await expect(post(GRAPHQL, query('{ shop { name } }'), { ...JSON_TYPE, 'Content-Encoding': 'gzip' })).rejects.toThrow(AGAIN);
+    await expect(post(GRAPHQL, '{ shop { name } }')).rejects.toThrow(AGAIN);
+    await expect(post(GRAPHQL, '{"extensions":{"persistedQuery":{"version":1}}}')).rejects.toThrow(AGAIN);
+    await expect(send(`${GRAPHQL}?extensions=%7B%22persistedQuery%22%3A1%7D`, { [H]: TOKEN }, pass())).rejects.toThrow(AGAIN);
+    // The token word in a body is named, with what to do when it is only text.
+    await expect(post(GRAPHQL, JSON.stringify({ query: 'mutation { productUpdate(product: { id: "1", descriptionHtml: "accessToken" }) { product { id } } }' })))
+      .rejects.toThrow(/If it is only text, tell the user which field contains it; the request cannot be sent while it does\. Do not retry it with changed headers or a changed address\.$/);
+    expect(sent).toHaveLength(0);
   });
 
   it('sends what names no token: a read, a write, a REST call, an empty body, UTF-8 named and identity', async () => {

@@ -71,11 +71,40 @@ export function credentialPathRefusal(path: string): string | null {
   if (path === STORE_SCOPES_PATH) return null;
   if (!/^\/admin(?:\/[a-z0-9_.-]+)+$/.test(path)) return 'the request is not for the Admin API';
   if (path.split('/').some((segment) => segment.startsWith('oauth'))) return 'a store pass does not reach the store\'s OAuth endpoints';
-  if (path.split('/').some((segment) => segment.includes('access_token'))) return ACCESS_TOKEN_REFUSAL;
+  if (path.split('/').some((segment) => segment.includes('access_token'))) return ACCESS_TOKEN_REFUSAL + TELL_NO_TOKENS;
   return null;
 }
 
 const ACCESS_TOKEN_REFUSAL = 'a store pass does not reach the store\'s access tokens';
+/** What the model is told to do after a refusal of the path or the address: stop and say so (ux U-086). */
+const TELL_NO_TOKENS = '; tell the user that lynox does not create or read access tokens through the connected store';
+/** The token word in a body: named, so a text that only contains it can be found and changed (ux U-086). */
+const BODY_TOKEN_REFUSAL = 'the body contains access_token or accessToken (any case, also inside text such as a description): '
+  + ACCESS_TOKEN_REFUSAL + '. If it is only text, tell the user which field contains it; the request cannot be sent while it does';
+const PERSISTED_ADDRESS_REFUSAL = 'the address asks for a persisted query';
+const PERSISTED_BODY_REFUSAL = 'the body asks for a persisted query';
+const ENCODED_REFUSAL = 'the body is sent encoded (Content-Encoding)';
+const CONTENT_TYPE_REFUSAL = 'a request under a store pass sends one Content-Type, application/json';
+const NOT_JSON_REFUSAL = 'a request under a store pass sends its body as JSON';
+
+/**
+ * The refusals of the form a request is sent in, not of what it asks for (ux U-086). A request
+ * sent again in the one form these checks read goes through every check again, the access-token
+ * ones included, so telling the model how to send it opens nothing.
+ */
+const FORMAT_REFUSALS: ReadonlySet<string> = new Set([
+  PERSISTED_ADDRESS_REFUSAL, PERSISTED_BODY_REFUSAL, ENCODED_REFUSAL, CONTENT_TYPE_REFUSAL, NOT_JSON_REFUSAL,
+]);
+
+/**
+ * The sentence `fetchPinned` puts after a store refusal: how to send it again for a refusal of its
+ * form, and not to try another way for every other one.
+ */
+export function storeRefusalNext(refusal: string): string {
+  return FORMAT_REFUSALS.has(refusal)
+    ? 'Send it again as JSON text with exactly one Content-Type: application/json header, no Content-Encoding, and the full query text instead of a persisted query.'
+    : 'Do not retry it with changed headers or a changed address.';
+}
 const TOKEN_WORD = /access_?token/i;
 const PERSISTED_WORD = /persistedquery/i;
 /**
@@ -147,16 +176,16 @@ const asciiTrim = (value: string): string => value.replace(/^[ \t]+|[ \t]+$/g, '
 function credentialRequestRefusal(url: URL, headers: Record<string, string>): string | null {
   if (url.search !== '') {
     const pieces = [...url.searchParams].flat();
-    if (pieces.some(namesAccessToken)) return 'the address names an access token: ' + ACCESS_TOKEN_REFUSAL;
-    if (pieces.some(asksPersisted)) return 'the address asks for a persisted query';
+    if (pieces.some(namesAccessToken)) return 'the address names an access token: ' + ACCESS_TOKEN_REFUSAL + TELL_NO_TOKENS;
+    if (pieces.some(asksPersisted)) return PERSISTED_ADDRESS_REFUSAL;
   }
   for (const [name, value] of Object.entries(headers)) {
-    if (name.trim().toLowerCase() === 'content-encoding' && value.trim().toLowerCase() !== 'identity') return 'the body is sent encoded (Content-Encoding)';
+    if (name.trim().toLowerCase() === 'content-encoding' && value.trim().toLowerCase() !== 'identity') return ENCODED_REFUSAL;
   }
   const types = contentTypesOf(headers);
   // Two of them are refused with a body ({@link storePassBodyRefusal}); without one they say nothing.
   if (types.some((type) => !JSON_CONTENT_TYPES.has(asciiTrim(type).toLowerCase()))) {
-    return 'a request under a store pass sends one Content-Type, application/json';
+    return CONTENT_TYPE_REFUSAL;
   }
   return null;
 }
@@ -282,15 +311,15 @@ export function storePassRefusal(url: URL, headers: Record<string, string>, pass
 export function storePassBodyRefusal(pass: StorePass, body: Buffer | undefined, headers: Record<string, string>): string | null {
   if (pass.kind !== 'exchange') {
     if (body === undefined || body.length === 0) return null;
-    if (contentTypesOf(headers).length !== 1) return 'a request under a store pass sends one Content-Type, application/json';
+    if (contentTypesOf(headers).length !== 1) return CONTENT_TYPE_REFUSAL;
     const text = body.toString('utf8');
     try {
       JSON.parse(text);
     } catch {
-      return 'a request under a store pass sends its body as JSON';
+      return NOT_JSON_REFUSAL;
     }
-    if (namesAccessToken(text)) return 'the body names an access token: ' + ACCESS_TOKEN_REFUSAL;
-    if (asksPersisted(text)) return 'the body asks for a persisted query';
+    if (namesAccessToken(text)) return BODY_TOKEN_REFUSAL;
+    if (asksPersisted(text)) return PERSISTED_BODY_REFUSAL;
     return null;
   }
   if (spent.has(pass)) return 'an exchange pass sends one request, and it has sent it';
