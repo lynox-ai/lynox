@@ -19,6 +19,7 @@ import {
   HEALTH_TIMEOUT_MS,
   parseInstallerArgs,
   pollHealth,
+  rerunCommand,
   runDockerInstaller,
   startupReport,
   type StartupFacts,
@@ -35,7 +36,7 @@ describe('parseInstallerArgs', () => {
 
   it('refuses installer flags without --non-interactive instead of ignoring them', () => {
     const r = parseInstallerArgs(['--provider', 'none', '--accept-terms']);
-    expect(r).toEqual({ error: '--provider, --accept-terms only work together with --non-interactive.' });
+    expect(r).toEqual({ error: '--provider, --accept-terms only work together with --non-interactive. Add --non-interactive, or leave them out.' });
   });
 
   it('requires --provider and names `none` as the way to start without a key', () => {
@@ -98,7 +99,7 @@ describe('parseInstallerArgs', () => {
 
   it('rejects a base URL without a scheme', () => {
     const r = parseInstallerArgs(['--non-interactive', '--provider', 'openai-compatible', '--base-url', 'localhost:11434']);
-    expect('error' in r && r.error).toContain('is not a valid URL');
+    expect(r).toEqual({ error: '--base-url is not a valid URL. Include the scheme (http:// or https://).' });
   });
 
   it('refuses a value flag with no value, or with the next flag in its place', () => {
@@ -134,6 +135,13 @@ describe('parseInstallerArgs', () => {
   it('does not echo a base URL it rejects, since a URL can carry credentials', () => {
     const r = parseInstallerArgs(['--non-interactive', '--provider', 'openai-compatible', '--base-url', 'user:pw@host']);
     expect('error' in r && r.error).not.toContain('pw');
+  });
+
+  it('builds the rerun line from the options, without a base URL that may hold credentials', () => {
+    expect(rerunCommand({ acceptTerms: true, provider: 'openai-compatible', dir: '/srv/my lynox', reconfigure: true, model: 'qwen2.5', baseUrl: 'https://u:pw@h/v1' }, 3002))
+      .toBe("PORT=3002 npx @lynox-ai/core --non-interactive --accept-terms --provider openai-compatible --model 'qwen2.5' --base-url <your base URL> --dir '/srv/my lynox' --reconfigure");
+    expect(rerunCommand({ acceptTerms: false, provider: 'none', dir: './lynox', reconfigure: false }, 3001))
+      .toBe('PORT=3001 npx @lynox-ai/core --non-interactive --provider none');
   });
 
   it('refuses a value on a switch', () => {
@@ -267,7 +275,7 @@ describe('runDockerInstaller exit codes before Docker is touched', () => {
     await runDockerInstaller(['--non-interactive', '--provider', 'none']);
     expect(process.exitCode).toBe(1);
     const out = vi.mocked(process.stdout.write).mock.calls.map(c => String(c[0])).join('');
-    expect(out).toContain('Pass --accept-terms');
+    expect(out).toContain("lynox's terms of use (https://lynox.ai/terms) must be accepted first. Pass --accept-terms to accept them in a non-interactive run.");
     // checkDocker always prints one of these; none may appear.
     expect(out).not.toMatch(/Docker not found|Docker daemon is not running|✓\S* Docker \S/);
   });
@@ -330,7 +338,7 @@ describe('runDockerInstaller refusals after the Docker check', () => {
     writeFileSync(join(dir, 'docker-compose.yml'), 'old\n');
     await runDockerInstaller(['--non-interactive', '--accept-terms', '--provider', 'none', '--dir', dir]);
     expect(process.exitCode).toBe(1);
-    expect(output()).toContain('already holds a setup. Pass --reconfigure');
+    expect(output()).toContain('already holds a setup. Pass --reconfigure to set it up again; the vault key of existing data is kept, and the access token is new unless LYNOX_HTTP_SECRET is set.');
     expect(readFileSync(join(dir, 'docker-compose.yml'), 'utf-8')).toBe('old\n');
     expect(dockerCalls()).toContain('--version');
     expect(dockerCalls()).not.toContain('compose up');
@@ -351,7 +359,8 @@ describe('runDockerInstaller refusals after the Docker check', () => {
     await runDockerInstaller(['--non-interactive', '--accept-terms', '--provider', 'none', '--dir', join(home, 'inst')]);
     expect(process.exitCode).toBe(1);
     expect(output()).toContain(`Port ${process.env['PORT']} is already in use`);
-    expect(output()).toContain('PORT=3001 npx @lynox-ai/core');
+    const next = String(Number(process.env['PORT']) + 1);
+    expect(output()).toContain(`PORT=${next} npx @lynox-ai/core --non-interactive --accept-terms --provider none --dir '${join(home, 'inst')}'`);
     expect(output()).not.toContain('Alternative port');
     expect(dockerCalls()).not.toContain('compose up');
   });

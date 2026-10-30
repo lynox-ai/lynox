@@ -32,6 +32,7 @@ import {
   helperChownArgs,
   helperFailure,
   planRunAs,
+  shellQuote,
   precheckDataDir,
   type DockerMode,
   type Ids,
@@ -66,7 +67,7 @@ async function acceptTos(
     ? await confirm('Continue?', true, stdin.isTTY ? undefined : rl)
     : acceptFlag;
   if (acceptFlag === false) {
-    stdout.write(`  ${RED}✗${RESET} Pass --accept-terms to accept them in a non-interactive run.\n`);
+    stdout.write(`  ${RED}✗${RESET} lynox's terms of use (https://lynox.ai/terms) must be accepted first. Pass --accept-terms to accept them in a non-interactive run.\n`);
     return false;
   }
   if (acceptFlag === true) {
@@ -127,6 +128,22 @@ export const NON_INTERACTIVE_USAGE = [
 ].join('\n');
 
 /**
+ * The command that repeats a non-interactive run on another port. Built from
+ * the parsed options, not the raw arguments: a base URL can carry credentials,
+ * so it is left as a placeholder.
+ */
+export function rerunCommand(o: NonInteractiveOptions, port: number): string {
+  const parts = [`PORT=${String(port)}`, 'npx @lynox-ai/core', '--non-interactive'];
+  if (o.acceptTerms) parts.push('--accept-terms');
+  parts.push('--provider', o.provider);
+  if (o.model !== undefined) parts.push('--model', shellQuote(o.model));
+  if (o.baseUrl !== undefined) parts.push('--base-url', '<your base URL>');
+  if (o.dir !== './lynox') parts.push('--dir', shellQuote(o.dir));
+  if (o.reconfigure) parts.push('--reconfigure');
+  return parts.join(' ');
+}
+
+/**
  * Reads the installer's own flags from the CLI arguments. Its flags are only
  * valid together with `--non-interactive`. An interactive run leaves every other
  * argument alone; a non-interactive one accepts only `init` / `--init` and the
@@ -168,7 +185,7 @@ export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { e
   if (!nonInteractive) {
     const stray = [...values.keys(), ...switches];
     if (stray.length > 0) {
-      return { error: `${stray.join(', ')} only work together with --non-interactive.` };
+      return { error: `${stray.join(', ')} only work together with --non-interactive. Add --non-interactive, or leave them out.` };
     }
     return { nonInteractive: false };
   }
@@ -205,7 +222,7 @@ export function parseInstallerArgs(args: readonly string[]): InstallerArgs | { e
     } catch { /* reported below */ }
     if (protocol !== 'http:' && protocol !== 'https:') {
       // The value is not echoed: a URL can carry credentials.
-      return { error: '--base-url is not a valid URL — include the scheme (http:// or https://).' };
+      return { error: '--base-url is not a valid URL. Include the scheme (http:// or https://).' };
     }
   }
 
@@ -875,7 +892,7 @@ export async function runDockerInstaller(args: readonly string[] = []): Promise<
 
     if (existsSync(join(installDir, 'docker-compose.yml'))) {
       if (ni && !ni.reconfigure) {
-        stdout.write(`  ${RED}✗${RESET} ${installDir} already holds a setup. Pass --reconfigure to overwrite it.\n`);
+        stdout.write(`  ${RED}✗${RESET} ${installDir} already holds a setup. Pass --reconfigure to set it up again; the vault key of existing data is kept, and the access token is new unless LYNOX_HTTP_SECRET is set.\n`);
         return;
       }
       const overwrite = ni
@@ -1091,13 +1108,19 @@ export async function runDockerInstaller(args: readonly string[] = []): Promise<
           stdout.write(`  ${GREEN}✓${RESET} Using port ${String(hostPort)}.\n`);
           break;
         }
-        if (await isPortInUse(hostPort)) return;
+        if (await isPortInUse(hostPort)) {
+          stdout.write(`  ${RED}✗${RESET} No free port chosen. Stop the conflicting process, or rerun with PORT set to a free port.\n`);
+          process.exitCode = 1;
+          return;
+        }
       } else {
         // User chose not to pick an alternative — surface the actionable hint
         // and stop. Empty `docker compose logs` after a port collision was
         // the silent-failure mode this whole branch fixes (item 17).
         stdout.write(`  ${DIM}Either stop the conflicting process, or rerun with:${RESET}\n`);
-        stdout.write(`  ${DIM}  PORT=3001 npx @lynox-ai/core${RESET}\n`);
+        const nextPort = hostPort < 65535 ? hostPort + 1 : 3001;
+        stdout.write(`  ${DIM}  ${ni ? rerunCommand(ni, nextPort) : `PORT=${String(nextPort)} npx @lynox-ai/core`}${RESET}\n`);
+        process.exitCode = 1;
         return;
       }
     }
