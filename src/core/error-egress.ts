@@ -46,11 +46,24 @@ export function reducedErrorText(err: unknown): string {
   // A getter on `name`, `status` or `message` that throws would carry its own text into the
   // handler that called this; such an error reads `Error`.
   try {
+    if (err instanceof FixedTextError) return err.fixedText;
     const name = err instanceof Error ? (/^[A-Za-z_][A-Za-z0-9_]{0,39}$/.test(err.name) ? err.name : 'Error') : typeof err;
     const status = providerStatus(err);
     return `${name}${status !== null ? ` (HTTP ${String(status)})` : ''}`;
   } catch {
     return 'Error';
+  }
+}
+
+/**
+ * An error whose reduced text lynox wrote itself, word for word, with nothing from a store in it:
+ * a reduced sink sends `fixedText` instead of the class, so the reader learns why and what to do.
+ * The message, which may name a stored value, stays for a sink that is not reduced.
+ */
+export class FixedTextError extends Error {
+  constructor(message: string, readonly fixedText: string) {
+    super(message);
+    this.name = 'FixedTextError';
   }
 }
 

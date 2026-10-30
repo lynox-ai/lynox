@@ -52,6 +52,10 @@ export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   return null;
 }
 
+/** The run refusal of `hiddenInRunValues` without the parameter's name, which is stored text: what
+ *  a reduced sink (a push from a contained instance) may say. */
+export const HIDDEN_RUN_VALUE_FIXED = 'A value this workflow runs with holds a character that does not show as text. Enter the value again without it.';
+
 /** Why a run's bound values may not run, or `null`. The same class as the save, so a value the
  *  save took (an emoji, a Persian word, a line break) runs too. A name takes no in-place character. */
 export function hiddenInRunValues(params: Readonly<Record<string, unknown>>): string | null {

@@ -22,7 +22,7 @@ import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
-import { hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
+import { HIDDEN_RUN_VALUE_FIXED, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
@@ -588,6 +588,9 @@ export interface RunSavedWorkflowResult {
    *  owner's run report: a refused write leaves its step `completed`, so nothing else
    *  would surface it. */
   writeNotes?: string[] | undefined;
+  /** For a refusal whose `error` names stored text: the same refusal in words lynox wrote alone,
+   *  for a sink that may not carry stored text (`FixedTextError`). */
+  fixedError?: string | undefined;
 }
 
 /**
@@ -867,7 +870,7 @@ export async function runSavedWorkflow(
   // This also covers a grant stamped before its values were checked at acceptance: a grant only
   // survives to here with values equal to the bound ones.
   const hiddenValue = hiddenInRunValues(bound.params);
-  if (hiddenValue !== null) return { ok: false, error: hiddenValue };
+  if (hiddenValue !== null) return { ok: false, error: hiddenValue, fixedError: HIDDEN_RUN_VALUE_FIXED };
 
   // Each step's task without the characters that render as nothing: the save refuses them now,
   // but a workflow saved before that still carries them, and a hidden clause would run as part
