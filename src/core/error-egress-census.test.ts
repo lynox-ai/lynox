@@ -9,7 +9,9 @@
  * name, `const msg = err.message` printed as `msg`, `errorText(err, <expression>)`). And it
  * counts per file: one raw sink removed and another added in the same file passes. The existing sites are frozen per file with their count, NOT judged safe one by one:
  * most write internal state errors (SQLite, init, the file system) on paths that carry no
- * provider answer; the ones judged by hand are named in `JUDGED`.
+ * provider answer; the ones judged by hand are named in `JUDGED` (whole files) and
+ * `JUDGED_SINKS` (single sinks). Neither exempts anything: the counts still hold, and a judgement
+ * only records why a frozen sink's text may stay.
  */
 import { it, expect } from 'vitest';
 import ts from 'typescript';
@@ -90,10 +92,11 @@ function sourceFiles(dir: string): string[] {
  * - transcribe/mistral-voxtral.ts: the provider body of a transcription; its input is the
  *   user's audio, never a store read.
  * - core/llm-wire-rules.ts: the wire rule's own refusal text, built by lynox.
- * - integrations/mail/escalation-mail-channel.ts: the mail provider's failure, which can quote up
- *   to 200 characters of its error body (`oauth-gmail.ts`, `bodyText.slice(0, 200)`). That is the
+ * - integrations/mail/escalation-mail-channel.ts: the mail provider's failure text. Gmail quotes up
+ *   to 200 characters of its error body (`oauth-gmail.ts`), SMTP the server's reply line uncut
+ *   (`imap-smtp.ts`, `SMTP send failed: …`), Graph only a status and a checked code. That is the
  *   provider's answer to a send, not a store read; it carries the escalation's text only if the
- *   provider echoed it back.
+ *   server echoes it back.
  * - core/config.ts: a schema issue about the local config file.
  * - core/mistral-health-check.ts: the answer to the boot-time GET of the model list, which
  *   sends no run data.
@@ -106,15 +109,18 @@ const JUDGED = [
 /**
  * Single sinks judged by hand, for a file whose other sinks are not: those on the paths a store
  * connection runs (setup, grant, renewal, bulk ledger). `marker` is a literal of the call and
- * must match exactly `count` raw sinks of the file, so a judgement whose sink moved, changed or
- * went away fails instead of standing for a line nobody judged. None of these calls a provider:
- * the error is the grant ledger's, the vault's or SQLite's, or a module that did not load.
+ * must match exactly `count` raw sinks of the file, so a judgement fails when its log line moves
+ * away, changes or multiplies. It does NOT see a change in what the try block calls: a provider
+ * call added there, or a callee that starts to reach the network, leaves the judgement green and
+ * the `why` false. Whoever changes such a try block judges its sink again. As judged: none of
+ * these calls a provider; the error is the grant ledger's, the vault's or SQLite's, or a module
+ * that did not load.
  */
 const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string }[]> = {
   'core/api-store.ts': [
     { marker: 'Hosts of grant for', count: 2, why: 'ledger.recordHosts over hosts lynox derives from the profile' },
     { marker: 'Renewed credential for', count: 1, why: 'the row write of a profile lynox built' },
-    { marker: 'Grant ${reason} for', count: 1, why: 'ledger.mint and the row write, in one local transaction' },
+    { marker: 'Grant ${reason} for', count: 1, why: 'ledger.mint, the in-memory vault fingerprints, recordHosts and the row write, in one local transaction' },
   ],
   'core/engine.ts': [
     { marker: 'Grant backfill failed', count: 1, why: 'backfillGrants and checkFingerprints read the ledger and the vault, no provider' },
