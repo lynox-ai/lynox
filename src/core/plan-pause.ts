@@ -246,11 +246,12 @@ export function pausedForEntries(
 
 /**
  * Whether an advance warning naming this plan, mandate and end was delivered: accepted by at least
- * one of the owner's channels, which says nothing of whether the owner saw it. A warning claimed
- * but not delivered, or one for an earlier end that was since extended, is not one.
+ * one of the owner's channels before that end, which says nothing of whether the owner saw it. A
+ * warning claimed but not delivered, one delivered only once the end had passed, or one for an
+ * earlier end that was since extended, is not one.
  */
 export function deliveredWarning(db: Database.Database, triggerId: string): (mandateId: string, endsAt: number) => boolean {
-  const stmt = db.prepare('SELECT 1 FROM plan_advance_warnings WHERE trigger_id = ? AND mandate_id = ? AND ends_at = ? AND delivered_at IS NOT NULL');
+  const stmt = db.prepare('SELECT 1 FROM plan_advance_warnings WHERE trigger_id = ? AND mandate_id = ? AND ends_at = ? AND delivered_at IS NOT NULL AND delivered_at < ends_at');
   return (mandateId, endsAt) => stmt.get(triggerId, mandateId, endsAt) !== undefined;
 }
 
@@ -436,13 +437,14 @@ export function claimPauseNotices(db: Database.Database, nowS: number = nowSecon
     "SELECT id, title, paused_for FROM triggers WHERE paused_at IS NOT NULL AND pause_noticed_at IS NULL AND status != 'completed'",
   ).all() as PendingNotice[];
   const claim = db.prepare('UPDATE triggers SET pause_noticed_at = ? WHERE id = ? AND pause_noticed_at IS NULL');
-  // By mandate and end: entries of one mandate with two ends (an end, an extension, a later end)
-  // are two notices, each with its own date.
+  // By mandate, end and reason: entries of one mandate with two ends (an end, an extension, a later
+  // end) are two notices, each with its own date, and an expiry is not told in a revocation's
+  // wording, which has no sentence about advance notice.
   const byEnd = new Map<string, { entry: PausedFor; plans: number; unwarned: number }>();
   for (const p of pending) {
     if (claim.run(nowS, p.id).changes === 0) continue;
     for (const entry of pausedForOf(p.paused_for).entries) {
-      const key = `${entry.mandateId}\u0000${String(entry.endsAt)}`;
+      const key = `${entry.mandateId}\u0000${String(entry.endsAt)}\u0000${entry.reason}`;
       const unwarned = entry.warned === true ? 0 : 1;
       const seen = byEnd.get(key);
       if (seen === undefined) byEnd.set(key, { entry, plans: 1, unwarned });
@@ -601,7 +603,7 @@ export function claimAdvanceWarnings(db: Database.Database, nowS: number = nowSe
 
   const planNow = db.prepare('SELECT paused_at, status, enabled, source, next_run_at FROM triggers WHERE id = ?');
   const endNow = db.prepare('SELECT ends_at, revoked_at FROM mandate_ends WHERE mandate_id = ?');
-  const earlier = db.prepare('SELECT 1 FROM plan_advance_warnings WHERE mandate_id = ? AND ends_at = ? LIMIT 1');
+  const earlier = db.prepare('SELECT 1 FROM plan_advance_warnings WHERE mandate_id = ? AND ends_at = ? AND delivered_at IS NOT NULL LIMIT 1');
   const insert = db.prepare('INSERT OR IGNORE INTO plan_advance_warnings (trigger_id, mandate_id, ends_at, claimed_at) VALUES (?, ?, ?, ?)');
   const groups = new Map<string, { email: string; endsAt: number; keys: WarningKey[]; more: boolean }>();
   db.transaction((): void => {
@@ -611,7 +613,8 @@ export function claimAdvanceWarnings(db: Database.Database, nowS: number = nowSe
       if (plan === undefined || end === undefined || end.revoked_at !== null || end.ends_at !== w.endsAt) continue;
       if (!wouldRunAt(plan, w.endsAt)) continue;
       const group = `${w.mandateId}\u0000${String(w.endsAt)}`;
-      // Read before this group's first claim: whether an earlier warning already named this end.
+      // Read before this group's first claim: whether an earlier warning of this end was delivered.
+      // One that was claimed but not delivered is not one, so this message does not say "more".
       const more = groups.get(group)?.more ?? earlier.get(w.mandateId, w.endsAt) !== undefined;
       if (insert.run(w.triggerId, w.mandateId, w.endsAt, nowS).changes === 0) continue;
       const g = groups.get(group);
@@ -632,8 +635,8 @@ export function markWarningsDelivered(db: Database.Database, keys: readonly Warn
 
 /**
  * The owner's advance warning for one mandate and end (ux U-065; English, like every notice of the
- * worker). `more`: an earlier warning of this end named other plans, and this one names one that
- * joined since. It promises no lead time: it goes out once the end is less than a day away, if a
+ * worker). `more`: an earlier warning of this end, delivered, named other plans, and this one
+ * names one that joined since. It promises no lead time: it goes out once the end is less than a day away, if a
  * channel is registered then (legal, POS-069 Nachtrag 8).
  */
 export function advanceWarning(email: string, endsAt: number, count: number, more: boolean): NotificationMessage {

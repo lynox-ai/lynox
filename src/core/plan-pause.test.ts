@@ -545,6 +545,21 @@ describe("the owner's notice", () => {
     expect(byName['none@x.ch']!.endsWith(' There was no advance notice.')).toBe(true);
   });
 
+  it('an expiry and a revoke of one mandate at one end are two notices: the expiry still says it had no warning', () => {
+    const b = box();
+    const at = (id: string, reason: 'expired' | 'revoked'): void => {
+      plan(b, id, { by: 'h@x.ch' });
+      writePause(b.db, id, [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason, endsAt: NOW - H, roles: ['created'], closedPrompt: false, warned: false }], NOW);
+    };
+    // The revoke first, so a group by mandate and end alone would take its wording.
+    at('r', 'revoked');
+    at('e', 'expired');
+    const bodies = claimPauseNotices(b.db, NOW).map((n) => n.body).sort();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.endsWith(' There was no advance notice.')).toBe(true);
+    expect(bodies[1]!.startsWith("h@x.ch's access was revoked.")).toBe(true);
+  });
+
   it('says a revoke as a revoke, and one plan in the singular', () => {
     const b = box();
     paused(b, 'p', 'h@x.ch', 'revoked');
@@ -687,13 +702,25 @@ describe("the owner's advance warning (641c-2b)", () => {
     const b = box();
     plan(b, 'a', { by: 'h@x.ch' });
     ending(b, NOW + H);
-    expect(claimAdvanceWarnings(b.db, NOW)).toHaveLength(1);
+    const [first] = claimAdvanceWarnings(b.db, NOW);
+    markWarningsDelivered(b.db, first!.keys, NOW + 1);
     plan(b, 'late', { by: 'h@x.ch' });
     const [w, ...rest] = claimAdvanceWarnings(b.db, NOW + 60);
     expect(rest).toEqual([]);
     expect(w!.keys.map((k) => k.triggerId)).toEqual(['late']);
     expect(w!.message.title).toBe('A plan will pause soon');
     expect(w!.message.body).toContain('Then one more plan in which they created');
+  });
+
+  it('a plan that joins after a warning no channel accepted is not "one more": the owner may have had none', () => {
+    const b = box();
+    plan(b, 'a', { by: 'h@x.ch' });
+    ending(b, NOW + H);
+    expect(claimAdvanceWarnings(b.db, NOW)).toHaveLength(1);
+    plan(b, 'late', { by: 'h@x.ch' });
+    const [w] = claimAdvanceWarnings(b.db, NOW + 60);
+    expect(w!.keys.map((k) => k.triggerId)).toEqual(['late']);
+    expect(w!.message.body).toContain('Then a plan in which they created');
   });
 
   it('an extension (a later end) warns again once that end is less than a day away', () => {
@@ -800,6 +827,20 @@ describe("the owner's advance warning (641c-2b)", () => {
     expect(pausedForOf(col(b, 'p').paused_for).entries[0]?.warned).toBe(false);
   });
 
+  it('a warning a channel accepted only once the end had passed is not advance notice', () => {
+    const b = box();
+    for (const id of ['before', 'at', 'after']) plan(b, id, { by: 'h@x.ch' });
+    ending(b, NOW + H);
+    const [w] = claimAdvanceWarnings(b.db, NOW);
+    const key = (id: string) => w!.keys.filter((k) => k.triggerId === id);
+    markWarningsDelivered(b.db, key('before'), NOW + H - 1);
+    markWarningsDelivered(b.db, key('at'), NOW + H);
+    markWarningsDelivered(b.db, key('after'), NOW + H + 30);
+    sweep(b, NOW + 2 * H);
+    const warned = (id: string): boolean | undefined => pausedForOf(col(b, id).paused_for).entries[0]?.warned;
+    expect([warned('before'), warned('at'), warned('after')]).toEqual([true, false, false]);
+  });
+
   it('marks only the rows it is given, and keeps the first delivery time', () => {
     const b = box();
     plan(b, 'a', { by: 'h@x.ch' });
@@ -880,12 +921,55 @@ describe('the advance warning under a forced race', () => {
 
     const revoked = two();
     expect(claimAdvanceWarnings(raced(revoked.a, () => { revoked.c.ends.revoke('g-h@x.ch', NOW); }), NOW)).toEqual([]);
-    // Disabled or completed in between: the claim reads the plan again and leaves it out.
-    for (const change of ["UPDATE triggers SET enabled = 0 WHERE id = 'p'", "UPDATE triggers SET status = 'completed' WHERE id = 'p'"]) {
+    // Disabled, completed or stopped in between: the claim reads the plan again and leaves it out.
+    for (const change of ["UPDATE triggers SET enabled = 0 WHERE id = 'p'", "UPDATE triggers SET status = 'completed' WHERE id = 'p'", "UPDATE triggers SET status = 'stopped' WHERE id = 'p'"]) {
       const t = two();
       const w = claimAdvanceWarnings(raced(t.a, () => { t.c.db.prepare(change).run(); }), NOW);
       expect(w.map((x) => x.keys.map((k) => k.triggerId)), change).toEqual([['q']]);
     }
+  });
+});
+
+describe('the advance warning\'s claiming transaction', () => {
+  it('holds the write lock from its first read: a second process cannot write until the claims are in', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-warn-lock-'));
+    const a = box(dir);
+    const c = box(dir);
+    plan(a, 'p', { by: 'h@x.ch' });
+    plan(a, 'q', { by: 'h@x.ch' });
+    login(a, 'h@x.ch', NOW + H, NOW - 2 * H);
+    c.db.pragma('busy_timeout = 0');
+    let refused: string | undefined = 'not tried';
+    const reread = 'SELECT paused_at, status, enabled, source, next_run_at FROM triggers WHERE id = ?';
+    const raced = new Proxy(a.db, {
+      get(target, key, receiver) {
+        if (key !== 'prepare') return Reflect.get(target, key, receiver) as unknown;
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (sql !== reread) return stmt;
+          return new Proxy(stmt, {
+            get(s, k, r) {
+              if (k !== 'get') return Reflect.get(s, k, r) as unknown;
+              return (...args: unknown[]) => {
+                // Inside the claim's transaction, at its first read: C tries to write.
+                if (refused === 'not tried') {
+                  try {
+                    c.db.prepare("UPDATE triggers SET title = 'x' WHERE id = 'q'").run();
+                    refused = undefined;
+                  } catch (err: unknown) {
+                    refused = (err as { code?: string }).code;
+                  }
+                }
+                return (s.get as (...a: unknown[]) => unknown).apply(s, args);
+              };
+            },
+          });
+        };
+      },
+    });
+    const w = claimAdvanceWarnings(raced, NOW);
+    expect(refused).toBe('SQLITE_BUSY');
+    expect(w.map((x) => x.keys.length)).toEqual([2]);
   });
 });
 
