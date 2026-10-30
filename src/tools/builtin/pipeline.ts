@@ -1006,8 +1006,10 @@ export function workflowRunTrail(
     ['workflow', isEngineRowId(run.workflowId) ? run.workflowId : undefined],
     ['one_shot', run.oneShot ? 'yes' : 'no'],
     ['retry', run.retry ? 'yes' : undefined],
-    // The owner pressed Run in the library (1055): the run is the mandate's, the start the owner's.
-    ['started', run.startedBy === 'library' ? 'owner-library' : undefined],
+    // The owner pressed Run in the library (1055): the run is the mandate's, the start the owner's,
+    // in the words a plan's run started by hand uses, which the trail view shows (`started_hand`).
+    ['started', run.startedBy === 'library' ? 'hand' : undefined],
+    ['by', run.startedBy === 'library' ? 'owner' : undefined],
   ];
   const write = (phase: AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
     if (auditLog === null) throw new Error('no audit log');

@@ -11743,11 +11743,15 @@ describe('LynoxHTTPApi', () => {
         const runRows = rows.filter((r) => r.action === 'workflow:run');
         expect(runRows.map((r) => [r.principal.kind, r.phase])).toEqual([['mandate', 'attempt'], ['mandate', 'done']]);
         expect(runRows[0]!.correlationId).toBe(runRows[1]!.correlationId);
-        // The start row says the owner started it from the library, unlike the mandate's own chat run.
-        expect(runRows[0]!.target).toContain('started=owner-library');
+        // The start row says the owner started it by hand, unlike the mandate's own chat run, in the
+        // words the trail view reads: the view shows it as started by hand.
+        expect(runRows[0]!.target).toContain('started=hand');
+        expect(runRows[0]!.target).toContain('by=owner');
+        const { targetPairs } = await import('../core/audit-trail-view.js');
+        expect(targetPairs(runRows[0]!.target).get('started')).toBe('hand');
       });
 
-      it('gives the rows the run\'s steps write the key of that run record', async () => {
+      it('runs the steps under the key of that run record, which their rows take from the plan-run context', async () => {
         mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
         const record = vi.fn();
         const origLog = engineRef()['getAuditLog'];
