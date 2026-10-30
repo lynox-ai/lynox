@@ -29,7 +29,7 @@ import { chatThreadOf } from './private-thread.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
 import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes } from '../../core/member-connection-notes.js';
 import { namedTarget, newCorrelationId, type AuditLog, type AuditPhase } from '../../core/audit-log.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal, type RequestPrincipal } from '../../core/request-principal.js';
+import { isOwnerPrincipal, type RequestPrincipal } from '../../core/request-principal.js';
 import { currentPlanRun, runAsWorkflowRun } from '../../core/plan-run-context.js';
 import { isEngineRowId } from '../../core/instance-trail.js';
 
