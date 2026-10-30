@@ -50,17 +50,19 @@ function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean
   return hit;
 }
 
-/** `file:line  form` for every raw sink in one source text. */
-function census(fileName: string, text: string): string[] {
+interface RawSink { line: number; form: string; call: string }
+
+/** Every raw sink in one source text, with the text of its call. */
+function rawSinks(fileName: string, text: string): RawSink[] {
   const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true);
-  const out: string[] = [];
+  const out: RawSink[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const kind = sinkKind(node);
       if (kind) {
         for (const arg of node.arguments) {
           const hit = rawText(arg, kind, true);
-          if (hit) { out.push(`${fileName}:${String(sf.getLineAndCharacterOfPosition(node.getStart()).line + 1)}  ${hit}`); break; }
+          if (hit) { out.push({ line: sf.getLineAndCharacterOfPosition(node.getStart()).line + 1, form: hit, call: node.getText() }); break; }
         }
       }
     }
@@ -68,6 +70,11 @@ function census(fileName: string, text: string): string[] {
   };
   visit(sf);
   return out;
+}
+
+/** `file:line  form` for every raw sink in one source text. */
+function census(fileName: string, text: string): string[] {
+  return rawSinks(fileName, text).map((s) => `${fileName}:${String(s.line)}  ${s.form}`);
 }
 
 function sourceFiles(dir: string): string[] {
@@ -83,7 +90,10 @@ function sourceFiles(dir: string): string[] {
  * - transcribe/mistral-voxtral.ts: the provider body of a transcription; its input is the
  *   user's audio, never a store read.
  * - core/llm-wire-rules.ts: the wire rule's own refusal text, built by lynox.
- * - integrations/mail/escalation-mail-channel.ts: a send result lynox formats.
+ * - integrations/mail/escalation-mail-channel.ts: the mail provider's failure, which can quote up
+ *   to 200 characters of its error body (`oauth-gmail.ts`, `bodyText.slice(0, 200)`). That is the
+ *   provider's answer to a send, not a store read; it carries the escalation's text only if the
+ *   provider echoed it back.
  * - core/config.ts: a schema issue about the local config file.
  * - core/mistral-health-check.ts: the answer to the boot-time GET of the model list, which
  *   sends no run data.
@@ -92,6 +102,52 @@ const JUDGED = [
   'core/transcribe/mistral-voxtral.ts', 'core/llm-wire-rules.ts', 'integrations/mail/escalation-mail-channel.ts',
   'core/config.ts', 'core/mistral-health-check.ts',
 ];
+
+/**
+ * Single sinks judged by hand, for a file whose other sinks are not: those on the paths a store
+ * connection runs (setup, grant, renewal, bulk ledger). `marker` is a literal of the call and
+ * must match exactly `count` raw sinks of the file, so a judgement whose sink moved, changed or
+ * went away fails instead of standing for a line nobody judged. None of these calls a provider:
+ * the error is the grant ledger's, the vault's or SQLite's, or a module that did not load.
+ */
+const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string }[]> = {
+  'core/api-store.ts': [
+    { marker: 'Hosts of grant for', count: 2, why: 'ledger.recordHosts over hosts lynox derives from the profile' },
+    { marker: 'Renewed credential for', count: 1, why: 'the row write of a profile lynox built' },
+    { marker: 'Grant ${reason} for', count: 1, why: 'ledger.mint and the row write, in one local transaction' },
+  ],
+  'core/engine.ts': [
+    { marker: 'Grant backfill failed', count: 1, why: 'backfillGrants and checkFingerprints read the ledger and the vault, no provider' },
+    { marker: 'Grant host recompute failed', count: 1, why: 'recomputeGrantHosts, the same ledger write as above' },
+    { marker: '[lynox:vault-bindings] Migration failed', count: 1, why: 'binds vault names to the hosts of stored profiles' },
+    { marker: 'ending bulk runs of ended mandates failed', count: 1, why: 'the bulk ledger sweep, rows only' },
+  ],
+  'server/http-api.ts': [
+    { marker: 'Grant for the credential write to', count: 1, why: 'secretWritten mints a grant locally after the vault write' },
+  ],
+  'tools/builtin/http.ts': [
+    { marker: 'api_setup did not load', count: 1, why: 'a failed dynamic import of a lynox module; a store connection never renews here' },
+  ],
+};
+
+/** The judgements whose marker does not match exactly `count` raw sinks of their file. */
+function staleJudgements(sinksOf: (file: string) => RawSink[], judged: typeof JUDGED_SINKS): string[] {
+  return Object.entries(judged).flatMap(([file, entries]) => {
+    const sinks = sinksOf(file);
+    return entries
+      .filter((j) => sinks.filter((s) => s.call.includes(j.marker)).length !== j.count)
+      .map((j) => `${file}: "${j.marker}" matches ${String(sinks.filter((s) => s.call.includes(j.marker)).length)} raw sinks, judged ${String(j.count)}`);
+  });
+}
+
+it('names a judgement whose sink moved away or multiplied', () => {
+  const src = 'process.stderr.write(`[a] one: ${err.message}\\n`);\nprocess.stderr.write(`[a] one: ${String(err)}\\n`);\nprocess.stderr.write(`[a] plain\\n`);';
+  const of = (): RawSink[] => rawSinks('a.ts', src);
+  expect(staleJudgements(of, { 'a.ts': [{ marker: '[a] one', count: 2, why: '' }] })).toEqual([]);
+  expect(staleJudgements(of, { 'a.ts': [{ marker: '[a] one', count: 1, why: '' }] })).toEqual(['a.ts: "[a] one" matches 2 raw sinks, judged 1']);
+  // A marker on a call that is no raw sink judges nothing.
+  expect(staleJudgements(of, { 'a.ts': [{ marker: '[a] plain', count: 1, why: '' }] })).toEqual(['a.ts: "[a] plain" matches 0 raw sinks, judged 1']);
+});
 
 /** Raw sinks per file as of this change. A rise fails (a new sink); a drop asks to lower it here. */
 const FROZEN: Record<string, number> = {
@@ -191,4 +247,6 @@ it('no sink writes raw error text beyond the frozen census', () => {
   expect(risingReport(found, FROZEN), 'a new sink writes an error\'s own text: route it through errorText(err, errorTextReduced(...)) from error-egress.ts').toEqual([]);
   expect(counts, 'the census dropped: lower FROZEN to match').toEqual(FROZEN);
   for (const f of JUDGED) expect(FROZEN[f], `${f} is judged but not frozen`).toBeGreaterThan(0);
+  const sinksOf = (file: string): RawSink[] => rawSinks(file, readFileSync(join(SRC, file), 'utf8'));
+  expect(staleJudgements(sinksOf, JUDGED_SINKS), 'a judged sink moved or changed: judge it again').toEqual([]);
 });
