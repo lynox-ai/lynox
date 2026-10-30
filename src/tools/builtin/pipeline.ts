@@ -492,7 +492,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     debitInSessionWorkflowCost(deps, state, steps, null);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
-    return `Error: Workflow execution failed: ${stripHidden(getErrorMessage(err))}`;
+    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
   }
 }
 
@@ -966,6 +966,7 @@ export async function runSavedWorkflow(
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
     };
   } catch (err: unknown) {
+    // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
     return { ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}` };
   }
 }

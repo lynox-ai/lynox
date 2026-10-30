@@ -1573,6 +1573,13 @@ describe('runSavedWorkflow', () => {
     expect(result.error).toMatch(/Run history is not available/);
   });
 
+  it('quotes a stored step id in a refusal before the run without the characters that render as nothing', async () => {
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockRejectedValueOnce(new Error(`Step "fetch${String.fromCodePoint(0x200B)}" declares unknown tool(s): gone`));
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(result.error).toBe('Workflow execution failed: Step "fetch" declares unknown tool(s): gone');
+  });
+
   it('surfaces a runManifest failure as an execution error', async () => {
     const id = seedSavedWorkflow();
     mockRunManifest.mockRejectedValueOnce(new Error('boom'));
@@ -2834,6 +2841,15 @@ describe('the run row of a stored workflow run from a chat', () => {
     mockRunManifest.mockResolvedValueOnce({ ...makeRunState(), outputs });
     expect(await runWorkflowTool.handler({ workflow_id: seed() }, agent)).toMatch(/^Error: Workflow execution failed: outputs gone/);
     expect(recs.map((r) => [r.phase, targetPairs(r.target).get('outcome') ?? null])).toEqual([['attempt', null], ['failed', 'failed']]);
+  });
+
+  it('a retry\'s refusal quotes a stored step id without the characters that render as nothing', async () => {
+    const { agent } = agentAs(HELPER);
+    const id = seed({ template: true });
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    mockRetryManifest.mockRejectedValueOnce(new Error(`Step "fetch${String.fromCodePoint(0x200B)}" is gone`));
+    expect(await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent)).toBe('Error: Workflow retry failed: Step "fetch" is gone');
   });
 
   it('ends a retry as failed when its answer fails after its steps completed', async () => {
