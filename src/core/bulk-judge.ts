@@ -205,7 +205,10 @@ function judgeModelPick(
   if (axis === null) return null;
   // On an instance connected to a Shopify store the judge runs only at a provider on the list
   // (`contained-providers.ts`): otherwise no model can judge, and the run says so before it starts.
-  if (providerListApplies() && refusedSnapshotClass({ ...slot, apiBaseURL: slot.apiBaseURL ?? uc.api_base_url }) !== null) return null;
+  // The base URL is the one the judge's client uses (`clientForTierSnapshot`): the instance's own
+  // only where the slot reuses the instance's client, the slot's own everywhere else.
+  const reusesAmbient = slot.apiBaseURL === undefined && slot.apiKey === undefined && slot.provider === provider;
+  if (providerListApplies() && refusedSnapshotClass(reusesAmbient ? { ...slot, apiBaseURL: uc.api_base_url } : slot) !== null) return null;
   const modelId = JUDGE_MODELS[axis];
   try {
     resolveRunModel({

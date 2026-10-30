@@ -17,8 +17,8 @@ import { shopifyExchangeSwitchOn } from '../tools/builtin/http.js';
  * thread id the client sends or leaves out would decide the answer.
  *
  * On the list: Anthropic's own API and Fireworks' canonical endpoint, each with the key the
- * control plane supplies. Refused: Mistral (its zero-retention agreement is not in place),
- * Vertex (not cleared by legal), any other base URL, and a key the user brought (BYOK).
+ * control plane supplies. Not on it: Mistral, Vertex, any other base URL, and a key the user
+ * brought (BYOK).
  */
 
 /** Why a provider is not on the list. */

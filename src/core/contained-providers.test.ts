@@ -17,6 +17,8 @@ import { reportMistralAccountHealth } from './mistral-health-check.js';
 import { hasSpeakProvider, getActiveSpeakProvider } from './speak/index.js';
 import { hasTranscribeProvider, getActiveTranscribeProvider, hasWhisperCpp } from './transcribe/index.js';
 import { judgeModelId, JUDGE_MODELS } from './bulk-judge.js';
+import { setTierSetResolver } from './tier-resolver.js';
+import type { TierSet } from '../types/index.js';
 
 const POOL_ANTHROPIC = ['sk', 'ant', 'pool', 'value'].join('-');
 const POOL_FIREWORKS = ['fw', 'pool', 'value'].join('-');
@@ -217,5 +219,27 @@ describe('profiles and the judge', () => {
     expect(judgeModelId(uc, 'fast', 'anthropic')).toBeNull();
     vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', undefined);
     expect(judgeModelId(uc, 'fast', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
+  });
+
+  it('judges an Anthropic slot of a Fireworks instance at Anthropic, where its client goes', () => {
+    // The slot has no base URL of its own, so its client goes to api.anthropic.com; the
+    // instance's Fireworks base is not the slot's.
+    const uc = { api_base_url: FIREWORKS_API_BASE } as Parameters<typeof judgeModelId>[0];
+    try {
+      setTierSetResolver({ routingMode: 'hybrid', tierSet: { fast: { provider: 'anthropic', model_id: JUDGE_MODELS.anthropic, api_key: POOL_ANTHROPIC } } as TierSet });
+      expect(judgeModelId(uc, 'fast', 'openai')).toBe(JUDGE_MODELS.anthropic);
+      // Without a key of its own the slot still changes the provider, so it gets its own client.
+      setTierSetResolver({ tierSet: { fast: { provider: 'anthropic', model_id: JUDGE_MODELS.anthropic } } as TierSet });
+      expect(judgeModelId(uc, 'fast', 'openai')).toBe(JUDGE_MODELS.anthropic);
+      setTierSetResolver({ tierSet: { fast: { provider: 'anthropic', model_id: JUDGE_MODELS.anthropic, api_key: POOL_ANTHROPIC, api_base_url: 'https://proxy.example/v1' } } as TierSet });
+      expect(judgeModelId(uc, 'fast', 'openai')).toBeNull();
+      // A slot of the instance's own provider with a key of its own gets its own client too: the
+      // instance's proxy is not where it goes.
+      const behindProxy = { api_base_url: 'https://proxy.example/v1' } as Parameters<typeof judgeModelId>[0];
+      setTierSetResolver({ tierSet: { fast: { provider: 'anthropic', model_id: JUDGE_MODELS.anthropic, api_key: POOL_ANTHROPIC } } as TierSet });
+      expect(judgeModelId(behindProxy, 'fast', 'anthropic')).toBe(JUDGE_MODELS.anthropic);
+    } finally {
+      setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    }
   });
 });

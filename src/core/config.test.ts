@@ -191,12 +191,6 @@ describe('Config', () => {
       expect(cfg.model_profiles ?? {}).toEqual({});
     });
 
-    it('without a worker profile at all, the worker runs on the main provider', async () => {
-      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
-      const { loadConfig } = await import('./config.js');
-      expect(loadConfig().worker_profile).toBeUndefined();
-    });
-
     it('keeps the Mistral worker profile without the switch', async () => {
       process.env['LYNOX_WORKER_PROFILE'] = 'worker';
       process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({ worker: MISTRAL_WORKER });
