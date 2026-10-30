@@ -145,7 +145,8 @@ function credentialRequestRefusal(url: URL, headers: Record<string, string>): st
     if (name.trim().toLowerCase() === 'content-encoding' && value.trim().toLowerCase() !== 'identity') return 'the body is sent encoded (Content-Encoding)';
   }
   const types = contentTypesOf(headers);
-  if (types.length > 1 || types.some((type) => !JSON_CONTENT_TYPES.has(type.trim().toLowerCase()))) {
+  // Two of them are refused with a body ({@link storePassBodyRefusal}); without one they say nothing.
+  if (types.some((type) => !JSON_CONTENT_TYPES.has(type.trim().toLowerCase()))) {
     return 'a request under a store pass sends one Content-Type, application/json';
   }
   return null;
