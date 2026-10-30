@@ -610,7 +610,7 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	list_item_mismatch: 'list_item_mismatch',
 	list_item_truncated: 'list_item_truncated',
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
-	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char',
+	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused',
 };
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */

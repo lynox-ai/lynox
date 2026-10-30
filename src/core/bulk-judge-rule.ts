@@ -34,7 +34,10 @@ const NUMBER_BYTES = 32;
 const RESERVED_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 
 export interface JudgeRule {
-  /** What the model is told to decide, per target. The owner's words, never a target's. */
+  /** What the model is told to decide, per target. Never a target's words, but not always the
+   *  owner's either: the agent may draft it from third-party data (keyword data for a shop's
+   *  meta texts), and the owner approves it without having written it. Nothing in the schema can
+   *  bar a string's content, so a field's value check carries that load (`seo-text.ts`). */
   rule: string;
   /** The verdict's shape over F, normalised by {@link normalizeJudgeRule}. */
   schema: ExtractSchema;

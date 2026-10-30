@@ -141,6 +141,8 @@ export type BulkInvalidReason =
   // `bulk-html.ts`). Every code of `MarkupRefusal` is one of these; the type below holds it so.
   /** a verdict for a text field that is not HTML adds `<`, `>` or a tag (S20-2) */
   | 'markup_in_text'
+  /** a title or SEO value holds a link, an address or `<` (PRD shopify-preset §23, `seo-text.ts`) */
+  | 'seo_text_refused'
   /** a value adds a hidden character its field did not hold as often (M5) */
   | 'hidden_char'
   /** an HTML value adds an element outside the allowlist */
