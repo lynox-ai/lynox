@@ -892,7 +892,7 @@ export async function runDockerInstaller(args: readonly string[] = []): Promise<
 
     if (existsSync(join(installDir, 'docker-compose.yml'))) {
       if (ni && !ni.reconfigure) {
-        stdout.write(`  ${RED}✗${RESET} ${installDir} already holds a setup. Pass --reconfigure to set it up again; the vault key of existing data is kept, and the access token is new unless LYNOX_HTTP_SECRET is set.\n`);
+        stdout.write(`  ${RED}✗${RESET} ${installDir} already holds a setup. Pass --reconfigure to set it up again. The vault key of existing data is kept; the access token is replaced unless LYNOX_HTTP_SECRET is set.\n`);
         return;
       }
       const overwrite = ni

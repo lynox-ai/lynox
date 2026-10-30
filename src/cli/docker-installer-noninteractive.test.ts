@@ -338,7 +338,7 @@ describe('runDockerInstaller refusals after the Docker check', () => {
     writeFileSync(join(dir, 'docker-compose.yml'), 'old\n');
     await runDockerInstaller(['--non-interactive', '--accept-terms', '--provider', 'none', '--dir', dir]);
     expect(process.exitCode).toBe(1);
-    expect(output()).toContain('already holds a setup. Pass --reconfigure to set it up again; the vault key of existing data is kept, and the access token is new unless LYNOX_HTTP_SECRET is set.');
+    expect(output()).toContain('already holds a setup. Pass --reconfigure to set it up again. The vault key of existing data is kept; the access token is replaced unless LYNOX_HTTP_SECRET is set.');
     expect(readFileSync(join(dir, 'docker-compose.yml'), 'utf-8')).toBe('old\n');
     expect(dockerCalls()).toContain('--version');
     expect(dockerCalls()).not.toContain('compose up');
