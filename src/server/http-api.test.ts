@@ -9834,6 +9834,121 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('GET /api/triggers tells the owner what the stamp of a confirmed plan lists, and a helper nothing', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const MID = 'M-EVA';
+      const crm = {
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'd', created_by: 'mandate:eva@kanzlei.example',
+        auth: { type: 'oauth2', vault_keys: [], oauth: { token_url: 'https://api.crm.example/oauth/token', client_id_key: 'CRM_CLIENT_ID' } },
+        oauth_grant: { connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: MID, grant_id: 'grant-1', account: { label: 'eva@crm', source: 'userinfo' } },
+      };
+      const AT = '2026-10-08T00:00:00.000Z';
+      const row = { id: 'trg-eva', title: 't', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: MID, confirmed_at: AT, created_at: AT };
+      ref['getApiStore'] = () => ({ knownProfiles: () => [crm] });
+      ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
+      const { bindingOf } = await import('../core/profile-secret-view.js');
+      const raw = JSON.stringify({ at: AT, wf: null, entries: [{ profile: 'crm-api', grant: 'grant-1', binding: bindingOf(crm as never) }] });
+      const history = { getTriggerStampConnections: (id: string) => (id === 'trg-eva' || id === 'trg-held' || id === 'trg-notify' ? { confirmedAt: id === 'trg-held' ? null : AT, stampConnections: raw } : undefined) };
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [row, { id: 'trg-own', title: 'o', effect: 'run_agent', created_by: 'owner', confirmed_at: AT }, { ...row, id: 'trg-held', confirmed_at: undefined }, { ...row, id: 'trg-notify', effect: 'notify' }] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          expect(triggers.find((t) => t.id === 'trg-eva')!['stamp_listed']).toEqual({ lapsed: false, ended: false, ended_on: null, entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'listed' }] });
+          // The owner's own plan acts for no mandate: nothing to list, no field.
+          expect(triggers.find((t) => t.id === 'trg-own')).not.toHaveProperty('stamp_listed');
+          // A plan that waits for its stamp shows its confirm block, not a list (it holds a stale column).
+          expect(triggers.find((t) => t.id === 'trg-held')).not.toHaveProperty('stamp_listed');
+          // A notice uses no connection, whatever its column holds.
+          expect(triggers.find((t) => t.id === 'trg-notify')).not.toHaveProperty('stamp_listed');
+          expect(JSON.stringify(triggers)).not.toContain('grant-1');
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@kanzlei.example', mandateId: MID }) as RequestPrincipal);
+          const helper = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          for (const t of helper.triggers) expect(t).not.toHaveProperty('stamp_listed');
+        });
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+        ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+      }
+    });
+
+    it('GET /api/triggers keeps the other rows when one row\'s stamp list cannot be read', async () => {
+      const AT = '2026-10-08T00:00:00.000Z';
+      const history = {
+        getTriggerStampConnections: (id: string) => { if (id === 'trg-bad') throw new Error('row unreadable'); return { confirmedAt: AT, stampConnections: null }; },
+        getPlannedPipeline: () => undefined,
+        getWorkflowAuthorship: () => undefined,
+      };
+      const row = (id: string): Record<string, unknown> => ({ id, title: id, effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'M-EVA', confirmed_at: AT });
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const savedApi = ref['getApiStore'];
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [row('trg-bad'), row('trg-ok')] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const res = await jsonFetch('/api/triggers');
+          expect(res.status).toBe(200);
+          const { triggers } = (await res.json()) as Flags;
+          expect(triggers.map((t) => t.id)).toEqual(['trg-bad', 'trg-ok']);
+          expect(triggers[0]!['stamp_listed']).toBeUndefined();
+          expect(warn).toHaveBeenCalledWith(expect.stringContaining('trg-bad'));
+        });
+      } finally {
+        warn.mockRestore();
+        ref['getApiStore'] = savedApi;
+      }
+    });
+
+    it('GET /api/triggers says on which side a member whose access ended sits', async () => {
+      // The way out differs: a member on the workflow's side needs the workflow copied too.
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const MID = 'M-EVA';
+      const AT = '2026-10-08T00:00:00.000Z';
+      const crm = {
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'd', created_by: 'mandate:eva@kanzlei.example',
+        auth: { type: 'oauth2', vault_keys: [], oauth: { token_url: 'https://api.crm.example/oauth/token', client_id_key: 'CRM_CLIENT_ID' } },
+        oauth_grant: { connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: MID, grant_id: 'grant-1' },
+      };
+      const raw = JSON.stringify({ at: AT, wf: null, entries: [{ profile: 'crm-api', grant: 'grant-1', binding: 'b'.repeat(64) }] });
+      ref['getApiStore'] = () => ({ knownProfiles: () => [crm] });
+      ref['getMandateEnds'] = () => ({ isLive: () => false, record: (): void => {} });
+      mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: AT } : undefined));
+      const history = {
+        getTriggerStampConnections: () => ({ confirmedAt: AT, stampConnections: raw }),
+        getPlannedPipeline: () => undefined,
+        getWorkflowAuthorship: () => ({ createdBy: 'mandate:eva@kanzlei.example', createdMandateId: MID, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-10-01 00:00:00' }),
+      };
+      const onWorkflow = { id: 'trg-wf', title: 'w', effect: 'run_workflow', pipeline_id: 'wf-eva', created_by: 'owner', confirmed_at: AT };
+      const onPlan = { id: 'trg-plan', title: 'p', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: MID, confirmed_at: AT };
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [onWorkflow, onPlan] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          const side = (id: string): unknown => (triggers.find((t) => t.id === id)!['stamp_listed'] as { ended_on: unknown; ended: unknown });
+          expect(side('trg-wf')).toMatchObject({ ended: true, ended_on: 'workflow' });
+          expect(side('trg-plan')).toMatchObject({ ended: true, ended_on: 'plan' });
+        });
+        // The member the plan acts for is live, the workflow's has ended: the run is refused all
+        // the same (the gate reads every member), so the list says ended.
+        ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === 'M-IDA', record: (): void => {} });
+        const idaPlan = { ...onWorkflow, id: 'trg-ida', created_by: 'mandate:ida@kanzlei.example', created_mandate_id: 'M-IDA', created_at: '2026-10-08 00:00:00' };
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [idaPlan] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          expect(triggers[0]!['stamp_listed']).toMatchObject({ ended: true, ended_on: 'workflow' });
+        });
+        // The schedule's mandate ended, the workflow's is live: a new plan on that workflow would run
+        // for the workflow's mandate, so the note says the workflow is someone else's.
+        ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => [idaPlan] }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+          const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+          expect(triggers[0]!['stamp_listed']).toMatchObject({ ended: true, ended_on: 'workflow_other' });
+        });
+      } finally {
+        ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+        mockGetPipeline.mockReset();
+      }
+    });
+
     it('GET /api/triggers adds the two flags, and the pause\'s, and nothing else to a row', async () => {
       // Who started the run stays inside: any further field — a starter tag, an effect —
       // would be a new disclosure on a list a mandate reads. `paused` is the plan pause's
@@ -19487,8 +19602,11 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         mockConfirmTrigger.mockClear();
         const preview = await jsonFetch('/api/tasks/task-1/stamp-preview');
         expect(preview.status).toBe(200);
-        const shown = await preview.json() as { expect: string; connections: unknown[] };
+        const shown = await preview.json() as { expect: string; connections: unknown[]; subject: Record<string, unknown>; by: unknown; workflow: unknown };
         expect(shown.connections).toEqual([{ id: 'crm-api', profile: 'CRM', provider: 'api.crm.example', account: 'eva@crm' }]);
+        // What the digest holds, shown field for field (the mandate ids as whom it acts for).
+        expect(shown.subject).toEqual({ id: 'task-1', effect: 'run_agent', source: null, title: 'Report', description: 'Weekly', schedule_cron: null, watch: null, pipeline_id: null, pipeline_params: null, model_tier: null, wf: null });
+        expect([shown.by, shown.workflow]).toEqual(['eva@kanzlei.example', null]);
         // Names only: the grant and the mandate's id stay on the engine.
         expect(JSON.stringify(shown)).not.toContain('grant-secret-1');
         expect(JSON.stringify(shown)).not.toContain(MID);
@@ -19497,6 +19615,8 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         profiles = [crm, { ...crm, id: 'crm2-api', name: 'CRM 2', oauth_grant: { ...crm.oauth_grant, grant_id: 'grant-2' } }];
         const stale = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) });
         expect(stale.status).toBe(409);
+        // The one 409 that asks for another look carries its own code; the view reloads only on it.
+        expect(((await stale.json()) as { code?: unknown }).code).toBe('changed');
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
 
         // The schedule changed since the preview (a mandate's edit): the same list no longer
@@ -19519,6 +19639,16 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         // Without the digest: stamped without a list, as every confirm was before.
         expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
+
+        // A mandate's backup or notice never uses a connection: nothing is listed or shown for it.
+        for (const effect of ['backup', 'notify']) {
+          Object.assign(trigger, { effect });
+          const none = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[]; by: unknown };
+          expect([none.connections, none.by]).toEqual([[], null]);
+          expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: none.expect }) })).status).toBe(200);
+          expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
+        }
+        Object.assign(trigger, { effect: 'run_agent' });
 
         // The owner's own schedule acts for no mandate: nothing to list, whatever is sent.
         Object.assign(trigger, { created_by: 'owner', created_mandate_id: undefined });
@@ -19555,8 +19685,9 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
       try {
         mockConfirmTrigger.mockClear();
-        const shown = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[] };
+        const shown = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[]; workflow: unknown; subject: Record<string, unknown> };
         expect(shown.connections).toHaveLength(1);
+        expect([shown.workflow, shown.subject['pipeline_id'], shown.subject['wf']]).toEqual([{ name: 'W', confirmed: true }, 'wf-eva', WF]);
         // The workflow was confirmed again since the preview: the list shown went with the
         // earlier confirmation, so it does not confirm this one.
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: '2026-10-09T00:00:00.000Z' } : undefined));
@@ -19569,6 +19700,10 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         editAfter = Infinity;
         expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: WF, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-1' })] });
+        // A workflow nobody confirmed: the preview says so, and the view offers no confirm (a
+        // confirmed schedule on it is switched off by its first run).
+        mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W' } : undefined));
+        expect(((await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json()) as { workflow: unknown }).workflow).toEqual({ name: 'W', confirmed: false });
       } finally {
         ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();

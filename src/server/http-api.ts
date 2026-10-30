@@ -33,7 +33,7 @@ import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
+import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
@@ -2309,12 +2309,62 @@ export class LynoxHTTPApi {
    * workflow's authorship cannot be read: then a stamp lists none.
    */
   async #stampListFor(trigger: TriggerRecord): Promise<{ wf: string | null; entries: readonly StampEntry[] } | null> {
+    return (await this.#stampPlanOf(trigger)).listed;
+  }
+
+  /**
+   * {@link #stampListFor} with what the preview shows beside it, from the same reading of the
+   * plan: whom the plan acts for, and for a workflow schedule the workflow's name and whether it is
+   * confirmed — a schedule on an unconfirmed workflow is switched off by its first run, so the
+   * view offers no confirm there.
+   */
+  async #stampPlanOf(trigger: TriggerRecord): Promise<{
+    listed: { wf: string | null; entries: readonly StampEntry[] } | null;
+    by: string | null;
+    workflow: { name: string | null; confirmed: boolean } | null;
+  }> {
     const engine = this.engine;
     const apiStore = engine?.getApiStore();
-    if (!engine || !apiStore || trigger.effect.startsWith('bulk_')) return null;
+    if (!engine || !apiStore || !stampUsesConnections(trigger.effect)) return { listed: null, by: null, workflow: null };
     const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
+    const workflow = trigger.effect === 'run_workflow'
+      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null }
+      : null;
+    if (plan.unreadable || plan.of === undefined) return { listed: null, by: null, workflow };
+    return {
+      listed: { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) },
+      by: plan.of.email,
+      workflow,
+    };
+  }
+
+  /**
+   * B3 for one row of the owner's list: null unless the plan is confirmed, acts for a mandate,
+   * and has something to show ({@link stampListState}). Read with the workflow confirmation the
+   * run reads (`planOfTrigger`), so an entry shown as listed is one the run may use.
+   */
+  async #stampListShown(trigger: TriggerRecord): Promise<StampListShown | null> {
+    const engine = this.engine;
+    const apiStore = engine?.getApiStore();
+    const history = engine?.getRunHistory();
+    if (!engine || !apiStore || !history || !trigger.confirmed_at || !stampUsesConnections(trigger.effect)) return null;
+    const plan = await planOfTrigger(trigger, history);
     if (plan.unreadable || plan.of === undefined) return null;
-    return { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) };
+    const row = history.getTriggerStampConnections(trigger.id);
+    if (row === undefined) return null;
+    const ends = engine.getMandateEnds() ?? null;
+    const shown = stampListState(row.stampConnections, row.confirmedAt, plan.workflowConfirmedAt, plan.of, apiStore, ends);
+    if (shown === null) return null;
+    // The run is refused when ANY member ended (the worker's gate), not only the one it acts for.
+    // The way out the view names: with a mandate on the workflow's side, a new plan on the same
+    // workflow would still run for that mandate. `workflow` when that mandate ended (its workflow
+    // goes too); `workflow_other` when it is still live and another member ended — the note then
+    // leaves the live member's workflow alone and does not say the ended person wrote it.
+    const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
+    const anyEnded = plan.members.some((m) => principalHasEnded(m, isLive));
+    const wf = plan.workflowMember;
+    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : principalHasEnded(wf, isLive) ? 'workflow' : 'workflow_other';
+    return { ...shown, ended: shown.ended || endedOn !== null, ended_on: endedOn };
   }
 
   private _principalOf(req: IncomingMessage): RequestPrincipal {
@@ -8359,9 +8409,10 @@ export class LynoxHTTPApi {
       const principal = this._principalOf(req);
       // `paused` is no status value: it reads `paused_at` (`plan-pause.ts`).
       const pausedFilter = (status as string | undefined) === 'paused';
-      const triggers = (pausedFilter
+      const rows = pausedFilter
         ? taskManager.listTriggers({ paused: true })
-        : taskManager.listTriggers(status ? { status } : undefined))
+        : taskManager.listTriggers(status ? { status } : undefined);
+      const triggers = rows
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
           const visible = starter !== undefined && mayStopRun(principal, starter, loop?.runningPlanTag(trigger.id));
@@ -8371,9 +8422,25 @@ export class LynoxHTTPApi {
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
           };
         });
+      // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
+      // owner only: the connections are a helper's, and only the owner decides on them.
+      const viewer = approvalScopeOf(principal)?.viewer ?? 'none';
+      const shown = viewer === 'owner'
+        ? await Promise.all(triggers.map(async (t, i) => {
+          // One row that cannot be read must not cost the owner the whole list. The list is display
+          // only (the run's gate reads the stamp itself), so the row just shows none.
+          let listed: StampListShown | null = null;
+          try {
+            listed = await this.#stampListShown(rows[i]!);
+          } catch (err: unknown) {
+            console.warn(`[lynox:http] stamp list of trigger ${t.id} not readable: ${processErrorText(err)}`);
+          }
+          return listed === null ? t : { ...t, stamp_listed: listed };
+        }))
+        : triggers;
       // `viewer` as in `/api/approvals`: the page offers the owner's controls (the takeover) only
       // to the owner's session. The routes check it again; this is what the page shows.
-      jsonResponse(res, 200, { triggers, viewer: approvalScopeOf(principal)?.viewer ?? 'none' });
+      jsonResponse(res, 200, { triggers: shown, viewer });
     }, READS);
 
     // How many plans wait for the owner's takeover, for the dot at "Automation": the pause is told
@@ -8750,7 +8817,8 @@ export class LynoxHTTPApi {
     // (an unconfirmed run_agent trigger is neither, closing the injection-
     // amplification hole). This user-scope HTTP action is the ONLY consent surface;
     // the agent `task_create` tool cannot reach it, so confirmation is always an
-    // explicit human step. Idempotent (re-confirming just re-stamps).
+    // explicit human step. A confirm of a confirmed schedule stamps it again: a new `confirmed_at`,
+    // and a list only when it is sent the preview's `expect` (without, a stamp lists none).
     // What the owner's stamp of this schedule would list: the connections the mandate its plan acts
     // for made with its own login (`plan-stamp.ts`). The confirm below writes the list only when
     // it is sent back the digest of exactly this list on exactly this schedule (`stampExpect`).
@@ -8758,12 +8826,20 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/tasks/:id/stamp-preview', async (_req, res, params) => {
       const trigger = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
-      const listed = await this.#stampListFor(trigger);
+      const { listed, by, workflow } = await this.#stampPlanOf(trigger);
       const entries = listed?.entries ?? [];
       const apiStore = engine.getApiStore();
       const profiles = apiStore ? stampProfiles(entries, apiStore) : [];
+      // `subject` is what `expect` is the digest of, field for field: the view shows the schedule
+      // from here, not from the list it polls, so the owner confirms what they read. The preview
+      // adds no mandate id of its own (`by` says whom the plan acts for); the digest holds them.
+      // (The list row carries the ids already, `triggerForRoute`; the preview does not repeat them.)
+      const { created_mandate_id: _created, mandate_editor_id: _editor, ...subject } = stampSubject(trigger, listed?.wf ?? null);
       jsonResponse(res, 200, {
         expect: stampExpect(trigger, listed?.wf ?? null, entries),
+        subject,
+        by,
+        workflow,
         connections: profiles.map((p) => ({ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null })),
       });
     }, ownerOnly('see what a schedule would be confirmed with')));
@@ -8786,7 +8862,7 @@ export class LynoxHTTPApi {
         // what is stamped.
         const now = engine.getRunHistory()?.getTrigger(params['id']!);
         if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
-          errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.');
+          errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
           return;
         }
         if (listed !== null && listed.entries.length > 0) connections = listed;

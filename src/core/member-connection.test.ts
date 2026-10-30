@@ -166,7 +166,7 @@ describe('a member\'s connection inside a plan\'s run', () => {
     runAsPlanOf(B, () => {
       expect(read(p, B)).toBeNull();
       expect(read(crm({ created_by: undefined, oauth_grant: G }), B)).toBeNull();
-      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`);
+      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use, and they can allow it under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).`);
     });
     expect(read(crm({ created_by: undefined, oauth_grant: G }), B)).toBe('access-value');
   });
@@ -188,7 +188,7 @@ describe('a member\'s connection inside a plan\'s run', () => {
     const now = change(stamped);
     runAsPlanOf(B, () => {
       expect(read(now, B)).toBeNull();
-      expect(memberConnectionRefusal(now, B, ends(['M-1']))).toBe(`${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`);
+      expect(memberConnectionRefusal(now, B, ends(['M-1']))).toBe(`${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use, and they can allow it under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).`);
     }, listed(stamped));
   });
 
