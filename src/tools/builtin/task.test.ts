@@ -733,6 +733,13 @@ describe('Task Tools', () => {
       expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent())).toContain('Workflow task created');
     });
 
+    it('task_create tells a mandate a stored workflow it cannot read apart from a missing one', async () => {
+      history.insertPlannedPipeline({ id: 'wf-garbled', name: 'g', goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, mandate);
+      engine.getDb().prepare("UPDATE workflows SET definition_json = '{' WHERE id = 'wf-garbled'").run();
+      expect(await taskCreateTool.handler({ title: 'Garbled', assignee: 'lynox', workflow_id: 'wf-garbled', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate)))
+        .toMatch(/^Error: workflow wf-garbled: Not scheduled: lynox could not read who set up this workflow/);
+    });
+
     it('control: a mandate\'s task_create assigned to lynox makes a schedule', async () => {
       const result = await taskCreateTool.handler({ title: 'Mandate run', assignee: 'lynox' }, makeAgent(undefined, mandate));
       expect(result).toMatch(/^Task created: /);

@@ -445,18 +445,23 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // part of confirming, so the refusal says not to create it here again.
         // Only the id is echoed: this tool's result is not scanned, and the
         // stored name is free text written by someone else. A workflow this
-        // cannot find is left, for the owner, to the manager and the worker,
-        // which already report a missing target.
+        // cannot find is left, for the owner, to the manager, which stores the
+        // task, and the worker, which reports the missing target at its tick.
         const { getPipeline } = await import('./pipeline.js');
         const planned = getPipeline(input.workflow_id, agent.toolContext.runHistory);
         // A schedule on another mandate's workflow ties both mandates into one plan, so a mandate
         // schedules only its own workflows and the owner's (`foreignWorkflowScheduleRefusal`). A
-        // workflow this cannot find has no author to check, so a mandate's schedule on it is refused.
+        // workflow this cannot find has no author to check, so a mandate's schedule on it is refused:
+        // as missing when no row has the id, as unreadable when one does (its definition did not parse).
         if (!isOwnerPrincipal(agent.principal)) {
-          const { foreignWorkflowScheduleRefusal, MISSING_WORKFLOW_SCHEDULE_REFUSAL } = await import('../../core/plan-stamp.js');
+          const { foreignWorkflowScheduleRefusal, MISSING_WORKFLOW_SCHEDULE_REFUSAL, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL } = await import('../../core/plan-stamp.js');
+          const asked = input.workflow_id;
+          const stored = (): boolean => {
+            try { return agent.toolContext.runHistory?.getWorkflowAuthorship(asked) !== undefined; } catch { return true; }
+          };
           const refusal = planned
             ? foreignWorkflowScheduleRefusal(agent.principal, planned.id, agent.toolContext.runHistory)
-            : MISSING_WORKFLOW_SCHEDULE_REFUSAL;
+            : stored() ? UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL : MISSING_WORKFLOW_SCHEDULE_REFUSAL;
           if (refusal !== null) return `Error: workflow ${planned?.id ?? input.workflow_id}: ${refusal}`;
         }
         if (planned) {
