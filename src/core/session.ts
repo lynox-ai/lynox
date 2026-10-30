@@ -32,6 +32,7 @@ import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } from './agent.js';
 import { isInputRequired } from './input-required.js';
+import { loopGuardStopReason } from './loop-guard-stop.js';
 import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
@@ -1552,6 +1553,7 @@ export class Session {
       // path. Record it distinctly as 'aborted' (not the scary 'failed') and
       // surface a calm interruption note instead of a provider-error banner.
       const isAbort = err instanceof RunAbortedError;
+      const guardStop = loopGuardStopReason(err);
       // The note code and whether it is reported: a hard loop break and a continuation
       // loop each get their own calm note naming WHY, a question nobody could be asked
       // gets one naming the question (`classifyRunFailure`).
@@ -1625,6 +1627,8 @@ export class Session {
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: isAbort ? 'aborted' : 'failed',
+            // A loop guard's stop is an abort too; the reason tells it from a stop by the user.
+            ...(guardStop !== null ? { stopReason: guardStop } : {}),
             errorText: secretStore ? secretStore.maskSecrets(errorDetail) : errorDetail,
           });
         } catch {

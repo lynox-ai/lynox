@@ -858,6 +858,26 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(mockSend).toHaveBeenCalledTimes(1);
     });
 
+    it('a run a loop guard stopped is recorded aborted with the guard as the reason and its message; a stop has neither', async () => {
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } = await import('./agent.js');
+      const cases: Array<[Error, string | undefined]> = [
+        [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
+        [new ContinuationLoopError('prefix'), 'continuation_loop'],
+        [new (ThinkingOnlyLoopError as unknown as new (p: string) => Error)(''), 'thinking_loop'],
+        [new RunAbortedError(), undefined],
+      ];
+      for (const [err, reason] of cases) {
+        const { engine, session } = await createEngineAndSession();
+        mockSend.mockRejectedValueOnce(err);
+        await expect(session.run('go')).rejects.toBe(err);
+        const calls = (engine.getRunHistory()!.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+        const update = calls.find((c) => (c[1] as { status?: string })?.status === 'aborted')?.[1] as { stopReason?: string; errorText?: string } | undefined;
+        expect(update, err.name).toBeDefined();
+        expect(update!.stopReason, err.name).toBe(reason);
+        expect(update!.errorText, err.name).toContain(err.message);
+      }
+    });
+
     it('an aborted run is recorded status:"aborted" (not "completed"/"failed") and re-throws', async () => {
       const { engine, session } = await createEngineAndSession();
       // agent.send() throws RunAbortedError when the run is interrupted (stop
