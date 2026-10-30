@@ -22,7 +22,7 @@ import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
-import { fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
+import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
@@ -340,7 +340,10 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
     totalCostUsd: totalCost,
   };
 
-  return JSON.stringify(result, null, 2);
+  // The name and the step ids are stored text, saved perhaps before the save refused characters
+  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show. The places
+  // real text puts one stay, so an emoji or a Persian word in a step's result reads as it is.
+  return escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
 }
 
 // 2a/B3: both the pipeline_runs row and its pipeline_step_results rows are now
@@ -968,7 +971,8 @@ export async function runSavedWorkflow(
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
     };
   } catch (err: unknown) {
-    return { ok: false, error: `Workflow execution failed: ${getErrorMessage(err)}` };
+    // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+    return { ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}` };
   }
 }
 
@@ -1194,7 +1198,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       retryOutcome = state.status === 'completed' ? 'success' : 'failed';
       return text;
     } catch (err: unknown) {
-      return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
+      // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+      return `Error: Workflow retry failed: ${stripHidden(getErrorMessage(err))}`;
     } finally {
       retryTrail?.end(retryOutcome, false);
     }
@@ -1313,7 +1318,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return text;
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
-    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
+    // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+    return `Error: Workflow execution failed: ${stripHidden(getErrorMessage(err))}`;
   } finally {
     if (!isTemplate) inFlightNonTemplatePipelines.delete(planned.id);
     trail?.end(outcome, definitionRemoved);

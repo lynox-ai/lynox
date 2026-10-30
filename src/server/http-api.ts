@@ -62,7 +62,7 @@ import { isProvisionedInstance } from '../core/wire-capture.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
 import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
 import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
-import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
+import { containedThreadStates, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
 import type { RunRecord } from '../core/run-history.js';
@@ -148,6 +148,7 @@ import type { StagedArchive, WorkspaceManifest } from '../core/workspace-export.
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
 import { ArtifactPlaceholderError } from '../core/artifact-store.js';
+import { findHiddenChar } from '../core/hidden-text.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -368,6 +369,18 @@ export function withdrawPromptOnAbort(
 /** What a chat opened from a contained one may promise for a store change, as this instance runs
  *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
  *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
+/**
+ * A thread's read-only state as the owner sees it. `contained` is what enforcement holds: also
+ * true when the record could not be read. `contained_unknown` says that it could not, and so
+ * that the chat may never have read store data: `provisioned` on an instance the control plane
+ * set up (its support can look), `self-hosted` otherwise (its own logs say why).
+ */
+function containedFields(states: { contained: Set<string>; unknown: Set<string> }, id: string): { contained: boolean; contained_unknown?: 'provisioned' | 'self-hosted' } {
+  if (states.contained.has(id)) return { contained: true };
+  if (states.unknown.has(id)) return { contained: true, contained_unknown: isProvisionedInstance() ? 'provisioned' : 'self-hosted' };
+  return { contained: false };
+}
+
 function containedWayOutOf(engine: Engine): ContainedWayOutState {
   const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? undefined;
   return {
@@ -394,6 +407,28 @@ function approvalChatReaderOf(
     checksumMatches: (id) => store.checksumMatches(id),
   };
 }
+
+/**
+ * Why a task's text from a request may not be saved: it holds a character that renders as nothing
+ * (`hidden-text.ts`), which the model's own write tools refuse too. A person, a helper included,
+ * writes these fields here, and the plan's text reaches the model later. `null` when it may be saved.
+ */
+function hiddenInTaskText(b: Record<string, unknown>): string | null {
+  for (const [key, field] of [['title', 'The title'], ['description', 'The description'], ['assignee', 'The assignee'], ['tags', 'A tag']] as const) {
+    const hit = findHiddenChar(b[key]);
+    if (hit !== null) return hiddenRefusal(field, hit.codePoint);
+  }
+  return null;
+}
+
+/** The 400 a person reads for text with a character that renders as nothing: the field and the
+ *  character, never the text. Answered with {@link HIDDEN_CHAR_CODE}, which a client tells it by. */
+function hiddenRefusal(field: string, codePoint: string): string {
+  return `${field} holds a character that does not show as text (${codePoint}). Nothing was saved. Enter it again by typing it rather than pasting it.`;
+}
+
+/** The `code` of that 400: the web UI shows its own sentence for it, and `save_failed` for any other. */
+export const HIDDEN_CHAR_CODE = 'hidden_char';
 
 function isValidMailPort(n: number): boolean {
   return Number.isInteger(n) && n >= 1 && n <= 65535;
@@ -5794,8 +5829,8 @@ export class LynoxHTTPApi {
       const threads = threadStore.listThreads({ limit, includeArchived });
       // `contained`: the chat read data through a store connection (`core/containment.ts`), so
       // private mode stays on and it can only read and explain. Fail-closed, like the refusals.
-      const contained = containedThreads(engine.getToolContext().containment, threads.map((t) => t.id));
-      jsonResponse(res, 200, { threads: threads.map((t) => ({ ...t, contained: contained.has(t.id) })) });
+      const states = containedThreadStates(engine.getToolContext().containment, threads.map((t) => t.id));
+      jsonResponse(res, 200, { threads: threads.map((t) => ({ ...t, ...containedFields(states, t.id) })) });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id', async (_req, res, params) => {
@@ -5809,7 +5844,8 @@ export class LynoxHTTPApi {
       // "gone" from "exists" without the noise. PATCH/DELETE below keep their
       // 404 — mutating a nonexistent thread IS an error.
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
-      jsonResponse(res, 200, { thread: { ...thread, contained: threadIsContained(engine.getToolContext().containment, thread.id) } });
+      const states = containedThreadStates(engine.getToolContext().containment, [thread.id]);
+      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id) } });
     }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
@@ -5825,9 +5861,12 @@ export class LynoxHTTPApi {
       // record, fail-closed — a record that cannot be read refuses. Refused before anything
       // else in the request is applied, so the answer is the whole truth.
       if (skipExtraction === false) {
-        const { threadIsContained } = await import('../core/containment.js');
-        if (threadIsContained(engine.getToolContext().containment, params['id']!)) {
-          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.', 'contained');
+        // One read decides and says which of the two, for the owner's text: a record that could
+        // not be read names where to look.
+        const { contained, contained_unknown } = containedFields(containedThreadStates(engine.getToolContext().containment, [params['id']!]), params['id']!);
+        if (contained) {
+          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.', 'contained',
+            contained_unknown !== undefined ? { contained_unknown } : undefined);
           return;
         }
       }
@@ -8363,6 +8402,10 @@ export class LynoxHTTPApi {
       if (name.trim().length > 200) {
         errorResponse(res, 400, 'name too long (max 200 characters)'); return;
       }
+      // The name reaches the model in every run and edit of the workflow; the save refuses such a
+      // character, and a rename does not pass through the save.
+      const hiddenName = findHiddenChar(name.trim());
+      if (hiddenName !== null) { errorResponse(res, 400, hiddenRefusal('The name', hiddenName.codePoint), HIDDEN_CHAR_CODE); return; }
       const renamed = history.renamePlannedPipeline(params['id']!, name.trim(), this._principalOf(req));
       if (!renamed) { errorResponse(res, 404, 'Workflow not found'); return; }
       // Evict the in-memory cache so a later run reflects the new name.
@@ -8464,6 +8507,8 @@ export class LynoxHTTPApi {
       const runAt = typeof b['runAt'] === 'string' && b['runAt'].length > 0 ? b['runAt'] : undefined;
       const dueDate = typeof b['dueDate'] === 'string' && b['dueDate'].length > 0 ? b['dueDate'] : undefined;
       const pipelineId = typeof b['pipelineId'] === 'string' && b['pipelineId'].length > 0 ? b['pipelineId'] : undefined;
+      const hidden = hiddenInTaskText(b);
+      if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
 
       // Slice B2: schedule a saved workflow on cron — the promote-to-cron consent
       // action. Validates the workflow is autonomous, binds + constrains the
@@ -8586,6 +8631,9 @@ export class LynoxHTTPApi {
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
       const b = body as Record<string, unknown>;
+      // Before the mark below: a refused edit is no mandate's edit.
+      const hidden = hiddenInTaskText(b);
+      if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
       // Checked here rather than left to `update`, which throws: a thrown error answers
       // 500, and a refused request must not mark the trigger as a mandate's edit either.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {

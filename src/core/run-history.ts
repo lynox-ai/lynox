@@ -24,7 +24,7 @@ import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
-import { findHiddenChar, hiddenCharRefusal } from './hidden-text.js';
+import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
@@ -3341,13 +3341,15 @@ export class RunHistory {
     // so a refusal reaches the model that wrote it. Not read: a step's `input_template`, which is
     // a tool's arguments as a session captured them (scraped text may hold such a character, and
     // the model saving it cannot rewrite them; a run shows them escaped, `runtime-adapter.ts`), and `reasoning`, the capture's own record, which
-    // never reaches a run's model.
+    // never reaches a run's model. A step's id is a name: it reaches the model in a run's result
+    // and in a diagnosis, and takes none of the places real text may carry one.
     const hidden = findHiddenChar({
       name: planned.name,
       goal: planned.goal,
       steps: planned.steps.map((s) => ({ task: s.task })),
       parameters: (planned as { parameters?: unknown }).parameters,
-    });
+    }) ?? planned.steps.reduce<ReturnType<typeof findHiddenInName>>(
+      (hit, s, i) => hit ?? (typeof s.id === 'string' ? findHiddenInName(s.id, `steps[${i}].id`) : null), null);
     if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
