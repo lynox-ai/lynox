@@ -356,7 +356,8 @@ function hostClaimant(url: string): OAuthPreset | undefined {
  * The one reading for the save (`api_setup`) and the request, so the two cannot disagree.
  */
 export function providerNotFollowed(profile: Parameters<typeof presetNotFollowed>[0]): OAuthPreset | undefined {
-  return presetNotFollowed(profile, OAUTH_PRESETS, { storesClaimed: shopifyExchangeSwitchOn() });
+  // `undefined`, not `OAUTH_PRESETS`: the register stays the predicate's own default, as every caller had it before.
+  return presetNotFollowed(profile, undefined, { storesClaimed: shopifyExchangeSwitchOn() });
 }
 
 /** Every profile on `url`'s host, as {@link presetProfilesOnHost} finds them, with or without a preset. */
