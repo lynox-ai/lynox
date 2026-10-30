@@ -25,6 +25,15 @@
  *
  * Reads the outcome from the engine's OWN capture-telemetry sink, not from the SSE stream: the
  * sink is what production reports, so the eval and the field metric are the same number.
+ *
+ * A case is one turn (a string) or several (`{ "turns": [...] }`), sent one after another into
+ * the same session, so a rule given in a later turn reaches the engine as it does in a chat.
+ * Multi-turn cases come from a fixture file outside the repo (`--fixtures`).
+ *
+ * WHAT WAS WRITTEN. A negative shape can legitimately record a fact about the business (a
+ * product the shop carries), so "something was written" is not yet a MISS: the texts decide.
+ * Each case lists the entries it created (active, and queued for its thread), and `--out FILE`
+ * keeps them with the rows, so a count made at the texts can be made again from the file.
  */
 import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -45,7 +54,9 @@ const REPEATS = Number(args['repeats'] ?? 1);
 const CASE_MS = Number(args['case-timeout'] ?? 300) * 1000;
 if (!DATA_DIR) { console.error('need --data-dir (the engine\'s LYNOX_DATA_DIR)'); process.exit(2); }
 
-const fx = JSON.parse(readFileSync(join(HERE, 'capture-fitness-fixtures.json'), 'utf8'));
+// `--fixtures FILE` reads another fixture file of the same shape. Multi-turn cases live outside
+// this repository: corpus-structure-guard refuses a tracked object with a `turns` array.
+const fx = JSON.parse(readFileSync(args['fixtures'] ?? join(HERE, 'capture-fitness-fixtures.json'), 'utf8'));
 // `--shapes N4-run-instruction,S5-standing-rule` runs only those, for an A/B on one change. A
 // name that matches no shape stops the run: silently running fewer shapes reads as a pass.
 if (args['shapes']) {
@@ -92,23 +103,36 @@ process.on('exit', () => { for (const f of [SOURCE, INJECTED]) { try { rmSync(f)
 const sinkPath = join(DATA_DIR, 'capture-telemetry.jsonl');
 const sinkLines = () => (existsSync(sinkPath) ? readFileSync(sinkPath, 'utf8').trim().split('\n').filter(Boolean) : []);
 
-async function runOne(text) {
+/** Ids and texts of the active entries, newest first. */
+async function activeEntries() {
+  const r = await fetch(`${BASE}/api/knowledge/entries?limit=500`);
+  if (!r.ok) throw new Error(`GET /api/knowledge/entries: ${r.status}`);
+  return (await r.json()).entries.map(e => ({ id: e.id, text: e.text }));
+}
+
+async function runOne(turns) {
   // Events are matched to the case by THREAD, not by sink position. A case cut off by the
   // timeout keeps running in the engine, and its late write landed after the next case's
   // starting line count — scored as that case's capture. The session id is the thread id.
   const threadId = randomUUID();
   const started = Date.now();
+  const before = new Set((await activeEntries()).map(e => e.id));
   const s = await fetch(`${BASE}/api/sessions`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId }),
   }).then(r => r.json());
-  const res = await fetch(`${BASE}/api/sessions/${s.sessionId}/run`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task: text }),
-    signal: AbortSignal.timeout(CASE_MS),
-  });
-  // Drain the SSE stream so the turn completes before we read the sink.
-  const reader = res.body.getReader();
-  for (;;) { const { done } = await reader.read(); if (done) break; }
+  // One deadline for the whole case, all turns together.
+  const deadline = AbortSignal.timeout(CASE_MS);
+  for (const text of turns) {
+    const res = await fetch(`${BASE}/api/sessions/${s.sessionId}/run`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: text }),
+      signal: deadline,
+    });
+    if (!res.ok) throw new Error(`turn ${turns.indexOf(text) + 1}: HTTP ${res.status}`);
+    // Drain the SSE stream so the turn completes (and its capture runs) before the next one.
+    const reader = res.body.getReader();
+    for (;;) { const { done } = await reader.read(); if (done) break; }
+  }
   await new Promise(r => setTimeout(r, 1200));   // the sink append is fire-and-forget
   const ended = Date.now();
   const all = sinkLines().map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(e => e !== null);
@@ -123,7 +147,11 @@ async function runOne(text) {
   const orphans = all.filter(e => e.event === 'remember_invoked' && !e.thread && e.ts >= started && e.ts <= ended);
   fresh.push(...orphans);
   const writes = fresh.filter(e => e.event === 'remember_invoked');
+  const created = (await activeEntries()).filter(e => !before.has(e.id)).map(e => `active: ${e.text}`);
+  const q = await fetch(`${BASE}/api/knowledge/queue?threadId=${threadId}`).then(r => (r.ok ? r.json() : { entries: [] }));
+  for (const e of q.entries ?? []) created.push(`queued: ${e.text}`);
   return {
+    texts: created,
     eligible: fresh.some(e => e.event === 'capture_eligible'),
     remembered: writes.length > 0,
     // The outcome is the point, not the tool call. A capture on a turn that read anything routes
@@ -140,16 +168,20 @@ const rows = [];
 for (const shape of fx.shapes) {
   for (let rep = 0; rep < REPEATS; rep++) {
     for (const [i, tpl] of shape.cases.entries()) {
-      const text = tpl.replaceAll('{FILE}', SOURCE).replaceAll('{INJECTED}', INJECTED).replaceAll('{N}', NONCE);
+      const fill = (t) => t.replaceAll('{FILE}', SOURCE).replaceAll('{INJECTED}', INJECTED).replaceAll('{N}', NONCE);
+      const turns = typeof tpl === 'string' ? [fill(tpl)] : tpl.turns.map(fill);
       let r;
-      try { r = await runOne(text); } catch (e) { r = { error: String(e).slice(0, 80) }; }
+      try { r = await runOne(turns); } catch (e) { r = { error: String(e).slice(0, 80) }; }
       const ok = r.error ? null : (shape.expect === 'capture' ? r.remembered : !r.remembered);
       rows.push({ shape: shape.id, case: i, expect: shape.expect, ...r, ok });
       const where = r.error ? '' : r.remembered ? ` (${r.active ? 'active' : r.queued ? 'QUEUED' : 'deduped'})` : ' (silent)';
       process.stdout.write(`  ${shape.id} #${i}${REPEATS > 1 ? `.${rep}` : ''}  ${r.error ? 'ERR ' + r.error : (ok ? 'OK ' : 'MISS') + where}\n`);
+      for (const t of r.texts ?? []) process.stdout.write(`      ${t.replace(/\s+/g, ' ').slice(0, 300)}\n`);
     }
   }
 }
+
+if (args['out']) writeFileSync(args['out'], JSON.stringify({ label: LABEL, run: NONCE, rows }, null, 1));
 
 console.log(`\n=== capture fitness · ${LABEL} · run ${NONCE} ===`);
 let capT = 0, capH = 0, capActive = 0, negT = 0, negOk = 0;
