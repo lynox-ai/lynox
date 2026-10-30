@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -168,6 +168,32 @@ describe('routes in sidecar mode (real engine)', () => {
         expect(res.status).toBe(200);
         const body = await res.json() as { entries: Array<{ name: string }> };
         expect(body.entries.map(e => e.name)).toEqual(['report.md']);
+      });
+    });
+
+    // In sidecar mode a pool uid can put a link into the area. Download and read must refuse a link
+    // to a file outside, at the file or on the way, and never send what it points to.
+    it('download and read refuse a link out of the area, at the file and on the way', async () => {
+      await withTree(async (tree) => {
+        const engineOnly = `engine-only-${randomBytes(6).toString('hex')}`;
+        mkdirSync(join(dir, 'engine-only'), { recursive: true });
+        writeFileSync(join(dir, 'engine-only', 'f.txt'), engineOnly);
+        writeFileSync(join(tree, 'ctx1', 'plain.txt'), 'inside');
+        symlinkSync(join(dir, 'engine-only', 'f.txt'), join(tree, 'ctx1', 'x.txt'));
+        symlinkSync(join(dir, 'engine-only'), join(tree, 'ctx1', 'dl'));
+        for (const route of ['/api/files/download', '/api/files/read']) {
+          // Control: a plain file is served, so a refusal below is the link's, not the route's.
+          const ok = await call('GET', `${route}?path=plain.txt`);
+          expect(ok.status).toBe(200);
+          expect(await ok.text()).toContain('inside');
+          for (const path of ['x.txt', 'dl/f.txt']) {
+            const res = await call('GET', `${route}?path=${encodeURIComponent(path)}`);
+            const text = await res.text();
+            expect({ route, path, status: res.status }).toEqual({ route, path, status: 403 });
+            expect(text).toContain('Outside workspace');
+            expect(text).not.toContain(engineOnly);
+          }
+        }
       });
     });
 
