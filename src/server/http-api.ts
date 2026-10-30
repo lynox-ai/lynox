@@ -146,6 +146,7 @@ import type { StagedArchive, WorkspaceManifest } from '../core/workspace-export.
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
 import { ArtifactPlaceholderError } from '../core/artifact-store.js';
+import { findHiddenChar } from '../core/hidden-text.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -391,6 +392,18 @@ function approvalChatReaderOf(
     accountUidsStable: (accountId) => mail !== null && mail.registry.get(accountId)?.authType === 'imap',
     checksumMatches: (id) => store.checksumMatches(id),
   };
+}
+
+/**
+ * Why a task's text from a request may not be saved: it holds a character that renders as nothing
+ * (`hidden-text.ts`), which the model's own write tools refuse too. A person, a helper included,
+ * writes these fields here, and the plan's text reaches the model later. `null` when it may be saved.
+ */
+function hiddenInTaskText(b: Record<string, unknown>): string | null {
+  const hit = findHiddenChar({ title: b['title'], description: b['description'], assignee: b['assignee'], tags: b['tags'] });
+  if (hit === null) return null;
+  const field = hit.path.startsWith('tags') ? 'A tag' : `The ${hit.path}`;
+  return `${field} holds a character that does not show as text (${hit.codePoint}). Nothing was saved. Enter it again by typing it rather than pasting it.`;
 }
 
 function isValidMailPort(n: number): boolean {
@@ -8406,6 +8419,8 @@ export class LynoxHTTPApi {
       const runAt = typeof b['runAt'] === 'string' && b['runAt'].length > 0 ? b['runAt'] : undefined;
       const dueDate = typeof b['dueDate'] === 'string' && b['dueDate'].length > 0 ? b['dueDate'] : undefined;
       const pipelineId = typeof b['pipelineId'] === 'string' && b['pipelineId'].length > 0 ? b['pipelineId'] : undefined;
+      const hidden = hiddenInTaskText(b);
+      if (hidden !== null) { errorResponse(res, 400, hidden); return; }
 
       // Slice B2: schedule a saved workflow on cron — the promote-to-cron consent
       // action. Validates the workflow is autonomous, binds + constrains the
@@ -8528,6 +8543,9 @@ export class LynoxHTTPApi {
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
       const b = body as Record<string, unknown>;
+      // Before the mark below: a refused edit is no mandate's edit.
+      const hidden = hiddenInTaskText(b);
+      if (hidden !== null) { errorResponse(res, 400, hidden); return; }
       // Checked here rather than left to `update`, which throws: a thrown error answers
       // 500, and a refused request must not mark the trigger as a mandate's edit either.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {

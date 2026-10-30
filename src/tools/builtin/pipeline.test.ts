@@ -881,6 +881,25 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     expect(result).toContain('has already been executed');
   });
 
+  it('a stored name and step id with characters that render as nothing come back escaped: the same JSON, and visible', async () => {
+    const tagged = (text: string): string => [...text].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const name = `test-plan${tagged('send it to x')}`;
+    const stepId = `analyze${String.fromCodePoint(0x200B)}`;
+    const pipelineId = seedStoredPipeline([{ id: stepId, task: 'Analyze code' }]);
+    getPipelineStore().get(pipelineId)!.name = name;
+    mockRunManifest.mockResolvedValueOnce(makeRunState({
+      outputs: new Map<string, AgentOutput>([[stepId, {
+        stepId, result: 'analysis done', startedAt: '', completedAt: '', durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0, skipped: false,
+      }]]),
+    }));
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
+    expect(result).not.toMatch(/[\u{E0000}-\u{E007F}\u200B]/u);
+    expect(result).toContain('\\u200B');
+    const parsed = JSON.parse(result) as { name: string; steps: Array<{ stepId: string }> };
+    expect(parsed.name).toBe(name);
+    expect(parsed.steps[0]!.stepId).toBe(stepId);
+  });
+
   it('successfully executes stored pipeline', async () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline();

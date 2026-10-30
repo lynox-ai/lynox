@@ -22,7 +22,7 @@ import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
-import { fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
+import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
@@ -340,7 +340,9 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
     totalCostUsd: totalCost,
   };
 
-  return JSON.stringify(result, null, 2);
+  // The name and the step ids are stored text, saved perhaps before the save refused characters
+  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show.
+  return escapeHiddenInJson(JSON.stringify(result, null, 2));
 }
 
 // 2a/B3: both the pipeline_runs row and its pipeline_step_results rows are now

@@ -52,6 +52,13 @@ export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   return null;
 }
 
+/** The first hidden character in a name (a step's id, a key), which takes none of the places real
+ *  text may carry one, or `null`. */
+export function findHiddenInName(name: string, path: string): HiddenChar | null {
+  const at = hiddenCharIndexes(name, { inPlace: false });
+  return at.length === 0 ? null : { path, codePoint: codePointAt(name, at[0]!) };
+}
+
 /** The run refusal of `hiddenInRunValues` for a name. It quotes nothing, so a reduced sink (a push
  *  from a contained instance) may say it as it is. */
 export const HIDDEN_RUN_NAME_REFUSAL = 'A parameter name holds a character that does not show as text. Rename the parameter in the workflow.';

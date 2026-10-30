@@ -1,6 +1,7 @@
 import type { ToolEntry } from '../../types/index.js';
 import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
+import { stripHidden } from '../../core/hidden-text.js';
 
 interface DiagnoseInput {
   run_id?: string | undefined;
@@ -15,10 +16,12 @@ const MAX_ERR = 600;
  * error, the workflow name, and step ids — so an embedded line break + a fake
  * `[System: …]` line can't inject a pseudo-directive into the tool output the
  * agent reads back (the result also passes through `scanToolResult`, but the
- * tool defangs at the source to match the context-seam's defence).
+ * tool defangs at the source to match the context-seam's defence). Characters that render as
+ * nothing (`hidden-text.ts`) are dropped first: a name or a step id saved before the save refused
+ * them, or a run's error that quotes one, would otherwise carry an instruction no one sees.
  */
 function flat(s: string): string {
-  const out = s.replace(/[\s\x00-\x1f\x7f]+/g, ' ').trim();
+  const out = stripHidden(s).replace(/[\s\x00-\x1f\x7f]+/g, ' ').trim();
   return out.length > MAX_ERR ? `${out.slice(0, MAX_ERR - 1)}…` : out;
 }
 
