@@ -679,7 +679,7 @@ describe('Task Tools', () => {
         taskCreateTool.handler({ title: `On ${id}`, assignee: 'lynox', workflow_id: id, schedule: '0 9 * * 1' }, makeAgent(undefined, by));
       const scheduled = (id: string): boolean => tm.listTriggers({}).some((x) => x.pipeline_id === id);
 
-      expect(await schedule('wf-other', mandate)).toMatch(/^Error: workflow wf-other: Not scheduled: another person with delegated access/);
+      expect(await schedule('wf-other', mandate)).toMatch(/^Error: workflow wf-other: Not scheduled: this workflow holds steps another person with delegated access/);
       expect(await schedule('wf-taken', mandate)).toMatch(/^Error: workflow wf-taken: Not scheduled/);
       expect(scheduled('wf-other')).toBe(false);
       expect(scheduled('wf-taken')).toBe(false);
@@ -688,6 +688,36 @@ describe('Task Tools', () => {
       // The owner schedules any workflow.
       expect(await schedule('wf-other', OWNER_PRINCIPAL)).toContain('Workflow task created');
       expect(scheduled('wf-other')).toBe(true);
+    });
+
+    // What the refusal advises (ux U-085): a newly written workflow is the mandate's own; a copy of
+    // the other's carries its mark and is refused like it; a change makes it the mandate's own,
+    // which is why the text advises against it rather than calling it a dead end.
+    it('task_create: a new workflow is the mandate\'s, a copy of another\'s is not, a change makes it its own', async () => {
+      const other: RequestPrincipal = { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' };
+      const wf = (id: string) => ({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true });
+      const save = (id: string, by: RequestPrincipal | null, copiedFrom?: string): void => {
+        history.insertPlannedPipeline(wf(id), by, copiedFrom);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      save('wf-theirs', other);
+      save('wf-written', mandate);
+      save('wf-copied', mandate, 'wf-theirs');
+      save('wf-changed', other);
+      save('wf-changed', mandate);
+      const schedule = (id: string): Promise<string> =>
+        taskCreateTool.handler({ title: `On ${id}`, assignee: 'lynox', workflow_id: id, schedule: '0 9 * * 1' }, makeAgent(undefined, mandate));
+      expect(await schedule('wf-written')).toContain('Workflow task created');
+      expect(await schedule('wf-copied')).toMatch(/^Error: workflow wf-copied: Not scheduled: this workflow holds steps/);
+      expect(await schedule('wf-changed')).toContain('Workflow task created');
+      expect(await schedule('wf-theirs')).toMatch(/^Error: workflow wf-theirs: Not scheduled/);
+    });
+
+    it('task_create refuses a mandate a workflow it cannot find, and lets the owner through to the worker', async () => {
+      expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate)))
+        .toMatch(/^Error: workflow wf-nowhere: Not scheduled: lynox could not read who set up this workflow/);
+      expect(tm.listTriggers({}).some((x) => x.title === 'Ghost')).toBe(false);
+      expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent())).not.toMatch(/Not scheduled/);
     });
 
     it('control: a mandate\'s task_create assigned to lynox makes a schedule', async () => {

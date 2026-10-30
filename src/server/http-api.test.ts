@@ -1847,7 +1847,7 @@ describe('LynoxHTTPApi', () => {
         author = 'mandate:jan@example.invalid';
         const foreign = await post();
         expect(foreign.status).toBe(403);
-        expect(((await foreign.json()) as { error: string }).error).toMatch(/^Not scheduled: another person with delegated access/);
+        expect(((await foreign.json()) as { error: string }).error).toMatch(/^Not scheduled: this workflow holds steps another person with delegated access/);
         author = undefined;
         expect((await post()).status).toBe(403);
         author = 'throws';

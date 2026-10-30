@@ -143,16 +143,21 @@ export async function planOfTrigger(
 }
 
 export const FOREIGN_WORKFLOW_SCHEDULE_REFUSAL =
-  'Not scheduled: another person with delegated access set up or last changed this workflow, so only they or the owner may schedule it.';
+  'Not scheduled: this workflow holds steps another person with delegated access set up or last changed, so only they or the owner may schedule it. '
+  + 'To schedule this task yourself, describe in chat what it should do and ask lynox to write a new workflow for it instead of copying or changing this one, '
+  + 'since a change would change it for that person too; a newly written workflow is yours. Otherwise ask the owner to schedule this one.';
 export const UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL =
-  'Not scheduled: could not read who set up this workflow.';
+  'Not scheduled: lynox could not read who set up this workflow, so only the owner may schedule it. '
+  + 'Ask the owner to schedule it, or describe in chat what it should do and ask lynox to write a new workflow for it; a newly written workflow is yours.';
 
 /**
  * Why `principal` may not put a schedule on the workflow `workflowId` (its exact id), or null when
- * it may. A schedule on a workflow acts for whichever of the two changed last (`planMembers`), so a
- * mandate's schedule on a workflow another mandate set up or last changed would let its runs act
- * for that other mandate. The owner may schedule any workflow; a mandate its own and the owner's.
- * A workflow whose authorship cannot be read is refused to anyone but the owner.
+ * it may. A schedule on a workflow ties the mandates of both into one plan, which acts for whichever
+ * of the two changed last (`planMembers`): a later change to the workflow by the other mandate moves
+ * the schedule's runs to that mandate. Refused here is the tie itself. The owner may schedule any
+ * workflow; a mandate its own, the owner's, and one it changed last (its change made it its own). A
+ * copy carries its source's mark (`WorkflowStore.upsertCopy`), so it is refused like the source. A
+ * workflow whose authorship cannot be read is refused to anyone but the owner.
  */
 export function foreignWorkflowScheduleRefusal(principal: RequestPrincipal, workflowId: string, runHistory: RunHistory | null | undefined): string | null {
   if (isOwnerPrincipal(principal)) return null;
