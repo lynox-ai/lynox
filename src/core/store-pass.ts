@@ -141,8 +141,8 @@ const asciiTrim = (value: string): string => value.replace(/^[ \t]+|[ \t]+$/g, '
  * the store decodes it, names and values. The body check reads the body as JSON in UTF-8, so a
  * body sent compressed, or labelled as anything other than one of {@link JSON_CONTENT_TYPES}, is
  * refused: a form type would let the store read the same bytes as a query, and a charset as other
- * text. A body with no `Content-Type` is refused as well ({@link storePassBodyRefusal}): Rack reads
- * a POST without one as a form.
+ * text. A body with no `Content-Type` is refused as well ({@link storePassBodyRefusal}): a server
+ * may read a POST without one as a form (Rack does).
  */
 function credentialRequestRefusal(url: URL, headers: Record<string, string>): string | null {
   if (url.search !== '') {
