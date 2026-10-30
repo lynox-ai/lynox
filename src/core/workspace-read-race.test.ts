@@ -13,9 +13,10 @@ import { AreaRefusal, areaTarget, readAreaText } from './file-area-anchor.js';
 
 /**
  * In sidecar mode a pool uid can write the workspace while the engine reads it. Here a second
- * process does what such a uid could do: it keeps turning a path into a link to a file outside
- * the workspace and back, as fast as it can, while this process reads that path the way the
- * download route does (`areaTarget` + `openAreaFile`, here through `readAreaText`). The read must
+ * process does what such a uid could do (here under the same uid; refusing a link does not depend
+ * on who made it): it keeps turning a path into a link to a file outside the workspace and back,
+ * as fast as it can, while this process reads that path through `readAreaText`. That is the read
+ * route's code, and its open (`areaTarget` + `openAreaFile`) is the download route's. The read must
  * never return the outside file. That both other outcomes occur (the inside content, and a
  * refusal of the link) shows the two processes did meet; without them the test proves nothing.
  */
@@ -58,9 +59,11 @@ async function race(mode: 'leaf' | 'dir', ctxDir: string, outside: string, readP
   const child = spawn(process.execPath, ['-e', SWAPPER, mode, ctxDir, outside, String(READ_MS + 1000)], { stdio: ['ignore', 'pipe', 'inherit'] });
   let out = '';
   child.stdout.setEncoding('utf8');
+  // 'close', not 'exit': only then has all of the child's output been read.
+  const closed = new Promise<number | null>((res) => child.on('close', res));
   await new Promise<void>((res, rej) => {
     child.stdout.on('data', (s: string) => { out += s; if (out.includes('go\n')) res(); });
-    child.on('exit', (code) => rej(new Error(`swapper exited early (${code})`)));
+    void closed.then((code) => rej(new Error(`swapper exited early (${code})`)));
   });
   const tally: Tally = { inside: 0, secret: 0, link: 0, missing: 0, other: [] };
   const end = Date.now() + READ_MS;
@@ -76,11 +79,7 @@ async function race(mode: 'leaf' | 'dir', ctxDir: string, outside: string, readP
       else tally.other.push(String(err));
     }
   }
-  const code = await new Promise<number | null>((res) => {
-    if (child.exitCode !== null) res(child.exitCode);
-    else { child.removeAllListeners('exit'); child.on('exit', res); }
-  });
-  expect(code).toBe(0);
+  expect(await closed).toBe(0);
   const swaps = Number(/swaps (\d+)/.exec(out)?.[1] ?? '0');
   return { tally, swaps };
 }
