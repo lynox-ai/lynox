@@ -493,6 +493,89 @@ export function bulkRollbackText(run: Pick<BulkRun, 'phase' | 'haltKey'>, i18n: 
 	return { cause: i18n.t(`bulk.halt.${key}`), incomplete };
 }
 
+/** The halts that end an unapproved run before it wrote anything: another judged run took its
+ *  place, or the access that planned it ended. Both leave the run aborted. */
+const BULK_ENDED_UNAPPROVED = new Set(['superseded', 'mandateEnded']);
+
+/** The label key of the button that starts a run waiting for its start, exactly as the page
+ *  shows it; null where the page shows no button (a judge it cannot use, or a list or judge
+ *  the run lacks the data to show). */
+export function bulkStartButtonKey(
+	run: Pick<BulkRunDetailData, 'listFirstPage' | 'judgeServedBy' | 'judgeRule'>,
+	kind: BulkStartKind | null,
+	supersedable: boolean,
+): string | null {
+	if (kind === 'read') return 'bulk.start.read';
+	if (kind === 'list') return run.listFirstPage ? 'bulk.start.list' : null;
+	if (kind === 'judge') return run.judgeServedBy && run.judgeRule ? (supersedable ? 'bulk.start.supersede_yes' : 'bulk.start.judge') : null;
+	return null;
+}
+
+/** The page's own sentences for the halts that neither a restart nor writing on moves past: a
+ *  run waiting for its start, one at a probe it may not write past yet, and one ended before it
+ *  was approved. `cause` replaces the engine's reason; `step` says what the owner does next.
+ *  `startButton`: the label of the start button the page shows ({@link bulkStartButtonKey}),
+ *  null when it shows none. Null on any other halt. */
+export function bulkStateText(
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>,
+	startButton: string | null,
+	i18n: BulkI18n,
+): { cause: string; step: string | null } | null {
+	const key = run.haltKey;
+	if (key === null) return null;
+	if (bulkWaitsForStart(run)) {
+		if (startButton !== null) return { cause: i18n.tf(`bulk.halt.${key}_start`, { button: startButton }), step: null };
+		// No button: a judge the run cannot use has its note on the page; a judge it can use but
+		// no button means the rule went only to the owner, and someone else is looking.
+		return { cause: i18n.t(bulkStartKind(run) === 'judge' ? 'bulk.halt.wait_owner_only' : 'bulk.halt.wait_no_start'), step: null };
+	}
+	// Set only while writing (bulk-apply), where the probe panel can stand.
+	if (key === 'probeRequired' && run.phase === 'writing') {
+		// The probe panel stands only where the server offers a probe confirming can file.
+		return { cause: i18n.t('bulk.halt.probeRequired'), step: i18n.t(bulkAtProbe(run) ? 'bulk.halt.probeRequired_confirm' : 'bulk.halt.probeRequired_replan') };
+	}
+	if (run.phase === 'aborted' && BULK_ENDED_UNAPPROVED.has(key)) return { cause: i18n.t(`bulk.halt.${key}`), step: null };
+	return null;
+}
+
+/** What the page says under "halted because": its own sentence where it has one, else the
+ *  engine's reason. `startButton` as for {@link bulkStateText}. */
+export function bulkHaltCause(
+	run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0] & Parameters<typeof bulkStateText>[0],
+	managed: boolean | null,
+	startButton: string | null,
+	i18n: BulkI18n,
+): string {
+	if (bulkAtProbe(run) && run.haltKey === 'maxTargets') return i18n.t('bulk.halted_after_probe');
+	const own = bulkHaltText(run, managed, i18n)?.cause ?? bulkResumeText(run, managed, i18n)?.cause ?? bulkRollbackText(run, i18n)?.cause;
+	if (own !== undefined) return own;
+	const state = bulkStateText(run, startButton, i18n);
+	if (state !== null) return state.step === null ? state.cause : `${state.cause} ${state.step}`;
+	return run.haltReason ?? '';
+}
+
+/** The address the support halts point to. */
+export const BULK_SUPPORT_EMAIL = 'support@lynox.ai';
+
+/** The halts whose sentence on a managed instance sends the owner to support. */
+const BULK_SUPPORT_HALTS = new Set(['blocked', 'shopifyWriteOff']);
+
+/** A `mailto:` link to support for a halt whose sentence names support, with a subject naming
+ *  the run and its host and nothing else from the run; null on any other halt, on a
+ *  self-hosted instance, and where the page shows no such sentence. */
+export function bulkSupportMailto(
+	run: Pick<BulkRunDetailData, 'id' | 'phase' | 'haltKey' | 'targetSystem' | 'probe' | 'haltReason' | 'probeConfirmed' | 'maxTargets' | 'changes' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>,
+	managed: boolean | null,
+	i18n: BulkI18n,
+): string | null {
+	if (managed === false || run.haltKey === null || !BULK_SUPPORT_HALTS.has(run.haltKey)) return null;
+	// The sentence stands with the way on: a restart for a planned run, writing on for one that wrote.
+	const shown = run.phase === 'planned' ? bulkRestartKind(run) !== null : bulkResumeKind(run) !== null;
+	if (!shown) return null;
+	const subject = i18n.tf('bulk.halt.support_subject', { run: run.id, host: bulkSystemName(run.targetSystem, i18n) });
+	return `mailto:${BULK_SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}`;
+}
+
 /** Whether an atomic run's rollback did not complete, so the page has targets to mark. The page
  *  then loads every target: a mark on a page the owner never opens would not be seen. */
 export function bulkRollbackIncomplete(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
