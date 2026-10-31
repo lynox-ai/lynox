@@ -273,7 +273,7 @@ const OPEN_AT_END = new Set(['p', 'ul', 'ol', 'li', 'h2', 'h3', 'h4']);
  * So a mark is appended and must come out as the last node of the tree, below allowed blocks
  * only; and a form appended must come out as a form, which it does not while one is still open.
  */
-function endsClosed(value: string): boolean {
+export function endsClosed(value: string): boolean {
   const count = (tree: HtmlFragment, name: string): number => {
     let n = 0;
     for (const [c] of descendants(tree, false)) if (isElement(c) && c.tagName === name && c.attrs.length === 0) n++;

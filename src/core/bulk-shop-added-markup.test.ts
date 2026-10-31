@@ -349,6 +349,14 @@ describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.
     expect(sameValue({ description: '<p>Neu</p>' }, { description: '<p class="x">Neu</p>' }, html)).toBe(false);
   });
 
+  it('compares a field open at its end byte for byte: the page closes what the parser drops', () => {
+    const html = ['description'];
+    expect(sameValue({ description: '<p>a</p>' }, { description: '<p>a</p><img src=x onerror=y' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>a</p><img src=x onerror=y' }, { description: '<p>a</p>' }, html)).toBe(false);
+    // The same value open at its end is equal to itself, byte for byte.
+    expect(sameValue({ description: '<p>a' }, { description: '<p>a' }, html)).toBe(true);
+  });
+
   it('keeps every other field byte for byte, and a field one side lacks as a difference', () => {
     expect(sameValue({ description: '<p>a</p>', name: '<b>x</b>' }, { description: '<p>a</p>', name: '<B>x</B>' }, ['description'])).toBe(false);
     expect(sameValue({ description: '<p>a</p>' }, { description: '<p>a</p>', name: null }, ['description'])).toBe(false);

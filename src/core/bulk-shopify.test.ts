@@ -859,11 +859,32 @@ describe('applying a Shopify run', () => {
     fill(3);
     const id = await previewed();
     plant(id, gid(10), { descriptionHtml: '<p>x</p><script>steal()</script>' });
-    plant(id, gid(20), { descriptionHtml: '<p>y<br/></p>' });
+    plant(id, gid(20), { descriptionHtml: '<p>y<br></p>' });
     const granted = ledger.shopifyApplyOf(id)!;
     expect(granted.writes.map((w) => w.gid)).toEqual([gid(20), gid(30)]);
     // Left out of the writes only: its read stays granted, so the apply reads it and halts on the refused request.
     expect(granted.reads).toEqual([gid(10), gid(20), gid(30)]);
+  });
+
+  it('mints no write for a description that is not the bytes the check read: a tag the parser drops, a non-canonical form', async () => {
+    fill(2);
+    const id = await previewed();
+    // The parser drops a `<body>` and its attributes from a fragment: the check sees `<p>neu</p>`, the page runs the handler.
+    plant(id, gid(10), { descriptionHtml: '<body onload=alert(1)><p>neu</p>' });
+    plant(id, gid(20), { descriptionHtml: '<p>y<br/></p>' });
+    expect(ledger.shopifyApplyOf(id)!.writes).toEqual([]);
+  });
+
+  it('checks a product run\'s description when its list form is not found', async () => {
+    fill(1);
+    const id = await previewed();
+    plant(id, gid(10), { descriptionHtml: '<p>x</p><script>steal()</script>' });
+    // No list form up the family, and a stored contract whose methods name one write verb: the
+    // run's own form reads as none, yet its product's description is still HTML.
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET list_source = NULL, contract_json = ? WHERE id = ?`)
+      .run(JSON.stringify({ httpMethods: ['GET', 'HEAD'] }), id);
+    expect(ledger.htmlFieldsOf(id)).not.toContain('descriptionHtml');
+    expect(ledger.shopifyApplyOf(id)!.writes).toEqual([]);
   });
 
   it('mints an undo\'s description only as its source\'s before-image, byte for byte', async () => {

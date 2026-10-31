@@ -24,8 +24,8 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, prin
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
-import { checkMarkup, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
-import { htmlEqual } from './html-tree.js';
+import { checkMarkup, endsClosed, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
+import { canonicalHtml, htmlEqual } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
@@ -870,8 +870,10 @@ export function canonicalJson(value: unknown): string {
  * Whether two values are the same, byte for byte over canonical JSON — except a run's HTML fields
  * (`htmlFieldsOf`) of two objects, compared under `htmlEqual` where both sides are text (PRD
  * shopify-preset §21.2 item 5): a store re-serialises a description, so its reformatting is no
- * change, while one changed character, element or attribute still is. A field one side holds and
- * the other does not differs; every other field stays byte-equal.
+ * change, while one changed character, element or attribute still is. Only where both sides end
+ * closed (`endsClosed`): the parser drops a tag or attribute left open at the end, which the page
+ * then closes live, so an open end compares byte for byte. A field one side holds and the other
+ * does not differs; every other field stays byte-equal.
  */
 export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] = []): boolean {
   const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -880,7 +882,8 @@ export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] 
     if (Object.hasOwn(a, k) !== Object.hasOwn(b, k)) return false;
     const x = a[k];
     const y = b[k];
-    const same = htmlFields.includes(k) && typeof x === 'string' && typeof y === 'string' ? htmlEqual(x, y) : canonicalJson(x) === canonicalJson(y);
+    const same = htmlFields.includes(k) && typeof x === 'string' && typeof y === 'string' && endsClosed(x) && endsClosed(y)
+      ? htmlEqual(x, y) : canonicalJson(x) === canonicalJson(y);
     if (!same) return false;
   }
   return true;
@@ -2326,7 +2329,8 @@ export class BulkLedger {
     const rows = this.engineDb.getDb().prepare(
       `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL} ORDER BY seq`,
     ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
-    const html = form === 'shopify_product' ? this.htmlFieldsOf(runId) : [];
+    // `descriptionHtml` always on the product form, whatever list form is found (fail-closed).
+    const html = form === 'shopify_product' ? [...new Set([...this.htmlFieldsOf(runId), 'descriptionHtml'])] : [];
     const reads: string[] = [];
     const writes: ShopifyWrite[] = [];
     for (const r of rows) {
@@ -2381,7 +2385,9 @@ export class BulkLedger {
       const value = after[f];
       const was = prior[f];
       if (value === was) return true;
-      if (typeof value !== 'string') return false;
+      // Canonical bytes: the parser drops what it cannot place (a `<body onload>`), so a value the
+      // check passes must also be the bytes it reads.
+      if (typeof value !== 'string' || canonicalHtml(value) !== value) return false;
       return checkMarkup({ before: typeof was === 'string' ? was : null, after: value, storeHost: host, startDomains }).ok;
     });
   }
