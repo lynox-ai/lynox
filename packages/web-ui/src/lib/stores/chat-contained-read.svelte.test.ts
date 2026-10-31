@@ -92,8 +92,15 @@ describe('a chat the engine does not let this reader read', () => {
 		expect(store.getChatError()).not.toBeNull();
 	});
 
-	it('a read refused after the chat opened shows the same reason', async () => {
-		// The chat became contained between opening and reading it.
+	it('a read refused after the chat opened shows the same reason, and not the kept copy', async () => {
+		// The chat became contained between opening and reading it; the page shows its saved copy
+		// while it opens.
+		const kept: Record<string, string> = { 'lynox-chat': JSON.stringify({ sessionId: 'shop', threads: { shop: [{ role: 'user', content: 'Order 1042 for Jane' }] } }) };
+		vi.stubGlobal('localStorage', {
+			getItem: (k: string) => kept[k] ?? null, setItem: (k: string, v: string) => { kept[k] = v; }, removeItem: (k: string) => { delete kept[k]; },
+		});
+		vi.resetModules();
+		store = await import('./chat.svelte.js');
 		serve((url) => (url.includes('/threads/shop/messages') ? refused('contained_thread') : undefined));
 
 		await store.resumeThread('shop');
