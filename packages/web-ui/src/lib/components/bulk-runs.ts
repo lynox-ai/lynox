@@ -27,6 +27,8 @@ export interface BulkRun {
 	/** Targets not written because an earlier send reached them without a clear answer; the
 	 *  engine does not send to them again. */
 	sentUnknown: number;
+	/** Written targets the store kept with markup lynox did not send. Optional: an older engine sends none. */
+	shopAddedMarkup?: number | undefined;
 	undone: number;
 	kind: 'apply' | 'undo';
 	atomic: boolean;
@@ -165,7 +167,7 @@ export function bulkHaltText(
 /** A write run's halts that writing on moves on from, each with its own sentence on the page. */
 const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
-	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff',
+	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff', 'markupAddedByShop',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
@@ -214,6 +216,7 @@ export function bulkResumeText(
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
+		: key === 'markupAddedByShop' ? 'bulk.halt.markupAddedByShop_before'
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, kept: null, soFar: null, allows: null };
@@ -402,6 +405,9 @@ export interface BulkTarget {
 	written?: boolean | undefined;
 	/** A rollback or an undo took this run's write back. */
 	undone?: boolean | undefined;
+	/** Written, and the store kept it with markup lynox did not send: the target the halt
+	 *  `markupAddedByShop` is about. Set only where it holds. */
+	shopAddedMarkup?: true | undefined;
 }
 
 /** The external host of a run's target system, or null for a local run. */
@@ -610,7 +616,7 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	list_item_mismatch: 'list_item_mismatch',
 	list_item_truncated: 'list_item_truncated',
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
-	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char',
+	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', shop_added_markup: 'shop_added_markup',
 };
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
