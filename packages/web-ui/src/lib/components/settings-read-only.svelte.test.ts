@@ -123,6 +123,7 @@ describe('LLMMemoryView', () => {
 		await render(load, config('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('llm.save'));
 		expect(rows()).toEqual([line(t('config.memory_extraction'), t('settings.value_on')), line(t('config.memory_half_life'), '45')]);
 	});
@@ -142,6 +143,7 @@ describe('WorkspaceUpdatesView', () => {
 		await render(load, config('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([line(t('system.update_label'), t('settings.value_on'))]);
 	});
@@ -160,6 +162,7 @@ describe('SystemSettings', () => {
 		await render(load, routes('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([line(t('system.update_label'), t('settings.value_off'))]);
 		expect(buttonTexts()).not.toContain(t('system.vault_reveal'));
@@ -183,6 +186,7 @@ describe('WorkspaceLimitsView', () => {
 		await render(load, config('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('cost_limits.save'));
 		expect(rows()).toEqual([
 			line(t('config.monthly_limit'), '50'),
@@ -209,6 +213,7 @@ describe('PrivacyDataSettings', () => {
 		await render(load, config('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([line(t('privacy.bugsink_label'), t('settings.value_off')), line(t('privacy.wire_capture_label'), t('settings.value_on'))]);
 		expect(buttonTexts()).not.toContain(t('privacy.delete_button'));
@@ -232,6 +237,7 @@ describe('ToolToggles', () => {
 		await render(load, routes('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([line('web_research', t('settings.value_on')), line('bash', t('settings.value_off'))]);
 	});
@@ -259,6 +265,7 @@ describe('VoiceSettings', () => {
 		await render(load, routes('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('voice.save'));
 		expect(rows()).toEqual([
 			line(t('voice.stt_heading'), 'Mistral Voxtral (Paris, EU)'),
@@ -286,6 +293,7 @@ describe('BackupsView', () => {
 		await render(load, routes('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([line(t('config.backup_retention'), '14'), line(t('config.backup_encrypt'), t('settings.value_on'))]);
 		expect(buttonTexts()).toEqual([]);
@@ -327,6 +335,7 @@ describe('NotificationsSettings', () => {
 		await render(load, routes('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([
 			line(t('integrations.push_inbox_toggle'), t('settings.value_on')),
@@ -382,6 +391,7 @@ describe('SearchSettings', () => {
 		await render(load, routes('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('settings.save'));
 		// The owner entered the URL; a mandate reads where it points, not its credentials or query.
 		expect(rows()).toEqual([line(t('integrations.searxng_label'), 'http://searx.internal:8888')]);
@@ -409,6 +419,7 @@ describe('LLMAdvancedView', () => {
 		await render(load, config('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('llm.save'));
 		expect(rows()).toEqual([
 			line(t('config.effort'), t('config.effort_medium')),
@@ -458,6 +469,7 @@ describe('LLMSettings', () => {
 		await render(load, routes('mandate'));
 		// Here, in the test body: the notice is what a mandate's page shows first.
 		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('llm.save'));
 		expect(rows()).toEqual([
 			line(t('llm.preset.heading'), t('llm.preset.standard')),
