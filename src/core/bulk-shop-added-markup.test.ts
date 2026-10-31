@@ -9,6 +9,7 @@ import { externalWriter, mintBulkContract, type ExternalClient, type ExternalIma
 import { parseListSource } from './bulk-list.js';
 import { markupAddedByHost } from './bulk-html.js';
 import { runBulkEffect, type TargetWriter } from './bulk-apply.js';
+import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import type { BeforeImage } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
@@ -100,8 +101,8 @@ function stubWriter(store: Map<string, Record<string, unknown>>, kept: (sent: Re
   };
 }
 
-const run = (id: string, w: TargetWriter, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply') =>
-  runBulkEffect(id, effect, { ledger, trailFor: () => null, writerFor: () => w });
+const run = (id: string, w: TargetWriter, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply', notices?: BulkNotices) =>
+  runBulkEffect(id, effect, { ledger, trailFor: () => null, writerFor: () => w, notices });
 const SCRIPT = '<script>steal()</script>';
 
 describe('markupAddedByHost: what the host kept against what was sent', () => {
@@ -189,6 +190,13 @@ describe('a write the host kept with markup it was not sent (§21.2 item 6)', ()
     expect(second).not.toHaveProperty('shopAddedMarkup');
     const row = engineDb.getDb().prepare('SELECT after_actual FROM bulk_targets WHERE run_id = ? AND seq = ?').get(id, first!.seq) as { after_actual: string };
     expect(JSON.parse(engineDb.dec(row.after_actual))).toEqual({ value: { description: `<p>Neu</p>${SCRIPT}` }, estimated: false });
+  });
+
+  it('says the halt in the instance\'s notice language', async () => {
+    const id = approvedRun({ description: '<p>Neu</p>' }, [{ description: '<p>Alt</p>' }]);
+    const store = new Map([[`${LIST}/1`, { description: '<p>Alt</p>' } as Record<string, unknown>]]);
+    const out = await run(id, stubWriter(store, (v) => ({ ...v, description: `${String(v['description'])}${SCRIPT}` })), 'bulk_apply', BULK_NOTICES.de);
+    expect(out.summary.startsWith(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.markupAddedByShop))).toBe(true);
   });
 
   it('keeps the mark when another halt overwrites the reason', async () => {

@@ -101,6 +101,12 @@ export interface RenderedUsage {
    *  opt-in diagnostics panel survives a thread resume. */
   runId?: string;
   durationMs?: number;
+  /** The run's requests to APIs with a cost (see `RunUsageSummary.apiCalls`), so a reloaded
+   *  thread shows the same count and cost as the live one. */
+  apiCalls?: number;
+  apiCostUsd?: number;
+  apiCostEstimated?: boolean;
+  apiCallsUnpriced?: number;
 }
 
 /** Structured failure-note marker (B-full). The engine persists this as the
@@ -287,6 +293,16 @@ function parseUsage(raw: string | null): RenderedUsage | undefined {
     // the footer tooltip.
     if (typeof u['spawnCostUsd'] === 'number' && u['spawnCostUsd'] > 0) {
       usage.spawnCostUsd = u['spawnCostUsd'];
+    }
+    // Only with a positive whole count: the writer omits the keys for a run that sent none.
+    const calls = u['apiCalls'];
+    if (typeof calls === 'number' && Number.isInteger(calls) && calls > 0) {
+      usage.apiCalls = calls;
+      const usd = u['apiCostUsd'];
+      usage.apiCostUsd = typeof usd === 'number' && Number.isFinite(usd) && usd >= 0 ? usd : 0;
+      usage.apiCostEstimated = u['apiCostEstimated'] === true;
+      const unpriced = u['apiCallsUnpriced'];
+      usage.apiCallsUnpriced = typeof unpriced === 'number' && Number.isInteger(unpriced) && unpriced > 0 ? Math.min(unpriced, calls) : 0;
     }
     return usage;
   } catch {

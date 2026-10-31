@@ -295,6 +295,10 @@ export interface ApiProfile {
     rate_usd: number;
     /** For per_token, ratio between input and output tokens (often ~3:1). */
     output_ratio?: number | undefined;
+    /** Where the API's answer states what the request cost, in USD: a dot path into the JSON
+     *  answer (`cost`, `tasks.0.cost`). Read before `response_shape`. When the answer gives a
+     *  number there, it is the request's cost; otherwise `rate_usd` stands, as an estimate. */
+    response_field?: string | undefined;
   } | undefined;
 
   /** Provenance — audit + refresh trigger. Presence of `schema_version: 2` marks a v2 profile. */

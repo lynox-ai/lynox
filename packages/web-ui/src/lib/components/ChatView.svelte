@@ -2378,10 +2378,10 @@
 						title={t('chat.footer_tokens_tooltip')}
 					>{formatTurnTokens(usage)}</span><span class="sr-only">{t('chat.footer_tokens_tooltip')}</span>
 					{#each formatUsageMetaParts(usage, !getDemoMode()) as part}
-						<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{#if part.title}<span
+						<span class={part.ownLineWhenNarrow ? 'hidden sm:contents' : 'contents'}><span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{#if part.title}<span
 								class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
 								title={part.title}
-							>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}
+							>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}</span>
 					{/each}
 				{/if}
 			</div>
@@ -2400,6 +2400,16 @@
 			{/if}
 		</div>
 	</div>
+	<!-- A part too important to be swiped out of view (the run's API calls, ux U-096) gets its own
+	     line under the stats on a narrow screen; from `sm` it sits in the row above. -->
+	{#if usage && !isStreamingMsg}
+		{#each formatUsageMetaParts(usage, !getDemoMode()).filter((p) => p.ownLineWhenNarrow) as part}
+			<div class="sm:hidden mt-0.5 text-[11px] font-mono text-text-subtle">{#if part.title}<span
+					class="cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
+					title={part.title}
+				>{part.text}</span><span class="sr-only">{part.title}</span>{:else}{part.text}{/if}</div>
+		{/each}
+	{/if}
 	<!-- Diagnostics panel: opt-in (Advanced metrics setting), never on demo
 	     tenants. Token breakdown + finish reason + iterations are live-only;
 	     duration / tok-s / run-id persist via usage_json and survive a reload. -->

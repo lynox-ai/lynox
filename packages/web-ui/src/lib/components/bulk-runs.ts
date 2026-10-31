@@ -622,6 +622,11 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
 	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', shop_added_markup: 'shop_added_markup',
 };
+/** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
+ *  of tags the page reads, whose way out differs from planning again (U-103). */
+const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
+	markup_dropped: 'markup_dropped', markup_dropped_before: 'markup_dropped_before',
+};
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
 export const BULK_DESELECT_REFUSALS: readonly string[] = ['atomic_undo', 'not_writing', 'not_taken_out'];
@@ -634,6 +639,10 @@ const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
  *  lynox does not change it, and the next step; elsewhere the reason by its code and the step
  *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
 export function bulkInvalidText(reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n): string {
+	const anyForm = BULK_INVALID_ANY_FORM[reason];
+	if (anyForm !== undefined) {
+		return i18n.tf(`bulk.invalid.${anyForm}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
+	}
 	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
 	if (key === undefined) return i18n.tf('bulk.invalid.other', { code: bulkVisibleText(reason) });
 	const support = BULK_INVALID_SUPPORT[key];

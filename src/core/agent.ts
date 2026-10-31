@@ -113,10 +113,10 @@ import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-pr
 import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
-import { callFiledOf, currentCallFiling, currentCallSignal, grantLiftOf, noteCallFiled, runInCallSlot, trackCallAnswer, type CallContract, type CallFiled, type GrantLift } from './call-connection.js';
+import { apiCostOf, callFiledOf, currentCallFiling, currentCallSignal, grantLiftOf, noteCallFiled, runInCallSlot, trackCallAnswer, type CallApiCost, type CallContract, type CallFiled, type GrantLift } from './call-connection.js';
 
 /** What a call's row carries beyond its outcome (PRD 3f-1b-α §2.1). */
-interface CallFacts { contract: CallContract; grant?: GrantLift; filed?: CallFiled }
+interface CallFacts { contract: CallContract; grant?: GrantLift; filed?: CallFiled; apiCost?: CallApiCost }
 import { MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, STOPPED_MESSAGE, notQueuedMessage, queuedMessage, storeFailedMessage, type ApprovalFilingContext, type FilingOutcome } from './approval-filing.js';
 import { approvalQueueEnabled, type ApprovalFiling } from './approval-store.js';
 import { inSessionPromptChain } from './prompt-chain.js';
@@ -1083,17 +1083,20 @@ export class Agent implements IAgent {
     return taken;
   }
 
-  /** What a call's row carries beyond its outcome: the contract, the lift and the filing. */
+  /** What a call's row carries beyond its outcome: the contract, the lift, the filing and the API request it sent. */
   private _factsOfCall(tc: BetaToolUseBlock, slot: CallSlot): CallFacts {
     const grant = grantLiftOf(slot);
     const filed = callFiledOf(slot);
-    return { contract: this._contractOfCall(tc), ...(grant !== undefined ? { grant } : {}), ...(filed !== undefined ? { filed } : {}) };
+    const apiCost = apiCostOf(slot);
+    return { contract: this._contractOfCall(tc), ...(grant !== undefined ? { grant } : {}), ...(filed !== undefined ? { filed } : {}), ...(apiCost !== undefined ? { apiCost } : {}) };
   }
 
-  /** The part of {@link _factsOfCall} the result event adds; `grant` already rides on it. */
-  private _eventFactsOfCall(tc: BetaToolUseBlock, slot: CallSlot): { contract: CallContract; filed?: CallFiled } {
+  /** The part of {@link _factsOfCall} the result event adds; `grant` already rides on it. The step
+   *  recorder builds a workflow step's row from this event, so the API request rides on it too. */
+  private _eventFactsOfCall(tc: BetaToolUseBlock, slot: CallSlot): { contract: CallContract; filed?: CallFiled; apiCost?: CallApiCost } {
     const filed = callFiledOf(slot);
-    return { contract: this._contractOfCall(tc), ...(filed !== undefined ? { filed } : {}) };
+    const apiCost = apiCostOf(slot);
+    return { contract: this._contractOfCall(tc), ...(filed !== undefined ? { filed } : {}), ...(apiCost !== undefined ? { apiCost } : {}) };
   }
   /** Wave 1.2: mark this run tainted (spawn propagates a shared-Memory child's taint here).
    *  Also arms the sticky conversation latch (DK.1 F5). */

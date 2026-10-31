@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +11,9 @@ import type { NotificationChannel, NotificationMessage } from './notification-ro
 import { currentRunGroup, openRunGroup } from './run-group.js';
 import { listScopeOf } from './approval-view.js';
 import type { LynoxConfig } from '../types/config.js';
+
+// The notice language reads the control plane's markers from the env; no test leaks its own.
+afterEach(() => { vi.unstubAllEnvs(); });
 
 // Every filed entry sends one push to the owner's devices and, when a mandate's run filed it, one to
 // that grant's devices only, each with its own fixed sentence, none with a value from the entry, and
@@ -51,7 +54,7 @@ function recordingRouter(): { notify: (msg: NotificationMessage) => Promise<neve
 describe('the approval push', () => {
   it('sends the owner and the filing grant each a fixed sentence, one tag per side, no values', () => {
     const router = recordingRouter();
-    createApprovalNotifier({ router, enabled: () => true, now: () => T0 })(entry('entry-1', 'mail_reply'));
+    createApprovalNotifier({ router, enabled: () => true, now: () => T0, language: () => 'de' })(entry('entry-1', 'mail_reply'));
     expect(router.sent).toEqual([
       { title: 'lynox', body: 'Eine Mail wartet auf deine Freigabe', priority: 'normal', taskId: 'lynox-approval-queue', audience: 'owner', data: { approvals: '1' } },
       { title: 'lynox', body: 'Deine Mail wartet auf die Freigabe des Inhabers.', priority: 'normal', taskId: 'lynox-approval-queue-mandate', audience: 'mandates', mandateId: 'grant-1' },
@@ -114,7 +117,7 @@ describe('the approval push', () => {
     expect(router.sent.slice(1).map((m) => [m.audience, m.mandateId])).toEqual([['owner', undefined]]);
   });
 
-  it('speaks English to an instance set to English, German to any other, and reads it per round', () => {
+  it('speaks English to an instance set to English and German to one set to German, and reads it per round', () => {
     const router = recordingRouter();
     let language: string | undefined = 'en';
     let now = T0;
@@ -124,16 +127,37 @@ describe('the approval push', () => {
       { title: 'lynox', body: 'An email is waiting for your approval.', priority: 'normal', taskId: 'lynox-approval-queue', audience: 'owner', data: { approvals: '1' } },
       { title: 'lynox', body: "Your email is waiting for the owner's approval.", priority: 'normal', taskId: 'lynox-approval-queue-mandate', audience: 'mandates', mandateId: 'grant-1' },
     ]);
-    language = ' EN ';
-    now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
-    notify(entry('entry-2', 'mail_reply'));
-    expect(router.sent.slice(2).map((m) => m.body)).toEqual(['An email is waiting for your approval.', "Your email is waiting for the owner's approval."]);
-    // Only exactly `en` is English: a regional tag or another language keeps German.
-    for (const [i, other] of (['en-US', 'fr'] as const).entries()) {
-      language = other;
-      now = T0 + (2 + i) * APPROVAL_NOTICE_MIN_GAP_MS;
-      notify(entry(`entry-${String(3 + i)}`));
-      expect(router.sent.slice(4 + 2 * i).map((m) => m.body)).toEqual([APPROVAL_NOTICE_OWNER.body, APPROVAL_NOTICE_MANDATE.body]);
+    // A regional tag counts as its language, on a provisioned instance as on a self-hosted one.
+    for (const [i, [set, provisioned, body]] of ([
+      [' EN ', true, 'An email is waiting for your approval.'],
+      ['en-US', true, 'An email is waiting for your approval.'],
+      ['de', false, APPROVAL_NOTICE_OWNER.body],
+      ['de-CH', false, APPROVAL_NOTICE_OWNER.body],
+    ] as const).entries()) {
+      language = set;
+      if (provisioned) vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-1');
+      else vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+      now = T0 + (1 + i) * APPROVAL_NOTICE_MIN_GAP_MS;
+      notify(entry(`entry-${String(2 + i)}`, 'mail_reply'));
+      expect(router.sent.slice(2 + 2 * i)[0]!.body).toBe(body);
+    }
+  });
+
+  // Without a language the instance decides: the control plane provisions German-speaking
+  // customers and sets no language, a self-hosted instance has no such default.
+  it('without a language, or with one there is no text for, speaks German on a provisioned instance and English on a self-hosted one', () => {
+    for (const language of [undefined, '', 'fr'] as const) {
+      for (const [marker, body] of [
+        ['LYNOX_MANAGED_INSTANCE_ID', APPROVAL_NOTICE_OWNER.body],
+        ['LYNOX_BILLING_TIER', APPROVAL_NOTICE_OWNER.body],
+        [undefined, 'An email is waiting for your approval.'],
+      ] as const) {
+        for (const k of ['LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE']) vi.stubEnv(k, '');
+        if (marker !== undefined) vi.stubEnv(marker, 'set');
+        const router = recordingRouter();
+        createApprovalNotifier({ router, enabled: () => true, now: () => T0, language: () => language })(entry('entry-1', 'mail_reply'));
+        expect([language, marker, router.sent[0]!.body]).toEqual([language, marker, body]);
+      }
     }
   });
 
@@ -298,7 +322,7 @@ describe('the approval push', () => {
   it('hands every caller its own copy, so a channel that edits the message cannot change the next one', () => {
     const router = recordingRouter();
     let now = T0;
-    const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now });
+    const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now, language: () => 'de' });
     notify(entry('a', 'mail_reply'));
     router.sent[0]!.data!['approvals'] = 'x';
     router.sent[1]!.body = 'x';
@@ -411,7 +435,7 @@ describe('a booted engine tells the owner of every filed entry', () => {
   }
 
   it('through the router the engine notifies with, from the store every run files into', async () => {
-    const { engine, received } = await boot('1');
+    const { engine, received } = await boot('1', 'de');
     const result = engine.getApprovalStore()!.file({ ...filing(3), createdBy: 'mandate:anna@example.com', mandateId: 'grant-5' });
     expect(result.ok).toBe(true);
     await new Promise((r) => setTimeout(r, 10));

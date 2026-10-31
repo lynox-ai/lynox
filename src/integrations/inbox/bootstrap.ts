@@ -155,6 +155,8 @@ export interface BootstrapInboxOptions {
   notificationRouter?: NotificationRouter | undefined;
   /** Override the poller cadence (tests pass small values). */
   reminderPollIntervalMs?: number | undefined;
+  /** The instance's configured language, for the reminder's title (`notice-language.ts`). */
+  language?: (() => string | undefined) | undefined;
   /**
    * RunHistory the engine keeps for the chat-session usage dashboard.
    * When wired, every classifier LLM call also lands here so the
@@ -381,6 +383,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     const pollerOpts: Parameters<typeof startReminderPoller>[0] = {
       state,
       router: opts.notificationRouter,
+      language: opts.language,
     };
     if (opts.reminderPollIntervalMs !== undefined) {
       pollerOpts.intervalMs = opts.reminderPollIntervalMs;

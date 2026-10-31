@@ -421,6 +421,36 @@ describe('projectMessages — usage', () => {
     expect(projectMessages([r])[0]?.usage).not.toHaveProperty('spawnCostUsd');
   });
 
+  it('carries the run\'s API calls through a resume', () => {
+    const r: ThreadMessageRecord = {
+      ...rec(0, 'assistant', 'keywords'),
+      usage_json: JSON.stringify({
+        tokensIn: 100, tokensOut: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.01,
+        apiCalls: 4, apiCostUsd: 0.0040, apiCostEstimated: true, apiCallsUnpriced: 1,
+      }),
+    };
+    expect(projectMessages([r])[0]?.usage).toMatchObject({ apiCalls: 4, apiCostUsd: 0.0040, apiCostEstimated: true, apiCallsUnpriced: 1 });
+  });
+
+  it('never says more calls went unpriced than were sent', () => {
+    const r: ThreadMessageRecord = {
+      ...rec(0, 'assistant', 'keywords'),
+      usage_json: JSON.stringify({ tokensIn: 100, tokensOut: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.01, apiCalls: 2, apiCostUsd: 0, apiCallsUnpriced: 9 }),
+    };
+    expect(projectMessages([r])[0]?.usage?.apiCallsUnpriced).toBe(2);
+  });
+
+  it('omits the API calls for a run that sent none, and drops a count that is not a positive whole number', () => {
+    for (const apiCalls of [undefined, 0, -1, 1.5, '4']) {
+      const r: ThreadMessageRecord = {
+        ...rec(0, 'assistant', 'solo'),
+        usage_json: JSON.stringify({ tokensIn: 100, tokensOut: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.01, apiCalls, apiCostUsd: 0.36 }),
+      };
+      expect(projectMessages([r])[0]?.usage).not.toHaveProperty('apiCalls');
+      expect(projectMessages([r])[0]?.usage).not.toHaveProperty('apiCostUsd');
+    }
+  });
+
   it('drops malformed usage_json instead of throwing', () => {
     const r: ThreadMessageRecord = { ...rec(0, 'assistant', 'x'), usage_json: 'not-json' };
     const [msg] = projectMessages([r]);

@@ -675,7 +675,7 @@ describe('the preview effect', () => {
       expect(none.summary).not.toMatch(/API calls/);
       ledger.resumePreview(refused);
       const out = await runBulkPreview(refused, previewDeps(client(), { costPerCallUsd: 0.002 }));
-      expect(out.summary).toContain('2 API calls this tick at $0.002 each ($0.0040).');
+      expect(out.summary).toContain('2 API calls this pass, estimated $0.0040 ($0.002 each from the profile rate).');
       expect(s.requests).toHaveLength(2);
     } finally {
       restore();
@@ -772,7 +772,7 @@ describe('the approval checksum of an external run', () => {
 
 /** A worker loop over this file's ledger, with a real ApiStore profile for the host and
  *  a vault that holds (or does not hold) its token. */
-function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: number; rateLimit?: () => string | null; auditLog?: { record: (e: never) => void } | null; beforeRearm?: () => void; auth?: Parameters<ApiStore['register']>[0]['auth']; secrets?: Record<string, string> } = {}) {
+function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: number; rateLimit?: () => string | null; auditLog?: { record: (e: never) => void } | null; beforeRearm?: () => void; auth?: Parameters<ApiStore['register']>[0]['auth']; secrets?: Record<string, string>; language?: string } = {}) {
   const apiStore = new ApiStore();
   apiStore.register({
     id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
@@ -805,6 +805,7 @@ function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: numbe
     getUserConfig: () => ({}),
     getEngineDb: () => null,
     getMandateEnds: () => null,
+    config: { language: opts.language },
   } as unknown as Engine;
   const notify = vi.fn(async () => {});
   const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
@@ -952,6 +953,24 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
     }
   });
 
+  // A pending outcome is recorded only, and its lead is English: its cost sentence is too, on a
+  // German instance as well, so the record does not switch language mid-line.
+  it('records a pending read wholly in English, its cost included, on a German instance', async () => {
+    const s = shop();
+    s.special.set('/products/0', { status: 429, headers: { 'retry-after': '30' } });
+    const restore = serve(s);
+    try {
+      planRun([{ target: url(0), after: { price: '1' } }]);
+      const w = workerFor({ costUsd: 0.01, language: 'de' });
+      await w.tick();
+      const result = w.recordTaskRun.mock.calls[0]![1];
+      expect(result).toContain('API calls this pass');
+      expect(result).not.toContain('API-Abrufe');
+    } finally {
+      restore();
+    }
+  });
+
   it('states the cost of a per-call profile in the run result', async () => {
     const s = shop();
     const restore = serve(s);
@@ -959,9 +978,32 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
       const w = workerFor({ costUsd: 0.01 });
       await w.tick();
-      expect(w.recordTaskRun.mock.calls[0]![1]).toContain('2 API calls this tick at $0.01 each ($0.0200).');
+      expect(w.recordTaskRun.mock.calls[0]![1]).toContain('2 API calls this pass, estimated $0.0200 ($0.01 each from the profile rate).');
     } finally {
       restore();
+    }
+  });
+
+  // 966: the worker hands the instance's notice language to the preview, so the run result it
+  // records and pushes is the owner's language — the counts and the estimate included.
+  it('records and pushes the outcome in German on an instance set to German, in English without', async () => {
+    for (const [language, done, counts, costs] of [
+      ['de', 'Vorschau fertig. Der Massenlauf wartet auf deine Prüfung.', 'Gelesen 2, ungültig 0, nicht gelesen 0 von 2 Zielen.', '2 API-Abrufe in diesem Durchgang, geschätzt $0.0200 (je $0.01 laut Profil).'],
+      [undefined, 'Bulk preview done. The run is ready for review.', 'Read 2, invalid 0, unread 0 of 2 targets.', '2 API calls this pass, estimated $0.0200 ($0.01 each from the profile rate).'],
+    ] as const) {
+      const s = shop();
+      const restore = serve(s);
+      try {
+        const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+        const w = workerFor({ costUsd: 0.01, ...(language !== undefined ? { language } : {}) });
+        await w.tick();
+        expect(w.recordTaskRun.mock.calls[0]![1]).toBe(`${done} ${counts} ${costs}`);
+        await vi.waitFor(() => expect(w.notify).toHaveBeenCalled());
+        expect((w.notify.mock.calls[0] as unknown as [{ body: string }])[0].body).toBe(`${done} ${counts} ${costs}`);
+        expect(ledger.getStatus(runId)!.phase).toBe('previewed');
+      } finally {
+        restore();
+      }
     }
   });
 
