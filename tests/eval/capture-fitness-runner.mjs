@@ -107,7 +107,11 @@ const sinkLines = () => (existsSync(sinkPath) ? readFileSync(sinkPath, 'utf8').t
 async function activeEntries() {
   const r = await fetch(`${BASE}/api/knowledge/entries?limit=500`);
   if (!r.ok) throw new Error(`GET /api/knowledge/entries: ${r.status}`);
-  return (await r.json()).entries.map(e => ({ id: e.id, text: e.text, thread: e.sourceThreadId ?? null }));
+  const { entries } = await r.json();
+  // The route returns at most 500. At the cap, an entry retired during the case lets an older one
+  // move into view and read as new: refuse rather than list texts that may be wrong.
+  if (entries.length >= 500) throw new Error('500 or more active entries: use a fresh data dir');
+  return entries.map(e => ({ id: e.id, text: e.text, thread: e.sourceThreadId ?? null }));
 }
 
 /**
@@ -117,8 +121,8 @@ async function activeEntries() {
  * can carry a fact ("Ohne Glas"), and a "Nein" to "Soll ich mir das merken?" would turn a capture
  * case into a MISS. It answers "Entscheide selbst." as free text (`ask_user` always accepts it).
  * A tool-permission prompt (Allow/Deny) is answered "Deny", which is what any other answer means
- * to the engine; the row says so. The deep-model consent prompt (Allow deep / Run on balanced /
- * Cancel) gets the free text, which the engine also reads as a refusal. Every answer is kept with the row, because it is operator text
+ * to the engine; the row says so. The deep-model consent prompt (Allow deep / Run on
+ * balanced / Cancel) gets the free text, which the engine also reads as a refusal. Every answer is kept with the row, because it is operator text
  * the capture can read.
  */
 function pickAnswer(options) {
@@ -151,7 +155,7 @@ async function drainTurn(res, sessionId, answers) {
         body: JSON.stringify({ promptId: p.promptId, answer }),
       });
       // Unanswered, the turn would wait for the case timeout and report that instead.
-      if (!ack.ok) { await reader.cancel(); throw new Error(`reply to ${p.promptId}: HTTP ${ack.status}`); }
+      if (!ack.ok) { await reader.cancel().catch(() => {}); throw new Error(`reply to ${p.promptId}: HTTP ${ack.status}`); }
       answers.push(`${String(p.question ?? '').slice(0, 120)} → ${answer}`);
     }
   }

@@ -57,7 +57,8 @@ beforeAll(async () => {
           await answered;
         }
         if (task.includes('PERM')) {
-          const promptId = `p${seen.length}`;
+          // REFUSE: the fake answers the Deny with 409, as an expired prompt would.
+          const promptId = `${task.includes('REFUSE') ? 'refuse-' : ''}p${seen.length}`;
           const answered = new Promise<void>((r) => waiting.set(promptId, r));
           res.write(`event: prompt\ndata: ${JSON.stringify({ promptId, question: 'bash: ls', options: ['Allow', 'Deny', '\x00'] })}\n\n`);
           await answered;
@@ -77,7 +78,7 @@ beforeAll(async () => {
       }
       if (req.method === 'POST' && /\/reply$/.test(url.pathname)) {
         const b = await body(req);
-        if (String(b['answer']) === 'Deny') { res.statusCode = 409; res.end('{}'); return; }
+        if (String(b['answer']) === 'Deny' && String(b['promptId']).startsWith('refuse-')) { res.statusCode = 409; res.end('{}'); return; }
         replies.push({ promptId: String(b['promptId']), answer: String(b['answer']) });
         waiting.get(String(b['promptId']))?.();
         res.end('{}');
@@ -137,7 +138,8 @@ describe('capture-fitness-runner', () => {
     const m = rows.find((x) => x.shape === 'N9-multi')!;
     const s = rows.find((x) => x.shape === 'S9-single')!;
     expect(m.ok).toBe(false);
-    expect(m.texts).toEqual(['active (no thread): Eintrag ohne Thread', expect.stringMatching(/^active: Regel aus Zweiter/)]);
+    // order-free: the fake lists oldest first, the engine newest first
+    expect([...m.texts].sort()).toEqual(['active (no thread): Eintrag ohne Thread', expect.stringMatching(/^active: Regel aus Zweiter/)]);
     expect(m.answers).toEqual([expect.stringContaining('→ Entscheide selbst.')]);
     expect(s.ok).toBe(true);
     expect(s.texts).toEqual([expect.stringMatching(/^active: Regel aus Einzug/)]);
@@ -147,10 +149,26 @@ describe('capture-fitness-runner', () => {
 
   it('answers a permission prompt with Deny and reports a refused reply as the case\'s error', async () => {
     const out = join(dir, 'rows-perm.json');
-    const r = await runRunner({ sourceFile: 'src.txt', shapes: [{ id: 'N8-perm', expect: 'silent', cases: ['Zug PERM {N}'] }] }, out);
+    const r = await runRunner({ sourceFile: 'src.txt', shapes: [{ id: 'N8-perm', expect: 'silent', cases: ['Zug PERM {N}', 'Zug PERM REFUSE {N}'] }] }, out);
     expect(r.code, r.stdout).toBe(0);
-    const rows = (JSON.parse(readFileSync(out, 'utf8')) as { rows: Array<{ error?: string }> }).rows;
-    // the fake refuses Deny with 409: the case says so instead of waiting for its timeout
-    expect(rows[0]!.error).toMatch(/^Error: reply to p\d+: HTTP 409/);
+    const rows = (JSON.parse(readFileSync(out, 'utf8')) as { rows: Array<{ error?: string; ok: boolean | null; answers?: string[] }> }).rows;
+    // an accepted Deny ends the turn normally, and the row names it
+    expect(rows[0]!.error).toBeUndefined();
+    expect(rows[0]!.ok).toBe(true);
+    expect(rows[0]!.answers).toEqual([expect.stringContaining('→ Deny')]);
+    // a refused reply: the case says so instead of waiting for its timeout
+    expect(rows[1]!.error).toMatch(/^Error: reply to refuse-p\d+: HTTP 409/);
+  }, 60_000);
+
+  it('refuses to list texts when the engine holds 500 or more active entries', async () => {
+    const start = entries.length;
+    for (let i = 0; i < 500; i++) entries.push({ id: `bulk${i}`, text: 'alt', sourceThreadId: 'old' });
+    try {
+      const out = join(dir, 'rows-cap.json');
+      const r = await runRunner({ sourceFile: 'src.txt', shapes: [{ id: 'N7-cap', expect: 'silent', cases: ['Zug {N}'] }] }, out);
+      expect(r.code, r.stdout).toBe(0);
+      const rows = (JSON.parse(readFileSync(out, 'utf8')) as { rows: Array<{ error?: string }> }).rows;
+      expect(rows[0]!.error).toMatch(/500 or more active entries/);
+    } finally { entries.splice(start); }
   }, 60_000);
 });
