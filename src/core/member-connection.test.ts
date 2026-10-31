@@ -160,13 +160,15 @@ describe('a member\'s connection inside a plan\'s run', () => {
   const G = { ...GRANT, grant_id: 'grant-1' } as OAuthGrantRecord;
   const listed = (p: ApiProfile): StampEntry[] => [{ profile: p.id, grant: p.oauth_grant!.grant_id!, binding: bindingOf(p) }];
   const lead = 'setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login';
+  // Spelled out: the model reads this sentence, and the probe that tests it reads this wording.
+  const FINAL = 'This is final for this run: another request, a token exchange or a look at the profile gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.';
 
   it('is not read in a plan whose stamp lists no connection, and says the stamp does not list it', () => {
     const p = crm({ oauth_grant: G });
     runAsPlanOf(B, () => {
       expect(read(p, B)).toBeNull();
       expect(read(crm({ created_by: undefined, oauth_grant: G }), B)).toBeNull();
-      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`);
+      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${FINAL}`);
     });
     expect(read(crm({ created_by: undefined, oauth_grant: G }), B)).toBe('access-value');
   });
@@ -188,7 +190,7 @@ describe('a member\'s connection inside a plan\'s run', () => {
     const now = change(stamped);
     runAsPlanOf(B, () => {
       expect(read(now, B)).toBeNull();
-      expect(memberConnectionRefusal(now, B, ends(['M-1']))).toBe(`${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`);
+      expect(memberConnectionRefusal(now, B, ends(['M-1']))).toBe(`${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${FINAL}`);
     }, listed(stamped));
   });
 

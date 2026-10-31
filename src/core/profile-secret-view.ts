@@ -1068,6 +1068,15 @@ function heldFromReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string,
 }
 
 /**
+ * How a plan run's refusal of a member's connection ends: that it is final for the run, and who
+ * may change it. Without the first, a model looked the profile up and tried the connection again
+ * (12 of 12 probe runs on one provider); with only "Tell the owner", it told the member instead.
+ */
+function planRefusalFinal(person: string): string {
+  return `This is final for this run: another request, a token exchange or a look at the profile gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.`;
+}
+
+/**
  * What a request through `profile` says when it would carry a token of a connection someone
  * else made with their own login, or null when that is not the case. Two shapes, because the way
  * out differs: while that person's access lasts, the connection is theirs and cannot be taken
@@ -1092,8 +1101,8 @@ export function memberConnectionRefusal(
   // a plan's run acting for anyone else reaches it no more than any other reader.
   if (inPlan !== 'no-plan') {
     const ownPlan = own && memberConnectionReader(profile, reader, mode, ends);
-    if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`;
-    if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`;
+    if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${planRefusalFinal(person)}`;
+    if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;
     return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session.`;
   }
   // The same person under a later access: the connection was made under the earlier one.
