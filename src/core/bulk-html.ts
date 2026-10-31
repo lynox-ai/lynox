@@ -39,6 +39,48 @@ function canonicalHtml(value: string): string {
   return serialize(parseHtmlFragment(value));
 }
 
+/**
+ * The tags of a value that its fragment does not keep: every stretch of the source no node of the
+ * tree was built from, whitespace left out. The fragment parse drops a start tag that only has a
+ * place at document level, with its attributes, while the page applies those attributes to its own
+ * element of that name; it drops an end tag that closes nothing in the fragment, while in the page
+ * it closes the theme's element around the value. Neither the tree, the canonical form nor
+ * `endsClosed` sees them, so they are read off the source.
+ */
+export function droppedTagsOf(value: string): string[] {
+  const div = defaultTreeAdapter.createElement('div', p5.NS.HTML, []);
+  const tree = parseFragment(div, value, { scriptingEnabled: true, sourceCodeLocationInfo: true });
+  const kept = new Uint8Array(value.length);
+  const keep = (at: { startOffset: number; endOffset: number } | null | undefined): void => {
+    if (at) kept.fill(1, at.startOffset, at.endOffset);
+  };
+  const visit = (parent: { childNodes?: Node[] }): void => {
+    for (const node of parent.childNodes ?? []) {
+      if (isElement(node)) {
+        keep(node.sourceCodeLocation?.startTag);
+        keep(node.sourceCodeLocation?.endTag);
+        if (node.tagName === 'template') visit(defaultTreeAdapter.getTemplateContent(node as DefaultTreeAdapterTypes.Template));
+        visit(node);
+      } else {
+        keep(node.sourceCodeLocation);
+      }
+    }
+  };
+  visit(tree);
+  const dropped: string[] = [];
+  let from = -1;
+  for (let i = 0; i <= value.length; i++) {
+    if (i < value.length && kept[i] === 0) {
+      if (from < 0) from = i;
+    } else if (from >= 0) {
+      const stretch = value.slice(from, i);
+      if (stretch.trim() !== '') dropped.push(stretch);
+      from = -1;
+    }
+  }
+  return dropped;
+}
+
 // --- Which fields hold HTML. Only the form knows a field's content type; a key name is no
 // evidence. A closed map from the list read, until forms declare it themselves.
 
@@ -217,6 +259,13 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
       return refused('not_canonical', 'The value leaves a tag, a comment, raw text or an element open at its end.');
     }
     const before = input.before ?? '';
+    // What the fragment drops, a multiset against the before-image's own, byte for byte.
+    const held = counts(droppedTagsOf(before));
+    for (const tag of droppedTagsOf(input.after)) {
+      const n = held.get(tag) ?? 0;
+      if (n === 0) return refused('not_canonical', `The value carries a tag the page reads but this check cannot place: ${tag}`);
+      held.set(tag, n - 1);
+    }
     // Each tree of the after-state against the before-image's tree of the same kind.
     const raw = checkTrees(parseHtmlFragment(before), parseHtmlFragment(input.after), input);
     if (!raw.ok) return raw;
