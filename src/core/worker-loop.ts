@@ -176,6 +176,13 @@ const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
 export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger does not accept events, so these events are not run. Look at the trigger under Automation.';
 export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves, so it was not run.';
 export const EVENT_RUN_FAILED = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual.';
+/**
+ * What a push from a contained run says instead of the run's own text (`errorTextReduced`): the
+ * run read a connected store, its result or question may carry what the store returned, and a
+ * push leaves the instance. The text stays in the chat the push opens.
+ */
+export const CONTAINED_RESULT_PUSH = 'The result is in the chat.';
+export const CONTAINED_QUESTION_PUSH = 'A question is waiting in the chat.';
 export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
 /** Why a mandate's trigger the owner has not confirmed did not run. */
 const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
@@ -2884,13 +2891,18 @@ export class WorkerLoop {
       // the box carries the field names the question lists, never the values.
       const offBoxText = flattenPrompt(offBoxPrompt(rawQuestion));
       const offBoxQuestion = secretStore ? secretStore.maskAll(offBoxText) : offBoxText;
+      // A contained run's question leaves as a fixed sentence and without its options: it may
+      // quote what a connected store returned, which no vault mask knows (`error-egress.ts`).
+      const questionReduced = errorTextReduced(this.engine.getToolContext().containment, {
+        threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
+      });
       // Whether the question reached anyone goes onto the trigger and, through the engine as a
       // workflow question's does, to the hooks: on a managed instance a push that reached nobody
       // then mails the owner a fixed text that names neither the question nor the task.
       const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id));
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
-        body: offBoxQuestion,
+        body: questionReduced ? CONTAINED_QUESTION_PUSH : offBoxQuestion,
         taskId: task.id,
         priority: 'high',
         // Deep-link to the asking thread so a tap opens the conversation where
@@ -2898,7 +2910,9 @@ export class WorkerLoop {
         // `promptId` rides along so a client can settle this exact row.
         data: { threadId: session.sessionId, promptId },
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
-        inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
+        inquiry: questionReduced
+          ? { question: CONTAINED_QUESTION_PUSH }
+          : { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
       }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
         process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });
@@ -3209,6 +3223,12 @@ export class WorkerLoop {
     const memberNotes = currentMemberNotes();
     const memberTold = withMemberNotes(truncatedResult, endedByOwner || budgetCut !== null ? 'other' : 'success', memberNotes);
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
+      // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
+      // its error does (above); the recorded run keeps the full text.
+      const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
+        threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
+      });
+      const pushed = resultReduced ? CONTAINED_RESULT_PUSH : memberTold.result;
       await this.notificationRouter.notify({
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
@@ -3223,7 +3243,7 @@ export class WorkerLoop {
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
         title: `${endedByOwner ? '\u23f9' : (budgetCut !== null ? '\u2717' : memberTold.status === 'halted' ? RUN_END_LOOK.halted.mark : '\u2713')} ${task.title}`,
-        body: endedByOwner ? `Stopped on your instruction.\n\n${memberTold.result}` : memberTold.result,
+        body: endedByOwner ? `Stopped on your instruction.\n\n${pushed}` : pushed,
         taskId: task.id,
         priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the

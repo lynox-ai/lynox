@@ -1911,6 +1911,48 @@ describe('WorkerLoop', () => {
     );
   });
 
+  // ---- 5a. a contained run's success push carries a fixed sentence, not its result ----
+
+  it('a contained run pushes a fixed sentence for its result — what the store returned stays home', async () => {
+    const { CONTAINED_RESULT_PUSH } = await import('./worker-loop.js');
+    const result = 'Storefront token for order #1042: shpat_abc, customer Jane Roe';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const isContained = vi.fn(() => true);
+    const engine = makeEngine({ taskManager: tm, session: makeSession(result), containment: { isContained } });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(isContained).toHaveBeenCalledWith({ threadId: 'thread-worker-test', bulkRunId: undefined });
+    const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { body: string; data?: { threadId?: string }; followUps?: { task: string }[] };
+    expect(msg.body).toBe(CONTAINED_RESULT_PUSH);
+    for (const text of [msg.body, ...(msg.followUps ?? []).map((f) => f.task)]) {
+      expect(text).not.toContain('Jane Roe');
+      expect(text).not.toContain('shpat_abc');
+    }
+    // The push still opens the run's chat, where the result is.
+    expect(msg.data?.threadId).toBe('thread-worker-test');
+    // The run's record on the instance keeps the full text.
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, result, 'success');
+  });
+
+  it('a run outside containment keeps its result in the success push', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const engine = makeEngine({ taskManager: tm, session: makeSession('order #1042 shipped'), containment: { isContained: () => false } });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { body: string };
+    expect(msg.body).toBe('order #1042 shipped');
+  });
+
   // ---- 5b. a contained run's push carries the error's class and status, not its text ----
 
   it('a contained run pushes class and HTTP status only — the provider body stays home', async () => {
@@ -2297,6 +2339,8 @@ describe('WorkerLoop', () => {
       }),
       getEngineDb: () => null,
       getMandateEnds: () => null,
+      // The success push asks whether the run is contained (`errorTextReduced`).
+      getToolContext: vi.fn(() => ({ containment: null })),
     } as unknown as Engine;
     const router = makeNotificationRouter();
 
@@ -3935,6 +3979,54 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     if (!store.getPending(SESSION_ID)) throw new Error('park(): no prompt row appeared — the task never reached ask_user');
     return { store, loop, taskId: task.id, answered };
   }
+
+  /** A parked question's push, from a run inside or outside containment. */
+  async function questionPush(contained: boolean): Promise<{ body: string; inquiry?: { question: string; options?: string[] } }> {
+    const store = makeRealStore();
+    const task = makeTask();
+    const session = {
+      sessionId: SESSION_ID,
+      _recreateAgent: vi.fn(),
+      getAgent: () => null,
+      getLastRunStop: () => null,
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+      run: vi.fn(async () => {
+        await session.promptUser!('Use the storefront token shpat_abc for Jane Roe?', ['Yes, shpat_abc', 'No']);
+        return 'Done.';
+      }),
+    };
+    const router = makeNotificationRouter();
+    const engine = makeEngine({
+      taskManager: makeTaskManager([task]),
+      session: session as unknown as Session,
+      promptStore: store,
+      containment: { isContained: () => contained },
+    });
+    const loop = new WorkerLoop(engine, router, 60_000);
+    closers.unshift(() => { loop.stop(); });
+    await loop.tick();
+    for (let i = 0; i < 200 && (router.notify as ReturnType<typeof vi.fn>).mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { body: string; inquiry?: { question: string; options?: string[] } } | undefined;
+    if (!msg) throw new Error('questionPush(): no push for the question');
+    return msg;
+  }
+
+  it('a contained run pushes its question as a fixed sentence, without the question or its options', async () => {
+    const { CONTAINED_QUESTION_PUSH } = await import('./worker-loop.js');
+    const msg = await questionPush(true);
+    expect(msg.body).toBe(CONTAINED_QUESTION_PUSH);
+    expect(msg.inquiry).toEqual({ question: CONTAINED_QUESTION_PUSH });
+    expect(JSON.stringify(msg)).not.toContain('shpat_abc');
+    expect(JSON.stringify(msg)).not.toContain('Jane Roe');
+  });
+
+  it('a run outside containment pushes its question and options as before', async () => {
+    const msg = await questionPush(false);
+    expect(msg.body).toContain('Jane Roe');
+    expect(msg.inquiry?.options).toEqual(['Yes, shpat_abc', 'No']);
+  });
 
   // §9 Q11 (PRD customer-granted-operator-access), the in-process path: a mandate's test
   // run by hand that asks a question goes on after the answer, in the same run. The door
