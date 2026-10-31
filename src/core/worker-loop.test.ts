@@ -1395,6 +1395,20 @@ describe('WorkerLoop', () => {
         }
       });
 
+      it('keeps its refusal when releasing the answer fails too', async () => {
+        const { resumedRunNotContained } = await import('./worker-loop.js');
+        const { engine, task, tm, answeredStore } = resumeFromContained(0);
+        vi.mocked(answeredStore.releaseTrigger).mockImplementation(() => { throw new Error('database is locked'); });
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(false), 'failed');
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
       it('names support on a provisioned instance and the instance log elsewhere', async () => {
         const { resumedRunNotContained, RESUMED_RUN_NOT_CONTAINED } = await import('./worker-loop.js');
         expect(resumedRunNotContained(true)).toBe(`${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`);

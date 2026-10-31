@@ -2750,7 +2750,11 @@ export class WorkerLoop {
           process.stderr.write(`[lynox:worker] task ${task.id}: the new thread of a run resumed from a deleted contained one could not be contained: ${processErrorText(err)}\n`);
           // The answer is released unread, as the refusal says: kept, every later pickup of this
           // trigger would meet the same refusal until the question expires.
-          this.engine.getPromptStore()?.releaseTrigger(answered.id);
+          try {
+            this.engine.getPromptStore()?.releaseTrigger(answered.id);
+          } catch (releaseErr: unknown) {
+            process.stderr.write(`[lynox:worker] task ${task.id}: the refused run's answer could not be released: ${processErrorText(releaseErr)}\n`);
+          }
           const refusal = resumedRunNotContained();
           throw new FixedTextError(refusal, refusal);
         }
