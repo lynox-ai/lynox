@@ -50,7 +50,9 @@ function canonicalHtml(value: string): string {
  * A text node does not vouch for its whole range: the parser appends the characters after a dropped
  * tag to the text before it and moves the node's end over the tag. Outside an element whose content
  * the tokenizer reads as raw text, a `<` that opens a tag, an end tag or a declaration cannot be a
- * character of the text, so each one inside a text node's range is reported up to its `>`.
+ * character of the text, so such a text node's whole source is reported as one stretch. Whole, not
+ * the tag alone: a before-image then holds only the same text with the same tag, never a prefix
+ * cut at a `>` inside a quoted value, nor a CDATA section of foreign content, which is inert text.
  */
 /** Elements whose content the tokenizer reads as text, scripting on: a `<` there is a character. */
 const RAW_TEXT_PARENTS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext']);
@@ -75,7 +77,8 @@ export function droppedTagsOf(value: string): string[] {
         const at = node.sourceCodeLocation;
         keep(at);
         if (at && node.nodeName === '#text' && !rawText) {
-          for (const m of value.slice(at.startOffset, at.endOffset).matchAll(/<[A-Za-z/!?][^>]*>?/g)) swallowed.push(m[0]);
+          const source = value.slice(at.startOffset, at.endOffset);
+          if (/<[A-Za-z/!?]/.test(source)) swallowed.push(source);
         }
       }
     }
