@@ -64,10 +64,12 @@ describe('a message sent without an AI provider key', () => {
 		expect(user?.failed, 'kept, failed').toBe(true);
 	});
 
-	it('keeps the general sentence for any other 400', async () => {
+	it('keeps the general sentence for any other 400, even one with the same fields', async () => {
 		i18n.setLocale('de');
 		await sendRefused({ error: 'Missing task' });
+		expect(store.getChatError()).toBe(i18n.t('chat.error_invalid_request'));
 
+		await sendRefused({ error: 'x', code: 'something_else', may_configure: false });
 		expect(store.getChatError()).toBe(i18n.t('chat.error_invalid_request'));
 	});
 });
