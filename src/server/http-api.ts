@@ -2574,7 +2574,8 @@ export class LynoxHTTPApi {
   /**
    * E2 (§3.13): a mandate answers only a question its own run asked. Every question the route
    * could answer is checked — the one named by id and the one pending on the session, which a
-   * body without an id answers — so no request reaches a question the check did not see. The question
+   * body without an id answers — so no request reaches a question the check did not see. Both are
+   * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
    * answers its own 404.
@@ -5501,8 +5502,9 @@ export class LynoxHTTPApi {
         if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
         if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
         if (!this._answerRecorded(_req, res, by, promptId)) return;
-        // Pending, yet not answered: its time ran out before the sweep marked it, or another answer
-        // settled it first.
+        // Pending, yet not answered: its time ran out before the sweep marked it. Nothing between
+        // the read above and this write yields, so another answer cannot settle it in between
+        // today; should that change, this still names only this question.
         if (!ps.answerUser(promptId, answer, by)) { errorResponse(res, 410, 'Prompt expired'); return; }
         jsonResponse(res, 200, { ok: true });
         return;
