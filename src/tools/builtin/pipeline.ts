@@ -107,13 +107,17 @@ function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipel
 export function getPipeline(id: string, runHistory?: RunHistory | null): PlannedPipeline | undefined {
   const direct = pipelineStore.get(id);
   if (direct) return direct;
-  // Prefix match in memory
-  for (const [key, val] of pipelineStore) {
-    if (key.startsWith(id)) return val;
+  // A saved workflow with exactly this id answers before any longer id that starts with it: a
+  // schedule checked and bound to the answer would otherwise target another workflow.
+  const row = runHistory?.getPlannedPipeline(id);
+  if (row?.id !== id) {
+    // Prefix match in memory
+    for (const [key, val] of pipelineStore) {
+      if (key.startsWith(id)) return val;
+    }
   }
   // Fall back to SQLite for cross-session persistence
   if (runHistory) {
-    const row = runHistory.getPlannedPipeline(id);
     if (row) {
       try {
         const planned = JSON.parse(row.manifest_json) as PlannedPipeline;
