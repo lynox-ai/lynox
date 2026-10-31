@@ -13000,11 +13000,15 @@ export class LynoxHTTPApi {
         }));
         exportData['threads_may_be_incomplete'] = threadsTruncated;
         exportData['contained_threads'] = threadsWithMessages.filter((t) => t.contained).length;
+        // Of those, the ones marked only because their state could not be read: they may never
+        // have held store data, and the copy says so rather than counting them as if they had.
+        exportData['contained_unknown_threads'] = threadsWithMessages.filter((t) => t.contained_unknown !== undefined).length;
         exportData['threads'] = threadsWithMessages;
       } else {
         exportData['threads'] = [];
         exportData['threads_may_be_incomplete'] = false;
         exportData['contained_threads'] = 0;
+        exportData['contained_unknown_threads'] = 0;
       }
 
       // Flat-file memory (all namespaces)

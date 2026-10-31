@@ -16816,18 +16816,19 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     it('GET /api/export keeps a contained chat whole and marks it, with how many there are', async () => {
       // The owner's own copy (Art. 15): containment bounds what an agent or a helper carries out,
       // not the owner's access to their data, so nothing is cut (orchestrator, register 1112).
-      const listThreadsForExport = vi.fn(() => [{ id: 'shop', title: 't', message_count: 1 }, { id: 'notes', title: 't', message_count: 1 }]);
+      const listThreadsForExport = vi.fn(() => [{ id: 'shop', title: 't', message_count: 1 }, { id: 'notes', title: 't', message_count: 1 }, { id: 'unread', title: 't', message_count: 1 }]);
       const getMessages = vi.fn((id: string) => [{ seq: 1, role: 'user', content_json: JSON.stringify(`text of ${id}`), display_only: 0, created_at: 'x' }]);
       await swapEngine({
         getThreadStore: () => ({ listThreadsForExport, getMessages }),
         getKnowledgeLayer: () => null,
         getCRM: () => null,
         getDataStore: () => null,
-        getToolContext: () => ({ tools: [], containment: { threadStates: (ids: readonly string[]) => ({ contained: new Set(ids.filter((i) => i === 'shop')), unknown: new Set<string>() }) } }),
+        getToolContext: () => ({ tools: [], containment: { threadStates: (ids: readonly string[]) => ({ contained: new Set(ids.filter((i) => i === 'shop')), unknown: new Set(ids.filter((i) => i === 'unread')) }) } }),
       }, async () => {
-        const body = await (await jsonFetch('/api/export')).json() as { contained_threads: number; threads: Array<{ id: string; contained: boolean; messages: Array<{ content: unknown }> }> };
-        expect(body.contained_threads).toBe(1);
-        expect(body.threads.map((t) => [t.id, t.contained])).toEqual([['shop', true], ['notes', false]]);
+        const body = await (await jsonFetch('/api/export')).json() as { contained_threads: number; contained_unknown_threads: number; threads: Array<{ id: string; contained: boolean; messages: Array<{ content: unknown }> }> };
+        // One that held store data, one whose state could not be read, counted apart.
+        expect([body.contained_threads, body.contained_unknown_threads]).toEqual([2, 1]);
+        expect(body.threads.map((t) => [t.id, t.contained])).toEqual([['shop', true], ['notes', false], ['unread', true]]);
         expect(body.threads.find((t) => t.id === 'shop')?.messages.map((m) => m.content)).toEqual(['text of shop']);
       });
     });
