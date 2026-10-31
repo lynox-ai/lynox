@@ -27,6 +27,7 @@ const EXEMPT: Record<string, string> = {
  */
 const HIDDEN: Record<string, string> = {
 	'SetupBanner.svelte': 'Setting up the provider is the owner\'s; GET /api/secrets/status answers a mandate too, so the banner asks.',
+	'WorkspaceSecurityView.svelte': 'Both of its values are secrets, so a mandate has nothing to see; the index and the palette leave it out.',
 };
 
 /** Whether `src` has a fetch whose URL names `/config` and whose options say PUT, in any form. */
@@ -87,7 +88,7 @@ describe('every settings page that saves through PUT /api/config has a read-only
 	const { pages, missing } = scan(sources(ROOT));
 
 	it('finds no page without the branch', () => {
-		// The 16 pages counted when this landed (13 with the branch, 1 hidden, 2 exempt); fewer means the scan went blind.
+		// The 16 pages counted when this landed (12 with the branch, 2 hidden, 2 exempt); fewer means the scan went blind.
 		expect(pages.length).toBeGreaterThanOrEqual(16);
 		expect(missing).toEqual([]);
 	});
@@ -102,7 +103,7 @@ describe('every settings page that saves through PUT /api/config has a read-only
 
 	it('exempts only pages the scan finds, each with its reason', () => {
 		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'ChatView.svelte']);
-		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte']);
+		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {
 			expect(pages.map((p) => basename(p))).toContain(name);
 			expect(reason.length).toBeGreaterThan(20);

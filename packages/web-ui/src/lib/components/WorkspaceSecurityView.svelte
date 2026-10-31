@@ -10,7 +10,6 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 
 	interface ConfigResponse { managed?: string }
 
@@ -88,9 +87,9 @@
 	{:else if !loaded}
 		<p class="text-sm text-text-muted">{t('system.loading')}</p>
 	{:else if isMandateSession()}
-		<!-- A mandate's session (ux U-104): the vault key and the access token are secrets, so there
-		     is no row and no reveal button — the server refuses both reveals to a mandate anyway. -->
-		<OwnerOnlyNotice />
+		<!-- A mandate's session (ux U-104): the vault key and the access token are secrets, so the
+		     page has nothing to show and is left out of the settings index and the palette. Reached by
+		     its address, it shows its heading only; the server refuses both reveals to a mandate. -->
 	{:else}
 		<!-- Vault key -->
 		<section class="border-t border-border pt-6 space-y-2">

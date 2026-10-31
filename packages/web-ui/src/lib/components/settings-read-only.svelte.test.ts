@@ -538,9 +538,12 @@ describe('WorkspaceSecurityView', () => {
 		'/vault/key': { configured: true },
 	});
 
-	it('shows a mandate only the notice: both values are secrets, and no reveal button', async () => {
+	it('shows a mandate nothing: both values are secrets, so no notice, no row and no reveal button', async () => {
 		await render(load, routes('mandate'));
-		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.textContent).toContain(t('settings.workspace.security'));
+		expect(notice()).toBeNull();
+		// No section: the vault key's and the access token's headings are not there.
+		expect(target.querySelectorAll('h2').length).toBe(0);
 		expect(buttonTexts()).toEqual([]);
 		expect(writes).toEqual([]);
 	});
@@ -549,5 +552,34 @@ describe('WorkspaceSecurityView', () => {
 		await render(load, routes('owner'));
 		expect(notice()).toBeNull();
 		expect(buttonTexts().length).toBeGreaterThan(0);
+	});
+});
+
+describe('SettingsIndex', () => {
+	const routes = (viewer: Viewer) => ({
+		'/config': { managed: null, viewer },
+		'/health': { version: '0.0.0-test' },
+	});
+	// The index asks whether it runs as an installed app; jsdom has no `matchMedia`.
+	beforeEach(() => {
+		Object.defineProperty(window, 'matchMedia', {
+			configurable: true,
+			value: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
+		});
+	});
+	afterEach(() => {
+		Reflect.deleteProperty(window, 'matchMedia');
+	});
+
+	it('leave the security page out of a mandate\'s settings index', async () => {
+		await render(() => import('./SettingsIndex.svelte'), routes('mandate'));
+		expect(target.querySelector('a[href="/app/settings/workspace/security"]')).toBeNull();
+		// Twin within the same session: an owner-held page with values stays.
+		expect(target.querySelector('a[href="/app/settings/workspace/updates"]')).not.toBeNull();
+	});
+
+	it('keep it in the owner\'s', async () => {
+		await render(() => import('./SettingsIndex.svelte'), routes('owner'));
+		expect(target.querySelector('a[href="/app/settings/workspace/security"]')).not.toBeNull();
 	});
 });
