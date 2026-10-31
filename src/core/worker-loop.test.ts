@@ -1336,6 +1336,136 @@ describe('WorkerLoop', () => {
       expect(prompt, 'and the answer reached the run').toContain('Yes, send it.');
     });
 
+    describe('an answered question from a deleted CONTAINED conversation', () => {
+      /** The deleted conversation read a connected store; `copied` is how many rows its containment hands on. */
+      function resumeFromContained(copied: number, opts?: { flagHolds?: boolean; noStore?: boolean }) {
+        configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
+        const answeredStore = {
+          getAnsweredForTrigger: vi.fn(() => ({
+            id: 'prompt-1', session_id: 'thread-parked', question: 'Send order #1042 to Jane Roe?', answer: 'Yes.',
+          })),
+          releaseTrigger: vi.fn(),
+        } as unknown as PromptStore;
+        const session = makeSession('Sent.');
+        const task = makeTask();
+        const tm = makeTaskManager([task]);
+        const containFromThread = vi.fn(() => copied);
+        const containment = { isContained: (k: { threadId?: string }) => k.threadId === 'thread-parked', containFromThread };
+        const engine = makeEngine({ taskManager: tm, session, promptStore: answeredStore, deletedThreads: ['thread-parked'], containment: opts?.noStore === true ? null : containment });
+        const flags = new Map<string, number>();
+        (engine as unknown as { getThreadStore: () => unknown }).getThreadStore = () => ({
+          isDeleted: (id: string) => id === 'thread-parked',
+          getThread: (id: string) => ({ id, skip_extraction: flags.get(id) ?? 0 }),
+          updateThread: (id: string, patch: { skip_extraction?: boolean }) => { if (patch.skip_extraction === true && opts?.flagHolds !== false) flags.set(id, 1); },
+        });
+        return { engine, session, task, tm, containFromThread, flags, answeredStore };
+      }
+
+      it('contains the new thread from the deleted one before the run starts', async () => {
+        const { engine, session, containFromThread, flags } = resumeFromContained(1);
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(containFromThread).toHaveBeenCalledWith('thread-parked', 'thread-worker-test');
+        expect(flags.get('thread-worker-test'), 'and keeps it private').toBe(1);
+        expect(session.run).toHaveBeenCalled();
+        const order = [vi.mocked(containFromThread).mock.invocationCallOrder[0]!, vi.mocked(session.run).mock.invocationCallOrder[0]!];
+        expect(order[0]).toBeLessThan(order[1]);
+      });
+
+      it('does not run when the new thread cannot be contained, says so, and logs the cause without the question', async () => {
+        const { resumedRunNotContained } = await import('./worker-loop.js');
+        const { engine, session, task, tm, answeredStore } = resumeFromContained(0);
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(session.run).not.toHaveBeenCalled();
+          // Not provisioned here: the way on is the instance log, which names the cause.
+          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(false), 'failed');
+          // The answer is let go, so the next pickup does not meet the same refusal.
+          expect(answeredStore.releaseTrigger).toHaveBeenCalledWith('prompt-1');
+          const logged = stderr.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('could not be contained'));
+          expect(logged).toHaveLength(1);
+          expect(logged[0]).toContain('the source has no containment row to copy');
+          expect(logged[0]).not.toContain('Jane Roe');
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('keeps its refusal when releasing the answer fails too', async () => {
+        const { resumedRunNotContained } = await import('./worker-loop.js');
+        const { engine, task, tm, answeredStore } = resumeFromContained(0);
+        vi.mocked(answeredStore.releaseTrigger).mockImplementation(() => { throw new Error('database is locked'); });
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(false), 'failed');
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('does not run when the new thread\'s private flag does not hold', async () => {
+        const { resumedRunNotContained } = await import('./worker-loop.js');
+        const { engine, session, task, tm } = resumeFromContained(1, { flagHolds: false });
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(session.run).not.toHaveBeenCalled();
+          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(false), 'failed');
+          expect(stderr.mock.calls.map((c) => String(c[0])).some((l) => l.includes('the private flag did not hold'))).toBe(true);
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('on a provisioned instance without a containment store, does not run and names support', async () => {
+        // No store reads as contained there (`threadIsContained`), and nothing can be copied.
+        const { resumedRunNotContained } = await import('./worker-loop.js');
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+          const { engine, session, task, tm } = resumeFromContained(1, { noStore: true });
+          await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(session.run).not.toHaveBeenCalled();
+          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(true), 'failed');
+          expect(stderr.mock.calls.map((c) => String(c[0])).some((l) => l.includes('no containment store'))).toBe(true);
+        } finally {
+          stderr.mockRestore();
+          vi.unstubAllEnvs();
+        }
+      });
+
+      it('names support on a provisioned instance and the instance log elsewhere', async () => {
+        const { resumedRunNotContained, RESUMED_RUN_NOT_CONTAINED } = await import('./worker-loop.js');
+        expect(resumedRunNotContained(true)).toBe(`${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`);
+        expect(resumedRunNotContained(false)).toBe(`${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`);
+      });
+    });
+
+    it('a deleted conversation that was not contained hands nothing on', async () => {
+      configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
+      const answeredStore = {
+        getAnsweredForTrigger: vi.fn(() => ({ id: 'prompt-1', session_id: 'thread-parked', question: 'Send?', answer: 'Yes.' })),
+        releaseTrigger: vi.fn(),
+      } as unknown as PromptStore;
+      const session = makeSession('Sent.');
+      const containFromThread = vi.fn(() => 1);
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session, promptStore: answeredStore, deletedThreads: ['thread-parked'], containment: { isContained: () => false, containFromThread } as never });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(containFromThread).not.toHaveBeenCalled();
+      expect(session.run).toHaveBeenCalled();
+    });
+
     it('never grants more than a single session is allowed to spend', async () => {
       // ⛔ The third term in the min, and without this case it is a free survivor: in every
       // other fixture the session ceiling (default $50) is the largest of the three, so
