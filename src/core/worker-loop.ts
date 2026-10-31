@@ -178,11 +178,14 @@ export const EVENT_SHOP_MOVED = 'The event came from another shop than the one t
 export const EVENT_RUN_FAILED = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual.';
 /**
  * What a push from a contained run says instead of the run's own text (`errorTextReduced`): the
- * run read a connected store, its result or question may carry what the store returned, and a
- * push leaves the instance. The text stays in the chat the push opens.
+ * run may have read a connected store, its result or question may carry what the store returned,
+ * and a push leaves the instance. The text stays in the chat the push opens (ux U-088). "may":
+ * a container whose state is unknown is reduced too.
  */
-export const CONTAINED_RESULT_PUSH = 'The result is in the chat.';
-export const CONTAINED_QUESTION_PUSH = 'A question is waiting in the chat.';
+export const CONTAINED_RESULT_PUSH = 'This run may have read data from your connected shop, so this notification leaves out its result. Open the chat to read it.';
+export const CONTAINED_QUESTION_PUSH = 'A question is waiting in the chat. This run may have read data from your connected shop, so this notification leaves out the question and its options. Open the chat to answer it.';
+/** The question a mail lists under the body, which already gives the reason. */
+export const CONTAINED_QUESTION_INQUIRY = 'A question is waiting in the chat.';
 export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
 /** Why a mandate's trigger the owner has not confirmed did not run. */
 const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
@@ -2911,7 +2914,7 @@ export class WorkerLoop {
         data: { threadId: session.sessionId, promptId },
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: questionReduced
-          ? { question: CONTAINED_QUESTION_PUSH }
+          ? { question: CONTAINED_QUESTION_INQUIRY }
           : { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
       }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
         process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
@@ -3224,11 +3227,15 @@ export class WorkerLoop {
     const memberTold = withMemberNotes(truncatedResult, endedByOwner || budgetCut !== null ? 'other' : 'success', memberNotes);
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
       // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
-      // its error does (above); the recorded run keeps the full text.
+      // its error does (above); the recorded run keeps the full text. Only the run's text is
+      // replaced: the ceiling's reason and the member-connection lines are lynox's own and say
+      // why the title is ✗ or ⏸, so they go out as before.
       const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
         threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
       });
-      const pushed = resultReduced ? CONTAINED_RESULT_PUSH : memberTold.result;
+      const pushed = resultReduced
+        ? withMemberNotes(budgetCut === null ? CONTAINED_RESULT_PUSH : `${budgetCut}.\n\n${CONTAINED_RESULT_PUSH}`, 'other', memberNotes).result
+        : memberTold.result;
       await this.notificationRouter.notify({
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.

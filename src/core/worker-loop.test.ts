@@ -1939,6 +1939,50 @@ describe('WorkerLoop', () => {
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, result, 'success');
   });
 
+  it('a contained run cut at its ceiling keeps the reason in the push, and only the result is left out', async () => {
+    const { CONTAINED_RESULT_PUSH } = await import('./worker-loop.js');
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = {
+      sessionId: 'thread-worker-test',
+      run: vi.fn<(task: string) => Promise<string>>().mockResolvedValue('order #1042 for Jane Roe'),
+      _recreateAgent: vi.fn(),
+      getAgent: () => null,
+      getLastRunStop: () => ({ cause: 'budget_cap', pendingToolCount: 2, pendingTools: ['http_request'], text: '' }),
+    } as unknown as Session;
+    const engine = makeEngine({ taskManager: tm, session, containment: { isContained: () => true } });
+    const router = makeNotificationRouter();
+
+    await new WorkerLoop(engine, router, 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { title: string; body: string };
+    expect(msg.title.startsWith('\u2717')).toBe(true);
+    expect(msg.body).toMatch(/^Stopped at this run's cost ceiling of \$[\d.]+ with work still pending\.\n\n/);
+    expect(msg.body.endsWith(CONTAINED_RESULT_PUSH)).toBe(true);
+    expect(msg.body).not.toContain('Jane Roe');
+  });
+
+  it('a contained run that met a member\'s connection keeps the line in the push under the fixed sentence', async () => {
+    const { CONTAINED_RESULT_PUSH } = await import('./worker-loop.js');
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('order #1042 for Jane Roe');
+    vi.mocked(session.run).mockImplementation(async () => { noteMemberConnection(LINE); return 'order #1042 for Jane Roe'; });
+    const engine = makeEngine({ taskManager: tm, session, containment: { isContained: () => true } });
+    const router = makeNotificationRouter();
+
+    await new WorkerLoop(engine, router, 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({
+      title: `\u23F8 ${task.title}`,
+      body: `${CONTAINED_RESULT_PUSH}\n• ${LINE}`,
+    }));
+  });
+
   it('a run outside containment keeps its result in the success push', async () => {
     const task = makeTask();
     const tm = makeTaskManager([task]);
@@ -3981,7 +4025,7 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
   }
 
   /** A parked question's push, from a run inside or outside containment. */
-  async function questionPush(contained: boolean): Promise<{ body: string; inquiry?: { question: string; options?: string[] } }> {
+  async function questionPush(contained: boolean, isContained = vi.fn((_key: { threadId?: string; bulkRunId?: string }) => contained)): Promise<{ body: string; inquiry?: { question: string; options?: string[] } }> {
     const store = makeRealStore();
     const task = makeTask();
     const session = {
@@ -4000,7 +4044,7 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
       taskManager: makeTaskManager([task]),
       session: session as unknown as Session,
       promptStore: store,
-      containment: { isContained: () => contained },
+      containment: { isContained },
     });
     const loop = new WorkerLoop(engine, router, 60_000);
     closers.unshift(() => { loop.stop(); });
@@ -4014,10 +4058,13 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
   }
 
   it('a contained run pushes its question as a fixed sentence, without the question or its options', async () => {
-    const { CONTAINED_QUESTION_PUSH } = await import('./worker-loop.js');
-    const msg = await questionPush(true);
+    const { CONTAINED_QUESTION_PUSH, CONTAINED_QUESTION_INQUIRY } = await import('./worker-loop.js');
+    // Contained only under the run's own thread: a predicate asked with another key reads it clear.
+    const isContained = vi.fn((key: { threadId?: string; bulkRunId?: string }) => key.threadId === SESSION_ID);
+    const msg = await questionPush(true, isContained);
+    expect(isContained).toHaveBeenCalledWith({ threadId: SESSION_ID, bulkRunId: undefined });
     expect(msg.body).toBe(CONTAINED_QUESTION_PUSH);
-    expect(msg.inquiry).toEqual({ question: CONTAINED_QUESTION_PUSH });
+    expect(msg.inquiry).toEqual({ question: CONTAINED_QUESTION_INQUIRY });
     expect(JSON.stringify(msg)).not.toContain('shpat_abc');
     expect(JSON.stringify(msg)).not.toContain('Jane Roe');
   });
