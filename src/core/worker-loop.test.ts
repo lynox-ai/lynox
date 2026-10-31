@@ -1358,7 +1358,7 @@ describe('WorkerLoop', () => {
           getThread: (id: string) => ({ id, skip_extraction: flags.get(id) ?? 0 }),
           updateThread: (id: string, patch: { skip_extraction?: boolean }) => { if (patch.skip_extraction === true) flags.set(id, 1); },
         });
-        return { engine, session, task, tm, containFromThread, flags };
+        return { engine, session, task, tm, containFromThread, flags, answeredStore };
       }
 
       it('contains the new thread from the deleted one before the run starts', async () => {
@@ -1373,14 +1373,32 @@ describe('WorkerLoop', () => {
         expect(order[0]).toBeLessThan(order[1]);
       });
 
-      it('does not run when the new thread cannot be contained', async () => {
-        const { RESUMED_RUN_NOT_CONTAINED } = await import('./worker-loop.js');
-        const { engine, session, task, tm } = resumeFromContained(0);
-        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
-        await vi.advanceTimersByTimeAsync(0);
+      it('does not run when the new thread cannot be contained, says so, and logs the cause without the question', async () => {
+        const { resumedRunNotContained } = await import('./worker-loop.js');
+        const { engine, session, task, tm, answeredStore } = resumeFromContained(0);
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+          await vi.advanceTimersByTimeAsync(0);
 
-        expect(session.run).not.toHaveBeenCalled();
-        expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, RESUMED_RUN_NOT_CONTAINED, 'failed');
+          expect(session.run).not.toHaveBeenCalled();
+          // Not provisioned here: the way on is the instance log, which names the cause.
+          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(false), 'failed');
+          // The answer is let go, so the next pickup does not meet the same refusal.
+          expect(answeredStore.releaseTrigger).toHaveBeenCalledWith('prompt-1');
+          const logged = stderr.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('could not be contained'));
+          expect(logged).toHaveLength(1);
+          expect(logged[0]).toContain('the source has no containment row to copy');
+          expect(logged[0]).not.toContain('Jane Roe');
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('names support on a provisioned instance and the instance log elsewhere', async () => {
+        const { resumedRunNotContained, RESUMED_RUN_NOT_CONTAINED } = await import('./worker-loop.js');
+        expect(resumedRunNotContained(true)).toBe(`${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`);
+        expect(resumedRunNotContained(false)).toBe(`${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`);
       });
     });
 

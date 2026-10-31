@@ -10,6 +10,7 @@
 
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
+import { isProvisionedInstance } from './wire-capture.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isFeatureEnabled } from './features.js';
@@ -177,8 +178,16 @@ const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
 export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger does not accept events, so these events are not run. Look at the trigger under Automation.';
 export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves, so it was not run.';
 export const EVENT_RUN_FAILED = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual.';
-/** A run whose answered question came from a deleted contained conversation, and whose new one could not be contained. */
-export const RESUMED_RUN_NOT_CONTAINED = 'This run read data from a connected shop, and its conversation was deleted before the answer came. lynox could not keep the new conversation private, so the run did not continue. Start the task again.';
+/**
+ * A run whose answered question came from a deleted contained conversation, and whose new one
+ * could not be contained (ux U-089). The way on depends on who runs the instance.
+ */
+export const RESUMED_RUN_NOT_CONTAINED = 'This run\'s chat was marked as holding data from a connected shop and was deleted before your answer came. lynox could not mark the new chat the same way, so the run did not continue and your answer was not used. Run the task again.';
+export function resumedRunNotContained(provisioned: boolean = isProvisionedInstance()): string {
+  return provisioned
+    ? `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`
+    : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`;
+}
 export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
 /** Why a mandate's trigger the owner has not confirmed did not run. */
 const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
@@ -2736,8 +2745,14 @@ export class WorkerLoop {
       if (threadIsContained(containment, answered.session_id)) {
         try {
           containThreadFrom({ containment, threadStore: this.engine.getThreadStore() }, answered.session_id, session.sessionId);
-        } catch {
-          throw new FixedTextError(RESUMED_RUN_NOT_CONTAINED, RESUMED_RUN_NOT_CONTAINED);
+        } catch (err: unknown) {
+          // The cause, for the instance log the refusal points to; neither the question nor the thread.
+          process.stderr.write(`[lynox:worker] task ${task.id}: the new thread of a run resumed from a deleted contained one could not be contained: ${processErrorText(err)}\n`);
+          // The answer is released unread, as the refusal says: kept, every later pickup of this
+          // trigger would meet the same refusal until the question expires.
+          this.engine.getPromptStore()?.releaseTrigger(answered.id);
+          const refusal = resumedRunNotContained();
+          throw new FixedTextError(refusal, refusal);
         }
       }
     }
