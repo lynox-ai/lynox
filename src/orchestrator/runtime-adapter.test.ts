@@ -41,7 +41,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 
 import { Agent } from '../core/agent.js';
 import { ConversationGrants } from '../core/conversation-grants.js';
-import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopToolsWithout, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, StepTimeout, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopToolsWithout, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, StepTimeout, DEFAULT_STEP_TIMEOUT_MS, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import { applyPluginToolGate } from '../core/session.js';
 import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
@@ -927,6 +927,28 @@ describe('spawnInline + parentPrompt propagation', () => {
       await expect(run).resolves.toMatchObject({ result: 'answered B' });
       const agent = vi.mocked(Agent).mock.results.at(-1)!.value as { abort: ReturnType<typeof vi.fn> };
       expect(agent.abort).not.toHaveBeenCalled();
+    });
+
+    it.each(['inline', 'agent'] as const)('a %s step without timeout_ms gets the default limit, 30 min', async (runtime) => {
+      expect(DEFAULT_STEP_TIMEOUT_MS).toBe(1_800_000);
+      vi.useFakeTimers();
+      // Hangs past the limit; the rejection it ends with is what the step reports.
+      mockSend.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => { setTimeout(() => reject(new Error('aborted')), DEFAULT_STEP_TIMEOUT_MS + 1_000); }));
+      const run = runtime === 'inline'
+        ? spawnInline({ id: 'hangs', agent: 'hangs', runtime: 'inline', task: 'work' }, {}, mockConfig, mockParentTools)
+        : spawnViaAgent({ id: 'hangs', agent: 'hangs', runtime: 'agent' }, { name: 'hangs', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] },
+          {}, mockConfig, undefined, 'run-1');
+      let settled = false;
+      run.then(() => { settled = true; }, () => { settled = true; });
+      await vi.advanceTimersByTimeAsync(DEFAULT_STEP_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      const agent = vi.mocked(Agent).mock.results.at(-1)!.value as { abort: ReturnType<typeof vi.fn> };
+      expect(agent.abort).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(agent.abort).toHaveBeenCalled();
+      const outcome = expect(run).rejects.toThrow('Step "hangs" timed out after 1800000ms');
+      await vi.advanceTimersByTimeAsync(1_000);
+      await outcome;
     });
 
     it('control: a step that hangs without asking still times out', async () => {
