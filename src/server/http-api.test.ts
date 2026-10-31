@@ -302,6 +302,8 @@ vi.mock('../core/engine.js', () => ({
       maskAll: mockSecretMask,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
+      // No workflow run in this history: every id is a chat's own (register 1112).
+      getPipelineRunOrigins: () => new Map(),
       getRecentRuns: mockHistoryGetRecentRuns,
       searchRuns: mockHistorySearchRuns,
       getRun: mockHistoryGetRun,
@@ -8811,7 +8813,12 @@ describe('LynoxHTTPApi', () => {
         'r-shop': { id: 'r-shop', session_id: 'shop', task_text: 't', response_text: 'Jane Roe, 1042' },
         'r-notes': { id: 'r-notes', session_id: 'notes', task_text: 't', response_text: 'n' },
         'r-evas': { id: 'r-evas', session_id: 'evas-shop', task_text: 't', response_text: 'e' },
+        // A workflow step records its run under the workflow run, which `shop` started.
+        'r-step': { id: 'r-step', session_id: 'wf-shop', task_text: 't', response_text: 'Jane Roe' },
       };
+      // Workflow runs and the chat that started each: `wf-free` was started by none.
+      const PIPELINES: Record<string, string | null> = { 'wf-shop': 'shop', 'wf-free': null };
+      const pipelineRow = (id: string): { id: string; manifest_json: string } => ({ id, manifest_json: '{"steps":[{"task":"Order 1042 for Jane"}]}' });
       const containment = {
         isContained: (k: { threadId?: string }) => CONTAINED.has(k.threadId ?? ''),
         containedThreadIds: (ids: readonly string[]) => new Set(ids.filter((i) => CONTAINED.has(i))),
@@ -8827,6 +8834,11 @@ describe('LynoxHTTPApi', () => {
           getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [],
           getRun: (id: string) => RUNS[id], getRecentRuns: () => Object.values(RUNS), searchRuns: () => Object.values(RUNS),
           getThreadAggregates: () => Object.values(THREADS).map((t) => ({ sessionId: t.id, title: t.title })),
+          getPipelineRunOrigin: (id: string) => PIPELINES[id],
+          getPipelineRunOrigins: (ids: readonly string[]) => new Map(ids.flatMap((id): Array<[string, string]> => { const o = PIPELINES[id]; return typeof o === 'string' ? [[id, o]] : []; })),
+          getPipelineRun: (id: string) => (id in PIPELINES ? pipelineRow(id) : undefined),
+          getPipelineStepResults: () => [{ step_id: 's1', result: 'Jane Roe, 1042' }],
+          getRecentPipelineRuns: () => Object.keys(PIPELINES).map(pipelineRow),
         }),
         getToolContext: () => ({ tools: [], containment }),
       }, test);
@@ -8840,7 +8852,10 @@ describe('LynoxHTTPApi', () => {
       };
       const ABOUT_SHOP = ['/api/threads/shop', '/api/threads/shop/messages', '/api/threads/shop/debug-export',
         '/api/sessions/shop/pending-prompt', '/api/sessions/shop/changeset', '/api/history/runs/r-shop', '/api/history/runs/r-shop/tool-calls',
-        '/api/history/runs?thread_id=shop', '/api/history/runs?sessionId=shop'];
+        '/api/history/runs?thread_id=shop', '/api/history/runs?sessionId=shop',
+        // Through a workflow `shop` started: its step's run, its steps, the run itself.
+        '/api/history/runs/r-step', '/api/history/runs/r-step/tool-calls', '/api/history/runs?sessionId=wf-shop',
+        '/api/workflows/wf-shop', '/api/workflows/wf-shop/steps'];
 
       it('a helper is refused another person\'s contained chat on every route about it, with who may read it and a code', async () => {
         const { CONTAINED_THREAD_READ_REFUSAL, CONTAINED_THREAD_CODE } = await import('./http-api.js');
@@ -8867,6 +8882,9 @@ describe('LynoxHTTPApi', () => {
           }
           expect((await as(EVA, '/api/history/runs/r-evas/tool-calls')).status).toBe(200);
           expect((await as(EVA, '/api/history/runs/r-notes')).status).toBe(200);
+          // A workflow no chat started is no chat's to keep.
+          expect((await as(EVA, '/api/workflows/wf-free')).status).toBe(200);
+          expect((await as(EVA, '/api/workflows/wf-free/steps')).status).toBe(200);
         });
       });
 
@@ -8888,8 +8906,12 @@ describe('LynoxHTTPApi', () => {
             const runs = (await as(EVA, path)).body['runs'] as Array<{ id: string }>;
             expect(runs.map((r) => r.id), path).toEqual(['r-notes', 'r-evas']);
             const all = (await as(OWNER_PRINCIPAL, path)).body['runs'] as Array<{ id: string }>;
-            expect(all.map((r) => r.id), path).toEqual(['r-shop', 'r-notes', 'r-evas']);
+            expect(all.map((r) => r.id), path).toEqual(['r-shop', 'r-notes', 'r-evas', 'r-step']);
           }
+          const workflows = (await as(EVA, '/api/workflows')).body['runs'] as Array<{ id: string }>;
+          expect(workflows.map((r) => r.id)).toEqual(['wf-free']);
+          const allWorkflows = (await as(OWNER_PRINCIPAL, '/api/workflows')).body['runs'] as Array<{ id: string }>;
+          expect(allWorkflows.map((r) => r.id)).toEqual(['wf-shop', 'wf-free']);
           const insights = (await as(EVA, '/api/thread-insights')).body['threadInsights'] as Array<{ sessionId: string; title: string }>;
           expect(insights.map((t) => [t.sessionId, t.title])).toEqual([['shop', ''], ['evas-shop', 'Eva shop'], ['notes', 'Notes']]);
         });
@@ -20402,13 +20424,28 @@ describe('mandate stance of every user route', () => {
   // so the dispatcher keeps a contained chat with its owner and its starter. A route that forgets
   // it reopens the chat to every helper, and nothing else would show.
   it('names its chat on every GET about one chat or run, and on the lists that carry chats\' text', () => {
-    const about = users().filter(r => r.method === 'GET' && /^\/api\/(threads|sessions|runs|history\/runs)\/:/.test(r.path));
-    expect(about.length, 'the set is the real one').toBeGreaterThanOrEqual(8);
+    const about = users().filter(r => r.method === 'GET' && /^\/api\/(threads|sessions|runs|history\/runs|workflows)\/:/.test(r.path));
+    expect(about.length, 'the set is the real one').toBeGreaterThanOrEqual(10);
     const unnamed = about.filter(r => r.stance?.kind === 'reads' && r.stance.thread === undefined).map(name);
     expect(unnamed, 'declare readsThread(...) at the registration').toEqual([]);
-    for (const path of ['/api/threads', '/api/history/runs', '/api/thread-insights']) {
+    for (const path of ['/api/threads', '/api/history/runs', '/api/thread-insights', '/api/workflows']) {
       const r = users().find(x => x.method === 'GET' && x.path === path);
       expect(r?.stance?.kind === 'reads' && r.stance.thread !== undefined, path).toBe(true);
+    }
+  });
+
+  // A list names no chat (`readsThread(() => null)`), so the dispatcher checks nothing: the
+  // handler itself leaves out what the reader may not read. A list route declared so without that
+  // filter would pass the check above and read every chat.
+  it('filters by reader in every list that names no chat', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('./http-api.ts', import.meta.url), 'utf8');
+    const ends = [...source.matchAll(/readsThread\(\(\) => null\)/g)].map((m) => m.index);
+    expect(ends.length, 'the set is the real one').toBeGreaterThanOrEqual(3);
+    for (const end of ends) {
+      const start = Math.max(source.lastIndexOf("this.addStatic('user'", end), source.lastIndexOf('this.dynamicRoutes.push(', end));
+      const handler = source.slice(start, end);
+      expect(handler.includes('this._unreadableChats('), handler.slice(0, 70)).toBe(true);
     }
   });
 

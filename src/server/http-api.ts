@@ -192,10 +192,10 @@ export type MandateStance =
 
 /**
  * The chat a read is about, as the request names it (register 1112): a thread by id, a live run
- * (by the run registry), or a recorded run (by the run history). `null` when this request names
- * none — a list, which then filters by itself.
+ * (by the run registry), a recorded run (by the run history), or a workflow run (by the chat that
+ * started it). `null` when this request names none — a list, which then filters by itself.
  */
-export type ThreadNamed = { readonly thread: string } | { readonly liveRun: string } | { readonly historyRun: string } | null;
+export type ThreadNamed = { readonly thread: string } | { readonly liveRun: string } | { readonly historyRun: string } | { readonly pipelineRun: string } | null;
 type ThreadNamer = (params: Readonly<Record<string, string>>, query: URLSearchParams) => ThreadNamed;
 
 /**
@@ -2624,13 +2624,23 @@ export class LynoxHTTPApi {
     const engine = this.engine;
     let threadId: string | undefined;
     if ('thread' in named) threadId = named.thread;
-    else if ('liveRun' in named) {
+    else if ('pipelineRun' in named) {
+      // As the handlers read it: `/:id` by prefix (`getPipelineRun`), `/:id/steps` by the exact id.
+      const history = engine?.getRunHistory();
+      const exact = history?.getPipelineRunOrigin(named.pipelineRun);
+      const origin = exact !== undefined ? exact : history?.getPipelineRunOrigin(history.getPipelineRun(named.pipelineRun)?.id ?? named.pipelineRun);
+      // No such run is the handler's 404; a run no chat started holds no chat's text.
+      if (origin === undefined || origin === null) return null;
+      threadId = origin;
+    } else if ('liveRun' in named) {
       threadId = engine?.getRunRegistry()?.getByRunId(named.liveRun)?.thread_id || undefined;
       if (threadId === undefined) return { status: 403, error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE };
     } else {
       threadId = engine?.getRunHistory()?.getRun(named.historyRun)?.session_id || undefined;
       if (threadId === undefined) return { status: 404, error: 'Run not found' };
     }
+    // A workflow step's run names its workflow run, not a chat: the chat is the one that started it.
+    threadId = this._chatsOf([threadId]).get(threadId) ?? threadId;
     if (ownedBy(engine?.getThreadStore()?.getThread(threadId) ?? undefined, principal)) return null;
     if (!threadIsContained(engine?.getToolContext().containment ?? null, threadId)) return null;
     return { status: 403, error: CONTAINED_THREAD_READ_REFUSAL, code: CONTAINED_THREAD_CODE };
@@ -2644,9 +2654,22 @@ export class LynoxHTTPApi {
   private _unreadableChats(principal: RequestPrincipal, threadIds: readonly string[]): Set<string> {
     if (isOwnerPrincipal(principal) || threadIds.length === 0) return new Set();
     const engine = this.engine;
-    const contained = containedThreads(engine?.getToolContext().containment ?? null, [...new Set(threadIds)]);
+    const ids = [...new Set(threadIds)];
+    const chatOf = this._chatsOf(ids);
+    const chats = [...new Set(ids.map((id) => chatOf.get(id) ?? id))];
+    const contained = containedThreads(engine?.getToolContext().containment ?? null, chats);
     const store = engine?.getThreadStore();
-    return new Set([...contained].filter((id) => !ownedBy(store?.getThread(id) ?? undefined, principal)));
+    const unreadable = new Set([...contained].filter((id) => !ownedBy(store?.getThread(id) ?? undefined, principal)));
+    return new Set(ids.filter((id) => unreadable.has(chatOf.get(id) ?? id)));
+  }
+
+  /**
+   * The chat each id stands for, where it is a workflow run's (register 1112): a workflow step
+   * records its run under the workflow run's id, and the workflow run names the chat that started
+   * it. An id not in the map is a chat's own, or a workflow run no chat started.
+   */
+  private _chatsOf(ids: readonly string[]): ReadonlyMap<string, string> {
+    return this.engine?.getRunHistory()?.getPipelineRunOrigins(ids) ?? new Map();
   }
 
   /**
@@ -7944,8 +7967,11 @@ export class LynoxHTTPApi {
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const runs = history.getRecentPipelineRuns(limit);
       const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins(runs.map((r) => r.id)));
-      jsonResponse(res, 200, { runs: runs.map((r) => ({ ...r, ...fieldsOf(r.id) })) });
-    }, READS);
+      // A run's plan carries what its chat wrote into it: another person's contained chat's runs
+      // are left out (register 1112).
+      const unreadable = this._unreadableChats(this._principalOf(req), runs.map((r) => r.id));
+      jsonResponse(res, 200, { runs: runs.filter((r) => !unreadable.has(r.id)).map((r) => ({ ...r, ...fieldsOf(r.id) })) });
+    }, readsThread(() => null));
 
     this.addStatic('user', 'GET /api/workflows/stats/steps', async (req, res) => {
       const history = engine.getRunHistory();
@@ -7972,7 +7998,7 @@ export class LynoxHTTPApi {
       if (!run) { errorResponse(res, 404, 'Pipeline run not found'); return; }
       const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins([run.id]));
       jsonResponse(res, 200, { ...run, ...fieldsOf(run.id) });
-    }, READS));
+    }, readsThread((p) => ({ pipelineRun: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/steps', async (_req, res, params) => {
       const history = engine.getRunHistory();
@@ -7981,7 +8007,7 @@ export class LynoxHTTPApi {
       // The outputs themselves: marked as the run is, for a client that reads only these.
       const fieldsOf = runContainedFields(engine.getToolContext().containment, history.getPipelineRunOrigins([params['id']!]));
       jsonResponse(res, 200, { steps, ...fieldsOf(params['id']!) });
-    }, READS));
+    }, readsThread((p) => ({ pipelineRun: p['id'] ?? '' }))));
 
     // ── Saved Workflows library (PRD §6.8 / D13) ──
     // A "saved workflow" = an engine.db workflow definition whose deserialized
