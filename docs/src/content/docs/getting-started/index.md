@@ -29,6 +29,8 @@ The interactive installer checks prerequisites, asks for your AI provider and AP
 
 ### Without a terminal (scripts, CI, coding assistants)
 
+From version 2.18.0.
+
 ```bash
 ANTHROPIC_API_KEY=... npx @lynox-ai/core --non-interactive --accept-terms --provider anthropic
 ```
