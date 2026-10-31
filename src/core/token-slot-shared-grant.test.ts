@@ -293,6 +293,116 @@ describe('deleting the owner of a grant a reader shares through a built-in provi
     // The reader holds nothing of the owner's: no value under the owner's names came back.
     expect(Object.keys(vault.snapshot()).filter((n) => n.startsWith('BEXIO_A_'))).toEqual(['BEXIO_A_CID', 'BEXIO_A_CSECRET']);
   });
+
+  // The owner's name does not pass to the reader either (register 685): a value stored under it
+  // after the delete is not the reader's to exchange, and the refusal does not send the model to
+  // store one.
+  const LATER = value('later', 'refresh');
+  const refusedAsLapsed = (result: string): void => {
+    expect(result).toContain('the refresh slot of a profile that was deleted');
+    expect(result).toContain('api_setup connect');
+    expect(result).not.toContain('ask_secret');
+    expect(result).not.toContain('Token exchange OK');
+    expect(result).not.toContain(LATER);
+    expect(sent).toHaveLength(0);
+  };
+
+  it('refuses the reader a value stored under the owner\'s refresh name after the delete, and sends nothing', async () => {
+    const store = booted();
+    const vault = vaultOf(VAULT);
+    expect(await tool(store, vault, { action: 'delete', id: 'bexio-a' })).toMatch(/^Deleted API profile "bexio-a"\./);
+    vault.set('BEXIO_A_REFRESH_TOKEN', LATER);
+    const result = await tool(store, vault, { action: 'fetch_token', id: 'bexio-b' });
+    expect(result).toMatch(/^Error: profile "bexio-b" reads its refresh token from "BEXIO_A_REFRESH_TOKEN", the refresh slot of a profile that was deleted\./);
+    refusedAsLapsed(result);
+  });
+
+  it('keeps the refusal across a restart: the mark is stored with the reader', async () => {
+    const store = booted();
+    const vault = vaultOf(VAULT);
+    await tool(store, vault, { action: 'delete', id: 'bexio-a' });
+    vault.set('BEXIO_A_REFRESH_TOKEN', LATER);
+    const again = new ApiStore();
+    again.loadFromDirectory(join(lynoxDir, 'apis'));
+    expect(again.get('bexio-b')?.oauth_grant?.lapsed_slots).toEqual(['BEXIO_A_REFRESH_TOKEN']);
+    refusedAsLapsed(await tool(again, vault, { action: 'fetch_token', id: 'bexio-b' }));
+  });
+
+  it('marks the reader on engine.db as well, and a store booted from it refuses', () => {
+    const engine = new EngineDb(join(tmp('lynox-shared-grant-db-'), 'engine.db'), '');
+    engines.push(engine);
+    const cs = new ConnectionStore(engine);
+    for (const p of [owner(), reader()]) {
+      const { id, name, ...rest } = p;
+      cs.upsert({ id, kind: 'api', name, subjectId: null, direction: 'outbound', configJson: JSON.stringify(rest), vaultKeys: [], status: 'active' });
+    }
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.loadFromConnections(cs);
+    expect(store.remove('bexio-a')).toBe(true);
+    const again = new ApiStore();
+    again.setConnectionStore(cs);
+    again.loadFromConnections(cs);
+    expect(again.get('bexio-a')).toBeUndefined();
+    expect(again.get('bexio-b')?.oauth_grant?.lapsed_slots).toEqual(['BEXIO_A_REFRESH_TOKEN']);
+  });
+
+  it('refuses every reader of the owner\'s refresh name, two of them included', async () => {
+    const dir = join(lynoxDir, 'apis');
+    mkdirSync(dir, { recursive: true });
+    const second = ofPreset('bexio', 'bexio-c', 'https://api.bexio.com/2.0', { refresh_token_key: 'BEXIO_A_REFRESH_TOKEN' });
+    for (const p of [owner(), reader(), second]) writeFileSync(join(dir, `${p.id}.json`), JSON.stringify(p));
+    const store = new ApiStore();
+    store.loadFromDirectory(dir);
+    expect(store.get('bexio-c')).toBeDefined();
+    const vault = vaultOf({ ...VAULT, BEXIO_C_CID: 'c-client', BEXIO_C_CSECRET: value('c', 'secret') });
+    await tool(store, vault, { action: 'delete', id: 'bexio-a' });
+    vault.set('BEXIO_A_REFRESH_TOKEN', LATER);
+    refusedAsLapsed(await tool(store, vault, { action: 'fetch_token', id: 'bexio-b' }));
+    refusedAsLapsed(await tool(store, vault, { action: 'fetch_token', id: 'bexio-c' }));
+  });
+
+  it('control: the reader on its own refresh slot, the way out the refusal names, exchanges after the delete', async () => {
+    const store = booted();
+    const vault = vaultOf(VAULT);
+    await tool(store, vault, { action: 'delete', id: 'bexio-a' });
+    vault.set('BEXIO_A_REFRESH_TOKEN', LATER);
+    const own = value('b', 'refresh');
+    vault.set('BEXIO_B_REFRESH_TOKEN', own);
+    const { refresh_token_key: _gone, ...ownOAuth } = store.get('bexio-b')!.auth!.oauth!;
+    expect(store.save({ ...store.get('bexio-b')!, auth: { ...store.get('bexio-b')!.auth!, oauth: ownOAuth } }).ok).toBe(true);
+    expect(await tool(store, vault, { action: 'fetch_token', id: 'bexio-b' })).toContain('Token exchange OK');
+    expect(tokenPosts()).toHaveLength(1);
+    expect(tokenPosts()[0]!.body).toContain(own);
+    expect(tokenPosts()[0]!.body).not.toContain(LATER);
+  });
+
+  // A reader the boot held back (it reads another grant's slot and shares nothing, so the boot holds
+  // back both) is marked too, and once the owner is gone and the next boot lets it in, it is
+  // refused with its own way out.
+  it('marks a reader the boot held back, and refuses it once a later boot lets it in', async () => {
+    const dir = join(lynoxDir, 'apis');
+    mkdirSync(dir, { recursive: true });
+    const custom = oauth('own-a');
+    const ownOwner: ApiProfile = { ...custom, oauth_grant: { written: [{ name: 'OWN_A_REFRESH_TOKEN', fp: tokenFingerprint(A_REFRESH) }] } };
+    const ownReader = oauth('own-b', { refresh_token_key: 'OWN_A_REFRESH_TOKEN' }, 'own-a.example');
+    for (const p of [ownOwner, ownReader]) writeFileSync(join(dir, `${p.id}.json`), JSON.stringify(p));
+    const store = new ApiStore();
+    store.loadFromDirectory(dir);
+    expect(store.get('own-a')).toBeUndefined();
+    expect(store.get('own-b')).toBeUndefined();
+    expect(store.remove('own-a', dir)).toBe(true);
+    const again = new ApiStore();
+    again.loadFromDirectory(dir);
+    expect(again.get('own-b')?.oauth_grant?.lapsed_slots).toEqual(['OWN_A_REFRESH_TOKEN']);
+    const vault = vaultOf({ OWN_A_REFRESH_TOKEN: LATER, OWN_B_CID: 'b-client', OWN_B_CSECRET: value('b', 'secret') });
+    const result = await tool(again, vault, { action: 'fetch_token', id: 'own-b' });
+    expect(result).toContain('the refresh slot of a profile that was deleted');
+    expect(result).toContain('so it reads its own refresh slot');
+    expect(result).not.toContain('ask_secret');
+    expect(result).not.toContain('api_setup connect');
+    expect(sent).toHaveLength(0);
+  });
 });
 
 // ── a provider with two API hosts ──

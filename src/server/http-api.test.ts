@@ -19251,6 +19251,20 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         expect((await complete(cookie)).status).toBe(200);
         expect(store.get(PROFILE)?.oauth_grant?.account).toBeUndefined();
       });
+
+      // A deleted profile's slot stays lapsed through a new consent (register 685): the profile may
+      // still name it as its refresh slot, and a new consent must not hand it over.
+      it.each([
+        ['keeps', ['GONE_REFRESH_TOKEN']],
+        ['adds none', undefined],
+      ])('%s the lapsed slots of the profile it connects', async (_label, lapsed) => {
+        const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }) });
+        onBexio(store);
+        store.register({ ...store.get(PROFILE)!, oauth_grant: { connected_by: 'owner', ...(lapsed ? { lapsed_slots: lapsed } : {}) } });
+        expect((await complete(cookie)).status).toBe(200);
+        expect(store.get(PROFILE)?.oauth_grant?.state).toBe('connected');
+        expect(store.get(PROFILE)?.oauth_grant?.lapsed_slots).toEqual(lapsed);
+      });
     });
 
     it('control: the same mandate and profile complete while the mandate is live', async () => {
