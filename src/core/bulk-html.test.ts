@@ -402,7 +402,8 @@ describe('checkMarkup: tags the fragment drops', () => {
       expect(reason(before, '<p>a<body class="z">b</p>'), before).toBe('not_canonical');
       expect(reason(before, `${before}`), before).toBe('not_canonical');
     }
-    expect(reason('<p>a</p>', '<p>a</p><body/class=z>')).toBe('not_canonical');
+    // An attribute after a slash is an attribute too: held by the bytes, still refused.
+    expect(reason('<body/class=z><p>a</p>', '<body/class=z><p>b</p>')).toBe('not_canonical');
   });
 
   it('finds nothing in markup the fragment keeps, however it is written', () => {
