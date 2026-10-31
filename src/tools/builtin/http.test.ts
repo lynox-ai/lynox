@@ -9568,6 +9568,14 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(prompt).not.toHaveBeenCalled();
     });
 
+    it.each([['%%33F'], ['%3%46'], ['%u003%46']])('reads the query after a ? that the escapes %s assemble', async (escape) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: `https://h.example/graphql${escape}query=mutation%7Bb%7D`, method: 'GET' }, agent270().agent);
+      expect(out).toContain('carries a GraphQL mutation in its URL');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it('reads the query after every decoded ?, not only the first', async () => {
       const fetchMock = vi.fn().mockImplementation(async () => ok());
       vi.stubGlobal('fetch', fetchMock);

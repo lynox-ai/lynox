@@ -440,7 +440,8 @@ export function isGraphqlEndpoint(url: string): boolean {
  * The query strings a server may read from a URL: its own, and the rest after each `?` that a
  * reading of the path decodes (`/graphql%3Fquery=…`), which a proxy that splits the URL again
  * hands on as a query string. Each without its `?`; a URL that does not parse gives none. The
- * readings are taken only where an escape could decode to `?` (`%3F`, `%u003F`, or an encoded `%`).
+ * readings are taken only for a path with an escape in it: a `?` decodes only from one, and the
+ * escapes that assemble one (`%%33F`, `%3%46`) cannot be listed.
  */
 export function urlQueryStrings(url: string): string[] {
   let parsed: URL;
@@ -450,7 +451,7 @@ export function urlQueryStrings(url: string): string[] {
     return [];
   }
   const out = [parsed.search.slice(1)];
-  if (!/%(?:3f|25|u003f)/i.test(parsed.pathname)) return out;
+  if (!parsed.pathname.includes('%')) return out;
   for (const reading of serverReadings(parsed.pathname)) {
     for (let at = reading.indexOf('?'); at !== -1; at = reading.indexOf('?', at + 1)) out.push(reading.slice(at + 1).split('#')[0]!);
   }
