@@ -612,7 +612,9 @@ const MAX_WRITE_NOTES = 10;
 /** The mail tools that file for approval. */
 const QUEUEABLE_MAIL_TOOLS: ReadonlySet<string> = new Set(['mail_send', 'mail_reply']);
 const MAX_WRITE_NOTE_CHARS = 300;
-const MAX_MEMBER_NOTE_CHARS = 700;
+/** Long enough for the longest line a plan run's refusal writes: it names the member twice and
+ *  the profile once, and the sentence that says who decides comes last. */
+const MAX_MEMBER_NOTE_CHARS = 1500;
 
 /**
  * Collects the refused and possibly-landed write lines from the tool calls of a run's

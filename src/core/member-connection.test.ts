@@ -330,6 +330,21 @@ describe('collectWriteNotes and a member connection\'s line (A4)', () => {
     expect(into.size).toBe(0);
   });
 
+  it('a plan run\'s refusal with a long address and profile name is picked up whole, up to who decides', () => {
+    const email = `${'a'.repeat(64)}@${'b'.repeat(40)}.example.org`;
+    const tag = `mandate:${email}`;
+    const member = { kind: 'mandate', email, mandateId: 'M-1' } as RequestPrincipal;
+    const stamped = crm({ name: 'C'.repeat(80), created_by: tag, oauth_grant: { ...GRANT, connected_by: tag, grant_id: 'grant-1' } as OAuthGrantRecord });
+    const now = { ...stamped, oauth_grant: { ...stamped.oauth_grant!, grant_id: 'grant-2' } };
+    const text = runAsPlanOf(member, () => memberConnectionRefusal(now, member, ends(['M-1'])), [{ profile: stamped.id, grant: 'grant-1', binding: bindingOf(stamped) }]);
+    expect(text).toContain('it changed after the owner confirmed');
+    const long = `${MEMBER_CONNECTION_PREFIX} ${text!}`;
+    const into = new Set<string>();
+    collectWriteNotes(into)({ toolName: 'http_request', outputJson: long });
+    expect([...into]).toEqual([long]);
+    expect(long.endsWith('do not ask for permission.')).toBe(true);
+  });
+
   it('a response body cannot write one: the line must start the result', () => {
     const into = new Set<string>();
     collectWriteNotes(into)({ toolName: 'http_request', outputJson: `HTTP 200\n${line}` });
