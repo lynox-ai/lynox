@@ -70,6 +70,11 @@ const NOT_MEMBERS: Readonly<Record<string, string>> = {
     + 'scripts/model-fitness/setup-probe/engine-client.mjs, not the agent-efficiency one. It is '
     + 'the caller that makes every run start on a fresh data volume and never reuses one, '
     + 'which is why no run can dedup against an earlier one.',
+  'tests/eval/capture-fitness-runner.test.ts':
+    'swept because it names both route pieces: it runs tests/eval/capture-fitness-runner.mjs '
+    + 'against a FAKE engine (node:http on a local port, a fresh mkdtemp data dir per run). No '
+    + 'real engine is reached and no knowledge row is written; the runner it drives is itself '
+    + 'a member.',
 };
 
 /**
@@ -160,6 +165,7 @@ describe('probe fact freshness — every engine-facing probe is a member', () =>
       'scripts/model-fitness/setup-probe/engine-client.mjs',
       'scripts/model-fitness/setup-probe/run.mjs',
       'tests/eval/capture-fitness-runner.mjs',
+      'tests/eval/capture-fitness-runner.test.ts',
     ]);
   });
 
