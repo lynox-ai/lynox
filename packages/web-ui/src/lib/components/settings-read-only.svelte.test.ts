@@ -121,6 +121,8 @@ describe('LLMMemoryView', () => {
 
 	it('shows a mandate the two dials as text', async () => {
 		await render(load, config('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('llm.save'));
 		expect(rows()).toEqual([line(t('config.memory_extraction'), t('settings.value_on')), line(t('config.memory_half_life'), '45')]);
 	});
@@ -138,6 +140,8 @@ describe('WorkspaceUpdatesView', () => {
 
 	it('shows a mandate the update check as text', async () => {
 		await render(load, config('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([line(t('system.update_label'), t('settings.value_on'))]);
 	});
@@ -154,6 +158,8 @@ describe('SystemSettings', () => {
 
 	it('shows a mandate the update check as text, and no way to reveal the vault key or the token', async () => {
 		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([line(t('system.update_label'), t('settings.value_off'))]);
 		expect(buttonTexts()).not.toContain(t('system.vault_reveal'));
@@ -175,6 +181,8 @@ describe('WorkspaceLimitsView', () => {
 
 	it('shows a mandate the limits as text, and an empty one as not set', async () => {
 		await render(load, config('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('cost_limits.save'));
 		expect(rows()).toEqual([
 			line(t('config.monthly_limit'), '50'),
@@ -199,6 +207,8 @@ describe('PrivacyDataSettings', () => {
 
 	it('shows a mandate the two switches as text, and no delete request', async () => {
 		await render(load, config('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([line(t('privacy.bugsink_label'), t('settings.value_off')), line(t('privacy.wire_capture_label'), t('settings.value_on'))]);
 		expect(buttonTexts()).not.toContain(t('privacy.delete_button'));
@@ -220,6 +230,8 @@ describe('ToolToggles', () => {
 
 	it('shows a mandate each tool as on or off', async () => {
 		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([line('web_research', t('settings.value_on')), line('bash', t('settings.value_off'))]);
 	});
@@ -245,6 +257,8 @@ describe('VoiceSettings', () => {
 
 	it('shows a mandate the chosen providers by their visible names, not their codes', async () => {
 		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('voice.save'));
 		expect(rows()).toEqual([
 			line(t('voice.stt_heading'), 'Mistral Voxtral (Paris, EU)'),
@@ -270,6 +284,8 @@ describe('BackupsView', () => {
 
 	it('shows a mandate the list and the settings as text, without create, restore or save', async () => {
 		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([line(t('config.backup_retention'), '14'), line(t('config.backup_encrypt'), t('settings.value_on'))]);
 		expect(buttonTexts()).toEqual([]);
@@ -309,6 +325,8 @@ describe('NotificationsSettings', () => {
 
 	it('shows a mandate the push settings and the escalation mail as text', async () => {
 		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('settings.save'));
 		expect(rows()).toEqual([
 			line(t('integrations.push_inbox_toggle'), t('settings.value_on')),
@@ -362,6 +380,8 @@ describe('SearchSettings', () => {
 
 	it('shows a mandate the SearXNG URL as text, without save, removal or check', async () => {
 		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('settings.save'));
 		// The owner entered the URL; a mandate reads where it points, not its credentials or query.
 		expect(rows()).toEqual([line(t('integrations.searxng_label'), 'http://searx.internal:8888')]);
@@ -387,6 +407,8 @@ describe('LLMAdvancedView', () => {
 
 	it('shows a mandate each choice by its visible option text, not its code', async () => {
 		await render(load, config('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('llm.save'));
 		expect(rows()).toEqual([
 			line(t('config.effort'), t('config.effort_medium')),
@@ -434,6 +456,8 @@ describe('LLMSettings', () => {
 
 	it('shows a mandate strategy, provider and model by their visible names', async () => {
 		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
 		expectMandateView(t('llm.save'));
 		expect(rows()).toEqual([
 			line(t('llm.preset.heading'), t('llm.preset.standard')),
