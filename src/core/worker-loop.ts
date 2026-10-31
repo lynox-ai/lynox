@@ -11,6 +11,9 @@
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
+import { noticeLanguage } from './notice-language.js';
+import { WORKER_NOTICES, type WorkerNotices } from './worker-notices.js';
+import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isFeatureEnabled } from './features.js';
@@ -79,20 +82,22 @@ const CONSENT_REMINDER_BATCH = 3;
  * {@link CONSENT_REMINDER_BATCH} at once (the first tick after an upgrade, say) become one
  * summary, so a backlog does not arrive as a burst.
  */
-export function consentReminderMessages(triggers: readonly TriggerRecord[]): NotificationMessage[] {
+export function consentReminderMessages(
+  triggers: readonly TriggerRecord[],
+  notices: WorkerNotices = WORKER_NOTICES.en,
+): NotificationMessage[] {
   if (triggers.length === 0) return [];
   if (triggers.length > CONSENT_REMINDER_BATCH) {
     return [{
-      title: `\u23F8 ${String(triggers.length)} scheduled actions are waiting for your confirmation`,
-      body: 'They came due and have not run. Review each one under Automation \u203A Triggers before you confirm it.',
+      title: notices.consentManyTitle(triggers.length),
+      body: notices.consentManyBody,
       priority: 'normal',
     }];
   }
   return triggers.map((t) => {
-    const outside = t.created_untrusted ? ' It was set up after reading content from outside.' : '';
     return {
-      title: '\u23F8 A scheduled action is waiting for your confirmation',
-      body: `It came due and has not run.${outside} Review \u201C${reminderTitle(t.title)}\u201D under Automation \u203A Triggers before you confirm it.`,
+      title: notices.consentOneTitle,
+      body: notices.consentOneBody(reminderTitle(t.title), Boolean(t.created_untrusted)),
       taskId: t.id,
       priority: 'normal' as const,
     };
@@ -170,8 +175,6 @@ const LEASE_HEARTBEAT_MS = 30_000;
 const LEASE_TTL_MS = 15 * 60_000;
 /** What a run the engine lost mid-way reads as — a RESULT; its run status is `interrupted`,
  *  the schedule's status `failed`. */
-const INTERRUPTED_RESULT =
-  'The engine stopped while this run was in progress. It is recorded as interrupted and not resumed or run again by itself, because what it had already done would happen a second time.';
 /** How long an event that did not run keeps its values. Nothing runs it again today. */
 const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
 /** What the owner is told of an event that was not run, or whose run did not complete: lynox's own sentences. */
@@ -194,10 +197,10 @@ export function resumedRunNotContained(provisioned: boolean = isProvisionedInsta
  * and a push leaves the instance. The text stays in the chat the push opens (ux U-088). "may":
  * a container whose state is unknown is reduced too.
  */
-export const CONTAINED_RESULT_PUSH = 'This run may have read data from your connected shop, so this notification leaves out its result. Open the chat to read it.';
-export const CONTAINED_QUESTION_PUSH = 'A question is waiting in the chat. This run may have read data from your connected shop, so this notification leaves out the question and its options. Open the chat to answer it.';
+export const CONTAINED_RESULT_PUSH = WORKER_NOTICES.en.containedResult;
+export const CONTAINED_QUESTION_PUSH = WORKER_NOTICES.en.containedQuestion;
 /** The question a mail lists under the body, which already gives the reason. */
-export const CONTAINED_QUESTION_INQUIRY = 'A question is waiting in the chat.';
+export const CONTAINED_QUESTION_INQUIRY = WORKER_NOTICES.en.containedQuestionInquiry;
 export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
 /** Why a mandate's trigger the owner has not confirmed did not run. */
 const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
@@ -706,6 +709,16 @@ export class WorkerLoop {
     /** The run lease's timing; only tests shorten it. */
     private readonly lease: { heartbeatMs: number; ttlMs: number } = { heartbeatMs: LEASE_HEARTBEAT_MS, ttlMs: LEASE_TTL_MS },
   ) {}
+
+  /** The worker's own sentences in the instance's notice language, read per notice (`notice-language.ts`). */
+  #notices(): WorkerNotices {
+    return WORKER_NOTICES[noticeLanguage(this.engine.config?.language)];
+  }
+
+  /** A bulk run's outcome sentences in the same language. */
+  #bulkNotices(): BulkNotices {
+    return BULK_NOTICES[noticeLanguage(this.engine.config?.language)];
+  }
 
   start(): void {
     if (this.timer) return; // already running
@@ -1441,7 +1454,7 @@ export class WorkerLoop {
         if (this.notificationRouter.hasChannels()) {
           const claimed = taskManager.getAwaitingConsentUnreminded()
             .filter((waiting) => taskManager.markConsentReminded(waiting.id));
-          for (const message of consentReminderMessages(claimed)) {
+          for (const message of consentReminderMessages(claimed, this.#notices())) {
             void this.notificationRouter.notify(message);
           }
         }
@@ -1606,7 +1619,7 @@ export class WorkerLoop {
           // then stays and lapses again, and the run is reported once more, never re-run.
           releasePersistentBudget(reservation.reservedUSD);
           try {
-            this.recordAndNotify(task, INTERRUPTED_RESULT, 'interrupted');
+            this.recordAndNotify(task, this.#notices().interrupted, 'interrupted');
             this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
           } catch (err: unknown) {
             process.stderr.write(
@@ -2095,7 +2108,7 @@ export class WorkerLoop {
               // executeTask call, a bypassed read path), refuse it — record + stop,
               // NEVER mint the autonomous run.
               if (!task.confirmed_at && !handRun) {
-                this.recordAndNotify(task, 'This scheduled agent action needs your confirmation before it runs unattended — skipped.', false);
+                this.recordAndNotify(task, this.#notices().confirmationSkipped, false);
                 break;
               }
               // Source-gated executor choice — NOT a money boundary (both branches are
@@ -2279,16 +2292,18 @@ export class WorkerLoop {
           threadId: entry.session?.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
         });
         const pushedMsg = reduce && !isTimeout ? errorText(err, true) : errorMsg;
+        const notices = this.#notices();
         await this.notificationRouter.notify({
           title: `${stopped ? '\u23f9' : '\u2717'} ${task.title}`,
-          body: stopped ? `Stopped on your instruction: ${pushedMsg}` : `Task failed: ${pushedMsg}`,
+          body: stopped ? notices.stoppedWith(pushedMsg) : notices.failed(pushedMsg),
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
+          // The tasks stay English model text: no channel shows them (`WorkerNotices.chipRunAgain`).
           followUps: stopped
-            ? [{ label: 'Run again', task: stripHidden(task.description ?? task.title) }]
+            ? [{ label: notices.chipRunAgain, task: stripHidden(task.description ?? task.title) }]
             : [
-              { label: 'Retry', task: stripHidden(task.description ?? task.title) },
-              { label: 'Explain', task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${stripHidden(pushedMsg)}` },
+              { label: notices.chipRetry, task: stripHidden(task.description ?? task.title) },
+              { label: notices.chipExplain, task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${stripHidden(pushedMsg)}` },
             ],
         });
       }
@@ -2373,6 +2388,7 @@ export class WorkerLoop {
         signal,
         ownerStopped,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
+        notices: this.#bulkNotices(),
       });
     } catch (err: unknown) {
       // What leaves here reaches the run result, the notification, the follow-up prompt and the
@@ -2432,6 +2448,7 @@ export class WorkerLoop {
         signal,
         costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
         clientFor: (r, listQuery, shopifyRead) => clientFor(r, listQuery, shopifyRead),
+        notices: this.#bulkNotices(),
       });
     } catch (err: unknown) {
       // A preview that threw would leave its run `planned` and unhalted with no trigger
@@ -2516,11 +2533,13 @@ export class WorkerLoop {
       outcome = await openRunGroup(randomUUID(), () => runBulkJudge(runId, {
         ledger,
         signal,
+        notices: this.#bulkNotices(),
         readTargets: host === null ? undefined : () => runBulkPreview(runId, {
           ledger,
           signal,
           costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
           clientFor: (r, listQuery, shopifyRead) => clientFor(r, listQuery, shopifyRead),
+          notices: this.#bulkNotices(),
         }),
         resolveModel: (tier) => resolveJudgeModel(this.engine.getUserConfig(), tier, this.engine.client, getActiveProvider()),
         gate: (tier) => fireBeforeRunGate(this.engine, tier),
@@ -2655,7 +2674,7 @@ export class WorkerLoop {
    */
   private async executeReminder(task: TriggerRecord): Promise<void> {
     await this.notificationRouter.notify({
-      title: 'Erinnerung',
+      title: this.#notices().reminderTitle,
       body: task.title,
       taskId: task.id,
       priority: 'normal',
@@ -2938,9 +2957,10 @@ export class WorkerLoop {
       // workflow question's does, to the hooks: on a managed instance a push that reached nobody
       // then mails the owner a fixed text that names neither the question nor the task.
       const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id));
+      const notices = this.#notices();
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
-        body: questionReduced ? CONTAINED_QUESTION_PUSH : offBoxQuestion,
+        body: questionReduced ? notices.containedQuestion : offBoxQuestion,
         taskId: task.id,
         priority: 'high',
         // Deep-link to the asking thread so a tap opens the conversation where
@@ -2949,7 +2969,7 @@ export class WorkerLoop {
         data: { threadId: session.sessionId, promptId },
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: questionReduced
-          ? { question: CONTAINED_QUESTION_INQUIRY }
+          ? { question: notices.containedQuestionInquiry }
           : { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
       }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
         process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
@@ -3268,8 +3288,9 @@ export class WorkerLoop {
       const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
         threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
       });
+      const notices = this.#notices();
       const pushed = resultReduced
-        ? withMemberNotes(budgetCut === null ? CONTAINED_RESULT_PUSH : `${budgetCut}.\n\n${CONTAINED_RESULT_PUSH}`, 'other', memberNotes).result
+        ? withMemberNotes(budgetCut === null ? notices.containedResult : `${budgetCut}.\n\n${notices.containedResult}`, 'other', memberNotes).result
         : memberTold.result;
       await this.notificationRouter.notify({
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
@@ -3285,7 +3306,7 @@ export class WorkerLoop {
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
         title: `${endedByOwner ? '\u23f9' : (budgetCut !== null ? '\u2717' : memberTold.status === 'halted' ? RUN_END_LOOK.halted.mark : '\u2713')} ${task.title}`,
-        body: endedByOwner ? `Stopped on your instruction.\n\n${pushed}` : pushed,
+        body: endedByOwner ? `${notices.stopped}\n\n${pushed}` : pushed,
         taskId: task.id,
         priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
@@ -3293,8 +3314,8 @@ export class WorkerLoop {
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
         data: { threadId: session.sessionId },
         followUps: [
-          { label: 'Details', task: `Show me more details about: ${stripHidden(task.title)}` },
-          { label: 'Run again', task: stripHidden(task.description ?? task.title) },
+          { label: notices.chipDetails, task: `Show me more details about: ${stripHidden(task.title)}` },
+          { label: notices.chipRunAgain, task: stripHidden(task.description ?? task.title) },
         ],
       });
     }
@@ -3329,7 +3350,7 @@ export class WorkerLoop {
       // effect=run_workflow, so a null target lands here rather than at
       // executeStandard. Same benign skip as a workflow deleted mid-flight (below):
       // record it and stop — NEVER run the trigger title as an autonomous task.
-      this.recordAndNotify(task, 'Pipeline target workflow no longer exists (skipped)', false);
+      this.recordAndNotify(task, this.#notices().workflowGone(undefined), false);
       return;
     }
 
@@ -3341,7 +3362,7 @@ export class WorkerLoop {
     // executor tick. Record a skip (so the task list reflects reality) and
     // return without surfacing to Bugsink — there's nothing to fix in code.
     if (!planned) {
-      this.recordAndNotify(task, `Pipeline ${task.pipeline_id} no longer exists (skipped)`, false);
+      this.recordAndNotify(task, this.#notices().workflowGone(task.pipeline_id), false);
       return;
     }
 
@@ -3538,7 +3559,7 @@ export class WorkerLoop {
     if (success) {
       // Still a success: the run completed. Marking it failed would retry the whole run
       // (repeating its other effects) and flip the trigger's status, on every instance.
-      this.recordAndNotify(task, `Pipeline completed (run ${result.runId ?? 'unknown'})${grantReport}`, true);
+      this.recordAndNotify(task, `${this.#notices().workflowCompleted(result.runId)}${grantReport}`, true);
       return;
     }
 
@@ -3558,18 +3579,17 @@ export class WorkerLoop {
     // The run + workflow ids ride in the seeded body so the agent, when the user
     // replies, can diagnose the run (diagnose_workflow_run), edit the workflow
     // (update_workflow_steps) and re-run it (run_workflow) — Slice C2's fix flow.
-    const ref = result.runId
-      ? `(run ${result.runId}${task.pipeline_id ? ` · workflow ${task.pipeline_id}` : ''})`
-      : (task.pipeline_id ? `(workflow ${task.pipeline_id})` : '');
+    const notices = this.#notices();
+    const ref = notices.workflowRef(result.runId, task.pipeline_id ?? undefined);
     this.engine.escalateToUser({
       key: task.id,
       title: `✗ ${task.title}`,
       body:
-        `Your scheduled workflow "${task.title}" didn't complete (status: ${result.status ?? 'unknown'}).\n\n` +
-        (result.error ? `Error: ${result.error}\n\n` : '') +
-        (stepDetail ? `Failed steps:\n${stepDetail}\n\n` : '') +
-        (grantLines.length > 0 ? `Writes:\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
-        `Reply here and I'll help you fix it — I have this run loaded${ref ? ` ${ref}` : ''}.`,
+        `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
+        (result.error ? `${notices.errorLabel} ${result.error}\n\n` : '') +
+        (stepDetail ? `${notices.failedStepsLabel}\n${stepDetail}\n\n` : '') +
+        (grantLines.length > 0 ? `${notices.writesLabel}\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
+        notices.workflowReply(ref),
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
       onReported: this.#recordEscalation(task.id),
     });

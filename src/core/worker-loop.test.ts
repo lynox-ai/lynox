@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
+import { WORKER_NOTICES } from './worker-notices.js';
 import { onBoxBlock, pv } from './prompt-value.js';
 import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -2771,7 +2772,7 @@ describe('WorkerLoop', () => {
     expect((engine as unknown as { createSession: ReturnType<typeof vi.fn> }).createSession).not.toHaveBeenCalled();
     // The benign skip is recorded (recordAndNotify maps success=false → 'failed'), not
     // silently dropped and not run.
-    expect(tm.recordTaskRun).toHaveBeenCalledWith('pt-nulled', 'Pipeline target workflow no longer exists (skipped)', 'failed');
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('pt-nulled', WORKER_NOTICES.en.workflowGone(undefined), 'failed');
   });
 
   it('executePipeline surfaces a non-template pipeline as a typed error', async () => {
@@ -3032,7 +3033,7 @@ describe('WorkerLoop', () => {
     // 1. The pipeline executed — success was recorded.
     expect(taskManager.recordTaskRun).toHaveBeenCalledWith(
       task.id,
-      expect.stringContaining('Pipeline completed') as string,
+      expect.stringContaining('Workflow completed') as string,
       'success',
     );
 
@@ -3573,6 +3574,28 @@ describe('WorkerLoop', () => {
 
   // ---- effect: 'notify' branch (Phase-4 standalone reminders) ----
 
+  // 966: the reminder's title follows the instance's notice language — the configured one, else
+  // German on an instance the control plane provisioned and English on a self-hosted one.
+  it('titles a reminder in the instance\'s notice language, read per notice', async () => {
+    for (const [language, marker, title] of [
+      ['de', undefined, 'Erinnerung'],
+      [undefined, 'inst-1', 'Erinnerung'],
+      ['en', 'inst-1', 'Reminder'],
+      [undefined, undefined, 'Reminder'],
+    ] as const) {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', marker ?? '');
+      vi.stubEnv('LYNOX_BILLING_TIER', '');
+      vi.stubEnv('LYNOX_MANAGED_MODE', '');
+      const task = makeTask({ effect: 'notify', title: 'Roland anrufen' });
+      const engine = Object.assign(makeEngine({ taskManager: makeTaskManager([task]), session: makeSession() }), { config: { language } });
+      const router = makeNotificationRouter();
+      await (new WorkerLoop(engine, router, 60_000) as unknown as { executeTask: (t: TriggerRecord) => Promise<void> }).executeTask(task);
+      const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
+      expect([language, marker, msg?.title]).toEqual([language, marker, title]);
+    }
+    vi.unstubAllEnvs();
+  });
+
   it('executes a reminder by firing notify + recordTaskRun, no agent run', async () => {
     const task = makeTask({ effect: 'notify', title: 'Roland anrufen' });
     const tm = makeTaskManager([task]);
@@ -3584,7 +3607,8 @@ describe('WorkerLoop', () => {
     // Reminder fired → notify called once, recordTaskRun stamped success.
     expect(router.notify).toHaveBeenCalledTimes(1);
     const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
-    expect(msg?.title).toBe('Erinnerung');
+    // No language and no control-plane marker: a self-hosted instance, so English (`notice-language.ts`).
+    expect(msg?.title).toBe('Reminder');
     expect(msg?.body).toBe('Roland anrufen');
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, 'reminder fired', 'success');
     // No agent invocation — session.run never called.

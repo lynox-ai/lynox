@@ -201,6 +201,44 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
     expect(again.changes).toEqual({ update: 0, create: 0, delete: 0, unchanged: 210, invalid: 0 });
   });
 
+  // 966: the worker hands the instance's notice language to the write, so the result it records
+  // and pushes is the owner's language.
+  it('records and pushes a written run in German on an instance set to German', async () => {
+    const runId = await planFiles(seedFiles().slice(0, 3));
+    approve(runId);
+    const triggers = new TriggerStore(engineDb);
+    const recordTaskRun = vi.fn((id: string, result: string, status: 'success' | 'failed' | 'timeout') => {
+      triggers.updateFields(id, { status: status === 'success' ? 'completed' : 'failed' });
+      triggers.updateRunResult(id, { lastRunAt: new Date().toISOString(), lastRunResult: result, lastRunStatus: status, nextRunAt: null });
+    });
+    const notify = vi.fn(async (_m: { body: string }) => {});
+    const engine = {
+      getTaskManager: () => ({
+        getDueTriggers: () => triggers.getDue(),
+        getExpiredWaitingTriggers: () => [],
+        endWait: () => false,
+        claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers),
+        getTrigger: (id: string) => triggers.getById(id),
+        recordTaskRun,
+      }),
+      getToolContext: () => ({ containment: null }),
+      getBulkLedger: () => ledger,
+      getDataStore: () => store,
+      getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+      getUserConfig: () => ({}),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+      config: { language: 'de' },
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
+    await loop.tick();
+    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 25_000 });
+    const said = 'Massenlauf fertig. Geschrieben 3, fehlgeschlagen 0, Konflikte 0, zurückgenommen 0 von 3 Zielen.';
+    expect(recordTaskRun.mock.calls[0]!.slice(1)).toEqual([said, 'success']);
+    await vi.waitFor(() => expect(notify).toHaveBeenCalled());
+    expect(notify.mock.calls[0]![0].body).toBe(said);
+  });
+
   it('bulk_status after the run reports counts and phase, no content', async () => {
     const runId = await planFiles(seedFiles());
     approve(runId);
