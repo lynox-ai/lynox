@@ -312,7 +312,9 @@ describe('deleting the owner of a grant a reader shares through a built-in provi
     const vault = vaultOf(VAULT);
     expect(await tool(store, vault, { action: 'delete', id: 'bexio-a' })).toMatch(/^Deleted API profile "bexio-a"\./);
     vault.set('BEXIO_A_REFRESH_TOKEN', LATER);
-    refusedAsLapsed(await tool(store, vault, { action: 'fetch_token', id: 'bexio-b' }));
+    const result = await tool(store, vault, { action: 'fetch_token', id: 'bexio-b' });
+    expect(result).toMatch(/^Error: profile "bexio-b" reads its refresh token from "BEXIO_A_REFRESH_TOKEN", the refresh slot of a profile that was deleted\./);
+    refusedAsLapsed(result);
   });
 
   it('keeps the refusal across a restart: the mark is stored with the reader', async () => {
