@@ -41,7 +41,7 @@ import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../cor
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -2775,6 +2775,8 @@ ${draftJson}
             removed = w.run('removal', () => apiStore.remove(id, apisDir, { record: 'closing' }), ifTrue);
           }
         } catch (err) {
+          // A reader of the profile's token slots could not be marked before it goes: nothing removed.
+          if (err instanceof SaveRefused) return `Error: API profile "${id}" not deleted — another profile reads its refresh token, and that could not be recorded: ${err.reason}`;
           // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
           // when a non-ENOENT unlink fails — the profile is already gone from
           // memory. Surface it so the agent doesn't retry blindly. The tokens stay:
@@ -2908,6 +2910,14 @@ ${draftJson}
         return `Error: profile "${input.id}" names "${slotNameForModel(tokenAsClient, refreshTokenKey(input.id))}" as its OAuth ${tokenAsClient === clientIdKey ? 'client id' : 'client secret'}, a vault name that holds an OAuth token, and a token is never sent as client credentials. Nothing was sent. Point the field at the vault name of this API's own client credential with api_setup update.`;
       }
       const exchangedSlot = oauth.refresh_token_key ?? refreshTokenKey(input.id);
+      // A deleted profile's refresh slot this one read: the name went with that connection. The way
+      // out is this profile's own sign-in, never a new value under the deleted profile's name.
+      if (grantType === 'refresh_token' && lapsedSlot(apiStore, exchangedSlot)) {
+        const own = builtInPresetOf(profile) !== undefined
+          ? 'remove auth.oauth.refresh_token_key with api_setup update, then connect it with api_setup connect'
+          : 'remove auth.oauth.refresh_token_key with api_setup update, so it reads its own refresh slot, and have the user store this API\'s own refresh token there';
+        return `Error: profile "${input.id}" reads its refresh token from "${slotNameForModel(exchangedSlot, refreshTokenKey(input.id))}", the refresh slot of a profile that was deleted. That connection went with the deleted profile, and this profile does not take its slot over, whatever is stored there. Nothing was sent. To sign this profile in on its own: ${own}.`;
+      }
       if (grantType === 'refresh_token' && !slotMayReach(apiStore, exchangedSlot, 'exchange', tokenUrl, profile)) {
         return `Error: profile "${input.id}" reads its refresh token from "${slotNameForModel(exchangedSlot, refreshTokenKey(input.id))}", and that token goes only to the token endpoint of the connection it belongs to, for that connection or a profile sharing it through a built-in provider — this profile is neither, or more than one profile holds the name. Nothing was sent. Another stored profile holds this vault name. Do not change or delete a profile to get past this: tell the user that another profile holds the connection behind this vault name, and let the user decide.`;
       }

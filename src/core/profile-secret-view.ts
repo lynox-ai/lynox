@@ -17,7 +17,7 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, lapsedSlots, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
@@ -138,10 +138,13 @@ export type SlotRole = 'request' | 'exchange' | 'client' | 'other';
  * - `owned` — `owner` holds it; `members` are the owner and, only for the owner's own refresh
  *   slot, the profiles that read that slot and share the grant through a built-in provider
  *   ({@link sharedGrant}).
+ * - `lapsed` — no profile holds it, and a profile that still names it read it from a profile
+ *   since deleted (`OAuthGrantRecord.lapsed_slots`): it stays that grant's and goes nowhere.
  */
 type SlotGrant =
   | { readonly kind: 'free' }
   | { readonly kind: 'contested' }
+  | { readonly kind: 'lapsed' }
   | { readonly kind: 'owned'; readonly owner: ApiProfile; readonly members: readonly ApiProfile[]; readonly preset: OAuthPreset | undefined };
 
 /**
@@ -186,12 +189,15 @@ function sharedGrant(a: ApiProfile, b: ApiProfile): OAuthPreset | undefined {
  * way, is the configurer's own refresh slot: it goes only to that profile's own exchange, and to
  * nothing else. Named by another profile as well (a state admission does not let two registered
  * profiles reach), it stays free, so a configured name never takes another profile's credential.
+ * A name no grant holds that a profile still naming it read from a deleted profile is `lapsed`,
+ * whoever else names it: the name does not pass from the deleted owner to a reader (register 685).
  */
 function slotGrant(profiles: readonly ApiProfile[], name: string): SlotGrant {
   const holders = profiles.filter((p) => grantTokenNames(p).has(name));
   const [owner] = holders;
   if (owner === undefined) {
     const namers = profiles.filter((p) => slotNames(p).includes(name));
+    if (namers.some((p) => lapsedSlots(p).includes(name))) return { kind: 'lapsed' };
     const [only] = namers;
     if (namers.length !== 1 || only!.auth?.type !== 'oauth2' || readersRefreshSlot(only!) !== name) return { kind: 'free' };
     return { kind: 'owned', owner: only!, members: [only!], preset: undefined };
@@ -442,6 +448,19 @@ export function clientlessSlot(
   }
 }
 
+/**
+ * Whether `name` is a deleted profile's token slot that a profile still naming it read as its
+ * refresh slot ({@link SlotGrant} `lapsed`), for the refusal that names the way out. Anything that
+ * throws answers false, and the refusal falls back to the general text.
+ */
+export function lapsedSlot(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string): boolean {
+  try {
+    return slotGrant(apiStore.knownProfiles(), name).kind === 'lapsed';
+  } catch {
+    return false;
+  }
+}
+
 /** Whether `name` is a refresh slot of `p`: the one its id derives, or the one it configures. */
 function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
   return p.auth?.type === 'oauth2' && (refreshTokenKey(p.id) === name || p.auth.oauth?.refresh_token_key === name);
@@ -482,7 +501,7 @@ export function slotMayReach(
     const profiles = apiStore.knownProfiles();
     const grant = slotGrant(profiles, name);
     if (grant.kind === 'free') return true;
-    if (grant.kind === 'contested' || target === undefined) return false;
+    if (grant.kind === 'contested' || grant.kind === 'lapsed' || target === undefined) return false;
     const { owner, members } = grant;
     const refresh = members.some((m) => isRefreshSlotOf(m, name));
     if (role === 'request') {

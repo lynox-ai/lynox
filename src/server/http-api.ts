@@ -12837,7 +12837,7 @@ export class LynoxHTTPApi {
       const store = engine.getApiStore();
       if (!requireService(res, store, 'API store')) return;
       const { getLynoxDir } = await import('../core/config.js');
-      const { ApiProfileUnlinkError, purgeRecordedTokens } = await import('../core/api-store.js');
+      const { ApiProfileUnlinkError, SaveRefused, purgeRecordedTokens } = await import('../core/api-store.js');
       const apisDir = join(getLynoxDir(), 'apis');
       // Read before the delete: the tokens to purge are named on the profile, registered or held
       // back by the boot.
@@ -12850,6 +12850,8 @@ export class LynoxHTTPApi {
         const removed = store.remove(params['id']!, apisDir, { record: 'closing' });
         if (!removed) { errorResponse(res, 404, 'Profile not found'); return; }
       } catch (err) {
+        // A reader of the profile's token slots could not be marked before it goes: nothing removed.
+        if (err instanceof SaveRefused) { errorResponse(res, 409, `Profile not deleted: another profile reads its refresh token, and that could not be recorded: ${err.reason}`); return; }
         if (err instanceof ApiProfileUnlinkError) {
           // The in-memory side already happened; report the partial state
           // so the operator sees a 500 instead of a misleading 404 + a
