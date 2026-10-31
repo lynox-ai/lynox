@@ -163,6 +163,23 @@ describe('continuation-loop break', () => {
       expect(mockProcess).toHaveBeenCalledTimes(6);
     });
 
+    it('a server tool call cut off before its result is blank, like a cut-off tool call', async () => {
+      // Nothing of it stays to build on: the call never ran, so no result block follows it.
+      const cutSearch = (): unknown => ({
+        content: [{ type: 'server_tool_use', id: 'srv_cut', name: 'web_search', input: { query: 'q' } }],
+        stop_reason: 'max_tokens',
+        usage: { input_tokens: 100, output_tokens: 8192 },
+      });
+      const turns = [cutCall(), thinkingOnly(), cutSearch(), cutCall()];
+      let n = 0;
+      mockProcess.mockImplementation(() => Promise.resolve(turns[n++]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      const err = await agent.send('search it').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ContinuationLoopError);
+      expect(err).not.toBeInstanceOf(ThinkingOnlyLoopError);
+      expect(mockProcess).toHaveBeenCalledTimes(3);
+    });
+
     it('each message starts the count over', async () => {
       // Two blank turns, then an answer; the next message begins with two blank turns again.
       const answer = (t: string): unknown => ({ content: [{ type: 'text', text: t }], stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 50 } });

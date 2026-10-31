@@ -7,7 +7,7 @@ import type { NetworkPolicy } from '../types/index.js';
 import { isGuardedBaselineHost } from './llm/endpoint-allowlist.js';
 import { noteNetworkContact } from './call-connection.js';
 import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
-import { storePassBodyRefusal, storePassRefusal, type StorePass } from './store-pass.js';
+import { storePassBodyRefusal, storePassRefusal, storeRefusalNext, type StorePass } from './store-pass.js';
 
 /**
  * Reject outbound network targets that point at private / reserved / loopback /
@@ -777,7 +777,7 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
     // A store pass reaches its own store and nothing else (`store-pass.ts`), checked here on
     // the URL as it is finally sent, on every hop.
     const refusal = toStore ? storePassRefusal(parsed, headers, pass, init.method ?? 'GET') : 'a store pass reaches only its own store';
-    if (refusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${refusal}. Do not retry it with changed headers or a changed address.`);
+    if (refusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${refusal}. ${storeRefusalNext(refusal)}`);
     // The exchange's body is digested as the bytes it is sent as; a body that is not a string
     // is not the one serialised for it.
     if (pass.kind === 'exchange' && typeof init.body !== 'string') {
@@ -800,8 +800,8 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
   const body = await materialiseBody(init.body);
   if (pass !== undefined) {
     // After the body is bytes: the exchange's pass names those bytes, and is spent here.
-    const bodyRefusal = storePassBodyRefusal(pass, body);
-    if (bodyRefusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${bodyRefusal}. Do not retry it with changed headers or a changed address.`);
+    const bodyRefusal = storePassBodyRefusal(pass, body, headers);
+    if (bodyRefusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${bodyRefusal}. ${storeRefusalNext(bodyRefusal)}`);
   }
 
   // Default port matches Node's URL behaviour (empty → protocol default).
