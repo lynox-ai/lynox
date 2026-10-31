@@ -103,6 +103,13 @@ describe('the read-back check of a written description (PRD shopify-preset §21.
     expect(marked).not.toHaveProperty('hostRewrote');
   });
 
+  it('counts a description the store cleared as stored otherwise than sent', async () => {
+    const product = { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] };
+    const cleared = { ...host, graphqlRead: async () => ({ kind: 'ok', value: { product: { id: P1, ...kept, descriptionHtml: null } } }) } as unknown as ExternalClient;
+    expect(await externalRunWriter(run(`http:${HOST}`, store), product, () => cleared)!.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } }))
+      .toMatchObject({ result: 'written', hostRewrote: true });
+  });
+
   it('counts nothing on a read-back that failed: the write is estimated', async () => {
     const product = { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] };
     const failing = { ...host, graphqlRead: async () => { throw new Error('down'); } } as unknown as ExternalClient;

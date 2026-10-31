@@ -69,16 +69,17 @@ export function bulkRunContract(stored: CapabilityContract, targetSystem: string
 }
 
 /** What a product's read-back holds in its HTML fields against the value sent: markup the write did
- *  not send in any field, else a field stored otherwise than sent, else the bytes sent. A field the
- *  write did not send, or that is not text on either side, is not read here. */
+ *  not send in any field, else a field stored otherwise than sent — a sent text held as no text
+ *  included — else the bytes sent. A field the write did not send as text is not read here. */
 function productReadBack(storeHost: string, startDomains: readonly string[]): (sent: ExternalImage, back: ExternalImage) => 'added' | 'rewritten' | 'kept' {
   return (sent, back) => {
-    const pairs = htmlFieldsOfListForm('shopify').flatMap((f) => {
-      const s = sent[f];
+    const fields = htmlFieldsOfListForm('shopify').filter((f) => typeof sent[f] === 'string');
+    const pairs = fields.flatMap((f) => {
       const b = back[f];
-      return typeof s === 'string' && typeof b === 'string' ? [[s, b] as const] : [];
+      return typeof b === 'string' ? [[sent[f] as string, b] as const] : [];
     });
     if (pairs.some(([s, b]) => !markupAddedByHost({ sent: s, back: b, storeHost, startDomains }).ok)) return 'added';
-    return pairs.some(([s, b]) => s !== b) ? 'rewritten' : 'kept';
+    // A sent text the store holds as no text (cleared) is a removal: counted like any other.
+    return pairs.length < fields.length || pairs.some(([s, b]) => s !== b) ? 'rewritten' : 'kept';
   };
 }

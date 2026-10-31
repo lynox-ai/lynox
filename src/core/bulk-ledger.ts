@@ -2347,9 +2347,12 @@ export class BulkLedger {
 
   /**
    * The markup check once more before a Shopify product write is minted (PRD shopify-preset §21.2
-   * item 3): the preview or the settle step passed the same check on the same two values, so a
-   * failure here means the ledger changed after that, the call sites disagree, or the rule changed
-   * in an engine upgrade. A field the after-state leaves as its before-image is not checked, as at
+   * item 3): where the run's list form names the field HTML, the preview or the settle step passed
+   * the same check on the same two values, so a failure here means the ledger changed after that,
+   * the call sites disagree, or the rule changed in an engine upgrade. A product run whose list form
+   * is not found still has `descriptionHtml` checked here as HTML ({@link htmlFieldsOf}, fail-closed),
+   * so it may leave out a write the preview passed as text: the run halts, it never writes more.
+   * A field the after-state leaves as its before-image is not checked, as at
    * the settle step. An undo is not checked against the rule: its after-state is its source's
    * before-image, which the rule would read as added. In its place each HTML field must be that
    * before-image byte for byte — the ledger checked against itself, not a security bound.

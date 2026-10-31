@@ -681,6 +681,42 @@ describe('the seo pair of a Shopify run', () => {
   });
 });
 
+describe('a product run\'s description classified as HTML (PRD shopify-preset §21.2 item 5)', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const REFORMATTED = '<P>x<br/></P>';
+  const CANONICAL = '<p>x<br></p>';
+  /** One product listed and read, then set back to unread with a description in its planned after-state. */
+  async function unreadWithDescription(): Promise<[string, number]> {
+    vi.stubEnv(FLAG, '1');
+    fill(1);
+    const id = startedList();
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    const seq = ledger.getPreview(id)[0]!.seq;
+    const db = engineDb.getDb();
+    db.prepare(`UPDATE bulk_runs SET phase = 'planned', halt_reason = NULL WHERE id = ?`).run(id);
+    db.prepare('UPDATE bulk_targets SET before = NULL, change = ?, after_planned = ? WHERE run_id = ? AND seq = ?')
+      .run('update', engineDb.enc(JSON.stringify({ seo_title: null, seo_description: 'D1', descriptionHtml: CANONICAL })), id, seq);
+    return [id, seq];
+  }
+
+  it('is unchanged at the preview when the product holds the planned description in another form', async () => {
+    const [id, seq] = await unreadWithDescription();
+    expect(ledger.recordRead(id, seq, { before: { seo_title: null, seo_description: 'D1', descriptionHtml: REFORMATTED } })).toBe(true);
+    expect(ledger.getPreview(id)[0]!.change).toBe('unchanged');
+  });
+
+  it('is unchanged at the settle step when a verdict sets the description the product holds in another form', async () => {
+    const [id, seq] = await unreadWithDescription();
+    expect(ledger.recordRead(id, seq, { before: { seo_title: null, seo_description: 'D1', descriptionHtml: REFORMATTED } })).toBe(true);
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'planned', halt_reason = NULL WHERE id = ?`).run(id);
+    expect(ledger.claimJudge(id, seq, 't', Date.now(), 60_000)).toBe(true);
+    expect(ledger.recordJudgement(id, seq, 't', { after: { seo_title: null, descriptionHtml: CANONICAL } })).toBe(true);
+    expect(ledger.getPreview(id)[0]!.change).toBe('unchanged');
+  });
+});
+
 describe('a planned text of a Shopify run (PRD shopify-preset §20.2 item 5)', () => {
   afterEach(() => { vi.unstubAllEnvs(); });
   /** Listed and read with the plan's `after`: one product, its title and seo as the store holds them. */
@@ -877,10 +913,15 @@ describe('applying a Shopify run', () => {
     expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0 });
   });
 
-  it('compares a product run\'s descriptions as HTML, and nothing on a run of another form', async () => {
+  it('compares a product run\'s descriptions as HTML, its undo\'s too, and nothing on a run that is not a store\'s', async () => {
     fill(1);
     const id = await previewed();
     expect(ledger.comparedAsHtml(id)).toContain('descriptionHtml');
+    ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    await apply(id);
+    const undo = ledger.planUndo(id);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(ledger.comparedAsHtml(undo.status.id)).toContain('descriptionHtml');
     const db = engineDb.getDb();
     db.prepare(`INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total, targets_applied) VALUES ('woo', 'x', 'http:shop.example.com', 'restorable', 'done', 0, 0)`).run();
     expect(ledger.comparedAsHtml('woo')).toEqual([]);
