@@ -96,6 +96,8 @@ import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
+import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orchestrator/run-source.js';
+import { runAsPlanOf } from '../core/plan-run-context.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
@@ -126,7 +128,7 @@ import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl } from '../core/bulk-l
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
-import { WorkflowStore } from '../core/workflow-store.js';
+import { WorkflowStore, type WorkflowAuthorship } from '../core/workflow-store.js';
 import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
@@ -1262,6 +1264,11 @@ export const BULK_PROBE_REQUIRED =
   'written to an unchecked target: it cannot get past its first target if it changes several kinds of entry, starts ' +
   'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes ' +
   'in a run of their own.';
+
+/** A workflow's authorship, or undefined when the read throws: no badge, and a run the runner refuses as unreadable. */
+function authorshipOrNone(read: () => WorkflowAuthorship | undefined): WorkflowAuthorship | undefined {
+  try { return read(); } catch { return undefined; }
+}
 
 function errorResponse(
   res: ServerResponse,
@@ -8043,7 +8050,10 @@ export class LynoxHTTPApi {
       // library agrees with the schedule handler on cron-eligibility (otherwise a
       // legacy autonomous workflow with no stored mode hides its Schedule button).
       const { inferPipelineMode, stepsThatAsk } = await import('../orchestrator/human-in-the-loop.js');
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean } }> = [];
+      // Whom the Run button runs each one as, for the owner only: a mandate's email is not another
+      // mandate's to read (1055, ux U-063). Absent for the owner's own workflows.
+      const ownerViews = isOwnerPrincipal(this._principalOf(req));
       for (const row of rows) {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
         try {
@@ -8098,6 +8108,13 @@ export class LynoxHTTPApi {
           askingSteps: mode === 'interactive' ? stepsThatAsk(fullSteps) : [],
           ...(typeof parsed.confirmedAt === 'string' ? { confirmedAt: parsed.confirmedAt } : {}),
           ...(parsed.capabilityContract !== undefined ? { capabilityContract: parsed.capabilityContract } : {}),
+          ...(() => {
+            if (!ownerViews) return {};
+            const runAs = workflowRunsAs(authorshipOrNone(() => history.getWorkflowAuthorship(row.id)));
+            return runAs.kind === 'mandate'
+              ? { runs_as: { person: runAs.email, ended: principalHasEnded(runAs, (id) => this._mandateLive(id)) } }
+              : {};
+          })(),
         });
       }
       // Whether the schedule dialog may offer a write grant at all (the feature switch).
@@ -8159,7 +8176,7 @@ export class LynoxHTTPApi {
       // rather than headless-running arbitrary imported bash. (Resolve via
       // getPipeline so a prefix id + the post-confirm cache eviction are handled;
       // a not-found id falls through to runGuardedSavedWorkflow's 404.)
-      const { getPipeline } = await import('../tools/builtin/pipeline.js');
+      const { getPipeline, workflowRunTrail, WORKFLOW_RUN_UNRECORDED_RESULT } = await import('../tools/builtin/pipeline.js');
       const plannedForRun = getPipeline(params['id']!, history);
       // A workflow that asks its owner runs only on its schedule (PRD 3b-2 §4.3): this route has
       // no question channel, so a run started here would reach a question step with nobody to ask.
@@ -8195,6 +8212,19 @@ export class LynoxHTTPApi {
             ? 'This workflow uses ask_secret or another way to ask for more than an answer, so it cannot run unattended — an unattended run has no one to give it. Run it from a chat instead; scheduling is not offered for it.'
             : 'This workflow needs first-run confirmation before it can run unattended. Review its steps and schedule it (the consent step confirms it), or run it from a chat where each action asks for your approval.',
         );
+        return;
+      }
+      // Whom the run is for (1055, decision A): the mandate that made or last changed the
+      // workflow, as its schedule would run it, else the owner. The owner pressing Run does not
+      // lift a mandate's workflow out of that mandate's lock. Once that mandate's access ended,
+      // the run is refused here, before the claim, with `author_ended` and the person, so the
+      // view can name the way out: a new workflow from the chat, which belongs to the owner. The
+      // runner refuses the same run (`sourceRefusal`); this answer only adds the person.
+      // A read that throws gives the owner here and the run is refused by the runner as
+      // unreadable, before any step: the same answer as no row.
+      const runAs = workflowRunsAs(plannedForRun === undefined ? undefined : authorshipOrNone(() => history.getWorkflowAuthorship(plannedForRun.id)));
+      if (principalHasEnded(runAs, (id) => this._mandateLive(id))) {
+        errorResponse(res, 403, WORKFLOW_ENDED_REFUSAL, 'author_ended', { runs_as: runAs.kind === 'mandate' ? runAs.email : null });
         return;
       }
       // Loaded BEFORE the claim is taken, and that order is load-bearing: this was the one
@@ -8383,8 +8413,18 @@ export class LynoxHTTPApi {
         // request owns a claim. An earlier shape handed `undefined` for the whole object when
         // there was none, which would have dropped `origin` for every keyless call: the
         // cheapest way to lose a security decision is to make it the sibling of an optional one.
-        result = await runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
+        // A mandate's workflow runs as that mandate (decision A), and as a plan's run, not as
+        // that person's own session: under `runAsPlanOf` with no stamp, so the mandate's own
+        // connections read as unlisted and are refused (`planConnectionState`), and under a
+        // recorded run of its own (the `workflow:run` pair), whose key every row of its steps
+        // carries. A start that cannot be recorded does not run. The owner's run has neither.
+        const trail = workflowRunTrail(runAs, engine.getAuditLog() ?? null, { workflowId: claimWorkflowId, oneShot: false, retry: false, startedBy: 'library' });
+        const run = (): ReturnType<typeof runGuardedSavedWorkflow> => runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
           origin: { kind: 'library', by: this._authOrigin.get(_req) ?? 'unknown' },
+          principal: runAs,
+          // Asked on the workflow as the runner reads it: an edit after this route looked at it
+          // must not run under the principal it decided (`libraryRunCheck`).
+          checkWorkflow: libraryRunCheck(runAs, (id) => history.getWorkflowAuthorship(id)),
           ...(ownedRunId === undefined ? {} : {
             runId: ownedRunId,
             // The stamp that turns "nothing spent" into "spent". `runManifest` fires it before
@@ -8406,6 +8446,21 @@ export class LynoxHTTPApi {
             hooks: { onRunStart: () => { history.markWorkflowRunStarted(ownedRunId); } },
           }),
         });
+        let begun = trail === null;
+        if (trail !== null) { try { trail.begin(); begun = true; } catch { /* answered below */ } }
+        if (!begun) {
+          result = { ok: false, error: WORKFLOW_RUN_UNRECORDED_RESULT };
+        } else if (trail === null) {
+          result = await run();
+        } else {
+          let outcome: 'success' | 'failed' = 'failed';
+          try {
+            result = await runAsPlanOf(runAs, run, null, trail.key);
+            if (result.ok && result.status === 'completed') outcome = 'success';
+          } finally {
+            trail.end(outcome, false);
+          }
+        }
       } finally {
         // Release ONLY what spent nothing, and let SQL decide it: the method's WHERE
         // carries `run_id = ? AND started_at IS NULL`, so a read-then-delete here would
