@@ -407,11 +407,12 @@ export function normalizeWritePath(pathname: string): { path: string; ambiguous:
  * GraphQL API on another path (`/api`, `/v2`) is not recognised and is handled as any POST is.
  */
 /**
- * A path segment a server routes to its GraphQL endpoint: `graphql`, with a format suffix a
- * router strips or matches on (`graphql.json`, Rails' `(.:format)`), and with trailing dots, which
- * IIS drops. Read from the decoded, lower-cased segment.
+ * A path segment a server routes to its GraphQL endpoint: `graphql`, with format suffixes a
+ * router strips or matches on (`graphql.json`, Rails' `(.:format)`, `graphql.tar.gz`, Spring's
+ * `graphql..json`), and with trailing dots, which IIS drops. Read from the decoded, lower-cased
+ * segment.
  */
-const GRAPHQL_SEGMENT = /^graphql(?:\.[a-z0-9]*)?\.*$/i;
+const GRAPHQL_SEGMENT = /^graphql(?:\.[a-z0-9]*)*$/i;
 
 export function isGraphqlEndpoint(url: string): boolean {
   let parsed: URL;
@@ -426,7 +427,12 @@ export function isGraphqlEndpoint(url: string): boolean {
   // a character a router may strip) is read every way a server may decode it, and any reading
   // that names `graphql` anywhere counts. Not every such path: an encoded space is a REST path.
   if (ambiguous) return [parsed.pathname, ...serverReadings(parsed.pathname)].some((reading) => reading.toLowerCase().includes('graphql'));
-  return path.split('/').some((segment) => GRAPHQL_SEGMENT.test(segment));
+  // A decoded `?` or `#` in a segment (`/graphql%3Fquery=…`) is where a proxy that splits the
+  // URL again ends the path, so the segment is read up to it as well.
+  if (path.split('/').some((segment) => GRAPHQL_SEGMENT.test(segment) || GRAPHQL_SEGMENT.test(segment.split(/[?#]/)[0]!))) return true;
+  // WPGraphQL answers on any path that carries the query key `graphql` (`/?graphql`,
+  // `/index.php?graphql`), with or without a value.
+  return [...parsed.searchParams.keys()].some((key) => key.toLowerCase() === 'graphql');
 }
 
 /** An operation that writes: `mutation` or `subscription` as a GraphQL name anywhere in the document. */

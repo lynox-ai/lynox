@@ -588,6 +588,14 @@ export async function fetchWithValidatedRedirects(
         method = 'GET';
         body = undefined;
       }
+      // A GraphQL endpoint runs a mutation it finds in the URL's `query`, for a GET as for a write,
+      // and a request that carries one is refused before it goes out (`graphqlUrlWrites`). A hop
+      // is held to the same, whatever guard the call has: a read has none, and a redirect would
+      // otherwise run the mutation without a question.
+      if (isGraphqlEndpoint(nextUrl) && graphqlUrlWrites(nextUrl)) {
+        if (sent !== undefined) throw new RedirectRefusedAfterWrite(sent, nextUrl, 'consent');
+        throw new Error(`Blocked: redirect to ${urlForNote(nextUrl)} carries a GraphQL mutation in its URL; the redirect was not followed.`);
+      }
       const verdict = redirectGuard ? redirectGuard(nextUrl, method) : true;
       if (verdict !== true) {
         // Decided on the write that was SENT, not on `method`: after a 303 (or a cross-origin
