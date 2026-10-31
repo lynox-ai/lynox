@@ -7308,6 +7308,9 @@ export class LynoxHTTPApi {
           ? { tier: 'managed', contact_for_quotas: true }
           : limitsMod.getHardLimits(),
       };
+      // Whose session asks, as in `/api/approvals`. `PUT /api/config` is the owner's, so the
+      // settings pages show a mandate the values as text instead of fields it cannot save.
+      redacted['viewer'] = approvalScopeOf(this._principalOf(req))?.viewer ?? 'none';
       // Bulk runs as the engine runs them right now, and who decides (`core/bulk-switch.ts`):
       // on a managed pool tier the control plane opens them per instance and the owner can only
       // turn them off; elsewhere the config alone decides. `allowed` is whether turning them ON
