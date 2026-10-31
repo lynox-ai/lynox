@@ -1012,9 +1012,9 @@ export function memberConnectionReader(
   return (consented || profile.created_by === tag) && ends !== null && ends.isLive(reader.mandateId);
 }
 
-/** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` exists only there, never in the store. */
+/** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` and `connected_by_reader` exist only there, never in the store. */
 export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
-  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined }) | undefined;
+  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined; connected_by_reader: boolean }) | undefined;
 };
 
 /**
@@ -1027,19 +1027,29 @@ export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
  * login ({@link memberConnectionReader}, `read`: same tag and same grant, both known); the
  * control plane's bearer none. A grant whose account was left out says so (`account_withheld`),
  * so the page does not read it as an account the engine never recorded.
+ *
+ * Every grant also says whether this reader gave the consent (`connected_by_reader`): the page
+ * cannot tell who reads it, and a tag alone does not say whether it is the reader's. The owner's
+ * is the owner tag or none (a grant from before the tag was recorded); a mandate's, the same
+ * test that shows it the account.
  */
 export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ProfileForReader {
   const shown = withoutFingerprints(profile);
   const grant = shown.oauth_grant;
-  if (grant?.account === undefined) return shown;
+  if (grant === undefined) {
+    const { oauth_grant: _none, ...rest } = shown;
+    return rest;
+  }
+  let yours: boolean;
   switch (reader.kind) {
-    case 'owner': return shown;
-    case 'mandate': if (memberConnectionReader(profile, reader, 'read', null)) return shown; break;
-    case 'cp-admin': break;
+    case 'owner': yours = grant.connected_by === undefined || grant.connected_by === 'owner'; break;
+    case 'mandate': yours = memberConnectionReader(profile, reader, 'read', null); break;
+    case 'cp-admin': yours = false; break;
     default: return unhandledPrincipal(reader);
   }
+  if (grant.account === undefined || reader.kind === 'owner' || yours) return { ...shown, oauth_grant: { ...grant, connected_by_reader: yours } };
   const { account: _account, ...rest } = grant;
-  return { ...shown, oauth_grant: { ...rest, account_withheld: true } };
+  return { ...shown, oauth_grant: { ...rest, connected_by_reader: yours, account_withheld: true } };
 }
 
 /**
