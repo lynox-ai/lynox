@@ -12,6 +12,7 @@
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 
@@ -53,10 +54,10 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(update),
 			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			await throwIfRefused(res);
 			addToast(t('llm.saved'), 'success', 3000);
 		} catch (e) {
-			addToast(e instanceof Error ? e.message : t('llm.save_failed'), 'error', 5000);
+			addToast(saveFailedText(e, t('llm.save_failed')), 'error', 5000);
 		} finally {
 			saving = false;
 		}
