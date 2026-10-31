@@ -21,6 +21,8 @@ import {
   helperFailure,
   planRunAs,
   precheckDataDir,
+  TOS_MARKER,
+  TOS_VERSION,
   type DockerMode,
   type Ids,
 } from './docker-run-as.js';
@@ -28,6 +30,14 @@ import {
 const ME: Ids = { uid: process.getuid?.() ?? 1000, gid: process.getgid?.() ?? 1000 };
 const USER: Ids = { uid: 1000, gid: 1000 };
 const DIR = '/home/someone/.lynox';
+
+describe('TOS_VERSION', () => {
+  it('is the version the literal marker records', () => {
+    // The installer prints this version; the marker stays a literal for the data-dir scanner.
+    expect(TOS_VERSION).toBe('1');
+    expect(TOS_MARKER).toBe(`.tos-accepted-${TOS_VERSION}`);
+  });
+});
 
 describe('dockerModeFromSecurityOptions', () => {
   it('is rootless only when an option names it', () => {
@@ -298,6 +308,9 @@ describe('on the filesystem', () => {
       // No command: none fixes it for the user, so the reason names the step (ux U-082).
       expect(precheckDataDir({ mode: 'rootful', host: ME, engine: ME, dataDir: join(root, '.lynox') }))
         .toEqual({ reason: `${join(root, '.lynox')} is a link or not a directory. Move it aside, then run this again.`, command: null });
+      // A non-interactive run chose the directory with --dir, so another one is a way out too.
+      expect(precheckDataDir({ mode: 'rootful', host: ME, engine: ME, dataDir: join(root, '.lynox'), dirFlag: true }))
+        .toEqual({ reason: `${join(root, '.lynox')} is a link or not a directory. Move it aside or pass another --dir, then run this again.`, command: null });
     });
 
     it('does not judge a rootless engine running as the image user (a subordinate id it does not compute)', () => {

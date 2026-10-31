@@ -251,6 +251,8 @@ export function precheckDataDir(opts: {
   readonly host: Ids;
   readonly engine: Ids;
   readonly dataDir: string;
+  /** The run took its data dir from `--dir`, so another one is a way out (ux U-082). */
+  readonly dirFlag?: boolean;
 }): { reason: string; command: string | null } | null {
   const { mode, host, engine, dataDir } = opts;
   let st;
@@ -260,7 +262,8 @@ export function precheckDataDir(opts: {
     return { reason: `${dataDir} does not exist.`, command: `mkdir -p ${shellQuote(dataDir)}` };
   }
   if (st.isSymbolicLink() || !st.isDirectory()) {
-    return { reason: `${dataDir} is a link or not a directory. Move it aside, then run this again.`, command: null };
+    const out = opts.dirFlag === true ? 'Move it aside or pass another --dir' : 'Move it aside';
+    return { reason: `${dataDir} is a link or not a directory. ${out}, then run this again.`, command: null };
   }
   if (mode === 'rootless') return null;
   const writable = (st.uid === engine.uid && (st.mode & 0o300) === 0o300)
