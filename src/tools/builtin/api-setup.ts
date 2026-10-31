@@ -2775,8 +2775,6 @@ ${draftJson}
             removed = w.run('removal', () => apiStore.remove(id, apisDir, { record: 'closing' }), ifTrue);
           }
         } catch (err) {
-          // A reader of the profile's token slots could not be marked before it goes: nothing removed.
-          if (err instanceof SaveRefused) return `Error: API profile "${id}" not deleted — another profile reads its refresh token, and that could not be recorded: ${err.reason}`;
           // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
           // when a non-ENOENT unlink fails — the profile is already gone from
           // memory. Surface it so the agent doesn't retry blindly. The tokens stay:

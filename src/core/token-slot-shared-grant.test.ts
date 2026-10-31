@@ -375,18 +375,6 @@ describe('deleting the owner of a grant a reader shares through a built-in provi
     expect(tokenPosts()[0]!.body).not.toContain(LATER);
   });
 
-  it('deletes nothing when the reader cannot be marked', async () => {
-    const store = booted();
-    const vault = vaultOf(VAULT);
-    const save = store.save.bind(store);
-    vi.spyOn(store, 'save').mockImplementation((p, ...rest) => (p.id === 'bexio-b' ? { ok: false, reason: 'held for the test' } : save(p, ...rest)));
-    const result = await tool(store, vault, { action: 'delete', id: 'bexio-a' });
-    expect(result).toMatch(/^Error: API profile "bexio-a" not deleted — another profile reads its refresh token/);
-    expect(result).toContain('held for the test');
-    expect(store.get('bexio-a')).toBeDefined();
-    expect(vault.resolve('BEXIO_A_REFRESH_TOKEN')).toBe(A_REFRESH);
-  });
-
   // A reader the boot held back (it reads another grant's slot and shares nothing, so the boot holds
   // back both) is marked too, and once the owner is gone and the next boot lets it in, it is
   // refused with its own way out.

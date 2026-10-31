@@ -2817,7 +2817,7 @@ export class ApiStore {
    * recorded. The flat-JSON path records nothing.
    */
   remove(id: string, apisDir?: string, options?: { readonly record?: ConnectionRecordKind | undefined }): boolean {
-    // Before the profile goes: a reader that cannot be marked keeps it in place (SaveRefused).
+    // Before the profile goes, while it still names its slots. A write that throws keeps it in place.
     this._markLapsedReaders(id, apisDir);
     const removed = this._removeStored(id, apisDir, options?.record);
     // Gone from the store, so no longer a profile any check has to see. Not before: a removal
@@ -2839,10 +2839,10 @@ export class ApiStore {
    * with that name in {@link OAuthGrantRecord.lapsed_slots} (register 685). Without the mark, once
    * `id` is gone, a reader that alone still names the slot would take it over as its own refresh
    * slot and exchange whatever value is stored there next. A mark on a reader that holds the name
-   * itself (the other half of a `-`/`_` pair) changes nothing: a held name is never `lapsed`. A
-   * registered reader is saved as any engine write is,
-   * and a refusal throws {@link SaveRefused}; a profile the boot held back is written as it is
-   * stored, and stays held back.
+   * itself (the other half of a `-`/`_` pair) changes nothing: a held name is never `lapsed`. The
+   * mark is written as the reader is stored, past admission: it changes only the engine's own
+   * record, and no reader's state may keep its owner from being deleted. A held-back reader stays
+   * held back.
    */
   private _markLapsedReaders(id: string, apisDir: string | undefined): void {
     const gone = this.knownProfiles().find((p) => p.id === id);
@@ -2853,14 +2853,10 @@ export class ApiStore {
       const slot = readersRefreshSlot(reader);
       if (!names.has(slot) || lapsedSlots(reader).includes(slot)) continue;
       const next: ApiProfile = { ...reader, oauth_grant: { ...reader.oauth_grant, lapsed_slots: [...lapsedSlots(reader), slot] } };
-      if (!this.profiles.has(reader.id)) {
-        if (this.connStore) this._writeRow(next);
-        else if (apisDir) writeFileSync(join(apisDir, `${next.id}.json`), JSON.stringify(next, null, 2), { mode: 0o600 });
-        this.heldBack.set(next.id, next);
-        continue;
-      }
-      const saved = this.save(next, apisDir);
-      if (!saved.ok) throw new SaveRefused(saved.reason);
+      if (this.connStore) this._writeRow(next);
+      else if (apisDir) writeFileSync(join(apisDir, `${next.id}.json`), JSON.stringify(next, null, 2), { mode: 0o600 });
+      if (this.profiles.has(next.id)) this.profiles.set(next.id, next);
+      else this.heldBack.set(next.id, next);
     }
   }
 

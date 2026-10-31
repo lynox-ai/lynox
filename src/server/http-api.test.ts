@@ -5733,26 +5733,6 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    // A reader of the profile's refresh token that cannot be marked before it goes (register 685)
-    // keeps the profile in place: 409 with the reason, and no token purged.
-    it('refuses with 409 and purges nothing when a reader of the profile cannot be marked', async () => {
-      const { ApiStore, SaveRefused } = await import('../core/api-store.js');
-      const store = new ApiStore();
-      store.register({ id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM', auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'] } });
-      vi.spyOn(store, 'remove').mockImplementation(() => { throw new SaveRefused('held for the test'); });
-      mockGetApiStore.mockReturnValue(store);
-      mockSecretDelete.mockClear();
-      try {
-        const res = await jsonFetch('/api/api-profiles/crm-api', { method: 'DELETE' });
-        expect(res.status).toBe(409);
-        expect((await res.json() as { error: string }).error).toBe('Profile not deleted: another profile reads its refresh token, and that could not be recorded: held for the test');
-        expect(store.get('crm-api')).toBeDefined();
-        expect(mockSecretDelete).not.toHaveBeenCalled();
-      } finally {
-        mockGetApiStore.mockReturnValue(null);
-      }
-    });
-
     // The same refusal `api_setup delete` gives: a recorded token that a stored entry the boot
     // could not read names too is not taken, and nothing is removed. The way out depends on
     // whether the entry's id is one a delete takes.
@@ -19220,6 +19200,20 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         store.register({ ...store.get(PROFILE)!, oauth_grant: { connected_by: 'owner', account: { label: 'old@example.invalid', source: 'id-token' } } });
         expect((await complete(cookie)).status).toBe(200);
         expect(store.get(PROFILE)?.oauth_grant?.account).toBeUndefined();
+      });
+
+      // A deleted profile's slot stays lapsed through a new consent (register 685): the profile may
+      // still name it as its refresh slot, and a new consent must not hand it over.
+      it.each([
+        ['keeps', ['GONE_REFRESH_TOKEN']],
+        ['adds none', undefined],
+      ])('%s the lapsed slots of the profile it connects', async (_label, lapsed) => {
+        const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }) });
+        onBexio(store);
+        store.register({ ...store.get(PROFILE)!, oauth_grant: { connected_by: 'owner', ...(lapsed ? { lapsed_slots: lapsed } : {}) } });
+        expect((await complete(cookie)).status).toBe(200);
+        expect(store.get(PROFILE)?.oauth_grant?.state).toBe('connected');
+        expect(store.get(PROFILE)?.oauth_grant?.lapsed_slots).toEqual(lapsed);
       });
     });
 
