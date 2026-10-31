@@ -7,8 +7,9 @@
  * this is where the customer reads that.
  *
  * Nothing here decides anything. An account the engine did not record is shown as unknown, never
- * guessed from the profile. An account the engine left out for this reader (`account_withheld`:
- * the owner sees every account, so the reader is not the owner) is shown as not shown.
+ * guessed from the profile. An account the engine left out for this reader (`account_withheld`)
+ * is shown as not shown. Whether the reader made the connection is the engine's answer
+ * (`connected_by_reader`), not read from the tag: the page does not know who reads it.
  */
 
 const MANDATE_TAG_PREFIX = 'mandate:';
@@ -17,6 +18,7 @@ export interface OAuthGrantView {
 	connected_by?: unknown;
 	account?: { label?: unknown } | undefined;
 	account_withheld?: unknown;
+	connected_by_reader?: unknown;
 }
 
 export type ConnectedBy = { kind: 'you' } | { kind: 'owner' } | { kind: 'helper'; address: string } | { kind: 'other'; tag: string };
@@ -41,11 +43,13 @@ export function connectionLine(grant: OAuthGrantView | undefined): ConnectionLin
 	const withheld = grant.account_withheld === true;
 	const account = !withheld && typeof label === 'string' && label !== '' ? label : null;
 	if (tag === undefined && account === null && !withheld) return null;
-	// Only the owner's tag (or none, from before it was recorded) is the owner's. It reads as
-	// "you" unless the account was withheld, which happens to every reader but the owner. Any
-	// other tag is named as it is, so a consent that was not the owner's never reads as theirs.
-	const by: ConnectedBy = tag === undefined || tag === 'owner'
-		? (withheld ? { kind: 'owner' } : { kind: 'you' })
+	// "You" only when the engine says this reader gave the consent; without that answer it is
+	// never "you". Otherwise the owner's tag (or none, from before it was recorded) is the owner's,
+	// and any other tag is named as it is, so a consent that was not the owner's never reads as theirs.
+	const by: ConnectedBy = grant.connected_by_reader === true
+		? { kind: 'you' }
+		: tag === undefined || tag === 'owner'
+		? { kind: 'owner' }
 		: typeof tag === 'string' && tag.startsWith(MANDATE_TAG_PREFIX) && tag.length > MANDATE_TAG_PREFIX.length
 			? { kind: 'helper', address: tag.slice(MANDATE_TAG_PREFIX.length) }
 			: { kind: 'other', tag: String(tag) };

@@ -5059,9 +5059,9 @@ describe('LynoxHTTPApi', () => {
       mockGetApiStore.mockReturnValue({ getAll: () => [profile], importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile });
       try {
         const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ oauth_grant?: Record<string, unknown> }> };
-        expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1' });
+        expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true });
         const one = await (await jsonFetch('/api/api-profiles/shop')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
-        expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1' });
+        expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true });
       } finally {
         mockGetApiStore.mockReturnValue(null);
       }
@@ -5141,7 +5141,45 @@ describe('LynoxHTTPApi', () => {
         mockGetApiStore.mockReturnValue({ getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES, get: () => PROFILES[3] });
         api.setPrincipalResolverForTesting(() => EVA);
         const body = await (await jsonFetch('/api/api-profiles/toms')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
-        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', account_withheld: true });
+        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', connected_by_reader: false, account_withheld: true });
+      });
+
+      // The page cannot tell who reads it, so the engine says whether this reader gave the
+      // consent — also on a grant without an account, which has nothing to withhold and so
+      // carried no other sign that the reader is not the owner.
+      describe('says whether the reader made the connection', () => {
+        const WITH_NONE = [
+          ...PROFILES,
+          { id: 'owners-bare', name: 'owners-bare', base_url: 'https://e.example', description: 'd', oauth_grant: { grant_id: 'g-bare', connected_by: 'owner' } },
+          { id: 'legacy-bare', name: 'legacy-bare', base_url: 'https://f.example', description: 'd', oauth_grant: { grant_id: 'g-legacy' } },
+          { id: 'evas-bare', name: 'evas-bare', base_url: 'https://g.example', description: 'd', oauth_grant: { grant_id: 'g-eb', connected_by: EVA_TAG, connected_mandate_id: 'grant-1' } },
+        ];
+        const yoursFor = async (reader: RequestPrincipal): Promise<Record<string, unknown>> => {
+          mockGetApiStore.mockReturnValue({
+            getAll: () => WITH_NONE, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => WITH_NONE,
+            get: (id: string) => WITH_NONE.find((p) => p.id === id),
+          });
+          api.setPrincipalResolverForTesting(() => reader);
+          const body = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ id: string; oauth_grant?: Record<string, unknown> }> };
+          const list = Object.fromEntries(body.profiles.map((p) => [p.id, p.oauth_grant?.['connected_by_reader']]));
+          for (const p of WITH_NONE) {
+            const one = await (await jsonFetch(`/api/api-profiles/${p.id}`)).json() as { profile: { oauth_grant?: Record<string, unknown> } };
+            expect(one.profile.oauth_grant?.['connected_by_reader'], p.id).toBe(list[p.id]);
+          }
+          return list;
+        };
+
+        it('the owner: the owner\'s and the untagged ones, with or without an account', async () => {
+          expect(await yoursFor(OWNER_PRINCIPAL)).toEqual({ owners: true, evas: false, 'evas-old': false, toms: false, 'owners-bare': true, 'legacy-bare': true, 'evas-bare': false });
+        });
+
+        it('a mandate: its own under this grant, never the owner\'s without an account', async () => {
+          expect(await yoursFor(EVA)).toEqual({ owners: false, evas: true, 'evas-old': false, toms: false, 'owners-bare': false, 'legacy-bare': false, 'evas-bare': true });
+        });
+
+        it('the control plane\'s bearer: none', async () => {
+          expect(Object.values(await yoursFor(CP_ADMIN_PRINCIPAL))).toEqual([false, false, false, false, false, false, false]);
+        });
       });
     });
 
