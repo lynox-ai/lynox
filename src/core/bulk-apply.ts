@@ -410,7 +410,13 @@ async function applyRunEffect(
         // (the target is marked sent), or someone else set the value, and the run sends
         // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
         // also what an undo must expect.
-        return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
+        // Found only under the HTML comparison: the store holds the planned description in its own
+        // form — counted like a read-back stored otherwise than sent.
+        const rewritten = htmlFields.length > 0 && !sameImage(cur, t.after);
+        return {
+          kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null,
+          ...(rewritten ? { hostRewrote: true as const } : {}),
+        };
       }
       if (cur === 'foreign' || !sameImage(cur, t.expected, htmlFields)) return { kind: 'conflict' };
       // Still as expected, but an earlier send reached it without a clear answer: that write

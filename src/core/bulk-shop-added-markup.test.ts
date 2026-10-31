@@ -357,6 +357,16 @@ describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.
     expect(sameValue({ description: '<p>a' }, { description: '<p>a' }, html)).toBe(true);
   });
 
+  it('compares a field byte for byte when the sides differ in what the parser drops', () => {
+    const html = ['description'];
+    expect(sameValue({ description: '<p>a</p>' }, { description: '<body onload=alert(1)><p>a</p>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>a</p>' }, { description: '<p>a</p></div>' }, html)).toBe(false);
+    // The same dropped stretch on both sides, the rest reformatted: equal.
+    expect(sameValue({ description: '<P>a</P></div>' }, { description: '<p>a</p></div>' }, html)).toBe(true);
+    // As often on each side, not only the same kinds.
+    expect(sameValue({ description: '<p>a</p></div></div>' }, { description: '<p>a</p></div></span>' }, html)).toBe(false);
+  });
+
   it('keeps every other field byte for byte, and a field one side lacks as a difference', () => {
     expect(sameValue({ description: '<p>a</p>', name: '<b>x</b>' }, { description: '<p>a</p>', name: '<B>x</B>' }, ['description'])).toBe(false);
     expect(sameValue({ description: '<p>a</p>' }, { description: '<p>a</p>', name: null }, ['description'])).toBe(false);

@@ -103,6 +103,23 @@ describe('the read-back check of a written description (PRD shopify-preset §21.
     expect(marked).not.toHaveProperty('hostRewrote');
   });
 
+  it('marks a read-back with a stretch the parser drops that the write never sent', async () => {
+    const product = { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] };
+    const backing = (descriptionHtml: string): ExternalClient =>
+      ({ ...host, graphqlRead: async () => ({ kind: 'ok', value: { product: { id: P1, ...kept, descriptionHtml } } }) }) as unknown as ExternalClient;
+    for (const back of ['<body onload=alert(1)><p>Neu</p>', '<p>Neu</p></div>']) {
+      const out = await externalRunWriter(run(`http:${HOST}`, store), product, () => backing(back))!.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } });
+      expect(out).toMatchObject({ result: 'written', hostAddedMarkup: true });
+      expect(out).not.toHaveProperty('hostRewrote');
+    }
+    // A stretch the value sent held itself, kept as sent: not added.
+    const held = await externalRunWriter(run(`http:${HOST}`, store), product, () => backing('<p>Neu</p></div>'))!.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p></div>' } });
+    expect(held).not.toHaveProperty('hostAddedMarkup');
+    // Held once, read back twice: the second copy is added.
+    const twice = await externalRunWriter(run(`http:${HOST}`, store), product, () => backing('<p>Neu</p></div> </div>'))!.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p></div>' } });
+    expect(twice).toMatchObject({ hostAddedMarkup: true });
+  });
+
   it('counts a description the store cleared as stored otherwise than sent', async () => {
     const product = { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] };
     const cleared = { ...host, graphqlRead: async () => ({ kind: 'ok', value: { product: { id: P1, ...kept, descriptionHtml: null } } }) } as unknown as ExternalClient;

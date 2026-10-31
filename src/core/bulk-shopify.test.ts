@@ -931,7 +931,31 @@ describe('applying a Shopify run', () => {
     };
     await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => reader });
     expect(sent).toEqual([]);
-    expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0 });
+    // Found in the store's own form: counted like a read-back stored otherwise than sent.
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0, hostRewrote: 1 });
+  });
+
+  it('resumes a description the store holds with a stretch the parser drops as a conflict, not as planned', async () => {
+    fill(1);
+    const id = await previewed();
+    plant(id, gid(10), { descriptionHtml: '<p>Neu</p>' });
+    s.products.set(10, { title: 'T1', descriptionHtml: '<body onload=alert(1)><p>Neu</p>', seo: { title: 'New title', description: 'D1' } });
+    ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    const sent: string[] = [];
+    const reader: TargetWriter = {
+      readsBack: true,
+      async read(key, fields) {
+        const p = s.products.get(Number(key.slice(key.lastIndexOf('/') + 1)));
+        if (p === undefined || fields === null) return 'foreign';
+        const seo = p['seo'] as { title: unknown; description: unknown };
+        const all: Record<string, unknown> = { title: p['title'], descriptionHtml: p['descriptionHtml'], seo_title: seo.title, seo_description: seo.description };
+        return { absent: false, value: Object.fromEntries(fields.map((f) => [f, all[f] ?? null])) };
+      },
+      async write(key) { sent.push(key); return 'written'; },
+    };
+    await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => reader });
+    expect(sent).toEqual([]);
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 0, conflicts: 1 });
   });
 
   it('compares a product run\'s descriptions as HTML, its undo\'s too, and nothing on a run that is not a store\'s', async () => {

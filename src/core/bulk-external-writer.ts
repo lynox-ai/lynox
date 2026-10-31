@@ -5,7 +5,7 @@
  */
 import type { TargetWriter } from './bulk-apply.js';
 import { externalWriter, parseBulkContract, writeMethodOf, type ExternalClient, type ExternalImage } from './bulk-external.js';
-import { htmlFieldsOfListForm, markupAddedByHost } from './bulk-html.js';
+import { droppedTagsOf, htmlFieldsOfListForm, markupAddedByHost } from './bulk-html.js';
 import { externalHostOf, type BulkLedger, type BulkRunForApply } from './bulk-ledger.js';
 import { shopifyTargetIo } from './bulk-shopify.js';
 import { shopifyGraphqlEndpoint } from './shopify-graphql.js';
@@ -68,6 +68,18 @@ export function bulkRunContract(stored: CapabilityContract, targetSystem: string
   }
 }
 
+/** Whether `back` holds a string more often than `sent` does. */
+function moreDropped(sent: readonly string[], back: readonly string[]): boolean {
+  const held = new Map<string, number>();
+  for (const v of sent) held.set(v, (held.get(v) ?? 0) + 1);
+  for (const v of back) {
+    const n = held.get(v) ?? 0;
+    if (n === 0) return true;
+    held.set(v, n - 1);
+  }
+  return false;
+}
+
 /** What a product's read-back holds in its HTML fields against the value sent: markup the write did
  *  not send in any field, else a field stored otherwise than sent — a sent text held as no text
  *  included — else the bytes sent. A field the write did not send as text is not read here. */
@@ -78,7 +90,10 @@ function productReadBack(storeHost: string, startDomains: readonly string[]): (s
       const b = back[f];
       return typeof b === 'string' ? [[sent[f] as string, b] as const] : [];
     });
-    if (pairs.some(([s, b]) => !markupAddedByHost({ sent: s, back: b, storeHost, startDomains }).ok)) return 'added';
+    // A stretch the parser drops (`<body onload>`, a stray end tag) is in no tree the check reads:
+    // one the store's read-back holds beyond the value sent is markup it added, live on the page.
+    if (pairs.some(([s, b]) => !markupAddedByHost({ sent: s, back: b, storeHost, startDomains }).ok
+      || (s !== b && moreDropped(droppedTagsOf(s), droppedTagsOf(b))))) return 'added';
     // A sent text the store holds as no text (cleared) is a removal: counted like any other.
     return pairs.length < fields.length || pairs.some(([s, b]) => s !== b) ? 'rewritten' : 'kept';
   };
