@@ -1338,7 +1338,7 @@ describe('WorkerLoop', () => {
 
     describe('an answered question from a deleted CONTAINED conversation', () => {
       /** The deleted conversation read a connected store; `copied` is how many rows its containment hands on. */
-      function resumeFromContained(copied: number) {
+      function resumeFromContained(copied: number, opts?: { flagHolds?: boolean; noStore?: boolean }) {
         configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
         const answeredStore = {
           getAnsweredForTrigger: vi.fn(() => ({
@@ -1351,12 +1351,12 @@ describe('WorkerLoop', () => {
         const tm = makeTaskManager([task]);
         const containFromThread = vi.fn(() => copied);
         const containment = { isContained: (k: { threadId?: string }) => k.threadId === 'thread-parked', containFromThread };
-        const engine = makeEngine({ taskManager: tm, session, promptStore: answeredStore, deletedThreads: ['thread-parked'], containment });
+        const engine = makeEngine({ taskManager: tm, session, promptStore: answeredStore, deletedThreads: ['thread-parked'], containment: opts?.noStore === true ? null : containment });
         const flags = new Map<string, number>();
         (engine as unknown as { getThreadStore: () => unknown }).getThreadStore = () => ({
           isDeleted: (id: string) => id === 'thread-parked',
           getThread: (id: string) => ({ id, skip_extraction: flags.get(id) ?? 0 }),
-          updateThread: (id: string, patch: { skip_extraction?: boolean }) => { if (patch.skip_extraction === true) flags.set(id, 1); },
+          updateThread: (id: string, patch: { skip_extraction?: boolean }) => { if (patch.skip_extraction === true && opts?.flagHolds !== false) flags.set(id, 1); },
         });
         return { engine, session, task, tm, containFromThread, flags, answeredStore };
       }
@@ -1406,6 +1406,37 @@ describe('WorkerLoop', () => {
           expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(false), 'failed');
         } finally {
           stderr.mockRestore();
+        }
+      });
+
+      it('does not run when the new thread\'s private flag does not hold', async () => {
+        const { resumedRunNotContained } = await import('./worker-loop.js');
+        const { engine, session, task, tm } = resumeFromContained(1, { flagHolds: false });
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(session.run).not.toHaveBeenCalled();
+          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(false), 'failed');
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('on a provisioned instance without a containment store, does not run and names support', async () => {
+        // No store reads as contained there (`threadIsContained`), and nothing can be copied.
+        const { resumedRunNotContained } = await import('./worker-loop.js');
+        vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+        const { engine, session, task, tm } = resumeFromContained(1, { noStore: true });
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(session.run).not.toHaveBeenCalled();
+          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(true), 'failed');
+        } finally {
+          stderr.mockRestore();
+          vi.unstubAllEnvs();
         }
       });
 
