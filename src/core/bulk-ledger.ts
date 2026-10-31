@@ -871,10 +871,10 @@ export function canonicalJson(value: unknown): string {
  * (`htmlFieldsOf`) of two objects, compared under `htmlEqual` where both sides are text (PRD
  * shopify-preset §21.2 item 5): a store re-serialises a description, so its reformatting is no
  * change, while one changed character, element or attribute still is. Only where both sides end
- * closed (`endsClosed`) and hold the same stretches the parser drops (`droppedTagsOf`): the tree
- * never sees a tag left open at the end, a `<body onload>` or a stray end tag, which the page runs
- * all the same, so such a value compares byte for byte. A field one side holds and the other does
- * not differs; every other field stays byte-equal.
+ * closed (`endsClosed`) and neither holds a stretch the parser drops (`droppedTagsOf`): the tree
+ * never sees a tag left open at the end, a `<body onload>` or a stray end tag, nor where it sits,
+ * while the page runs and places it all the same, so such a value compares byte for byte. A field
+ * one side holds and the other does not differs; every other field stays byte-equal.
  */
 export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] = []): boolean {
   const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -884,19 +884,11 @@ export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] 
     const x = a[k];
     const y = b[k];
     const same = htmlFields.includes(k) && typeof x === 'string' && typeof y === 'string' && endsClosed(x) && endsClosed(y)
-      && sameStrings(droppedTagsOf(x), droppedTagsOf(y))
+      && droppedTagsOf(x).length === 0 && droppedTagsOf(y).length === 0
       ? htmlEqual(x, y) : canonicalJson(x) === canonicalJson(y);
     if (!same) return false;
   }
   return true;
-}
-
-/** Whether two lists hold the same strings, each as often (order aside). */
-function sameStrings(a: readonly string[], b: readonly string[]): boolean {
-  if (a.length !== b.length) return false;
-  const x = [...a].sort();
-  const y = [...b].sort();
-  return x.every((v, i) => v === y[i]);
 }
 
 /** What the rule would do to one target; `htmlFields` compare under `htmlEqual` ({@link sameValue}). */

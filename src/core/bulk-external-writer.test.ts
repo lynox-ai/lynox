@@ -107,7 +107,7 @@ describe('the read-back check of a written description (PRD shopify-preset §21.
     const product = { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] };
     const backing = (descriptionHtml: string): ExternalClient =>
       ({ ...host, graphqlRead: async () => ({ kind: 'ok', value: { product: { id: P1, ...kept, descriptionHtml } } }) }) as unknown as ExternalClient;
-    for (const back of ['<body onload=alert(1)><p>Neu</p>', '<p>Neu</p></div>']) {
+    for (const back of ['<body onload=alert(1)><p>Neu</p>', '<p>Neu</p></div>', '<p>N</div>eu</p>', '<p>N<body onload=alert(1)>eu</p>']) {
       const out = await externalRunWriter(run(`http:${HOST}`, store), product, () => backing(back))!.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } });
       expect(out).toMatchObject({ result: 'written', hostAddedMarkup: true });
       expect(out).not.toHaveProperty('hostRewrote');

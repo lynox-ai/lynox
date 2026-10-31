@@ -361,10 +361,16 @@ describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.
     const html = ['description'];
     expect(sameValue({ description: '<p>a</p>' }, { description: '<body onload=alert(1)><p>a</p>' }, html)).toBe(false);
     expect(sameValue({ description: '<p>a</p>' }, { description: '<p>a</p></div>' }, html)).toBe(false);
-    // The same dropped stretch on both sides, the rest reformatted: equal.
-    expect(sameValue({ description: '<P>a</P></div>' }, { description: '<p>a</p></div>' }, html)).toBe(true);
-    // As often on each side, not only the same kinds.
-    expect(sameValue({ description: '<p>a</p></div></div>' }, { description: '<p>a</p></div></span>' }, html)).toBe(false);
+    // Text on both sides of the dropped tag: the parser joins it into one text node over the tag.
+    expect(sameValue({ description: '<p>ab</p>' }, { description: '<p>a</div>b</p>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>ab</p>' }, { description: '<p>a<body onload=alert(1)>b</p>' }, html)).toBe(false);
+    // A dropped stretch on either side, the rest only reformatted: byte for byte, so not equal —
+    // the tree does not say where it sits, and the page closes the container there.
+    expect(sameValue({ description: '<P>a</P></div>' }, { description: '<p>a</p></div>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>a</p></div>' }, { description: '<P>a</P></div>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>a</p></div><p>b</p>' }, { description: '<p>a</p><p>b</p></div>' }, html)).toBe(false);
+    // The same bytes stay equal.
+    expect(sameValue({ description: '<p>a</p></div>' }, { description: '<p>a</p></div>' }, html)).toBe(true);
   });
 
   it('keeps every other field byte for byte, and a field one side lacks as a difference', () => {
