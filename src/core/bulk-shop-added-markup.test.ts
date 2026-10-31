@@ -353,6 +353,11 @@ describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.
     const html = ['description'];
     expect(sameValue({ description: '<p>a</p>' }, { description: '<p>a</p><img src=x onerror=y' }, html)).toBe(false);
     expect(sameValue({ description: '<p>a</p><img src=x onerror=y' }, { description: '<p>a</p>' }, html)).toBe(false);
+    // An element left open at the end that takes in what follows (a `strong`, reopened around the
+    // theme's markup) drops nothing, and the parser closes it: the same tree as the closed value.
+    // Byte for byte, in both directions.
+    expect(sameValue({ description: '<p><strong>a</p>' }, { description: '<p><strong>a</strong></p>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p><strong>a</strong></p>' }, { description: '<p><strong>a</p>' }, html)).toBe(false);
     // The same value open at its end is equal to itself, byte for byte.
     expect(sameValue({ description: '<p>a' }, { description: '<p>a' }, html)).toBe(true);
   });
