@@ -366,7 +366,8 @@ export class Session {
    * The principal of the run in flight, or of the last one. Kept between runs on purpose:
    * the agent can be rebuilt outside a run (`setModel`, `reloadUserConfig`, the restore
    * after a compaction), and a session a mandate drove must not come back unlocked from
-   * such a rebuild. The next run that names a principal replaces it.
+   * such a rebuild. The next run that names a principal replaces it. The owner before any is the
+   * library's default; the engine's own places name theirs (principal-sites.test.ts).
    */
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
 

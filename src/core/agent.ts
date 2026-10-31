@@ -1222,6 +1222,8 @@ export class Agent implements IAgent {
     this._principal = p;
     this._toolLock = toolLockFor(p);
   }
+  // The library's default: whoever builds an Agent directly is the owner. Inside the engine no
+  // place leans on it; each names its principal, the owner included (principal-sites.test.ts).
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
   private _toolLock: ReadonlySet<string> | null = null;
 

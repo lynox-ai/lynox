@@ -5,6 +5,7 @@ import { normalizeTier } from '../types/index.js';
 import type { ThreadRecord } from './thread-store.js';
 import { hydrateApiMessages } from './run-stop.js';
 import { threadIsContained } from './containment.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 const VERBATIM_THRESHOLD = 80;
 const RECENT_COUNT = 40;
@@ -79,7 +80,9 @@ async function generateThreadSummary(
   engine: Engine, threadId: string, messages: BetaMessageParam[],
 ): Promise<void> {
   try {
-    const summarySession = engine.createSession({ model: 'fast' });
+    // A summary without tools, in a session of its own: built for the owner, as it always was,
+    // and named rather than left to the library's default (register 735).
+    const summarySession = engine.createSession({ model: 'fast', principal: OWNER_PRINCIPAL });
     const formatted = formatMessagesForSummary(messages.slice(0, -RECENT_COUNT));
     const prompt = `Summarize this conversation concisely in 3-5 paragraphs. Focus on: what was discussed, decisions made, current state of work, and any pending items.\n\n${formatted.slice(0, 30_000)}`;
     // Run as an INTERNAL summary (mirror compact()): a budget/credit guard block is
