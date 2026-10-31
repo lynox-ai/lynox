@@ -1285,7 +1285,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.placeholder_secret': { de: 'Schlüssel oben eingeben — dann geht es weiter', en: 'Enter the key above to continue' },
 	'chat.placeholder_tabs': { de: 'Frage oben beantworten — dann geht es weiter', en: 'Answer the question above to continue' },
 	'chat.error_busy': { de: 'Der Agent arbeitet noch. Bitte warten.', en: 'The agent is still working. Please wait.' },
-	'chat.prompt_expired': { de: 'Diese Frage war abgelaufen, deine Antwort wurde nicht verwendet. Schreib sie als neue Nachricht in den Chat.', en: 'This question had expired, so your answer was not used. Send it as a new message in the chat.' },
+	'chat.prompt_expired': { de: 'Diese Frage ist nicht mehr offen, deine Antwort wurde nicht verwendet. Schreib sie als neue Nachricht in den Chat.', en: 'This question is no longer open, so your answer was not used. Send it as a new message in the chat.' },
 	'chat.prompt_closed_restart': { de: 'Diese Frage wurde geschlossen, weil lynox neu gestartet ist. Der Lauf, der gefragt hat, wartet nicht mehr, und deine Antwort wurde nicht verwendet. Starte die Aufgabe noch einmal.', en: 'This question was closed because lynox restarted. The run that asked is no longer waiting, and your answer was not used. Start the task again.' },
 	'chat.error_blocked_by_prompt': { de: 'Beantworte zuerst die offene Anfrage oben — sie blockiert den Agenten.', en: 'Answer the open prompt above first — it is blocking the agent.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
