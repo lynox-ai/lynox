@@ -1336,6 +1336,71 @@ describe('WorkerLoop', () => {
       expect(prompt, 'and the answer reached the run').toContain('Yes, send it.');
     });
 
+    describe('an answered question from a deleted CONTAINED conversation', () => {
+      /** The deleted conversation read a connected store; `copied` is how many rows its containment hands on. */
+      function resumeFromContained(copied: number) {
+        configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
+        const answeredStore = {
+          getAnsweredForTrigger: vi.fn(() => ({
+            id: 'prompt-1', session_id: 'thread-parked', question: 'Send order #1042 to Jane Roe?', answer: 'Yes.',
+          })),
+          releaseTrigger: vi.fn(),
+        } as unknown as PromptStore;
+        const session = makeSession('Sent.');
+        const task = makeTask();
+        const tm = makeTaskManager([task]);
+        const containFromThread = vi.fn(() => copied);
+        const containment = { isContained: (k: { threadId?: string }) => k.threadId === 'thread-parked', containFromThread };
+        const engine = makeEngine({ taskManager: tm, session, promptStore: answeredStore, deletedThreads: ['thread-parked'], containment });
+        const flags = new Map<string, number>();
+        (engine as unknown as { getThreadStore: () => unknown }).getThreadStore = () => ({
+          isDeleted: (id: string) => id === 'thread-parked',
+          getThread: (id: string) => ({ id, skip_extraction: flags.get(id) ?? 0 }),
+          updateThread: (id: string, patch: { skip_extraction?: boolean }) => { if (patch.skip_extraction === true) flags.set(id, 1); },
+        });
+        return { engine, session, task, tm, containFromThread, flags };
+      }
+
+      it('contains the new thread from the deleted one before the run starts', async () => {
+        const { engine, session, containFromThread, flags } = resumeFromContained(1);
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(containFromThread).toHaveBeenCalledWith('thread-parked', 'thread-worker-test');
+        expect(flags.get('thread-worker-test'), 'and keeps it private').toBe(1);
+        expect(session.run).toHaveBeenCalled();
+        const order = [vi.mocked(containFromThread).mock.invocationCallOrder[0]!, vi.mocked(session.run).mock.invocationCallOrder[0]!];
+        expect(order[0]).toBeLessThan(order[1]);
+      });
+
+      it('does not run when the new thread cannot be contained', async () => {
+        const { RESUMED_RUN_NOT_CONTAINED } = await import('./worker-loop.js');
+        const { engine, session, task, tm } = resumeFromContained(0);
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(session.run).not.toHaveBeenCalled();
+        expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, RESUMED_RUN_NOT_CONTAINED, 'failed');
+      });
+    });
+
+    it('a deleted conversation that was not contained hands nothing on', async () => {
+      configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
+      const answeredStore = {
+        getAnsweredForTrigger: vi.fn(() => ({ id: 'prompt-1', session_id: 'thread-parked', question: 'Send?', answer: 'Yes.' })),
+        releaseTrigger: vi.fn(),
+      } as unknown as PromptStore;
+      const session = makeSession('Sent.');
+      const containFromThread = vi.fn(() => 1);
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session, promptStore: answeredStore, deletedThreads: ['thread-parked'], containment: { isContained: () => false, containFromThread } as never });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(containFromThread).not.toHaveBeenCalled();
+      expect(session.run).toHaveBeenCalled();
+    });
+
     it('never grants more than a single session is allowed to spend', async () => {
       // ⛔ The third term in the min, and without this case it is a free survivor: in every
       // other fixture the session ceiling (default $50) is the largest of the three, so

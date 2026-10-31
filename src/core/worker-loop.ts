@@ -9,6 +9,7 @@
  */
 
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
+import { containThreadFrom, threadIsContained } from './containment.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isFeatureEnabled } from './features.js';
@@ -176,6 +177,8 @@ const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
 export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger does not accept events, so these events are not run. Look at the trigger under Automation.';
 export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves, so it was not run.';
 export const EVENT_RUN_FAILED = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual.';
+/** A run whose answered question came from a deleted contained conversation, and whose new one could not be contained. */
+export const RESUMED_RUN_NOT_CONTAINED = 'This run read data from a connected shop, and its conversation was deleted before the answer came. lynox could not keep the new conversation private, so the run did not continue. Start the task again.';
 export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
 /** Why a mandate's trigger the owner has not confirmed did not run. */
 const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
@@ -2725,6 +2728,19 @@ export class WorkerLoop {
       // The tier the user chose for this trigger, held to the ceiling by the session.
       ...(triggerTier ? { model: triggerTier } : {}),
     });
+    // The new thread takes the question and its answer as input, and the question may quote what
+    // a connected store returned: when the deleted conversation was contained, the new thread is
+    // contained before the run starts (`containThreadFrom`), or the run does not start.
+    if (answered !== undefined && continueIn === undefined) {
+      const { containment } = this.engine.getToolContext();
+      if (threadIsContained(containment, answered.session_id)) {
+        try {
+          containThreadFrom({ containment, threadStore: this.engine.getThreadStore() }, answered.session_id, session.sessionId);
+        } catch {
+          throw new FixedTextError(RESUMED_RUN_NOT_CONTAINED, RESUMED_RUN_NOT_CONTAINED);
+        }
+      }
+    }
     // Cost control: cap agent loop iterations for background tasks
     // Background model: the user's choice (`background_model`, already bounded at
     // config load) beats the operator's `worker_profile`, which routes background
