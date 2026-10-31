@@ -71,7 +71,7 @@ describe('shownReason — what of the server\'s sentence a toast may show', () =
 		expect(shownReason("tier_set slot 'fast' api_base_url 'u:pw@api.example.com/v1?key=abc' is not a curated endpoint."))
 			.toBe("tier_set slot 'fast' api_base_url 'api.example.com/v1' is not a curated endpoint.");
 		// No dot, no path, a slash in the password: the quotes bound the value, not a guess at the host.
-		for (const [entered, kept] of [['localhost:3000/v1?key=abc', 'localhost:3000/v1'], ['h.example.com?key=abc', 'h.example.com'], ['u:p/w@localhost/v1', 'localhost/v1'], ['u:pw@h#frag', 'h']]) {
+		for (const [entered, kept] of [['localhost:3000/v1?key=abc', 'localhost:3000/v1'], ['h.example.com?key=abc', 'h.example.com'], ['u:p/w@localhost/v1', 'localhost/v1'], ['u:pw@h#frag', 'h'], ['u:p@ss@h.example.com/v1', 'h.example.com/v1']]) {
 			expect(shownReason(`api_base_url '${entered}' does not belong to provider 'anthropic'.`)).toBe(`api_base_url '${kept}' does not belong to provider 'anthropic'.`);
 		}
 	});
