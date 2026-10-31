@@ -503,6 +503,13 @@ describe('WorkerLoop', () => {
     const prompt = String(vi.mocked(analysisSession.run).mock.calls[0]![0]);
     expect(prompt).toContain('You are monitoring https://x.test/ for changes');
     expect(prompt).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+    // A later check gets the last summary back into its prompt, and the run before wrote it.
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v2', { status: 200 }));
+    await fire(makeTask({ id: 't-hid', source: 'watch', effect: 'run_agent', last_run_result: `Price was 10.${hidden}`, watch_config: JSON.stringify({ url: 'https://x.test/', interval_minutes: 60, last_hash: 'an-earlier-hash' }) }));
+    const later = String(vi.mocked(analysisSession.run).mock.calls[1]![0]);
+    expect(later).toContain('The content changed since the last check');
+    expect(later).toContain('Previous summary was: Price was 10.\n');
+    expect(later).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
   });
 
   it('executeWatch records on the trigger whether its finding reached anyone', async () => {
