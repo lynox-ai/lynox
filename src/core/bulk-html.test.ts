@@ -356,10 +356,10 @@ describe('checkMarkup: tags the fragment drops', () => {
     ['<p>a</p></section><p>b</p>', '</section>'],
     ['<head><p>a</p>', '<head>'],
     // Text on both sides: the parser joins it into one node whose range covers the tag.
-    ['<p>a<body class="x">b</p>', 'a<body class="x">b'],
-    ['<p>a</div>b</p>', 'a</div>b'],
-    ['<p>a</p> </div> <p>b</p>', ' </div> '],
-    ['<p>a&amp;<html lang="x">b</p>', 'a&amp;<html lang="x">b'],
+    ['<p>a<body class="x">b</p>', '<body class="x">'],
+    ['<p>a</div>b</p>', '</div>'],
+    ['<p>a</p> </div> <p>b</p>', '</div>'],
+    ['<p>a&amp;<html lang="x">b</p>', '<html lang="x">'],
   ] as const;
 
   it.each(dropped)('refuses %s, names the stretch %s, and passes the value without the tag', (after, stretch) => {
@@ -373,6 +373,11 @@ describe('checkMarkup: tags the fragment drops', () => {
     const before = '<p>x<body title="a>b">y</p>';
     expect(reason(before, before)).toBe('ok');
     expect(reason(before, '<p>x<body title="a>" class="z">y</p>')).toBe('not_canonical');
+  });
+
+  it('passes an edit of the text around a held tag, and whitespace around it normalised', () => {
+    expect(reason('<p>Neu</div> Lieferzeit 3 Tage</p>', '<p>Neu</div> Lieferzeit 2 Tage</p>')).toBe('ok');
+    expect(reason('<p>a</p>\n</div>\n<p>b</p>', '<p>a</p></div><p>b</p>')).toBe('ok');
   });
 
   it('lets inert CDATA text of the before-image hold nothing live', () => {
@@ -399,9 +404,11 @@ describe('checkMarkup: tags the fragment drops', () => {
 
   it('reads every dropped stretch, inside a template too', () => {
     expect(droppedTagsOf('<p>a</span></p><template><p>b</p></div></template>')).toEqual(['</span>', '</div>']);
-    expect(droppedTagsOf('<svg><desc>a</div>b</desc></svg>')).toEqual(['a</div>b']);
+    expect(droppedTagsOf('<svg><desc>a</div>b</desc></svg>')).toEqual(['</div>']);
     // An SVG `title` or `style` is not raw text: the tokenizer reads tags in it.
-    expect(droppedTagsOf('<svg><title>a<body class="x">b</title></svg>')).toEqual(['a<body class="x">b']);
+    expect(droppedTagsOf('<svg><title>a<body class="x">b</title></svg>')).toEqual(['<body class="x">']);
+    // Two tags in one text: one stretch from the first to the last, what lies between included.
+    expect(droppedTagsOf('<p>a<body class="x">b</div>c</p>')).toEqual(['<body class="x">b</div>']);
   });
 
   it('reads a < in raw text as a character, and one in ordinary text that opens nothing as text', () => {
