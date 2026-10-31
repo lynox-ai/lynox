@@ -33,23 +33,55 @@ describe('externalRunWriter', () => {
   it('hands a Shopify run a client granted the apply phase its rows hold, and nothing else', () => {
     const { calls, clientFor } = recording();
     const r = run(`http:${HOST}`, store);
-    expect(externalRunWriter(r, { shopifyApplyOf: () => PHASE }, clientFor)).not.toBeNull();
+    expect(externalRunWriter(r, { shopifyApplyOf: () => PHASE, startDomainsOf: () => [] }, clientFor)).not.toBeNull();
     expect(calls).toEqual([[r, undefined, undefined, PHASE]]);
   });
 
   it('hands any other external run its stored contract, and writes with its one verb', () => {
     const { calls, clientFor } = recording();
     const r = run('http:shop.example.invalid', ordinary);
-    expect(externalRunWriter(r, { shopifyApplyOf: () => null }, clientFor)).not.toBeNull();
+    expect(externalRunWriter(r, { shopifyApplyOf: () => null, startDomainsOf: () => [] }, clientFor)).not.toBeNull();
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual([r]);
   });
 
   it('has no writer without a client, or for a store host it cannot reach', () => {
-    expect(externalRunWriter(run(`http:${HOST}`, store), { shopifyApplyOf: () => PHASE }, () => null)).toBeNull();
+    expect(externalRunWriter(run(`http:${HOST}`, store), { shopifyApplyOf: () => PHASE, startDomainsOf: () => [] }, () => null)).toBeNull();
     const { calls, clientFor } = recording();
-    expect(externalRunWriter(run('http:not-a-store.example.invalid', store), { shopifyApplyOf: () => PHASE }, clientFor)).toBeNull();
+    expect(externalRunWriter(run('http:not-a-store.example.invalid', store), { shopifyApplyOf: () => PHASE, startDomainsOf: () => [] }, clientFor)).toBeNull();
     expect(calls).toEqual([]);
+  });
+});
+
+describe('the read-back check of a written description (PRD shopify-preset §21.2 item 6, N5)', () => {
+  const SCRIPT = '<script>steal()</script>';
+  const kept = { title: 'T', descriptionHtml: `<p>Neu</p>${SCRIPT}`, seo: { title: null, description: null } };
+  // A host that keeps whatever is written with a script appended, and reads it back so.
+  const host = {
+    track: () => () => null,
+    graphqlWrite: async () => ({ kind: 'ok', value: {} }),
+    graphqlRead: async () => ({ kind: 'ok', value: { product: { id: P1, ...kept } } }),
+    write: async () => ({ kind: 'ok', value: {} }),
+    get: async () => ({ kind: 'ok', value: { id: 1, description: `<p>Neu</p>${SCRIPT}` } }),
+  } as unknown as ExternalClient;
+
+  it('marks a product whose read-back holds markup the write never sent', async () => {
+    // `shopifyApplyOf` names the form beside the phase.
+    const w = externalRunWriter(run(`http:${HOST}`, store), { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] }, () => host)!;
+    expect(await w.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } })).toMatchObject({ result: 'written', hostAddedMarkup: true });
+    // The same read-back of a field that was not sent is not the run's doing.
+    expect(await w.write(P1, { absent: false, value: { title: 'T' } })).not.toHaveProperty('hostAddedMarkup');
+  });
+
+  it('checks no field on the image form', async () => {
+    const w = externalRunWriter(run(`http:${HOST}`, store), { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_media_alt' as const }), startDomainsOf: () => [] }, () => host)!;
+    expect(await w.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } })).not.toHaveProperty('hostAddedMarkup');
+  });
+
+  it('checks no other form: a WooCommerce description keeps today\'s read-back', async () => {
+    const w = externalRunWriter(run('http:shop.example.invalid', ordinary), { shopifyApplyOf: () => null, startDomainsOf: () => [] }, () => host)!;
+    expect(await w.write('https://shop.example.invalid/items/1', { absent: false, value: { description: '<p>Neu</p>' } }))
+      .toEqual({ result: 'written', actual: { value: { description: `<p>Neu</p>${SCRIPT}` }, estimated: false } });
   });
 });
 
