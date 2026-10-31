@@ -5148,6 +5148,13 @@ describe('LynoxHTTPApi', () => {
       // consent — also on a grant without an account, which has nothing to withhold and so
       // carried no other sign that the reader is not the owner.
       describe('says whether the reader made the connection', () => {
+        // This file shares ONE per-IP rate window; the requests below are paid back so a test
+        // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+        const rateCounts = (): Map<string, { count: number }> =>
+          (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+        let windowBefore = new Map<string, number>();
+        beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+        afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
         const WITH_NONE = [
           ...PROFILES,
           { id: 'owners-bare', name: 'owners-bare', base_url: 'https://e.example', description: 'd', oauth_grant: { grant_id: 'g-bare', connected_by: 'owner' } },
