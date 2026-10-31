@@ -422,6 +422,9 @@ export function isGraphqlEndpoint(url: string): boolean {
     return true;
   }
   if (parsed.hostname.toLowerCase().split('.').some((label) => label.startsWith('graphql'))) return true;
+  // WPGraphQL answers on any path that carries the query key `graphql` (`/?graphql`,
+  // `/index.php?graphql`), with or without a value; PHP reads `graphql[]` as the same key.
+  if (urlQueryStrings(url).some((search) => [...new URLSearchParams(search).keys()].some((key) => key.toLowerCase().replace(/\[.*$/, '') === 'graphql'))) return true;
   const { path, ambiguous } = normalizeWritePath(parsed.pathname);
   // A path whose routing is not known here (a double encoding, an escape that does not decode,
   // a character a router may strip) is read every way a server may decode it, and any reading
@@ -429,10 +432,27 @@ export function isGraphqlEndpoint(url: string): boolean {
   if (ambiguous) return [parsed.pathname, ...serverReadings(parsed.pathname)].some((reading) => reading.toLowerCase().includes('graphql'));
   // A decoded `?` or `#` in a segment (`/graphql%3Fquery=…`) is where a proxy that splits the
   // URL again ends the path, so the segment is read up to it as well.
-  if (path.split('/').some((segment) => GRAPHQL_SEGMENT.test(segment) || GRAPHQL_SEGMENT.test(segment.split(/[?#]/)[0]!))) return true;
-  // WPGraphQL answers on any path that carries the query key `graphql` (`/?graphql`,
-  // `/index.php?graphql`), with or without a value.
-  return [...parsed.searchParams.keys()].some((key) => key.toLowerCase() === 'graphql');
+  return path.split('/').some((segment) => GRAPHQL_SEGMENT.test(segment) || GRAPHQL_SEGMENT.test(segment.split(/[?#]/)[0]!));
+}
+
+/**
+ * The query strings a server may read from a URL: its own, and the rest after a `?` that a
+ * reading of the path decodes (`/graphql%3Fquery=…`), which a proxy that splits the URL again
+ * hands on as a query string. Each without its `?`; a URL that does not parse gives none.
+ */
+export function urlQueryStrings(url: string): string[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return [];
+  }
+  const out = [parsed.search.slice(1)];
+  for (const reading of [parsed.pathname, ...serverReadings(parsed.pathname)]) {
+    const at = reading.indexOf('?');
+    if (at !== -1) out.push(reading.slice(at + 1).split('#')[0]!);
+  }
+  return out;
 }
 
 /** An operation that writes: `mutation` or `subscription` as a GraphQL name anywhere in the document. */
@@ -489,6 +509,23 @@ function jsonRepeatsAKey(text: string): boolean {
  * `operationName: "B"` runs B. A false hit (the word in a string or a field name) only means the
  * write is asked again.
  */
+/**
+ * Whether a body is one JSON object that cannot be a GraphQL request: none of the keys a GraphQL
+ * request sends (`query`, `operationName`, `variables`, `extensions`) and no key a persisted
+ * query names its document by (`id`, `documentId`, `doc_id`, `queryId`). A write to a file whose name reads as a GraphQL path sends such a body; it is
+ * refused all the same, with a note of its own.
+ */
+export function jsonObjectNotGraphql(body: unknown): boolean {
+  if (typeof body !== 'string') return false;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
+    return ![...GRAPHQL_BODY_KEYS, 'id', 'documentId', 'doc_id', 'queryId'].some((key) => Object.hasOwn(parsed, key));
+  } catch {
+    return false;
+  }
+}
+
 export function graphqlWrite(headers: Readonly<Record<string, string>>, body: unknown): { refusal: string } | { mutates: boolean } {
   const types = Object.entries(headers).filter(([name]) => name.trim().toLowerCase() === 'content-type');
   if (types.length !== 1 || !GRAPHQL_CONTENT_TYPE.test(types[0]![1])) {
@@ -523,7 +560,8 @@ export function graphqlWrite(headers: Readonly<Record<string, string>>, body: un
  */
 export function graphqlUrlWrites(url: string): boolean {
   try {
-    return new URL(url).searchParams.getAll('query').some((query) => GRAPHQL_WRITE_OPERATION.test(query));
+    new URL(url);
+    return urlQueryStrings(url).some((search) => new URLSearchParams(search).getAll('query').some((query) => GRAPHQL_WRITE_OPERATION.test(query)));
   } catch {
     return true;
   }
