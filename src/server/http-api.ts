@@ -2587,8 +2587,8 @@ export class LynoxHTTPApi {
    */
   private _refuseContainedRead(req: IncomingMessage, res: ServerResponse, threadId: string): boolean {
     const principal = this._principalOf(req);
-    if (isOwnerPrincipal(principal)) return false;
     const engine = this.engine;
+    // The owner owns every row (`ownedBy`), so the owner passes here too.
     if (ownedBy(engine?.getThreadStore()?.getThread(threadId) ?? undefined, principal)) return false;
     if (!threadIsContained(engine?.getToolContext().containment ?? null, threadId)) return false;
     errorResponse(res, 403, CONTAINED_THREAD_READ_REFUSAL);
