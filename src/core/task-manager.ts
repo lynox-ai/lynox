@@ -762,7 +762,7 @@ export class TaskManager {
     for (const t of summary.overdue) {
       const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${stripHidden(t.scope_id)})`;
       const assignee = t.assignee ? ` [${stripHidden(t.assignee)}]` : '';
-      parts.push(`Overdue: "${stripHidden(t.title)}"${scope}, due ${t.due_date}, ${t.priority.toUpperCase()}${assignee}`);
+      parts.push(`Overdue: "${stripHidden(t.title)}"${scope}, due ${stripHidden(t.due_date ?? '')}, ${t.priority.toUpperCase()}${assignee}`);
     }
 
     // Highlight tasks assigned to lynox that aren't already shown as overdue
