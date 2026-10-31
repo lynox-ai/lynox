@@ -57,7 +57,10 @@ export interface TargetWriter {
    *  connections of what it sends from now on (`ExternalClient.track`). A local writer has none. */
   readonly track?: (() => () => AttachedConnection | null) | undefined;
   read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
-  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage }>;
+  /** `hostAddedMarkup`: the read-back holds markup the write never sent (PRD shopify-preset
+   *  §21.2 item 6). The target is written all the same — the value is in the store — and is
+   *  recorded with its mark; the run then halts. */
+  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true }>;
 }
 
 /**
@@ -312,7 +315,13 @@ async function applyRunEffect(
       return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', outcome.reason), say) };
     }
     if (outcome.kind === 'applied') {
-      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via);
+      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true);
+      if (outcome.hostAddedMarkup === true) {
+        // Written and recorded with its mark first, so a halt that another loop's reason
+        // overwrites still leaves the target marked: the mark is the truth, not `halt_reason`.
+        ledger.halt(runId, BULK_HALT_REASONS.markupAddedByShop);
+        return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.markupAddedByShop), say) };
+      }
       consecutive = 0;
       continue;
     }
@@ -390,7 +399,7 @@ async function applyRunEffect(
 
   /** One claimed target: what to record for it. */
   async function writeOne(w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null):
-    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
+    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
     try {
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
@@ -412,7 +421,8 @@ async function applyRunEffect(
       const refused = (): void => { ledger.markRefused(runId, t.seq); };
       if (w.reportsSend !== true) sent();
       const out = await w.write(t.key, t.after, sent, refused);
-      return typeof out === 'string' ? { kind: 'applied', result: out, actual: null } : { kind: 'applied', result: out.result, actual: out.actual };
+      if (typeof out === 'string') return { kind: 'applied', result: out, actual: null };
+      return { kind: 'applied', result: out.result, actual: out.actual, ...(out.hostAddedMarkup === true ? { hostAddedMarkup: true as const } : {}) };
     } catch (err: unknown) {
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };

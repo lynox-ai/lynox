@@ -4,7 +4,8 @@
  * without a worker.
  */
 import type { TargetWriter } from './bulk-apply.js';
-import { externalWriter, parseBulkContract, writeMethodOf, type ExternalClient } from './bulk-external.js';
+import { externalWriter, parseBulkContract, writeMethodOf, type ExternalClient, type ExternalImage } from './bulk-external.js';
+import { htmlFieldsOfListForm, markupAddedByHost } from './bulk-html.js';
 import { externalHostOf, type BulkLedger, type BulkRunForApply } from './bulk-ledger.js';
 import { shopifyTargetIo } from './bulk-shopify.js';
 import { shopifyGraphqlEndpoint } from './shopify-graphql.js';
@@ -21,13 +22,21 @@ export type BulkApplyClientFor = (
  * reads and writes are granted body by body from this run's rows (`shopifyApplyOf`). Any other
  * external run writes with its contract's one verb. Null where neither holds.
  */
-export function externalRunWriter(run: BulkRunForApply, ledger: Pick<BulkLedger, 'shopifyApplyOf'>, clientFor: BulkApplyClientFor): TargetWriter | null {
+export function externalRunWriter(
+  run: BulkRunForApply, ledger: Pick<BulkLedger, 'shopifyApplyOf' | 'startDomainsOf'>, clientFor: BulkApplyClientFor,
+): TargetWriter | null {
   const shopifyApply = ledger.shopifyApplyOf(run.id);
   if (shopifyApply !== null) {
     const host = externalHostOf(run.targetSystem);
     const endpoint = host === null ? null : shopifyGraphqlEndpoint(host);
     const client = endpoint === null ? null : clientFor(run, undefined, undefined, shopifyApply);
-    return client && endpoint ? externalWriter(client, { io: shopifyTargetIo(client, endpoint, shopifyApply.form) }) : null;
+    if (!client || !endpoint || host === null) return null;
+    const io = shopifyTargetIo(client, endpoint, shopifyApply.form);
+    // A product's description is read back for markup the write never sent (PRD shopify-preset
+    // §21.2 item 6), on this form only (N5): an image's `alt` is plain text.
+    return shopifyApply.form === 'shopify_product'
+      ? externalWriter(client, { io, addedByHost: shopAddedMarkup(host, ledger.startDomainsOf(run.id)) })
+      : externalWriter(client, { io });
   }
   const client = clientFor(run);
   const contract = parseBulkContract(run.contractJson);
@@ -57,4 +66,14 @@ export function bulkRunContract(stored: CapabilityContract, targetSystem: string
   } catch {
     return null;
   }
+}
+
+/** Whether a product's read-back holds markup in an HTML field that the write did not send. A
+ *  field the write did not send, or that is not text on either side, is not checked here. */
+function shopAddedMarkup(storeHost: string, startDomains: readonly string[]): (sent: ExternalImage, back: ExternalImage) => boolean {
+  return (sent, back) => htmlFieldsOfListForm('shopify').some((f) => {
+    const s = sent[f];
+    const b = back[f];
+    return typeof s === 'string' && typeof b === 'string' && !markupAddedByHost({ sent: s, back: b, storeHost, startDomains }).ok;
+  });
 }
