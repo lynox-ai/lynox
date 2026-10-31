@@ -302,6 +302,8 @@ vi.mock('../core/engine.js', () => ({
       maskAll: mockSecretMask,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
+      // No workflow run in this history: every id is a chat's own (register 1112).
+      getPipelineRunOrigins: () => new Map(),
       getRecentRuns: mockHistoryGetRecentRuns,
       searchRuns: mockHistorySearchRuns,
       getRun: mockHistoryGetRun,
@@ -4049,6 +4051,10 @@ describe('LynoxHTTPApi', () => {
       ref.getRunBufferManager = (): unknown => mgr;
       const buf = mgr.create('b8-tail');
       buf.append({ type: 'text', text: 'hello', agent: 'main' });
+      // A helper streams only a run that names its chat (register 1112); this one's is not contained.
+      const regRef = ref as unknown as { getRunRegistry: () => unknown };
+      const origReg = regRef.getRunRegistry;
+      regRef.getRunRegistry = (): unknown => ({ getByRunId: () => ({ thread_id: 't-b8' }) });
       try {
         api.setPrincipalResolverForTesting(() => EVA);
         const evaRes = await fetch(`${baseUrl}/api/runs/b8-tail/stream`, { headers: authHeaders() });
@@ -4078,6 +4084,7 @@ describe('LynoxHTTPApi', () => {
         expect(owner.sse).toContain('event: done');
       } finally {
         ref.getRunBufferManager = orig;
+        regRef.getRunRegistry = origReg;
         mgr.remove('b8-tail');
       }
     });
@@ -8783,6 +8790,191 @@ describe('LynoxHTTPApi', () => {
         db.close();
         rmSync(dir, { recursive: true, force: true });
       }
+    });
+
+    // Register 1112: a chat holding data from a connected store is read by the owner and by whoever
+    // started it, and by nobody else, on any route about it: the dispatcher checks the chat a
+    // route names (`readsThread`), and the lists leave the chat's text out.
+    describe('a contained chat is read only by the owner and by whoever started it', () => {
+      const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
+      type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+      let cookieResolver: Resolver;
+      beforeEach(() => { repayRateWindow(); cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver; });
+      afterEach(() => { api.setPrincipalResolverForTesting(cookieResolver); });
+
+      // `shop` is contained and the owner's, `evas-shop` contained and Eva's, `notes` not contained.
+      const THREADS: Record<string, { id: string; title: string; summary: string | null; created_by?: string }> = {
+        shop: { id: 'shop', title: 'Order 1042 for Jane', summary: 'Jane ordered', created_by: undefined as never },
+        'evas-shop': { id: 'evas-shop', title: 'Eva shop', summary: 's', created_by: 'mandate:eva@example.invalid' },
+        notes: { id: 'notes', title: 'Notes', summary: 's' },
+      };
+      const CONTAINED = new Set(['shop', 'evas-shop']);
+      const RUNS: Record<string, { id: string; session_id: string; task_text: string; response_text: string }> = {
+        'r-shop': { id: 'r-shop', session_id: 'shop', task_text: 't', response_text: 'Jane Roe, 1042' },
+        'r-notes': { id: 'r-notes', session_id: 'notes', task_text: 't', response_text: 'n' },
+        'r-evas': { id: 'r-evas', session_id: 'evas-shop', task_text: 't', response_text: 'e' },
+        // A workflow step records its run under the workflow run, which `shop` started.
+        'r-step': { id: 'r-step', session_id: 'wf-shop', task_text: 't', response_text: 'Jane Roe' },
+        // A sub-agent whose parent had no current thread records no chat at all.
+        'r-orphan': { id: 'r-orphan', session_id: '', task_text: 't', response_text: 'Jane Roe' },
+      };
+      // Workflow runs and the chat that started each: `wf-free` was started by none.
+      const PIPELINES: Record<string, string | null> = { 'wf-shop': 'shop', 'wf-free': null };
+      const pipelineRow = (id: string): { id: string; manifest_json: string } => ({ id, manifest_json: '{"steps":[{"task":"Order 1042 for Jane"}]}' });
+      const containment = {
+        isContained: (k: { threadId?: string }) => CONTAINED.has(k.threadId ?? ''),
+        containedThreadIds: (ids: readonly string[]) => new Set(ids.filter((i) => CONTAINED.has(i))),
+        threadStates: (ids: readonly string[]) => ({ contained: new Set(ids.filter((i) => CONTAINED.has(i))), unknown: new Set<string>() }),
+      };
+      const engineWith = (test: () => Promise<void>): Promise<void> => swapEngine({
+        getThreadStore: () => ({
+          getThread: (id: string) => THREADS[id] ?? null, getMessages: () => [], getMessageCount: () => 0,
+          listThreads: () => Object.values(THREADS),
+        }),
+        getRunHistory: () => ({
+          getRunsBySession: () => [], getRunToolCalls: () => [{ tool_name: 'http_request', output_json: 'Jane Roe' }], getPromptSnapshot: () => null,
+          getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [],
+          getRun: (id: string) => RUNS[id], getRecentRuns: () => Object.values(RUNS), searchRuns: () => Object.values(RUNS),
+          getThreadAggregates: () => Object.values(THREADS).map((t) => ({ sessionId: t.id, title: t.title })),
+          getPipelineRunOrigin: (id: string) => PIPELINES[id],
+          getPipelineRunOrigins: (ids: readonly string[]) => new Map(ids.flatMap((id): Array<[string, string]> => { const o = PIPELINES[id]; return typeof o === 'string' ? [[id, o]] : []; })),
+          // As the store reads it: the exact id, or a run whose id starts with it.
+          getPipelineRun: (id: string) => { const hit = Object.keys(PIPELINES).find((k) => k === id || k.startsWith(id)); return hit === undefined ? undefined : pipelineRow(hit); },
+          getPipelineStepResults: () => [{ step_id: 's1', result: 'Jane Roe, 1042' }],
+          getRecentPipelineRuns: () => Object.keys(PIPELINES).map(pipelineRow),
+        }),
+        getToolContext: () => ({ tools: [], containment }),
+      }, test);
+      const as = async (who: RequestPrincipal, path: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+        api.setPrincipalResolverForTesting(() => who);
+        const res = await jsonFetch(path);
+        const text = await res.text();
+        let body: Record<string, unknown> = {};
+        try { body = JSON.parse(text) as Record<string, unknown>; } catch { /* a stream */ }
+        return { status: res.status, body };
+      };
+      const ABOUT_SHOP = ['/api/threads/shop', '/api/threads/shop/messages', '/api/threads/shop/debug-export',
+        '/api/sessions/shop/pending-prompt', '/api/sessions/shop/changeset', '/api/history/runs/r-shop', '/api/history/runs/r-shop/tool-calls',
+        '/api/history/runs?thread_id=shop', '/api/history/runs?sessionId=shop',
+        // Through a workflow `shop` started: its step's run, its steps, the run itself.
+        '/api/history/runs/r-step', '/api/history/runs/r-step/tool-calls', '/api/history/runs?sessionId=wf-shop',
+        '/api/workflows/wf-shop', '/api/workflows/wf-shop/steps', '/api/workflows/wf-sh'];
+
+      it('a helper is refused another person\'s contained chat on every route about it, with who may read it and a code', async () => {
+        const { CONTAINED_THREAD_READ_REFUSAL, CONTAINED_THREAD_CODE } = await import('./http-api.js');
+        await engineWith(async () => {
+          for (const path of ABOUT_SHOP) {
+            const { status, body } = await as(EVA, path);
+            expect({ status, error: body['error'], code: body['code'] }, path).toEqual({ status: 403, error: CONTAINED_THREAD_READ_REFUSAL, code: CONTAINED_THREAD_CODE });
+          }
+        });
+      });
+
+      it('the owner reads it on every one of those routes', async () => {
+        await engineWith(async () => {
+          for (const path of ABOUT_SHOP) expect((await as(OWNER_PRINCIPAL, path)).status, path).not.toBe(403);
+        });
+      });
+
+      it('the helper reads their own contained chat, and a chat that is not contained, as before', async () => {
+        await engineWith(async () => {
+          for (const id of ['evas-shop', 'notes']) {
+            for (const path of [`/api/threads/${id}`, `/api/threads/${id}/messages`, `/api/threads/${id}/debug-export`, `/api/history/runs?thread_id=${id}`]) {
+              expect((await as(EVA, path)).status, path).toBe(200);
+            }
+          }
+          expect((await as(EVA, '/api/history/runs/r-evas/tool-calls')).status).toBe(200);
+          expect((await as(EVA, '/api/history/runs/r-notes')).status).toBe(200);
+          // A workflow no chat started is no chat's to keep.
+          expect((await as(EVA, '/api/workflows/wf-free')).status).toBe(200);
+          expect((await as(EVA, '/api/workflows/wf-free/steps')).status).toBe(200);
+        });
+      });
+
+      it('opening another person\'s contained chat is refused with the same reason and code; any other foreign chat as before', async () => {
+        const { CONTAINED_THREAD_READ_REFUSAL, CONTAINED_THREAD_CODE } = await import('./http-api.js');
+        const SHOP = '11111111-1111-4111-8111-111111111111';
+        const NOTES = '22222222-2222-4222-8222-222222222222';
+        const GONE = '33333333-3333-4333-8333-333333333333';
+        const rows: Record<string, { id: string; created_by?: string }> = { [SHOP]: { id: SHOP }, [NOTES]: { id: NOTES } };
+        await swapEngine({
+          getThreadStore: () => ({ getThread: (id: string) => rows[id] ?? null, isDeleted: (id: string) => id === GONE }),
+          getRunHistory: () => ({ getPipelineRunOrigins: () => new Map() }),
+          getToolContext: () => ({ tools: [], containment: { ...containment, isContained: (k: { threadId?: string }) => k.threadId === SHOP || k.threadId === GONE, containedThreadIds: (ids: readonly string[]) => new Set(ids.filter((i) => i === SHOP || i === GONE)) } }),
+        }, async () => {
+          const open = async (who: RequestPrincipal, threadId: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+            api.setPrincipalResolverForTesting(() => who);
+            const res = await jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify({ threadId }) });
+            return { status: res.status, body: await res.json() as Record<string, unknown> };
+          };
+          const shop = await open(EVA, SHOP);
+          expect({ status: shop.status, error: shop.body['error'], code: shop.body['code'] }).toEqual({ status: 403, error: CONTAINED_THREAD_READ_REFUSAL, code: CONTAINED_THREAD_CODE });
+          const notes = await open(EVA, NOTES);
+          expect([notes.status, notes.body['code']]).toEqual([403, undefined]);
+          expect(String(notes.body['error'])).toContain('continue this conversation');
+          expect((await open(OWNER_PRINCIPAL, SHOP)).body['code']).toBeUndefined();
+          // A deleted chat answers as it did, not as a contained one: its row is gone.
+          expect((await open(EVA, GONE)).body['code']).toBeUndefined();
+        });
+      });
+
+      it('a recorded run that names no chat answers as not found to a helper', async () => {
+        await engineWith(async () => {
+          expect((await as(EVA, '/api/history/runs/r-nowhere/tool-calls')).status).toBe(404);
+        });
+      });
+
+      it('the lists keep another person\'s contained chat out of a helper\'s view of its text, and the owner\'s whole', async () => {
+        await engineWith(async () => {
+          const threads = (await as(EVA, '/api/threads')).body['threads'] as Array<{ id: string; title: string; summary: string | null; contained: boolean }>;
+          expect(threads.map((t) => [t.id, t.title, t.summary, t.contained])).toEqual([
+            ['shop', '', null, true], ['evas-shop', 'Eva shop', 's', true], ['notes', 'Notes', 's', false],
+          ]);
+          const owned = (await as(OWNER_PRINCIPAL, '/api/threads')).body['threads'] as Array<{ title: string }>;
+          expect(owned.map((t) => t.title)).toEqual(['Order 1042 for Jane', 'Eva shop', 'Notes']);
+          for (const path of ['/api/history/runs', '/api/history/runs?q=Jane']) {
+            const runs = (await as(EVA, path)).body['runs'] as Array<{ id: string }>;
+            expect(runs.map((r) => r.id), path).toEqual(['r-notes', 'r-evas']);
+            const all = (await as(OWNER_PRINCIPAL, path)).body['runs'] as Array<{ id: string }>;
+            expect(all.map((r) => r.id), path).toEqual(['r-shop', 'r-notes', 'r-evas', 'r-step', 'r-orphan']);
+          }
+          const workflows = (await as(EVA, '/api/workflows')).body['runs'] as Array<{ id: string }>;
+          expect(workflows.map((r) => r.id)).toEqual(['wf-free']);
+          const allWorkflows = (await as(OWNER_PRINCIPAL, '/api/workflows')).body['runs'] as Array<{ id: string }>;
+          expect(allWorkflows.map((r) => r.id)).toEqual(['wf-shop', 'wf-free']);
+          const insights = (await as(EVA, '/api/thread-insights')).body['threadInsights'] as Array<{ sessionId: string; title: string }>;
+          expect(insights.map((t) => [t.sessionId, t.title])).toEqual([['shop', ''], ['evas-shop', 'Eva shop'], ['notes', 'Notes']]);
+        });
+      });
+
+      it('a live run of another person\'s contained chat does not stream to a helper; one that names no chat says so', async () => {
+        const { CONTAINED_THREAD_CODE, RUN_CHAT_UNKNOWN_REFUSAL, RUN_CHAT_UNKNOWN_CODE } = await import('./http-api.js');
+        const { RunBufferManager } = await import('../core/run-buffer.js');
+        const mgr = new RunBufferManager();
+        for (const id of ['run-shop', 'run-notes', 'run-nowhere']) mgr.create(id).append({ type: 'text', text: 'hello', agent: 'main' });
+        const rows: Record<string, { thread_id: string }> = { 'run-shop': { thread_id: 'shop' }, 'run-notes': { thread_id: 'notes' } };
+        await swapEngine({
+          getRunBufferManager: () => mgr,
+          getRunRegistry: () => ({ getByRunId: (id: string) => rows[id] }),
+          getThreadStore: () => ({ getThread: (id: string) => THREADS[id] ?? null }),
+          getToolContext: () => ({ tools: [], containment }),
+        }, async () => {
+          expect((await as(EVA, '/api/runs/run-shop/stream')).body['code']).toBe(CONTAINED_THREAD_CODE);
+          const nowhere = await as(EVA, '/api/runs/run-nowhere/stream');
+          expect({ status: nowhere.status, error: nowhere.body['error'], code: nowhere.body['code'] }).toEqual({ status: 403, error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE });
+          // Twins: a chat that is not contained, the owner on the contained one, and the owner on a
+          // run that names no chat. Each opens a stream.
+          const open = async (who: RequestPrincipal, runId: string): Promise<number> => {
+            api.setPrincipalResolverForTesting(() => who);
+            const res = await fetch(`${baseUrl}/api/runs/${runId}/stream`, { headers: authHeaders() });
+            await res.body?.cancel();
+            return res.status;
+          };
+          expect(await open(EVA, 'run-notes')).toBe(200);
+          expect(await open(OWNER_PRINCIPAL, 'run-shop')).toBe(200);
+          expect(await open(OWNER_PRINCIPAL, 'run-nowhere')).toBe(200);
+        });
+      });
     });
 
     it('GET /api/threads/:id/debug-export 404s an unknown thread', async () => {
@@ -16673,6 +16865,26 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('GET /api/export keeps a contained chat whole and marks it, with how many there are', async () => {
+      // The owner's own copy (Art. 15): containment bounds what an agent or a helper carries out,
+      // not the owner's access to their data, so nothing is cut (orchestrator, register 1112).
+      const listThreadsForExport = vi.fn(() => [{ id: 'shop', title: 't', message_count: 1 }, { id: 'notes', title: 't', message_count: 1 }, { id: 'unread', title: 't', message_count: 1 }]);
+      const getMessages = vi.fn((id: string) => [{ seq: 1, role: 'user', content_json: JSON.stringify(`text of ${id}`), display_only: 0, created_at: 'x' }]);
+      await swapEngine({
+        getThreadStore: () => ({ listThreadsForExport, getMessages }),
+        getKnowledgeLayer: () => null,
+        getCRM: () => null,
+        getDataStore: () => null,
+        getToolContext: () => ({ tools: [], containment: { threadStates: (ids: readonly string[]) => ({ contained: new Set(ids.filter((i) => i === 'shop')), unknown: new Set(ids.filter((i) => i === 'unread')) }) } }),
+      }, async () => {
+        const body = await (await jsonFetch('/api/export')).json() as { contained_threads: number; contained_unknown_threads: number; threads: Array<{ id: string; contained: boolean; messages: Array<{ content: unknown }> }> };
+        // One that held store data, one whose state could not be read, counted apart.
+        expect([body.contained_threads, body.contained_unknown_threads]).toEqual([2, 1]);
+        expect(body.threads.map((t) => [t.id, t.contained])).toEqual([['shop', true], ['notes', false], ['unread', true]]);
+        expect(body.threads.find((t) => t.id === 'shop')?.messages.map((m) => m.content)).toEqual(['text of shop']);
+      });
+    });
+
     it('GET /api/export does NOT mark the thread list incomplete on a short page', async () => {
       // The other direction, because a flag that is always true is as useless as
       // one that is always false — and `true` is the value a careless fix would
@@ -20236,6 +20448,37 @@ describe('mandate stance of every user route', () => {
 
   it('allows `reads` only on a GET', () => {
     expect(users().filter(r => r.stance?.kind === 'reads' && r.method !== 'GET').map(name)).toEqual([]);
+  });
+
+  // Register 1112: a GET about one chat (by its id, a live run's or a recorded run's) names the chat,
+  // so the dispatcher keeps a contained chat with its owner and its starter. A route that forgets
+  // it reopens the chat to every helper, and nothing else would show.
+  it('names its chat on every GET about one chat or run, and on the lists that carry chats\' text', () => {
+    const about = users().filter(r => r.method === 'GET' && /^\/api\/(threads|sessions|runs|history\/runs|workflows)\/:/.test(r.path));
+    expect(about.length, 'the set is the real one').toBeGreaterThanOrEqual(10);
+    const unnamed = about.filter(r => r.stance?.kind === 'reads' && r.stance.thread === undefined).map(name);
+    expect(unnamed, 'declare readsThread(...) at the registration').toEqual([]);
+    for (const path of ['/api/threads', '/api/history/runs', '/api/thread-insights', '/api/workflows']) {
+      const r = users().find(x => x.method === 'GET' && x.path === path);
+      expect(r?.stance?.kind === 'reads' && r.stance.thread !== undefined, path).toBe(true);
+    }
+  });
+
+  // A list names no chat (`readsThread(() => null)`), so the dispatcher checks nothing: the
+  // handler itself leaves out what the reader may not read. A list route declared so without that
+  // filter would pass the check above and read every chat.
+  it('filters by reader in every list that names no chat', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('./http-api.ts', import.meta.url), 'utf8');
+    const ends = [...source.matchAll(/readsThread\(\(\) => null\)/g)].map((m) => m.index);
+    expect(ends.length, 'the set is the real one').toBeGreaterThanOrEqual(3);
+    for (const end of ends) {
+      const start = Math.max(source.lastIndexOf("this.addStatic('user'", end), source.lastIndexOf('this.dynamicRoutes.push(', end));
+      const handler = source.slice(start, end);
+      expect(handler.includes('this._unreadableChats('), handler.slice(0, 70)).toBe(true);
+      // ...and uses what it returns: the filter reads the set it was given.
+      expect(/const unreadable = this\._unreadableChats\(/.test(handler) && handler.includes('unreadable.has('), handler.slice(0, 70)).toBe(true);
+    }
   });
 
   it('opens to a mandate exactly the routes named here — opening another is a change to this list', () => {

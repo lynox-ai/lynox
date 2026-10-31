@@ -37,6 +37,8 @@ export const IMAGE_IDS: Ids = { uid: 1001, gid: 1001 };
 
 /** The marker the installer writes into `<home>/.lynox` once the terms are accepted, before the data dir is judged. */
 export const TOS_MARKER = '.tos-accepted-1';
+/** The terms version the marker records, read off its name so the marker stays a literal. */
+export const TOS_VERSION = TOS_MARKER.slice('.tos-accepted-'.length);
 
 /**
  * Where the installer writes {@link TOS_MARKER}. Built here, beside the constant, so the data-dir
