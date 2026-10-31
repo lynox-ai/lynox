@@ -8635,6 +8635,11 @@ export class LynoxHTTPApi {
         const { getPipeline, forgetPipeline } = await import('../tools/builtin/pipeline.js');
         const planned = getPipeline(pipelineId, history);
         if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`); return; }
+        // A schedule on another mandate's workflow ties both mandates into one plan, so a mandate
+        // schedules only its own workflows and the owner's (`foreignWorkflowScheduleRefusal`).
+        const { foreignWorkflowScheduleRefusal } = await import('../core/plan-stamp.js');
+        const refusal = foreignWorkflowScheduleRefusal(principal, planned.id, history);
+        if (refusal !== null) { errorResponse(res, 403, refusal); return; }
         if (!isSchedulableWorkflow(planned)) {
           errorResponse(res, 400, `Workflow "${planned.id}" asks for more than an answer from its owner and cannot be scheduled — remove its ask_secret / ask_human steps first.`); return;
         }
