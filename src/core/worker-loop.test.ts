@@ -1702,13 +1702,19 @@ describe('WorkerLoop', () => {
         taskManager: tm,
         session: sessionStoppedAt({ cause: 'budget_cap', pendingToolCount: 2 }, 'x'.repeat(5000)),
       });
+      const router = makeNotificationRouter();
 
-      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await new WorkerLoop(engine, router, 60_000).tick();
       await vi.advanceTimersByTimeAsync(0);
 
       const recorded = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls[0]?.[1] ?? '';
       expect(recorded.length, 'still bounded').toBeLessThanOrEqual(4001);
       expect(recorded, 'and the reason is what survived, not what got cut').toContain('cost ceiling');
+      // The push is composed apart from the record (it leaves out the way out), and is bounded
+      // the same way.
+      const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
+      expect(msg?.body.length, 'the push is bounded too').toBeLessThanOrEqual(4001);
+      expect(msg?.body.startsWith('Stopped at the cost ceiling of')).toBe(true);
     });
 
     it('records a budget-capped run as failed, naming the ceiling', async () => {
@@ -1736,6 +1742,11 @@ describe('WorkerLoop', () => {
       const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
       expect(msg?.title).toContain('✗');
       expect(msg?.priority).toBe('high');
+      // The way out is in the recorded result the push opens; the push leads with the stop's
+      // first sentence and keeps the room for the run's own text (web push cuts at 240).
+      expect(call?.[1], 'the record names the way out').toContain(WORKER_NOTICES.en.budgetCutWayOut);
+      expect(msg?.body, 'the push does not').not.toContain(WORKER_NOTICES.en.budgetCutWayOut);
+      expect(msg?.body).toMatch(/^Stopped at the cost ceiling of \$[\d.]+ with work still pending\.\n\nPartial findings so far\./);
     });
 
     it('reports a TURN-capped run too, and says which limit it was', async () => {
@@ -2096,7 +2107,8 @@ describe('WorkerLoop', () => {
 
     const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { title: string; body: string };
     expect(msg.title.startsWith('\u2717')).toBe(true);
-    expect(msg.body).toMatch(/^Stopped at this run's cost ceiling of \$[\d.]+ with work still pending\.\n\n/);
+    // The push leads with the stop's first sentence only; the way out is in the recorded result.
+    expect(msg.body).toMatch(/^Stopped at the cost ceiling of \$[\d.]+ with work still pending\.\n\n/);
     expect(msg.body.endsWith(CONTAINED_RESULT_PUSH)).toBe(true);
     expect(msg.body).not.toContain('Jane Roe');
   });

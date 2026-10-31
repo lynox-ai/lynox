@@ -233,7 +233,7 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
     const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
     await loop.tick();
     await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 25_000 });
-    const said = 'Massenlauf fertig. Geschrieben 3, fehlgeschlagen 0, Konflikte 0, zurückgenommen 0 von 3 Zielen.';
+    const said = 'Massenlauf fertig. 3 geschrieben, von 3 Zielen.';
     expect(recordTaskRun.mock.calls[0]!.slice(1)).toEqual([said, 'success']);
     await vi.waitFor(() => expect(notify).toHaveBeenCalled());
     expect(notify.mock.calls[0]![0].body).toBe(said);
@@ -844,7 +844,7 @@ describe('the owner stops a running write — between targets, never inside one'
     // Recorded as the owner's stop — no failure, no retry — and the record names the count.
     expect(out.records).toHaveLength(1);
     expect(out.records[0]![2]).toBe('stopped');
-    expect(out.records[0]![1]).toContain('Applied 4,');
+    expect(out.records[0]![1]).toContain('4 applied');
     expect(out.records[0]![1]).toContain(BULK_HALT_REASONS.stoppedByOwner);
     expect(out.notified, 'the owner asked; nobody is notified of it').toBe(0);
   });
@@ -930,7 +930,7 @@ describe('halt thresholds', () => {
     const halted = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
     expect(halted.status).toBe('halted');
     expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 6 });
-    expect(halted.summary).toContain('failed 6,');
+    expect(halted.summary).toContain('6 failed,');
     // What the resume button shows: six failed so far; five may fail in the next pass and the
     // sixth halts it; the fifty not written are what it tries.
     expect(ledger.getStatus(runId)).toMatchObject({ applied: 50, failedOnce: 6, failureLimit: 5, resumeOpen: 50, resumeTries: 50 });
@@ -947,7 +947,7 @@ describe('halt thresholds', () => {
     expect(s.failedOnce).toBe(9);
     expect(s.applied + s.conflicts + s.failed).toBeLessThanOrEqual(s.total);
     // The notice after the run and what the model reads say the same count.
-    expect(done.summary).toContain('Applied 97, failed 3, conflicts 0');
+    expect(done.summary).toContain('97 applied, 3 failed, of');
     expect(await bulkStatusTool.handler({ run_id: runId }, agent())).toContain('Applied 97, failed 3, conflicts 0, undone 0.');
   });
 

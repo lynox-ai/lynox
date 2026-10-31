@@ -12,7 +12,7 @@
  * listed in `worker-notices.test.ts`.
  */
 import type { NoticeLanguage } from './notice-language.js';
-import { BULK_HALT_REASONS, bulkFoundAsPlannedNote } from './bulk-ledger.js';
+import { BULK_HALT_REASONS } from './bulk-ledger.js';
 
 export interface BulkApplyCounts {
   applied: number; foundAsPlanned: number; failed: number; conflicts: number;
@@ -40,17 +40,44 @@ export interface BulkNotices {
   readonly judgeStopped: string;
 }
 
+interface CountWords {
+  unclear(k: string): string;
+  applied(a: string, foundAsPlanned: string | null): string;
+  failed(f: string): string;
+  conflicts(k: string): string;
+  undone(u: string): string;
+  total(t: string): string;
+}
+
+/**
+ * A written run's counts, ordered so web push's cut (240 characters) takes the counts and never
+ * the warning: the unclear sends first, and only when there are any; then what was written, and
+ * the other counts only when they are not 0 (ux U-099).
+ */
+function applyCounts(c: BulkApplyCounts, w: CountWords): string {
+  const parts = [
+    w.applied(String(c.applied), c.foundAsPlanned > 0 ? String(c.foundAsPlanned) : null),
+    ...(c.failed > 0 ? [w.failed(String(c.failed))] : []),
+    ...(c.conflicts > 0 ? [w.conflicts(String(c.conflicts))] : []),
+    ...(c.undone > 0 ? [w.undone(String(c.undone))] : []),
+    w.total(String(c.total)),
+  ];
+  return `${c.sentUnknown > 0 ? `${w.unclear(String(c.sentUnknown))} ` : ''}${parts.join(', ')}`;
+}
+
 const EN: BulkNotices = Object.freeze({
   applyDone: 'Bulk run done.',
   previewDone: 'Bulk preview done. The run is ready for review.',
   readDone: 'Bulk read done. The targets are to be judged next.',
   listEmpty: 'Bulk list read done. The list holds no target that could be planned.',
-  listWaiting: 'Bulk list read done. Waiting for the owner to review the targets and start reading them.',
+  listWaiting: 'Bulk list read done. Review the targets, then start reading them.',
   judgeDone: 'Bulk judge done. The run is ready for review.',
-  applyCounts: (c: BulkApplyCounts) =>
-    `Applied ${String(c.applied)}${bulkFoundAsPlannedNote(c.foundAsPlanned)}, failed ${String(c.failed)}, conflicts ${String(c.conflicts)}, ` +
-    `undone ${String(c.undone)} of ${String(c.total)} targets.` +
-    (c.sentUnknown > 0 ? ` Unclear ${String(c.sentUnknown)}: sent without a clear answer, not sent again.` : ''),
+  applyCounts: (c: BulkApplyCounts) => applyCounts(c, {
+    unclear: (k) => `${k} unclear: sent without a clear answer, not sent again.`,
+    applied: (a, n) => `${a} applied${n !== null ? ` (of which ${n} already as planned)` : ''}`,
+    failed: (f) => `${f} failed`, conflicts: (k) => `${k} conflicts`, undone: (u) => `${u} undone`,
+    total: (t) => `of ${t} targets.`,
+  }),
   previewCounts: (read: number, invalid: number, unread: number, total: number) =>
     `Read ${String(read)}, invalid ${String(invalid)}, unread ${String(unread)} of ${String(total)} targets.`,
   judgeCounts: (judged: number, invalid: number, unjudged: number, total: number) =>
@@ -72,13 +99,13 @@ const EN: BulkNotices = Object.freeze({
 let deHaltReasons: Readonly<Record<string, string>> | undefined;
 function deHaltReason(reason: string): string | undefined {
   deHaltReasons ??= Object.freeze({
-    [BULK_HALT_REASONS.timeBudget]: 'Der Lauf hat seine Zeit aufgebraucht.',
-    [BULK_HALT_REASONS.failureRate]: 'Mehr als 5 % der Ziele sind fehlgeschlagen.',
-    [BULK_HALT_REASONS.consecutiveFailures]: 'Drei Ziele hintereinander sind fehlgeschlagen.',
-    [BULK_HALT_REASONS.stoppedByOwner]: 'Der Lauf wurde von Hand gestoppt.',
-    [BULK_HALT_REASONS.maxTargets]: 'Die freigegebene Höchstzahl an Zielen ist erreicht.',
-    [BULK_HALT_REASONS.awaitingStart]: 'Er wartet darauf, dass du das Lesen der Ziele startest.',
-    [BULK_HALT_REASONS.expired]: 'Die Freigabe ist abgelaufen.',
+    [BULK_HALT_REASONS.timeBudget]: 'Zeitbudget aufgebraucht.',
+    [BULK_HALT_REASONS.failureRate]: 'Über 5 % der Ziele fehlgeschlagen.',
+    [BULK_HALT_REASONS.consecutiveFailures]: 'Drei Ziele in Folge fehlgeschlagen.',
+    [BULK_HALT_REASONS.stoppedByOwner]: 'Von Hand gestoppt.',
+    [BULK_HALT_REASONS.maxTargets]: 'Freigegebene Höchstzahl erreicht.',
+    [BULK_HALT_REASONS.awaitingStart]: 'Wartet, bis du das Lesen startest.',
+    [BULK_HALT_REASONS.expired]: 'Freigabe abgelaufen.',
   });
   return deHaltReasons[reason];
 }
@@ -90,10 +117,12 @@ const DE: BulkNotices = Object.freeze({
   listEmpty: 'Liste gelesen. Sie enthält kein Ziel, das sich planen lässt.',
   listWaiting: 'Liste gelesen. Prüf die Ziele und starte dann das Lesen.',
   judgeDone: 'Beurteilung fertig. Der Massenlauf wartet auf deine Prüfung.',
-  applyCounts: (c: BulkApplyCounts) =>
-    `Geschrieben ${String(c.applied)}${c.foundAsPlanned > 0 ? ` (${String(c.foundAsPlanned)} hatten schon den geplanten Wert, an sie wurde nichts gesendet)` : ''}, ` +
-    `fehlgeschlagen ${String(c.failed)}, Konflikte ${String(c.conflicts)}, zurückgenommen ${String(c.undone)} von ${String(c.total)} Zielen.` +
-    (c.sentUnknown > 0 ? ` Unklar ${String(c.sentUnknown)}: gesendet, aber ohne klare Antwort, deshalb nicht noch einmal gesendet.` : ''),
+  applyCounts: (c: BulkApplyCounts) => applyCounts(c, {
+    unclear: (k) => `${k} unklar: gesendet ohne klare Antwort, nicht wiederholt.`,
+    applied: (a, n) => `${a} geschrieben${n !== null ? ` (davon ${n} schon wie geplant)` : ''}`,
+    failed: (f) => `${f} fehlgeschlagen`, conflicts: (k) => `${k} Konflikte`, undone: (u) => `${u} zurückgenommen`,
+    total: (t) => `von ${t} Zielen.`,
+  }),
   previewCounts: (read: number, invalid: number, unread: number, total: number) =>
     `Gelesen ${String(read)}, ungültig ${String(invalid)}, nicht gelesen ${String(unread)} von ${String(total)} Zielen.`,
   judgeCounts: (judged: number, invalid: number, unjudged: number, total: number) =>

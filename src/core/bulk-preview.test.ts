@@ -953,6 +953,24 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
     }
   });
 
+  // A pending outcome is recorded only, and its lead is English: its cost sentence is too, on a
+  // German instance as well, so the record does not switch language mid-line.
+  it('records a pending read wholly in English, its cost included, on a German instance', async () => {
+    const s = shop();
+    s.special.set('/products/0', { status: 429, headers: { 'retry-after': '30' } });
+    const restore = serve(s);
+    try {
+      planRun([{ target: url(0), after: { price: '1' } }]);
+      const w = workerFor({ costUsd: 0.01, language: 'de' });
+      await w.tick();
+      const result = w.recordTaskRun.mock.calls[0]![1];
+      expect(result).toContain('API calls this pass');
+      expect(result).not.toContain('API-Abrufe');
+    } finally {
+      restore();
+    }
+  });
+
   it('states the cost of a per-call profile in the run result', async () => {
     const s = shop();
     const restore = serve(s);

@@ -3236,17 +3236,20 @@ export class WorkerLoop {
     // the text the owner reads. The partial-double case is not hypothetical; it is why
     // this repo states the same rule at `session.ts`'s helper-cost read.
     const stop = session.getLastRunStop?.() ?? null;
-    const cut = stop === null || stop.pendingToolCount <= 0 ? null
-      : stop.cause === 'budget_cap' ? `cost ceiling of $${(capUSD ?? WORKER_MAX_COST_USD).toFixed(2)}`
-        : stop.cause === 'iteration_cap' ? `turn limit of ${String(WORKER_MAX_ITERATIONS)}`
+    const notices = this.#notices();
+    // The push leads with the stop's first sentence; the recorded result adds the way out, which
+    // in the push would take the room of the result (web push cuts at 240).
+    const capStop = stop === null || stop.pendingToolCount <= 0 ? null
+      : stop.cause === 'budget_cap' ? notices.budgetCut('cost', `$${(capUSD ?? WORKER_MAX_COST_USD).toFixed(2)}`)
+        : stop.cause === 'iteration_cap' ? notices.budgetCut('turns', String(WORKER_MAX_ITERATIONS))
           : null;
-    const budgetCut = cut === null ? null : `Stopped at this run's ${cut} with work still pending`;
+    const budgetCut = capStop === null ? null : `${capStop} ${notices.budgetCutWayOut}`;
     // Composed BEFORE the truncation, so the reason survives a long result rather than
     // being the thing that gets cut.
-    const reported = budgetCut === null ? result : `${budgetCut}.\n\n${result}`;
-    const truncatedResult = reported.length > MAX_TASK_RESULT_CHARS
-      ? reported.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
-      : reported;
+    const truncate = (text: string): string => text.length > MAX_TASK_RESULT_CHARS
+      ? text.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
+      : text;
+    const truncatedResult = truncate(budgetCut === null ? result : `${budgetCut}\n\n${result}`);
 
     // Who ended the run, when an unanswered question is how it ended (see below).
     const endedByOwner = questionWentUnanswered && active?.stopRequested === true;
@@ -3288,10 +3291,10 @@ export class WorkerLoop {
       const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
         threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
       });
-      const notices = this.#notices();
       const pushed = resultReduced
-        ? withMemberNotes(budgetCut === null ? notices.containedResult : `${budgetCut}.\n\n${notices.containedResult}`, 'other', memberNotes).result
-        : memberTold.result;
+        ? withMemberNotes(capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`, 'other', memberNotes).result
+        : capStop === null ? memberTold.result
+          : withMemberNotes(truncate(`${capStop}\n\n${result}`), 'other', memberNotes).result;
       await this.notificationRouter.notify({
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.

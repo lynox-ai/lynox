@@ -42,6 +42,17 @@ export interface WorkerNotices {
   readonly errorLabel: string;
   readonly failedStepsLabel: string;
   readonly writesLabel: string;
+  /**
+   * A run that stopped at its cost ceiling (`value` like `$0.50`) or turn limit (`value` the
+   * count) with work still pending: the sentence the push leads with.
+   */
+  budgetCut(kind: 'cost' | 'turns', value: string): string;
+  /**
+   * What follows it in the recorded result, which the push opens: no setting raises either limit
+   * for one plan, so the way out is a smaller task. Not in the push, where it would take the
+   * room of the result (web push cuts at 240; ux U-099).
+   */
+  readonly budgetCutWayOut: string;
   /** The ids the agent needs to diagnose the run when the owner replies. */
   workflowRef(runId: string | undefined, workflowId: string | undefined): string;
   workflowReply(ref: string): string;
@@ -57,7 +68,8 @@ export interface WorkerNotices {
   workflowGone(workflowId: string | undefined): string;
 }
 
-/** The workflow statuses a German sentence names; any other is left out rather than quoted raw. */
+/** The workflow statuses a notice names; any other, `unknown` included, is left out rather than quoted raw. */
+const NAMED_WORKFLOW_STATUS: ReadonlySet<string> = new Set(['failed', 'rejected']);
 const DE_WORKFLOW_STATUS: Readonly<Record<string, string>> = Object.freeze({
   failed: 'fehlgeschlagen',
   rejected: 'abgelehnt',
@@ -80,14 +92,17 @@ const EN: WorkerNotices = Object.freeze({
   containedQuestion: 'A question is waiting in the chat. This run may have read data from your connected shop, so this notification leaves out the question and its options. Open the chat to answer it.',
   containedQuestionInquiry: 'A question is waiting in the chat.',
   workflowIncomplete: (title: string, status: string | undefined) =>
-    `Your scheduled workflow "${title}" didn't complete (status: ${status ?? 'unknown'}).`,
+    `Your scheduled workflow "${title}" didn't complete${status !== undefined && NAMED_WORKFLOW_STATUS.has(status) ? ` (status: ${status})` : ''}.`,
+  budgetCut: (kind: 'cost' | 'turns', value: string) =>
+    `Stopped at the ${kind === 'cost' ? `cost ceiling of ${value}` : `turn limit of ${value}`} with work still pending.`,
+  budgetCutWayOut: 'Running it again can stop at the same point. Ask lynox in the chat to split the task into smaller plans.',
   errorLabel: 'Error:',
   failedStepsLabel: 'Failed steps:',
   writesLabel: 'Writes:',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(run ${runId}${workflowId ? ` · workflow ${workflowId}` : ''})`
     : (workflowId ? `(workflow ${workflowId})` : ''),
-  workflowReply: (ref: string) => `Reply here and I'll help you fix it — I have this run loaded${ref ? ` ${ref}` : ''}.`,
+  workflowReply: (ref: string) => `Reply here and I'll help you fix it. I have this run loaded${ref ? ` ${ref}` : ''}.`,
   reminderTitle: 'Reminder',
   interrupted: 'lynox restarted while this run was in progress. It is recorded as interrupted and does not continue by itself, so that nothing it already did happens twice. Check what it already did, and start it again if needed.',
   confirmationSkipped: 'This scheduled action needs your confirmation before it runs without you. It was skipped. Confirm it under Automation › Triggers.',
@@ -116,6 +131,9 @@ const DE: WorkerNotices = Object.freeze({
     const named = status !== undefined ? DE_WORKFLOW_STATUS[status] : undefined;
     return `Dein geplanter Workflow „${title}“ ist nicht fertig geworden${named !== undefined ? ` (Status: ${named})` : ''}.`;
   },
+  budgetCut: (kind: 'cost' | 'turns', value: string) =>
+    `${kind === 'cost' ? `Gestoppt an der Kostengrenze (${value})` : `Gestoppt am Rundenlimit (${value})`}, obwohl noch Arbeit offen war.`,
+  budgetCutWayOut: 'Ein Neustart kann wieder an derselben Stelle stoppen. Bitte lynox im Chat, die Aufgabe in kleinere Pläne aufzuteilen.',
   errorLabel: 'Fehler:',
   failedStepsLabel: 'Fehlgeschlagene Schritte:',
   writesLabel: 'Schreibvorgänge:',

@@ -82,19 +82,42 @@ describe('the notice tables', () => {
 
   it('names a German workflow status it knows, and leaves out one it does not', () => {
     expect(WORKER_NOTICES.de.workflowIncomplete('W', 'rejected')).toBe('Dein geplanter Workflow „W“ ist nicht fertig geworden (Status: abgelehnt).');
+    expect(WORKER_NOTICES.en.workflowIncomplete('W', 'failed')).toBe('Your scheduled workflow "W" didn\'t complete (status: failed).');
     for (const s of [undefined, 'unknown', 'running']) {
       expect(WORKER_NOTICES.de.workflowIncomplete('W', s)).toBe('Dein geplanter Workflow „W“ ist nicht fertig geworden.');
+      expect(WORKER_NOTICES.en.workflowIncomplete('W', s)).toBe('Your scheduled workflow "W" didn\'t complete.');
     }
   });
 
   // Web push cuts a body at REMINDER_BODY_MAX: the sentence after the quoted title must survive
   // the longest title the reminder lets through (80 units) with the outside-content note.
+  // A bulk outcome is pushed whole: the longest a run produces in ordinary use must fit, and when
+  // a body runs long the cut takes the counts, never the unclear-send warning before them.
+  it('keeps a bulk outcome within the web-push cut, the warning first, in both languages', () => {
+    const c = { applied: 12_400, foundAsPlanned: 3_120, failed: 130, conflicts: 20, undone: 10, total: 15_000, sentUnknown: 30 };
+    for (const lang of ['de', 'en'] as const) {
+      const b = BULK_NOTICES[lang];
+      for (const lead of [b.applyDone, ...(['timeBudget', 'failureRate', 'consecutiveFailures', 'maxTargets', 'expired'] as const)
+        .map((k) => b.halted('apply', BULK_HALT_REASONS[k]))]) {
+        const body = `${lead} ${b.applyCounts(c)}`;
+        expect([lang, lead, body.length <= REMINDER_BODY_MAX]).toEqual([lang, lead, true]);
+      }
+      const counts = b.applyCounts(c);
+      expect(counts.indexOf(lang === 'de' ? 'unklar' : 'unclear')).toBeLessThan(counts.indexOf(lang === 'de' ? 'geschrieben' : 'applied'));
+      // A count of 0 is left out, but what was written and the total always stand.
+      expect(b.applyCounts({ applied: 0, foundAsPlanned: 0, failed: 0, conflicts: 0, undone: 0, total: 4, sentUnknown: 0 }))
+        .toBe(lang === 'de' ? '0 geschrieben, von 4 Zielen.' : '0 applied, of 4 targets.');
+    }
+  });
+
   it('keeps every fixed push body within the web-push cut, in both languages', () => {
     const longest = 'x'.repeat(79) + '…';
     for (const lang of ['de', 'en'] as const) {
       const n = WORKER_NOTICES[lang];
       for (const body of [n.consentOneBody(longest, true), n.consentManyBody, n.interrupted, n.confirmationSkipped,
-        n.workflowGone(undefined), n.containedResult, n.containedQuestion]) {
+        n.workflowGone(undefined), n.containedResult, n.containedQuestion,
+        // Three digits before the point, so the room is real (ux U-099).
+        `${n.budgetCut('cost', '$150.00')}\n\n${n.containedResult}`, `${n.budgetCut('turns', '300')}\n\n${n.containedResult}`]) {
         expect([lang, body.length <= REMINDER_BODY_MAX]).toEqual([lang, true]);
       }
     }
@@ -114,7 +137,9 @@ const SOURCES = [
   'src/integrations/inbox/inbox-reminder-poller.ts',
 ];
 const LITERAL = /'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.|\$\{[^}]*\})*`/g;
-const SITE = /recordAndNotify\(task|#sayEvent\([^)]|\btitle: |\bbody: |summary: |summarize\(ledger, [^,]+, |halted: /;
+const SITE = /recordAndNotify\(task|#sayEvent\([^)]|#refuseBeforeDispatch\(task|\btitle: |\bbody: |summary: |summarize\(ledger, [^,]+, |halted: /;
+/** A constant handed to a site that pushes what it is given (the old `INTERRUPTED_RESULT` form). */
+const CONSTANT_ARG = /(?:recordAndNotify\(task|#sayEvent\([^,]+,[^,]+|#refuseBeforeDispatch\(task, entry), ([A-Z][A-Z0-9_]{3,})\b/;
 
 function fixedNotices(file: string, source: string): string[] {
   const found: string[] = [];
@@ -128,22 +153,39 @@ function fixedNotices(file: string, source: string): string[] {
     }
     // A `pending` outcome is recorded, never pushed (worker-loop.ts, the bulk branches).
     if (!SITE.test(line) || /\bpending\(/.test(line)) continue;
+    const constant = CONSTANT_ARG.exec(line);
+    if (constant) found.push(`${file}: ${constant[1]!}`);
     for (const m of line.matchAll(LITERAL)) {
-      if (/[A-Za-z]{2,} [A-Za-z]{2,}/.test(m[0].slice(1, -1).replace(/\$\{[^}]*\}/g, ' X '))) found.push(`${file}: ${m[0]}`);
+      // Prose is two words, an interpolation counting as one (`${url} changed.`), but never two
+      // interpolations alone (`${mark} ${task.title}`); a lone word counts too where a title or
+      // body is nothing but that word (`title: 'Erinnerung'`).
+      const text = m[0].slice(1, -1).replace(/\$\{[^}]*\}/g, ' \u0000 ').replace(/\\u[0-9A-Fa-f]{4}|\\n/g, ' ');
+      const words = text.match(/[A-Za-zÄÖÜäöü]{2,}|\u0000/g) ?? [];
+      const real = words.filter((w) => w !== '\u0000').length;
+      const lone = /\b(?:title|body): $/.test(line.slice(0, m.index)) && real === 1 && words.length === 1 && words[0]!.length >= 3;
+      if (lone || (real >= 1 && words.length >= 2)) found.push(`${file}: ${m[0]}`);
     }
   }
   return found;
 }
 
 /**
- * The notices still English at their call site; each is still to be translated.
- * This list only shrinks: a new entry is a new fixed notice,
- * and an entry the code no longer has must be taken out, so the list says what is left.
+ * The notices still English at their call site, as the detector sees them; each is still to be
+ * translated. This list only shrinks: a new entry is a new fixed notice, and an entry the code no
+ * longer has must be taken out. It is what the DETECTOR sees, not all that is left: a sentence
+ * built in a variable first, or a literal over several lines, is not in it.
  */
 const STILL_ENGLISH: readonly string[] = [
   // Events (ux U-099 item 8, after the cut).
   'src/core/worker-loop.ts: `An event was not run: ${why}`',
   'src/core/worker-loop.ts: `${String(count)} events were not run: ${why}`',
+  'src/core/worker-loop.ts: EVENT_OUTCOME_UNKNOWN',
+  // Mandate and plan-access refusals (mandates from 24.11.).
+  'src/core/worker-loop.ts: MANDATE_UNSTAMPED_RESULT',
+  'src/core/worker-loop.ts: \'Could not read who set up the workflow this schedule runs, so it did not run.\'',
+  'src/core/worker-loop.ts: PLAN_ENDED_RESULT',
+  'src/core/worker-loop.ts: PLAN_OF_ANOTHER_RESULT',
+  'src/core/worker-loop.ts: PLAN_RUN_UNRECORDED_RESULT',
   // An effect the engine does not know: a defect, not a customer path.
   'src/core/worker-loop.ts: `Unknown trigger effect \'${effect}\' — skipped`',
   // Bulk branches outside ordinary use.
@@ -154,6 +196,8 @@ const STILL_ENGLISH: readonly string[] = [
   'src/core/worker-loop.ts: \'Bulk runs are not available on this instance — skipped.\'',
   'src/core/worker-loop.ts: `Bulk judge halted: ${reason}.`',
   'src/core/worker-loop.ts: \'Bulk judge stopped.\'',
+  // The watch (ux U-099 item 9, after the cut).
+  'src/core/worker-loop.ts: `${config.url} changed.\\n\\n${truncatedAnalysis}`',
   'src/core/bulk-apply.ts: \'No bulk run with this id.\'',
   'src/core/bulk-apply.ts: \'The trigger effect does not match the bulk run.\'',
   'src/core/bulk-apply.ts: `Bulk run is ${run.phase}, not approved — nothing written.`',
@@ -179,8 +223,11 @@ describe('the fixed-notice detector', () => {
       '        body: `Your run ${id} finished early.`,',
       "    this.#sayEvent(triggerId, title, 'Nothing came in.');",
       '      title: WORKER_NOTICES.en.reminderTitle,',
+      "      title: 'Erinnerung',",
+      '        body: `${config.url} changed.`,',
+      '      this.recordAndNotify(task, NEW_FIXED_RESULT, false);',
       "  return { status: 'done', summary: summarize(ledger, runId, 'Bulk run done.') };",
-    ].join('\n'))).toHaveLength(5);
+    ].join('\n'))).toHaveLength(8);
     // …and not a sentence through the table, an id, a mark or a pending lead.
     expect(fixedNotices('src/core/worker-loop.ts', [
       '      this.recordAndNotify(task, this.#notices().interrupted, false);',

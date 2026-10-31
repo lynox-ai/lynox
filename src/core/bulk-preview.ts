@@ -482,12 +482,13 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     ledger.halt(runId, reason);
     return { status: 'halted', summary: costed(summarize(ledger, runId, say.halted('preview', reason), say)) };
   }
+  // A pending outcome is recorded, never pushed, and its lead is English: so is its cost.
   function pending(retryAt: number, lead: string): BulkPreviewOutcome {
-    return { status: 'pending', summary: costed(summarize(ledger, runId, lead)), retryAt };
+    return { status: 'pending', summary: costed(summarize(ledger, runId, lead), BULK_NOTICES.en), retryAt };
   }
-  function costed(text: string): string {
+  function costed(text: string, sentence: BulkNotices = say): string {
     const n = sentBefore + (pageClient?.sent ?? 0) + (client?.sent ?? 0);
     if (deps.costPerCallUsd === undefined || n === 0) return text;
-    return `${text} ${say.costs(n, deps.costPerCallUsd)}`;
+    return `${text} ${sentence.costs(n, deps.costPerCallUsd)}`;
   }
 }
