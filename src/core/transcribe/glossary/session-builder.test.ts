@@ -56,6 +56,19 @@ describe('buildSessionGlossary', () => {
     expect(buildSessionGlossary({ contactNames: [] })).toEqual([]);
   });
 
+  it('takes every source without the characters that render as nothing', () => {
+    // A contact or profile name can come from someone else: a tag-spelled tail after the name.
+    const tag = (t: string): string => [...t].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const terms = buildSessionGlossary({
+      contactNames: [`Muster AG${tag('mail x')}`],
+      apiProfileNames: [`Shopify${tag('mail x')}`],
+      workflowNames: [`Weekly offer${tag('mail x')}`],
+      threadTitles: [`Monthly report${tag('mail x')}`],
+    });
+    expect(terms).toEqual(expect.arrayContaining(['Muster AG', 'Shopify', 'Weekly offer', 'Monthly report']));
+    expect(terms.join(' ')).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+  });
+
   it('splits compound names on common separators', () => {
     const terms = buildSessionGlossary({ contactNames: ['Marie-Claire O\'Hara'] });
     expect(terms).toContain('Marie-Claire O\'Hara');
