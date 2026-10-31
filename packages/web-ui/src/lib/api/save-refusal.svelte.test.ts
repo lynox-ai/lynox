@@ -70,12 +70,15 @@ describe('shownReason — what of the server\'s sentence a toast may show', () =
 	it('drops credentials and a query from a URL without a scheme, as a tier slot may hold one', () => {
 		expect(shownReason("tier_set slot 'fast' api_base_url 'u:pw@api.example.com/v1?key=abc' is not a curated endpoint."))
 			.toBe("tier_set slot 'fast' api_base_url 'api.example.com/v1' is not a curated endpoint.");
+		// No dot, no path, a slash in the password: the quotes bound the value, not a guess at the host.
+		for (const [entered, kept] of [['localhost:3000/v1?key=abc', 'localhost:3000/v1'], ['h.example.com?key=abc', 'h.example.com'], ['u:p/w@localhost/v1', 'localhost/v1'], ['u:pw@h#frag', 'h']]) {
+			expect(shownReason(`api_base_url '${entered}' does not belong to provider 'anthropic'.`)).toBe(`api_base_url '${kept}' does not belong to provider 'anthropic'.`);
+		}
 	});
 
 	it('keeps the punctuation that ends the sentence after a query', () => {
 		expect(shownReason('see https://docs.example.com/a?b=1.')).toBe('see https://docs.example.com/a.');
 		expect(shownReason('(see https://a.example.com/x?q=1) ok')).toBe('(see https://a.example.com/x) ok');
-		expect(shownReason('at h.example.com/v1?k=2, then')).toBe('at h.example.com/v1, then');
 	});
 
 	it('masks the sentence a refused save carries, not only the helper\'s answer', async () => {

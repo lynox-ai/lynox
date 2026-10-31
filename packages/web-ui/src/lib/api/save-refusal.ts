@@ -24,18 +24,17 @@ const QUERY = `(?:[?#][^\\s'"]*?)?(?=[.,;:!)]*(?:[\\s'"]|$))`;
 /** A URL of any scheme: what stays is scheme, host and path. */
 const URL_PART = new RegExp(`\\b([a-z][a-z0-9+.-]*:\\/\\/)(?:[^\\s/?#'"@]*@)?([^\\s/?#'"]+)([^\\s?#'"]*?)${QUERY}`, 'gi');
 /**
- * The same without a scheme — a tier slot's `api_base_url` is any string, and the server quotes
- * it as given: credentials before a host, and a query after a host with a path.
+ * A value the server quotes as it was entered — every check that repeats an endpoint puts it in
+ * single quotes, and a tier slot's `api_base_url` may be any string, with no scheme and no dot:
+ * whatever stands before its last `@`, and from its first `?` or `#`, is dropped.
  */
-const BARE_CREDENTIALS = /(^|[\s'"(])[^\s/?#'"@]+@(?=[\w-]+(?:\.[\w-]+)+)/g;
-const BARE_QUERY = new RegExp(`(\\b[\\w-]+(?:\\.[\\w-]+)+(?::\\d+)?\\/[^\\s?#'"]*?)[?#][^\\s'"]*?(?=[.,;:!)]*(?:[\\s'"]|$))`, 'g');
+const QUOTED = /'([^'\n]*)'/g;
 
 /** The server's sentence as a toast may show it: no URL credentials, query or fragment, short. */
 export function shownReason(reason: string): string {
 	const masked = reason
 		.replace(URL_PART, (_m, scheme: string, host: string, path: string) => `${scheme}${host}${path}`)
-		.replace(BARE_CREDENTIALS, '$1')
-		.replace(BARE_QUERY, '$1');
+		.replace(QUOTED, (_m, value: string) => `'${value.replace(/^[^]*@/, '').replace(/[?#][^]*$/, '')}'`);
 	return masked.length > MAX_REASON ? `${masked.slice(0, MAX_REASON - 1)}…` : masked;
 }
 
