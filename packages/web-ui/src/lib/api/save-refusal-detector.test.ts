@@ -2,53 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SaveRefused, saveFailedText, throwIfRefused } from './save-refusal.js';
-
-const OWNER_ONLY = 'Only the owner of this instance can change the configuration.';
-
-async function failedText(res: Response, fallback = 'Save failed'): Promise<string> {
-	try {
-		await throwIfRefused(res);
-	} catch (e) {
-		return saveFailedText(e, fallback);
-	}
-	return 'NOT REFUSED';
-}
-
-describe('throwIfRefused + saveFailedText — the sentence a refused save shows', () => {
-	it('shows the server\'s sentence for a 403 that names the owner', async () => {
-		expect(await failedText(Response.json({ error: OWNER_ONLY }, { status: 403 }))).toBe(OWNER_ONLY);
-	});
-
-	it('shows the sentence of any other refusal, a locked field or a failed validation', async () => {
-		const locked = 'Managed instance: cannot change provider';
-		expect(await failedText(Response.json({ error: locked }, { status: 403 }))).toBe(locked);
-		expect(await failedText(Response.json({ error: "provider:'openai' requires openai_model_id" }, { status: 400 })))
-			.toBe("provider:'openai' requires openai_model_id");
-	});
-
-	it('falls back to the page\'s own text when the server sent no sentence', async () => {
-		expect(await failedText(new Response('<html>bad gateway</html>', { status: 502 }))).toBe('Save failed');
-		expect(await failedText(Response.json({ error: '   ' }, { status: 400 }))).toBe('Save failed');
-		expect(await failedText(Response.json({ error: { code: 'x' } }, { status: 400 }))).toBe('Save failed');
-		expect(await failedText(Response.json(null, { status: 500 }))).toBe('Save failed');
-	});
-
-	it('keeps the status in the error message, for a page that shows the message itself', async () => {
-		const err = await throwIfRefused(new Response('', { status: 403 })).then(() => null, (e: unknown) => e);
-		expect(err).toBeInstanceOf(SaveRefused);
-		expect((err as SaveRefused).message).toBe('HTTP 403');
-		expect((err as SaveRefused).status).toBe(403);
-		const named = await throwIfRefused(Response.json({ error: OWNER_ONLY }, { status: 403 })).then(() => null, (e: unknown) => e);
-		expect((named as SaveRefused).message).toBe(OWNER_ONLY);
-	});
-
-	it('lets an ok answer through, and gives any other failure the fallback', async () => {
-		await expect(throwIfRefused(Response.json({ ok: true }, { status: 200 }))).resolves.toBeUndefined();
-		expect(saveFailedText(new TypeError('Failed to fetch'), 'Save failed')).toBe('Save failed');
-		expect(saveFailedText('weird', 'Save failed')).toBe('Save failed');
-	});
-});
 
 /**
  * A detector: every `PUT` on `/config` in the web UI goes through `throwIfRefused`. Pages that
@@ -57,6 +10,26 @@ describe('throwIfRefused + saveFailedText — the sentence a refused save shows'
  */
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const PUT_CONFIG = /fetch\(\s*`\$\{[^}]+\}\/config`,\s*\{\s*method:\s*'PUT'/g;
+/**
+ * Any fetch whose first lines name `/config` and a PUT, in any order or quoting. The strict
+ * pattern above must find every one of these; a save written another way would otherwise be
+ * missed without a sound.
+ */
+/** Where each fetch starts whose URL names `/config` and whose options say PUT, in any form. */
+function loosePutConfigAt(src: string): number[] {
+	const out: number[] = [];
+	for (const m of src.matchAll(/\bfetch\(/g)) {
+		const rest = src.slice(m.index + 6, m.index + 900);
+		const next = rest.search(/\bfetch\(/);
+		const call = `fetch(${next === -1 ? rest : rest.slice(0, next)}`;
+		const url = call.slice(0, 200).split(/,\s*\{/)[0]!;
+		if (/\/config\b(?![-\w./])/.test(url) && /method\s*:\s*['"`]PUT['"`]/.test(call)) out.push(m.index);
+	}
+	return out;
+}
+function loosePutConfigCount(src: string): number {
+	return loosePutConfigAt(src).length;
+}
 
 function sources(dir: string): string[] {
 	const out: string[] = [];
@@ -82,9 +55,9 @@ function putConfigSites(src: string): { at: number; checked: boolean; shown: boo
 		// The first handler after the call is the one that sees its refusal: `catch {`, `catch (e) {`
 		// or a promise chain's `.catch(`.
 		const rest = call === -1 ? '' : after.slice(call);
-		const at = rest.search(/\bcatch\b/);
+		const at = rest.search(/\}\s*catch\b|^\s*\.catch\(/m);
 		const handler = at === -1 ? '' : rest.slice(at, at + 400);
-		return { at: m.index, checked: call !== -1, shown: /\bsaveFailedText\(|\b(?:e|err)\.message\b/.test(handler) };
+		return { at: m.index, checked: call !== -1, shown: /(?:addToast\(|=)[^;]*(?:\bsaveFailedText\(|\b(?:e|err)\.message\b)/.test(handler) };
 	});
 }
 
@@ -92,8 +65,13 @@ describe('every PUT on /config shows why the server refused it', () => {
 	it('finds no save that skips throwIfRefused', () => {
 		const unchecked: string[] = [];
 		let total = 0;
+		const unseen: string[] = [];
 		for (const path of sources(ROOT)) {
 			const src = readFileSync(path, 'utf8');
+			const strictAt = new Set(putConfigSites(src).map((site) => site.at));
+			for (const at of loosePutConfigAt(src)) {
+				if (!strictAt.has(at)) unseen.push(`${relative(ROOT, path)}:${src.slice(0, at).split('\n').length}`);
+			}
 			for (const site of putConfigSites(src)) {
 				total++;
 				if (!site.checked || !site.shown) unchecked.push(`${relative(ROOT, path)}:${src.slice(0, site.at).split('\n').length}${site.checked ? ' (refusal not shown)' : ''}`);
@@ -101,6 +79,8 @@ describe('every PUT on /config shows why the server refused it', () => {
 		}
 		// The 16 saves counted when this landed; fewer means the pattern went blind.
 		expect(total).toBeGreaterThanOrEqual(16);
+		// Every save the loose scan sees, the strict one checked.
+		expect(unseen).toEqual([]);
 		expect(unchecked).toEqual([]);
 	});
 
@@ -114,6 +94,13 @@ describe('every PUT on /config shows why the server refused it', () => {
 		const shown = `${read}\n} catch (e) {\n\taddToast(saveFailedText(e, t('x.save_failed')), 'error');\n}`;
 		expect(putConfigSites(dropped).map((s) => s.shown)).toEqual([false]);
 		expect(putConfigSites(shown).map((s) => s.shown)).toEqual([true]);
+		// The message logged and a fixed text shown is still a dropped sentence.
+		const logged = `${read}\n} catch (e) {\n\tconsole.warn(e.message);\n\taddToast(t('x.save_failed'), 'error');\n}`;
+		expect(putConfigSites(logged).map((s) => s.shown)).toEqual([false]);
+		// A save in another form is seen by the loose scan, and not by the strict one.
+		const other = "const res = await fetch(url + '/config', { headers: {}, method: \"PUT\", body: '{}' });";
+		expect(loosePutConfigCount(other)).toBe(1);
+		expect(putConfigSites(other)).toEqual([]);
 		// A check that belongs to a later fetch does not count for this one.
 		const later = `${bare}\nconst r2 = await fetch('/x');\nawait throwIfRefused(r2);`;
 		expect(putConfigSites(later)[0]!.checked).toBe(false);

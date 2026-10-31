@@ -1813,6 +1813,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.save': { de: 'Speichern', en: 'Save' },
 	'settings.saving': { de: 'Speichern...', en: 'Saving...' },
 	'settings.saved': { de: 'Gespeichert', en: 'Saved' },
+	// A save the server refused, with its reason (ux U-102). {reason} is the server's sentence.
+	'settings.save_refused': { de: 'Nicht gespeichert: {reason}', en: 'Not saved: {reason}' },
 	'settings.delete': { de: 'Löschen', en: 'Delete' },
 	'settings.back': { de: 'Settings', en: 'Settings' },
 

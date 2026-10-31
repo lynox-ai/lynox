@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 import { getToasts } from '../stores/toast.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
@@ -59,7 +59,7 @@ async function toggleAndReadToast(): Promise<string | undefined> {
 describe('a refused settings save says why (BulkRunsSetting)', () => {
 	it('shows the server\'s sentence when a mandate is refused', async () => {
 		refusal = Response.json({ error: OWNER_ONLY }, { status: 403 });
-		expect(await toggleAndReadToast()).toBe(OWNER_ONLY);
+		expect(await toggleAndReadToast()).toBe(tf('settings.save_refused', { reason: OWNER_ONLY }));
 	});
 
 	it('shows its own text when the refusal carries no sentence', async () => {
