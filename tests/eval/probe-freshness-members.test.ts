@@ -72,7 +72,7 @@ const NOT_MEMBERS: Readonly<Record<string, string>> = {
     + 'which is why no run can dedup against an earlier one.',
   'tests/eval/capture-fitness-runner.test.ts':
     'swept because it names both route pieces: it runs tests/eval/capture-fitness-runner.mjs '
-    + 'against a FAKE engine (node:http on a local port, a fresh mkdtemp data dir per run). No '
+    + 'against a FAKE engine (node:http on a local port, one temporary mkdtemp data dir). No '
     + 'real engine is reached and no knowledge row is written; the runner it drives is itself '
     + 'a member.',
 };
