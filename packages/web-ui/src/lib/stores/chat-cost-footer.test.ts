@@ -367,10 +367,21 @@ describe('formatApiCalls — the run\'s API calls in the footer', () => {
 		expect(line({ apiCalls: 4, apiCostUsd: 0, apiCostEstimated: false, apiCallsUnpriced: 4 })).toBe('4 API calls · cost unknown');
 	});
 
-	it('a sum that leaves calls without an amount out is an estimate too', () => {
+	it('a sum that leaves calls without an amount out is a lower bound, and says so', () => {
 		const part = formatApiCalls({ ...base, apiCalls: 4, apiCostUsd: 0.27, apiCostEstimated: false, apiCallsUnpriced: 1 });
-		expect(part?.text).toBe('4 API calls · $0.27 estimated');
-		expect(part?.title).toContain('1 of 4 without an amount');
+		expect(part?.text).toBe('4 API calls · at least $0.27');
+		expect(part?.title).toBe('1 of 4 without an amount; the rest from the responses');
+		const both = formatApiCalls({ ...base, apiCalls: 4, apiCostUsd: 0.27, apiCostEstimated: true, apiCallsUnpriced: 1 });
+		expect(both?.text).toBe('4 API calls · at least $0.27 estimated');
+		expect(both?.title).toContain('1 of 4 without an amount');
+	});
+
+	it('a lower bound under $0.001 states no amount: an upper bound nobody knows would read as one', () => {
+		for (const usd of [0.0004, 0]) {
+			const part = formatApiCalls({ ...base, apiCalls: 4, apiCostUsd: usd, apiCostEstimated: true, apiCallsUnpriced: 1 });
+			expect(part?.text).toBe('4 API calls · cost partly unknown');
+			expect(part?.title).toBe('1 of 4 without an amount');
+		}
 	});
 
 	it('one call, a tiny amount and a zero', () => {

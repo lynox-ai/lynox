@@ -120,8 +120,9 @@ export function mergeDoneUsage(
  * The run's third-party API calls for the footer (ux U-096): `4 API calls · $0.36` when every
  * amount is the provider's own, `· $0.0040 estimated` when any is a profile rate (the whole sum
  * then counts as an estimate; a profile rate missed by a factor of 90 once), `· cost unknown`
- * when no amount is known. The line has to hold without its tooltip, which a phone does not show.
- * `null` when the run sent none.
+ * when no amount is known. When only some calls have an amount the sum is a lower bound, so it
+ * says `at least`, and below $0.001 no bound is worth stating: `· cost partly unknown`. The line
+ * has to hold without its tooltip, which a phone does not show. `null` when the run sent none.
  */
 export function formatApiCalls(u: UsageInfo): UsageMetaPart | null {
 	const calls = u.apiCalls ?? 0;
@@ -132,13 +133,18 @@ export function formatApiCalls(u: UsageInfo): UsageMetaPart | null {
 		return { text: `${head} · cost unknown`, title: 'No amount is known for these calls' };
 	}
 	const usd = u.apiCostUsd ?? 0;
+	const estimated = u.apiCostEstimated === true;
+	const source = estimated ? 'estimated from the profile rate where the answer gave no cost' : 'from the responses';
+	const tag = estimated ? ' estimated' : '';
+	if (unpriced > 0) {
+		// Some calls have no amount, so the sum is only a lower bound — and `< $0.001` would be an
+		// upper bound nobody knows.
+		const missing = `${unpriced} of ${calls} without an amount`;
+		if (usd < 0.001) return { text: `${head} · cost partly unknown`, title: missing };
+		return { text: `${head} · at least ${formatCost(usd)}${tag}`, title: `${missing}; the rest ${source}` };
+	}
 	const amount = usd === 0 ? '$0' : usd < 0.001 ? '< $0.001' : formatCost(usd);
-	// A sum that leaves calls without an amount out is no more exact than a profile rate.
-	const estimated = u.apiCostEstimated === true || unpriced > 0;
-	const title = estimated
-		? `${unpriced > 0 ? `${unpriced} of ${calls} without an amount; the rest ` : ''}estimated from the profile rate where the answer gave no cost`
-		: 'From the responses';
-	return { text: `${head} · ${amount}${estimated ? ' estimated' : ''}`, title };
+	return { text: `${head} · ${amount}${tag}`, title: estimated ? `Estimated from the profile rate where the answer gave no cost` : 'From the responses' };
 }
 
 /**
