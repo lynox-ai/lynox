@@ -221,6 +221,16 @@ describe('a profile connected again while a provider\'s erasure still stands', (
 		expect(q('api-erasure-notice')).toBeNull();
 	});
 
+	it('the helper reading their own reconnect: no erasure notice and no way out, since only the owner reads the records', async () => {
+		// `GET /api/connections/records` is the owner's; a helper's page gets no notices. A reconnect by
+		// the helper does not lift the erasure either: only the owner's does (ux U-090).
+		serve([{ ...byHelper, oauth_grant: { ...byHelper.oauth_grant, connected_by_reader: true } }], { status: 403, body: { error: 'owner only' } });
+		await render();
+		expect(q('api-erasure-reconnected')).toBeNull();
+		expect(q('api-erasure-avert')).toBeNull();
+		expect(q('api-erasure-notice')).toBeNull();
+	});
+
 	it('reconnected by a mandate, past the hold: the notice until the deadline, no way out and no button', async () => {
 		serve([byHelper], { status: 200, body: { notices: [{ ...r(7), holdUntil: new Date(Date.now() - 1000).toISOString() }] } });
 		await render();
