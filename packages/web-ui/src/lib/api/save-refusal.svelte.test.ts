@@ -67,6 +67,17 @@ describe('shownReason — what of the server\'s sentence a toast may show', () =
 			.toBe("api_base_url 'postgres://db.example.com/x' is not a curated endpoint");
 	});
 
+	it('drops credentials and a query from a URL without a scheme, as a tier slot may hold one', () => {
+		expect(shownReason("tier_set slot 'fast' api_base_url 'u:pw@api.example.com/v1?key=abc' is not a curated endpoint."))
+			.toBe("tier_set slot 'fast' api_base_url 'api.example.com/v1' is not a curated endpoint.");
+	});
+
+	it('keeps the punctuation that ends the sentence after a query', () => {
+		expect(shownReason('see https://docs.example.com/a?b=1.')).toBe('see https://docs.example.com/a.');
+		expect(shownReason('(see https://a.example.com/x?q=1) ok')).toBe('(see https://a.example.com/x) ok');
+		expect(shownReason('at h.example.com/v1?k=2, then')).toBe('at h.example.com/v1, then');
+	});
+
 	it('masks the sentence a refused save carries, not only the helper\'s answer', async () => {
 		setLocale('en');
 		const refused = Response.json({ error: "Managed instance: api_base_url 'https://u:pw@h.example.com/v1?key=abc' does not belong to provider 'anthropic'." }, { status: 403 });

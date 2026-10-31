@@ -98,7 +98,7 @@ describe('every PUT on /config shows why the server refused it', () => {
 		const logged = `${read}\n} catch (e) {\n\tconsole.warn(e.message);\n\taddToast(t('x.save_failed'), 'error');\n}`;
 		expect(putConfigSites(logged).map((s) => s.shown)).toEqual([false]);
 		// A comparison is no assignment: the message is tested, not shown.
-		const compared = `${read}\n} catch (e) {\n\tif (e instanceof Error && e.message === 'x') return;\n\taddToast(t('x.save_failed'), 'error');\n}`;
+		const compared = `${read}\n} catch (e) {\n\tif (e instanceof Error && code === e.message) return;\n\taddToast(t('x.save_failed'), 'error');\n}`;
 		expect(putConfigSites(compared).map((s) => s.shown)).toEqual([false]);
 		// A save in another form is seen by the loose scan, and not by the strict one.
 		const other = "const res = await fetch(url + '/config', { headers: {}, method: \"PUT\", body: '{}' });";
