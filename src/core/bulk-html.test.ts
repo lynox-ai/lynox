@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  checkMarkup, htmlFieldsOfListForm, markupChangesOf, markupOf, plainTextMarkupOf,
+  checkMarkup, droppedTagsOf, htmlFieldsOfListForm, markupChangesOf, markupOf, plainTextMarkupOf,
   type MarkupCheckInput, type MarkupRefusal,
 } from './bulk-html.js';
 import { parseFragment, defaultTreeAdapter, html as p5 } from 'parse5';
@@ -342,6 +342,46 @@ describe('checkMarkup: what the page makes of the value (refuter round 1)', () =
     expect(() => check('', deep)).not.toThrow();
     expect(() => markupChangesOf('d', '', deep)).not.toThrow();
     expect(() => markupChangesOf('d', '', `<svg>${'<g>'.repeat(200000)}`)).not.toThrow();
+  });
+});
+
+describe('checkMarkup: tags the fragment drops', () => {
+  // Measured with parse5 8.0.1 (div context): each tag below is gone from the fragment's tree,
+  // its canonical form and its end, while the page reads it — attributes on its own element of
+  // that name, or the theme's element closed around the value.
+  const dropped = [
+    ['<body class="x" data-a="1"><p>a</p>', '<body class="x" data-a="1">'],
+    ['<html lang="x" title="t"><p>a</p>', '<html lang="x" title="t">'],
+    ['</div><p>a</p>', '</div>'],
+    ['<p>a</p></section><p>b</p>', '</section>'],
+    ['<head><p>a</p>', '<head>'],
+  ] as const;
+
+  it.each(dropped)('refuses %s, names the tag, and passes the same value without it', (after, tag) => {
+    const out = check('<p>a</p>', after);
+    expect(out).toEqual({ ok: false, reason: 'not_canonical', detail: expect.stringContaining(tag) });
+    expect(reason('<p>a</p>', after.replace(tag, ''))).toBe('ok');
+  });
+
+  it('passes a dropped tag the before-image holds the same way, and refuses a second copy', () => {
+    const before = '<body class="x"><p>a</p>';
+    expect(reason(before, '<body class="x"><p>b</p>')).toBe('ok');
+    expect(reason(before, '<body class="x"><p>b</p><body class="x">')).toBe('not_canonical');
+    expect(reason(before, '<body class="y"><p>b</p>')).toBe('not_canonical');
+  });
+
+  it('finds nothing in markup the fragment keeps, however it is written', () => {
+    for (const v of [
+      '<p>a</p>', '<ul><li>a<li>b</ul>', '<b><p>x</b>y</p>', '<pre>\nx</pre>', '<p>a &amp; b&nbsp;c</p>',
+      '<p>a<br/>b</p>', '<svg><circle/></svg>', '<table><tr><td>a</td></tr></table>',
+      '<template><p>x</p></template>', '<p>a\r\nb</p>', '<!-- note --><p>a</p>', ' \n ',
+    ]) {
+      expect(droppedTagsOf(v), v).toEqual([]);
+    }
+  });
+
+  it('reads every dropped stretch, inside a template too', () => {
+    expect(droppedTagsOf('<p>a</span></p><template></div></template>')).toEqual(['</span>', '</div>']);
   });
 });
 

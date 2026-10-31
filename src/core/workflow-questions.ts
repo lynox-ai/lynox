@@ -234,7 +234,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     const id = this.#deps.runId;
     try {
       if (!this.#threadReady) {
-        threads.createThread(id, { title: this.#deps.title, created_by: principalTag(this.#deps.principal) });
+        threads.createThread(id, { title: stripHidden(this.#deps.title), created_by: principalTag(this.#deps.principal) });
         this.#threadReady = true;
       }
       // A resumable conversation starts with a user turn and alternates, as an escalation

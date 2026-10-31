@@ -133,7 +133,7 @@ import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
-import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -7991,18 +7991,22 @@ export class LynoxHTTPApi {
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
-      const stats = history.getPipelineStepStats(days);
+      // Names and step ids are the starting chat's words: another person's contained chat's runs
+      // are left out (register 1118).
+      const unreadable = this._unreadableChats(this._principalOf(req), history.getPipelineOriginChats());
+      const stats = history.getPipelineStepStats(days, [...unreadable]);
       jsonResponse(res, 200, { stats });
-    }, READS);
+    }, readsThread(() => null));
 
     this.addStatic('user', 'GET /api/workflows/stats/cost', async (req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
-      const stats = history.getPipelineCostStats(days);
+      const unreadable = this._unreadableChats(this._principalOf(req), history.getPipelineOriginChats());
+      const stats = history.getPipelineCostStats(days, [...unreadable]);
       jsonResponse(res, 200, { stats });
-    }, READS);
+    }, readsThread(() => null));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
@@ -8787,7 +8791,7 @@ export class LynoxHTTPApi {
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
-        if (err instanceof TriggerTierUnsupportedError) { errorResponse(res, 400, err.message); return; }
+        if (err instanceof TriggerTierUnsupportedError || err instanceof InvalidDueDateError) { errorResponse(res, 400, err.message); return; }
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
