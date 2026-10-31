@@ -8838,7 +8838,8 @@ describe('LynoxHTTPApi', () => {
           getThreadAggregates: () => Object.values(THREADS).map((t) => ({ sessionId: t.id, title: t.title })),
           getPipelineRunOrigin: (id: string) => PIPELINES[id],
           getPipelineRunOrigins: (ids: readonly string[]) => new Map(ids.flatMap((id): Array<[string, string]> => { const o = PIPELINES[id]; return typeof o === 'string' ? [[id, o]] : []; })),
-          getPipelineRun: (id: string) => (id in PIPELINES ? pipelineRow(id) : undefined),
+          // As the store reads it: the exact id, or a run whose id starts with it.
+          getPipelineRun: (id: string) => { const hit = Object.keys(PIPELINES).find((k) => k === id || k.startsWith(id)); return hit === undefined ? undefined : pipelineRow(hit); },
           getPipelineStepResults: () => [{ step_id: 's1', result: 'Jane Roe, 1042' }],
           getRecentPipelineRuns: () => Object.keys(PIPELINES).map(pipelineRow),
         }),
@@ -8857,7 +8858,7 @@ describe('LynoxHTTPApi', () => {
         '/api/history/runs?thread_id=shop', '/api/history/runs?sessionId=shop',
         // Through a workflow `shop` started: its step's run, its steps, the run itself.
         '/api/history/runs/r-step', '/api/history/runs/r-step/tool-calls', '/api/history/runs?sessionId=wf-shop',
-        '/api/workflows/wf-shop', '/api/workflows/wf-shop/steps'];
+        '/api/workflows/wf-shop', '/api/workflows/wf-shop/steps', '/api/workflows/wf-sh'];
 
       it('a helper is refused another person\'s contained chat on every route about it, with who may read it and a code', async () => {
         const { CONTAINED_THREAD_READ_REFUSAL, CONTAINED_THREAD_CODE } = await import('./http-api.js');
@@ -20475,6 +20476,8 @@ describe('mandate stance of every user route', () => {
       const start = Math.max(source.lastIndexOf("this.addStatic('user'", end), source.lastIndexOf('this.dynamicRoutes.push(', end));
       const handler = source.slice(start, end);
       expect(handler.includes('this._unreadableChats('), handler.slice(0, 70)).toBe(true);
+      // ...and uses what it returns: the filter reads the set it was given.
+      expect(/const unreadable = this\._unreadableChats\(/.test(handler) && handler.includes('unreadable.has('), handler.slice(0, 70)).toBe(true);
     }
   });
 
