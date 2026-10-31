@@ -992,6 +992,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'backups.coverage_mismatch_advice': { de: 'Stell es nur wieder her, wenn du weisst, woher es stammt.', en: 'Only restore it if you know where it came from.' },
 	'backups.cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'backups.settings': { de: 'Backup-Einstellungen', en: 'Backup settings' },
+	// The stored "never delete" (0) as a value in a mandate's read-only view (ux U-104).
+	'backups.retention_never_value': { de: 'Nie löschen', en: 'Never delete' },
 	'backups.retention_never': { de: 'Lokale Backups werden nie gelöscht. Diese Einstellung lässt sich nicht mehr neu wählen, sie bleibt, bis du sie änderst.', en: 'Local backups are never deleted. This setting can no longer be chosen anew; it stays until you change it.' },
 	'backups.retention_confirm': { de: 'Ab jetzt löscht lynox lokale Backups, die älter als {days} Tage sind, schon beim nächsten Lauf. Ältere Backups sind danach weg.', en: 'From now on lynox deletes local backups older than {days} days, starting with the next run. Older backups are gone after that.' },
 	'backups.retention_apply': { de: 'Übernehmen', en: 'Apply' },
@@ -1817,6 +1819,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.save': { de: 'Speichern', en: 'Save' },
 	'settings.saving': { de: 'Speichern...', en: 'Saving...' },
 	'settings.saved': { de: 'Gespeichert', en: 'Saved' },
+	// A settings page in a mandate's session (ux U-104): the owner sets these, the mandate sees them.
+	'settings.owner_only_notice': { de: 'Diese Einstellungen legt der Inhaber dieser Instanz fest. Du siehst sie, kannst sie aber nicht ändern. Brauchst du eine Änderung, wende dich an den Inhaber.', en: 'The owner of this instance sets these settings. You can see them but not change them. If you need a change, ask the owner.' },
+	'settings.value_on': { de: 'An', en: 'On' },
+	'settings.value_off': { de: 'Aus', en: 'Off' },
+	'settings.value_not_set': { de: 'Nicht festgelegt', en: 'Not set' },
 	// A save the server refused, with its reason (ux U-102). {reason} is the server's sentence.
 	'settings.save_refused': { de: 'Nicht gespeichert: {reason}', en: 'Not saved: {reason}' },
 	'settings.delete': { de: 'Löschen', en: 'Delete' },

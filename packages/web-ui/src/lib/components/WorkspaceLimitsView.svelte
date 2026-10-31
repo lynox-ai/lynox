@@ -25,6 +25,10 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { formatContextWindow } from '../utils/context-window.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { orNotSet } from './settings-readonly/values.js';
 
 	interface UserConfig {
 		max_monthly_cost_usd?: number;
@@ -69,6 +73,7 @@
 				managed?: string;
 				capabilities?: { hard_limits?: HardLimits };
 			};
+			noteSettingsViewer(body);
 			// Narrow to the 4 fields this surface owns — preserves type safety
 			// and avoids stomping unrelated config on save.
 			config = {
@@ -129,6 +134,10 @@
 	{#if !loaded}
 		<p class="text-sm text-text-muted">{t('cost_limits.loading')}</p>
 	{:else}
+		{#if isMandateSession()}
+			<!-- A mandate's session: the values as text (ux U-104); PUT /api/config is the owner's. -->
+			<OwnerOnlyNotice />
+		{/if}
 		<!-- Item 9/11: Effective-limits pills row. Self-host/BYOK pills carry
 		     numeric caps from getHardLimits(); managed renders a tier-tag pill
 		     since the CP enforces per-customer caps not exposed here. Section
@@ -176,6 +185,14 @@
 			</section>
 		{/if}
 
+		{#if isMandateSession()}
+			<ReadOnlyRows rows={[
+				{ label: t('config.monthly_limit'), value: orNotSet(config.max_monthly_cost_usd) },
+				{ label: t('config.daily_limit'), value: orNotSet(config.max_daily_cost_usd) },
+				{ label: t('config.session_limit'), value: orNotSet(config.max_session_cost_usd) },
+				{ label: t('config.http_rate_limit'), value: orNotSet(config.max_http_requests_per_hour) },
+			]} />
+		{:else}
 		<!-- Spend limits — Item 8: grayed on managed (with tooltip) instead of
 		     hidden. Inputs always rendered so the user can see what's gated. -->
 		<section aria-labelledby="wl-spend-heading" class="border-t border-border pt-6">
@@ -233,6 +250,7 @@
 					{saving ? t('cost_limits.saving') : t('cost_limits.save')}
 				</button>
 			</div>
+		{/if}
 		{/if}
 	{/if}
 </div>
