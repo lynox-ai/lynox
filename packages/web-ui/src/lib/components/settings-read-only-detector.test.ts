@@ -19,6 +19,7 @@ const ROOT = fileURLToPath(new URL('../..', import.meta.url));
  */
 const EXEMPT: Record<string, string> = {
 	'BulkRunsSetting.svelte': 'Its page leaves it out for a mandate (bulk runs are the owner\'s switch); the mandate is told the owner turns it on.',
+	'ChatView.svelte': 'Not a settings page: it reveals the vault key only for the owner\'s backup reminder, and a refused reveal shows nothing.',
 };
 /**
  * Pages a mandate does not see at all, hidden by themselves: they must ask whose session it is,
@@ -46,6 +47,9 @@ function importsModule(src: string, moduleFile: string): boolean {
 	return new RegExp(`from\\s+['"][^'"]*/${name}['"]`).test(src);
 }
 
+/** A call that reveals an owner's secret (`/vault/key?reveal=true`, `/auth/token?reveal=true`). */
+const REVEALS = /[?&]reveal=true/;
+
 function hasBranch(src: string): boolean {
 	return src.includes('isMandateSession(') && src.includes('OwnerOnlyNotice');
 }
@@ -60,7 +64,8 @@ function scan(files: Map<string, string>): { pages: string[]; missing: string[] 
 	const missing: string[] = [];
 	for (const [path, src] of files) {
 		if (!path.endsWith('.svelte')) continue;
-		if (!putsConfig(src) && !stores.some((store) => importsModule(src, store))) continue;
+		// A page that reveals a secret counts too: the server refuses the reveal to a mandate.
+		if (!putsConfig(src) && !REVEALS.test(src) && !stores.some((store) => importsModule(src, store))) continue;
 		pages.push(path);
 		const name = basename(path);
 		if (name in EXEMPT) continue;
@@ -82,8 +87,8 @@ describe('every settings page that saves through PUT /api/config has a read-only
 	const { pages, missing } = scan(sources(ROOT));
 
 	it('finds no page without the branch', () => {
-		// The 14 pages counted when this landed (12 with the branch, 1 hidden, 1 exempt); fewer means the scan went blind.
-		expect(pages.length).toBeGreaterThanOrEqual(14);
+		// The 16 pages counted when this landed (13 with the branch, 1 hidden, 2 exempt); fewer means the scan went blind.
+		expect(pages.length).toBeGreaterThanOrEqual(16);
 		expect(missing).toEqual([]);
 	});
 
@@ -96,7 +101,7 @@ describe('every settings page that saves through PUT /api/config has a read-only
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
-		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte']);
+		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'ChatView.svelte']);
 		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {
 			expect(pages.map((p) => basename(p))).toContain(name);
@@ -122,9 +127,11 @@ describe('every settings page that saves through PUT /api/config has a read-only
 			['hidden/SetupBanner.svelte', `<script>${put}</script>{#if !isMandateSession()}x{/if}`],
 			// A route page counts like a component.
 			['routes/app/x/+page.svelte', `<script>${put}</script>`],
+			// A page that reveals a secret counts without any PUT.
+			['components/Reveals.svelte', "<script>const res = await fetch(`${getApiBase()}/auth/token?reveal=true`);</script>"],
 		]);
 		const result = scan(files);
-		expect(result.missing.sort()).toEqual(['components/Bare.svelte', 'components/NoticeOnly.svelte', 'components/SetupBanner.svelte', 'components/ThroughStore.svelte', 'routes/app/x/+page.svelte']);
+		expect(result.missing.sort()).toEqual(['components/Bare.svelte', 'components/NoticeOnly.svelte', 'components/Reveals.svelte', 'components/SetupBanner.svelte', 'components/ThroughStore.svelte', 'routes/app/x/+page.svelte']);
 		expect(result.pages).not.toContain('components/ReadsOnly.svelte');
 		expect(result.pages).toContain('hidden/SetupBanner.svelte');
 	});

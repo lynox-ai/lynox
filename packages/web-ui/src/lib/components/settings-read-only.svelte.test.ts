@@ -530,3 +530,24 @@ describe('SetupBanner', () => {
 		expect(document.body.innerHTML).toContain('Claude (Anthropic)');
 	});
 });
+
+describe('WorkspaceSecurityView', () => {
+	const load = () => import('./WorkspaceSecurityView.svelte');
+	const routes = (viewer: Viewer) => ({
+		'/config': { managed: SELF_HOST, viewer },
+		'/vault/key': { configured: true },
+	});
+
+	it('shows a mandate only the notice: both values are secrets, and no reveal button', async () => {
+		await render(load, routes('mandate'));
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(buttonTexts()).toEqual([]);
+		expect(writes).toEqual([]);
+	});
+
+	it('keeps the owner\'s reveal buttons', async () => {
+		await render(load, routes('owner'));
+		expect(notice()).toBeNull();
+		expect(buttonTexts().length).toBeGreaterThan(0);
+	});
+});
