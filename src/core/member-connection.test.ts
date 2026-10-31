@@ -161,7 +161,7 @@ describe('a member\'s connection inside a plan\'s run', () => {
   const listed = (p: ApiProfile): StampEntry[] => [{ profile: p.id, grant: p.oauth_grant!.grant_id!, binding: bindingOf(p) }];
   const lead = 'setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login';
   // Spelled out: the model reads this sentence, and the probe that tests it reads this wording.
-  const FINAL = 'This is final for this run: another request, a token exchange or a look at the profile gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.';
+  const FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.';
 
   it('is not read in a plan whose stamp lists no connection, and says the stamp does not list it', () => {
     const p = crm({ oauth_grant: G });

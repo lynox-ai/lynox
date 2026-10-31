@@ -1073,7 +1073,7 @@ function heldFromReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string,
  * (12 of 12 probe runs on one provider); with only "Tell the owner", it told the member instead.
  */
 function planRefusalFinal(person: string): string {
-  return `This is final for this run: another request, a token exchange or a look at the profile gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.`;
+  return `This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.`;
 }
 
 /**
