@@ -140,6 +140,8 @@ function makeHarness(opts?: {
   lastRunStop?: { cause: string; pendingToolCount: number } | undefined;
   /** A run that loops in the past and is now short: the execution deadline, in ms. */
   taskTimeoutMs?: number | undefined;
+  /** Whether the run's container reads as contained (a store pass was minted in it). */
+  contained?: boolean | undefined;
 }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
@@ -250,9 +252,9 @@ function makeHarness(opts?: {
     escalateToUser: () => null,
     // A task's question hands its delivery here; no hooks on this engine.
     escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
-    // A failed run's push asks whether its thread is contained; no store here, as on an
-    // instance that never connected one.
-    getToolContext: () => ({ containment: null }),
+    // A run's push asks whether its thread is contained; no store here, as on an instance
+    // that never connected one, unless the test says the run is contained.
+    getToolContext: () => ({ containment: opts?.contained === true ? { isContained: () => true } : null }),
     getEngineDb: () => null,
     getMandateEnds: () => null,
   } as unknown as Engine;
@@ -1071,6 +1073,19 @@ describe('the recorded word for a run that returns rather than throws', () => {
     expect(note.priority).toBe('normal');
     expect(note.body).toContain('Stopped on your instruction');
     expect(note.body, 'the ceiling is still reported').toContain('cost ceiling');
+  });
+
+  it('stopped while parked in a CONTAINED run: the stop is told, and the run\'s text is not', async () => {
+    const { CONTAINED_RESULT_PUSH } = await import('./worker-loop.js');
+    const h = makeHarness({ park: true, withChannels: true, contained: true });
+    await h.parked;
+    h.loop.stopTask('trg-stop');
+    await waitUntil('the stop to be recorded', () => lastStatus(h) !== null);
+    const parkNotices = 1;
+    await waitUntil('the owner to be told', () => h.notifications().length > parkNotices);
+    const note = h.notifications().at(-1)!;
+    expect(note.title.startsWith('\u23f9')).toBe(true);
+    expect(note.body).toBe(`Stopped on your instruction.\n\n${CONTAINED_RESULT_PUSH}`);
   });
 
   it('on its ceiling with no stop: failed, and the notice is a cross at high priority', async () => {
