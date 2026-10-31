@@ -3,6 +3,7 @@ import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t, tf } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
+import { containedReadKey, type ContainedReadKey } from '../utils/contained-read.js';
 import {
 	recordToolCall,
 	recordToolResult,
@@ -604,6 +605,9 @@ let changesetLoading = $state(false);
 let skipExtraction = $state(false);
 /** The open chat read data through a store connection (`contained` on the thread). */
 let threadContained = $state(false);
+/** The engine refused this reader the open chat or its live run (register 1112, ux U-091): the
+ *  text key the page shows instead of the history, or null. */
+let threadReadRefusal = $state<ContainedReadKey | null>(null);
 /** Set while `threadContained` comes only from a record the engine could not read
  *  (`contained_unknown`): the chat may never have read store data (`contained-text.ts`). */
 let threadContainedUnknown = $state<ContainedUnknown | null>(null);
@@ -881,12 +885,17 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const id = newQueueId();
 		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, ...(runOptions?.typed === true ? { typed: true } : {}), queued: true, queueId: id, createdAt: new Date().toISOString() });
 		messageQueue.push({ id, task, files, ...(runOptions ? { runOptions } : {}) });
+		// The message a closed question's sentence asked for is sent; the sentence goes with it.
+		if (chatError !== null && chatError === closedReplySentence) chatError = null;
 		// Flush immediately so a reload before the next persist tick (or before
 		// the run ends) can recover the queued turn instead of losing it.
 		persistChatNow();
 		return;
 	}
 
+	// The reason for a refused chat or run is about what came before: the reader's own message
+	// starts what follows, so it goes (register 1112).
+	threadReadRefusal = null;
 	await _executeRun(task, files, displayText, runOptions);
 }
 
@@ -2501,9 +2510,8 @@ export async function replyPermission(answer: string): Promise<void> {
 	const promptId = pendingPermission?.promptId;
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
-	if (!await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply`, { answer, promptId })) {
-		addToast(t('chat.error_connection'), 'error', 6000);
-	}
+	const sid = sessionId;
+	reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }));
 }
 
 /** One-shot reply for a multi-question tabs prompt. Answers are ordered to
@@ -2513,10 +2521,26 @@ export async function replyPermissionTabs(answers: string[]): Promise<void> {
 	const promptId = pendingTabsPrompt?.promptId;
 	if (!promptId) return;
 	pendingTabsPrompt = null;
-	if (!await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply-tabs`, { promptId, answers })) {
-		addToast(t('chat.error_connection'), 'error', 6000);
-	}
+	const sid = sessionId;
+	reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply-tabs`, { promptId, answers }));
 }
+
+/**
+ * What the user hears about an answer once its card is gone. An answer that did not arrive is a
+ * toast. One that arrived at a closed question was not used, and nothing else would tell them:
+ * it stands where the chat's other errors stand until the next message is sent — in the thread
+ * that asked only, and never over another error, which says more than this sentence does. A
+ * stale (404) or refused (409) answer stays silent; the question it named has no card left.
+ */
+function reportReply(sid: string, outcome: ReplyOutcome): void {
+	if (outcome === 'lost') { addToast(t('chat.error_connection'), 'error', 6000); return; }
+	if (outcome === 'settled' || sessionId !== sid) return;
+	if (chatError !== null && chatError !== closedReplySentence) return;
+	chatError = closedReplySentence = t(outcome === 'restarted' ? 'chat.prompt_closed_restart' : 'chat.prompt_expired');
+	chatErrorDetail = null;
+}
+/** The sentence `reportReply` last put up, so a queued message takes down that one and no other error. */
+let closedReplySentence: string | null = null;
 
 /** Optionally persist partial answers so a mid-batch reconnect restores
  * progress. Best-effort — failure does not surface to the user. */
@@ -2531,11 +2555,14 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 	} catch { /* best-effort */ }
 }
 
+/** How a reply ended: `lost` when the server could not be reached or failed twice, `expired` or
+ *  `restarted` when it answered 410 (a closed question, the second when the engine restart closed
+ *  it), and `settled` for every other final word. */
+type ReplyOutcome = 'settled' | 'expired' | 'restarted' | 'lost';
+
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
- *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Resolves false
- *  only when the server could not be reached or failed twice; any other answer is the server's
- *  final word. Never rejects. */
-async function postReplyWithRetry(url: string, body: Record<string, unknown>): Promise<boolean> {
+ *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
+async function postReplyWithRetry(url: string, body: Record<string, unknown>): Promise<ReplyOutcome> {
 	for (let attempt = 0; attempt < 2; attempt++) {
 		try {
 			const res = await fetch(url, {
@@ -2543,26 +2570,30 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(body),
 			});
-			// 2xx or expected terminal states (410 expired, 404 stale) are all "done".
-			if (res.ok || res.status === 404 || res.status === 410) return true;
+			if (res.status === 410) {
+				let code: unknown;
+				try { code = ((await res.json()) as { code?: unknown } | null)?.code; } catch { /* no body: a plain expiry */ }
+				return code === 'process_restarted' ? 'restarted' : 'expired';
+			}
 			// 5xx → retry once
 			if (res.status >= 500) {
 				if (attempt === 0) {
 					await new Promise(r => setTimeout(r, 500));
 					continue;
 				}
-				return false;
+				return 'lost';
 			}
-			return true;
+			// 2xx and the other final answers (404 stale, 409 refused, 400) are all "done".
+			return 'settled';
 		} catch {
 			if (attempt === 0) {
 				await new Promise(r => setTimeout(r, 500));
 				continue;
 			}
-			return false;
+			return 'lost';
 		}
 	}
-	return false;
+	return 'lost';
 }
 
 /** Result of a vault write attempt — distinguishes the three failure modes
@@ -3238,6 +3269,9 @@ export function getThreadContained() {
 export function getThreadContainedUnknown(): ContainedUnknown | null {
 	return threadContainedUnknown;
 }
+export function getThreadReadRefusal(): ContainedReadKey | null {
+	return threadReadRefusal;
+}
 /**
  * Whether the open chat is contained now: a run may have contained it since it was opened (a
  * store request). Read from the thread itself, not the list, which holds only its first page.
@@ -3401,6 +3435,7 @@ export function newChat() {
 	skipExtraction = false;
 	threadContained = false;
 	threadContainedUnknown = null;
+	threadReadRefusal = null;
 	containedOrigin = null;
 	containedPrefillText = null;
 	chatError = null;
@@ -3586,6 +3621,9 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	} catch {
 		return; // network drop — nav poll still reflects the run; user can reload
 	}
+	// Refused (register 1112): the live part is not this reader's; say so, the transcript stays.
+	const refused = res.ok ? null : await containedReadKey(res);
+	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; return; }
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
@@ -3757,6 +3795,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	skipExtraction = false;
 	threadContained = false;
 	threadContainedUnknown = null;
+	threadReadRefusal = null;
 	containedOrigin = null;
 	containedPrefillText = null;
 	// Restore any pending send-queue for this thread (durable across reload).
@@ -3814,6 +3853,16 @@ export async function resumeThread(threadId: string): Promise<void> {
 			chatError = t('chat.error_thread_deleted');
 			return;
 		}
+		// Not this reader's chat to read (register 1112, ux U-091): the reason instead of the chat,
+		// no copy this page kept of it, and the next message starts a new chat.
+		const openRefused = res.status === 403 ? await containedReadKey(res) : null;
+		if (gen !== _resumeGeneration) return;
+		if (openRefused !== null) {
+			newChat();
+			dropPersistedThread(threadId);
+			threadReadRefusal = openRefused;
+			return;
+		}
 		if (!res.ok) {
 			// The server responded with an error status (not a dropped
 			// connection) — opening the conversation failed. Don't blame the
@@ -3854,6 +3903,15 @@ export async function resumeThread(threadId: string): Promise<void> {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
+		// Not this reader's to read: no history, the reason instead (register 1112). A copy this
+		// page kept from before is not shown either.
+		const refused = msgRes.ok ? null : await containedReadKey(msgRes);
+		if (gen !== _resumeGeneration) return;
+		if (refused !== null) {
+			threadReadRefusal = refused;
+			messages = [];
+			return;
+		}
 		if (msgRes.ok) {
 			// Server returns RenderedMessage[] — already shaped for the UI
 			// (tool_result carriers merged into preceding tool_use, safety

@@ -59,6 +59,7 @@
 		reviewKnowledge,
 		getThreadContained,
 		getThreadContainedUnknown,
+		getThreadReadRefusal,
 		getContainedOrigin,
 		getContainedPrefill,
 		planInNewChat,
@@ -1655,6 +1656,8 @@
 	// Set when the engine could not read whether this chat read store data (`contained-text.ts`):
 	// every chat is locked then, so a new one does not help and is not offered.
 	const threadContainedUnknown = $derived(getThreadContainedUnknown());
+	/** The engine refused this reader the chat or its live run (register 1112, ux U-091). */
+	const threadReadRefusal = $derived(getThreadReadRefusal());
 	const containedOrigin = $derived(getContainedOrigin());
 	/** What the line above the input of such a chat may promise, read from the config each time
 	 *  such a chat opens: a bulk run only where this instance runs one that reads a Shopify store.
@@ -2492,7 +2495,12 @@
 	     if an ancestor becomes scrollable again someday. -->
 	<div class="relative flex min-h-0 flex-1 flex-col">
 	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
-		{#if messages.length === 0 && !isStreaming}
+		{#if threadReadRefusal !== null && messages.length === 0}
+			<!-- Not this reader's chat to read: the reason, not an empty start page. -->
+			<div class="flex h-full items-center justify-center">
+				<p class="max-w-md text-center text-sm text-text-muted" role="status" data-thread-read-refused>{t(threadReadRefusal)}</p>
+			</div>
+		{:else if messages.length === 0 && !isStreaming}
 			<div class="flex h-full items-center justify-center">
 				{#if hasApiKey === false}
 					{@const variant = inlineProviderVariant()}
@@ -3758,6 +3766,10 @@
 		 the status bar. `shrink-0`: the composer never pays for a tall stack —
 		 the stack above shrinks and scrolls instead. -->
 	<div class="shrink-0 border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
+		{#if threadReadRefusal !== null && messages.length > 0}
+			<!-- The history is shown, its live part is not: say why, where it shows at 390px too. -->
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 text-[13px] md:text-xs text-text-muted" role="status" data-thread-read-refused-bar>{t(threadReadRefusal)}</div>
+		{/if}
 		{#if threadContained}
 			<!-- As long as the chat only reads: in the composer, so it shows on touch and at
 			     390px too, where the sidebar icon's tooltip never does. -->

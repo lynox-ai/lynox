@@ -124,6 +124,8 @@ On native Linux the container has to be able to write `~/.lynox`; the line after
 
 `npx @lynox-ai/core` walks you through an interactive installer: provider selection, API key, Docker Compose scaffolding, container pull, health check, and finally it opens the Web UI at [localhost:3000](http://localhost:3000). Save the access token and vault key it prints — the vault key cannot be recovered if lost.
 
+Without a terminal (a script, CI, a coding assistant), from version 2.18.0: `npx @lynox-ai/core --non-interactive --accept-terms --provider <anthropic|mistral|openai-compatible|none>`, with the key in the environment. It asks nothing and exits `0` only when lynox answers on `/api/health`. `--provider none` installs without a key; add one later in the Web UI. See [Getting started](https://docs.lynox.ai/getting-started/#without-a-terminal-scripts-ci-coding-assistants).
+
 ### Mobile access (PWA)
 
 Open [localhost:3000](http://localhost:3000) on your phone and use your browser's "Add to Home Screen" to install lynox as a PWA. The QR code in Web UI → Settings makes pairing instant — scan it on any device to get a pre-authenticated session.
