@@ -117,7 +117,8 @@ async function activeEntries() {
  * can carry a fact ("Ohne Glas"), and a "Nein" to "Soll ich mir das merken?" would turn a capture
  * case into a MISS. It answers "Entscheide selbst." as free text (`ask_user` always accepts it).
  * A tool-permission prompt (Allow/Deny) is answered "Deny", which is what any other answer means
- * to the engine; the row says so. Every answer is kept with the row, because it is operator text
+ * to the engine; the row says so. The deep-model consent prompt (Allow deep / Run on balanced /
+ * Cancel) gets the free text, which the engine also reads as a refusal. Every answer is kept with the row, because it is operator text
  * the capture can read.
  */
 function pickAnswer(options) {
@@ -150,7 +151,7 @@ async function drainTurn(res, sessionId, answers) {
         body: JSON.stringify({ promptId: p.promptId, answer }),
       });
       // Unanswered, the turn would wait for the case timeout and report that instead.
-      if (!ack.ok) throw new Error(`reply to ${p.promptId}: HTTP ${ack.status}`);
+      if (!ack.ok) { await reader.cancel(); throw new Error(`reply to ${p.promptId}: HTTP ${ack.status}`); }
       answers.push(`${String(p.question ?? '').slice(0, 120)} → ${answer}`);
     }
   }

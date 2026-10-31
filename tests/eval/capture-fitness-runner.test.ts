@@ -63,6 +63,8 @@ beforeAll(async () => {
           await answered;
         }
         // An earlier case's run, still going, writes while this one runs.
+        // A sub-agent's write carries no thread.
+        if (task.includes('NOTHREAD')) entries.push({ id: `n${entries.length + 1}`, text: 'Eintrag ohne Thread', sourceThreadId: null });
         if (task.includes('LATE')) entries.push({ id: `x${entries.length + 1}`, text: 'Fremder Eintrag', sourceThreadId: 'another-thread' });
         appendFileSync(sink, JSON.stringify({ ts: Date.now(), event: 'capture_eligible', thread: session }) + '\n');
         if (task.includes('MERK')) {
@@ -114,7 +116,7 @@ describe('capture-fitness-runner', () => {
     const r = await runRunner({
       sourceFile: 'src.txt',
       shapes: [
-        { id: 'N9-multi', expect: 'silent', cases: [{ [TURNS]: ['Erster Zug ASK {N}', 'Zweiter Zug MERK LATE {N}'] }] },
+        { id: 'N9-multi', expect: 'silent', cases: [{ [TURNS]: ['Erster Zug ASK NOTHREAD {N}', 'Zweiter Zug MERK LATE {N}'] }] },
         { id: 'S9-single', expect: 'capture', cases: ['Einzug MERK {N}'] },
       ],
     }, out);
@@ -135,7 +137,7 @@ describe('capture-fitness-runner', () => {
     const m = rows.find((x) => x.shape === 'N9-multi')!;
     const s = rows.find((x) => x.shape === 'S9-single')!;
     expect(m.ok).toBe(false);
-    expect(m.texts).toEqual([expect.stringMatching(/^active: Regel aus Zweiter/)]);
+    expect(m.texts).toEqual(['active (no thread): Eintrag ohne Thread', expect.stringMatching(/^active: Regel aus Zweiter/)]);
     expect(m.answers).toEqual([expect.stringContaining('→ Entscheide selbst.')]);
     expect(s.ok).toBe(true);
     expect(s.texts).toEqual([expect.stringMatching(/^active: Regel aus Einzug/)]);
