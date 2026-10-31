@@ -356,16 +356,28 @@ describe('checkMarkup: tags the fragment drops', () => {
     ['<p>a</p></section><p>b</p>', '</section>'],
     ['<head><p>a</p>', '<head>'],
     // Text on both sides: the parser joins it into one node whose range covers the tag.
-    ['<p>a<body class="x">b</p>', '<body class="x">'],
-    ['<p>a</div>b</p>', '</div>'],
-    ['<p>a</p> </div> <p>b</p>', '</div>'],
-    ['<p>a&amp;<html lang="x">b</p>', '<html lang="x">'],
+    ['<p>a<body class="x">b</p>', 'a<body class="x">b'],
+    ['<p>a</div>b</p>', 'a</div>b'],
+    ['<p>a</p> </div> <p>b</p>', ' </div> '],
+    ['<p>a&amp;<html lang="x">b</p>', 'a&amp;<html lang="x">b'],
   ] as const;
 
-  it.each(dropped)('refuses %s, names the tag, and passes the same value without it', (after, tag) => {
+  it.each(dropped)('refuses %s, names the stretch %s, and passes the value without the tag', (after, stretch) => {
     const out = check('<p>a</p>', after);
-    expect(out).toEqual({ ok: false, reason: 'not_canonical', detail: expect.stringContaining(tag) });
-    expect(reason('<p>a</p>', after.replace(tag, ''))).toBe('ok');
+    expect(out).toEqual({ ok: false, reason: 'not_canonical', detail: expect.stringContaining(stretch) });
+    expect(reason('<p>a</p>', after.replace(/<\/?(body|html|div|section|head)\b[^>]*>/, ''))).toBe('ok');
+  });
+
+  it('lets a text that swallowed a tag hold only the same text, not a prefix of another tag', () => {
+    // A `>` inside a quoted value: a match cut there would be the same for both tags.
+    const before = '<p>x<body title="a>b">y</p>';
+    expect(reason(before, before)).toBe('ok');
+    expect(reason(before, '<p>x<body title="a>" class="z">y</p>')).toBe('not_canonical');
+  });
+
+  it('lets inert CDATA text of the before-image hold nothing live', () => {
+    const before = '<p>Info</p><svg><![CDATA[x> <body class="z">]]></svg>';
+    expect(reason(before, '<p>Info<body class="z">!</p><svg><![CDATA[x> <body class="z">]]></svg>')).toBe('not_canonical');
   });
 
   it('passes a dropped tag the before-image holds the same way, and refuses a second copy', () => {
@@ -387,7 +399,9 @@ describe('checkMarkup: tags the fragment drops', () => {
 
   it('reads every dropped stretch, inside a template too', () => {
     expect(droppedTagsOf('<p>a</span></p><template><p>b</p></div></template>')).toEqual(['</span>', '</div>']);
-    expect(droppedTagsOf('<svg><desc>a</div>b</desc></svg>')).toEqual(['</div>']);
+    expect(droppedTagsOf('<svg><desc>a</div>b</desc></svg>')).toEqual(['a</div>b']);
+    // An SVG `title` or `style` is not raw text: the tokenizer reads tags in it.
+    expect(droppedTagsOf('<svg><title>a<body class="x">b</title></svg>')).toEqual(['a<body class="x">b']);
   });
 
   it('reads a < in raw text as a character, and one in ordinary text that opens nothing as text', () => {
