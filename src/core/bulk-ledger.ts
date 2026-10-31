@@ -164,7 +164,12 @@ export type BulkInvalidReason =
   /** an HTML value holds a link with a control character, U+FFFD or a backslash */
   | 'url_control_char'
   /** an HTML value whose serialised form parses to another tree, or that ends open */
-  | 'not_canonical';
+  | 'not_canonical'
+  /** an HTML value carries a tag the fragment drops but the page reads, which its field does not hold */
+  | 'markup_dropped'
+  /** as `markup_dropped`, with attributes, and the field's current value carries it already: only
+   *  the owner removing it in the shop lets the field be written */
+  | 'markup_dropped_before';
 
 /** Every markup refusal is a reason a target can record. */
 const _markupRefusalsAreReasons: MarkupRefusal extends BulkInvalidReason ? true : never = true;

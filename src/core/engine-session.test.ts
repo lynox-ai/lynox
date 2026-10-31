@@ -410,6 +410,7 @@ const mockInsertWireSnapshot = vi.fn();
 /** Sub-agent spend rollup (session.ts run-end). Defaults to 0 = the turn
  *  delegated nothing; individual tests override it. */
 const mockGetDescendantCostUsd = vi.fn().mockReturnValue(0);
+const mockGetApiCallsOfRun = vi.fn().mockReturnValue({ calls: 0, usd: 0, estimated: false, unpriced: 0 });
 
 vi.mock('./run-history.js', () => ({
   RunHistory: vi.fn().mockImplementation(function () {
@@ -437,6 +438,7 @@ vi.mock('./run-history.js', () => ({
     this.insertToolCall = vi.fn();
     // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
     this.getDescendantCostUsd = mockGetDescendantCostUsd;
+    this.getApiCallsOfRun = mockGetApiCallsOfRun;
     // @ts-expect-error mock constructor
     this.getEmbeddings = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
@@ -1118,6 +1120,22 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(plain!.grantId).toBeUndefined();
     });
 
+    it('passes the API request a call sent, and its cost, through to the ledger row (v71)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: false, apiCost: { usd: 0.09, source: 'response' } });
+        agent?.recordToolCall?.({ toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        throw new Error('stop after two calls');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('stop after two calls');
+
+      const rows = vi.mocked(engine.getRunHistory()!.insertToolCall).mock.calls.map(c => c[0]);
+      expect(rows.find(p => p.toolName === 'http_request')!.apiCost).toEqual({ usd: 0.09, source: 'response' });
+      expect(rows.find(p => p.toolName === 'read_file')!.apiCost).toBeUndefined();
+    });
+
     it('passes the call\'s outcome, contract, lift and filing through to the ledger row (PRD 3f-1b-α)', async () => {
       const { engine, session } = await createEngineAndSession();
       const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
@@ -1623,6 +1641,30 @@ describe('Engine + Session (Orchestrator)', () => {
       await session.run('no delegation here');
 
       expect(session.getLastRunUsage()).not.toHaveProperty('spawnCostUsd');
+    });
+
+    // The footer's API calls come from the run's rows, the same way: without this wiring the
+    // count could be deleted from `Session.run` with the SQL and the formatter still green.
+    it('puts the API calls of THIS run and its sub-agents into the run usage', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetApiCallsOfRun.mockClear().mockReturnValue({ calls: 4, usd: 0.36, estimated: false, unpriced: 0 });
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('look up keywords');
+
+      expect(mockGetApiCallsOfRun).toHaveBeenCalledWith('run-123');
+      expect(session.getLastRunUsage()).toMatchObject({ apiCalls: 4, apiCostUsd: 0.36, apiCostEstimated: false, apiCallsUnpriced: 0 });
+    });
+
+    it('omits the API calls when the run sent none', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetApiCallsOfRun.mockClear().mockReturnValue({ calls: 0, usd: 0, estimated: false, unpriced: 0 });
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('no API here');
+
+      expect(session.getLastRunUsage()).not.toHaveProperty('apiCalls');
+      expect(session.getLastRunUsage()).not.toHaveProperty('apiCostUsd');
     });
   });
 

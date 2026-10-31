@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
+import { WORKER_NOTICES } from './worker-notices.js';
 import { onBoxBlock, pv } from './prompt-value.js';
 import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -503,6 +504,13 @@ describe('WorkerLoop', () => {
     const prompt = String(vi.mocked(analysisSession.run).mock.calls[0]![0]);
     expect(prompt).toContain('You are monitoring https://x.test/ for changes');
     expect(prompt).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+    // A later check gets the last summary back into its prompt, and the run before wrote it.
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v2', { status: 200 }));
+    await fire(makeTask({ id: 't-hid', source: 'watch', effect: 'run_agent', last_run_result: `Price was 10.${hidden}`, watch_config: JSON.stringify({ url: 'https://x.test/', interval_minutes: 60, last_hash: 'an-earlier-hash' }) }));
+    const later = String(vi.mocked(analysisSession.run).mock.calls[1]![0]);
+    expect(later).toContain('The content changed since the last check');
+    expect(later).toContain('Previous summary was: Price was 10.\n');
+    expect(later).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
   });
 
   it('executeWatch records on the trigger whether its finding reached anyone', async () => {
@@ -1694,13 +1702,19 @@ describe('WorkerLoop', () => {
         taskManager: tm,
         session: sessionStoppedAt({ cause: 'budget_cap', pendingToolCount: 2 }, 'x'.repeat(5000)),
       });
+      const router = makeNotificationRouter();
 
-      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await new WorkerLoop(engine, router, 60_000).tick();
       await vi.advanceTimersByTimeAsync(0);
 
       const recorded = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls[0]?.[1] ?? '';
       expect(recorded.length, 'still bounded').toBeLessThanOrEqual(4001);
       expect(recorded, 'and the reason is what survived, not what got cut').toContain('cost ceiling');
+      // The push is composed apart from the record (it leaves out the way out), and is bounded
+      // the same way.
+      const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
+      expect(msg?.body.length, 'the push is bounded too').toBeLessThanOrEqual(4001);
+      expect(msg?.body.startsWith('Stopped at the cost ceiling of')).toBe(true);
     });
 
     it('records a budget-capped run as failed, naming the ceiling', async () => {
@@ -1728,6 +1742,11 @@ describe('WorkerLoop', () => {
       const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
       expect(msg?.title).toContain('✗');
       expect(msg?.priority).toBe('high');
+      // The way out is in the recorded result the push opens; the push leads with the stop's
+      // first sentence and keeps the room for the run's own text (web push cuts at 240).
+      expect(call?.[1], 'the record names the way out').toContain(WORKER_NOTICES.en.budgetCutWayOut);
+      expect(msg?.body, 'the push does not').not.toContain(WORKER_NOTICES.en.budgetCutWayOut);
+      expect(msg?.body).toMatch(/^Stopped at the cost ceiling of \$[\d.]+ with work still pending\.\n\nPartial findings so far\./);
     });
 
     it('reports a TURN-capped run too, and says which limit it was', async () => {
@@ -2088,7 +2107,8 @@ describe('WorkerLoop', () => {
 
     const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { title: string; body: string };
     expect(msg.title.startsWith('\u2717')).toBe(true);
-    expect(msg.body).toMatch(/^Stopped at this run's cost ceiling of \$[\d.]+ with work still pending\.\n\n/);
+    // The push leads with the stop's first sentence only; the way out is in the recorded result.
+    expect(msg.body).toMatch(/^Stopped at the cost ceiling of \$[\d.]+ with work still pending\.\n\n/);
     expect(msg.body.endsWith(CONTAINED_RESULT_PUSH)).toBe(true);
     expect(msg.body).not.toContain('Jane Roe');
   });
@@ -2764,7 +2784,7 @@ describe('WorkerLoop', () => {
     expect((engine as unknown as { createSession: ReturnType<typeof vi.fn> }).createSession).not.toHaveBeenCalled();
     // The benign skip is recorded (recordAndNotify maps success=false → 'failed'), not
     // silently dropped and not run.
-    expect(tm.recordTaskRun).toHaveBeenCalledWith('pt-nulled', 'Pipeline target workflow no longer exists (skipped)', 'failed');
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('pt-nulled', WORKER_NOTICES.en.workflowGone(undefined), 'failed');
   });
 
   it('executePipeline surfaces a non-template pipeline as a typed error', async () => {
@@ -3025,7 +3045,7 @@ describe('WorkerLoop', () => {
     // 1. The pipeline executed — success was recorded.
     expect(taskManager.recordTaskRun).toHaveBeenCalledWith(
       task.id,
-      expect.stringContaining('Pipeline completed') as string,
+      expect.stringContaining('Workflow completed') as string,
       'success',
     );
 
@@ -3566,6 +3586,28 @@ describe('WorkerLoop', () => {
 
   // ---- effect: 'notify' branch (Phase-4 standalone reminders) ----
 
+  // 966: the reminder's title follows the instance's notice language — the configured one, else
+  // German on an instance the control plane provisioned and English on a self-hosted one.
+  it('titles a reminder in the instance\'s notice language, read per notice', async () => {
+    for (const [language, marker, title] of [
+      ['de', undefined, 'Erinnerung'],
+      [undefined, 'inst-1', 'Erinnerung'],
+      ['en', 'inst-1', 'Reminder'],
+      [undefined, undefined, 'Reminder'],
+    ] as const) {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', marker ?? '');
+      vi.stubEnv('LYNOX_BILLING_TIER', '');
+      vi.stubEnv('LYNOX_MANAGED_MODE', '');
+      const task = makeTask({ effect: 'notify', title: 'Roland anrufen' });
+      const engine = Object.assign(makeEngine({ taskManager: makeTaskManager([task]), session: makeSession() }), { config: { language } });
+      const router = makeNotificationRouter();
+      await (new WorkerLoop(engine, router, 60_000) as unknown as { executeTask: (t: TriggerRecord) => Promise<void> }).executeTask(task);
+      const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
+      expect([language, marker, msg?.title]).toEqual([language, marker, title]);
+    }
+    vi.unstubAllEnvs();
+  });
+
   it('executes a reminder by firing notify + recordTaskRun, no agent run', async () => {
     const task = makeTask({ effect: 'notify', title: 'Roland anrufen' });
     const tm = makeTaskManager([task]);
@@ -3577,7 +3619,8 @@ describe('WorkerLoop', () => {
     // Reminder fired → notify called once, recordTaskRun stamped success.
     expect(router.notify).toHaveBeenCalledTimes(1);
     const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
-    expect(msg?.title).toBe('Erinnerung');
+    // No language and no control-plane marker: a self-hosted instance, so English (`notice-language.ts`).
+    expect(msg?.title).toBe('Reminder');
     expect(msg?.body).toBe('Roland anrufen');
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, 'reminder fired', 'success');
     // No agent invocation — session.run never called.

@@ -35,7 +35,7 @@ import { mintBulkContract } from '../core/bulk-external.js';
 import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
-import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { WorkflowStore } from '../core/workflow-store.js';
 import { RunHistory } from '../core/run-history.js';
@@ -304,6 +304,7 @@ vi.mock('../core/engine.js', () => ({
     this.getRunHistory = vi.fn().mockReturnValue({
       // No workflow run in this history: every id is a chat's own (register 1112).
       getPipelineRunOrigins: () => new Map(),
+      getPipelineOriginChats: () => [],
       getRecentRuns: mockHistoryGetRecentRuns,
       searchRuns: mockHistorySearchRuns,
       getRun: mockHistoryGetRun,
@@ -8899,6 +8900,10 @@ describe('LynoxHTTPApi', () => {
           getPipelineRun: (id: string) => { const hit = Object.keys(PIPELINES).find((k) => k === id || k.startsWith(id)); return hit === undefined ? undefined : pipelineRow(hit); },
           getPipelineStepResults: () => [{ step_id: 's1', result: 'Jane Roe, 1042' }],
           getRecentPipelineRuns: () => Object.keys(PIPELINES).map(pipelineRow),
+          getPipelineOriginChats: () => ['shop', 'evas-shop', 'notes'],
+          // What each stats route was told to leave out (register 1118).
+          getPipelineStepStats: (_days: number, hidden: readonly string[]) => [{ hidden: [...hidden] }],
+          getPipelineCostStats: (_days: number, hidden: readonly string[]) => [{ hidden: [...hidden] }],
         }),
         getToolContext: () => ({ tools: [], containment }),
       }, test);
@@ -8999,6 +9004,12 @@ describe('LynoxHTTPApi', () => {
           expect(workflows.map((r) => r.id)).toEqual(['wf-free']);
           const allWorkflows = (await as(OWNER_PRINCIPAL, '/api/workflows')).body['runs'] as Array<{ id: string }>;
           expect(allWorkflows.map((r) => r.id)).toEqual(['wf-shop', 'wf-free']);
+          // The workflow stats leave out the names written by another person's contained chat.
+          for (const path of ['/api/workflows/stats/steps', '/api/workflows/stats/cost']) {
+            const hidden = (who: RequestPrincipal): Promise<unknown> => as(who, path).then((r) => (r.body['stats'] as Array<{ hidden: string[] }>)[0]?.hidden);
+            expect(await hidden(EVA), path).toEqual(['shop']);
+            expect(await hidden(OWNER_PRINCIPAL), path).toEqual([]);
+          }
           const insights = (await as(EVA, '/api/thread-insights')).body['threadInsights'] as Array<{ sessionId: string; title: string }>;
           expect(insights.map((t) => [t.sessionId, t.title])).toEqual([['shop', ''], ['evas-shop', 'Eva shop'], ['notes', 'Notes']]);
         });
@@ -9758,6 +9769,14 @@ describe('LynoxHTTPApi', () => {
       expect(mockTaskSetEnabled).not.toHaveBeenCalled();
       // The switch alone still answers as before.
       expect((await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ enabled: false }) })).status).toBe(200);
+    });
+
+    it('PATCH answers 400 for a due date that is not YYYY-MM-DD, as POST does', async () => {
+      repayRateWindow();
+      mockTaskUpdate.mockImplementationOnce(() => { throw new InvalidDueDateError('2026-1x-01'); });
+      const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ dueDate: '2026-1x-01' }) });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe(new InvalidDueDateError('2026-1x-01').message);
     });
 
     it('PATCH returns 404 for unknown task', async () => {
@@ -20515,7 +20534,7 @@ describe('mandate stance of every user route', () => {
     expect(about.length, 'the set is the real one').toBeGreaterThanOrEqual(10);
     const unnamed = about.filter(r => r.stance?.kind === 'reads' && r.stance.thread === undefined).map(name);
     expect(unnamed, 'declare readsThread(...) at the registration').toEqual([]);
-    for (const path of ['/api/threads', '/api/history/runs', '/api/thread-insights', '/api/workflows']) {
+    for (const path of ['/api/threads', '/api/history/runs', '/api/thread-insights', '/api/workflows', '/api/workflows/stats/steps', '/api/workflows/stats/cost']) {
       const r = users().find(x => x.method === 'GET' && x.path === path);
       expect(r?.stance?.kind === 'reads' && r.stance.thread !== undefined, path).toBe(true);
     }
@@ -20533,8 +20552,8 @@ describe('mandate stance of every user route', () => {
       const start = Math.max(source.lastIndexOf("this.addStatic('user'", end), source.lastIndexOf('this.dynamicRoutes.push(', end));
       const handler = source.slice(start, end);
       expect(handler.includes('this._unreadableChats('), handler.slice(0, 70)).toBe(true);
-      // ...and uses what it returns: the filter reads the set it was given.
-      expect(/const unreadable = this\._unreadableChats\(/.test(handler) && handler.includes('unreadable.has('), handler.slice(0, 70)).toBe(true);
+      // ...and uses what it returns: the set is read again after it is made.
+      expect(/const unreadable = this\._unreadableChats\(/.test(handler) && (handler.match(/\bunreadable\b/g) ?? []).length >= 2, handler.slice(0, 70)).toBe(true);
     }
   });
 
