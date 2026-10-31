@@ -383,3 +383,21 @@ describe('a written description the store kept otherwise than sent (§21.2 item 
     expect(rows[1]).not.toHaveProperty('hostRewrote');
   });
 });
+
+describe('a WooCommerce description keeps today\'s comparison (§21.4, N5)', () => {
+  it('compares nothing as HTML on a WooCommerce list run, although its list form names the field HTML', () => {
+    const id = approvedRun({ description: 'Neu' }, [{ description: '<P>Alt</P>' }]);
+    expect(ledger.htmlFieldsOf(id)).toContain('description');
+    expect(ledger.comparedAsHtml(id)).toEqual([]);
+  });
+
+  it('resumes a WooCommerce target the store reformatted as a conflict, as before', async () => {
+    const id = approvedRun({ description: '<p>Neu</p>' }, [{ description: '<p>Alt</p>' }]);
+    // A dead loop's write, kept reformatted: not the planned bytes, so not found as planned.
+    const store = new Map<string, Record<string, unknown>>([[`${LIST}/1`, { description: '<P>Neu</P>' }]]);
+    const w = stubWriter(store);
+    await run(id, w);
+    expect(w.sent).toEqual([]);
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 0, conflicts: 1 });
+  });
+});
