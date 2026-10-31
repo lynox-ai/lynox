@@ -135,14 +135,14 @@ afterAll(() => {
 });
 
 function transient(err: unknown): boolean {
-  return /429|5\d\d|overloaded|rate|timeout/i.test(String((err as { status?: number })?.status ?? err));
+  return /\b(429|5\d\d)\b|overloaded|rate.?limit|timed? ?out/i.test(String((err as { status?: number })?.status ?? err));
 }
 
 async function runOne(provider: string, agent: Agent, i: number): Promise<void> {
   try {
     await agent.send(MESSAGE);
   } catch (err) {
-    if (transient(err)) { table.push(`${provider}\t#${String(i)}\tSKIP\ttransient`); return; }
+    if (transient(err)) { table.push(`${provider}\t#${String(i)}\tSKIP\ttransient: ${String((err as { status?: number })?.status ?? '')} ${String(err).slice(0, 160)}`); return; }
     throw err;
   }
   const turn = turnOf(agent);
