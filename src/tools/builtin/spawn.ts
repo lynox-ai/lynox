@@ -1674,7 +1674,10 @@ async function executeThinker(
   if (runHistory) {
     try {
       childRunId = runHistory.insertRun({
-        sessionId: parentAgent.currentThreadId ?? '',
+        // The chat this child runs for, as its own `originThreadId` below: a child of a workflow
+        // step or of another child has no thread of its own, and a run naming no chat is kept from
+        // everyone but the owner (register 1116).
+        sessionId: parentAgent.currentThreadId ?? parentAgent.originThreadId ?? '',
         taskText: spec.task,
         modelTier: modelTier as string,
         modelId: model,
