@@ -8815,6 +8815,8 @@ describe('LynoxHTTPApi', () => {
         'r-evas': { id: 'r-evas', session_id: 'evas-shop', task_text: 't', response_text: 'e' },
         // A workflow step records its run under the workflow run, which `shop` started.
         'r-step': { id: 'r-step', session_id: 'wf-shop', task_text: 't', response_text: 'Jane Roe' },
+        // A sub-agent whose parent had no current thread records no chat at all.
+        'r-orphan': { id: 'r-orphan', session_id: '', task_text: 't', response_text: 'Jane Roe' },
       };
       // Workflow runs and the chat that started each: `wf-free` was started by none.
       const PIPELINES: Record<string, string | null> = { 'wf-shop': 'shop', 'wf-free': null };
@@ -8892,11 +8894,12 @@ describe('LynoxHTTPApi', () => {
         const { CONTAINED_THREAD_READ_REFUSAL, CONTAINED_THREAD_CODE } = await import('./http-api.js');
         const SHOP = '11111111-1111-4111-8111-111111111111';
         const NOTES = '22222222-2222-4222-8222-222222222222';
+        const GONE = '33333333-3333-4333-8333-333333333333';
         const rows: Record<string, { id: string; created_by?: string }> = { [SHOP]: { id: SHOP }, [NOTES]: { id: NOTES } };
         await swapEngine({
-          getThreadStore: () => ({ getThread: (id: string) => rows[id] ?? null, isDeleted: () => false }),
+          getThreadStore: () => ({ getThread: (id: string) => rows[id] ?? null, isDeleted: (id: string) => id === GONE }),
           getRunHistory: () => ({ getPipelineRunOrigins: () => new Map() }),
-          getToolContext: () => ({ tools: [], containment: { ...containment, isContained: (k: { threadId?: string }) => k.threadId === SHOP, containedThreadIds: (ids: readonly string[]) => new Set(ids.filter((i) => i === SHOP)) } }),
+          getToolContext: () => ({ tools: [], containment: { ...containment, isContained: (k: { threadId?: string }) => k.threadId === SHOP || k.threadId === GONE, containedThreadIds: (ids: readonly string[]) => new Set(ids.filter((i) => i === SHOP || i === GONE)) } }),
         }, async () => {
           const open = async (who: RequestPrincipal, threadId: string): Promise<{ status: number; body: Record<string, unknown> }> => {
             api.setPrincipalResolverForTesting(() => who);
@@ -8909,6 +8912,8 @@ describe('LynoxHTTPApi', () => {
           expect([notes.status, notes.body['code']]).toEqual([403, undefined]);
           expect(String(notes.body['error'])).toContain('continue this conversation');
           expect((await open(OWNER_PRINCIPAL, SHOP)).body['code']).toBeUndefined();
+          // A deleted chat answers as it did, not as a contained one: its row is gone.
+          expect((await open(EVA, GONE)).body['code']).toBeUndefined();
         });
       });
 
@@ -8930,7 +8935,7 @@ describe('LynoxHTTPApi', () => {
             const runs = (await as(EVA, path)).body['runs'] as Array<{ id: string }>;
             expect(runs.map((r) => r.id), path).toEqual(['r-notes', 'r-evas']);
             const all = (await as(OWNER_PRINCIPAL, path)).body['runs'] as Array<{ id: string }>;
-            expect(all.map((r) => r.id), path).toEqual(['r-shop', 'r-notes', 'r-evas', 'r-step']);
+            expect(all.map((r) => r.id), path).toEqual(['r-shop', 'r-notes', 'r-evas', 'r-step', 'r-orphan']);
           }
           const workflows = (await as(EVA, '/api/workflows')).body['runs'] as Array<{ id: string }>;
           expect(workflows.map((r) => r.id)).toEqual(['wf-free']);

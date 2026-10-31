@@ -2660,7 +2660,10 @@ export class LynoxHTTPApi {
     const contained = containedThreads(engine?.getToolContext().containment ?? null, chats);
     const store = engine?.getThreadStore();
     const unreadable = new Set([...contained].filter((id) => !ownedBy(store?.getThread(id) ?? undefined, principal)));
-    return new Set(ids.filter((id) => unreadable.has(chatOf.get(id) ?? id)));
+    // A run that names no chat (`session_id` empty: a sub-agent whose parent had no current
+    // thread, as in a workflow step) cannot be checked, so it is not read: fail-closed, at the
+    // price of a helper's own such runs. Its detail route answers 404 likewise.
+    return new Set(ids.filter((id) => id === '' || unreadable.has(chatOf.get(id) ?? id)));
   }
 
   /**
@@ -4320,7 +4323,8 @@ export class LynoxHTTPApi {
         }
         // A contained chat says why, with its code, so the page can show the way out (register 1112,
         // ux U-091): opening a chat goes through here before any read of it.
-        const contained = this._containedReadRefusal(principal, { thread: threadId });
+        // A deleted chat keeps the answer it had: its row is gone, so it would read as no one's.
+        const contained = engine.getThreadStore()?.isDeleted(threadId) === true ? null : this._containedReadRefusal(principal, { thread: threadId });
         if (contained !== null) { errorResponse(res, contained.status, contained.error, contained.code); return; }
         if (this._refuseUnlessOwns(_req, res, 'continue this conversation', () => [this._threadRow(threadId)])) return;
       }
