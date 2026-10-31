@@ -221,12 +221,12 @@ describe('a profile connected again while a provider\'s erasure still stands', (
 		expect(q('api-erasure-notice')).toBeNull();
 	});
 
-	it('a helper\'s page: the records route refuses, so no erasure notice and no way out, whoever made the connection', async () => {
+	it.each([true, false])('a helper\'s page: the records route refuses, so no erasure notice and no way out (helper made it: %s)', async (theirs) => {
 		// What keeps the notice from a helper is the route, not `connected_by_reader`:
 		// `GET /api/connections/records` is the owner's, and without notices nothing of an erasure shows.
 		// That is right, since a helper's reconnect does not lift the erasure; only the owner's does
 		// (ux U-090). The flag decides only who the connection line names (`apistoreview-connection`).
-		serve([{ ...byHelper, oauth_grant: { ...byHelper.oauth_grant, connected_by_reader: true } }], { status: 403, body: { error: 'owner only' } });
+		serve([{ ...byHelper, oauth_grant: { ...byHelper.oauth_grant, connected_by_reader: theirs } }], { status: 403, body: { error: 'owner only' } });
 		await render();
 		expect(q('api-erasure-reconnected')).toBeNull();
 		expect(q('api-erasure-avert')).toBeNull();
