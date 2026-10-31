@@ -4318,6 +4318,10 @@ export class LynoxHTTPApi {
           errorResponse(res, 403, 'Only the owner of this instance, or the person who started it, can continue this conversation.');
           return;
         }
+        // A contained chat says why, with its code, so the page can show the way out (register 1112,
+        // ux U-091): opening a chat goes through here before any read of it.
+        const contained = this._containedReadRefusal(principal, { thread: threadId });
+        if (contained !== null) { errorResponse(res, contained.status, contained.error, contained.code); return; }
         if (this._refuseUnlessOwns(_req, res, 'continue this conversation', () => [this._threadRow(threadId)])) return;
       }
       // A deleted conversation stays deleted. A tab still showing it, or a link into it, would

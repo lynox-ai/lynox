@@ -78,7 +78,8 @@ afterEach(() => {
 
 describe('ChatView on a chat this reader may not read', () => {
 	it('shows the reason where the history would be', async () => {
-		serve((url) => (/\/threads\/shop(\/messages)?(\?|$)/.test(url) ? json({ error: 'engine sentence', code: 'contained_thread' }, 403) : undefined));
+		// Refused where opening a chat is refused: `POST /sessions`.
+		serve((url) => (url.endsWith('/sessions') ? json({ error: 'engine sentence', code: 'contained_thread' }, 403) : undefined));
 		await openThenRender('shop');
 		expect(target.querySelector('[data-thread-read-refused]')?.textContent).toBe(t('contained.thread_read_refused'));
 		expect(target.textContent).not.toContain('engine sentence');

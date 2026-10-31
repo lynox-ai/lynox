@@ -8888,6 +8888,30 @@ describe('LynoxHTTPApi', () => {
         });
       });
 
+      it('opening another person\'s contained chat is refused with the same reason and code; any other foreign chat as before', async () => {
+        const { CONTAINED_THREAD_READ_REFUSAL, CONTAINED_THREAD_CODE } = await import('./http-api.js');
+        const SHOP = '11111111-1111-4111-8111-111111111111';
+        const NOTES = '22222222-2222-4222-8222-222222222222';
+        const rows: Record<string, { id: string; created_by?: string }> = { [SHOP]: { id: SHOP }, [NOTES]: { id: NOTES } };
+        await swapEngine({
+          getThreadStore: () => ({ getThread: (id: string) => rows[id] ?? null, isDeleted: () => false }),
+          getRunHistory: () => ({ getPipelineRunOrigins: () => new Map() }),
+          getToolContext: () => ({ tools: [], containment: { ...containment, isContained: (k: { threadId?: string }) => k.threadId === SHOP, containedThreadIds: (ids: readonly string[]) => new Set(ids.filter((i) => i === SHOP)) } }),
+        }, async () => {
+          const open = async (who: RequestPrincipal, threadId: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+            api.setPrincipalResolverForTesting(() => who);
+            const res = await jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify({ threadId }) });
+            return { status: res.status, body: await res.json() as Record<string, unknown> };
+          };
+          const shop = await open(EVA, SHOP);
+          expect({ status: shop.status, error: shop.body['error'], code: shop.body['code'] }).toEqual({ status: 403, error: CONTAINED_THREAD_READ_REFUSAL, code: CONTAINED_THREAD_CODE });
+          const notes = await open(EVA, NOTES);
+          expect([notes.status, notes.body['code']]).toEqual([403, undefined]);
+          expect(String(notes.body['error'])).toContain('continue this conversation');
+          expect((await open(OWNER_PRINCIPAL, SHOP)).body['code']).toBeUndefined();
+        });
+      });
+
       it('a recorded run that names no chat answers as not found to a helper', async () => {
         await engineWith(async () => {
           expect((await as(EVA, '/api/history/runs/r-nowhere/tool-calls')).status).toBe(404);

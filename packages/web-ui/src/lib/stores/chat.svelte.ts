@@ -891,6 +891,9 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		return;
 	}
 
+	// The reason for a refused chat or run is about what came before: the reader's own message
+	// starts what follows, so it goes (register 1112).
+	threadReadRefusal = null;
 	await _executeRun(task, files, displayText, runOptions);
 }
 
@@ -3824,6 +3827,16 @@ export async function resumeThread(threadId: string): Promise<void> {
 			newChat();
 			forgetDeletedThread(threadId);
 			chatError = t('chat.error_thread_deleted');
+			return;
+		}
+		// Not this reader's chat to read (register 1112, ux U-091): the reason instead of the chat,
+		// no copy this page kept of it, and the next message starts a new chat.
+		const openRefused = res.status === 403 ? await containedReadKey(res) : null;
+		if (gen !== _resumeGeneration) return;
+		if (openRefused !== null) {
+			newChat();
+			dropPersistedThread(threadId);
+			threadReadRefusal = openRefused;
 			return;
 		}
 		if (!res.ok) {
