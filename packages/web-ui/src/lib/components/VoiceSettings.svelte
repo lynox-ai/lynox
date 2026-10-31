@@ -10,6 +10,9 @@
 	import { addToast } from '../stores/toast.svelte.js';
 
 	interface VoiceInfo {
+		/** The instance is connected to a Shopify store: no text or audio goes to a speech
+		 *  service, so reading aloud is off and dictation runs only with whisper.cpp. */
+		speech_service_off?: boolean;
 		stt: {
 			available: boolean;
 			provider: string | null;
@@ -42,6 +45,11 @@
 	}
 
 	let info = $state<VoiceInfo | null>(null);
+	// A section offers a choice only where one of its options is available; on an instance
+	// connected to a Shopify store none may be (ux U-074), and then neither the picker nor
+	// "Save" is shown.
+	const sttChoosable = $derived(info?.stt.providers.some((p) => p.available) ?? false);
+	const ttsChoosable = $derived(info?.tts.providers.some((p) => p.available) ?? false);
 	let config = $state<Config>({});
 	let loaded = $state(false);
 	let saving = $state(false);
@@ -98,19 +106,29 @@
 		<!-- STT (speech-to-text) -->
 		<section class="space-y-3">
 			<h2 class="text-lg font-medium">{t('voice.stt_heading')}</h2>
-			<p class="text-xs text-text-muted">{t('voice.stt_privacy')}</p>
-			{#if info.stt.env_override}
+			{#if info.speech_service_off && !info.stt.available}
+				<p class="text-xs text-text-muted">{t('voice.stt_off_shopify')}</p>
+			{:else if info.speech_service_off}
+				<!-- whisper.cpp transcribes on the instance: the Mistral privacy note would be false here. -->
+				<p class="text-xs text-text-muted">{t('voice.stt_local_shopify')}</p>
+			{:else}
+				<p class="text-xs text-text-muted">{t('voice.stt_privacy')}</p>
+			{/if}
+			{#if !sttChoosable}
+				<!-- nothing to choose -->
+			{:else if info.stt.env_override}
 				<p class="text-xs text-warning">{t('voice.env_override')} <code class="font-mono">{info.stt.env_override}</code></p>
 				<select disabled class="w-full px-2 py-1 border border-border rounded bg-bg opacity-60">
 					<option>{info.stt.provider ?? '—'}</option>
 				</select>
 			{:else if info.stt.locked}
-				<p class="text-xs text-text-muted">{t('voice.managed_locked')}</p>
+				{#if !info.speech_service_off}<p class="text-xs text-text-muted">{t('voice.managed_locked')}</p>{/if}
 				<select disabled class="w-full px-2 py-1 border border-border rounded bg-bg opacity-60">
 					<option>{info.stt.provider ?? '—'}</option>
 				</select>
 			{:else}
-				<select disabled={!loaded} bind:value={config.transcription_provider}
+				<select disabled={!loaded} value={config.transcription_provider ?? 'auto'}
+					onchange={(e) => { config.transcription_provider = e.currentTarget.value as Config['transcription_provider']; }}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 					{#each info.stt.providers as p (p.id)}
 						<option value={p.id} disabled={!p.available}>{p.name}{p.available ? '' : ' — ' + t('voice.unavailable')}</option>
@@ -122,19 +140,26 @@
 		<!-- TTS (text-to-speech) -->
 		<section class="space-y-3 border-t border-border pt-6">
 			<h2 class="text-lg font-medium">{t('voice.tts_heading')}</h2>
-			<p class="text-xs text-text-muted">{t('voice.tts_privacy')}</p>
-			{#if info.tts.env_override}
+			{#if info.speech_service_off}
+				<p class="text-xs text-text-muted">{t('voice.tts_off_shopify')}</p>
+			{:else}
+				<p class="text-xs text-text-muted">{t('voice.tts_privacy')}</p>
+			{/if}
+			{#if !ttsChoosable}
+				<!-- nothing to choose -->
+			{:else if info.tts.env_override}
 				<p class="text-xs text-warning">{t('voice.env_override')} <code class="font-mono">{info.tts.env_override}</code></p>
 				<select disabled class="w-full px-2 py-1 border border-border rounded bg-bg opacity-60">
 					<option>{info.tts.provider ?? '—'}</option>
 				</select>
 			{:else if info.tts.locked}
-				<p class="text-xs text-text-muted">{t('voice.managed_locked')}</p>
+				{#if !info.speech_service_off}<p class="text-xs text-text-muted">{t('voice.managed_locked')}</p>{/if}
 				<select disabled class="w-full px-2 py-1 border border-border rounded bg-bg opacity-60">
 					<option>{info.tts.provider ?? '—'}</option>
 				</select>
 			{:else}
-				<select disabled={!loaded} bind:value={config.tts_provider}
+				<select disabled={!loaded} value={config.tts_provider ?? 'auto'}
+					onchange={(e) => { config.tts_provider = e.currentTarget.value as Config['tts_provider']; }}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 					{#each info.tts.providers as p (p.id)}
 						<option value={p.id} disabled={!p.available}>{p.name}{p.available ? '' : ' — ' + t('voice.unavailable')}</option>
@@ -142,7 +167,7 @@
 				</select>
 			{/if}
 
-			{#if info.tts.voices.length > 0}
+			{#if ttsChoosable && info.tts.voices.length > 0}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('voice.tts_voice')}</span>
 					<select disabled={!loaded} bind:value={config.tts_voice}
@@ -157,11 +182,13 @@
 			{/if}
 		</section>
 
+		{#if sttChoosable || ttsChoosable}
 		<div class="flex justify-end">
 			<button type="button" onclick={save} disabled={saving || !loaded}
 				class="px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-50">
 				{saving ? t('voice.saving') : t('voice.save')}
 			</button>
 		</div>
+		{/if}
 	{/if}
 </div>

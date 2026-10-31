@@ -212,6 +212,25 @@ export function verifyProfileOAuthState(
   return { state, profileId, verifier, by };
 }
 
+/** States a callback has used, each with the second after which its cookie is refused anyway. */
+const spentStates = new Map<string, number>();
+
+/**
+ * Mark `state` used: `true` the first time, `false` for any later callback with it while its
+ * cookie could still verify. Clearing the cookie stops a browser that replays the URL, not
+ * whoever kept the cookie's value; this stops both, in this process. An engine is one process,
+ * and a restart forgets the set, which a replay across one can use within the ten minutes. A
+ * wall clock set forward past an entry's end drops it at the next spend, and set back, its
+ * cookie verifies again.
+ */
+export function spendProfileOAuthState(state: string, nowSec: number): boolean {
+  for (const [s, until] of spentStates) if (until < nowSec) spentStates.delete(s);
+  if (spentStates.has(state)) return false;
+  // At least as long as the cookie lives: it was minted no later than now.
+  spentStates.set(state, nowSec + PROFILE_OAUTH_STATE_TTL_SEC);
+  return true;
+}
+
 function sign(payload: string, secret: string): string {
   const key = createHmac('sha256', PURPOSE).update(secret).digest();
   return createHmac('sha256', key).update(payload).digest('hex');

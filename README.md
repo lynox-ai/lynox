@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@lynox-ai/core)](https://www.npmjs.com/package/@lynox-ai/core)
 [![CI](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml/badge.svg)](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-15000%2B-brightgreen)](#testing-and-security)
+[![Tests](https://img.shields.io/badge/tests-20000%2B-brightgreen)](#testing-and-security)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![License: ELv2](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
@@ -113,14 +113,18 @@ cd packages/web-ui && VITE_ENGINE_URL=http://localhost:3100 pnpm run dev   # web
 
 ```bash
 cp .env.example .env       # add your API key
+mkdir -p ~/.lynox          # required before the first start
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; elif [ "$(id -u)" = 0 ]; then chown -R -P 1001:1001 ~/.lynox; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
 docker compose up
 ```
 
-See [Docker docs](https://docs.lynox.ai/setup/docker/) for encryption and production deployment.
+On native Linux the container has to be able to write `~/.lynox`; the line after `mkdir` does what your Docker mode needs. Never set `LYNOX_UID` to `0`. See [Docker docs](https://docs.lynox.ai/setup/docker/) for why, for Docker Desktop, and for encryption and production deployment.
 
 ## Your first run
 
 `npx @lynox-ai/core` walks you through an interactive installer: provider selection, API key, Docker Compose scaffolding, container pull, health check, and finally it opens the Web UI at [localhost:3000](http://localhost:3000). Save the access token and vault key it prints — the vault key cannot be recovered if lost.
+
+Without a terminal (a script, CI, a coding assistant), from version 2.18.0: `npx @lynox-ai/core --non-interactive --accept-terms --provider <anthropic|mistral|openai-compatible|none>`, with the key in the environment. It asks nothing and exits `0` only when lynox answers on `/api/health`. `--provider none` installs without a key; add one later in the Web UI. See [Getting started](https://docs.lynox.ai/getting-started/#without-a-terminal-scripts-ci-coding-assistants).
 
 ### Mobile access (PWA)
 
@@ -128,7 +132,7 @@ Open [localhost:3000](http://localhost:3000) on your phone and use your browser'
 
 ## Testing and security
 
-- 15000+ tests across the engine, tools, orchestrator, and web UI. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
+- 20000+ tests across the engine, tools, orchestrator, and web UI. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
 - Layered defenses: input-guard, permission-guard, data-boundary, AES-256-GCM vault, security-audit, plus tool-result injection scanning. SSRF protection on every outbound URL via `fetchWithValidatedRedirects` — DNS resolves once, the connection is pinned to the validated IP at TCP-connect time (rebind-safe), and each redirect hop is re-validated.
 - Responsible disclosure → [`SECURITY.md`](SECURITY.md).
 

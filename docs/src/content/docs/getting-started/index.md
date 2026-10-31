@@ -27,6 +27,24 @@ The interactive installer checks prerequisites, asks for your AI provider and AP
 
 **Requires:** Node.js 22+, Docker + Docker Compose.
 
+### Without a terminal (scripts, CI, coding assistants)
+
+From version 2.18.0.
+
+```bash
+ANTHROPIC_API_KEY=... npx @lynox-ai/core --non-interactive --accept-terms --provider anthropic
+```
+
+`--non-interactive` asks nothing. Every answer comes from a flag or the environment:
+
+- `--accept-terms` accepts the terms of service. Without it the run stops, even if the terms were accepted on this machine before.
+- An argument the installer does not know stops the run, so a misspelt flag never turns into a default.
+- `--provider anthropic|mistral|openai-compatible|none` picks the AI provider. The key comes from `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY` or `OPENAI_API_KEY`, never from a flag. `none` starts lynox without a key; add one later in the Web UI.
+- `--model <id>` is for `mistral` and `openai-compatible`, `--base-url <url>` for `openai-compatible`. `--dir <path>` sets the install directory (default `./lynox`). An existing setup there stops the run unless you pass `--reconfigure`.
+- `LYNOX_HTTP_SECRET` sets the access token; blank means one is generated. `PORT` sets the host port, 1–65535; anything else falls back to 3000. A port in use stops the run.
+
+Without a key (`--provider none`) lynox starts all the same; AI replies stay off until you add a key in the Web UI under Settings. The run exits `0` only once `GET /api/health` answers. A health check that times out, or any refusal, exits `1`. A missing `--provider`, an unknown argument, a flag without its value, or an installer flag used without `--non-interactive` exits `2` and prints the usage. The access token and vault key are not printed: they are `LYNOX_HTTP_SECRET` and `LYNOX_VAULT_KEY` in `<dir>/.env`. No browser opens.
+
 ### Manual Docker Compose
 
 If you prefer to set things up yourself:
@@ -42,7 +60,14 @@ git clone https://github.com/lynox-ai/lynox.git && cd lynox
 cp .env.example .env
 # then: edit .env, uncomment the `ANTHROPIC_API_KEY=` line, paste your key
 
-# 3. Start lynox + SearXNG (web search)
+# 3. Required before the first start: create the data folder, and let the
+#    container write it (the second line does what your Docker mode needs;
+#    never set LYNOX_UID to 0; Docker Desktop: keep the mkdir, skip the
+#    second line)
+mkdir -p ~/.lynox
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; elif [ "$(id -u)" = 0 ]; then chown -R -P 1001:1001 ~/.lynox; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
+
+# 4. Start lynox + SearXNG (web search)
 docker compose up -d
 ```
 

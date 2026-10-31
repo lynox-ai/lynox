@@ -39,6 +39,8 @@ import type { MeteredGateResult } from './metered-request.js';
 import { getProviderDescriptor, isMistralHost, modelCapability, type LLMProvider, type LynoxUserConfig, type ModelTier } from '../types/index.js';
 import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
 import { clientForTierSnapshot } from './llm-client.js';
+import { providerListApplies, refusedSnapshotClass } from './contained-providers.js';
+import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 
 export interface BulkJudgeOutcome {
   /** `pending`: the judge waits (a provider's 429 or 5xx, a stopped tick) and is due again at
@@ -83,6 +85,8 @@ export interface BulkJudgeDeps {
   now?: (() => number) | undefined;
   signal?: AbortSignal | undefined;
   newToken?: (() => string) | undefined;
+  /** The sentences of the outcome's summary, in the instance's notice language; English without. */
+  notices?: BulkNotices | undefined;
 }
 
 /**
@@ -202,6 +206,12 @@ function judgeModelPick(
   const slot = resolveTierModel(resolved, provider);
   const axis = judgeAxisOf(slot, uc.api_base_url);
   if (axis === null) return null;
+  // On an instance connected to a Shopify store the judge runs only at a provider on the list
+  // (`contained-providers.ts`): otherwise no model can judge, and the run says so before it starts.
+  // The base URL is the one the judge's client uses (`clientForTierSnapshot`): the instance's own
+  // only where the slot reuses the instance's client, the slot's own everywhere else.
+  const reusesAmbient = slot.apiBaseURL === undefined && slot.apiKey === undefined && slot.provider === provider;
+  if (providerListApplies() && refusedSnapshotClass(reusesAmbient ? { ...slot, apiBaseURL: uc.api_base_url } : slot) !== null) return null;
   const modelId = JUDGE_MODELS[axis];
   try {
     resolveRunModel({
@@ -324,11 +334,10 @@ export function judgeErrorForTracker(err: unknown, what = 'bulk_judge call'): Er
   return e;
 }
 
-function summarize(ledger: BulkLedger, runId: string, lead: string): string {
+function summarize(ledger: BulkLedger, runId: string, lead: string, say: BulkNotices = BULK_NOTICES.en): string {
   const s = ledger.getStatus(runId);
   if (!s) return lead;
-  return `${lead} Judged ${String(judgedTargets(s))}, invalid ${String(s.changes.invalid)}, ` +
-    `without a verdict ${String(s.judge?.unjudged ?? 0)} of ${String(s.total)} targets.`;
+  return `${lead} ${say.judgeCounts(judgedTargets(s), s.changes.invalid, s.judge?.unjudged ?? 0, s.total)}`;
 }
 
 /** The before-image over F, as the model may read it. A data-store row holds more than F: only
@@ -399,6 +408,7 @@ export function verdictTextRefusal(
  */
 export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<BulkJudgeOutcome> {
   const { ledger } = deps;
+  const say = deps.notices ?? BULK_NOTICES.en;
   const now = deps.now ?? Date.now;
   const call = deps.call ?? callForStructuredJson;
   const newToken = deps.newToken ?? randomUUID;
@@ -434,7 +444,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     if (deps.signal?.aborted) return pending(now() + JUDGE_RETRY_MS, 'Bulk judge paused.');
     const current = ledger.getJudgeRun(runId);
     if (!current || current.phase !== 'planned' || current.haltReason !== null) {
-      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk judge stopped: the run was halted, superseded or moved on.') };
+      return { status: 'halted', summary: summarize(ledger, runId, say.judgeStopped, say) };
     }
     // The operator's switch, asked before every paid call: a Shopify run judged while it is off
     // could never be approved (`approve` refuses it), so nothing more is spent on it.
@@ -595,14 +605,14 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   if (bookingFailed) return halt(BULK_HALT_REASONS.unavailable);
   if (ledger.listUnjudged(runId).length > 0) return pending(now() + JUDGE_RETRY_MS, 'Bulk judge has targets left to judge.');
   if (!ledger.finishJudge(runId)) {
-    return { status: 'halted', summary: summarize(ledger, runId, 'Bulk judge stopped: the run was halted, superseded or moved on.') };
+    return { status: 'halted', summary: summarize(ledger, runId, say.judgeStopped, say) };
   }
-  return { status: 'done', summary: summarize(ledger, runId, 'Bulk judge done — the run is ready for review.') };
+  return { status: 'done', summary: summarize(ledger, runId, say.judgeDone, say) };
 
   function halt(reason: BulkHaltReason): BulkJudgeOutcome {
     // Only a run still planned and not halted: a run superseded or stopped meanwhile keeps its reason.
     ledger.haltPreview(runId, reason);
-    return { status: 'halted', summary: summarize(ledger, runId, `Bulk judge halted: ${reason}.`) };
+    return { status: 'halted', summary: summarize(ledger, runId, say.halted('judge', reason), say) };
   }
   function pending(retryAt: number, lead: string): BulkJudgeOutcome {
     return { status: 'pending', summary: summarize(ledger, runId, lead), retryAt };

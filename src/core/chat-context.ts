@@ -6,6 +6,7 @@ import type { ThreadStore } from './thread-store.js';
 import { stripUntrustedSeparators } from './sanitize.js';
 import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
 import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
+import { stripHidden } from './hidden-text.js';
 
 const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
@@ -157,7 +158,8 @@ export interface ChatInboxReader {
 export interface ContainedWayOutState {
   /** Bulk runs run on this instance (`core/bulk-switch.ts › bulkRunsOn`). */
   readonly bulkRuns: boolean;
-  /** Who turns bulk runs on: the owner through the config, or the control plane (`bulkRunsSource`). */
+  /** Who can turn bulk runs on here: the owner through the config, also on a pool tier the
+   *  control plane has opened them on, or the control plane (`bulkRunsTurnedOnBy`). */
   readonly bulkRunsBy: 'config' | 'control-plane';
   /** A bulk run may read a Shopify store (`core/bulk-shopify.ts › shopifyBulkReadEnabled`). */
   readonly shopifyBulk: boolean;
@@ -189,8 +191,8 @@ export const CONTAINED_ORIGIN_CONTEXT = ORIGIN_HEAD + ORIGIN_STORE_BY_BULK_RUN +
 
 /** What is missing and who can turn it on, as clauses after „Tell the user … that“: the Shopify
  *  read first, then bulk runs, each with the one who can turn it on where there is a way, and
- *  support once. The owner turns bulk runs on through the config alone: no settings switch and no
- *  tool does it yet, so that clause names no place. */
+ *  support once. Bulk runs the owner can turn on get a clause that names no place: the line above
+ *  the input names the settings switch (`contained-way-out.ts › originLineKeys`). */
 function enableClauses(state: ContainedWayOutState): string[] {
   const clauses: string[] = [];
   const support = 'they can write to support@lynox.ai to have them enabled';
@@ -267,6 +269,14 @@ export interface ChatApprovalReader {
 function oneLine(s: string, max: number): string {
   const flat = s.replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** {@link oneLine} for a stored workflow's or run's text (name, step id, task, error), without the
+ *  characters that render as nothing (`hidden-text.ts`): text saved before the save refused them
+ *  would otherwise carry an instruction no one sees into the chat. Not for mail fields, whose
+ *  values the model echoes back to the mail tools. */
+function storedLine(s: string, max: number): string {
+  return oneLine(stripHidden(s), max);
 }
 
 /**
@@ -529,11 +539,11 @@ export function resolveChatContext(
     }
     if (wf.template !== true) return null; // only saved workflows are editable
     const steps = (wf.steps ?? [])
-      .map((s, i) => `  ${i + 1}. [${oneLine(s.id, MAX_STEP_ID_CHARS)}] ${oneLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
+      .map((s, i) => `  ${i + 1}. [${storedLine(s.id, MAX_STEP_ID_CHARS)}] ${storedLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
       .join('\n');
     return (
       `[Loaded saved workflow for editing — id: ${wf.id}]\n` +
-      `Name: "${oneLine(wf.name, MAX_NAME_CHARS)}"\n` +
+      `Name: "${storedLine(wf.name, MAX_NAME_CHARS)}"\n` +
       `Mode: ${wf.mode ?? 'autonomous'}${contractNote(wf.capabilityContract)}\n` +
       `Steps:\n${steps}\n\n` +
       `To change it, call update_workflow_steps with workflow_id "${wf.id}". ` +
@@ -558,7 +568,7 @@ export function resolveChatContext(
   }
   const stepResults = runHistory.getPipelineStepResults(run.id);
   const trace = stepResults
-    .map(s => `  [${s.status}] ${oneLine(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${oneLine(s.error, MAX_ERR_CHARS)}` : ''}`)
+    .map(s => `  [${s.status}] ${storedLine(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${storedLine(s.error, MAX_ERR_CHARS)}` : ''}`)
     .join('\n');
   const hasFailure = run.status === 'failed' || stepResults.some(s => s.status === 'failed' || s.error);
   // Only point at the editable workflow if it still exists — a run can outlive a
@@ -569,8 +579,8 @@ export function resolveChatContext(
   const readerContained = reader?.threadId !== undefined && reader.threadId !== '' && threadIsContained(reader.containment, reader.threadId);
   return (
     `[Loaded workflow run — id: ${run.id}]\n` +
-    `Workflow: "${oneLine(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
-    `Status: ${run.status}${run.error ? `\nError: ${oneLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
+    `Workflow: "${storedLine(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
+    `Status: ${run.status}${run.error ? `\nError: ${storedLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
     (trace ? `Steps:\n${trace}\n` : '') +
     (hasFailure
       ? readerContained

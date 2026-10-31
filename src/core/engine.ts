@@ -855,11 +855,15 @@ export class Engine {
    * pool's spend only: on a pool tier, the US classifier (the pool's Anthropic client) and the
    * EU one on the pool's Mistral key. A classifier on the user's own key is not debited, as the
    * user already pays the provider for it and would pay twice.
+   *
+   * And the instance's language, for the reminder poller's title (`notice-language.ts`): set here
+   * so the cold boot and the rebootstrap cannot hand the inbox different ones.
    */
   private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
     const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
     if (key !== undefined) bootOpts.mistralApiKey = key;
     if (poolSuppliesLLMKeys() && (bootOpts.llmRegion !== 'eu' || poolPays)) bootOpts.meteredHost = this;
+    bootOpts.language = () => this.config.language;
   }
 
   /**

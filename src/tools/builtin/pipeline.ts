@@ -14,7 +14,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode, asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { DEFAULT_STEP_TIMEOUT_MS, undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import { UNKNOWN_GRANT } from '../../core/conversation-grants.js';
 import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { normalizeTier } from '../../types/index.js';
@@ -22,7 +22,7 @@ import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
-import { hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
+import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
@@ -340,7 +340,10 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
     totalCostUsd: totalCost,
   };
 
-  return JSON.stringify(result, null, 2);
+  // The name and the step ids are stored text, saved perhaps before the save refused characters
+  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show. The places
+  // real text puts one stay, so an emoji or a Persian word in a step's result reads as it is.
+  return escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
 }
 
 // 2a/B3: both the pipeline_runs row and its pipeline_step_results rows are now
@@ -588,6 +591,9 @@ export interface RunSavedWorkflowResult {
    *  owner's run report: a refused write leaves its step `completed`, so nothing else
    *  would surface it. */
   writeNotes?: string[] | undefined;
+  /** For a refusal whose `error` names stored text: the same refusal in words lynox wrote alone,
+   *  for a sink that may not carry stored text (`FixedTextError`). */
+  fixedError?: string | undefined;
 }
 
 /**
@@ -606,7 +612,9 @@ const MAX_WRITE_NOTES = 10;
 /** The mail tools that file for approval. */
 const QUEUEABLE_MAIL_TOOLS: ReadonlySet<string> = new Set(['mail_send', 'mail_reply']);
 const MAX_WRITE_NOTE_CHARS = 300;
-const MAX_MEMBER_NOTE_CHARS = 700;
+/** Long enough for the longest line a plan run's refusal writes: it names the member twice and
+ *  the profile once, and the sentence that says who decides comes last. */
+const MAX_MEMBER_NOTE_CHARS = 1500;
 
 /**
  * Collects the refused and possibly-landed write lines from the tool calls of a run's
@@ -867,7 +875,7 @@ export async function runSavedWorkflow(
   // This also covers a grant stamped before its values were checked at acceptance: a grant only
   // survives to here with values equal to the bound ones.
   const hiddenValue = hiddenInRunValues(bound.params);
-  if (hiddenValue !== null) return { ok: false, error: hiddenValue };
+  if (hiddenValue !== null) return { ok: false, error: hiddenValue, fixedError: fixedRunRefusal(hiddenValue) };
 
   // Each step's task without the characters that render as nothing: the save refuses them now,
   // but a workflow saved before that still carries them, and a hidden clause would run as part
@@ -960,7 +968,8 @@ export async function runSavedWorkflow(
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
     };
   } catch (err: unknown) {
-    return { ok: false, error: `Workflow execution failed: ${getErrorMessage(err)}` };
+    // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+    return { ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}` };
   }
 }
 
@@ -1183,7 +1192,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       retryOutcome = state.status === 'completed' ? 'success' : 'failed';
       return text;
     } catch (err: unknown) {
-      return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
+      // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+      return `Error: Workflow retry failed: ${stripHidden(getErrorMessage(err))}`;
     } finally {
       retryTrail?.end(retryOutcome, false);
     }
@@ -1302,7 +1312,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return text;
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
-    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
+    // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+    return `Error: Workflow execution failed: ${stripHidden(getErrorMessage(err))}`;
   } finally {
     if (!isTemplate) inFlightNonTemplatePipelines.delete(planned.id);
     trail?.end(outcome, definitionRemoved);
@@ -1356,7 +1367,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
               model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Capability tier (omitted = fast)' },
               tools: { type: 'array', items: { type: 'string' }, description: 'Exact tool names this step needs, from your own toolset. bash only when a shell is essential.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'Step IDs whose output flows into this step\'s context' },
-              timeout_ms: { type: 'number', description: 'Timeout in ms (default: 600000)' },
+              timeout_ms: { type: 'number', description: `Timeout in ms (default: ${String(DEFAULT_STEP_TIMEOUT_MS)}, ${String(DEFAULT_STEP_TIMEOUT_MS / 60_000)} min)` },
             },
             required: ['id', 'task'],
           },

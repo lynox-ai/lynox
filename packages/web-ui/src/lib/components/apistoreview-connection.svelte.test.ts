@@ -63,11 +63,26 @@ describe('the API page says who connected a profile and with which account', () 
 
 	it('an account shown or never recorded reads as before', async () => {
 		expect(await lines([
-			{ connected_by: 'owner', account: { label: 'a@example.invalid' } },
-			{ connected_by: 'mandate:tom@example.invalid' },
+			{ connected_by: 'owner', account: { label: 'a@example.invalid' }, connected_by_reader: true },
+			{ connected_by: 'mandate:tom@example.invalid', connected_by_reader: false },
 		])).toEqual([
 			'Verbunden von dir · Konto: a@example.invalid',
 			'Verbunden von tom@example.invalid · Konto unbekannt',
+		]);
+	});
+
+	it('"by you" follows the engine\'s answer about the reader, not the owner tag', async () => {
+		expect(await lines([
+			// A helper reading the owner's connection that recorded no account: nothing was withheld.
+			{ connected_by: 'owner', connected_by_reader: false },
+			// The owner reading the same.
+			{ connected_by: 'owner', connected_by_reader: true },
+			// A helper reading their own connection.
+			{ connected_by: 'mandate:tom@example.invalid', account: { label: 't@example.invalid' }, connected_by_reader: true },
+		])).toEqual([
+			'Verbunden vom Inhaber · Konto unbekannt',
+			'Verbunden von dir · Konto unbekannt',
+			'Verbunden von dir · Konto: t@example.invalid',
 		]);
 	});
 });

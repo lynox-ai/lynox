@@ -94,8 +94,8 @@ describe('the query identifiers of a read row, held to the handlers', () => {
       .filter((l) => /searchParams|new URLSearchParams\(|\burl\.search\b/.test(l))
       .map((l) => l.trim());
     expect(other).toEqual([
-      'if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams)) return;',
-      'if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams)) return;',
+      'if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams, stance, {})) return;',
+      'if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams, route.stance, params)) return;',
       'const v = Number(url.searchParams.get(name));',
       'return url.searchParams.has(name) && Number.isInteger(v) && v >= 0 ? v : undefined;',
     ]);

@@ -51,6 +51,8 @@ import {
   type OnInboundMailHook,
 } from './watcher-hook.js';
 import type { MailStateDb } from '../mail/state.js';
+import { PROVIDER_NOT_ON_LIST_REFUSAL, providerListApplies } from '../../core/contained-providers.js';
+import { FixedTextError } from '../../core/error-egress.js';
 
 /** Bundle the Engine retains. `shutdown()` drains the queue. */
 export interface InboxRuntime {
@@ -153,6 +155,8 @@ export interface BootstrapInboxOptions {
   notificationRouter?: NotificationRouter | undefined;
   /** Override the poller cadence (tests pass small values). */
   reminderPollIntervalMs?: number | undefined;
+  /** The instance's configured language, for the reminder's title (`notice-language.ts`). */
+  language?: (() => string | undefined) | undefined;
   /**
    * RunHistory the engine keeps for the chat-session usage dashboard.
    * When wired, every classifier LLM call also lands here so the
@@ -255,7 +259,13 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     }
   };
   let llm: LLMCaller;
-  if (opts.llmRegion === 'eu') {
+  if (opts.llmRegion === 'eu' && providerListApplies()) {
+    // On an instance connected to a Shopify store the EU caller — a direct request to Mistral —
+    // is not on the provider list (`core/contained-providers.ts`). Nor is the US path a stand-in:
+    // the operator chose that mail stays in the EU. Every classification is refused instead: the
+    // queue retries and then dead-letters the item to `requires_user`, as for any classifier failure.
+    llm = async () => { throw new FixedTextError(PROVIDER_NOT_ON_LIST_REFUSAL, PROVIDER_NOT_ON_LIST_REFUSAL); };
+  } else if (opts.llmRegion === 'eu') {
     if (!opts.mistralApiKey) {
       throw new Error('bootstrapInbox: llmRegion=eu requires mistralApiKey');
     }
@@ -373,6 +383,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     const pollerOpts: Parameters<typeof startReminderPoller>[0] = {
       state,
       router: opts.notificationRouter,
+      language: opts.language,
     };
     if (opts.reminderPollIntervalMs !== undefined) {
       pollerOpts.intervalMs = opts.reminderPollIntervalMs;

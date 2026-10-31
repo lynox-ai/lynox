@@ -11,7 +11,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -40,7 +40,7 @@ import {
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
-import { currentCallSignal, currentCallTwins, joinCallSignal, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
@@ -344,10 +344,20 @@ export function connectedAccountProfiles(url: string, apiStore: NonNullable<Tool
 }
 
 /** The built-in provider whose API host `url` is on (`apiHosts`), whatever profiles exist: the
- *  same predicate a profile is held to when it is saved (`presetNotFollowed`), asked for a
+ *  same predicate a profile is held to when it is saved (`providerNotFollowed`), asked for a
  *  request that follows no provider. */
 function hostClaimant(url: string): OAuthPreset | undefined {
-  return presetNotFollowed({ base_url: url });
+  return providerNotFollowed({ base_url: url });
+}
+
+/**
+ * {@link presetNotFollowed} as the engine asks it: a store host counts as the store provider's
+ * while the store exchange is switched on ({@link shopifyExchangeSwitchOn}), read at each call.
+ * The one reading for the save (`api_setup`) and the request, so the two cannot disagree.
+ */
+export function providerNotFollowed(profile: Parameters<typeof presetNotFollowed>[0]): OAuthPreset | undefined {
+  // `undefined`, not `OAUTH_PRESETS`: the register stays the predicate's own default, as every caller had it before.
+  return presetNotFollowed(profile, undefined, { storesClaimed: shopifyExchangeSwitchOn() });
 }
 
 /** Every profile on `url`'s host, as {@link presetProfilesOnHost} finds them, with or without a preset. */
@@ -2120,7 +2130,7 @@ async function attachEngineManagedAuth(
   try { new URL(url); } catch { parsed = false; } // invalid URL — assertHostPolicy reports it downstream
   if (write && parsed && apiStore) {
     for (const p of profilesOnHost(url, apiStore)) {
-      const provider = presetNotFollowed(p);
+      const provider = providerNotFollowed(p);
       if (provider) { astray = { profile: p, provider }; break; }
     }
   }
@@ -2234,7 +2244,12 @@ async function attachEngineManagedAuth(
     if (memberRefusal !== null) return { refusal: memberRefusal };
     // Before the revoked-grant check and the renewal: a request this refuses reads nothing.
     const offGrant = slotOffGrant([accessTokenKey(profile.id)]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
+    if (offGrant !== undefined) {
+      // A store's own connection asked for a path its token does not go to: said as that, since the
+      // general text below ("to its base_url") is true of the host and wrong about the path.
+      const store = storePathRefusal(profile, url);
+      return { refusal: store ?? slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
+    }
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
     // token and send the model to fetch_token, which cannot help. Only while the
@@ -2389,8 +2404,10 @@ async function attachEngineManagedAuth(
       if (origin === null || typeof bound !== 'string' || digest === null || !digestsEqual(digest, bound)) {
         return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".` };
       }
-      // Step 6b, the containment and the pass: after every refusal above, so a refused request
-      // records nothing and contains nothing (`mintStorePassFor`).
+      // Step 6b, the containment and the pass: after every refusal above, so a request refused
+      // there records nothing and contains nothing (`mintStorePassFor`). The pass's own checks
+      // (path, encoding, access tokens, `store-pass.ts`) run at the send, after this: a request
+      // they refuse has contained the chat without anything sent, the safe direction.
       const minted = await mintStorePassFor(toolContext!, container, { kind: 'api', connectionId: profile.id }, origin, oauthSlot, oauthValue);
       if ('refusal' in minted) return { refusal: `Error: ${minted.refusal}` };
       return { ...put(oauthSlot, oauthValue), pass: minted.pass };
@@ -2801,6 +2818,22 @@ function slotReachRefusal(profileId: string, name: string, hostname: string, cli
   return `Error: api_profile "${profileId}" would send ${shapedForLog(name, DERIVED_NAME_SHAPE, 80)} to ${hostname}, but that vault name holds an OAuth token that goes only to where its own connection points (an access token to its base_url, a refresh token only to its token endpoint), or more than one profile claims it. Nothing was sent. Give this profile a credential of its own with api_setup action="update", or send the request through the profile that holds the connection.`;
 }
 
+/**
+ * A store connection's request to a path outside its provider's API (`apiPathPrefix`), written
+ * plainly or with an encoded slash or backslash: `null` for any other profile or path. Asked after
+ * the attach refused a store profile whose base is off its store, so the host is the store's. The
+ * path is not repeated; the model wrote it and knows it.
+ */
+function storePathRefusal(profile: ApiProfile, url: string): string | null {
+  const preset = OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '');
+  const prefix = preset?.apiPathPrefix;
+  if (preset === undefined || prefix === undefined) return null;
+  let path: string;
+  try { path = new URL(url).pathname; } catch { return null; }
+  if (path.startsWith(prefix) && !/%(2f|5c)/i.test(path)) return null;
+  return `Error: api_profile "${profile.id}" is the connection of a ${preset.label} store, and its token goes only to the store's API: paths under ${prefix}, with no encoded slash or backslash (%2F, %5C) in the path. This request goes to another path on the store, so nothing was sent. Other paths there are served by others than the store's API (an app's pages under /apps/, for example), and lynox does not send the store's token to them. Do not retry it, and do not set a credential yourself; make the request to the API path for what you need.`;
+}
+
 /** Shared wording — the same refusal for basic and bearer/header. */
 function protectedKeyRefusal(profileId: string, keys: string): string {
   return `Error: api_profile "${profileId}" names protected secret(s) ${keys} as its credentials. Those belong to the platform or hold the tenant's own provider key, and are never attached to an outbound request. Use a credential the user supplied for this API.`;
@@ -2851,6 +2884,45 @@ function withFrontNotes(result: string, writeNote: string | undefined, sizeNotes
     `${writeNote === undefined ? '' : `${writeNote}\n\n`}${notes.length > 0 ? `${notes.join('\n')}\n\n` : ''}${result}`;
   const whole = compose(sizeNotes);
   return whole.length > cut ? compose([...sizeNotes, resultCutNote(cut, parsedJson)]) : whole;
+}
+
+/** The profile of `url`'s host when it has a cost; `undefined` for any other URL. */
+function apiProfileOfUrl(url: string, toolContext: ToolContext | undefined): ApiProfile | undefined {
+  try {
+    const profile = toolContext?.apiStore?.getByHostname(new URL(url).hostname);
+    return profile?.cost === undefined ? undefined : profile;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The most a provider's own figure may say one request cost, as the profile rate's own bound
+ *  (`api-setup.ts`). A larger or a negative figure is not taken; the profile rate stands. */
+const MAX_RESPONSE_COST_USD = 100;
+
+/**
+ * What one answered request to `profile`'s API cost (`CallApiCost`). The answer's own figure at
+ * `cost.response_field` when it gives a finite number from 0 to {@link MAX_RESPONSE_COST_USD};
+ * otherwise the profile's `per_call` rate as an estimate; otherwise no amount. `json` is the
+ * answer as parsed, before any `response_shape`; `undefined` when it was not parsed.
+ * The figure is the provider's: it is shown, and nothing that limits spending reads it.
+ */
+export function apiCostOfAnswer(profile: ApiProfile, json: unknown): CallApiCost {
+  const cost = profile.cost;
+  const field = cost?.response_field;
+  if (field !== undefined && json !== undefined) {
+    let at: unknown = json;
+    for (const key of field.split('.')) {
+      // An array is entered by index only, so `tasks.length` reads no count as a cost.
+      at = Array.isArray(at) ? (/^\d+$/.test(key) ? (at as unknown[])[Number(key)] : undefined)
+        : at !== null && typeof at === 'object' ? (at as Record<string, unknown>)[key] : undefined;
+    }
+    if (typeof at === 'number' && Number.isFinite(at) && at >= 0 && at <= MAX_RESPONSE_COST_USD) {
+      return { usd: at, source: 'response' };
+    }
+  }
+  if (cost?.model === 'per_call') return { usd: cost.rate_usd, source: 'profile' };
+  return { usd: null, source: 'none' };
 }
 
 /**
@@ -3140,7 +3212,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // nowhere to keep a profile.
       const wayOut = !toolContext?.apiStore
         ? 'This run has no api_profile store, so it cannot write there.'
-        : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
+        : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}"${presetParamsForModel(claimant) === '' ? '' : ` and auth.oauth.preset_params ${presetParamsForModel(claimant)}`}, then connect it with api_setup action "connect".`;
       blockedVerbatim(`Blocked: ${writeShown} to ${service()} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
     }
     // A write to a connected account is shown with everything the request puts on the wire, as
@@ -3762,6 +3834,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // (the transport destroys the socket), which a name check took for an unrelated failure.
     let timedOut: 'abort' | 'wall' | 'stopped' | null = null;
     let answeredStatus: string | undefined;
+    // The request this call sent to an API whose profile has a cost, once an answer came back
+    // (`apiCostOfAnswer`). Recorded on the call at the success return and on the error path, so a
+    // body that stalled after the headers still counts: the request went out.
+    let apiCost: CallApiCost | undefined;
     // A write a redirect of this call carried as a method override (`onOverrideWrite`), for the
     // stop and timeout messages: they would otherwise go by `gatedMethod`, a read.
     let carriedWrite: SentWrite | undefined;
@@ -3870,6 +3946,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const status = `${response.status} ${response.statusText}`;
       // After a write turned into a GET on another origin, the answer is that GET's, not the write's.
       answeredStatus = writeFollowedAsRead === undefined ? status : `${status} to the GET it was redirected to on ${urlForNote(finalRequestUrl)}`;
+      // Attributed to the final URL after redirects; when that host has no cost but the first one
+      // has, the request still went to the priced API (a redirect to a CDN or a signed link). The
+      // answer is then another party's, so its cost field is not read: only the profile rate counts.
+      const answeringProfile = apiProfileOfUrl(finalRequestUrl, toolContext);
+      const costProfile = answeringProfile ?? apiProfileOfUrl(input.url, toolContext);
+      const costInAnswer = answeringProfile !== undefined;
+      apiCost = costProfile === undefined ? undefined : apiCostOfAnswer(costProfile, undefined);
       // Strip sensitive response headers to prevent credential leakage to agent
       const REDACTED_HEADERS = new Set([
         'set-cookie', 'authorization', 'www-authenticate', 'proxy-authenticate',
@@ -3933,6 +4016,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         try {
           const json = JSON.parse(text) as unknown;
           parsedJson = true;
+          // The amount the answer gives, read before the shaping can drop its field.
+          if (costProfile !== undefined && costInAnswer) apiCost = apiCostOfAnswer(costProfile, json);
           // Apply per-API response shaping if the profile defines one.
           const shapedBody = await maybeShapeJson(json, input.url, toolContext);
           body = shapedBody;
@@ -4092,39 +4177,32 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
       }
 
-      // Phase E (api-cost-display): if this hit a profiled API with a per_call
-      // cost model, surface the cost on the streamHandler so the web-ui can
-      // show "$0.0006" alongside the tool_result. per_token / per_unit are
-      // deferred — we have no reliable token counter for arbitrary HTTP bodies.
-      try {
-        // Attribute to the final URL after redirects, so a chain landing on a
-        // different host is profiled against its actual endpoint. This used to
-        // read `response.url || input.url`, and `response.url` is always ''
-        // because fetchPinned constructs the Response — so it silently did the
-        // opposite of what this comment promised.
-        const parsedFinal = new URL(finalRequestUrl);
-        const profile = toolContext?.apiStore?.getByHostname(parsedFinal.hostname);
-        if (profile?.cost?.model === 'per_call' && isFeatureEnabled('api-cost-display')) {
+      // Phase E (api-cost-display): the request's cost goes on the call's row, where the run's
+      // footer counts it, and on the streamHandler so the web-ui can show it beside the tool_result.
+      if (apiCost !== undefined) {
+        noteApiCost(apiCost);
+        try {
           const streamHandler = toolContext?.streamHandler;
-          if (streamHandler) {
+          if (streamHandler && apiCost.source !== 'none' && apiCost.usd !== null && costProfile !== undefined && isFeatureEnabled('api-cost-display')) {
             // Mirror emitBootstrapProgress: catch sync throws via the outer
             // try/catch, and chain .catch on the Promise so an async rejection
             // from the handler cannot escape as an unhandledRejection.
             const emitResult = streamHandler({
               type: 'api_cost',
               tool: 'http_request',
-              profileId: profile.id,
-              profileName: profile.name,
-              endpoint: parsedFinal.pathname,
-              costUsd: profile.cost.rate_usd,
+              profileId: costProfile.id,
+              profileName: costProfile.name,
+              endpoint: new URL(costInAnswer ? finalRequestUrl : input.url).pathname,
+              costUsd: apiCost.usd,
+              source: apiCost.source === 'response' ? 'response' : 'profile',
               agent: agent.name,
             });
             if (emitResult instanceof Promise) {
               emitResult.catch(() => { /* best-effort */ });
             }
           }
-        }
-      } catch { /* cost emission is best-effort */ }
+        } catch { /* cost emission is best-effort */ }
+      }
 
       // Append profile warning if this was an unregistered API
       const profileWarning = (input as unknown as Record<string, unknown>)['_profileWarning'];
@@ -4132,6 +4210,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const resultCut = agent.toolContext?.userConfig?.max_tool_result_chars ?? DEFAULT_MAX_TOOL_RESULT_CHARS;
       return withFrontNotes(result, writeNote, sizeNotes, resultCut, parsedJson);
     } catch (err: unknown) {
+      // The request went out and was answered, so it counts even though reading the answer failed.
+      if (answeredStatus !== undefined && apiCost !== undefined) noteApiCost(apiCost);
+      // So does a write whose redirect hop was refused: it was sent and answered before the hop.
+      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused) {
+        const sentTo = apiProfileOfUrl(input.url, toolContext);
+        if (sentTo !== undefined) noteApiCost(apiCostOfAnswer(sentTo, undefined));
+      }
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
       // the REASON as its message, and `blockedFriendly`'s reason starts with
       // "Blocked:" — so the branch two lines down would match it, re-wrap it as

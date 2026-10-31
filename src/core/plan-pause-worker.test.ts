@@ -13,7 +13,7 @@ import { AuditLog } from './audit-log.js';
 import { pauseEndedPlans, pausedForOf, setPlanPauseForTests } from './plan-pause.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
-import type { NotificationRouter, NotificationMessage } from './notification-router.js';
+import type { ChannelOutcome, NotificationRouter, NotificationMessage } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
 
 /**
@@ -52,7 +52,8 @@ interface Proc {
   ends: MandateEnds;
   prompts: PromptStore;
   sent: NotificationMessage[];
-  channels: { on: boolean };
+  /** `outcome`: what the one channel reports for every message; `hold`: notify never settles. */
+  channels: { on: boolean; outcome: ChannelOutcome; hold: boolean };
   dispatches: () => number;
   /** Resolves when an agent turn has started and is waiting; `abort` then ends it as a stop. */
   turnStarted: Promise<void>;
@@ -100,11 +101,15 @@ function boot(dir = mkdtempSync(join(tmpdir(), 'lynox-pause-w-')), opts: { hold?
     getMandateEnds: () => ends,
     getAuditLog: () => audit,
   } as unknown as Engine;
-  const channels = { on: true };
+  const channels: Proc['channels'] = { on: true, outcome: 'delivered', hold: false };
   const sent: NotificationMessage[] = [];
   const router = {
     hasChannels: () => channels.on,
-    notify: vi.fn(async (m: NotificationMessage) => { sent.push(m); }),
+    notify: vi.fn(async (m: NotificationMessage) => {
+      sent.push(m);
+      if (channels.hold) await new Promise(() => undefined);
+      return [{ channel: 'push', outcome: channels.outcome }];
+    }),
   } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000);
   closers.push(() => loop.stop());
@@ -274,6 +279,72 @@ describe("the owner's notice in the tick", () => {
     await Promise.all([a.loop.tick(), b.loop.tick()]);
     await settle();
     expect(pauseNotices(a).length + pauseNotices(b).length).toBe(1);
+  });
+});
+
+describe("the owner's advance warning in the tick (641c-2b)", () => {
+  const warnings = (p: Proc): NotificationMessage[] => p.sent.filter((m) => m.title.includes('will pause'));
+  const rows = (p: Proc): Array<{ trigger_id: string; delivered_at: number | null }> =>
+    p.db.prepare('SELECT trigger_id, delivered_at FROM plan_advance_warnings ORDER BY trigger_id').all() as never;
+
+  it('goes once, and counts as given once a channel of the owner accepted it', async () => {
+    const p = boot();
+    plan(p, 'a');
+    plan(p, 'b');
+    login(p, 'h@x.ch', nowS() + H, nowS() - H);
+    await tick(p);
+    await tick(p);
+    expect(warnings(p).map((m) => m.title)).toEqual(['Plans will pause soon']);
+    expect(warnings(p)[0]!.audience).toBe('owner');
+    expect(rows(p).map((r) => [r.trigger_id, r.delivered_at !== null])).toEqual([['a', true], ['b', true]]);
+  });
+
+  it('a warning no channel of the owner accepted is not given and not sent again', async () => {
+    for (const outcome of ['failed', 'reached_others', 'skipped'] as const) {
+      const p = boot();
+      plan(p);
+      login(p, 'h@x.ch', nowS() + H, nowS() - H);
+      p.channels.outcome = outcome;
+      await tick(p);
+      await tick(p);
+      expect(warnings(p), outcome).toHaveLength(1);
+      expect(rows(p), outcome).toEqual([{ trigger_id: 'p', delivered_at: null }]);
+    }
+  });
+
+  it('a tick without a channel claims nothing; the first tick with one warns', async () => {
+    const p = boot();
+    plan(p);
+    login(p, 'h@x.ch', nowS() + H, nowS() - H);
+    p.channels.on = false;
+    await tick(p);
+    expect(rows(p)).toEqual([]);
+    p.channels.on = true;
+    await tick(p);
+    expect(warnings(p)).toHaveLength(1);
+  });
+
+  it('a channel that does not answer holds up neither the tick nor the due plans', async () => {
+    const p = boot();
+    plan(p, 'warned');
+    p.history.insertTrigger({ id: 'due', title: 'Plan due', source: 'cron', effect: 'run_agent', scheduleCron: '0 9 * * 1', nextRunAt: DUE, confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner' });
+    login(p, 'h@x.ch', nowS() + 2 * H, nowS() - H);
+    p.channels.hold = true;
+    await tick(p);
+    expect(warnings(p)).toHaveLength(1);
+    expect(p.dispatches()).toBeGreaterThan(0);
+    expect(rows(p).map((r) => r.delivered_at)).toEqual([null]);
+  });
+
+  it('two loops on one engine.db warn once', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-warn-w2-'));
+    const a = boot(dir);
+    const b = boot(dir);
+    plan(a);
+    login(a, 'h@x.ch', nowS() + H, nowS() - H);
+    await Promise.all([a.loop.tick(), b.loop.tick()]);
+    await settle();
+    expect(warnings(a).length + warnings(b).length).toBe(1);
   });
 });
 

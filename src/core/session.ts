@@ -32,6 +32,7 @@ import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } from './agent.js';
 import { isInputRequired } from './input-required.js';
+import { loopGuardStopReason } from './loop-guard-stop.js';
 import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
@@ -274,6 +275,14 @@ export interface RunUsageSummary {
    *  tooltip — before this, a delegated turn under-reported by whatever the
    *  children spent (measured: $0.38 shown, $0.45 actually billed). */
   spawnCostUsd?: number;
+  /** The requests to APIs with a cost that this run and its sub-agents sent, from their rows
+   *  (`RunHistory.getApiCallsOfRun`), never from what the model wrote. Absent when there were
+   *  none. `apiCostUsd` sums the amounts known; `apiCostEstimated` when any is a profile rate;
+   *  `apiCallsUnpriced` how many had no amount. */
+  apiCalls?: number;
+  apiCostUsd?: number;
+  apiCostEstimated?: boolean;
+  apiCallsUnpriced?: number;
   /** Diagnostics (opt-in UI panel): the run's id for log/Bugsink correlation
    *  and its wall-to-wall agent duration. Persisted via setMessageUsage so the
    *  diagnostics detail survives a thread resume. */
@@ -636,6 +645,7 @@ export class Session {
             contract: call.contract,
             lift: call.grant,
             filed: call.filed,
+            apiCost: call.apiCost,
           });
         } catch {
           // Fire-and-forget
@@ -1333,9 +1343,12 @@ export class Session {
       // this line the figure is complete. Best-effort — a cost line must never
       // be the reason a turn fails.
       let spawnCostUsd = 0;
+      let apiCalls: ReturnType<RunHistory['getApiCallsOfRun']> | undefined;
       if (runHistory && this.currentRunId) {
         try { spawnCostUsd = runHistory.getDescendantCostUsd(this.currentRunId); }
         catch { spawnCostUsd = 0; }
+        try { apiCalls = runHistory.getApiCallsOfRun(this.currentRunId); }
+        catch { apiCalls = undefined; }
       }
 
       // Snapshot this run's usage in the UI footer's convention (tokensIn =
@@ -1350,6 +1363,9 @@ export class Session {
         costUsd: displayCostUsd,
         model,
         ...(spawnCostUsd > 0 ? { spawnCostUsd } : {}),
+        ...(apiCalls !== undefined && apiCalls.calls > 0
+          ? { apiCalls: apiCalls.calls, apiCostUsd: apiCalls.usd, apiCostEstimated: apiCalls.estimated, apiCallsUnpriced: apiCalls.unpriced }
+          : {}),
         ...(this.currentRunId ? { runId: this.currentRunId } : {}),
         durationMs,
       };
@@ -1552,6 +1568,7 @@ export class Session {
       // path. Record it distinctly as 'aborted' (not the scary 'failed') and
       // surface a calm interruption note instead of a provider-error banner.
       const isAbort = err instanceof RunAbortedError;
+      const guardStop = loopGuardStopReason(err);
       // The note code and whether it is reported: a hard loop break and a continuation
       // loop each get their own calm note naming WHY, a question nobody could be asked
       // gets one naming the question (`classifyRunFailure`).
@@ -1625,6 +1642,8 @@ export class Session {
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: isAbort ? 'aborted' : 'failed',
+            // A loop guard's stop is an abort too; the reason tells it from a stop by the user.
+            ...(guardStop !== null ? { stopReason: guardStop } : {}),
             errorText: secretStore ? secretStore.maskSecrets(errorDetail) : errorDetail,
           });
         } catch {

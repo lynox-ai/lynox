@@ -8,7 +8,7 @@ import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGT
 import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
-import type { CallContract, CallFiled, GrantLift } from './call-connection.js';
+import type { CallApiCost, CallContract, CallFiled, GrantLift } from './call-connection.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
 import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -24,7 +24,7 @@ import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
-import { findHiddenChar, hiddenCharRefusal } from './hidden-text.js';
+import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
@@ -1622,6 +1622,14 @@ const MIGRATIONS: string[] = [
   // never changed. Not in HISTORY_KEPT_ON_ERASURE: the owner's erasure empties them with the
   // threads. No backfill here: the boot copies what engine.db holds (`ContainmentMirror.syncFrom`).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (70);${HISTORY_MARKERS_DDL}`,
+  // v71: the request a call sent to an API whose profile has a cost (`CallApiCost`), for the
+  // count and cost a run shows in its footer. `api_cost_source` is set exactly when the call sent
+  // one, so the count is the rows where it is not NULL; `api_cost_usd` is NULL for `none`. Written
+  // from the engine's own record of the call, never from tool input; the `response` amount is the
+  // provider's number, for display only. No backfill: nothing recorded it before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
+   ALTER TABLE run_tool_calls ADD COLUMN api_cost_usd REAL CHECK (api_cost_usd IS NULL OR api_cost_usd >= 0);
+   ALTER TABLE run_tool_calls ADD COLUMN api_cost_source TEXT CHECK (api_cost_source IN ('response', 'profile', 'none'));`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -1966,15 +1974,18 @@ export class RunHistory {
     contract?: CallContract | undefined;
     lift?: GrantLift | undefined;
     filed?: CallFiled | undefined;
+    /** v71 (see there). Absent writes NULL: the call sent no request to an API with a cost. */
+    apiCost?: CallApiCost | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
       INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id, tool_use_id,
-        is_error, contract_state, contract_grant_id, lift_grant_id, lift_entry, filing, approval_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        is_error, contract_state, contract_grant_id, lift_grant_id, lift_entry, filing, approval_id, api_cost_usd, api_cost_source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null, params.toolUseId ?? null,
       params.isError === undefined ? null : (params.isError ? 1 : 0), params.contract?.state ?? null, params.contract?.grantId ?? null,
-      params.lift?.grantId ?? null, params.lift?.entry ?? null, params.filed?.outcome ?? null, params.filed?.approvalId ?? null);
+      params.lift?.grantId ?? null, params.lift?.entry ?? null, params.filed?.outcome ?? null, params.filed?.approvalId ?? null,
+      params.apiCost?.usd ?? null, params.apiCost?.source ?? null);
     return id;
   }
 
@@ -2957,6 +2968,30 @@ export class RunHistory {
     return row?.total ?? 0;
   }
 
+  /**
+   * The requests to APIs with a cost that `runId` and every run it spawned, at any depth, sent
+   * (v71): how many, and the sum of the amounts known. `estimated` when any amount is a profile
+   * rate, `unpriced` how many had no amount. A sub-agent's calls are on its own run, so the
+   * spawn tree is walked like {@link getDescendantCostUsd}, here with the root and every status:
+   * a request a failed child sent was still sent. `UNION` for the same reason as there.
+   */
+  getApiCallsOfRun(runId: string): { calls: number; usd: number; estimated: boolean; unpriced: number } {
+    const row = this.db.prepare(`
+      WITH RECURSIVE tree AS (
+        SELECT id FROM runs WHERE id = ?
+        UNION
+        SELECT r.id FROM runs r JOIN tree t ON r.spawn_parent_id = t.id
+      )
+      SELECT COUNT(*) AS calls,
+             COALESCE(SUM(api_cost_usd), 0) AS usd,
+             COALESCE(MAX(api_cost_source = 'profile'), 0) AS estimated,
+             COALESCE(SUM(api_cost_source = 'none'), 0) AS unpriced
+      FROM run_tool_calls
+      WHERE run_id IN (SELECT id FROM tree) AND api_cost_source IS NOT NULL
+    `).get(runId) as { calls: number; usd: number; estimated: number; unpriced: number } | undefined;
+    return { calls: row?.calls ?? 0, usd: row?.usd ?? 0, estimated: (row?.estimated ?? 0) === 1, unpriced: row?.unpriced ?? 0 };
+  }
+
   // === Analytics delegates ===
 
   getRepeatTasks(contextId: string, minCount: number, days: number) {
@@ -2983,12 +3018,23 @@ export class RunHistory {
     return analytics.getToolStats(this.db, contextId, days);
   }
 
-  getPipelineStepStats(days: number) {
-    return analytics.getPipelineStepStats(this.db, days);
+  /**
+   * The chats any top-level workflow run was started from (register 1118). Without a time window:
+   * a stats query reads its own `now`, and a run that crosses the window's edge between the two
+   * reads must still be in this list.
+   */
+  getPipelineOriginChats(): string[] {
+    return (this.db.prepare(
+      "SELECT DISTINCT origin_thread_id AS id FROM pipeline_runs WHERE parent_run_id IS NULL AND origin_thread_id IS NOT NULL AND origin_thread_id != ''",
+    ).all() as Array<{ id: string }>).map((r) => r.id);
   }
 
-  getPipelineCostStats(days: number) {
-    return analytics.getPipelineCostStats(this.db, days);
+  getPipelineStepStats(days: number, hiddenChats: readonly string[] = []) {
+    return analytics.getPipelineStepStats(this.db, days, hiddenChats);
+  }
+
+  getPipelineCostStats(days: number, hiddenChats: readonly string[] = []) {
+    return analytics.getPipelineCostStats(this.db, days, hiddenChats);
   }
 
   getAvgStepCostByModelTier(days: number) {
@@ -3237,6 +3283,11 @@ export class RunHistory {
     persistence.insertPipelineRun(this.db, params);
   }
 
+  /** {@link getPipelineRunOrigin} for several runs at once: only the runs a chat started. */
+  getPipelineRunOrigins(ids: readonly string[]): Map<string, string> {
+    return persistence.getPipelineRunOrigins(this.db, ids);
+  }
+
   /**
    * The chat a pipeline run was started from, by its exact id: `null` for a run no chat
    * started (or an older row), `undefined` for no such run. Not part of {@link getPipelineRun},
@@ -3341,13 +3392,15 @@ export class RunHistory {
     // so a refusal reaches the model that wrote it. Not read: a step's `input_template`, which is
     // a tool's arguments as a session captured them (scraped text may hold such a character, and
     // the model saving it cannot rewrite them; a run shows them escaped, `runtime-adapter.ts`), and `reasoning`, the capture's own record, which
-    // never reaches a run's model.
+    // never reaches a run's model. A step's id is a name: it reaches the model in a run's result
+    // and in a diagnosis, and takes none of the places real text may carry one.
     const hidden = findHiddenChar({
       name: planned.name,
       goal: planned.goal,
       steps: planned.steps.map((s) => ({ task: s.task })),
       parameters: (planned as { parameters?: unknown }).parameters,
-    });
+    }) ?? planned.steps.reduce<ReturnType<typeof findHiddenInName>>(
+      (hit, s, i) => hit ?? (typeof s.id === 'string' ? findHiddenInName(s.id, `steps[${i}].id`) : null), null);
     if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);

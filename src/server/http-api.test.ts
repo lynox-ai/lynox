@@ -4,7 +4,7 @@ import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
-import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
@@ -35,7 +35,7 @@ import { mintBulkContract } from '../core/bulk-external.js';
 import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
-import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { WorkflowStore } from '../core/workflow-store.js';
 import { RunHistory } from '../core/run-history.js';
@@ -55,6 +55,8 @@ let mockEngineHooks: LynoxHooks[] = [];
 // availability + stream entry points overridden) so the capabilities endpoint
 // keeps its real shape while the speak/transcribe ROUTE tests stay hermetic.
 const mockHasSpeakProvider = vi.fn(() => true);
+// The transcribe route asks this per request (it used to read the boot-time HAS_WHISPER).
+const mockHasTranscribeProvider = vi.fn(() => true);
 const mockSpeakStream = vi.fn();
 // STT route entry points — overridden so the transcribe route tests can assert
 // the gate fires before the provider is touched, and drive a happy path.
@@ -300,6 +302,9 @@ vi.mock('../core/engine.js', () => ({
       maskAll: mockSecretMask,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
+      // No workflow run in this history: every id is a chat's own (register 1112).
+      getPipelineRunOrigins: () => new Map(),
+      getPipelineOriginChats: () => [],
       getRecentRuns: mockHistoryGetRecentRuns,
       searchRuns: mockHistorySearchRuns,
       getRun: mockHistoryGetRun,
@@ -511,8 +516,8 @@ vi.mock('../tools/builtin/pipeline.js', () => ({
 // Partial mocks for the voice facades: spread the real module so the
 // capabilities endpoint keeps every export it reads (getActiveSpeakProvider,
 // listMistralVoices, provider .isAvailable flags, …) and only override the
-// availability check + stream entry the /api/speak route uses, plus HAS_WHISPER
-// so the /api/transcribe route reaches the credit gate.
+// availability check + stream entry the /api/speak route uses, plus
+// hasTranscribeProvider so the /api/transcribe route reaches the credit gate.
 vi.mock('../core/speak.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/speak.js')>()),
   hasSpeakProvider: mockHasSpeakProvider,
@@ -520,7 +525,7 @@ vi.mock('../core/speak.js', async (importActual) => ({
 }));
 vi.mock('../core/transcribe.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/transcribe.js')>()),
-  HAS_WHISPER: true,
+  hasTranscribeProvider: mockHasTranscribeProvider,
   transcribeWithStream: mockTranscribeWithStream,
   extractSessionContext: mockExtractSessionContext,
   getActiveTranscribeProvider: mockGetActiveTranscribeProvider,
@@ -700,6 +705,7 @@ beforeEach(() => {
   // synth result. Per-test overrides drive the gate-block / debit cases.
   mockEngineHooks = [];
   mockHasSpeakProvider.mockReturnValue(true);
+  mockHasTranscribeProvider.mockReturnValue(true);
   mockSpeakStream.mockReset();
   mockSpeakStream.mockResolvedValue({ characters: 100, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
   mockExtractSessionContext.mockReturnValue({});
@@ -1203,6 +1209,17 @@ describe('LynoxHTTPApi', () => {
         method: 'POST', headers: { cookie: `lynox_session=${owner}`, 'Content-Type': 'application/json' }, body: '{}',
       });
       expect(asOwner.status).not.toBe(403);
+    });
+
+    it('GET /api/config says whose session asks about bulk runs: the owner or a mandate', async () => {
+      repayRateWindow();
+      const viewerOf = async (token: string): Promise<unknown> => {
+        const res = await fetch(`${baseUrl}/api/config`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        return ((await res.json()) as { bulk_runs: { viewer: unknown } }).bulk_runs.viewer;
+      };
+      expect(await viewerOf(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token)).toBe('mandate');
+      expect(await viewerOf(webUiLoginSession(TEST_SECRET, null)!.token)).toBe('owner');
     });
 
     it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
@@ -4035,6 +4052,10 @@ describe('LynoxHTTPApi', () => {
       ref.getRunBufferManager = (): unknown => mgr;
       const buf = mgr.create('b8-tail');
       buf.append({ type: 'text', text: 'hello', agent: 'main' });
+      // A helper streams only a run that names its chat (register 1112); this one's is not contained.
+      const regRef = ref as unknown as { getRunRegistry: () => unknown };
+      const origReg = regRef.getRunRegistry;
+      regRef.getRunRegistry = (): unknown => ({ getByRunId: () => ({ thread_id: 't-b8' }) });
       try {
         api.setPrincipalResolverForTesting(() => EVA);
         const evaRes = await fetch(`${baseUrl}/api/runs/b8-tail/stream`, { headers: authHeaders() });
@@ -4064,6 +4085,7 @@ describe('LynoxHTTPApi', () => {
         expect(owner.sse).toContain('event: done');
       } finally {
         ref.getRunBufferManager = orig;
+        regRef.getRunRegistry = origReg;
         mgr.remove('b8-tail');
       }
     });
@@ -4415,14 +4437,71 @@ describe('LynoxHTTPApi', () => {
       });
     }
 
-    it('reply with an unknown promptId records only the question the legacy path answers', async () => {
+    it('reply with an unknown promptId answers 404 and leaves the session\'s open question alone', async () => {
+      repayRateWindow();
       await withStore(async (store, rows) => {
         api.setPrincipalResolverForTesting(() => EVA);
         const id = store.insertAskUser('s-unknown', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
         const res = await jsonFetch('/api/sessions/s-unknown/reply', { method: 'POST', body: JSON.stringify({ promptId: 'no-such-prompt', answer: 'B' }) });
-        expect(res.status).toBe(200);
-        expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
+        expect(res.status).toBe(404);
+        expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+        expect(answerRows(rows)).toEqual([]);
+      });
+    });
+
+    const OTHER_KINDS: Array<[label: string, ask: (store: import('../core/prompt-store.js').PromptStore, sid: string) => string]> = [
+      ['ask_secret', (s, sid) => s.insertAskSecret(sid, 'API_KEY', 'Paste the key', undefined, undefined, { principal: EVA })],
+      ['connect_mail', (s, sid) => s.insertConnectMail(sid, 'Connect the office mailbox?', '{}', undefined, { principal: EVA })],
+      ['tabs', (s, sid) => s.insertAskUserTabs(sid, [{ question: 'Which list?' }], undefined, { principal: EVA })],
+    ];
+    for (const [label, ask] of OTHER_KINDS) {
+      it(`reply naming a ${label} question answers 409 and stores no text on it`, async () => {
+        repayRateWindow();
+        await withStore(async (store, rows) => {
+          api.setPrincipalResolverForTesting(() => EVA);
+          const id = ask(store, `s-kind-${label}`);
+          const res = await jsonFetch(`/api/sessions/s-kind-${label}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'B' }) });
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { error: string }).error).toBe('Prompt is a different kind of question');
+          expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+          expect(store.getById(id)?.answer ?? null).toBeNull();
+          expect(answerRows(rows)).toEqual([]);
+        });
+      });
+    }
+
+    it('reply naming a question whose time ran out before the sweep answers 410, and answers nothing else', async () => {
+      repayRateWindow();
+      await withStore(async (store, rows) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const id = store.insertAskUser('s-late', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
+        // Past its time, not yet marked: the row still reads `pending`.
+        (store as unknown as { db: import('better-sqlite3').Database }).db.prepare(`UPDATE pending_prompts SET expires_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
+        expect(store.getById(id)?.status).toBe('pending');
+        const res = await jsonFetch('/api/sessions/s-late/reply', { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'B' }) });
+        expect(res.status).toBe(410);
+        expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
         expect(answerRows(rows)).toEqual([{ target: `prompt:${id}`, phase: 'attempt' }]);
+      });
+    });
+
+    it('reply naming a question another answer settled first does not answer the session\'s newer question', async () => {
+      repayRateWindow();
+      await withStore(async (store, rows) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const first = store.insertAskUser('s-race', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
+        // The route read `first` while it was open; before it stored the answer, another answer
+        // settled `first` and the run asked a newer question.
+        const seen = store.getById(first)!;
+        expect(store.answerUser(first, 'A', EVA)).toBe(true);
+        const newer = store.insertAskUser('s-race', 'Which month?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
+        const getById = store.getById.bind(store);
+        store.getById = (pid: string) => (pid === first ? seen : getById(pid));
+        const res = await jsonFetch('/api/sessions/s-race/reply', { method: 'POST', body: JSON.stringify({ promptId: first, answer: 'B' }) });
+        expect(res.status).toBe(410);
+        expect(by(store, newer)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+        expect(getById(first)?.answer).toBe('A');
+        expect(answerRows(rows)).toEqual([{ target: `prompt:${first}`, phase: 'attempt' }]);
       });
     });
 
@@ -5045,9 +5124,9 @@ describe('LynoxHTTPApi', () => {
       mockGetApiStore.mockReturnValue({ getAll: () => [profile], importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile });
       try {
         const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ oauth_grant?: Record<string, unknown> }> };
-        expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1' });
+        expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true });
         const one = await (await jsonFetch('/api/api-profiles/shop')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
-        expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1' });
+        expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1', connected_by_reader: true });
       } finally {
         mockGetApiStore.mockReturnValue(null);
       }
@@ -5127,7 +5206,62 @@ describe('LynoxHTTPApi', () => {
         mockGetApiStore.mockReturnValue({ getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES, get: () => PROFILES[3] });
         api.setPrincipalResolverForTesting(() => EVA);
         const body = await (await jsonFetch('/api/api-profiles/toms')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
-        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', account_withheld: true });
+        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', connected_by_reader: false, account_withheld: true });
+      });
+
+      // The page cannot tell who reads it, so the engine says whether this reader gave the
+      // consent — also on a grant without an account, which has nothing to withhold and so
+      // carried no other sign that the reader is not the owner.
+      describe('says whether the reader made the connection', () => {
+        // This file shares ONE per-IP rate window; the requests below are paid back so a test
+        // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+        const rateCounts = (): Map<string, { count: number }> =>
+          (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+        let windowBefore = new Map<string, number>();
+        beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+        afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+        const WITH_NONE = [
+          ...PROFILES,
+          { id: 'owners-bare', name: 'owners-bare', base_url: 'https://e.example', description: 'd', oauth_grant: { grant_id: 'g-bare', connected_by: 'owner' } },
+          { id: 'legacy-bare', name: 'legacy-bare', base_url: 'https://f.example', description: 'd', oauth_grant: { grant_id: 'g-legacy' } },
+          { id: 'evas-bare', name: 'evas-bare', base_url: 'https://g.example', description: 'd', oauth_grant: { grant_id: 'g-eb', connected_by: EVA_TAG, connected_mandate_id: 'grant-1' } },
+          // Neither the owner's nor a mandate's tag: nobody's own, not even the owner's.
+          { id: 'cp-tagged', name: 'cp-tagged', base_url: 'https://h.example', description: 'd', oauth_grant: { grant_id: 'g-cp', connected_by: 'cp-admin' } },
+          // Never connected: no grant, so no answer to give.
+          { id: 'unconnected', name: 'unconnected', base_url: 'https://i.example', description: 'd' },
+        ];
+        const yoursFor = async (reader: RequestPrincipal): Promise<Record<string, unknown>> => {
+          mockGetApiStore.mockReturnValue({
+            getAll: () => WITH_NONE, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => WITH_NONE,
+            get: (id: string) => WITH_NONE.find((p) => p.id === id),
+          });
+          api.setPrincipalResolverForTesting(() => reader);
+          const body = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ id: string; oauth_grant?: Record<string, unknown> }> };
+          const list = Object.fromEntries(body.profiles.map((p) => [p.id, p.oauth_grant?.['connected_by_reader']]));
+          for (const p of WITH_NONE) {
+            const one = await (await jsonFetch(`/api/api-profiles/${p.id}`)).json() as { profile: { oauth_grant?: Record<string, unknown> } };
+            expect(one.profile.oauth_grant?.['connected_by_reader'], p.id).toBe(list[p.id]);
+          }
+          return list;
+        };
+
+        it('the owner: the owner\'s and the untagged ones, with or without an account', async () => {
+          expect(await yoursFor(OWNER_PRINCIPAL)).toEqual({ owners: true, evas: false, 'evas-old': false, toms: false, 'owners-bare': true, 'legacy-bare': true, 'evas-bare': false, 'cp-tagged': false, unconnected: undefined });
+        });
+
+        it('a mandate: its own under this grant, never the owner\'s without an account', async () => {
+          expect(await yoursFor(EVA)).toEqual({ owners: false, evas: true, 'evas-old': false, toms: false, 'owners-bare': false, 'legacy-bare': false, 'evas-bare': true, 'cp-tagged': false, unconnected: undefined });
+        });
+
+        it('a profile never connected gets no grant to answer on', async () => {
+          await yoursFor(OWNER_PRINCIPAL);
+          const body = await (await jsonFetch('/api/api-profiles/unconnected')).json() as { profile: Record<string, unknown> };
+          expect(body.profile).not.toHaveProperty('oauth_grant');
+        });
+
+        it('the control plane\'s bearer: none', async () => {
+          expect(Object.values(await yoursFor(CP_ADMIN_PRINCIPAL))).toEqual([false, false, false, false, false, false, false, false, undefined]);
+        });
       });
     });
 
@@ -5932,37 +6066,46 @@ describe('LynoxHTTPApi', () => {
       host.engine['getEngineDb'] = () => ({});
       vi.stubEnv('LYNOX_BILLING_TIER', tier);
       vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', flag);
+      // Pinned, not left to the shell: `shopify` reads the flag, and one set in the shell would fail this.
+      vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       try {
         for (const on of [false, true]) {
           host.engine['getBulkLedger'] = () => (on ? {} : null);
           const res = await jsonFetch('/api/config');
           expect(res.status).toBe(200);
           const body = await res.json() as Record<string, unknown>;
-          expect(body['bulk_runs']).toEqual({ on, ...expected, db: true, shopify: false });
+          expect(body['bulk_runs']).toEqual({ on, ...expected, db: true, shopify: false, viewer: 'owner' });
         }
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '1');
+        repayRateWindow();
+        const read = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        expect((read['bulk_runs'] as Record<string, unknown>)['shopify']).toBe(true);
       } finally {
         host.engine['getEngineDb'] = origDb;
         host.engine['getBulkLedger'] = origLedger;
         vi.stubEnv('LYNOX_BILLING_TIER', '');
         vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       }
     });
 
     it('GET /api/config: without engine.db bulk runs cannot be turned on, on any tier', async () => {
       repayRateWindow();
       vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '1');
+      vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       try {
         const res = await jsonFetch('/api/config');
         const body = await res.json() as Record<string, unknown>;
-        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false, db: false, shopify: false });
+        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false, db: false, shopify: false, viewer: 'owner' });
         // On a pool tier lynox opened, the missing database is still the reason, not the tier.
         vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
         repayRateWindow();
         const pool = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
-        expect(pool['bulk_runs']).toEqual({ on: false, source: 'control-plane', allowed: false, db: false, shopify: false });
+        expect(pool['bulk_runs']).toEqual({ on: false, source: 'control-plane', allowed: false, db: false, shopify: false, viewer: 'owner' });
       } finally {
         vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
         vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('LYNOX_FEATURE_SHOPIFY_BULK_READ', '');
       }
     });
 
@@ -8707,6 +8850,201 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // Register 1112: a chat holding data from a connected store is read by the owner and by whoever
+    // started it, and by nobody else, on any route about it: the dispatcher checks the chat a
+    // route names (`readsThread`), and the lists leave the chat's text out.
+    describe('a contained chat is read only by the owner and by whoever started it', () => {
+      const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
+      type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+      let cookieResolver: Resolver;
+      beforeEach(() => { repayRateWindow(); cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver; });
+      afterEach(() => { api.setPrincipalResolverForTesting(cookieResolver); });
+
+      // `shop` is contained and the owner's, `evas-shop` contained and Eva's, `notes` not contained.
+      const THREADS: Record<string, { id: string; title: string; summary: string | null; created_by?: string }> = {
+        shop: { id: 'shop', title: 'Order 1042 for Jane', summary: 'Jane ordered', created_by: undefined as never },
+        'evas-shop': { id: 'evas-shop', title: 'Eva shop', summary: 's', created_by: 'mandate:eva@example.invalid' },
+        notes: { id: 'notes', title: 'Notes', summary: 's' },
+      };
+      const CONTAINED = new Set(['shop', 'evas-shop']);
+      const RUNS: Record<string, { id: string; session_id: string; task_text: string; response_text: string }> = {
+        'r-shop': { id: 'r-shop', session_id: 'shop', task_text: 't', response_text: 'Jane Roe, 1042' },
+        'r-notes': { id: 'r-notes', session_id: 'notes', task_text: 't', response_text: 'n' },
+        'r-evas': { id: 'r-evas', session_id: 'evas-shop', task_text: 't', response_text: 'e' },
+        // A workflow step records its run under the workflow run, which `shop` started.
+        'r-step': { id: 'r-step', session_id: 'wf-shop', task_text: 't', response_text: 'Jane Roe' },
+        // A sub-agent whose parent had no current thread records no chat at all.
+        'r-orphan': { id: 'r-orphan', session_id: '', task_text: 't', response_text: 'Jane Roe' },
+      };
+      // Workflow runs and the chat that started each: `wf-free` was started by none.
+      const PIPELINES: Record<string, string | null> = { 'wf-shop': 'shop', 'wf-free': null };
+      const pipelineRow = (id: string): { id: string; manifest_json: string } => ({ id, manifest_json: '{"steps":[{"task":"Order 1042 for Jane"}]}' });
+      const containment = {
+        isContained: (k: { threadId?: string }) => CONTAINED.has(k.threadId ?? ''),
+        containedThreadIds: (ids: readonly string[]) => new Set(ids.filter((i) => CONTAINED.has(i))),
+        threadStates: (ids: readonly string[]) => ({ contained: new Set(ids.filter((i) => CONTAINED.has(i))), unknown: new Set<string>() }),
+      };
+      const engineWith = (test: () => Promise<void>): Promise<void> => swapEngine({
+        getThreadStore: () => ({
+          getThread: (id: string) => THREADS[id] ?? null, getMessages: () => [], getMessageCount: () => 0,
+          listThreads: () => Object.values(THREADS),
+        }),
+        getRunHistory: () => ({
+          getRunsBySession: () => [], getRunToolCalls: () => [{ tool_name: 'http_request', output_json: 'Jane Roe' }], getPromptSnapshot: () => null,
+          getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [],
+          getRun: (id: string) => RUNS[id], getRecentRuns: () => Object.values(RUNS), searchRuns: () => Object.values(RUNS),
+          getThreadAggregates: () => Object.values(THREADS).map((t) => ({ sessionId: t.id, title: t.title })),
+          getPipelineRunOrigin: (id: string) => PIPELINES[id],
+          getPipelineRunOrigins: (ids: readonly string[]) => new Map(ids.flatMap((id): Array<[string, string]> => { const o = PIPELINES[id]; return typeof o === 'string' ? [[id, o]] : []; })),
+          // As the store reads it: the exact id, or a run whose id starts with it.
+          getPipelineRun: (id: string) => { const hit = Object.keys(PIPELINES).find((k) => k === id || k.startsWith(id)); return hit === undefined ? undefined : pipelineRow(hit); },
+          getPipelineStepResults: () => [{ step_id: 's1', result: 'Jane Roe, 1042' }],
+          getRecentPipelineRuns: () => Object.keys(PIPELINES).map(pipelineRow),
+          getPipelineOriginChats: () => ['shop', 'evas-shop', 'notes'],
+          // What each stats route was told to leave out (register 1118).
+          getPipelineStepStats: (_days: number, hidden: readonly string[]) => [{ hidden: [...hidden] }],
+          getPipelineCostStats: (_days: number, hidden: readonly string[]) => [{ hidden: [...hidden] }],
+        }),
+        getToolContext: () => ({ tools: [], containment }),
+      }, test);
+      const as = async (who: RequestPrincipal, path: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+        api.setPrincipalResolverForTesting(() => who);
+        const res = await jsonFetch(path);
+        const text = await res.text();
+        let body: Record<string, unknown> = {};
+        try { body = JSON.parse(text) as Record<string, unknown>; } catch { /* a stream */ }
+        return { status: res.status, body };
+      };
+      const ABOUT_SHOP = ['/api/threads/shop', '/api/threads/shop/messages', '/api/threads/shop/debug-export',
+        '/api/sessions/shop/pending-prompt', '/api/sessions/shop/changeset', '/api/history/runs/r-shop', '/api/history/runs/r-shop/tool-calls',
+        '/api/history/runs?thread_id=shop', '/api/history/runs?sessionId=shop',
+        // Through a workflow `shop` started: its step's run, its steps, the run itself.
+        '/api/history/runs/r-step', '/api/history/runs/r-step/tool-calls', '/api/history/runs?sessionId=wf-shop',
+        '/api/workflows/wf-shop', '/api/workflows/wf-shop/steps', '/api/workflows/wf-sh'];
+
+      it('a helper is refused another person\'s contained chat on every route about it, with who may read it and a code', async () => {
+        const { CONTAINED_THREAD_READ_REFUSAL, CONTAINED_THREAD_CODE } = await import('./http-api.js');
+        await engineWith(async () => {
+          for (const path of ABOUT_SHOP) {
+            const { status, body } = await as(EVA, path);
+            expect({ status, error: body['error'], code: body['code'] }, path).toEqual({ status: 403, error: CONTAINED_THREAD_READ_REFUSAL, code: CONTAINED_THREAD_CODE });
+          }
+        });
+      });
+
+      it('the owner reads it on every one of those routes', async () => {
+        await engineWith(async () => {
+          for (const path of ABOUT_SHOP) expect((await as(OWNER_PRINCIPAL, path)).status, path).not.toBe(403);
+        });
+      });
+
+      it('the helper reads their own contained chat, and a chat that is not contained, as before', async () => {
+        await engineWith(async () => {
+          for (const id of ['evas-shop', 'notes']) {
+            for (const path of [`/api/threads/${id}`, `/api/threads/${id}/messages`, `/api/threads/${id}/debug-export`, `/api/history/runs?thread_id=${id}`]) {
+              expect((await as(EVA, path)).status, path).toBe(200);
+            }
+          }
+          expect((await as(EVA, '/api/history/runs/r-evas/tool-calls')).status).toBe(200);
+          expect((await as(EVA, '/api/history/runs/r-notes')).status).toBe(200);
+          // A workflow no chat started is no chat's to keep.
+          expect((await as(EVA, '/api/workflows/wf-free')).status).toBe(200);
+          expect((await as(EVA, '/api/workflows/wf-free/steps')).status).toBe(200);
+        });
+      });
+
+      it('opening another person\'s contained chat is refused with the same reason and code; any other foreign chat as before', async () => {
+        const { CONTAINED_THREAD_READ_REFUSAL, CONTAINED_THREAD_CODE } = await import('./http-api.js');
+        const SHOP = '11111111-1111-4111-8111-111111111111';
+        const NOTES = '22222222-2222-4222-8222-222222222222';
+        const GONE = '33333333-3333-4333-8333-333333333333';
+        const rows: Record<string, { id: string; created_by?: string }> = { [SHOP]: { id: SHOP }, [NOTES]: { id: NOTES } };
+        await swapEngine({
+          getThreadStore: () => ({ getThread: (id: string) => rows[id] ?? null, isDeleted: (id: string) => id === GONE }),
+          getRunHistory: () => ({ getPipelineRunOrigins: () => new Map() }),
+          getToolContext: () => ({ tools: [], containment: { ...containment, isContained: (k: { threadId?: string }) => k.threadId === SHOP || k.threadId === GONE, containedThreadIds: (ids: readonly string[]) => new Set(ids.filter((i) => i === SHOP || i === GONE)) } }),
+        }, async () => {
+          const open = async (who: RequestPrincipal, threadId: string): Promise<{ status: number; body: Record<string, unknown> }> => {
+            api.setPrincipalResolverForTesting(() => who);
+            const res = await jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify({ threadId }) });
+            return { status: res.status, body: await res.json() as Record<string, unknown> };
+          };
+          const shop = await open(EVA, SHOP);
+          expect({ status: shop.status, error: shop.body['error'], code: shop.body['code'] }).toEqual({ status: 403, error: CONTAINED_THREAD_READ_REFUSAL, code: CONTAINED_THREAD_CODE });
+          const notes = await open(EVA, NOTES);
+          expect([notes.status, notes.body['code']]).toEqual([403, undefined]);
+          expect(String(notes.body['error'])).toContain('continue this conversation');
+          expect((await open(OWNER_PRINCIPAL, SHOP)).body['code']).toBeUndefined();
+          // A deleted chat answers as it did, not as a contained one: its row is gone.
+          expect((await open(EVA, GONE)).body['code']).toBeUndefined();
+        });
+      });
+
+      it('a recorded run that names no chat answers as not found to a helper', async () => {
+        await engineWith(async () => {
+          expect((await as(EVA, '/api/history/runs/r-nowhere/tool-calls')).status).toBe(404);
+        });
+      });
+
+      it('the lists keep another person\'s contained chat out of a helper\'s view of its text, and the owner\'s whole', async () => {
+        await engineWith(async () => {
+          const threads = (await as(EVA, '/api/threads')).body['threads'] as Array<{ id: string; title: string; summary: string | null; contained: boolean }>;
+          expect(threads.map((t) => [t.id, t.title, t.summary, t.contained])).toEqual([
+            ['shop', '', null, true], ['evas-shop', 'Eva shop', 's', true], ['notes', 'Notes', 's', false],
+          ]);
+          const owned = (await as(OWNER_PRINCIPAL, '/api/threads')).body['threads'] as Array<{ title: string }>;
+          expect(owned.map((t) => t.title)).toEqual(['Order 1042 for Jane', 'Eva shop', 'Notes']);
+          for (const path of ['/api/history/runs', '/api/history/runs?q=Jane']) {
+            const runs = (await as(EVA, path)).body['runs'] as Array<{ id: string }>;
+            expect(runs.map((r) => r.id), path).toEqual(['r-notes', 'r-evas']);
+            const all = (await as(OWNER_PRINCIPAL, path)).body['runs'] as Array<{ id: string }>;
+            expect(all.map((r) => r.id), path).toEqual(['r-shop', 'r-notes', 'r-evas', 'r-step', 'r-orphan']);
+          }
+          const workflows = (await as(EVA, '/api/workflows')).body['runs'] as Array<{ id: string }>;
+          expect(workflows.map((r) => r.id)).toEqual(['wf-free']);
+          const allWorkflows = (await as(OWNER_PRINCIPAL, '/api/workflows')).body['runs'] as Array<{ id: string }>;
+          expect(allWorkflows.map((r) => r.id)).toEqual(['wf-shop', 'wf-free']);
+          // The workflow stats leave out the names written by another person's contained chat.
+          for (const path of ['/api/workflows/stats/steps', '/api/workflows/stats/cost']) {
+            const hidden = (who: RequestPrincipal): Promise<unknown> => as(who, path).then((r) => (r.body['stats'] as Array<{ hidden: string[] }>)[0]?.hidden);
+            expect(await hidden(EVA), path).toEqual(['shop']);
+            expect(await hidden(OWNER_PRINCIPAL), path).toEqual([]);
+          }
+          const insights = (await as(EVA, '/api/thread-insights')).body['threadInsights'] as Array<{ sessionId: string; title: string }>;
+          expect(insights.map((t) => [t.sessionId, t.title])).toEqual([['shop', ''], ['evas-shop', 'Eva shop'], ['notes', 'Notes']]);
+        });
+      });
+
+      it('a live run of another person\'s contained chat does not stream to a helper; one that names no chat says so', async () => {
+        const { CONTAINED_THREAD_CODE, RUN_CHAT_UNKNOWN_REFUSAL, RUN_CHAT_UNKNOWN_CODE } = await import('./http-api.js');
+        const { RunBufferManager } = await import('../core/run-buffer.js');
+        const mgr = new RunBufferManager();
+        for (const id of ['run-shop', 'run-notes', 'run-nowhere']) mgr.create(id).append({ type: 'text', text: 'hello', agent: 'main' });
+        const rows: Record<string, { thread_id: string }> = { 'run-shop': { thread_id: 'shop' }, 'run-notes': { thread_id: 'notes' } };
+        await swapEngine({
+          getRunBufferManager: () => mgr,
+          getRunRegistry: () => ({ getByRunId: (id: string) => rows[id] }),
+          getThreadStore: () => ({ getThread: (id: string) => THREADS[id] ?? null }),
+          getToolContext: () => ({ tools: [], containment }),
+        }, async () => {
+          expect((await as(EVA, '/api/runs/run-shop/stream')).body['code']).toBe(CONTAINED_THREAD_CODE);
+          const nowhere = await as(EVA, '/api/runs/run-nowhere/stream');
+          expect({ status: nowhere.status, error: nowhere.body['error'], code: nowhere.body['code'] }).toEqual({ status: 403, error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE });
+          // Twins: a chat that is not contained, the owner on the contained one, and the owner on a
+          // run that names no chat. Each opens a stream.
+          const open = async (who: RequestPrincipal, runId: string): Promise<number> => {
+            api.setPrincipalResolverForTesting(() => who);
+            const res = await fetch(`${baseUrl}/api/runs/${runId}/stream`, { headers: authHeaders() });
+            await res.body?.cancel();
+            return res.status;
+          };
+          expect(await open(EVA, 'run-notes')).toBe(200);
+          expect(await open(OWNER_PRINCIPAL, 'run-shop')).toBe(200);
+          expect(await open(OWNER_PRINCIPAL, 'run-nowhere')).toBe(200);
+        });
+      });
+    });
+
     it('GET /api/threads/:id/debug-export 404s an unknown thread', async () => {
       await swapEngine({ getThreadStore: () => ({ getThread: () => null, getMessages: () => [], getMessageCount: () => 0 }) }, async () => {
         const res = await jsonFetch('/api/threads/nope/debug-export');
@@ -9431,6 +9769,14 @@ describe('LynoxHTTPApi', () => {
       expect(mockTaskSetEnabled).not.toHaveBeenCalled();
       // The switch alone still answers as before.
       expect((await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ enabled: false }) })).status).toBe(200);
+    });
+
+    it('PATCH answers 400 for a due date that is not YYYY-MM-DD, as POST does', async () => {
+      repayRateWindow();
+      mockTaskUpdate.mockImplementationOnce(() => { throw new InvalidDueDateError('2026-1x-01'); });
+      const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ dueDate: '2026-1x-01' }) });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe(new InvalidDueDateError('2026-1x-01').message);
     });
 
     it('PATCH returns 404 for unknown task', async () => {
@@ -13207,6 +13553,70 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      it('GET /api/voice/info on an instance connected to a Shopify store: no speech output, no Mistral option, no voice fetch', async () => {
+        // ux U-074: the buttons hang on `available`, so the switch has to act there, not only
+        // when a request is refused. A Mistral key is set, so without the switch both would be on.
+        // This file shares ONE per-IP rate window: the requests below are paid back after.
+        const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+        const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
+        // Set and restored by hand: vi.unstubAllEnvs would also undo this file's own env stubs.
+        const saved = { admin: process.env['LYNOX_HTTP_ADMIN_SECRET'], mistral: process.env['MISTRAL_API_KEY'], sw: process.env['LYNOX_SHOPIFY_EXCHANGE'] };
+        process.env['LYNOX_HTTP_ADMIN_SECRET'] = 'admin-secret-token-99999';
+        process.env['MISTRAL_API_KEY'] = ['mistral', 'test'].join('-');
+        delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+        const restore = (k: string, v: string | undefined): void => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
+        type Info = {
+          speech_service_off?: boolean;
+          stt: { available: boolean; provider: string | null; providers: Array<{ id: string; available: boolean }> };
+          tts: { available: boolean; providers: Array<{ id: string; available: boolean }>; voices: unknown[] };
+        };
+        const mistral = (list: Array<{ id: string; available: boolean }>): boolean | undefined => list.find((p) => p.id === 'mistral')?.available;
+        // The real availability, not the route tests' stand-ins.
+        const realSpeak = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
+        const realStt = await vi.importActual<typeof import('../core/transcribe.js')>('../core/transcribe.js');
+        mockHasSpeakProvider.mockImplementation(realSpeak.hasSpeakProvider);
+        mockHasTranscribeProvider.mockImplementation(realStt.hasTranscribeProvider);
+        let fetchSpy: { mockRestore(): void } | undefined;
+        try {
+          const without = await (await jsonFetch('/api/voice/info')).json() as Info;
+          expect(without.speech_service_off).toBe(false);
+          expect(without.tts.available).toBe(true);
+          expect(mistral(without.stt.providers)).toBe(true);
+          const auto = (list: Array<{ id: string; available: boolean }>): boolean | undefined => list.find((p) => p.id === 'auto')?.available;
+          expect(auto(without.tts.providers)).toBe(true);
+          expect(auto(without.stt.providers)).toBe(true);
+
+          process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+          const { hasWhisperCpp } = await import('../core/transcribe.js');
+          const spy = vi.spyOn(globalThis, 'fetch');
+          fetchSpy = spy;
+          const info = await (await jsonFetch('/api/voice/info')).json() as Info;
+          expect(info.speech_service_off).toBe(true);
+          expect(info.tts.available).toBe(false);
+          expect(info.tts.voices).toEqual([]);
+          expect(mistral(info.tts.providers)).toBe(false);
+          expect(mistral(info.stt.providers)).toBe(false);
+          expect(info.stt.available).toBe(hasWhisperCpp());
+          // `auto` is offered only where it resolves to something: never for speech output, and for
+          // dictation only with whisper.cpp on the instance.
+          expect(auto(info.tts.providers)).toBe(false);
+          expect(auto(info.stt.providers)).toBe(hasWhisperCpp());
+          // With speech recognition on the instance (stood in here: this box has no whisper.cpp).
+          mockHasTranscribeProvider.mockReturnValue(true);
+          const local = await (await jsonFetch('/api/voice/info')).json() as Info;
+          expect(auto(local.stt.providers)).toBe(true);
+          expect(auto(local.tts.providers)).toBe(false);
+          // The route's own fetch is the test's request; nothing went to Mistral for the voices.
+          expect(spy.mock.calls.some(([u]) => String(u).includes('mistral.ai'))).toBe(false);
+        } finally {
+          fetchSpy?.mockRestore();
+          for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+          restore('LYNOX_HTTP_ADMIN_SECRET', saved.admin);
+          restore('MISTRAL_API_KEY', saved.mistral);
+          restore('LYNOX_SHOPIFY_EXCHANGE', saved.sw);
+        }
+      });
+
       it('PUT /api/config accepts user-scope in managed mode for allowlisted fields', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
@@ -14881,6 +15291,60 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('on an instance connected to a Shopify store probes only a provider on the list, and sends nothing to another', async () => {
+      // This file shares ONE per-IP rate window: the requests below are paid back after.
+      const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
+      // Set by hand, not vi.stubEnv: unstubAllEnvs would also drop this block's LYNOX_TRUST_PROXY.
+      const prev = process.env['LYNOX_SHOPIFY_EXCHANGE'];
+      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+      const realFetch = globalThis.fetch;
+      // Anthropic answers here; the test's own requests to the API go out as they are.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((u, init) =>
+        String(u).startsWith('https://api.anthropic.com') ? Promise.resolve(new Response('{}', { status: 200 })) : realFetch(u, init));
+      const { PROVIDER_NOT_ON_LIST_REFUSAL } = await import('../core/contained-providers.js');
+      try {
+        // The refusal text is the assertion. The openai and custom probes would not go through
+        // the spied global fetch (they use the pinned network path), so only anthropic's is counted.
+        for (const body of [
+          { provider: 'openai', base_url: 'https://api.mistral.ai/v1', api_key: 'k' },
+          { provider: 'custom', base_url: 'https://proxy.example/v1', api_key: 'k' },
+          { provider: 'vertex' },
+        ]) {
+          const res = await llmTestFetch(body);
+          const json = await res.json() as { error?: string };
+          expect(json.error, JSON.stringify(body)).toBe(PROVIDER_NOT_ON_LIST_REFUSAL);
+        }
+        // On a pool tier: a typed key is the user's and is refused before Anthropic is asked;
+        // without one, the stored pool key goes to Anthropic, which the list allows.
+        const savedTier = process.env['LYNOX_BILLING_TIER'];
+        const savedKey = process.env['ANTHROPIC_API_KEY'];
+        process.env['LYNOX_BILLING_TIER'] = 'managed';
+        process.env['ANTHROPIC_API_KEY'] = ['sk', 'ant', 'pool'].join('-');
+        try {
+          const toAnthropic = (): number => fetchSpy.mock.calls.filter(([u]) => String(u).startsWith('https://api.anthropic.com')).length;
+          const typed = await (await llmTestFetch({ provider: 'anthropic', api_key: ['sk', 'ant', 'typed'].join('-') })).json() as { error?: string };
+          expect(typed.error).toBe(PROVIDER_NOT_ON_LIST_REFUSAL);
+          expect(toAnthropic()).toBe(0);
+          const stored = await (await llmTestFetch({ provider: 'anthropic' })).json() as { ok?: boolean; error?: string };
+          expect(stored.error).not.toBe(PROVIDER_NOT_ON_LIST_REFUSAL);
+          expect(toAnthropic()).toBe(1);
+        } finally {
+          if (savedTier === undefined) delete process.env['LYNOX_BILLING_TIER']; else process.env['LYNOX_BILLING_TIER'] = savedTier;
+          if (savedKey === undefined) delete process.env['ANTHROPIC_API_KEY']; else process.env['ANTHROPIC_API_KEY'] = savedKey;
+        }
+        // Without the switch the same probe is not refused by the list (vertex: nothing is sent).
+        delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+        const res = await llmTestFetch({ provider: 'vertex' });
+        const json = await res.json() as { error?: string };
+        expect(json.error).not.toBe(PROVIDER_NOT_ON_LIST_REFUSAL);
+      } finally {
+        fetchSpy.mockRestore();
+        for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+        if (prev === undefined) delete process.env['LYNOX_SHOPIFY_EXCHANGE']; else process.env['LYNOX_SHOPIFY_EXCHANGE'] = prev;
+      }
+    });
+
     it('400 when base_url is missing for custom provider', async () => {
       const res = await llmTestFetch({ provider: 'custom', api_key: 'sk-test' });
       expect(res.status).toBe(400);
@@ -15171,6 +15635,28 @@ describe('LynoxHTTPApi', () => {
       mockGetUserConfig.mockReturnValue({});
       mockHistoryGetRecentRuns.mockReturnValue([{ id: 'run-1', task_text: 'test', status: 'completed' }]);
       clearPrimaryCache();
+    });
+
+    it('on an instance connected to a Shopify store names no provider off the list', async () => {
+      // An Anthropic primary with a Mistral fast slot and the Mistral fallback key: with the
+      // switch on neither Mistral entry is reached (`contained-providers.ts`), so neither shows.
+      const config = { ...HYBRID, api_base_url: undefined };
+      await withMistralPrimary(config);
+      const llmClient = await import('../core/llm-client.js');
+      vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('anthropic');
+      vi.stubEnv('MISTRAL_API_KEY', 'test-key');
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+      try {
+        const names = (await callProvidersStatus()).map((p) => p.provider);
+        expect(names).not.toContain('Mistral');
+        expect(names).toContain('Fireworks AI');
+        // Counter-witness: the same instance without the switch names Mistral.
+        vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', undefined as unknown as string);
+        clearPrimaryCache();
+        expect((await callProvidersStatus()).map((p) => p.provider)).toContain('Mistral');
+      } finally {
+        vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', undefined as unknown as string);
+      }
     });
 
     it('lists one entry per tier_set provider, primary first, deduped', async () => {
@@ -16066,6 +16552,32 @@ describe('metered audio routes: managed credit gate + debit', () => {
   });
 
   describe('POST /api/transcribe', () => {
+    it('on an instance connected to a Shopify store without whisper.cpp: 503 that names why, not a Mistral key', async () => {
+      const realStt = await vi.importActual<typeof import('../core/transcribe.js')>('../core/transcribe.js');
+      mockHasTranscribeProvider.mockImplementation(realStt.hasTranscribeProvider);
+      // This file shares ONE per-IP rate window: the request below is paid back after.
+      const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
+      // Set and restored by hand: vi.unstubAllEnvs would also undo this file's own env stubs.
+      const saved = { mistral: process.env['MISTRAL_API_KEY'], sw: process.env['LYNOX_SHOPIFY_EXCHANGE'] };
+      const restore = (k: string, v: string | undefined): void => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
+      process.env['MISTRAL_API_KEY'] = ['mistral', 'test'].join('-');
+      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+      try {
+        if (realStt.hasWhisperCpp()) return; // a box with whisper.cpp transcribes, which is right
+        const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+        expect(res.status).toBe(503);
+        const body = await res.json() as { error: string };
+        expect(body.error).toContain('Shopify');
+        expect(body.error).not.toContain('MISTRAL_API_KEY');
+        expect(mockTranscribeWithStream).not.toHaveBeenCalled();
+      } finally {
+        for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+        restore('MISTRAL_API_KEY', saved.mistral);
+        restore('LYNOX_SHOPIFY_EXCHANGE', saved.sw);
+      }
+    });
+
     it('blocks with 402 when the onBeforeRun hook denies — provider never touched', async () => {
       // The gate is wired immediately after audio decode, before the route
       // touches extractSessionContext / transcribeWithStream — so a denied
@@ -16426,6 +16938,26 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // the store's own `EXPORT_PAGE_MAX`, so the count is a multiple of it.
         expect(body.threads.length).toBeGreaterThanOrEqual(20_000);
         expect(body.threads.length).toBeLessThan(21_000);
+      });
+    });
+
+    it('GET /api/export keeps a contained chat whole and marks it, with how many there are', async () => {
+      // The owner's own copy (Art. 15): containment bounds what an agent or a helper carries out,
+      // not the owner's access to their data, so nothing is cut (orchestrator, register 1112).
+      const listThreadsForExport = vi.fn(() => [{ id: 'shop', title: 't', message_count: 1 }, { id: 'notes', title: 't', message_count: 1 }, { id: 'unread', title: 't', message_count: 1 }]);
+      const getMessages = vi.fn((id: string) => [{ seq: 1, role: 'user', content_json: JSON.stringify(`text of ${id}`), display_only: 0, created_at: 'x' }]);
+      await swapEngine({
+        getThreadStore: () => ({ listThreadsForExport, getMessages }),
+        getKnowledgeLayer: () => null,
+        getCRM: () => null,
+        getDataStore: () => null,
+        getToolContext: () => ({ tools: [], containment: { threadStates: (ids: readonly string[]) => ({ contained: new Set(ids.filter((i) => i === 'shop')), unknown: new Set(ids.filter((i) => i === 'unread')) }) } }),
+      }, async () => {
+        const body = await (await jsonFetch('/api/export')).json() as { contained_threads: number; contained_unknown_threads: number; threads: Array<{ id: string; contained: boolean; messages: Array<{ content: unknown }> }> };
+        // One that held store data, one whose state could not be read, counted apart.
+        expect([body.contained_threads, body.contained_unknown_threads]).toEqual([2, 1]);
+        expect(body.threads.map((t) => [t.id, t.contained])).toEqual([['shop', true], ['notes', false], ['unread', true]]);
+        expect(body.threads.find((t) => t.id === 'shop')?.messages.map((m) => m.content)).toEqual(['text of shop']);
       });
     });
 
@@ -17669,7 +18201,8 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
   // The provider signs its redirect with the client secret (`sec-1` below), and the signed shop
   // has to be the store the profile's own parameter derives. All of it before the code is spent.
   const PROFILE = 'shop-acme';
-  const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+  // A fresh state per test: the callback spends each one (`spendProfileOAuthState`).
+  let STATE = randomUUID();
   const VERIFIER = 'v'.repeat(43);
   const CLIENT_SECRET = 'sec-1';
 
@@ -17694,6 +18227,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
   let origGetEngineDb: unknown;
   const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
   beforeEach(() => {
+    STATE = randomUUID();
     previousDataDir = process.env['LYNOX_DATA_DIR'];
     dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauth-shopify-'));
     process.env['LYNOX_DATA_DIR'] = dataDir;
@@ -17747,6 +18281,20 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(req.bodyFormat).toBe('form');
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'read_orders']);
     expect(store.get(PROFILE)?.oauth_grant?.origin).toBe('callback');
+  });
+
+  it('a second callback with the same state sends no exchange and asks for no exchange pass, though its cookie and signature still hold', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    exchangePassFor.calls = [];
+    const { cookie } = await arrange();
+    const query = signed(good());
+    expect((await call(query, cookie)).status).toBe(200);
+    expect([mockExchangeToken.mock.calls.length, exchangePassFor.calls.length]).toEqual([1, 1]);
+    // Whoever kept the cookie's value and the URL replays both: refused like any invalid round-trip.
+    const replay = await call(query, cookie);
+    expect(replay.status).toBe(400);
+    expect(await replay.text()).toContain('This authorization link is no longer valid.');
+    expect([mockExchangeToken.mock.calls.length, exchangePassFor.calls.length]).toEqual([1, 1]);
   });
 
   it('asks for the exchange pass over the verified store and the body it sends, and hands the pass to the exchange (B4)', async () => {
@@ -17993,7 +18541,8 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   // being looked at.
 
   const PROFILE = 'crm-api';
-  const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+  // A fresh state per test: the callback spends each one (`spendProfileOAuthState`).
+  let STATE = randomUUID();
   const VERIFIER = 'v'.repeat(43);
 
   async function arrange(opts: {
@@ -18077,6 +18626,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   let rateBefore = new Map<string, number>();
 
   beforeEach(() => {
+    STATE = randomUUID();
     rateBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count]));
     previousDataDir = process.env['LYNOX_DATA_DIR'];
     dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauth-callback-'));
@@ -18171,7 +18721,9 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       db.close();
       quiet?.mockRestore();
     }
-    // Twin: the same refusal on a profile that is not revoked keeps the page it had.
+    // Twin: the same refusal on a profile that is not revoked keeps the page it had. A state of
+    // its own: the first callback spent the one before.
+    STATE = randomUUID();
     const second = await arrange();
     vi.spyOn(second.store, 'save').mockReturnValue({ ok: false, reason: 'refused for the test' });
     const quiet2 = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -19972,6 +20524,37 @@ describe('mandate stance of every user route', () => {
 
   it('allows `reads` only on a GET', () => {
     expect(users().filter(r => r.stance?.kind === 'reads' && r.method !== 'GET').map(name)).toEqual([]);
+  });
+
+  // Register 1112: a GET about one chat (by its id, a live run's or a recorded run's) names the chat,
+  // so the dispatcher keeps a contained chat with its owner and its starter. A route that forgets
+  // it reopens the chat to every helper, and nothing else would show.
+  it('names its chat on every GET about one chat or run, and on the lists that carry chats\' text', () => {
+    const about = users().filter(r => r.method === 'GET' && /^\/api\/(threads|sessions|runs|history\/runs|workflows)\/:/.test(r.path));
+    expect(about.length, 'the set is the real one').toBeGreaterThanOrEqual(10);
+    const unnamed = about.filter(r => r.stance?.kind === 'reads' && r.stance.thread === undefined).map(name);
+    expect(unnamed, 'declare readsThread(...) at the registration').toEqual([]);
+    for (const path of ['/api/threads', '/api/history/runs', '/api/thread-insights', '/api/workflows', '/api/workflows/stats/steps', '/api/workflows/stats/cost']) {
+      const r = users().find(x => x.method === 'GET' && x.path === path);
+      expect(r?.stance?.kind === 'reads' && r.stance.thread !== undefined, path).toBe(true);
+    }
+  });
+
+  // A list names no chat (`readsThread(() => null)`), so the dispatcher checks nothing: the
+  // handler itself leaves out what the reader may not read. A list route declared so without that
+  // filter would pass the check above and read every chat.
+  it('filters by reader in every list that names no chat', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('./http-api.ts', import.meta.url), 'utf8');
+    const ends = [...source.matchAll(/readsThread\(\(\) => null\)/g)].map((m) => m.index);
+    expect(ends.length, 'the set is the real one').toBeGreaterThanOrEqual(3);
+    for (const end of ends) {
+      const start = Math.max(source.lastIndexOf("this.addStatic('user'", end), source.lastIndexOf('this.dynamicRoutes.push(', end));
+      const handler = source.slice(start, end);
+      expect(handler.includes('this._unreadableChats('), handler.slice(0, 70)).toBe(true);
+      // ...and uses what it returns: the set is read again after it is made.
+      expect(/const unreadable = this\._unreadableChats\(/.test(handler) && (handler.match(/\bunreadable\b/g) ?? []).length >= 2, handler.slice(0, 70)).toBe(true);
+    }
   });
 
   it('opens to a mandate exactly the routes named here — opening another is a change to this list', () => {

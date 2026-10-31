@@ -13,6 +13,7 @@ import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVeri
 import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
 import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
+import { stripHidden } from './hidden-text.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -54,6 +55,14 @@ export class TriggerTierUnsupportedError extends Error {
   constructor(effect: string) {
     super(`A model tier applies only to agent tasks and watches; this trigger's runs (${effect}) do not use it.`);
     this.name = 'TriggerTierUnsupportedError';
+  }
+}
+
+/** Thrown when a due date is not in the form YYYY-MM-DD, on create and on update alike. */
+export class InvalidDueDateError extends Error {
+  constructor(value: string) {
+    super(`Invalid due_date format: ${value}. Use YYYY-MM-DD.`);
+    this.name = 'InvalidDueDateError';
   }
 }
 
@@ -286,7 +295,7 @@ export class TaskManager {
     }
 
     if (params.dueDate && !/^\d{4}-\d{2}-\d{2}/.test(params.dueDate)) {
-      throw new Error(`Invalid due_date format: ${params.dueDate}. Use YYYY-MM-DD.`);
+      throw new InvalidDueDateError(params.dueDate);
     }
 
     // Auto-trigger: if assigned to lynox with no explicit schedule/watch,
@@ -636,6 +645,9 @@ export class TaskManager {
     if (params.status !== undefined) updateParams.status = params.status;
     if (params.priority !== undefined) updateParams.priority = params.priority;
     if (params.assignee !== undefined) updateParams.assignee = params.assignee;
+    if (params.dueDate && !/^\d{4}-\d{2}-\d{2}/.test(params.dueDate)) {
+      throw new InvalidDueDateError(params.dueDate);
+    }
     if (params.dueDate !== undefined) updateParams.dueDate = params.dueDate ? params.dueDate.slice(0, 10) : '';
     if (params.tags !== undefined) updateParams.tags = params.tags ? JSON.stringify(params.tags) : '';
 
@@ -744,10 +756,13 @@ export class TaskManager {
     if (lynoxTasks.length > 0) counts.push(`${lynoxTasks.length} assigned to you`);
     parts.push(counts.join(', ') + '.');
 
+    // Every session reads this, the unattended run of a plan too, and a plan's text may have been
+    // written by someone else: without the characters that render as nothing (`hidden-text.ts`).
+    // The model's write tools refuse them, but a plan saved before, or through another path, carries them.
     for (const t of summary.overdue) {
-      const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${t.scope_id})`;
-      const assignee = t.assignee ? ` [${t.assignee}]` : '';
-      parts.push(`Overdue: "${t.title}"${scope}, due ${t.due_date}, ${t.priority.toUpperCase()}${assignee}`);
+      const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${stripHidden(t.scope_id)})`;
+      const assignee = t.assignee ? ` [${stripHidden(t.assignee)}]` : '';
+      parts.push(`Overdue: "${stripHidden(t.title)}"${scope}, due ${stripHidden(t.due_date ?? '')}, ${t.priority.toUpperCase()}${assignee}`);
     }
 
     // Highlight tasks assigned to lynox that aren't already shown as overdue
@@ -760,7 +775,7 @@ export class TaskManager {
         // scheduled fire instead when present.
         // A paused plan says so instead of a next run that will not come (`plan-pause.ts`).
         const next = isPaused(t) ? `, ${PAUSED_MODEL_TEXT}` : t.next_run_at ? `, next run ${t.next_run_at}` : '';
-        parts.push(`  - "${t.title}" [${t.status}]${next}`);
+        parts.push(`  - "${stripHidden(t.title)}" [${t.status}]${next}`);
       }
     }
 

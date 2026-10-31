@@ -14,7 +14,7 @@ import { EngineDb } from './engine-db.js';
 import { BulkLedger, type PlannedTarget } from './bulk-ledger.js';
 import { runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
-import { Containment, chatIsContained, containedRefusal, threadIsContained } from './containment.js';
+import { Containment, chatIsContained, containedRefusal, containedThreadStates, threadIsContained } from './containment.js';
 import { createToolContext } from './tool-context.js';
 import { bulkPlanTool } from '../tools/builtin/bulk.js';
 
@@ -59,7 +59,7 @@ describe('the contained table (v40)', () => {
     raw.close();
     const e = new EngineDb(path, '');
     try {
-      expect((e.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(63);
+      expect((e.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(64);
       expect(e.exactMarkerSet()).toBe(true);
       const c = new Containment(e.getDb(), null);
       c.contain({ kind: 'bulk_run', id: 'r1' }, { kind: 'api', connectionId: 'shop-acme' });
@@ -86,7 +86,7 @@ describe('the contained table (v40)', () => {
   });
 
   it('the store has no way to remove or change a row, and no source file deletes or updates one', () => {
-    expect(Object.getOwnPropertyNames(Containment.prototype).sort()).toEqual(['canContain', 'constructor', 'contain', 'containFromThread', 'containedThreadIds', 'engine', 'holds', 'isContained']);
+    expect(Object.getOwnPropertyNames(Containment.prototype).sort()).toEqual(['canContain', 'constructor', 'contain', 'containFromThread', 'containedThreadIds', 'engine', 'holds', 'isContained', 'threadStates']);
     const SRC = fileURLToPath(new URL('..', import.meta.url));
     const sources = (d: string): string[] => readdirSync(d).flatMap((n) => {
       const p = join(d, n);
@@ -146,6 +146,73 @@ describe('isContained reads fail-closed', () => {
     // A billing tier marks the instance provisioned; no control-plane URL or secret this boot.
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
     expect(threadIsContained(null, 't1')).toBe(true);
+  });
+});
+
+describe('threadStates tells a record from a failed read', () => {
+  const sorted = (s: Set<string>): string[] => [...s].sort();
+  const throwingDb = { prepare: () => { throw new Error('disk I/O error'); } } as never;
+
+  it('a read that works: recorded threads contained, nothing unknown', () => {
+    containment.contain({ kind: 'thread', id: 't1' }, { kind: 'api', connectionId: 'shop-acme' });
+    const s = containment.threadStates(['t1', 't2']);
+    expect(sorted(s.contained)).toEqual(['t1']);
+    expect(sorted(s.unknown)).toEqual([]);
+  });
+
+  it('a read that throws: every thread unknown, but one the history copy names stays contained', () => {
+    const mirror = { has: (id: string) => id === 't1', threadIds: (ids: readonly string[]) => ids.filter((id) => id === 't1') };
+    const s = new Containment(throwingDb, mirror as never).threadStates(['t1', 't2', 't3']);
+    expect(sorted(s.contained)).toEqual(['t1']);
+    expect(sorted(s.unknown)).toEqual(['t2', 't3']);
+    expect(sorted(new Containment(throwingDb, null).threadStates(['t2']).unknown)).toEqual(['t2']);
+  });
+
+  it('a history copy whose read throws: a thread engine.db records stays known, any other is unknown', () => {
+    containment.contain({ kind: 'thread', id: 't1' }, { kind: 'api', connectionId: 'shop-acme' });
+    const throwingMirror = { has: () => { throw new Error('x'); }, threadIds: () => { throw new Error('x'); } };
+    const s = new Containment(engineDb.getDb(), throwingMirror as never).threadStates(['t1', 't2']);
+    expect(sorted(s.contained)).toEqual(['t1']);
+    expect(sorted(s.unknown)).toEqual(['t2']);
+    // Enforced as contained, as isContained has it.
+    const c = new Containment(engineDb.getDb(), throwingMirror as never);
+    expect(c.containedThreadIds(['t2']).has('t2')).toBe(true);
+    expect(c.isContained({ threadId: 't2' })).toBe(true);
+    // No engine.db and an unreadable copy: unknown on a self-hosted instance too.
+    expect(sorted(new Containment(null, throwingMirror as never).threadStates(['t2']).unknown)).toEqual(['t2']);
+  });
+
+  it('no engine.db: unknown on a provisioned instance, clear elsewhere', () => {
+    expect(sorted(new Containment(null, null).threadStates(['t2']).unknown)).toEqual([]);
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    expect(sorted(new Containment(null, null).threadStates(['t2']).unknown)).toEqual(['t2']);
+  });
+
+  it('an empty id is contained, not unknown, as the refusals have it', () => {
+    const s = new Containment(throwingDb, null).threadStates(['', 't2']);
+    expect(sorted(s.contained)).toEqual(['']);
+    expect(sorted(s.unknown)).toEqual(['t2']);
+  });
+
+  it('no store: unknown on a provisioned instance, clear elsewhere', () => {
+    expect(sorted(containedThreadStates(null, ['t1']).unknown)).toEqual([]);
+    expect(sorted(containedThreadStates(null, ['t1']).contained)).toEqual([]);
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    expect(sorted(containedThreadStates(null, ['t1']).unknown)).toEqual(['t1']);
+  });
+
+  it('enforcement is the union: containedThreadIds holds both, in every branch', () => {
+    containment.contain({ kind: 'thread', id: 't1' }, { kind: 'api', connectionId: 'shop-acme' });
+    const stores = [containment, new Containment(throwingDb, null), new Containment(null, null)];
+    for (const tier of [undefined, 'managed']) {
+      if (tier !== undefined) vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      for (const c of stores) {
+        const ids = ['t1', 't2', ''];
+        const { contained, unknown } = c.threadStates(ids);
+        expect(sorted(c.containedThreadIds(ids))).toEqual(sorted(new Set([...contained, ...unknown])));
+        for (const id of ['t1', 't2']) expect(c.isContained({ threadId: id })).toBe(contained.has(id) || unknown.has(id));
+      }
+    }
   });
 });
 

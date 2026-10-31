@@ -131,9 +131,10 @@ describe('a scheduled workflow under a grant writes each call\'s facts onto its 
     return id;
   }
 
-  function engine(): Engine {
+  function engine(apiStore?: ApiStore): Engine {
     const ctx = createToolContext({});
     ctx.tools = [httpRequestTool];
+    if (apiStore !== undefined) ctx.apiStore = apiStore;
     return {
       getTaskManager: () => tm,
       getUserConfig: () => ({ api_key: 'test-key' }),
@@ -150,8 +151,8 @@ describe('a scheduled workflow under a grant writes each call\'s facts onto its 
     } as unknown as Engine;
   }
 
-  async function fire(trigger: TriggerRecord): Promise<void> {
-    const loop = new WorkerLoop(engine(), { hasChannels: () => false, notify: vi.fn() } as never, 60_000);
+  async function fire(trigger: TriggerRecord, apiStore?: ApiStore): Promise<void> {
+    const loop = new WorkerLoop(engine(apiStore), { hasChannels: () => false, notify: vi.fn() } as never, 60_000);
     await (loop as unknown as { executePipeline: (t: TriggerRecord, starter: undefined, ownerStop: AbortSignal) => Promise<void> }).executePipeline(tm.getTrigger(trigger.id)!, undefined, new AbortController().signal);
   }
 
@@ -167,6 +168,17 @@ describe('a scheduled workflow under a grant writes each call\'s facts onto its 
     expect(callFactsOf(row!)).toEqual({ recorded: true, status: 'ok', contract: 'governing', contractGrantId: stampedGrantId('wf-post'), lift: null, filing: null });
     // The connection column stays its own: no connection was resolved for this host.
     expect(row!.grant_id).toBeNull();
+  });
+
+  it('a GET to an API with a cost puts the request and its cost on the step\'s row (v71)', async () => {
+    const trigger = accept(saveWorkflow());
+    const store = new ApiStore();
+    store.register({ id: 'reports', name: 'Reports', base_url: `https://${HOST}`, description: 'Reports API', cost: { model: 'per_call', rate_usd: 0.002 } });
+    mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'GET' })).mockResolvedValueOnce(endTurn('read'));
+    await fire(trigger, store);
+    const [row] = httpRows() as Array<ToolCallRecord & { api_cost_usd: number | null; api_cost_source: string | null }>;
+    expect(row).toBeDefined();
+    expect([row!.api_cost_usd, row!.api_cost_source]).toEqual([0.002, 'profile']);
   });
 
   it('a POST the grant lets through carries the lift, and the lift names the accepted grant', async () => {
@@ -377,5 +389,48 @@ describe('an Agent with a contract reports each call\'s facts to its sink and on
     expect(events).toHaveLength(4);
     expect(events[3]!.result).toContain('Do NOT call it again');
     expect(events[3]!.contract).toEqual({ state: 'withheld', grantId: 'grant-r' });
+  });
+});
+
+// v71: the API request a call sent rides the same two ways — to the sink a Session wires to
+// history.db, and on the result event the step recorder builds a workflow step's row from.
+describe('an Agent reports the API request a call sent, with its cost, to its sink and on its result event', () => {
+  let restoreTransport: () => void;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockProcess.mockReset();
+    vi.mocked(dns.lookup).mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+    restoreTransport = setPinnedTransportForTests(async () => new Response('{"cost":0.09,"tasks":[]}', { status: 200, headers: { 'content-type': 'application/json' } }));
+  });
+  afterEach(() => restoreTransport());
+
+  async function run(url: string): Promise<{ recs: Array<{ apiCost?: unknown }>; events: Array<Extract<StreamEvent, { type: 'tool_result' }>> }> {
+    const store = new ApiStore();
+    store.register({ id: 'dataforseo', name: 'DataForSEO', base_url: 'https://api.dataforseo.com', description: 'SEO API', cost: { model: 'per_call', rate_usd: 0.001, response_field: 'cost' } });
+    const ctx = createToolContext({});
+    ctx.apiStore = store;
+    const recs: Array<{ apiCost?: unknown }> = [];
+    const events: Array<Extract<StreamEvent, { type: 'tool_result' }>> = [];
+    mockProcess.mockResolvedValueOnce(toolUses([{ name: 'http_request', input: { url }, id: 'tu-1' }]));
+    mockProcess.mockResolvedValueOnce(endTurn('done'));
+    const agent = new Agent({
+      name: 'chat', model: 'claude-sonnet-4-6', tools: [httpRequestTool], autonomy: 'autonomous', toolContext: ctx,
+      recordToolCall: (c) => { recs.push(c); },
+      onStream: async (e) => { if (e.type === 'tool_result') events.push(e); },
+    });
+    await agent.send('go');
+    return { recs, events };
+  }
+
+  it('a GET to an API with a cost: the provider\'s figure, at the sink and on the event', async () => {
+    const { recs, events } = await run('https://api.dataforseo.com/v3/keywords');
+    expect(recs[0]!.apiCost).toEqual({ usd: 0.09, source: 'response' });
+    expect(events[0]!.apiCost).toEqual({ usd: 0.09, source: 'response' });
+  });
+
+  it('CONTROL: the same GET to a host without a cost carries none', async () => {
+    const { recs, events } = await run('https://example.com/v1/x');
+    expect(recs[0]).not.toHaveProperty('apiCost');
+    expect(events[0]).not.toHaveProperty('apiCost');
   });
 });

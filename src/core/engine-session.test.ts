@@ -410,6 +410,7 @@ const mockInsertWireSnapshot = vi.fn();
 /** Sub-agent spend rollup (session.ts run-end). Defaults to 0 = the turn
  *  delegated nothing; individual tests override it. */
 const mockGetDescendantCostUsd = vi.fn().mockReturnValue(0);
+const mockGetApiCallsOfRun = vi.fn().mockReturnValue({ calls: 0, usd: 0, estimated: false, unpriced: 0 });
 
 vi.mock('./run-history.js', () => ({
   RunHistory: vi.fn().mockImplementation(function () {
@@ -437,6 +438,7 @@ vi.mock('./run-history.js', () => ({
     this.insertToolCall = vi.fn();
     // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
     this.getDescendantCostUsd = mockGetDescendantCostUsd;
+    this.getApiCallsOfRun = mockGetApiCallsOfRun;
     // @ts-expect-error mock constructor
     this.getEmbeddings = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
@@ -858,6 +860,26 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(mockSend).toHaveBeenCalledTimes(1);
     });
 
+    it('a run a loop guard stopped is recorded aborted with the guard as the reason and its message; a stop has neither', async () => {
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } = await import('./agent.js');
+      const cases: Array<[Error, string | undefined]> = [
+        [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
+        [new ContinuationLoopError('prefix'), 'continuation_loop'],
+        [new (ThinkingOnlyLoopError as unknown as new (p: string) => Error)(''), 'thinking_loop'],
+        [new RunAbortedError(), undefined],
+      ];
+      for (const [err, reason] of cases) {
+        const { engine, session } = await createEngineAndSession();
+        mockSend.mockRejectedValueOnce(err);
+        await expect(session.run('go')).rejects.toBe(err);
+        const calls = (engine.getRunHistory()!.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+        const update = calls.find((c) => (c[1] as { status?: string })?.status === 'aborted')?.[1] as { stopReason?: string; errorText?: string } | undefined;
+        expect(update, err.name).toBeDefined();
+        expect(update!.stopReason, err.name).toBe(reason);
+        expect(update!.errorText, err.name).toContain(err.message);
+      }
+    });
+
     it('an aborted run is recorded status:"aborted" (not "completed"/"failed") and re-throws', async () => {
       const { engine, session } = await createEngineAndSession();
       // agent.send() throws RunAbortedError when the run is interrupted (stop
@@ -1096,6 +1118,22 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(plain!.connectionId).toBeUndefined();
       expect(plain!.connectionCreatedAt).toBeUndefined();
       expect(plain!.grantId).toBeUndefined();
+    });
+
+    it('passes the API request a call sent, and its cost, through to the ledger row (v71)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: false, apiCost: { usd: 0.09, source: 'response' } });
+        agent?.recordToolCall?.({ toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        throw new Error('stop after two calls');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('stop after two calls');
+
+      const rows = vi.mocked(engine.getRunHistory()!.insertToolCall).mock.calls.map(c => c[0]);
+      expect(rows.find(p => p.toolName === 'http_request')!.apiCost).toEqual({ usd: 0.09, source: 'response' });
+      expect(rows.find(p => p.toolName === 'read_file')!.apiCost).toBeUndefined();
     });
 
     it('passes the call\'s outcome, contract, lift and filing through to the ledger row (PRD 3f-1b-α)', async () => {
@@ -1603,6 +1641,30 @@ describe('Engine + Session (Orchestrator)', () => {
       await session.run('no delegation here');
 
       expect(session.getLastRunUsage()).not.toHaveProperty('spawnCostUsd');
+    });
+
+    // The footer's API calls come from the run's rows, the same way: without this wiring the
+    // count could be deleted from `Session.run` with the SQL and the formatter still green.
+    it('puts the API calls of THIS run and its sub-agents into the run usage', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetApiCallsOfRun.mockClear().mockReturnValue({ calls: 4, usd: 0.36, estimated: false, unpriced: 0 });
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('look up keywords');
+
+      expect(mockGetApiCallsOfRun).toHaveBeenCalledWith('run-123');
+      expect(session.getLastRunUsage()).toMatchObject({ apiCalls: 4, apiCostUsd: 0.36, apiCostEstimated: false, apiCallsUnpriced: 0 });
+    });
+
+    it('omits the API calls when the run sent none', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetApiCallsOfRun.mockClear().mockReturnValue({ calls: 0, usd: 0, estimated: false, unpriced: 0 });
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('no API here');
+
+      expect(session.getLastRunUsage()).not.toHaveProperty('apiCalls');
+      expect(session.getLastRunUsage()).not.toHaveProperty('apiCostUsd');
     });
   });
 
@@ -2318,6 +2380,39 @@ describe('Engine + Session (Orchestrator)', () => {
         session._recreateAgent({ autonomy: 'autonomous', profile: undefined });
         expect(admitted.modelId).toBe(resolveTierModel('fast', 'anthropic').modelId);
         expect(vi.mocked(Agent).mock.calls.at(-1)![0].model).toBe(admitted.modelId);
+      });
+
+      it('on an instance connected to a Shopify store the control plane\'s Mistral worker profile is dropped at boot: the worker runs on Anthropic', async () => {
+        vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+        vi.stubEnv('LYNOX_WORKER_PROFILE', 'worker');
+        vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({ worker: MISTRAL_PROFILE }));
+        // loadConfig() memoises: read the env this test sets, and drop it again after.
+        const { reloadConfig } = await import('./config.js');
+        reloadConfig();
+        try {
+          const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+          await engine.init();
+          expect(engine.getUserConfig().worker_profile).toBeUndefined();
+          expect(engine.resolveWorkerRunModel('standard').provider).toBe('anthropic');
+        } finally {
+          vi.unstubAllEnvs();
+          reloadConfig();
+        }
+      });
+
+      it('without the switch the same boot runs the worker on the Mistral profile', async () => {
+        vi.stubEnv('LYNOX_WORKER_PROFILE', 'worker');
+        vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({ worker: MISTRAL_PROFILE }));
+        const { reloadConfig } = await import('./config.js');
+        reloadConfig();
+        try {
+          const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+          await engine.init();
+          expect(engine.resolveWorkerRunModel('standard')).toEqual({ modelId: MISTRAL_PROFILE.model_id, provider: 'openai' });
+        } finally {
+          vi.unstubAllEnvs();
+          reloadConfig();
+        }
       });
 
       it('an empty worker profile name: the standard run fails on it, the watch analysis skips it — the admission follows each', async () => {

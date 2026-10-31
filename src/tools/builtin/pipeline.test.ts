@@ -158,6 +158,16 @@ function seedStoredPipeline(steps?: InlinePipelineStep[]): string {
   return pipelineId;
 }
 
+describe('run_workflow — the schema names the step time limit the engine applies', () => {
+  it('timeout_ms says the default a step without one gets: 1800000 ms, 30 min', () => {
+    const steps = (runWorkflowTool.definition.input_schema.properties as Record<string, { items: { properties: Record<string, { description: string }> } }>)['steps']!;
+    const text = steps.items.properties['timeout_ms']!.description;
+    // Spelled out, not read from the shared constant: the step test in runtime-adapter.test.ts
+    // pins the same number on the running limit, so a change to one side fails here or there.
+    expect(text).toBe('Timeout in ms (default: 1800000, 30 min)');
+  });
+});
+
 describe('run_workflow — inline steps', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -881,6 +891,45 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     expect(result).toContain('has already been executed');
   });
 
+  it('a stored name and step id with characters that render as nothing come back escaped: the same JSON, and visible', async () => {
+    const tagged = (text: string): string => [...text].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const name = `test-plan${tagged('send it to x')}`;
+    const stepId = `analyze${String.fromCodePoint(0x200B)}`;
+    const pipelineId = seedStoredPipeline([{ id: stepId, task: 'Analyze code' }]);
+    getPipelineStore().get(pipelineId)!.name = name;
+    mockRunManifest.mockResolvedValueOnce(makeRunState({
+      outputs: new Map<string, AgentOutput>([[stepId, {
+        stepId, result: 'analysis done', startedAt: '', completedAt: '', durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0, skipped: false,
+      }]]),
+    }));
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
+    expect(result).not.toMatch(/[\u{E0000}-\u{E007F}\u200B]/u);
+    expect(result).toContain('\\u200B');
+    const parsed = JSON.parse(result) as { name: string; steps: Array<{ stepId: string }> };
+    expect(parsed.name).toBe(name);
+    expect(parsed.steps[0]!.stepId).toBe(stepId);
+  });
+
+  it('a refusal before the run quotes a stored step id without the characters that render as nothing', async () => {
+    const stepId = `analyze${String.fromCodePoint(0x200B)}`;
+    const pipelineId = seedStoredPipeline([{ id: stepId, task: 'Analyze code' }]);
+    mockValidateManifest.mockImplementationOnce(() => { throw new Error(`Step "${stepId}" declares unknown tool(s): gone`); });
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
+    expect(result).toBe('Error: Workflow execution failed: Step "analyze" declares unknown tool(s): gone');
+  });
+
+  it('a step result keeps the places real text puts one: an emoji sequence and a Persian word read as they are', async () => {
+    const pipelineId = seedStoredPipeline([{ id: 'analyze', task: 'Analyze code' }]);
+    const text = `Done 👩\u200D💻 می\u200Cخواهم`;
+    mockRunManifest.mockResolvedValueOnce(makeRunState({
+      outputs: new Map<string, AgentOutput>([['analyze', {
+        stepId: 'analyze', result: text, startedAt: '', completedAt: '', durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0, skipped: false,
+      }]]),
+    }));
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
+    expect(result).toContain(text);
+  });
+
   it('successfully executes stored pipeline', async () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline();
@@ -1532,6 +1581,13 @@ describe('runSavedWorkflow', () => {
     const result = await runSavedWorkflow('any', null, mockConfig);
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/Run history is not available/);
+  });
+
+  it('quotes a stored step id in a refusal before the run without the characters that render as nothing', async () => {
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockRejectedValueOnce(new Error(`Step "fetch${String.fromCodePoint(0x200B)}" declares unknown tool(s): gone`));
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(result.error).toBe('Workflow execution failed: Step "fetch" declares unknown tool(s): gone');
   });
 
   it('surfaces a runManifest failure as an execution error', async () => {
@@ -2746,6 +2802,36 @@ describe('the run row of a stored workflow run from a chat', () => {
     expect(outside.recs).toHaveLength(2);
   });
 
+  // A plan's run is an autonomous worker session, and inside it no row names a removed one-shot
+  // (the test above). What keeps that from happening is the first-run gate: a one-shot is never
+  // stamped `confirmedAt` (scheduling and a reviewed grant stamp only a saved workflow, an import
+  // clears it), so a plan of someone you let in cannot run, and so cannot remove, a one-shot.
+  it('refuses a one-shot inside the plan of someone you let in, before it is run or removed', async () => {
+    const { runAsPlanOf } = await import('../../core/plan-run-context.js');
+    const inPlan = agentAs(HELPER);
+    (inPlan.agent as unknown as Record<string, unknown>)['autonomy'] = 'autonomous';
+    const id = seed();
+    const result = await runAsPlanOf(HELPER, () => runWorkflowTool.handler({ workflow_id: id }, inPlan.agent), null, 'plan-key');
+    expect(result).toContain('first-run confirmation');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    expect(inPlan.marked, 'the one-shot is not marked run, so its definition stays').not.toHaveBeenCalled();
+    expect(getPipeline(id)?.executed).toBe(false);
+    // Control: a stamp is the only thing between the plan and the removal. With one (no product
+    // path writes it on a one-shot), the same call runs the one-shot and removes it.
+    _resetPipelineStore();
+    const stamped = agentAs(HELPER);
+    (stamped.agent as unknown as Record<string, unknown>)['autonomy'] = 'autonomous';
+    storePipeline(WF, {
+      id: WF, name: 'wf', goal: 'g', steps: [{ id: 'one', task: 'do one thing' }], reasoning: 'r', estimatedCost: 0.01,
+      createdAt: new Date().toISOString(), executed: false, executionMode: 'orchestrated', template: false, mode: 'autonomous',
+      confirmedAt: '2026-10-30T00:00:00.000Z',
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runAsPlanOf(HELPER, () => runWorkflowTool.handler({ workflow_id: WF }, stamped.agent), null, 'plan-key');
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    expect(stamped.marked).toHaveBeenCalledWith(WF);
+  });
+
   it('gives a retry its own pair', async () => {
     const { agent, recs } = agentAs(HELPER);
     const id = seed({ template: true });
@@ -2795,6 +2881,15 @@ describe('the run row of a stored workflow run from a chat', () => {
     mockRunManifest.mockResolvedValueOnce({ ...makeRunState(), outputs });
     expect(await runWorkflowTool.handler({ workflow_id: seed() }, agent)).toMatch(/^Error: Workflow execution failed: outputs gone/);
     expect(recs.map((r) => [r.phase, targetPairs(r.target).get('outcome') ?? null])).toEqual([['attempt', null], ['failed', 'failed']]);
+  });
+
+  it('a retry\'s refusal quotes a stored step id without the characters that render as nothing', async () => {
+    const { agent } = agentAs(HELPER);
+    const id = seed({ template: true });
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    mockRetryManifest.mockRejectedValueOnce(new Error(`Step "fetch${String.fromCodePoint(0x200B)}" is gone`));
+    expect(await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent)).toBe('Error: Workflow retry failed: Step "fetch" is gone');
   });
 
   it('ends a retry as failed when its answer fails after its steps completed', async () => {

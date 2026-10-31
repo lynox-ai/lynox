@@ -7,6 +7,7 @@ import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, ContinuationLoopError, RunAbortedError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
+import { loopGuardStopReason } from '../../core/loop-guard-stop.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import type { AgentConfig } from '../../types/index.js';
@@ -1673,7 +1674,10 @@ async function executeThinker(
   if (runHistory) {
     try {
       childRunId = runHistory.insertRun({
-        sessionId: parentAgent.currentThreadId ?? '',
+        // The chat this child runs for, as its own `originThreadId` below: a child of a workflow
+        // step or of another child has no thread of its own, and a run naming no chat is kept from
+        // everyone but the owner (register 1116).
+        sessionId: parentAgent.currentThreadId ?? parentAgent.originThreadId ?? '',
         taskText: spec.task,
         modelTier: modelTier as string,
         modelId: model,
@@ -1982,6 +1986,9 @@ async function executeThinker(
     // The time limit ended it — not the parent's stop and not a loop guard (both
     // guards' errors are RunAbortedErrors too). A failure, not an interruption.
     const timedOut = childAborted && !(err instanceof ToolLoopBreakError) && !(err instanceof ContinuationLoopError) && deadline?.signal.aborted === true;
+    // A loop guard ended it: recorded aborted like a stop, but with the guard as the reason and
+    // its message as the error, so the history tells a guard from a stop.
+    const guard = loopGuardStopReason(err);
     const timeoutReason = `Stopped after the ${String(Math.round(spawnTimeoutMs / 60_000) || 1)}-minute spawn time limit without finishing.`;
     if (runHistory && childRunId) {
       try {
@@ -1996,14 +2003,14 @@ async function executeThinker(
           // misreading that started this whole investigation (a customer instance, 2026-08-10).
           toolCallCount: childAgent?.getRecordedToolCallCount() ?? 0,
           status: timedOut ? 'failed' : (childAborted ? 'aborted' : 'failed'),
-          stopReason: timedOut ? 'spawn_timeout' : (childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error')),
+          stopReason: timedOut ? 'spawn_timeout' : (guard ?? (childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error'))),
           // Record the FULL structured error so a failed sub-agent is diagnosable
           // (not just status=failed + a null error_text). Skipped for an abort —
-          // an intentional interruption isn't an error to store.
+          // an intentional interruption isn't an error to store. A loop guard's stop is not one.
           // A child that died after being refused a key still owes that reason:
           // "it failed" and "it failed after the vault refused it X" send the
           // reader to different repairs.
-          errorText: timedOut ? timeoutReason : (childAborted ? undefined : appendDeniedKeyNote(formatSpawnError(err), deniedKeys)),
+          errorText: timedOut ? timeoutReason : (guard !== null ? appendDeniedKeyNote((err as Error).message, deniedKeys) : (childAborted ? undefined : appendDeniedKeyNote(formatSpawnError(err), deniedKeys))),
         });
       } catch { /* swallow */ }
     }

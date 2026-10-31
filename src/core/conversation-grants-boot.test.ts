@@ -53,7 +53,7 @@ describe('Engine boot — the conversation grant set', () => {
       const store = new ThreadStore(before.getDb());
       store.createThread('old-thread');
       store.appendMessages('old-thread', [{ role: 'user', content: 'hello' }], 0);
-      before.getDb().exec('DROP TABLE conversation_grants; DELETE FROM schema_version WHERE version > 66; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
+      before.getDb().exec('DROP TABLE conversation_grants; DELETE FROM schema_version WHERE version > 66; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
       before.close();
     });
     const history = engine.getRunHistory();

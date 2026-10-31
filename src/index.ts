@@ -192,6 +192,16 @@ Options:
   --project <dir>               Set project directory (loads .lynox/config.json)
   --data-dir <dir>              Override data directory (default: ~/.lynox)
 
+Installer without prompts (no terminal needed; exits non-zero on failure):
+  --non-interactive             Take every answer from the flags below and the environment
+  --accept-terms                Accept the terms of service (https://lynox.ai/terms)
+  --provider <name>             anthropic | mistral | openai-compatible | none (start without a key)
+  --model <id>                  Model for mistral or openai-compatible
+  --base-url <url>              Endpoint for openai-compatible (default: http://localhost:11434/v1)
+  --dir <path>                  Install directory (default: ./lynox)
+  --reconfigure                 Overwrite an existing setup in that directory
+  Keys are read from ANTHROPIC_API_KEY, MISTRAL_API_KEY or OPENAI_API_KEY, never from a flag.
+
 Environment:
   ANTHROPIC_API_KEY             Anthropic API key (required for anthropic provider)
   LYNOX_API_BASE_URL            Base URL for non-Anthropic backends (e.g. https://api.mistral.ai/v1)
@@ -276,7 +286,7 @@ Docs: https://docs.lynox.ai
   // === Docker installer (--init / "init" subcommand) ===
   if (args.includes('--init') || args[0] === 'init') {
     const { runDockerInstaller } = await import('./cli/docker-installer.js');
-    await runDockerInstaller();
+    await runDockerInstaller(args);
     return;
   }
 
@@ -284,7 +294,7 @@ Docs: https://docs.lynox.ai
   // Power-user CLI modes (single-task, --watch, --manifest, --task, --output)
   // were removed pre-HN-launch; drive lynox via the Web UI or HTTP API instead.
   const { runDockerInstaller } = await import('./cli/docker-installer.js');
-  await runDockerInstaller();
+  await runDockerInstaller(args);
 }
 
 

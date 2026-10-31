@@ -259,7 +259,7 @@ describe('a scheduled workflow that asks its owner', () => {
     await waitUntil('the run to end', () => h.records.length > 0);
     expect(answers).toEqual(['B']);
     expect(h.records[0]![2]).toBe('success');
-    expect(h.records[0]![1]).toContain('Pipeline completed');
+    expect(h.records[0]![1]).toContain('Workflow completed');
   });
 
   it('a question of a mandate\'s stamped plan carries the mandate the plan acts for', async () => {
