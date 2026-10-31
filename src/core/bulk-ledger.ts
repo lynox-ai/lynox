@@ -2215,15 +2215,18 @@ export class BulkLedger {
   private restoresShopAddedMarkup(runId: string, seq: number, after: unknown, htmlFields: readonly string[]): boolean {
     if (after === null || typeof after !== 'object') return false;
     const restored = after as Record<string, unknown>;
-    const db = this.engineDb.getDb();
+    const step = this.engineDb.getDb().prepare(
+      `SELECT t.after_actual, t.shop_added_markup, t.source_seq, r.source_run_id FROM bulk_targets t
+         JOIN bulk_runs r ON r.id = t.run_id WHERE t.run_id = ? AND t.seq = ?`,
+    );
     let at: { runId: string; seq: number } | null = { runId, seq };
-    // Bounded like `listFormOfFamily`: one run per undo, and a cycle must not hang the planner.
-    for (let depth = 0; at !== null && depth <= 64; depth++) {
-      const row = db.prepare(
-        `SELECT t.after_actual, t.shop_added_markup, t.source_seq, r.source_run_id FROM bulk_targets t
-           JOIN bulk_runs r ON r.id = t.run_id WHERE t.run_id = ? AND t.seq = ?`,
-      ).get(at.runId, at.seq) as { after_actual: string | null; shop_added_markup: number; source_seq: number | null; source_run_id: string | null } | undefined;
-      if (!row) return false;
+    // Bounded like `listFormOfFamily`: one run per undo, and a cycle must not hang the planner. A
+    // chain the walk cannot finish — past the bound, or broken — counts as restoring the mark: the
+    // safe direction, since the value's origin is then not known.
+    for (let depth = 0; at !== null; depth++) {
+      if (depth > 64) return true;
+      const row = step.get(at.runId, at.seq) as { after_actual: string | null; shop_added_markup: number; source_seq: number | null; source_run_id: string | null } | undefined;
+      if (!row) return true;
       if (depth > 0 && row.shop_added_markup === 1 && row.after_actual !== null) {
         const kept = (JSON.parse(this.engineDb.dec(row.after_actual)) as ActualImage).value;
         if (kept !== null && typeof kept === 'object') {

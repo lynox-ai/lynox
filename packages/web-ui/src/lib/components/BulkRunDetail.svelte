@@ -95,9 +95,10 @@
 			// A preview the owner approves is loaded whole: the approval covers every target, and
 			// each one the owner may take out has to be on the page to be taken out.
 			// So is a run whose rollback left targets: the sentence names the marked ones, and each
-			// has to be on the page to be seen.
+			// has to be on the page to be seen. So is a run halted on markup its store added: the
+			// sentence points at the marked product below.
 			const approving = r.body.phase === 'previewed' && r.body.kind === 'apply';
-			const whole = approving || bulkRollbackIncomplete(r.body);
+			const whole = approving || bulkRollbackIncomplete(r.body) || r.body.haltKey === 'markupAddedByShop';
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
 			if (whole && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
@@ -413,6 +414,9 @@
 									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}">
 										<td class="py-1.5 pr-3">
 											<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+											{#if target.shopAddedMarkup}
+												<span class="ml-1 inline-block rounded-full bg-danger/15 border border-danger/40 px-1.5 text-[11px] text-danger" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
+											{/if}
 											{#if bulkRollbackLeft(run, target)}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
 											{/if}

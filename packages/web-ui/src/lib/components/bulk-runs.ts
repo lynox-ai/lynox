@@ -403,6 +403,9 @@ export interface BulkTarget {
 	written?: boolean | undefined;
 	/** A rollback or an undo took this run's write back. */
 	undone?: boolean | undefined;
+	/** Written, and the store kept it with markup lynox did not send: the target the halt
+	 *  `markupAddedByShop` is about. Set only where it holds. */
+	shopAddedMarkup?: true | undefined;
 }
 
 /** The external host of a run's target system, or null for a local run. */
