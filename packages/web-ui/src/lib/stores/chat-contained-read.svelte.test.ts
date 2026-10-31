@@ -44,6 +44,23 @@ describe('a chat the engine does not let this reader read', () => {
 		expect(store.getMessages()).toEqual([]);
 	});
 
+	it('a copy this page kept of the chat from before is not shown either', async () => {
+		// The page keeps chats it showed (localStorage); a chat the engine now refuses is not shown
+		// from that copy instead.
+		const kept: Record<string, string> = { 'lynox-chat': JSON.stringify({ sessionId: 'shop', threads: { shop: [{ role: 'user', content: 'Order 1042 for Jane' }] } }) };
+		vi.stubGlobal('localStorage', {
+			getItem: (k: string) => kept[k] ?? null, setItem: (k: string, v: string) => { kept[k] = v; }, removeItem: (k: string) => { delete kept[k]; },
+		});
+		vi.resetModules();
+		store = await import('./chat.svelte.js');
+		serve((url) => (/\/threads\/shop(\/messages)?(\?|$)/.test(url) ? refused('contained_thread') : undefined));
+
+		await store.resumeThread('shop');
+
+		expect(store.getThreadReadRefusal()).toBe('contained.thread_read_refused');
+		expect(store.getMessages()).toEqual([]);
+	});
+
 	it('another 403 is not read as this refusal', async () => {
 		serve((url) => (url.includes('/threads/shop/messages') ? json({ error: 'x', code: 'other' }, 403) : undefined));
 
