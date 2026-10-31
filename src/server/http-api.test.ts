@@ -4049,6 +4049,10 @@ describe('LynoxHTTPApi', () => {
       ref.getRunBufferManager = (): unknown => mgr;
       const buf = mgr.create('b8-tail');
       buf.append({ type: 'text', text: 'hello', agent: 'main' });
+      // A helper streams only a run that names its chat (register 1112); this one's is not contained.
+      const regRef = ref as unknown as { getRunRegistry: () => unknown };
+      const origReg = regRef.getRunRegistry;
+      regRef.getRunRegistry = (): unknown => ({ getByRunId: () => ({ thread_id: 't-b8' }) });
       try {
         api.setPrincipalResolverForTesting(() => EVA);
         const evaRes = await fetch(`${baseUrl}/api/runs/b8-tail/stream`, { headers: authHeaders() });
@@ -4078,6 +4082,7 @@ describe('LynoxHTTPApi', () => {
         expect(owner.sse).toContain('event: done');
       } finally {
         ref.getRunBufferManager = orig;
+        regRef.getRunRegistry = origReg;
         mgr.remove('b8-tail');
       }
     });
@@ -8783,6 +8788,89 @@ describe('LynoxHTTPApi', () => {
         db.close();
         rmSync(dir, { recursive: true, force: true });
       }
+    });
+
+    // Register 1112: a chat holding data from a connected store is read by the owner and by whoever
+    // started it, by nobody else — as messages, as a debug export, or as a live run.
+    describe('a contained chat is read only by the owner and by whoever started it', () => {
+      const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
+      type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+      let cookieResolver: Resolver;
+      beforeEach(() => { repayRateWindow(); cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver; });
+      afterEach(() => { api.setPrincipalResolverForTesting(cookieResolver); });
+
+      // `shop` is contained and the owner's, `evas-shop` contained and Eva's, `notes` not contained.
+      const THREADS: Record<string, { id: string; title: string; created_by?: string }> = {
+        shop: { id: 'shop', title: 'T' },
+        'evas-shop': { id: 'evas-shop', title: 'T', created_by: 'mandate:eva@example.invalid' },
+        notes: { id: 'notes', title: 'T' },
+      };
+      const CONTAINED = new Set(['shop', 'evas-shop']);
+      const engineWith = (test: () => Promise<void>): Promise<void> => swapEngine({
+        getThreadStore: () => ({ getThread: (id: string) => THREADS[id] ?? null, getMessages: () => [], getMessageCount: () => 0 }),
+        getRunHistory: () => ({
+          getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null,
+          getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [],
+        }),
+        getToolContext: () => ({ tools: [], containment: { isContained: (k: { threadId?: string }) => CONTAINED.has(k.threadId ?? '') } }),
+      }, test);
+      const statusAs = async (who: RequestPrincipal, path: string): Promise<{ status: number; error?: string }> => {
+        api.setPrincipalResolverForTesting(() => who);
+        const res = await jsonFetch(path);
+        const text = await res.text();
+        let error: string | undefined;
+        try { error = (JSON.parse(text) as { error?: string }).error; } catch { /* a stream or a bundle */ }
+        return { status: res.status, ...(error !== undefined ? { error } : {}) };
+      };
+
+      it('a helper is refused another person\'s contained chat, with who may read it', async () => {
+        const { CONTAINED_THREAD_READ_REFUSAL } = await import('./http-api.js');
+        await engineWith(async () => {
+          for (const path of ['/api/threads/shop/messages', '/api/threads/shop/debug-export']) {
+            expect(await statusAs(EVA, path), path).toEqual({ status: 403, error: CONTAINED_THREAD_READ_REFUSAL });
+          }
+        });
+      });
+
+      it('the owner reads it, the helper reads their own contained chat, and a chat that is not contained as before', async () => {
+        await engineWith(async () => {
+          for (const path of ['/api/threads/shop/messages', '/api/threads/shop/debug-export']) {
+            expect((await statusAs(OWNER_PRINCIPAL, path)).status, `owner ${path}`).toBe(200);
+          }
+          for (const id of ['evas-shop', 'notes']) {
+            for (const route of ['messages', 'debug-export']) {
+              expect((await statusAs(EVA, `/api/threads/${id}/${route}`)).status, `eva ${id} ${route}`).toBe(200);
+            }
+          }
+        });
+      });
+
+      it('a live run of another person\'s contained chat does not stream to a helper, nor a run that names no chat', async () => {
+        const { CONTAINED_THREAD_READ_REFUSAL } = await import('./http-api.js');
+        const { RunBufferManager } = await import('../core/run-buffer.js');
+        const mgr = new RunBufferManager();
+        for (const id of ['run-shop', 'run-notes', 'run-nowhere']) mgr.create(id).append({ type: 'text', text: 'hello', agent: 'main' });
+        const rows: Record<string, { thread_id: string }> = { 'run-shop': { thread_id: 'shop' }, 'run-notes': { thread_id: 'notes' } };
+        await swapEngine({
+          getRunBufferManager: () => mgr,
+          getRunRegistry: () => ({ getByRunId: (id: string) => rows[id] }),
+          getThreadStore: () => ({ getThread: (id: string) => THREADS[id] ?? null }),
+          getToolContext: () => ({ tools: [], containment: { isContained: (k: { threadId?: string }) => CONTAINED.has(k.threadId ?? '') } }),
+        }, async () => {
+          expect(await statusAs(EVA, '/api/runs/run-shop/stream')).toEqual({ status: 403, error: CONTAINED_THREAD_READ_REFUSAL });
+          expect(await statusAs(EVA, '/api/runs/run-nowhere/stream')).toEqual({ status: 403, error: CONTAINED_THREAD_READ_REFUSAL });
+          // Twins: a chat that is not contained, and the owner on the contained one. Both open a
+          // stream; ending the buffers lets them close.
+          const open = async (who: RequestPrincipal, runId: string): Promise<number> => {
+            api.setPrincipalResolverForTesting(() => who);
+            const res = await fetch(`${baseUrl}/api/runs/${runId}/stream`, { headers: authHeaders() });
+            await res.body?.cancel();
+            return res.status;
+          };
+          expect(await open(EVA, 'run-notes')).toBe(200);
+          expect(await open(OWNER_PRINCIPAL, 'run-shop')).toBe(200);
+        });
+      });
     });
 
     it('GET /api/threads/:id/debug-export 404s an unknown thread', async () => {
@@ -16670,6 +16758,25 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // the store's own `EXPORT_PAGE_MAX`, so the count is a multiple of it.
         expect(body.threads.length).toBeGreaterThanOrEqual(20_000);
         expect(body.threads.length).toBeLessThan(21_000);
+      });
+    });
+
+    it('GET /api/export keeps a contained chat whole and marks it, with how many there are', async () => {
+      // The owner's own copy (Art. 15): containment bounds what an agent or a helper carries out,
+      // not the owner's access to their data, so nothing is cut (orchestrator, register 1112).
+      const listThreadsForExport = vi.fn(() => [{ id: 'shop', title: 't', message_count: 1 }, { id: 'notes', title: 't', message_count: 1 }]);
+      const getMessages = vi.fn((id: string) => [{ seq: 1, role: 'user', content_json: JSON.stringify(`text of ${id}`), display_only: 0, created_at: 'x' }]);
+      await swapEngine({
+        getThreadStore: () => ({ listThreadsForExport, getMessages }),
+        getKnowledgeLayer: () => null,
+        getCRM: () => null,
+        getDataStore: () => null,
+        getToolContext: () => ({ tools: [], containment: { threadStates: (ids: readonly string[]) => ({ contained: new Set(ids.filter((i) => i === 'shop')), unknown: new Set<string>() }) } }),
+      }, async () => {
+        const body = await (await jsonFetch('/api/export')).json() as { contained_threads: number; threads: Array<{ id: string; contained: boolean; messages: Array<{ content: unknown }> }> };
+        expect(body.contained_threads).toBe(1);
+        expect(body.threads.map((t) => [t.id, t.contained])).toEqual([['shop', true], ['notes', false]]);
+        expect(body.threads.find((t) => t.id === 'shop')?.messages.map((m) => m.content)).toEqual(['text of shop']);
       });
     });
 

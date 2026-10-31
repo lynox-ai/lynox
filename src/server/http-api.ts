@@ -1074,6 +1074,12 @@ function refuseContainedSource(res: ServerResponse, body: unknown, containment: 
   return false;
 }
 
+/**
+ * Why a helper does not read a chat that holds data from a connected store (register 1112): what
+ * the chat holds stays with the owner and with whoever started it. Says who may read it.
+ */
+export const CONTAINED_THREAD_READ_REFUSAL = 'This chat was marked as holding data from a connected shop, so only the owner of this instance, or the person who started the chat, can read it.';
+
 /** {@link jsonResponse} for an answer no cache may keep (it holds personal text). */
 function noStoreJson(res: ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body);
@@ -2568,6 +2574,24 @@ export class LynoxHTTPApi {
     const principal = this._principalOf(req);
     if (isOwnerPrincipal(principal) || rows().every((row) => ownedBy(row, principal))) return false;
     errorResponse(res, 403, `Only the owner of this instance, or the person who started it, can ${what}.`);
+    return true;
+  }
+
+  /**
+   * Register 1112: the text of a contained chat (`threadIsContained`, which reads an unknown
+   * state as contained) goes to the owner and to whoever started the chat (`ownedBy`), and to
+   * nobody else on the read routes — a helper under a mandate reads another person's shop chat
+   * neither as messages, nor as a debug export, nor as a live run. A thread row that is missing
+   * is no one's, so a non-owner is refused on a contained id even then. Answers `true` when it
+   * has answered the request.
+   */
+  private _refuseContainedRead(req: IncomingMessage, res: ServerResponse, threadId: string): boolean {
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return false;
+    const engine = this.engine;
+    if (ownedBy(engine?.getThreadStore()?.getThread(threadId) ?? undefined, principal)) return false;
+    if (!threadIsContained(engine?.getToolContext().containment ?? null, threadId)) return false;
+    errorResponse(res, 403, CONTAINED_THREAD_READ_REFUSAL);
     return true;
   }
 
@@ -5351,6 +5375,13 @@ export class LynoxHTTPApi {
       const runId = params['runId'] ?? '';
       const buffer = this.engine?.getRunBufferManager()?.get(runId);
       if (!buffer) { jsonResponse(res, 404, { error: 'run not found' }); return; }
+      // A live run streams its chat's text. For anyone but the owner the run must name its chat;
+      // one that names none is refused like a contained one, since its chat cannot be checked.
+      if (!isOwnerPrincipal(this._principalOf(req))) {
+        const threadId = this.engine?.getRunRegistry()?.getByRunId(runId)?.thread_id;
+        if (threadId === undefined || threadId === null || threadId === '') { errorResponse(res, 403, CONTAINED_THREAD_READ_REFUSAL); return; }
+        if (this._refuseContainedRead(req, res, threadId)) return;
+      }
 
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const sinceRaw = parseInt(url.searchParams.get('since') ?? '0', 10);
@@ -6020,6 +6051,7 @@ export class LynoxHTTPApi {
       // empty state instead of a misleading connection error — and the browser
       // logs no failed-resource console noise.
       if (!thread) { jsonResponse(res, 200, { messages: [], activeRun: null, threadMissing: true }); return; }
+      if (this._refuseContainedRead(req, res, thread.id)) return;
       const url = new URL(req.url ?? '', 'http://localhost');
       const fromSeq = Math.max(parseInt(url.searchParams.get('fromSeq') ?? '0', 10) || 0, 0);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '10000', 10) || 10000, 1), 50000);
@@ -6062,12 +6094,13 @@ export class LynoxHTTPApi {
     // Tier 2 adds persisted cost data (per-run composition + cache-hit, raw
     // error detail, compaction events, thread cost rollup) captured by migrations
     // v36–v38 — they ride the bundle here via the run/compaction read paths.
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id/debug-export', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id/debug-export', async (req, res, params) => {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
       const id = params['id']!;
       const thread = threadStore.getThread(id);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      if (this._refuseContainedRead(req, res, id)) return;
 
       // Raw per-iteration view: the debug export exists to reveal the row-by-row
       // truth (incl. what the merged chat bubble hides), so it must NOT collapse
@@ -12891,8 +12924,13 @@ export class LynoxHTTPApi {
           // a licence to assert it in a log.
           process.stderr.write(`⚠ /api/export: thread export hit the ${THREAD_CAP}-row cap — dump may be incomplete\n`);
         }
+        // Every thread, contained ones included: this is the owner's copy of their own data
+        // (Art. 15), and containment bounds what an agent or a helper carries out, not that.
+        // A contained thread says so, so the copy shows which chats held data from a store.
+        const containedStates = containedThreadStates(engine.getToolContext().containment ?? null, threads.map((t) => t.id));
         const threadsWithMessages = threads.map(t => ({
           ...t,
+          ...containedFields(containedStates, t.id),
           messages: threadStore.getMessages(t.id, { limit: 50000 }).map(m => ({
             seq: m.seq,
             role: m.role,
@@ -12906,10 +12944,12 @@ export class LynoxHTTPApi {
           })),
         }));
         exportData['threads_may_be_incomplete'] = threadsTruncated;
+        exportData['contained_threads'] = threadsWithMessages.filter((t) => t.contained).length;
         exportData['threads'] = threadsWithMessages;
       } else {
         exportData['threads'] = [];
         exportData['threads_may_be_incomplete'] = false;
+        exportData['contained_threads'] = 0;
       }
 
       // Flat-file memory (all namespaces)
