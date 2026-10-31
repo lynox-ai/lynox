@@ -88,6 +88,11 @@ describe('shownReason — what of the server\'s sentence a toast may show', () =
 		expect(shownReason(model)).toBe(model);
 	});
 
+	it('cleans a URL outside the quotes too, in any scheme', () => {
+		// No lead names it: only the URL rule stands between such a sentence and the toast.
+		expect(shownReason('see postgres://u:pw@db.example.com/x for details')).toBe('see postgres://db.example.com/x for details');
+	});
+
 	it('keeps the punctuation that ends the sentence after a query', () => {
 		expect(shownReason('see https://docs.example.com/a?b=1.')).toBe('see https://docs.example.com/a.');
 		expect(shownReason('(see https://a.example.com/x?q=1) ok')).toBe('(see https://a.example.com/x) ok');
