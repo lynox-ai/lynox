@@ -4571,7 +4571,18 @@ export class LynoxHTTPApi {
         preflightKeyOk = !!key;
       }
       if (!preflightKeyOk) {
-        errorResponse(res, 400, `No ${preflightProvider} API key configured. Open Settings → Providers and add one.`);
+        // `code` is what the web UI translates (ux UX-069). Who may add the key decides the
+        // sentence: the provider settings are owner-only, so a mandate is told to ask the owner,
+        // not sent to a page it cannot use. `provider` is the display name the status bar
+        // shows, never the config key, and goes only to the one who can act on it.
+        if (this._principalOf(req).kind === 'mandate') {
+          errorResponse(res, 400, 'No AI provider is set up on this instance yet. Only the owner can do that, so ask the owner.',
+            'llm_not_configured', { may_configure: false });
+        } else {
+          const providerName = providerIdentity(preflightProvider, preflightCfg.api_base_url).label;
+          errorResponse(res, 400, `No key is stored for ${providerName} yet. Open Settings → Configuration and add one.`,
+            'llm_not_configured', { may_configure: true, provider: providerName });
+        }
         return;
       }
 

@@ -899,6 +899,23 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 	await _executeRun(task, files, displayText, runOptions);
 }
 
+/** The run refused because no AI provider is set up (`code: 'llm_not_configured'`): the
+ *  sentence for this reader, or null for any other answer. The server says whether this reader
+ *  may add the key; only then does it name the provider and the page to go to. */
+function noLlmKeyText(status: number, detail: string): string | null {
+	if (status !== 400) return null;
+	let body: unknown;
+	try { body = JSON.parse(detail); } catch { return null; }
+	if (typeof body !== 'object' || body === null) return null;
+	const b = body as { code?: unknown; may_configure?: unknown; provider?: unknown };
+	if (b.code !== 'llm_not_configured') return null;
+	if (b.may_configure === false) return t('chat.error_no_llm_key_mandate');
+	if (b.may_configure === true && typeof b.provider === 'string' && b.provider !== '') {
+		return tf('chat.error_no_llm_key_owner', { provider: b.provider, label: t('settings.config') });
+	}
+	return null;
+}
+
 /** Map HTTP status + error detail to a user-friendly i18n message. */
 function mapApiError(status: number, detail: string): string {
 	const lower = detail.toLowerCase();
@@ -1546,7 +1563,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			return;
 		}
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
-		chatError = mapApiError(res.status, chatErrorDetail ?? '');
+		chatError = noLlmKeyText(res.status, chatErrorDetail ?? '') ?? mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
 		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 		if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;

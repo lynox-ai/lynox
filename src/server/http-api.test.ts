@@ -2103,6 +2103,66 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
+    describe('without an AI provider key (ux UX-069)', () => {
+      const run = (): Promise<Response> => jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'hello' }),
+      });
+      // No key from the environment either: the provider's own variable outranks the vault.
+      beforeEach(() => {
+        mockSecretResolve.mockReturnValue(null);
+        for (const name of ['ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'OPENAI_API_KEY']) vi.stubEnv(name, '');
+        mockSessionRun.mockClear();
+      });
+      afterEach(() => { mockGetUserConfig.mockReturnValue({}); vi.unstubAllEnvs(); });
+
+      it('tells the owner which provider lacks a key, by its display name, and where to add it', async () => {
+        const res = await run();
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+          error: 'No key is stored for Anthropic yet. Open Settings → Configuration and add one.',
+          code: 'llm_not_configured',
+          may_configure: true,
+          provider: 'Anthropic',
+        });
+        expect(mockSessionRun).not.toHaveBeenCalled();
+      });
+
+      it('names a provider behind the OpenAI wire by its brand, not the config key', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-medium-2604' });
+        const res = await run();
+        expect(res.status).toBe(400);
+        const body = await res.json() as { provider?: string; error: string };
+        expect(body.provider).toBe('Mistral');
+        expect(body.error).not.toContain('openai');
+      });
+
+      it('tells a mandate to ask the owner, and names neither provider nor settings page', async () => {
+        const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+        // A chat the mandate started itself, on a live grant: the run is the mandate's to send.
+        const ref = (api as unknown as { engine: { getThreadStore: () => unknown; getMandateEnds: () => unknown } }).engine;
+        const origThreads = ref.getThreadStore;
+        const origEnds = ref.getMandateEnds;
+        ref.getThreadStore = (): unknown => ({ getThread: () => ({ created_by: 'mandate:eva@example.invalid' }) });
+        ref.getMandateEnds = (): unknown => ({ record: (): void => {}, isLive: (): boolean => true });
+        api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+        try {
+          const res = await run();
+          expect(res.status).toBe(400);
+          expect(await res.json()).toEqual({
+            error: 'No AI provider is set up on this instance yet. Only the owner can do that, so ask the owner.',
+            code: 'llm_not_configured',
+            may_configure: false,
+          });
+          expect(mockSessionRun).not.toHaveBeenCalled();
+        } finally {
+          api.setPrincipalResolverForTesting(resolver);
+          ref.getThreadStore = origThreads;
+          ref.getMandateEnds = origEnds;
+        }
+      });
+    });
+
     it('streams SSE events for a run', async () => {
       // Make run complete immediately
       mockSessionRun.mockImplementation(async () => {
