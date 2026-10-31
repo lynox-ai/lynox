@@ -278,6 +278,27 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     expect(byKey(undo, `${LIST}/1`).change).not.toBe('invalid');
   });
 
+  it('counts a chain it cannot walk to its end as marked: a cycle, and a broken link', async () => {
+    const { id, store } = await markedRun();
+    const u1 = planned(id);
+    approve(u1);
+    await run(u1, stubWriter(store), 'bulk_undo');
+    const db = engineDb.getDb();
+    // A cycle: the source points back at its own undo, so the walk never reaches the start.
+    db.prepare('UPDATE bulk_runs SET source_run_id = ? WHERE id = ?').run(u1, id);
+    db.prepare('UPDATE bulk_targets SET source_seq = (SELECT seq FROM bulk_targets WHERE run_id = ? AND target_key = bulk_targets.target_key) WHERE run_id = ?').run(u1, id);
+    expect(byKey(planned(u1), `${LIST}/2`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
+  });
+
+  it('counts a broken link up the chain as marked', async () => {
+    const { id, store } = await markedRun();
+    const u1 = planned(id);
+    approve(u1);
+    await run(u1, stubWriter(store), 'bulk_undo');
+    engineDb.getDb().prepare('UPDATE bulk_targets SET source_seq = 999 WHERE run_id = ?').run(u1);
+    expect(byKey(planned(u1), `${LIST}/2`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
+  });
+
   it('lists what an undo restores, the HTML fields resolved from the run its family started from', async () => {
     const id = approvedRun({ description: '<p>Neu</p>' }, [{ description: `<p>Alt</p>${SCRIPT}` }]);
     const store = new Map([[`${LIST}/1`, { description: `<p>Alt</p>${SCRIPT}` } as Record<string, unknown>]]);
