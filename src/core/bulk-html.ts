@@ -39,6 +39,71 @@ function canonicalHtml(value: string): string {
   return serialize(parseHtmlFragment(value));
 }
 
+/**
+ * The tags of a value that its fragment does not keep: every stretch of the source no node of the
+ * tree was built from, whitespace left out. The fragment parse drops a start tag that only has a
+ * place at document level, with its attributes, while the page applies those attributes to its own
+ * element of that name; it drops an end tag that closes nothing in the fragment, while in the page
+ * it closes the theme's element around the value. Neither the tree, the canonical form nor
+ * `endsClosed` sees them, so they are read off the source.
+ *
+ * A text node does not vouch for its whole range: the parser appends the characters after a dropped
+ * tag to the text before it and moves the node's end over the tag. Outside an element whose content
+ * the tokenizer reads as raw text, a `<` that opens a tag, an end tag or a declaration cannot be a
+ * character of the text, so such a text node's source from the first one to its last `>` is reported
+ * as one stretch. Not a match cut at the first `>`: a before-image then holds only the same tags with
+ * what lies between them, never a prefix cut at a `>` inside a quoted value, nor a CDATA section of
+ * foreign content, which is inert text. The text around them stays out, so editing it is no change.
+ */
+/** A start tag in a dropped stretch whose name is followed by an attribute. */
+const DROPPED_WITH_ATTRIBUTES = /<[A-Za-z][^\s/>]*[\s/]+[^\s/>]/;
+
+/** Elements whose content the tokenizer reads as text, scripting on: a `<` there is a character. */
+const RAW_TEXT_PARENTS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext']);
+
+export function droppedTagsOf(value: string): string[] {
+  const div = defaultTreeAdapter.createElement('div', p5.NS.HTML, []);
+  const tree = parseFragment(div, value, { scriptingEnabled: true, sourceCodeLocationInfo: true });
+  const kept = new Uint8Array(value.length);
+  const keep = (at: { startOffset: number; endOffset: number } | null | undefined): void => {
+    if (at) kept.fill(1, at.startOffset, at.endOffset);
+  };
+  const swallowed: string[] = [];
+  const visit = (parent: { childNodes?: Node[] }, rawText: boolean): void => {
+    for (const node of parent.childNodes ?? []) {
+      if (isElement(node)) {
+        keep(node.sourceCodeLocation?.startTag);
+        keep(node.sourceCodeLocation?.endTag);
+        const raw = node.namespaceURI === p5.NS.HTML && RAW_TEXT_PARENTS.has(node.tagName);
+        if (node.tagName === 'template') visit(defaultTreeAdapter.getTemplateContent(node as DefaultTreeAdapterTypes.Template), false);
+        visit(node, raw);
+      } else {
+        const at = node.sourceCodeLocation;
+        keep(at);
+        if (at && node.nodeName === '#text' && !rawText) {
+          const source = value.slice(at.startOffset, at.endOffset);
+          const first = source.search(/<[A-Za-z/!?]/);
+          const last = source.lastIndexOf('>');
+          if (first >= 0) swallowed.push(source.slice(first, last > first ? last + 1 : source.length));
+        }
+      }
+    }
+  };
+  visit(tree, false);
+  const dropped: string[] = [...swallowed];
+  let from = -1;
+  for (let i = 0; i <= value.length; i++) {
+    if (i < value.length && kept[i] === 0) {
+      if (from < 0) from = i;
+    } else if (from >= 0) {
+      const stretch = value.slice(from, i);
+      if (stretch.trim() !== '') dropped.push(stretch);
+      from = -1;
+    }
+  }
+  return dropped;
+}
+
 // --- Which fields hold HTML. Only the form knows a field's content type; a key name is no
 // evidence. A closed map from the list read, until forms declare it themselves.
 
@@ -185,7 +250,9 @@ export type MarkupRefusal =
   | 'url_scheme'
   | 'url_control_char'
   | 'hidden_char'
-  | 'not_canonical';
+  | 'not_canonical'
+  | 'markup_dropped'
+  | 'markup_dropped_before';
 
 export interface MarkupCheckInput {
   /** The field's before-image; null where the target has none. */
@@ -217,6 +284,20 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
       return refused('not_canonical', 'The value leaves a tag, a comment, raw text or an element open at its end.');
     }
     const before = input.before ?? '';
+    // What the fragment drops, a multiset against the before-image's own, byte for byte. A stretch
+    // with a start tag that carries attributes is never held: the same bytes are inert where the
+    // before-image has them (a `template`, a `select`) and land on the page's own element where the
+    // after-state puts them, and the place is not compared. Held is only what can move layout.
+    // Where the before-image carries the same attributed stretch, planning again never helps: the
+    // owner has to remove it in the shop, and the refusal says so (`markup_dropped_before`).
+    const held = counts(droppedTagsOf(before));
+    for (const tag of droppedTagsOf(input.after)) {
+      const n = held.get(tag) ?? 0;
+      const detail = `The value carries a tag the page reads but this check cannot place: ${tag}`;
+      if (DROPPED_WITH_ATTRIBUTES.test(tag)) return refused(n > 0 ? 'markup_dropped_before' : 'markup_dropped', detail);
+      if (n === 0) return refused('markup_dropped', detail);
+      held.set(tag, n - 1);
+    }
     // Each tree of the after-state against the before-image's tree of the same kind.
     const raw = checkTrees(parseHtmlFragment(before), parseHtmlFragment(input.after), input);
     if (!raw.ok) return raw;
