@@ -15,10 +15,13 @@
  * `principal` or `….principal`.
  *
  * It is a net, not a fence, and it sees forms only. Unseen: an agent or session built under an
- * imported alias or through a reference to the method, a session's run on a receiver whose name
- * does not end in "session" (or `this.run` in `session.ts`), a principal whose VALUE is undefined
- * at run time (the public API's optional one, handed on), a step spawner's principal handed in
- * at the wrong position, and a literal declared in one block for an identifier shadowed in another.
+ * imported alias or through a reference to the method; a session's run on a receiver that is not
+ * a name ending in "session" (`getSession(id).run(…)`, `session['run']`, `.call`), or `this.run`
+ * outside `session.ts`; a principal whose VALUE is undefined at run time (the public API's
+ * optional one, handed on); a step spawner's principal at the wrong position, or any argument
+ * ending in `.principal` taken for it; a literal declared in one block for an identifier shadowed
+ * in another, changed after it is declared, or computed (`['principal']`). A literal declared in
+ * an outer function, or under `as`/`satisfies`, reads as naming nothing, which fails loudly.
  */
 import { it, expect } from 'vitest';
 import ts from 'typescript';
@@ -206,7 +209,8 @@ it('tells naming a principal from naming nothing, form by form', () => {
     'function h() { s.createSession(o); const o = { principal: p }; }',
     'function i() { runManifest(m, c, buildRunCtx({ principal: p })); runManifest(m, c, buildRunCtx({ source })); }',
     'function j() { retryManifest(m, st, c, { principal: p }); store.getOrCreate(id, engine, { principal: p }); }',
-    'function k() { spawnInline(s, ctx, options.principal); spawnViaAgent(s, ctx); }',
+    'function k() { spawnInline(s, ctx, options.principal); spawnViaAgent(s, ctx); spawnPipeline(s, principal); }',
+    'function m() { s.createSession({ ...rest, principal: p }); }',
     'function l() { this.run(t, { principal: p }); }',
   ].join('\n');
   expect(sitesIn('x.ts', text).map(key)).toEqual([
@@ -230,6 +234,8 @@ it('tells naming a principal from naming nothing, form by form', () => {
     'x.ts · getOrCreate in j · principal',
     'x.ts · spawnInline in k · principal',
     'x.ts · spawnViaAgent in k · nothing',
+    'x.ts · spawnPipeline in k · principal',
+    'x.ts · createSession in m · principal',
   ]);
   // `this.run` is a session's own run in `session.ts` only.
   expect(sitesIn('core/session.ts', text).filter((s) => s.kind === 'run' && s.fn === 'l').map(key)).toEqual(['core/session.ts · run in l · principal']);
