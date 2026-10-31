@@ -5166,7 +5166,6 @@ describe('LynoxHTTPApi', () => {
           api.setPrincipalResolverForTesting(() => reader);
           const body = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ id: string; oauth_grant?: Record<string, unknown> }> };
           const list = Object.fromEntries(body.profiles.map((p) => [p.id, p.oauth_grant?.['connected_by_reader']]));
-          expect(body.profiles.find((p) => p.id === 'unconnected'), 'a profile never connected gets no grant').not.toHaveProperty('oauth_grant');
           for (const p of WITH_NONE) {
             const one = await (await jsonFetch(`/api/api-profiles/${p.id}`)).json() as { profile: { oauth_grant?: Record<string, unknown> } };
             expect(one.profile.oauth_grant?.['connected_by_reader'], p.id).toBe(list[p.id]);
@@ -5180,6 +5179,12 @@ describe('LynoxHTTPApi', () => {
 
         it('a mandate: its own under this grant, never the owner\'s without an account', async () => {
           expect(await yoursFor(EVA)).toEqual({ owners: false, evas: true, 'evas-old': false, toms: false, 'owners-bare': false, 'legacy-bare': false, 'evas-bare': true, 'cp-tagged': false, unconnected: undefined });
+        });
+
+        it('a profile never connected gets no grant to answer on', async () => {
+          await yoursFor(OWNER_PRINCIPAL);
+          const body = await (await jsonFetch('/api/api-profiles/unconnected')).json() as { profile: Record<string, unknown> };
+          expect(body.profile).not.toHaveProperty('oauth_grant');
         });
 
         it('the control plane\'s bearer: none', async () => {
