@@ -239,10 +239,11 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
  */
 export function markupAddedByHost(input: { sent: string; back: string; storeHost: string; startDomains: readonly string[] }): MarkupCheckResult {
   try {
-    // A tag, comment or attribute value the host leaves open at the end falls away from the
-    // fragment's tree, so no tree check sees it; the theme's next `>` closes it, live. It counts
-    // as added where the value sent ended closed: an undo may send a before-image that did not.
-    if (!endsClosed(input.back) && endsClosed(input.sent)) {
+    // A tag, comment or attribute value left open at the end falls away from the fragment's tree,
+    // so no tree check sees it, nor what the host writes into it; the theme's next `>` closes it,
+    // live. A value read back open counts as added unless it is the bytes sent: a before-image an
+    // undo restores, or an unchanged field a verdict carries, may itself end open.
+    if (!endsClosed(input.back) && input.back !== input.sent) {
       return refused('not_canonical', 'The value read back leaves a tag, a comment, raw text or an element open at its end.');
     }
     const got = checkTrees(parseHtmlFragment(input.sent), parseHtmlFragment(input.back), {

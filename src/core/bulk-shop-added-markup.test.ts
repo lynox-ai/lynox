@@ -123,8 +123,11 @@ describe('markupAddedByHost: what the host kept against what was sent', () => {
   it('names a tag or attribute value the host left open at the end, which no tree shows', () => {
     expect(added('<p>Neu</p>', '<p>Neu</p><img src=x onerror=alert(1) ')).toBe(true);
     expect(added('<p>Neu</p>', '<p title="x')).toBe(true);
-    // A value sent open (an undo's before-image) and kept so is not the host's doing.
+    // A value sent open (an undo's before-image) and kept so is not the host's doing…
     expect(added('<p>Neu</p><b title="x', '<p>Neu</p><b title="x')).toBe(false);
+    // …but what the host writes into that open end is, though both trees read the same.
+    expect(added('<p>Neu</p><b title="x', '<p>Neu</p><b title="x" onerror="alert(1)')).toBe(true);
+    expect(added('<p>Neu</p><img src=x ', '<p>Neu</p><img src=x onerror=alert(1) ')).toBe(true);
   });
 
   it('counts a second copy of a script the run sent once', () => {
@@ -293,7 +296,8 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     const db = engineDb.getDb();
     // A cycle: the source points back at its own undo, so the walk never reaches the start.
     db.prepare('UPDATE bulk_runs SET source_run_id = ? WHERE id = ?').run(u1, id);
-    db.prepare('UPDATE bulk_targets SET source_seq = (SELECT seq FROM bulk_targets WHERE run_id = ? AND target_key = bulk_targets.target_key) WHERE run_id = ?').run(u1, id);
+    // Each target of the source points at the undo's target that took it back.
+    db.prepare('UPDATE bulk_targets SET source_seq = (SELECT u.seq FROM bulk_targets u WHERE u.run_id = ? AND u.source_seq = bulk_targets.seq) WHERE run_id = ?').run(u1, id);
     expect(byKey(planned(u1), `${LIST}/2`)).toMatchObject({ change: 'invalid', error: 'shop_added_markup' });
   });
 
