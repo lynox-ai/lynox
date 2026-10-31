@@ -1686,6 +1686,17 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     expect(calls[1]!.filed).toBeUndefined();
   });
 
+  it('copies the API request a call sent onto the step\'s record, and adds none the event lacks (v71)', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'http_request', input: {}, agent: 'step', toolUseId: 'tu_h' });
+    h({ type: 'tool_result', name: 'http_request', result: 'HTTP 200', agent: 'step', toolUseId: 'tu_h', apiCost: { usd: 0.09, source: 'response' } });
+    h({ type: 'tool_call', name: 'read_file', input: {}, agent: 'step', toolUseId: 'tu_r' });
+    h({ type: 'tool_result', name: 'read_file', result: 'x', agent: 'step', toolUseId: 'tu_r' });
+    expect(calls[0]!.apiCost).toEqual({ usd: 0.09, source: 'response' });
+    expect(calls[1]!.apiCost).toBeUndefined();
+  });
+
   it('pairs same-named concurrent calls FIFO (input order preserved)', () => {
     const calls: Parameters<StepToolRecorder>[0][] = [];
     const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
