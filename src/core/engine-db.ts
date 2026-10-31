@@ -1595,6 +1595,11 @@ const MIGRATIONS: string[] = [
   // back (§21.2 item 7 (b)). 0 for every existing target: none was checked.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (65);
    ALTER TABLE bulk_targets ADD COLUMN shop_added_markup INTEGER NOT NULL DEFAULT 0;`,
+  // v66 (PRD shopify-preset §21.2 item 6): a written target whose store kept an HTML field otherwise
+  // than sent, within what the run may write — counted and named, not halted. 0 for every existing
+  // target: none was compared.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (66);
+   ALTER TABLE bulk_targets ADD COLUMN host_rewrote INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export interface EngineDbOptions {
