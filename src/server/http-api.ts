@@ -63,7 +63,7 @@ import { isProvisionedInstance } from '../core/wire-capture.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
 import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
 import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
-import { containedThreadStates, threadIsContained, type Containment } from '../core/containment.js';
+import { containedThreadStates, containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
 import type { RunRecord } from '../core/run-history.js';
@@ -174,7 +174,8 @@ type RouteHandler = (
  * - `own`: a mandate may act only on what it set up or last changed itself; the handler
  *   checks that.
  * - `free`: a mandate may, for the reason given.
- * - `reads`: a GET that only reads. Allowed on GET alone. Filling an in-process cache or
+ * - `reads`: a GET that only reads. Allowed on GET alone. One about a chat names it
+ *   (`readsThread`), and the dispatcher then keeps a contained chat to its owner and its starter. Filling an in-process cache or
  *   touching an in-memory last-used time counts as reading. A GET with any other effect
  *   (disk, database, cookie, token, a call that leaves state elsewhere) declares one of the
  *   four above instead, with the effect in its reason.
@@ -187,7 +188,22 @@ export type MandateStance =
   | { readonly kind: 'mark' }
   | { readonly kind: 'own' }
   | { readonly kind: 'free'; readonly why: string }
-  | { readonly kind: 'reads' };
+  | { readonly kind: 'reads'; readonly thread?: ThreadNamer };
+
+/**
+ * The chat a read is about, as the request names it (register 1112): a thread by id, a live run
+ * (by the run registry), or a recorded run (by the run history). `null` when this request names
+ * none — a list, which then filters by itself.
+ */
+export type ThreadNamed = { readonly thread: string } | { readonly liveRun: string } | { readonly historyRun: string } | null;
+type ThreadNamer = (params: Readonly<Record<string, string>>, query: URLSearchParams) => ThreadNamed;
+
+/**
+ * A GET that only reads, about one chat (`ThreadNamer`). The dispatcher refuses anyone but the
+ * owner and whoever started the chat when the chat is contained, before the handler runs: a
+ * route is covered by declaring it, and a test holds every GET that names a chat to declaring it.
+ */
+const readsThread = (thread: ThreadNamer): MandateStance => ({ kind: 'reads', thread });
 
 /** A mandate may not; `what` completes "Only the owner of this instance can …". */
 const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what });
@@ -1078,7 +1094,12 @@ function refuseContainedSource(res: ServerResponse, body: unknown, containment: 
  * Why a helper does not read a chat that holds data from a connected store (register 1112): what
  * the chat holds stays with the owner and with whoever started it. Says who may read it.
  */
-export const CONTAINED_THREAD_READ_REFUSAL = 'This chat was marked as holding data from a connected shop, so only the owner of this instance, or the person who started the chat, can read it.';
+export const CONTAINED_THREAD_READ_REFUSAL = 'This chat was marked as holding data from a connected shop, so only the owner of this instance and the person who started it can read it. To work on the task yourself, start a new chat.';
+/** The `code` beside {@link CONTAINED_THREAD_READ_REFUSAL}, which the Web UI shows in its own language (ux U-091). */
+export const CONTAINED_THREAD_CODE = 'contained_thread';
+/** Why a live run that names no chat is not streamed to anyone but the owner: its chat cannot be checked (ux U-091). */
+export const RUN_CHAT_UNKNOWN_REFUSAL = 'lynox could not read which chat this run belongs to, so only the owner of this instance can follow it live. If the run belongs to a chat of yours, open that chat from the chat list.';
+export const RUN_CHAT_UNKNOWN_CODE = 'run_chat_unknown';
 
 /** {@link jsonResponse} for an answer no cache may keep (it holds personal text). */
 function noStoreJson(res: ServerResponse, status: number, body: unknown): void {
@@ -2462,23 +2483,36 @@ export class LynoxHTTPApi {
    * being registered. The action is the route as registered, the target the path; never the
    * query or the answer. The owner's reads leave no row. `false` when the row cannot be
    * written: the dispatcher has answered 503 and the read is not answered, as a write is not.
+   *
+   * A read about a chat (`readsThread`) is also refused here, after its row, when the chat is
+   * contained and not the reader's ({@link _containedReadRefusal}); `false` then too.
    */
-  private _recordedMandateRead(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string, query: URLSearchParams): boolean {
+  private _recordedMandateRead(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string, query: URLSearchParams, stance: MandateStance | undefined, params: Readonly<Record<string, string>>): boolean {
     // No scope test: an `admin` route refuses a mandate before dispatch (D6), so every read a
     // mandate reaches here is a `user` route's.
     if (method !== 'GET' && method !== 'HEAD') return true;
     const principal = this._principalOf(req);
-    if (!writesMandateTrail(principal)) return true;
-    try {
-      const log = this.engine?.getAuditLog() ?? null;
-      if (log === null) throw new Error('no audit log');
-      const identifiers = (READ_IDENTIFIERS.get(`GET ${routePath}`) ?? [])
-                // As sent, an empty value too: a route may read it as "no filter" and so read more.
-        .flatMap((name): Array<[string, string]> => { const v = query.get(name); return v === null ? [] : [[name, v]]; });
-      log.record({ principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname, identifiers), phase: 'read', correlationId: newCorrelationId() });
-    } catch {
-      errorResponse(res, 503, 'This read cannot be recorded in the instance log right now, so it was not answered.');
-      return false;
+    if (writesMandateTrail(principal)) {
+      try {
+        const log = this.engine?.getAuditLog() ?? null;
+        if (log === null) throw new Error('no audit log');
+        const identifiers = (READ_IDENTIFIERS.get(`GET ${routePath}`) ?? [])
+          // As sent, an empty value too: a route may read it as "no filter" and so read more.
+          .flatMap((name): Array<[string, string]> => { const v = query.get(name); return v === null ? [] : [[name, v]]; });
+        log.record({ principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname, identifiers), phase: 'read', correlationId: newCorrelationId() });
+      } catch {
+        errorResponse(res, 503, 'This read cannot be recorded in the instance log right now, so it was not answered.');
+        return false;
+      }
+    }
+    // After the row: a read that cannot be recorded is not answered at all, and a refused one is
+    // in the trail as the attempt it was.
+    if (stance?.kind === 'reads' && stance.thread !== undefined) {
+      const refusal = this._containedReadRefusal(principal, stance.thread(params, query));
+      if (refusal !== null) {
+        errorResponse(res, refusal.status, refusal.error, refusal.code);
+        return false;
+      }
     }
     return true;
   }
@@ -2578,21 +2612,41 @@ export class LynoxHTTPApi {
   }
 
   /**
-   * Register 1112: the text of a contained chat (`threadIsContained`, which reads an unknown
-   * state as contained) goes to the owner and to whoever started the chat (`ownedBy`), and to
-   * nobody else on the read routes — a helper under a mandate reads another person's shop chat
-   * neither as messages, nor as a debug export, nor as a live run. A thread row that is missing
-   * is no one's, so a non-owner is refused on a contained id even then. Answers `true` when it
-   * has answered the request.
+   * Register 1112: whether `principal` may read the chat a `readsThread` route names. The text of a
+   * contained chat (`threadIsContained`, which reads an unknown state as contained) goes to the
+   * owner and to whoever started the chat (`ownedBy`; the owner owns every row). A chat whose row
+   * is missing is no one's, so anyone else is refused on a contained id even then. A live run that
+   * names no chat cannot be checked and is refused; a recorded run that names none answers as not
+   * found. `null` when the read may go on.
    */
-  private _refuseContainedRead(req: IncomingMessage, res: ServerResponse, threadId: string): boolean {
-    const principal = this._principalOf(req);
+  private _containedReadRefusal(principal: RequestPrincipal, named: ThreadNamed): { status: number; error: string; code?: string } | null {
+    if (named === null || isOwnerPrincipal(principal)) return null;
     const engine = this.engine;
-    // The owner owns every row (`ownedBy`), so the owner passes here too.
-    if (ownedBy(engine?.getThreadStore()?.getThread(threadId) ?? undefined, principal)) return false;
-    if (!threadIsContained(engine?.getToolContext().containment ?? null, threadId)) return false;
-    errorResponse(res, 403, CONTAINED_THREAD_READ_REFUSAL);
-    return true;
+    let threadId: string | undefined;
+    if ('thread' in named) threadId = named.thread;
+    else if ('liveRun' in named) {
+      threadId = engine?.getRunRegistry()?.getByRunId(named.liveRun)?.thread_id || undefined;
+      if (threadId === undefined) return { status: 403, error: RUN_CHAT_UNKNOWN_REFUSAL, code: RUN_CHAT_UNKNOWN_CODE };
+    } else {
+      threadId = engine?.getRunHistory()?.getRun(named.historyRun)?.session_id || undefined;
+      if (threadId === undefined) return { status: 404, error: 'Run not found' };
+    }
+    if (ownedBy(engine?.getThreadStore()?.getThread(threadId) ?? undefined, principal)) return null;
+    if (!threadIsContained(engine?.getToolContext().containment ?? null, threadId)) return null;
+    return { status: 403, error: CONTAINED_THREAD_READ_REFUSAL, code: CONTAINED_THREAD_CODE };
+  }
+
+  /**
+   * Register 1112, for lists: which of `threadIds` name a chat `principal` may not read (contained
+   * and not theirs, as {@link _containedReadRefusal} has it). A list keeps such an entry without
+   * its text, or leaves it out. Empty for the owner.
+   */
+  private _unreadableChats(principal: RequestPrincipal, threadIds: readonly string[]): Set<string> {
+    if (isOwnerPrincipal(principal) || threadIds.length === 0) return new Set();
+    const engine = this.engine;
+    const contained = containedThreads(engine?.getToolContext().containment ?? null, [...new Set(threadIds)]);
+    const store = engine?.getThreadStore();
+    return new Set([...contained].filter((id) => !ownedBy(store?.getThread(id) ?? undefined, principal)));
   }
 
   /**
@@ -3860,7 +3914,7 @@ export class LynoxHTTPApi {
         if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
         if (this._refusedByStance(req, res, stance)) return;
         const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
-        if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams)) return;
+        if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams, stance, {})) return;
         if (!this._beganMandateChange(req, res, method, routePath, pathname)) return;
         try { await staticHandler(req, res, {}, body); } finally { this._closeTrail(req, res); }
         return;
@@ -3881,7 +3935,7 @@ export class LynoxHTTPApi {
           }
           if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
           if (this._refusedByStance(req, res, route.stance)) return;
-          if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams)) return;
+          if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams, route.stance, params)) return;
           if (!this._beganMandateChange(req, res, method, route.path, pathname)) return;
           try { await route.handler(req, res, params, body); } finally { this._closeTrail(req, res); }
           return;
@@ -5375,13 +5429,6 @@ export class LynoxHTTPApi {
       const runId = params['runId'] ?? '';
       const buffer = this.engine?.getRunBufferManager()?.get(runId);
       if (!buffer) { jsonResponse(res, 404, { error: 'run not found' }); return; }
-      // A live run streams its chat's text. For anyone but the owner the run must name its chat;
-      // one that names none is refused like a contained one, since its chat cannot be checked.
-      if (!isOwnerPrincipal(this._principalOf(req))) {
-        const threadId = this.engine?.getRunRegistry()?.getByRunId(runId)?.thread_id;
-        if (threadId === undefined || threadId === null || threadId === '') { errorResponse(res, 403, CONTAINED_THREAD_READ_REFUSAL); return; }
-        if (this._refuseContainedRead(req, res, threadId)) return;
-      }
 
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const sinceRaw = parseInt(url.searchParams.get('since') ?? '0', 10);
@@ -5442,7 +5489,7 @@ export class LynoxHTTPApi {
         clearInterval(keepalive);
         unsub();
       });
-    }, READS));
+    }, readsThread((p) => ({ liveRun: p['runId'] ?? '' }))));
 
     // GET /sessions/:id/pending-prompt — client checks for resumable prompts on reconnect
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/sessions/:id/pending-prompt', async (_req, res, params) => {
@@ -5505,7 +5552,7 @@ export class LynoxHTTPApi {
         timeoutMs: PROMPT_TIMEOUT_MS,
         createdAt: row.created_at,
       });
-    }, READS));
+    }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/reply', async (_req, res, params, body) => {
       const ps = this.engine?.getPromptStore();
@@ -5713,7 +5760,7 @@ export class LynoxHTTPApi {
         return { file: c.file, status: c.status, diff: c.diff, added, removed, compared: c.compared };
       });
       jsonResponse(res, 200, { hasChanges: true, runId: csm.runId, files });
-    }, READS));
+    }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
       const session = this.sessionStore.get(params['id']!);
@@ -5880,8 +5927,11 @@ export class LynoxHTTPApi {
       // `contained`: the chat read data through a store connection (`core/containment.ts`), so
       // private mode stays on and it can only read and explain. Fail-closed, like the refusals.
       const states = containedThreadStates(engine.getToolContext().containment, threads.map((t) => t.id));
-      jsonResponse(res, 200, { threads: threads.map((t) => ({ ...t, ...containedFields(states, t.id) })) });
-    }, READS);
+      // Another person's contained chat stays in the list, marked, without its title and summary,
+      // which can carry what the store returned (register 1112).
+      const unreadable = this._unreadableChats(this._principalOf(req), threads.map((t) => t.id));
+      jsonResponse(res, 200, { threads: threads.map((t) => ({ ...t, ...(unreadable.has(t.id) ? { title: '', summary: null } : {}), ...containedFields(states, t.id) })) });
+    }, readsThread(() => null));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id', async (_req, res, params) => {
       const threadStore = engine.getThreadStore();
@@ -5896,7 +5946,7 @@ export class LynoxHTTPApi {
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
       const states = containedThreadStates(engine.getToolContext().containment, [thread.id]);
       jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id) } });
-    }, READS));
+    }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
       const threadStore = engine.getThreadStore();
@@ -6051,7 +6101,6 @@ export class LynoxHTTPApi {
       // empty state instead of a misleading connection error — and the browser
       // logs no failed-resource console noise.
       if (!thread) { jsonResponse(res, 200, { messages: [], activeRun: null, threadMissing: true }); return; }
-      if (this._refuseContainedRead(req, res, thread.id)) return;
       const url = new URL(req.url ?? '', 'http://localhost');
       const fromSeq = Math.max(parseInt(url.searchParams.get('fromSeq') ?? '0', 10) || 0, 0);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '10000', 10) || 10000, 1), 50000);
@@ -6081,7 +6130,7 @@ export class LynoxHTTPApi {
         }
       }
       jsonResponse(res, 200, { messages, activeRun });
-    }, READS));
+    }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     // Comprehensive thread DEBUG-EXPORT. The thin client export (AppShell
     // exportThreadJson) carries only the thread record + rendered messages;
@@ -6100,7 +6149,6 @@ export class LynoxHTTPApi {
       const id = params['id']!;
       const thread = threadStore.getThread(id);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
-      if (this._refuseContainedRead(req, res, id)) return;
 
       // Raw per-iteration view: the debug export exists to reveal the row-by-row
       // truth (incl. what the merged chat bubble hides), so it must NOT collapse
@@ -6364,7 +6412,7 @@ export class LynoxHTTPApi {
       // user-scoped own-thread data; the scrub is defense-in-depth for sharing.
       const scrubbed: unknown = JSON.parse(maskSecretPatterns(JSON.stringify(bundle)));
       jsonResponse(res, 200, scrubbed);
-    }, READS));
+    }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     // ── Memory ──
     const VALID_MEMORY_NS = new Set(['knowledge', 'methods', 'status', 'learnings']);
@@ -7807,7 +7855,9 @@ export class LynoxHTTPApi {
       const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
       if (q) {
         const runs = history.searchRuns(q, limit, offset);
-        jsonResponse(res, 200, { runs });
+        // A search reads run texts: another person's contained chat is left out (register 1112).
+        const unreadable = this._unreadableChats(this._principalOf(req), runs.map((r) => r.session_id));
+        jsonResponse(res, 200, { runs: runs.filter((r) => !unreadable.has(r.session_id)) });
       } else {
         const filters: { status?: string; model?: string; dateFrom?: string; dateTo?: string; sessionId?: string } = {};
         const status = url.searchParams.get('status');
@@ -7829,9 +7879,12 @@ export class LynoxHTTPApi {
         if (dateTo) filters.dateTo = dateTo;
         if (sessionId) filters.sessionId = sessionId;
         const runs = history.getRecentRuns(limit, offset, Object.keys(filters).length > 0 ? filters : undefined);
-        jsonResponse(res, 200, { runs });
+        // Unfiltered, the list holds every chat's runs: another person's contained chat is left
+        // out (register 1112). Filtered by one chat, the dispatcher has checked that chat already.
+        const unreadable = this._unreadableChats(this._principalOf(req), runs.map((r) => r.session_id));
+        jsonResponse(res, 200, { runs: runs.filter((r) => !unreadable.has(r.session_id)) });
       }
-    }, READS);
+    }, readsThread((_p, q) => { const id = q.get('q') ? null : (q.get('sessionId') ?? q.get('thread_id')); return id ? { thread: id } : null; }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/history/runs/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
@@ -7839,14 +7892,14 @@ export class LynoxHTTPApi {
       const run = history.getRun(params['id']!);
       if (!run) { errorResponse(res, 404, 'Run not found'); return; }
       jsonResponse(res, 200, run);
-    }, READS));
+    }, readsThread((p) => ({ historyRun: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/history/runs/:id/tool-calls', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const toolCalls = history.getRunToolCalls(params['id']!);
       jsonResponse(res, 200, { toolCalls });
-    }, READS));
+    }, readsThread((p) => ({ historyRun: p['id'] ?? '' }))));
 
     this.addStatic('user', 'GET /api/history/stats', async (_req, res) => {
       const history = engine.getRunHistory();
@@ -12446,8 +12499,10 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const threadInsights = rh.getThreadAggregates(limit);
-      jsonResponse(res, 200, { threadInsights });
-    }, READS);
+      // The title of another person's contained chat is left out (register 1112).
+      const unreadable = this._unreadableChats(this._principalOf(req), threadInsights.map((t) => t.sessionId));
+      jsonResponse(res, 200, { threadInsights: threadInsights.map((t) => unreadable.has(t.sessionId) ? { ...t, title: '' } : t) });
+    }, readsThread(() => null));
 
     this.addStatic('user', 'GET /api/metrics', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
