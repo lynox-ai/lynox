@@ -423,8 +423,9 @@ export function isGraphqlEndpoint(url: string): boolean {
   }
   if (parsed.hostname.toLowerCase().split('.').some((label) => label.startsWith('graphql'))) return true;
   // WPGraphQL answers on any path that carries the query key `graphql` (`/?graphql`,
-  // `/index.php?graphql`), with or without a value; PHP reads `graphql[]` as the same key.
-  if (urlQueryStrings(url).some((search) => [...new URLSearchParams(search).keys()].some((key) => key.toLowerCase().replace(/\[.*$/, '') === 'graphql'))) return true;
+  // `/index.php?graphql`), with or without a value; PHP reads `graphql[]` and ` graphql` (leading
+  // spaces dropped) as the same key.
+  if (urlQueryStrings(url).some((search) => [...new URLSearchParams(search).keys()].some((key) => key.trimStart().toLowerCase().replace(/\[.*$/, '') === 'graphql'))) return true;
   const { path, ambiguous } = normalizeWritePath(parsed.pathname);
   // A path whose routing is not known here (a double encoding, an escape that does not decode,
   // a character a router may strip) is read every way a server may decode it, and any reading
@@ -436,9 +437,10 @@ export function isGraphqlEndpoint(url: string): boolean {
 }
 
 /**
- * The query strings a server may read from a URL: its own, and the rest after a `?` that a
+ * The query strings a server may read from a URL: its own, and the rest after each `?` that a
  * reading of the path decodes (`/graphql%3Fquery=…`), which a proxy that splits the URL again
- * hands on as a query string. Each without its `?`; a URL that does not parse gives none.
+ * hands on as a query string. Each without its `?`; a URL that does not parse gives none. The
+ * readings are taken only where an escape could decode to `?` (`%3F`, `%u003F`, or an encoded `%`).
  */
 export function urlQueryStrings(url: string): string[] {
   let parsed: URL;
@@ -448,9 +450,9 @@ export function urlQueryStrings(url: string): string[] {
     return [];
   }
   const out = [parsed.search.slice(1)];
-  for (const reading of [parsed.pathname, ...serverReadings(parsed.pathname)]) {
-    const at = reading.indexOf('?');
-    if (at !== -1) out.push(reading.slice(at + 1).split('#')[0]!);
+  if (!/%(?:3f|25|u003f)/i.test(parsed.pathname)) return out;
+  for (const reading of serverReadings(parsed.pathname)) {
+    for (let at = reading.indexOf('?'); at !== -1; at = reading.indexOf('?', at + 1)) out.push(reading.slice(at + 1).split('#')[0]!);
   }
   return out;
 }
@@ -520,7 +522,9 @@ export function jsonObjectNotGraphql(body: unknown): boolean {
   try {
     const parsed: unknown = JSON.parse(body);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
-    return ![...GRAPHQL_BODY_KEYS, 'id', 'documentId', 'doc_id', 'queryId'].some((key) => Object.hasOwn(parsed, key));
+    // Keys compared without case: some servers bind the body to their fields that way.
+    const named = new Set([...GRAPHQL_BODY_KEYS, 'id', 'documentId', 'doc_id', 'queryId'].map((key) => key.toLowerCase()));
+    return !Object.keys(parsed).some((key) => named.has(key.toLowerCase()));
   } catch {
     return false;
   }

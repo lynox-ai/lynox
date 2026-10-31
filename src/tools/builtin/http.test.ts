@@ -9464,7 +9464,7 @@ describe('write approvals for the write the question showed (270)', () => {
     });
 
     it.each([
-      ['/%u0067raphql'], ['/?graphql'], ['/?GraphQL=1'], ['/?graphql[]'], ['/index.php?graphql'], ['/%2567x?graphql'], ['/graphql.a.b'], ['/graphql.tar.gz'], ['/graphql..json'], ['/graphql.json.'], ['/graphql...'], ['/graphql%3Fquery=x'],
+      ['/%u0067raphql'], ['/?graphql'], ['/?GraphQL=1'], ['/?graphql[]'], ['/?+graphql'], ['/index.php%3Fgraphql'], ['/index.php?graphql'], ['/%2567x?graphql'], ['/graphql.a.b'], ['/graphql.tar.gz'], ['/graphql..json'], ['/graphql.json.'], ['/graphql...'], ['/graphql%3Fquery=x'],
     ])('reads %s as a GraphQL endpoint, so a write there it cannot read is refused and nothing is sent', async (path) => {
       const fetchMock = vi.fn().mockImplementation(async () => ok());
       vi.stubGlobal('fetch', fetchMock);
@@ -9566,6 +9566,23 @@ describe('write approvals for the write the question showed (270)', () => {
       await expect(visible({ url: 'https://h.example/graphql%3Fquery=x', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"query":"{ a }"}' }, agent)).resolves.toContain('is a GraphQL write with a query string');
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(prompt).not.toHaveBeenCalled();
+    });
+
+    it('reads the query after every decoded ?, not only the first', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: 'https://h.example/a%3Fb/graphql%3Fquery=mutation%7Bb%7D', method: 'GET' }, agent270().agent);
+      expect(out).toContain('carries a GraphQL mutation in its URL');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a body that names a GraphQL key in another case keeps the general refusal, not the file note', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: GQL, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"Query":"mutation{b}"}' }, agent270().agent);
+      expect(out).toContain('is a GraphQL request this check cannot read');
+      expect(out).not.toContain('file whose name contains graphql');
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('a JSON object that cannot be a GraphQL request, as a file write sends, gets its own refusal that tells the model to name the file to the user', async () => {
