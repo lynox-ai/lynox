@@ -24,17 +24,20 @@ const QUERY = `(?:[?#][^\\s'"]*?)?(?=[.,;:!)]*(?:[\\s'"]|$))`;
 /** A URL of any scheme: what stays is scheme, host and path. */
 const URL_PART = new RegExp(`\\b([a-z][a-z0-9+.-]*:\\/\\/)(?:[^\\s/?#'"@]*@)?([^\\s/?#'"]+)([^\\s?#'"]*?)${QUERY}`, 'gi');
 /**
- * A value the server quotes as it was entered — every check that repeats an endpoint puts it in
- * single quotes, and a tier slot's `api_base_url` may be any string, with no scheme and no dot:
- * whatever stands before its last `@`, and from its first `?` or `#`, is dropped.
+ * An endpoint the server quotes as it was entered. The managed provider check writes it after
+ * `api_base_url '`, `api_base_url to '`, `api_base_url; got '` or `routes to '`, and a tier slot's
+ * may be any string — no scheme, no dot, an apostrophe in the password. Bound to those four
+ * leads, not to every quote: a model id like `claude-x@20250101` must stay readable. The value
+ * ends at a quote before a space or punctuation; what stands between its scheme and its last `@`,
+ * and from its first `?` or `#`, is dropped.
  */
-const QUOTED = /'([^'\n]*)'/g;
+const ENDPOINT = /((?:api_base_url(?:; got| to)?|routes to) ')(.*?)(?='(?=[\s.,;:!)\u2014]|$))/g;
 
 /** The server's sentence as a toast may show it: no URL credentials, query or fragment, short. */
 export function shownReason(reason: string): string {
 	const masked = reason
 		.replace(URL_PART, (_m, scheme: string, host: string, path: string) => `${scheme}${host}${path}`)
-		.replace(QUOTED, (_m, value: string) => `'${value.replace(/^[^]*@/, '').replace(/[?#][^]*$/, '')}'`);
+		.replace(ENDPOINT, (_m, lead: string, value: string) => `${lead}${value.replace(/^([a-z][a-z0-9+.-]*:\/\/)?[^]*@/i, '$1').replace(/[?#][^]*$/, '')}`);
 	return masked.length > MAX_REASON ? `${masked.slice(0, MAX_REASON - 1)}…` : masked;
 }
 

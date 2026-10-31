@@ -70,10 +70,22 @@ describe('shownReason — what of the server\'s sentence a toast may show', () =
 	it('drops credentials and a query from a URL without a scheme, as a tier slot may hold one', () => {
 		expect(shownReason("tier_set slot 'fast' api_base_url 'u:pw@api.example.com/v1?key=abc' is not a curated endpoint."))
 			.toBe("tier_set slot 'fast' api_base_url 'api.example.com/v1' is not a curated endpoint.");
-		// No dot, no path, a slash in the password: the quotes bound the value, not a guess at the host.
-		for (const [entered, kept] of [['localhost:3000/v1?key=abc', 'localhost:3000/v1'], ['h.example.com?key=abc', 'h.example.com'], ['u:p/w@localhost/v1', 'localhost/v1'], ['u:pw@h#frag', 'h'], ['u:p@ss@h.example.com/v1', 'h.example.com/v1']]) {
+		// No dot, no path, a slash, an @ or an apostrophe in the password: the server's own words bound the value.
+		for (const [entered, kept] of [['localhost:3000/v1?key=abc', 'localhost:3000/v1'], ['h.example.com?key=abc', 'h.example.com'], ['u:p/w@localhost/v1', 'localhost/v1'], ['u:pw@h#frag', 'h'], ['u:p@ss@h.example.com/v1', 'h.example.com/v1'], ["https://u:p'w@evil.example/v1?k=1", 'https://evil.example/v1']]) {
 			expect(shownReason(`api_base_url '${entered}' does not belong to provider 'anthropic'.`)).toBe(`api_base_url '${kept}' does not belong to provider 'anthropic'.`);
 		}
+	});
+
+	it('cleans every lead the server quotes an endpoint after, and nothing else in quotes', () => {
+		expect(shownReason("Managed instance: provider 'openai' is only allowed with the curated Mistral preset api_base_url; got 'u:pw@h.example.com/v1?k=1'."))
+			.toBe("Managed instance: provider 'openai' is only allowed with the curated Mistral preset api_base_url; got 'h.example.com/v1'.");
+		expect(shownReason("Managed instance: cannot set api_base_url to 'localhost:3000/v1?key=abc' — only the curated endpoints are allowed."))
+			.toBe("Managed instance: cannot set api_base_url to 'localhost:3000/v1' — only the curated endpoints are allowed.");
+		expect(shownReason("Managed instance: tier_preset 'eu' slot 'fast' routes to 'u:pw@h#frag', which is not a curated endpoint"))
+			.toBe("Managed instance: tier_preset 'eu' slot 'fast' routes to 'h', which is not a curated endpoint");
+		// A model id and a slot name are not endpoints: an @ in them stays.
+		const model = "Managed instance: tier_set slot 'a@b' model 'claude-x@20250101' is not available on this instance (operator model blocklist).";
+		expect(shownReason(model)).toBe(model);
 	});
 
 	it('keeps the punctuation that ends the sentence after a query', () => {
