@@ -436,7 +436,7 @@ describe('applying an external run', () => {
       expect([s.items.get('/products/1')!['price'], s.items.get('/products/2')!['price']]).toEqual(['15.00', '15.00']);
       expect(targetErrors(runId)).toEqual(['secret']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, failed: 1 });
-      expect(done.summary).toContain('Applied 2, failed 1,');
+      expect(done.summary).toContain('2 applied, 1 failed,');
       const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
       expect(await bulkStatusTool.handler({ run_id: runId }, agent)).toContain('Applied 2, failed 1, conflicts 0, undone 0.');
       expect(s.requests.filter((r) => r.path.includes(LOOKS_LIKE_A_KEY))).toEqual([]);
@@ -1174,7 +1174,7 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
       for (const i of [1, 2, 3]) s.items.get(`/products/${String(i)}`)!['price'] = '15.00';
       const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
-      expect(out.summary).toContain('Applied 3 (3 already held the planned value and were sent nothing), failed 0');
+      expect(out.summary).toContain('3 applied (of which 3 already as planned), of');
       // Every target read, none written: the cap bounds the targets that receive the verb.
       expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
@@ -2314,7 +2314,7 @@ describe('a send without a clear answer is not sent again', () => {
       const runId = await unknownFirst(s, c);
       const second = await run(runId, c);
       expect(second.status).toBe('done');
-      expect(second.summary).toContain('Unclear 1: sent without a clear answer, not sent again.');
+      expect(second.summary).toContain('1 unclear: sent without a clear answer, not sent again.');
       expect(patches(s)).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
       expect(s.items.get('/products/0')!['price']).toBe('12.00');
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 4, failed: 0, failedOnce: 1, sentUnknown: 1 });
