@@ -128,6 +128,8 @@ describe('a question of a scheduled workflow run', () => {
     expect(msgs[0]!.content_json).toContain('Weekly offer');
     expect(msgs[1]!.content_json).toContain('Which list, A or B?');
     expect(msgs.map((m) => m.content_json).join('')).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+    // The thread's title is read too: by the thread list and the dictation glossary.
+    expect(h.threads.getThread(RUN_ID)?.title).toBe('Weekly offer');
     h.prompts.answerUser(id, 'A', OWNER_PRINCIPAL);
     await expect(answer).resolves.toBe('A');
   });
