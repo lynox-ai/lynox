@@ -27,6 +27,8 @@ export interface BulkRun {
 	/** Targets not written because an earlier send reached them without a clear answer; the
 	 *  engine does not send to them again. */
 	sentUnknown: number;
+	/** Written targets the store kept with markup lynox did not send. Optional: an older engine sends none. */
+	shopAddedMarkup?: number | undefined;
 	undone: number;
 	kind: 'apply' | 'undo';
 	atomic: boolean;

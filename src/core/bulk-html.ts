@@ -232,12 +232,19 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
  * item 6): an occurrence or a triple outside the allowlist and outside the value sent, or a link
  * to a domain the rule does not take. Checked against the value SENT, not the before-image: an
  * undo's before-image may already hold the shop's markup, and against it that would pass unmarked.
- * Only the tree the host serialised is read, the one a shopper's browser parses. Formatting,
+ * Only the tree the host serialised is read, the one a shopper's browser parses, and its end must
+ * be as closed as the value sent was (`endsClosed`). Formatting,
  * allowlisted additions and removals are not refused here; hidden characters are not either.
  * Like {@link checkMarkup}, it never throws: a value that cannot be read counts as added markup.
  */
 export function markupAddedByHost(input: { sent: string; back: string; storeHost: string; startDomains: readonly string[] }): MarkupCheckResult {
   try {
+    // A tag, comment or attribute value the host leaves open at the end falls away from the
+    // fragment's tree, so no tree check sees it; the theme's next `>` closes it, live. It counts
+    // as added where the value sent ended closed: an undo may send a before-image that did not.
+    if (!endsClosed(input.back) && endsClosed(input.sent)) {
+      return refused('not_canonical', 'The value read back leaves a tag, a comment, raw text or an element open at its end.');
+    }
     const got = checkTrees(parseHtmlFragment(input.sent), parseHtmlFragment(input.back), {
       before: input.sent, after: input.back, storeHost: input.storeHost, startDomains: input.startDomains,
     });

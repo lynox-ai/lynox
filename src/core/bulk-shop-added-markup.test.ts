@@ -120,6 +120,13 @@ describe('markupAddedByHost: what the host kept against what was sent', () => {
     expect(added('<p>Neu</p>', '<p>Neu <a href="/de/produkt">x</a></p>')).toBe(false);
   });
 
+  it('names a tag or attribute value the host left open at the end, which no tree shows', () => {
+    expect(added('<p>Neu</p>', '<p>Neu</p><img src=x onerror=alert(1) ')).toBe(true);
+    expect(added('<p>Neu</p>', '<p title="x')).toBe(true);
+    // A value sent open (an undo's before-image) and kept so is not the host's doing.
+    expect(added('<p>Neu</p><b title="x', '<p>Neu</p><b title="x')).toBe(false);
+  });
+
   it('counts a second copy of a script the run sent once', () => {
     expect(added(`<p>Neu</p>${SCRIPT}`, `<p>Neu</p>${SCRIPT}${SCRIPT}`)).toBe(true);
   });

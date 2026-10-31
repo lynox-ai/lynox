@@ -73,6 +73,16 @@ describe('the read-back check of a written description (PRD shopify-preset §21.
     expect(await w.write(P1, { absent: false, value: { title: 'T' } })).not.toHaveProperty('hostAddedMarkup');
   });
 
+  it('takes the link domains of the run it writes for, not of another', async () => {
+    const linked = { ...host, graphqlRead: async () => ({ kind: 'ok', value: { product: { id: P1, ...kept, descriptionHtml: '<p>Neu <a href="https://partner.example/">x</a></p>' } } }) } as unknown as ExternalClient;
+    const domains = (id: string): string[] => (id === 'run-1' ? ['partner.example'] : []);
+    const product = { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: domains };
+    const own = externalRunWriter(run(`http:${HOST}`, store), product, () => linked)!;
+    expect(await own.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } })).not.toHaveProperty('hostAddedMarkup');
+    const other = externalRunWriter({ ...run(`http:${HOST}`, store), id: 'run-2' }, product, () => linked)!;
+    expect(await other.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } })).toMatchObject({ hostAddedMarkup: true });
+  });
+
   it('checks no field on the image form', async () => {
     const w = externalRunWriter(run(`http:${HOST}`, store), { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_media_alt' as const }), startDomainsOf: () => [] }, () => host)!;
     expect(await w.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } })).not.toHaveProperty('hostAddedMarkup');

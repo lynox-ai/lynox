@@ -95,10 +95,10 @@
 			// A preview the owner approves is loaded whole: the approval covers every target, and
 			// each one the owner may take out has to be on the page to be taken out.
 			// So is a run whose rollback left targets: the sentence names the marked ones, and each
-			// has to be on the page to be seen. So is a run halted on markup its store added: the
-			// sentence points at the marked product below.
+			// has to be on the page to be seen. So is a run with a product its store kept with markup
+			// lynox did not send: the halt's sentence points at it, and the mark outlives that halt.
 			const approving = r.body.phase === 'previewed' && r.body.kind === 'apply';
-			const whole = approving || bulkRollbackIncomplete(r.body) || r.body.haltKey === 'markupAddedByShop';
+			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0;
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
 			if (whole && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }

@@ -208,7 +208,7 @@ describe('writing on a halted run', () => {
 describe('a run halted on markup its store added', () => {
 	it('marks exactly the product the store changed, past the first page, and offers writing on', async () => {
 		run = makeRun({
-			phase: 'writing', haltKey: 'markupAddedByShop', haltReason: 'engine English', applied: 8, probeConfirmed: true, total: 9,
+			phase: 'writing', haltKey: 'markupAddedByShop', haltReason: 'engine English', applied: 8, probeConfirmed: true, total: 9, shopAddedMarkup: 1,
 			changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 },
 		});
 		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
@@ -223,6 +223,19 @@ describe('a run halted on markup its store added', () => {
 		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop_before'));
 		expect(target.textContent).not.toContain('engine English');
 		expect(buttonByText(t('bulk.resume.write'))).toBeDefined();
+	});
+
+	it('still loads the marked product past the first page once another halt replaced the reason', async () => {
+		run = makeRun({
+			phase: 'writing', haltKey: 'unavailable', haltReason: 'engine English', applied: 8, probeConfirmed: true, total: 9, shopAddedMarkup: 1,
+			changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+		});
+		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false,
+			written: i < 8, ...(i === 7 ? { shopAddedMarkup: true as const } : {}),
+		}));
+		await render();
+		expect(target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')).toHaveLength(1);
 	});
 });
 
