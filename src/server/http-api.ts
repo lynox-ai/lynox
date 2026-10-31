@@ -7993,7 +7993,7 @@ export class LynoxHTTPApi {
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       // Names and step ids are the starting chat's words: another person's contained chat's runs
       // are left out (register 1118).
-      const unreadable = this._unreadableChats(this._principalOf(req), history.getPipelineOriginChats(days));
+      const unreadable = this._unreadableChats(this._principalOf(req), history.getPipelineOriginChats());
       const stats = history.getPipelineStepStats(days, [...unreadable]);
       jsonResponse(res, 200, { stats });
     }, readsThread(() => null));
@@ -8003,7 +8003,7 @@ export class LynoxHTTPApi {
       if (!requireService(res, history, 'History')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
-      const unreadable = this._unreadableChats(this._principalOf(req), history.getPipelineOriginChats(days));
+      const unreadable = this._unreadableChats(this._principalOf(req), history.getPipelineOriginChats());
       const stats = history.getPipelineCostStats(days, [...unreadable]);
       jsonResponse(res, 200, { stats });
     }, readsThread(() => null));

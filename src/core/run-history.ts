@@ -2983,11 +2983,15 @@ export class RunHistory {
     return analytics.getToolStats(this.db, contextId, days);
   }
 
-  /** The chats top-level workflow runs of the last `days` were started from (register 1118). */
-  getPipelineOriginChats(days: number): string[] {
+  /**
+   * The chats any top-level workflow run was started from (register 1118). Without a time window:
+   * a stats query reads its own `now`, and a run that crosses the window's edge between the two
+   * reads must still be in this list.
+   */
+  getPipelineOriginChats(): string[] {
     return (this.db.prepare(
-      "SELECT DISTINCT origin_thread_id AS id FROM pipeline_runs WHERE started_at >= datetime('now', ?) AND parent_run_id IS NULL AND origin_thread_id IS NOT NULL AND origin_thread_id != ''",
-    ).all(`-${days} days`) as Array<{ id: string }>).map((r) => r.id);
+      "SELECT DISTINCT origin_thread_id AS id FROM pipeline_runs WHERE parent_run_id IS NULL AND origin_thread_id IS NOT NULL AND origin_thread_id != ''",
+    ).all() as Array<{ id: string }>).map((r) => r.id);
   }
 
   getPipelineStepStats(days: number, hiddenChats: readonly string[] = []) {

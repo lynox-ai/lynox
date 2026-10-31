@@ -1482,7 +1482,7 @@ describe('RunHistory', () => {
       h.insertPipelineRun({ id: 'from-api', manifestName: 'Nightly', status: 'completed', manifestJson: '{}' });
       h.insertPipelineStepResult({ pipelineRunId: 'from-api', stepId: 'sync', status: 'completed', durationMs: 5 });
 
-      expect(h.getPipelineOriginChats(7).sort()).toEqual(['notes', 'shop']);
+      expect(h.getPipelineOriginChats().sort()).toEqual(['notes', 'shop']);
       const steps = (hidden?: string[]): string[] => h.getPipelineStepStats(7, hidden).map((s) => `${s.manifest_name}/${s.step_id}`).sort();
       const costs = (hidden?: string[]): string[] => h.getPipelineCostStats(7, hidden).map((s) => s.manifest_name).sort();
       expect(steps()).toEqual(['Nightly/sync', 'Refund Jane Roe/mail-jane', 'Weekly notes/collect']);
