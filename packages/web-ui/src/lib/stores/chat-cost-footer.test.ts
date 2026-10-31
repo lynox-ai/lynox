@@ -395,6 +395,12 @@ describe('formatApiCalls — the run\'s API calls in the footer', () => {
 		expect(line({ apiCalls: 1, apiCostUsd: 0 })).toBe('1 API call · $0');
 	});
 
+	it('only the API part asks for its own line on a narrow screen, so it is never swiped out of view', () => {
+		const parts = formatUsageMetaParts({ ...base, apiCalls: 4, apiCostUsd: 0.27, apiCostEstimated: true, apiCallsUnpriced: 1, model: 'claude-sonnet-5' }, true);
+		expect(parts.filter((p) => p.ownLineWhenNarrow).map((p) => p.text)).toEqual(['4 API calls · at least $0.27 estimated']);
+		expect(parts.length).toBeGreaterThan(1);
+	});
+
 	it('nothing for a run that sent none', () => {
 		expect(formatApiCalls(base)).toBeNull();
 		expect(formatApiCalls({ ...base, apiCalls: 0 })).toBeNull();

@@ -166,6 +166,9 @@ export function formatTurnTokens(u: UsageInfo): string {
 export interface UsageMetaPart {
 	text: string;
 	title?: string;
+	/** On a narrow screen the part gets a line of its own under the footer instead of a place in
+	 *  its swipeable row, where it could be cut off mid-amount (ux U-096). */
+	ownLineWhenNarrow?: true;
 }
 
 /**
@@ -204,7 +207,7 @@ export function formatUsageMetaParts(u: UsageInfo, includeCost: boolean): UsageM
 			}
 			: { text: formatCost(u.costUsd) });
 		const api = formatApiCalls(u);
-		if (api) parts.push(api);
+		if (api) parts.push({ ...api, ownLineWhenNarrow: true });
 	}
 	const cachePct = u.tokensIn > 0 ? Math.round((u.cacheRead / u.tokensIn) * 100) : 0;
 	if (cachePct > 0) parts.push({ text: `${cachePct}% cache` });
