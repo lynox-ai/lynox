@@ -177,6 +177,21 @@ describe('an answer that arrives at a closed question', () => {
 		await settle();
 		expect(store.getChatError()).toBeNull();
 	});
+
+	it('a message queued while another error stands leaves that error up', async () => {
+		const run = openRun(() => json({}));
+		void store.sendMessage('go');
+		await settle();
+		// The provider's error arrives as text in a run that goes on: the run is still streaming.
+		run.send('text', { text: '429 {"type":"error","error":{"message":"rate limited"}}' });
+		await settle();
+		const standing = store.getChatError();
+		expect(standing).not.toBeNull();
+		void store.sendMessage('again');
+		await settle();
+		expect(store.getMessages().at(-1)).toMatchObject({ role: 'user', content: 'again', queued: true });
+		expect(store.getChatError()).toBe(standing);
+	});
 });
 
 describe('a stop whose request fails', () => {
