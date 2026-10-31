@@ -20,7 +20,7 @@ const TURNS = ['tu', 'rns'].join('');
 interface Seen { session: string; task: string }
 const seen: Seen[] = [];
 const replies: Array<{ promptId: string; answer: string }> = [];
-const entries: Array<{ id: string; text: string }> = [];
+const entries: Array<{ id: string; text: string; sourceThreadId: string | null }> = [];
 let dir = '';
 let server: Server;
 let port = 0;
@@ -53,13 +53,21 @@ beforeAll(async () => {
           // The turn ends only after the runner answered, as the engine's ask_user does.
           const promptId = `p${seen.length}`;
           const answered = new Promise<void>((r) => waiting.set(promptId, r));
-          res.write(`event: prompt\ndata: ${JSON.stringify({ promptId, question: 'Welcher Ton?', options: ['herzlich', 'Nein, entscheide selbst'] })}\n\n`);
+          res.write(`event: prompt\ndata: ${JSON.stringify({ promptId, question: 'Soll ich mir das merken?', options: ['Ja', 'Nein', '\x00'] })}\n\n`);
           await answered;
         }
+        if (task.includes('PERM')) {
+          const promptId = `p${seen.length}`;
+          const answered = new Promise<void>((r) => waiting.set(promptId, r));
+          res.write(`event: prompt\ndata: ${JSON.stringify({ promptId, question: 'bash: ls', options: ['Allow', 'Deny', '\x00'] })}\n\n`);
+          await answered;
+        }
+        // An earlier case's run, still going, writes while this one runs.
+        if (task.includes('LATE')) entries.push({ id: `x${entries.length + 1}`, text: 'Fremder Eintrag', sourceThreadId: 'another-thread' });
         appendFileSync(sink, JSON.stringify({ ts: Date.now(), event: 'capture_eligible', thread: session }) + '\n');
         if (task.includes('MERK')) {
           const id = `e${entries.length + 1}`;
-          entries.push({ id, text: `Regel aus ${task.slice(0, 12)}` });
+          entries.push({ id, text: `Regel aus ${task.slice(0, 12)}`, sourceThreadId: session });
           appendFileSync(sink, JSON.stringify({ ts: Date.now(), event: 'remember_invoked', thread: session, outcome: 'active', source: 'model' }) + '\n');
         }
         res.end('event: done\ndata: {}\n\n');
@@ -67,6 +75,7 @@ beforeAll(async () => {
       }
       if (req.method === 'POST' && /\/reply$/.test(url.pathname)) {
         const b = await body(req);
+        if (String(b['answer']) === 'Deny') { res.statusCode = 409; res.end('{}'); return; }
         replies.push({ promptId: String(b['promptId']), answer: String(b['answer']) });
         waiting.get(String(b['promptId']))?.();
         res.end('{}');
@@ -105,7 +114,7 @@ describe('capture-fitness-runner', () => {
     const r = await runRunner({
       sourceFile: 'src.txt',
       shapes: [
-        { id: 'N9-multi', expect: 'silent', cases: [{ [TURNS]: ['Erster Zug ASK {N}', 'Zweiter Zug MERK {N}'] }] },
+        { id: 'N9-multi', expect: 'silent', cases: [{ [TURNS]: ['Erster Zug ASK {N}', 'Zweiter Zug MERK LATE {N}'] }] },
         { id: 'S9-single', expect: 'capture', cases: ['Einzug MERK {N}'] },
       ],
     }, out);
@@ -118,18 +127,28 @@ describe('capture-fitness-runner', () => {
     // the {N} placeholder was filled in every turn
     expect(seen.every((s) => !s.task.includes('{N}'))).toBe(true);
 
-    // the question got the option that asks for nothing more, not the first one
-    expect(replies).toEqual([{ promptId: 'p1', answer: 'Nein, entscheide selbst' }]);
+    // the question got free text, not an option: a "Nein" here would answer "don't remember"
+    expect(replies).toEqual([{ promptId: 'p1', answer: 'Entscheide selbst.' }]);
 
-    // the case's own new entry is listed, the earlier case's is not counted again
+    // the case's own new entry is listed; neither the earlier case's nor another thread's is
     const rows = (JSON.parse(readFileSync(out, 'utf8')) as { rows: Array<{ shape: string; ok: boolean; texts: string[]; answers: string[] }> }).rows;
     const m = rows.find((x) => x.shape === 'N9-multi')!;
     const s = rows.find((x) => x.shape === 'S9-single')!;
     expect(m.ok).toBe(false);
     expect(m.texts).toEqual([expect.stringMatching(/^active: Regel aus Zweiter/)]);
-    expect(m.answers).toEqual([expect.stringContaining('→ Nein, entscheide selbst')]);
+    expect(m.answers).toEqual([expect.stringContaining('→ Entscheide selbst.')]);
     expect(s.ok).toBe(true);
     expect(s.texts).toEqual([expect.stringMatching(/^active: Regel aus Einzug/)]);
     expect(r.stdout).toMatch(/active: Regel aus Zweiter/);
+    expect(r.stdout).not.toMatch(/Fremder Eintrag/);
+  }, 60_000);
+
+  it('answers a permission prompt with Deny and reports a refused reply as the case\'s error', async () => {
+    const out = join(dir, 'rows-perm.json');
+    const r = await runRunner({ sourceFile: 'src.txt', shapes: [{ id: 'N8-perm', expect: 'silent', cases: ['Zug PERM {N}'] }] }, out);
+    expect(r.code, r.stdout).toBe(0);
+    const rows = (JSON.parse(readFileSync(out, 'utf8')) as { rows: Array<{ error?: string }> }).rows;
+    // the fake refuses Deny with 409: the case says so instead of waiting for its timeout
+    expect(rows[0]!.error).toMatch(/^Error: reply to p\d+: HTTP 409/);
   }, 60_000);
 });

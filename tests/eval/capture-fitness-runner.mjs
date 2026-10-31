@@ -103,26 +103,26 @@ process.on('exit', () => { for (const f of [SOURCE, INJECTED]) { try { rmSync(f)
 const sinkPath = join(DATA_DIR, 'capture-telemetry.jsonl');
 const sinkLines = () => (existsSync(sinkPath) ? readFileSync(sinkPath, 'utf8').trim().split('\n').filter(Boolean) : []);
 
-/** Ids and texts of the active entries, newest first. */
+/** Ids, texts and source threads of the active entries (pinned first, then newest; at most 500). */
 async function activeEntries() {
   const r = await fetch(`${BASE}/api/knowledge/entries?limit=500`);
   if (!r.ok) throw new Error(`GET /api/knowledge/entries: ${r.status}`);
-  return (await r.json()).entries.map(e => ({ id: e.id, text: e.text }));
+  return (await r.json()).entries.map(e => ({ id: e.id, text: e.text, thread: e.sourceThreadId ?? null }));
 }
 
 /**
  * The answer the runner gives to a question the agent asks (`ask_user`). A model that asks
  * before it writes (Sonnet 5 does, on a bare briefing) waits a day for the answer, and the case
- * would end on the timeout instead of at its turn end. The runner picks the option that asks the
- * operator for nothing more, or else says "Entscheide selbst.", so no new content comes in;
- * the answer is kept with the row, because it is operator text the capture can read.
+ * would end on the timeout instead of at its turn end. The runner never picks an option: a label
+ * can carry a fact ("Ohne Glas"), and a "Nein" to "Soll ich mir das merken?" would turn a capture
+ * case into a MISS. It answers "Entscheide selbst." as free text (`ask_user` always accepts it).
+ * A tool-permission prompt (Allow/Deny) is answered "Deny", which is what any other answer means
+ * to the engine; the row says so. Every answer is kept with the row, because it is operator text
+ * the capture can read.
  */
-const NEUTRAL = /\b(nein|ohne|allgemein|selbst|weiter|egal|no|without|general)\b/i;
 function pickAnswer(options) {
-  const real = (options ?? []).filter(o => typeof o === 'string' && o.trim() !== '' && o !== '\u0000');
-  // Without such an option, no option: picking the first would hand the agent a product fact
-  // (a material, a colour) the operator never gave, and the capture could record it.
-  return real.find(o => NEUTRAL.test(o)) ?? 'Entscheide selbst.';
+  const real = (options ?? []).filter(o => typeof o === 'string');
+  return real.includes('Allow') && real.includes('Deny') ? 'Deny' : 'Entscheide selbst.';
 }
 
 /** Read one turn's SSE stream to its end, answering every question on the way. */
@@ -142,19 +142,15 @@ async function drainTurn(res, sessionId, answers) {
       const data = block.split('\n').filter(l => l.startsWith('data: ')).map(l => l.slice(6)).join('\n');
       let p;
       try { p = JSON.parse(data); } catch { continue; }
-      if (Array.isArray(p.questions)) {
-        await fetch(`${BASE}/api/sessions/${sessionId}/reply-tabs`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ promptId: p.promptId, answers: p.questions.map(() => '__dismissed__') }),
-        });
-        answers.push(`(tabs dismissed: ${p.questions.length})`);
-        continue;
-      }
+      // A batch `ask_user` arrives as one `prompt` per question: the runner does not send
+      // `protocol: 2`, so the engine never uses `prompt_tabs` with it.
       const answer = pickAnswer(p.options);
-      await fetch(`${BASE}/api/sessions/${sessionId}/reply`, {
+      const ack = await fetch(`${BASE}/api/sessions/${sessionId}/reply`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ promptId: p.promptId, answer }),
       });
+      // Unanswered, the turn would wait for the case timeout and report that instead.
+      if (!ack.ok) throw new Error(`reply to ${p.promptId}: HTTP ${ack.status}`);
       answers.push(`${String(p.question ?? '').slice(0, 120)} → ${answer}`);
     }
   }
@@ -173,13 +169,13 @@ async function runOne(turns) {
   // One deadline for the whole case, all turns together.
   const deadline = AbortSignal.timeout(CASE_MS);
   const answers = [];
-  for (const text of turns) {
+  for (const [n, text] of turns.entries()) {
     const res = await fetch(`${BASE}/api/sessions/${s.sessionId}/run`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ task: text }),
       signal: deadline,
     });
-    if (!res.ok) throw new Error(`turn ${turns.indexOf(text) + 1}: HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`turn ${n + 1}: HTTP ${res.status}`);
     // Drain the SSE stream so the turn completes (and its capture runs) before the next one.
     await drainTurn(res, s.sessionId, answers);
   }
@@ -197,7 +193,12 @@ async function runOne(turns) {
   const orphans = all.filter(e => e.event === 'remember_invoked' && !e.thread && e.ts >= started && e.ts <= ended);
   fresh.push(...orphans);
   const writes = fresh.filter(e => e.event === 'remember_invoked');
-  const created = (await activeEntries()).filter(e => !before.has(e.id)).map(e => `active: ${e.text}`);
+  // By thread too: an earlier case that timed out and still runs writes during this one, and its
+  // entry must not read as this case's text. An entry without a thread (a sub-agent's) stays,
+  // marked, like the orphan events above.
+  const created = (await activeEntries())
+    .filter(e => !before.has(e.id) && (e.thread === threadId || e.thread === null))
+    .map(e => `${e.thread === null ? 'active (no thread)' : 'active'}: ${e.text}`);
   const q = await fetch(`${BASE}/api/knowledge/queue?threadId=${threadId}`).then(r => (r.ok ? r.json() : { entries: [] }));
   for (const e of q.entries ?? []) created.push(`queued: ${e.text}`);
   return {
