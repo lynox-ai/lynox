@@ -1472,6 +1472,26 @@ describe('RunHistory', () => {
       h.close();
     });
 
+    // Register 1118: a workflow run's name and step ids are written by the chat that started it.
+    it('leaves out the runs started from the chats it is given, and only those, in both stats', () => {
+      const h = createHistory();
+      h.insertPipelineRun({ id: 'from-shop', manifestName: 'Refund Jane Roe', status: 'completed', manifestJson: '{}', originThreadId: 'shop' });
+      h.insertPipelineStepResult({ pipelineRunId: 'from-shop', stepId: 'mail-jane', status: 'completed', durationMs: 5 });
+      h.insertPipelineRun({ id: 'from-notes', manifestName: 'Weekly notes', status: 'completed', manifestJson: '{}', originThreadId: 'notes' });
+      h.insertPipelineStepResult({ pipelineRunId: 'from-notes', stepId: 'collect', status: 'completed', durationMs: 5 });
+      h.insertPipelineRun({ id: 'from-api', manifestName: 'Nightly', status: 'completed', manifestJson: '{}' });
+      h.insertPipelineStepResult({ pipelineRunId: 'from-api', stepId: 'sync', status: 'completed', durationMs: 5 });
+
+      expect(h.getPipelineOriginChats(7).sort()).toEqual(['notes', 'shop']);
+      const steps = (hidden?: string[]): string[] => h.getPipelineStepStats(7, hidden).map((s) => `${s.manifest_name}/${s.step_id}`).sort();
+      const costs = (hidden?: string[]): string[] => h.getPipelineCostStats(7, hidden).map((s) => s.manifest_name).sort();
+      expect(steps()).toEqual(['Nightly/sync', 'Refund Jane Roe/mail-jane', 'Weekly notes/collect']);
+      expect(steps(['shop'])).toEqual(['Nightly/sync', 'Weekly notes/collect']);
+      expect(costs()).toEqual(['Nightly', 'Refund Jane Roe', 'Weekly notes']);
+      expect(costs(['shop'])).toEqual(['Nightly', 'Weekly notes']);
+      h.close();
+    });
+
     it('getPipelineCostStats aggregates by manifest', () => {
       const h = createHistory();
       h.insertPipelineRun({ id: 'pc-1', manifestName: 'deploy', status: 'completed', manifestJson: '{}', totalCostUsd: 0.15 });

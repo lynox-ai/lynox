@@ -2983,12 +2983,19 @@ export class RunHistory {
     return analytics.getToolStats(this.db, contextId, days);
   }
 
-  getPipelineStepStats(days: number) {
-    return analytics.getPipelineStepStats(this.db, days);
+  /** The chats top-level workflow runs of the last `days` were started from (register 1118). */
+  getPipelineOriginChats(days: number): string[] {
+    return (this.db.prepare(
+      "SELECT DISTINCT origin_thread_id AS id FROM pipeline_runs WHERE started_at >= datetime('now', ?) AND parent_run_id IS NULL AND origin_thread_id IS NOT NULL AND origin_thread_id != ''",
+    ).all(`-${days} days`) as Array<{ id: string }>).map((r) => r.id);
   }
 
-  getPipelineCostStats(days: number) {
-    return analytics.getPipelineCostStats(this.db, days);
+  getPipelineStepStats(days: number, hiddenChats: readonly string[] = []) {
+    return analytics.getPipelineStepStats(this.db, days, hiddenChats);
+  }
+
+  getPipelineCostStats(days: number, hiddenChats: readonly string[] = []) {
+    return analytics.getPipelineCostStats(this.db, days, hiddenChats);
   }
 
   getAvgStepCostByModelTier(days: number) {
