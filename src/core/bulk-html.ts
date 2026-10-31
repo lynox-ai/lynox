@@ -250,7 +250,9 @@ export type MarkupRefusal =
   | 'url_scheme'
   | 'url_control_char'
   | 'hidden_char'
-  | 'not_canonical';
+  | 'not_canonical'
+  | 'markup_dropped'
+  | 'markup_dropped_before';
 
 export interface MarkupCheckInput {
   /** The field's before-image; null where the target has none. */
@@ -286,10 +288,14 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     // with a start tag that carries attributes is never held: the same bytes are inert where the
     // before-image has them (a `template`, a `select`) and land on the page's own element where the
     // after-state puts them, and the place is not compared. Held is only what can move layout.
+    // Where the before-image carries the same attributed stretch, planning again never helps: the
+    // owner has to remove it in the shop, and the refusal says so (`markup_dropped_before`).
     const held = counts(droppedTagsOf(before));
     for (const tag of droppedTagsOf(input.after)) {
-      const n = DROPPED_WITH_ATTRIBUTES.test(tag) ? 0 : held.get(tag) ?? 0;
-      if (n === 0) return refused('not_canonical', `The value carries a tag the page reads but this check cannot place: ${tag}`);
+      const n = held.get(tag) ?? 0;
+      const detail = `The value carries a tag the page reads but this check cannot place: ${tag}`;
+      if (DROPPED_WITH_ATTRIBUTES.test(tag)) return refused(n > 0 ? 'markup_dropped_before' : 'markup_dropped', detail);
+      if (n === 0) return refused('markup_dropped', detail);
       held.set(tag, n - 1);
     }
     // Each tree of the after-state against the before-image's tree of the same kind.

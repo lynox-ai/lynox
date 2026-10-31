@@ -885,6 +885,19 @@ describe('what the preview says about a target lynox leaves out', () => {
 		expect(bulkVisibleText(odd)).not.toBe(odd);
 		expect(bulkInvalidText(odd, true, true, own)).toBe(`skip (${bulkVisibleText(odd)})`);
 	});
+	it('words the HTML check\'s refusals of dropped tags on every run, with where to remove them (U-103)', () => {
+		const table: Record<string, string> = {
+			'bulk.invalid.markup_dropped': 'plan again', 'bulk.invalid.markup_dropped_before': 'remove them {where}',
+			'bulk.invalid.where_shopify': 'in Shopify', 'bulk.invalid.where_other': 'where you manage them', 'bulk.invalid.other': 'skip ({code})',
+		};
+		const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => (table[k] ?? k).replace(/\{(\w+)\}/g, (_, n: string) => v[n] ?? '') };
+		for (const shopify of [true, false]) {
+			expect(bulkInvalidText('markup_dropped', shopify, true, own)).toBe('plan again');
+		}
+		expect(bulkInvalidText('markup_dropped_before', true, true, own)).toBe('remove them in Shopify');
+		expect(bulkInvalidText('markup_dropped_before', false, true, own)).toBe('remove them where you manage them');
+		expect(i18nSource).toMatch(/'bulk\.invalid\.markup_dropped_before': \{ de: '[^']*\{where\}[^']*', en: "[^"]*\{where\}[^"]*" \}/);
+	});
 	it('adds the way to support on a managed instance only, and an unknown one reads as managed', () => {
 		expect(bulkInvalidText('read_failed', true, true, i18n)).toBe('bulk.invalid.read_failed bulk.invalid.persists_support');
 		expect(bulkInvalidText('read_failed', true, null, i18n)).toBe('bulk.invalid.read_failed bulk.invalid.persists_support');
