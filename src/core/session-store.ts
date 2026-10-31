@@ -81,7 +81,8 @@ async function generateThreadSummary(
 ): Promise<void> {
   try {
     // A summary without tools, in a session of its own: built for the owner, as it always was,
-    // and named rather than left to the library's default (register 735).
+    // and named rather than left to the library's default (register 735). Its thread row now
+    // records `created_by = 'owner'` where it recorded nothing; every reader treats the two alike.
     const summarySession = engine.createSession({ model: 'fast', principal: OWNER_PRINCIPAL });
     const formatted = formatMessagesForSummary(messages.slice(0, -RECENT_COUNT));
     const prompt = `Summarize this conversation concisely in 3-5 paragraphs. Focus on: what was discussed, decisions made, current state of work, and any pending items.\n\n${formatted.slice(0, 30_000)}`;
