@@ -10,15 +10,22 @@ import { fileURLToPath } from 'node:url';
  * sends it (the SearXNG saves live in `stores/integrations/search.svelte.ts`). A new settings page
  * that copies a save without the branch would hand a mandate fields whose save is always refused.
  */
-const ROOT = fileURLToPath(new URL('..', import.meta.url));
+// `src`, not only `src/lib`: a route page that saves the config counts too.
+const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 /**
  * Pages that save through `PUT /api/config` and need no branch, each with its reason. Nothing else
  * belongs here.
  */
 const EXEMPT: Record<string, string> = {
-	'SetupBanner.svelte': 'A mandate never sees it: its GET /api/secrets/status is owner-only and answers 403, so the banner stays hidden.',
 	'BulkRunsSetting.svelte': 'Its page leaves it out for a mandate (bulk runs are the owner\'s switch); the mandate is told the owner turns it on.',
+};
+/**
+ * Pages a mandate does not see at all, hidden by themselves: they must ask whose session it is,
+ * but show no notice. The setup banner is for setting up a provider, which is the owner's.
+ */
+const HIDDEN: Record<string, string> = {
+	'SetupBanner.svelte': 'Setting up the provider is the owner\'s; GET /api/secrets/status answers a mandate too, so the banner asks.',
 };
 
 /** Whether `src` has a fetch whose URL names `/config` and whose options say PUT, in any form. */
@@ -55,7 +62,9 @@ function scan(files: Map<string, string>): { pages: string[]; missing: string[] 
 		if (!path.endsWith('.svelte')) continue;
 		if (!putsConfig(src) && !stores.some((store) => importsModule(src, store))) continue;
 		pages.push(path);
-		if (!(basename(path) in EXEMPT) && !hasBranch(src)) missing.push(path);
+		const name = basename(path);
+		if (name in EXEMPT) continue;
+		if (name in HIDDEN ? !src.includes('isMandateSession(') : !hasBranch(src)) missing.push(path);
 	}
 	return { pages, missing };
 }
@@ -73,9 +82,13 @@ describe('every settings page that saves through PUT /api/config has a read-only
 	const { pages, missing } = scan(sources(ROOT));
 
 	it('finds no page without the branch', () => {
-		// The 14 pages counted when this landed (12 with the branch, 2 exempt); fewer means the scan went blind.
+		// The 14 pages counted when this landed (12 with the branch, 1 hidden, 1 exempt); fewer means the scan went blind.
 		expect(pages.length).toBeGreaterThanOrEqual(14);
 		expect(missing).toEqual([]);
+	});
+
+	it('scans the route pages, not only the library', () => {
+		expect([...sources(ROOT).keys()].some((p) => p.startsWith('routes/'))).toBe(true);
 	});
 
 	it('counts the page whose save lives in a store module', () => {
@@ -83,8 +96,9 @@ describe('every settings page that saves through PUT /api/config has a read-only
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
-		expect(Object.keys(EXEMPT).sort()).toEqual(['BulkRunsSetting.svelte', 'SetupBanner.svelte']);
-		for (const [name, reason] of Object.entries(EXEMPT)) {
+		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte']);
+		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte']);
+		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {
 			expect(pages.map((p) => basename(p))).toContain(name);
 			expect(reason.length).toBeGreaterThan(20);
 		}
@@ -103,11 +117,15 @@ describe('every settings page that saves through PUT /api/config has a read-only
 			['components/ThroughStoreBranched.svelte', `<script>import { save } from '../stores/integrations/thing.svelte.js';</script>${branch}`],
 			// A GET of /config is no save.
 			['components/ReadsOnly.svelte', "<script>const res = await fetch(`${getApiBase()}/config`);</script>"],
+			// A hidden page that does not ask whose session it is, and one that does.
 			['components/SetupBanner.svelte', `<script>${put}</script>`],
+			['hidden/SetupBanner.svelte', `<script>${put}</script>{#if !isMandateSession()}x{/if}`],
+			// A route page counts like a component.
+			['routes/app/x/+page.svelte', `<script>${put}</script>`],
 		]);
 		const result = scan(files);
-		expect(result.missing.sort()).toEqual(['components/Bare.svelte', 'components/NoticeOnly.svelte', 'components/ThroughStore.svelte']);
+		expect(result.missing.sort()).toEqual(['components/Bare.svelte', 'components/NoticeOnly.svelte', 'components/SetupBanner.svelte', 'components/ThroughStore.svelte', 'routes/app/x/+page.svelte']);
 		expect(result.pages).not.toContain('components/ReadsOnly.svelte');
-		expect(result.pages).toContain('components/SetupBanner.svelte');
+		expect(result.pages).toContain('hidden/SetupBanner.svelte');
 	});
 });

@@ -38,9 +38,9 @@
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { endpointText } from './settings-readonly/values.js';
 
-	// A mandate's session (ux U-104): the URL as text. The owner's card reads it from
-	// `/api/secrets/status`, which is the owner's and refuses a mandate, so it comes from
-	// `GET /api/config` here, together with whose session asks.
+	// A mandate's session (ux U-104): the URL as text, from the same source as the owner's card
+	// (`/api/secrets/status`, which a mandate may read and which also names a URL set only by the
+	// environment). `GET /api/config` says whose session asks; its own `searxng_url` is the fallback.
 	let configuredUrl = $state<string | null>(null);
 	async function loadSearchConfig(): Promise<void> {
 		try {
@@ -76,7 +76,7 @@
 				<p class="text-sm text-text-muted">{t('integrations.search_managed_hint')}</p>
 			</div>
 		{:else}
-			<ReadOnlyRows rows={[{ label: t('integrations.searxng_label'), value: endpointText(configuredUrl) }]} />
+			<ReadOnlyRows rows={[{ label: t('integrations.searxng_label'), value: endpointText(getSearxngConfiguredUrl() || configuredUrl) }]} />
 		{/if}
 	{:else if isManaged()}
 		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">

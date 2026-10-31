@@ -67,7 +67,14 @@
 			]);
 			if (!infoRes.ok || !configRes.ok) throw new Error(`HTTP ${infoRes.status} / ${configRes.status}`);
 			const infoBody = (await infoRes.json()) as VoiceInfo;
-			const body = (await configRes.json()) as Config;
+			let body: Config;
+			try {
+				body = (await configRes.json()) as Config;
+			} catch (e) {
+				// As before: the pickers still show when only the config body is unreadable.
+				info = infoBody;
+				throw e;
+			}
 			// Whose session asks, before `info` shows a section: a mandate never sees the pickers flash.
 			noteSettingsViewer(body);
 			info = infoBody;

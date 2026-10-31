@@ -352,11 +352,12 @@ describe('NotificationsSettings', () => {
 describe('SearchSettings', () => {
 	const load = () => import('./SearchSettings.svelte');
 	const routes = (viewer: Viewer) => ({
-		'/config': { managed: SELF_HOST, searxng_url: 'http://u:pw@searx.internal:8888/?token=abc', viewer },
-		// The owner's status read; a mandate's is refused.
+		// Set only by the environment: the config file has no URL, the status read names it.
+		'/config': { managed: SELF_HOST, viewer },
+		// A mandate may read the status too (`READS`), as the owner's card does.
 		'/secrets/status': viewer === 'owner'
 			? { configured: { search: false, api_key: true, searxng: false }, searxng_url: null }
-			: () => Response.json({ error: 'owner only' }, { status: 403 }),
+			: { configured: { search: false, api_key: true, searxng: true }, searxng_url: 'http://u:pw@searx.internal:8888/?token=abc' },
 	});
 
 	it('shows a mandate the SearXNG URL as text, without save, removal or check', async () => {
@@ -467,5 +468,29 @@ describe('endpointText — an endpoint the owner entered, as a mandate reads it'
 		expect(endpointText('u:p@ss@h.example.com/v1?k=1')).toBe('h.example.com/v1');
 		expect(endpointText('')).toBe(t('settings.value_not_set'));
 		expect(endpointText(null)).toBe(t('settings.value_not_set'));
+	});
+});
+
+describe('SetupBanner', () => {
+	const load = () => import('./SetupBanner.svelte');
+	// No key on this instance. A mandate may read the status (`READS`), so the banner has to ask
+	// whose session it is: setting up the provider is the owner's.
+	const routes = (viewer: Viewer) => ({
+		'/secrets/status': { provider: 'anthropic', managed: null, configured: { api_key: false } },
+		'/config': { managed: SELF_HOST, viewer },
+	});
+
+	it('shows a mandate no banner and no key wizard when no key is set', async () => {
+		await render(load, routes('mandate'));
+		expect(document.body.innerHTML).not.toContain('Claude (Anthropic)');
+		expect(target.textContent).not.toContain(t('banner.api_key_missing'));
+		expect(fields()).toBe(0);
+		expect(writes).toEqual([]);
+	});
+
+	it('opens the owner the key wizard when no key is set', async () => {
+		// Not dismissed before: the wizard opens straight away, at the provider choice.
+		await render(load, routes('owner'));
+		expect(document.body.innerHTML).toContain('Claude (Anthropic)');
 	});
 });
