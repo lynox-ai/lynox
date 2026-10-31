@@ -1418,6 +1418,7 @@ describe('WorkerLoop', () => {
           await vi.advanceTimersByTimeAsync(0);
           expect(session.run).not.toHaveBeenCalled();
           expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(false), 'failed');
+          expect(stderr.mock.calls.map((c) => String(c[0])).some((l) => l.includes('the private flag did not hold'))).toBe(true);
         } finally {
           stderr.mockRestore();
         }
@@ -1426,14 +1427,15 @@ describe('WorkerLoop', () => {
       it('on a provisioned instance without a containment store, does not run and names support', async () => {
         // No store reads as contained there (`threadIsContained`), and nothing can be copied.
         const { resumedRunNotContained } = await import('./worker-loop.js');
-        vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
-        const { engine, session, task, tm } = resumeFromContained(1, { noStore: true });
         const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
         try {
+          vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+          const { engine, session, task, tm } = resumeFromContained(1, { noStore: true });
           await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
           await vi.advanceTimersByTimeAsync(0);
           expect(session.run).not.toHaveBeenCalled();
           expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(true), 'failed');
+          expect(stderr.mock.calls.map((c) => String(c[0])).some((l) => l.includes('no containment store'))).toBe(true);
         } finally {
           stderr.mockRestore();
           vi.unstubAllEnvs();
