@@ -308,9 +308,6 @@ describe('on the filesystem', () => {
       // No command: none fixes it for the user, so the reason names the step (ux U-082).
       expect(precheckDataDir({ mode: 'rootful', host: ME, engine: ME, dataDir: join(root, '.lynox') }))
         .toEqual({ reason: `${join(root, '.lynox')} is a link or not a directory. Move it aside, then run this again.`, command: null });
-      // A non-interactive run chose the directory with --dir, so another one is a way out too.
-      expect(precheckDataDir({ mode: 'rootful', host: ME, engine: ME, dataDir: join(root, '.lynox'), dirFlag: true }))
-        .toEqual({ reason: `${join(root, '.lynox')} is a link or not a directory. Move it aside or pass another --dir, then run this again.`, command: null });
     });
 
     it('does not judge a rootless engine running as the image user (a subordinate id it does not compute)', () => {

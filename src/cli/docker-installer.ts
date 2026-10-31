@@ -1207,7 +1207,7 @@ export async function runDockerInstaller(args: readonly string[] = []): Promise<
           return;
         }
       } else {
-        const blocked = precheckDataDir({ mode: dockerMode, host: hostIds, engine: runAs.engine, dataDir, dirFlag: ni !== undefined });
+        const blocked = precheckDataDir({ mode: dockerMode, host: hostIds, engine: runAs.engine, dataDir });
         if (blocked) {
           refuse(blocked.reason, blocked.command);
           return;
