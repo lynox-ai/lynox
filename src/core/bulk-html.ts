@@ -50,10 +50,14 @@ function canonicalHtml(value: string): string {
  * A text node does not vouch for its whole range: the parser appends the characters after a dropped
  * tag to the text before it and moves the node's end over the tag. Outside an element whose content
  * the tokenizer reads as raw text, a `<` that opens a tag, an end tag or a declaration cannot be a
- * character of the text, so such a text node's whole source is reported as one stretch. Whole, not
- * the tag alone: a before-image then holds only the same text with the same tag, never a prefix
- * cut at a `>` inside a quoted value, nor a CDATA section of foreign content, which is inert text.
+ * character of the text, so such a text node's source from the first one to its last `>` is reported
+ * as one stretch. Not a match cut at the first `>`: a before-image then holds only the same tags with
+ * what lies between them, never a prefix cut at a `>` inside a quoted value, nor a CDATA section of
+ * foreign content, which is inert text. The text around them stays out, so editing it is no change.
  */
+/** A start tag in a dropped stretch whose name is followed by an attribute. */
+const DROPPED_WITH_ATTRIBUTES = /<[A-Za-z][^\s/>]*[\s/]+[^\s/>]/;
+
 /** Elements whose content the tokenizer reads as text, scripting on: a `<` there is a character. */
 const RAW_TEXT_PARENTS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext']);
 
@@ -78,7 +82,9 @@ export function droppedTagsOf(value: string): string[] {
         keep(at);
         if (at && node.nodeName === '#text' && !rawText) {
           const source = value.slice(at.startOffset, at.endOffset);
-          if (/<[A-Za-z/!?]/.test(source)) swallowed.push(source);
+          const first = source.search(/<[A-Za-z/!?]/);
+          const last = source.lastIndexOf('>');
+          if (first >= 0) swallowed.push(source.slice(first, last > first ? last + 1 : source.length));
         }
       }
     }
@@ -276,10 +282,13 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
       return refused('not_canonical', 'The value leaves a tag, a comment, raw text or an element open at its end.');
     }
     const before = input.before ?? '';
-    // What the fragment drops, a multiset against the before-image's own, byte for byte.
+    // What the fragment drops, a multiset against the before-image's own, byte for byte. A stretch
+    // with a start tag that carries attributes is never held: the same bytes are inert where the
+    // before-image has them (a `template`, a `select`) and land on the page's own element where the
+    // after-state puts them, and the place is not compared. Held is only what can move layout.
     const held = counts(droppedTagsOf(before));
     for (const tag of droppedTagsOf(input.after)) {
-      const n = held.get(tag) ?? 0;
+      const n = DROPPED_WITH_ATTRIBUTES.test(tag) ? 0 : held.get(tag) ?? 0;
       if (n === 0) return refused('not_canonical', `The value carries a tag the page reads but this check cannot place: ${tag}`);
       held.set(tag, n - 1);
     }
