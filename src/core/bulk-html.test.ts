@@ -355,6 +355,11 @@ describe('checkMarkup: tags the fragment drops', () => {
     ['</div><p>a</p>', '</div>'],
     ['<p>a</p></section><p>b</p>', '</section>'],
     ['<head><p>a</p>', '<head>'],
+    // Text on both sides: the parser joins it into one node whose range covers the tag.
+    ['<p>a<body class="x">b</p>', '<body class="x">'],
+    ['<p>a</div>b</p>', '</div>'],
+    ['<p>a</p> </div> <p>b</p>', '</div>'],
+    ['<p>a&amp;<html lang="x">b</p>', '<html lang="x">'],
   ] as const;
 
   it.each(dropped)('refuses %s, names the tag, and passes the same value without it', (after, tag) => {
@@ -381,7 +386,14 @@ describe('checkMarkup: tags the fragment drops', () => {
   });
 
   it('reads every dropped stretch, inside a template too', () => {
-    expect(droppedTagsOf('<p>a</span></p><template></div></template>')).toEqual(['</span>', '</div>']);
+    expect(droppedTagsOf('<p>a</span></p><template><p>b</p></div></template>')).toEqual(['</span>', '</div>']);
+    expect(droppedTagsOf('<svg><desc>a</div>b</desc></svg>')).toEqual(['</div>']);
+  });
+
+  it('reads a < in raw text as a character, and one in ordinary text that opens nothing as text', () => {
+    for (const v of ['<style>a</div>b</style>', '<textarea>a<body>b</textarea>', '<p>a < b and 1<2</p>']) {
+      expect(droppedTagsOf(v), v).toEqual([]);
+    }
   });
 });
 

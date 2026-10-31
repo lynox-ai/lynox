@@ -46,7 +46,15 @@ function canonicalHtml(value: string): string {
  * element of that name; it drops an end tag that closes nothing in the fragment, while in the page
  * it closes the theme's element around the value. Neither the tree, the canonical form nor
  * `endsClosed` sees them, so they are read off the source.
+ *
+ * A text node does not vouch for its whole range: the parser appends the characters after a dropped
+ * tag to the text before it and moves the node's end over the tag. Outside an element whose content
+ * the tokenizer reads as raw text, a `<` that opens a tag, an end tag or a declaration cannot be a
+ * character of the text, so each one inside a text node's range is reported up to its `>`.
  */
+/** Elements whose content the tokenizer reads as text, scripting on: a `<` there is a character. */
+const RAW_TEXT_PARENTS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext']);
+
 export function droppedTagsOf(value: string): string[] {
   const div = defaultTreeAdapter.createElement('div', p5.NS.HTML, []);
   const tree = parseFragment(div, value, { scriptingEnabled: true, sourceCodeLocationInfo: true });
@@ -54,20 +62,26 @@ export function droppedTagsOf(value: string): string[] {
   const keep = (at: { startOffset: number; endOffset: number } | null | undefined): void => {
     if (at) kept.fill(1, at.startOffset, at.endOffset);
   };
-  const visit = (parent: { childNodes?: Node[] }): void => {
+  const swallowed: string[] = [];
+  const visit = (parent: { childNodes?: Node[] }, rawText: boolean): void => {
     for (const node of parent.childNodes ?? []) {
       if (isElement(node)) {
         keep(node.sourceCodeLocation?.startTag);
         keep(node.sourceCodeLocation?.endTag);
-        if (node.tagName === 'template') visit(defaultTreeAdapter.getTemplateContent(node as DefaultTreeAdapterTypes.Template));
-        visit(node);
+        const raw = node.namespaceURI === p5.NS.HTML && RAW_TEXT_PARENTS.has(node.tagName);
+        if (node.tagName === 'template') visit(defaultTreeAdapter.getTemplateContent(node as DefaultTreeAdapterTypes.Template), false);
+        visit(node, raw);
       } else {
-        keep(node.sourceCodeLocation);
+        const at = node.sourceCodeLocation;
+        keep(at);
+        if (at && node.nodeName === '#text' && !rawText) {
+          for (const m of value.slice(at.startOffset, at.endOffset).matchAll(/<[A-Za-z/!?][^>]*>?/g)) swallowed.push(m[0]);
+        }
       }
     }
   };
-  visit(tree);
-  const dropped: string[] = [];
+  visit(tree, false);
+  const dropped: string[] = [...swallowed];
   let from = -1;
   for (let i = 0; i <= value.length; i++) {
     if (i < value.length && kept[i] === 0) {
