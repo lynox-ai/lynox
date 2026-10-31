@@ -50,6 +50,8 @@ describe('escalateToUser (the Agent→User escalation primitive, Slice B3)', () 
     expect(seeded).toContain('✗ Report');
     expect(seeded).toContain('Your scheduled workflow');
     expect(seeded).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+    // The thread's title is read too: by the thread list and the dictation glossary.
+    expect(store.getThread('escalation-task-h')?.title).toBe('✗ Report');
   });
 
   it('opens an unread thread keyed by source, seeds the context, and pushes the threadId as a wakeup', () => {
