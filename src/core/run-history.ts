@@ -3018,12 +3018,23 @@ export class RunHistory {
     return analytics.getToolStats(this.db, contextId, days);
   }
 
-  getPipelineStepStats(days: number) {
-    return analytics.getPipelineStepStats(this.db, days);
+  /**
+   * The chats any top-level workflow run was started from (register 1118). Without a time window:
+   * a stats query reads its own `now`, and a run that crosses the window's edge between the two
+   * reads must still be in this list.
+   */
+  getPipelineOriginChats(): string[] {
+    return (this.db.prepare(
+      "SELECT DISTINCT origin_thread_id AS id FROM pipeline_runs WHERE parent_run_id IS NULL AND origin_thread_id IS NOT NULL AND origin_thread_id != ''",
+    ).all() as Array<{ id: string }>).map((r) => r.id);
   }
 
-  getPipelineCostStats(days: number) {
-    return analytics.getPipelineCostStats(this.db, days);
+  getPipelineStepStats(days: number, hiddenChats: readonly string[] = []) {
+    return analytics.getPipelineStepStats(this.db, days, hiddenChats);
+  }
+
+  getPipelineCostStats(days: number, hiddenChats: readonly string[] = []) {
+    return analytics.getPipelineCostStats(this.db, days, hiddenChats);
   }
 
   getAvgStepCostByModelTier(days: number) {
