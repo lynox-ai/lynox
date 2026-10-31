@@ -3,6 +3,7 @@ import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t, tf } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
+import { containedReadKey, type ContainedReadKey } from '../utils/contained-read.js';
 import {
 	recordToolCall,
 	recordToolResult,
@@ -604,6 +605,9 @@ let changesetLoading = $state(false);
 let skipExtraction = $state(false);
 /** The open chat read data through a store connection (`contained` on the thread). */
 let threadContained = $state(false);
+/** The engine refused this reader the open chat or its live run (register 1112, ux U-091): the
+ *  text key the page shows instead of the history, or null. */
+let threadReadRefusal = $state<ContainedReadKey | null>(null);
 /** Set while `threadContained` comes only from a record the engine could not read
  *  (`contained_unknown`): the chat may never have read store data (`contained-text.ts`). */
 let threadContainedUnknown = $state<ContainedUnknown | null>(null);
@@ -889,6 +893,9 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		return;
 	}
 
+	// The reason for a refused chat or run is about what came before: the reader's own message
+	// starts what follows, so it goes (register 1112).
+	threadReadRefusal = null;
 	await _executeRun(task, files, displayText, runOptions);
 }
 
@@ -3262,6 +3269,9 @@ export function getThreadContained() {
 export function getThreadContainedUnknown(): ContainedUnknown | null {
 	return threadContainedUnknown;
 }
+export function getThreadReadRefusal(): ContainedReadKey | null {
+	return threadReadRefusal;
+}
 /**
  * Whether the open chat is contained now: a run may have contained it since it was opened (a
  * store request). Read from the thread itself, not the list, which holds only its first page.
@@ -3425,6 +3435,7 @@ export function newChat() {
 	skipExtraction = false;
 	threadContained = false;
 	threadContainedUnknown = null;
+	threadReadRefusal = null;
 	containedOrigin = null;
 	containedPrefillText = null;
 	chatError = null;
@@ -3610,6 +3621,9 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	} catch {
 		return; // network drop — nav poll still reflects the run; user can reload
 	}
+	// Refused (register 1112): the live part is not this reader's; say so, the transcript stays.
+	const refused = res.ok ? null : await containedReadKey(res);
+	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; return; }
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
@@ -3781,6 +3795,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	skipExtraction = false;
 	threadContained = false;
 	threadContainedUnknown = null;
+	threadReadRefusal = null;
 	containedOrigin = null;
 	containedPrefillText = null;
 	// Restore any pending send-queue for this thread (durable across reload).
@@ -3838,6 +3853,16 @@ export async function resumeThread(threadId: string): Promise<void> {
 			chatError = t('chat.error_thread_deleted');
 			return;
 		}
+		// Not this reader's chat to read (register 1112, ux U-091): the reason instead of the chat,
+		// no copy this page kept of it, and the next message starts a new chat.
+		const openRefused = res.status === 403 ? await containedReadKey(res) : null;
+		if (gen !== _resumeGeneration) return;
+		if (openRefused !== null) {
+			newChat();
+			dropPersistedThread(threadId);
+			threadReadRefusal = openRefused;
+			return;
+		}
 		if (!res.ok) {
 			// The server responded with an error status (not a dropped
 			// connection) — opening the conversation failed. Don't blame the
@@ -3878,6 +3903,15 @@ export async function resumeThread(threadId: string): Promise<void> {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
+		// Not this reader's to read: no history, the reason instead (register 1112). A copy this
+		// page kept from before is not shown either.
+		const refused = msgRes.ok ? null : await containedReadKey(msgRes);
+		if (gen !== _resumeGeneration) return;
+		if (refused !== null) {
+			threadReadRefusal = refused;
+			messages = [];
+			return;
+		}
 		if (msgRes.ok) {
 			// Server returns RenderedMessage[] — already shaped for the UI
 			// (tool_result carriers merged into preceding tool_use, safety

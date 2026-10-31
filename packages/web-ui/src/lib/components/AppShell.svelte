@@ -5,6 +5,7 @@
 	import { slide } from 'svelte/transition';
 	import { newChat, resumeThread, getSessionId, getSkipExtraction, getThreadContained, getThreadContainedUnknown, toggleSkipExtraction, compactNow, getIsCompacting } from '../stores/chat.svelte.js';
 	import { containedTextKeys, readContainedUnknown } from '../stores/contained-text.js';
+	import { containedReadKey } from '../utils/contained-read.js';
 	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh, startActiveRunsPoll, getRunStatus, markThreadRead } from '../stores/threads.svelte.js';
 	import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -209,7 +210,8 @@
 		try {
 			const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(threadId)}/messages?limit=10000`);
 			if (!res.ok) {
-				alert(t('threads.error_export'));
+				// A chat this reader may not read says why, in the page's language (register 1112).
+				alert(t((await containedReadKey(res)) ?? 'threads.error_export'));
 				return;
 			}
 			const data = (await res.json()) as { messages: Array<{ role: string; content?: unknown }> };
@@ -248,6 +250,12 @@
 			if (res.ok) {
 				const bundle: unknown = await res.json();
 				downloadBlob(JSON.stringify(bundle, null, 2), 'application/json', exportFilename(title, 'json'));
+				return;
+			}
+			// Refused, not missing: no fallback to the thin bundle, which the engine refuses too.
+			const refused = await containedReadKey(res);
+			if (refused !== null) {
+				alert(t(refused));
 				return;
 			}
 			// Fallback for an older engine without /debug-export (e.g. mid-rollout):

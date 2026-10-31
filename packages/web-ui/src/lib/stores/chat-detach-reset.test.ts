@@ -37,7 +37,7 @@ const THREAD_SCOPED = [
 	'messages', 'sessionId', 'isStreaming', 'streamingActivity',
 	'streamingToolName', 'streamingToolPhase', 'pendingPermission', 'pendingTabsPrompt',
 	'pendingSecretPrompt', 'pendingMailConnect', 'pendingChangeset', 'changesetLoading',
-	'skipExtraction', 'threadContained', 'threadContainedUnknown', 'chatError', 'runInterrupted', 'messageQueue', 'runStartedAt',
+	'skipExtraction', 'threadContained', 'threadContainedUnknown', 'threadReadRefusal', 'chatError', 'runInterrupted', 'messageQueue', 'runStartedAt',
 	'runPromptCount', 'contextBudget', 'compactionOffer', 'retryStatus',
 	// A count of what is waiting in the PREVIOUS conversation is exactly the wrong thing to
 	// leave on screen; `resumeThread` re-fetches it for the new one.
