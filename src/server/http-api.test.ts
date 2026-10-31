@@ -317,6 +317,12 @@ vi.mock('../core/engine.js', () => ({
       renamePlannedPipeline: mockHistoryRenamePlannedPipeline,
       deletePlannedPipeline: mockHistoryDeletePlannedPipeline,
       setWorkflowConfirmedAt: mockSetWorkflowConfirmedAt,
+      // Who set up a workflow: the owner, unless a test says otherwise. A mandate's schedule is
+      // refused on a workflow another mandate set up, and on one whose authorship cannot be read.
+      getWorkflowAuthorship: vi.fn().mockReturnValue({
+        createdBy: null, createdMandateId: null, createdAt: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null,
+        coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null, coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
+      }),
       getTask: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
@@ -1831,6 +1837,50 @@ describe('LynoxHTTPApi', () => {
         scheduleCron: '0 9 1 * *',
         pipelineParams: JSON.stringify({ month: '2026-06' }),
       }));
+    });
+
+    it('lets a mandate schedule only its own workflows and the owner\'s', async () => {
+      storeWf();
+      const ref = (api as unknown as { engine: { getRunHistory: () => Record<string, unknown> } }).engine;
+      const history = ref.getRunHistory();
+      type Resolver = Parameters<typeof api.setPrincipalResolverForTesting>[0];
+      const resolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+      let author: string | null | undefined = null;
+      const savedAuthorship = history['getWorkflowAuthorship'];
+      history['getWorkflowAuthorship'] = () => {
+        if (author === 'throws') throw new Error('engine.db closed');
+        return author === undefined ? undefined : {
+        createdBy: author, createdMandateId: author === null ? null : 'grant-x', createdAt: '2026-10-01 00:00:00',
+        mandateEditor: null, mandateEditorId: null, mandateEditedAt: null,
+        coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null, coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
+        };
+      };
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      const post = (): Promise<Response> => jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 1 * *', params: { month: '2026-06' } }) });
+      try {
+        author = 'mandate:jan@example.invalid';
+        const foreign = await post();
+        expect(foreign.status).toBe(403);
+        expect(((await foreign.json()) as { error: string }).error).toMatch(/^Not scheduled: this workflow holds steps another person with delegated access/);
+        author = undefined;
+        expect((await post()).status).toBe(403);
+        author = 'throws';
+        expect((await post()).status).toBe(403);
+        expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
+        author = 'mandate:eva@example.invalid';
+        expect((await post()).status).toBe(201);
+        author = null;
+        expect((await post()).status).toBe(201);
+        expect(mockTaskCreatePipeline).toHaveBeenCalledTimes(2);
+        // The owner schedules a workflow a mandate set up.
+        author = 'mandate:jan@example.invalid';
+        api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+        expect((await post()).status).toBe(201);
+        expect(mockTaskCreatePipeline).toHaveBeenCalledTimes(3);
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+        history['getWorkflowAuthorship'] = savedAuthorship;
+      }
     });
 
     it('rejects an invalid cron WITHOUT stamping the confirm (no spurious consent)', async () => {
@@ -19211,6 +19261,20 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         store.register({ ...store.get(PROFILE)!, oauth_grant: { connected_by: 'owner', account: { label: 'old@example.invalid', source: 'id-token' } } });
         expect((await complete(cookie)).status).toBe(200);
         expect(store.get(PROFILE)?.oauth_grant?.account).toBeUndefined();
+      });
+
+      // A deleted profile's slot stays lapsed through a new consent (register 685): the profile may
+      // still name it as its refresh slot, and a new consent must not hand it over.
+      it.each([
+        ['keeps', ['GONE_REFRESH_TOKEN']],
+        ['adds none', undefined],
+      ])('%s the lapsed slots of the profile it connects', async (_label, lapsed) => {
+        const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }) });
+        onBexio(store);
+        store.register({ ...store.get(PROFILE)!, oauth_grant: { connected_by: 'owner', ...(lapsed ? { lapsed_slots: lapsed } : {}) } });
+        expect((await complete(cookie)).status).toBe(200);
+        expect(store.get(PROFILE)?.oauth_grant?.state).toBe('connected');
+        expect(store.get(PROFILE)?.oauth_grant?.lapsed_slots).toEqual(lapsed);
       });
     });
 
