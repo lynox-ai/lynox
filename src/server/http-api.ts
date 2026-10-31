@@ -2660,9 +2660,9 @@ export class LynoxHTTPApi {
     const contained = containedThreads(engine?.getToolContext().containment ?? null, chats);
     const store = engine?.getThreadStore();
     const unreadable = new Set([...contained].filter((id) => !ownedBy(store?.getThread(id) ?? undefined, principal)));
-    // A run that names no chat (`session_id` empty: a sub-agent whose parent had no current
-    // thread, as in a workflow step) cannot be checked, so it is not read: fail-closed, at the
-    // price of a helper's own such runs. Its detail route answers 404 likewise.
+    // A run that names no chat (`session_id` empty: a batch or inbox run, or a sub-agent recorded
+    // before its run named the chat it ran for) cannot be checked, so it is not read: fail-closed.
+    // Its detail route answers 404 likewise.
     return new Set(ids.filter((id) => id === '' || unreadable.has(chatOf.get(id) ?? id)));
   }
 
