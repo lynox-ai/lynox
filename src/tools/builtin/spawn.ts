@@ -1729,9 +1729,6 @@ async function executeThinker(
     // refuses tool_use blocks naming disabled tools (in addition to the
     // tool list itself already being filtered above).
     excludeTools: [...parentAgent.getExcludedToolNames()],
-    // And the parent's principal, so the child runs under the same tool lock (PRD
-    // customer-granted-operator-access §3.13 E5) — again on top of the filtered list.
-    principal: parentAgent.principal,
     // The parent's review, as the writer view its own tools get: the child's writes are saved and
     // recorded in it, and a move under it is refused, as in the parent. Without a review there is
     // none here either.
@@ -1816,6 +1813,10 @@ async function executeThinker(
     // PARENT's scope below, and by carrying that same scope it makes its own children
     // land there too. Without it a grandchild is reachable by nothing.
     abortScope: parentAgent.abortScope,
+    // And the parent's principal, so the child runs under the same tool lock (PRD
+    // customer-granted-operator-access §3.13 E5) — again on top of the filtered list. After both
+    // spreads for the same reason as the scope: no key a source gains later can rebind it.
+    principal: parentAgent.principal,
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
     // onto the child and the child's downstream code (memory writes, tool-call
     // recording) can attribute work to this run.
