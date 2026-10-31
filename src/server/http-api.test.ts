@@ -35,7 +35,7 @@ import { mintBulkContract } from '../core/bulk-external.js';
 import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
-import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { WorkflowStore } from '../core/workflow-store.js';
 import { RunHistory } from '../core/run-history.js';
@@ -4436,14 +4436,71 @@ describe('LynoxHTTPApi', () => {
       });
     }
 
-    it('reply with an unknown promptId records only the question the legacy path answers', async () => {
+    it('reply with an unknown promptId answers 404 and leaves the session\'s open question alone', async () => {
+      repayRateWindow();
       await withStore(async (store, rows) => {
         api.setPrincipalResolverForTesting(() => EVA);
         const id = store.insertAskUser('s-unknown', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
         const res = await jsonFetch('/api/sessions/s-unknown/reply', { method: 'POST', body: JSON.stringify({ promptId: 'no-such-prompt', answer: 'B' }) });
-        expect(res.status).toBe(200);
-        expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
+        expect(res.status).toBe(404);
+        expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+        expect(answerRows(rows)).toEqual([]);
+      });
+    });
+
+    const OTHER_KINDS: Array<[label: string, ask: (store: import('../core/prompt-store.js').PromptStore, sid: string) => string]> = [
+      ['ask_secret', (s, sid) => s.insertAskSecret(sid, 'API_KEY', 'Paste the key', undefined, undefined, { principal: EVA })],
+      ['connect_mail', (s, sid) => s.insertConnectMail(sid, 'Connect the office mailbox?', '{}', undefined, { principal: EVA })],
+      ['tabs', (s, sid) => s.insertAskUserTabs(sid, [{ question: 'Which list?' }], undefined, { principal: EVA })],
+    ];
+    for (const [label, ask] of OTHER_KINDS) {
+      it(`reply naming a ${label} question answers 409 and stores no text on it`, async () => {
+        repayRateWindow();
+        await withStore(async (store, rows) => {
+          api.setPrincipalResolverForTesting(() => EVA);
+          const id = ask(store, `s-kind-${label}`);
+          const res = await jsonFetch(`/api/sessions/s-kind-${label}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'B' }) });
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { error: string }).error).toBe('Prompt is a different kind of question');
+          expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+          expect(store.getById(id)?.answer ?? null).toBeNull();
+          expect(answerRows(rows)).toEqual([]);
+        });
+      });
+    }
+
+    it('reply naming a question whose time ran out before the sweep answers 410, and answers nothing else', async () => {
+      repayRateWindow();
+      await withStore(async (store, rows) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const id = store.insertAskUser('s-late', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
+        // Past its time, not yet marked: the row still reads `pending`.
+        (store as unknown as { db: import('better-sqlite3').Database }).db.prepare(`UPDATE pending_prompts SET expires_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
+        expect(store.getById(id)?.status).toBe('pending');
+        const res = await jsonFetch('/api/sessions/s-late/reply', { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'B' }) });
+        expect(res.status).toBe(410);
+        expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
         expect(answerRows(rows)).toEqual([{ target: `prompt:${id}`, phase: 'attempt' }]);
+      });
+    });
+
+    it('reply naming a question another answer settled first does not answer the session\'s newer question', async () => {
+      repayRateWindow();
+      await withStore(async (store, rows) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const first = store.insertAskUser('s-race', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
+        // The route read `first` while it was open; before it stored the answer, another answer
+        // settled `first` and the run asked a newer question.
+        const seen = store.getById(first)!;
+        expect(store.answerUser(first, 'A', EVA)).toBe(true);
+        const newer = store.insertAskUser('s-race', 'Which month?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
+        const getById = store.getById.bind(store);
+        store.getById = (pid: string) => (pid === first ? seen : getById(pid));
+        const res = await jsonFetch('/api/sessions/s-race/reply', { method: 'POST', body: JSON.stringify({ promptId: first, answer: 'B' }) });
+        expect(res.status).toBe(410);
+        expect(by(store, newer)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+        expect(getById(first)?.answer).toBe('A');
+        expect(answerRows(rows)).toEqual([{ target: `prompt:${first}`, phase: 'attempt' }]);
       });
     });
 
@@ -9701,6 +9758,14 @@ describe('LynoxHTTPApi', () => {
       expect(mockTaskSetEnabled).not.toHaveBeenCalled();
       // The switch alone still answers as before.
       expect((await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ enabled: false }) })).status).toBe(200);
+    });
+
+    it('PATCH answers 400 for a due date that is not YYYY-MM-DD, as POST does', async () => {
+      repayRateWindow();
+      mockTaskUpdate.mockImplementationOnce(() => { throw new InvalidDueDateError('2026-1x-01'); });
+      const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ dueDate: '2026-1x-01' }) });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe(new InvalidDueDateError('2026-1x-01').message);
     });
 
     it('PATCH returns 404 for unknown task', async () => {

@@ -133,7 +133,7 @@ import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
-import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -2660,9 +2660,9 @@ export class LynoxHTTPApi {
     const contained = containedThreads(engine?.getToolContext().containment ?? null, chats);
     const store = engine?.getThreadStore();
     const unreadable = new Set([...contained].filter((id) => !ownedBy(store?.getThread(id) ?? undefined, principal)));
-    // A run that names no chat (`session_id` empty: a sub-agent whose parent had no current
-    // thread, as in a workflow step) cannot be checked, so it is not read: fail-closed, at the
-    // price of a helper's own such runs. Its detail route answers 404 likewise.
+    // A run that names no chat (`session_id` empty: a batch or inbox run, or a sub-agent recorded
+    // before its run named the chat it ran for) cannot be checked, so it is not read: fail-closed.
+    // Its detail route answers 404 likewise.
     return new Set(ids.filter((id) => id === '' || unreadable.has(chatOf.get(id) ?? id)));
   }
 
@@ -2677,8 +2677,9 @@ export class LynoxHTTPApi {
 
   /**
    * E2 (§3.13): a mandate answers only a question its own run asked. Every question the route
-   * could answer is checked — the one named by id and the one pending on the session, which the
-   * route falls back to — so no fallback reaches a question the check did not see. The question
+   * could answer is checked — the one named by id and the one pending on the session, which a
+   * body without an id answers — so no request reaches a question the check did not see. Both are
+   * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
    * answers its own 404.
@@ -5597,24 +5598,28 @@ export class LynoxHTTPApi {
       // Who answers, from the request: recorded beside the answer.
       const by = this._principalOf(_req);
 
-      // Idempotency: if the client retries with the same promptId after a
-      // successful answer (network blip), return 200 so the client can move
-      // on instead of seeing 404 and wedging. Stale/unknown promptId → 404;
-      // expired → 410. Cross-session IDs → 409.
+      // A promptId names exactly one question, as at `_settleNamedPrompt`: only that question is
+      // answered, and one that is unknown, belongs to another session, is of another kind or is no
+      // longer open is reported as such — never replaced by whatever question the session has open
+      // now. Idempotency: a retry with the same promptId after a successful answer (network blip)
+      // gets 200, so the client can move on instead of wedging.
       if (promptId) {
         const existing = ps.getById(promptId);
-        if (existing) {
-          if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
-          if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
-          if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
-          // Only a question that exists gets a row: an unknown id falls through to the legacy path,
-          // which records the question it does answer.
-          if (!this._answerRecorded(_req, res, by, promptId)) return;
-          if (ps.answerUser(promptId, answer, by)) { jsonResponse(res, 200, { ok: true }); return; }
-        }
+        if (!existing) { errorResponse(res, 404, 'No pending prompt'); return; }
+        if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
+        if (existing.prompt_type !== 'ask_user' || existing.questions_json) { errorResponse(res, 409, 'Prompt is a different kind of question'); return; }
+        if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
+        if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
+        if (!this._answerRecorded(_req, res, by, promptId)) return;
+        // Pending, yet not answered: its time ran out before the sweep marked it. Nothing between
+        // the read above and this write yields, so another answer cannot settle it in between
+        // today; should that change, this still names only this question.
+        if (!ps.answerUser(promptId, answer, by)) { errorResponse(res, 410, 'Prompt expired'); return; }
+        jsonResponse(res, 200, { ok: true });
+        return;
       }
 
-      // Fallback for clients that didn't echo the promptId (legacy path).
+      // Only a body without a promptId answers the session's open question (legacy clients).
       const pending = ps.getPending(params['id']!);
       if (pending && pending.prompt_type === 'ask_user' && !pending.questions_json) {
         if (!this._answerRecorded(_req, res, by, pending.id)) return;
@@ -8782,7 +8787,7 @@ export class LynoxHTTPApi {
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
-        if (err instanceof TriggerTierUnsupportedError) { errorResponse(res, 400, err.message); return; }
+        if (err instanceof TriggerTierUnsupportedError || err instanceof InvalidDueDateError) { errorResponse(res, 400, err.message); return; }
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
