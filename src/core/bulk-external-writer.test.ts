@@ -83,6 +83,34 @@ describe('the read-back check of a written description (PRD shopify-preset §21.
     expect(await other.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } })).toMatchObject({ hostAddedMarkup: true });
   });
 
+  it('counts a read-back stored otherwise than sent, within what the run may write, and leaves one kept byte for byte unmarked', async () => {
+    const product = { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] };
+    const backing = (descriptionHtml: string): ExternalClient =>
+      ({ ...host, graphqlRead: async () => ({ kind: 'ok', value: { product: { id: P1, ...kept, descriptionHtml } } }) }) as unknown as ExternalClient;
+    const reformatted = externalRunWriter(run(`http:${HOST}`, store), product, () => backing('<p>Neu<br></p>'))!;
+    const out = await reformatted.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu<br/></p>' } });
+    expect(out).toMatchObject({ result: 'written', hostRewrote: true });
+    expect(out).not.toHaveProperty('hostAddedMarkup');
+    const wrapped = externalRunWriter(run(`http:${HOST}`, store), product, () => backing('<p>Neu</p>'))!;
+    expect(await wrapped.write(P1, { absent: false, value: { descriptionHtml: 'Neu' } })).toMatchObject({ hostRewrote: true });
+    const same = externalRunWriter(run(`http:${HOST}`, store), product, () => backing('<p>Neu</p>'))!;
+    const kept1 = await same.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } });
+    expect(kept1).toMatchObject({ result: 'written' });
+    expect(kept1).not.toHaveProperty('hostRewrote');
+    // Markup the write never sent is the halt, never also the count.
+    const marked = await externalRunWriter(run(`http:${HOST}`, store), product, () => host)!.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } });
+    expect(marked).toMatchObject({ hostAddedMarkup: true });
+    expect(marked).not.toHaveProperty('hostRewrote');
+  });
+
+  it('counts nothing on a read-back that failed: the write is estimated', async () => {
+    const product = { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] };
+    const failing = { ...host, graphqlRead: async () => { throw new Error('down'); } } as unknown as ExternalClient;
+    const out = await externalRunWriter(run(`http:${HOST}`, store), product, () => failing)!.write(P1, { absent: false, value: { descriptionHtml: 'Neu' } });
+    expect(out).toMatchObject({ result: 'written', actual: { estimated: true } });
+    expect(out).not.toHaveProperty('hostRewrote');
+  });
+
   it('checks no field on the image form', async () => {
     const w = externalRunWriter(run(`http:${HOST}`, store), { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_media_alt' as const }), startDomainsOf: () => [] }, () => host)!;
     expect(await w.write(P1, { absent: false, value: { descriptionHtml: '<p>Neu</p>' } })).not.toHaveProperty('hostAddedMarkup');

@@ -23,7 +23,7 @@ import {
   isOfferedListSource, listPageUrl, listQueryParams, listReadContract, maxListPages, parseListSource, type BulkListSource,
 } from './bulk-list.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
-import { bulkWriterFor, runBulkEffect } from './bulk-apply.js';
+import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { shopifyBeforeImage, shopifyListPage, shopifyPairedAfter, shopifyTargetIo } from './bulk-shopify.js';
 import { shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
@@ -807,6 +807,83 @@ describe('applying a Shopify run', () => {
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.shopifyWriteOff);
     expect(s.requests).toEqual([]);
     expect(s.products.get(10)!['seo']).toEqual({ title: null, description: 'D1' });
+  });
+
+  /** A planned after-state as a ledger that changed after the preview would hold it: the plan
+   *  cannot set `descriptionHtml` yet, so the tests plant it in the row. */
+  const plant = (runId: string, key: string, extra: Record<string, unknown>): void => {
+    const db = engineDb.getDb();
+    const seq = ledger.getPreview(runId).find((t) => t.key === key)!.seq;
+    const row = db.prepare('SELECT after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { after_planned: string };
+    const after = { ...(JSON.parse(engineDb.dec(row.after_planned)) as Record<string, unknown>), ...extra };
+    db.prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND seq = ?').run(engineDb.enc(JSON.stringify(after)), runId, seq);
+  };
+
+  it('mints no write for a description that fails the markup check once more, and keeps the others (§21.2 item 3)', async () => {
+    fill(3);
+    const id = await previewed();
+    plant(id, gid(10), { descriptionHtml: '<p>x</p><script>steal()</script>' });
+    plant(id, gid(20), { descriptionHtml: '<p>y<br/></p>' });
+    const granted = ledger.shopifyApplyOf(id)!;
+    expect(granted.writes.map((w) => w.gid)).toEqual([gid(20), gid(30)]);
+    // Left out of the writes only: its read stays granted, so the apply reads it and halts on the refused request.
+    expect(granted.reads).toEqual([gid(10), gid(20), gid(30)]);
+  });
+
+  it('mints an undo\'s description only as its source\'s before-image, byte for byte', async () => {
+    fill(1);
+    const id = await previewed();
+    ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    await apply(id);
+    const undo = ledger.planUndo(id);
+    if (!undo.ok) throw new Error(undo.reason);
+    const db = engineDb.getDb();
+    // The source held a description with markup the rule would refuse as added: the undo restores it.
+    const held = '<p>1</p><script>theirs()</script>';
+    const src = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = 0').get(id) as { before: string };
+    const image = JSON.parse(engineDb.dec(src.before)) as { absent: false; value: Record<string, unknown> };
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = 0')
+      .run(engineDb.enc(JSON.stringify({ absent: false, value: { ...image.value, descriptionHtml: held } })), id);
+    plant(undo.status.id, gid(10), { descriptionHtml: held });
+    expect(ledger.shopifyApplyOf(undo.status.id)!.writes.map((w) => w.gid)).toEqual([gid(10)]);
+    // One character off the before-image is not the source's state: no write.
+    plant(undo.status.id, gid(10), { descriptionHtml: `${held} ` });
+    expect(ledger.shopifyApplyOf(undo.status.id)!.writes).toEqual([]);
+  });
+
+  it('finds a description the store reformatted as planned when resuming, and sends nothing to it (§21.2 item 5)', async () => {
+    fill(1);
+    const id = await previewed();
+    plant(id, gid(10), { descriptionHtml: '<p>Neu<br/></p>' });
+    // A dead loop's write: the store holds the planned seo pair and the description as Shopify keeps it.
+    s.products.set(10, { title: 'T1', descriptionHtml: '<p>Neu<br></p>', seo: { title: 'New title', description: 'D1' } });
+    ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    // The apply grant cannot name a description until the field opens, so the store is read
+    // here by a writer of its own; what is under test is the comparison in the apply loop.
+    const sent: string[] = [];
+    const reader: TargetWriter = {
+      readsBack: true,
+      async read(key, fields) {
+        const p = s.products.get(Number(key.slice(key.lastIndexOf('/') + 1)));
+        if (p === undefined || fields === null) return 'foreign';
+        const seo = p['seo'] as { title: unknown; description: unknown };
+        const all: Record<string, unknown> = { title: p['title'], descriptionHtml: p['descriptionHtml'], seo_title: seo.title, seo_description: seo.description };
+        return { absent: false, value: Object.fromEntries(fields.map((f) => [f, all[f] ?? null])) };
+      },
+      async write(key) { sent.push(key); return 'written'; },
+    };
+    await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => reader });
+    expect(sent).toEqual([]);
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0 });
+  });
+
+  it('compares a product run\'s descriptions as HTML, and nothing on a run of another form', async () => {
+    fill(1);
+    const id = await previewed();
+    expect(ledger.comparedAsHtml(id)).toContain('descriptionHtml');
+    const db = engineDb.getDb();
+    db.prepare(`INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total, targets_applied) VALUES ('woo', 'x', 'http:shop.example.com', 'restorable', 'done', 0, 0)`).run();
+    expect(ledger.comparedAsHtml('woo')).toEqual([]);
   });
 
   it('takes back what it wrote, both seo fields, beyond one target and with the switch off', async () => {

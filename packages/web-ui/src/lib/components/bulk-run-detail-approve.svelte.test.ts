@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // The approval of a preview: the owner sees every target, why lynox leaves one out, can take one
@@ -235,6 +235,47 @@ describe('a run halted on markup its store added', () => {
 			written: i < 8, ...(i === 7 ? { shopAddedMarkup: true as const } : {}),
 		}));
 		await render();
+		expect(target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')).toHaveLength(1);
+	});
+});
+
+// A run whose store kept descriptions otherwise than sent, without outside markup: counted and
+// named, not halted — one line on the run, a neutral mark on each product, wherever it sits.
+describe('a run whose store kept descriptions otherwise than sent', () => {
+	const rewritten = (marked: number[], extra: Partial<BulkTarget> = {}): void => {
+		run = makeRun({
+			phase: 'done', applied: 9, probeConfirmed: true, total: 9, hostRewrote: marked.length,
+			changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+		});
+		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false,
+			written: true, ...(marked.includes(i + 1) ? { hostRewrote: true as const, ...extra } : {}),
+		}));
+	};
+	const markedKeys = (): string[] => [...target.querySelectorAll('[data-testid="bulk-host-rewrote"]')]
+		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+
+	it('names one product in the singular, and marks it past the first page', async () => {
+		rewritten([8]);
+		await render();
+		expect(target.querySelector('[data-testid="bulk-host-rewrote-count"]')?.textContent).toBe(t('bulk.run.host_rewrote_one'));
+		expect(markedKeys()).toEqual(['gid://shopify/Product/8']);
+	});
+
+	it('names three products with their number, and marks each', async () => {
+		rewritten([2, 5, 9]);
+		await render();
+		expect(target.querySelector('[data-testid="bulk-host-rewrote-count"]')?.textContent).toBe(tf('bulk.run.host_rewrote', { n: '3' }));
+		expect(markedKeys()).toEqual(['gid://shopify/Product/2', 'gid://shopify/Product/5', 'gid://shopify/Product/9']);
+	});
+
+	it('shows no line on a run with none, and only the red mark on a product the store added markup to', async () => {
+		rewritten([]);
+		await render();
+		expect(target.querySelector('[data-testid="bulk-host-rewrote-count"]')).toBeNull();
+		rewritten([3], { shopAddedMarkup: true });
+		await render();
+		expect(target.querySelectorAll('[data-testid="bulk-host-rewrote"]')).toHaveLength(0);
 		expect(target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')).toHaveLength(1);
 	});
 });

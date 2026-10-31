@@ -24,7 +24,7 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, prin
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
-import { htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
+import { checkMarkup, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { htmlEqual } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
@@ -201,6 +201,9 @@ export interface BulkRunStatus {
   /** Written targets whose read-back held markup the write never sent (`shop_added_markup`). The
    *  page loads every target while one is marked, whatever the run halted on since. */
   shopAddedMarkup: number;
+  /** Written targets whose store kept an HTML field otherwise than sent, within what the run may
+   *  write (`host_rewrote`): counted and named, not halted (PRD shopify-preset §21.2 item 6). */
+  hostRewrote: number;
   /** Targets whose write failed and that stand failed now. A resume tries them again, except
    *  one that failed on what it would send (`secret`), which stays failed and stays counted. */
   failed: number;
@@ -555,6 +558,9 @@ export interface PreviewTarget {
   /** Written, and its read-back held markup the write never sent (PRD shopify-preset §21.2
    *  item 6): the target the halt `markupAddedByShop` is about. Set only where it holds. */
   shopAddedMarkup?: true | undefined;
+  /** Written, and the store kept an HTML field otherwise than sent, within what the run may write:
+   *  counted and named, not halted. Set only where it holds. */
+  hostRewrote?: true | undefined;
   /** The owner took this target out of the write before approving (`deselectTarget`). */
   deselected: boolean;
   /** This run wrote the target: recorded as applied, and not found already as planned. */
@@ -860,10 +866,30 @@ export function canonicalJson(value: unknown): string {
   return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(',')}}`;
 }
 
-/** What the rule would do to one target. */
-export function classifyChange(before: BeforeImage, after: unknown): BulkChange {
+/**
+ * Whether two values are the same, byte for byte over canonical JSON — except a run's HTML fields
+ * (`htmlFieldsOf`) of two objects, compared under `htmlEqual` where both sides are text (PRD
+ * shopify-preset §21.2 item 5): a store re-serialises a description, so its reformatting is no
+ * change, while one changed character, element or attribute still is. A field one side holds and
+ * the other does not differs; every other field stays byte-equal.
+ */
+export function sameValue(a: unknown, b: unknown, htmlFields: readonly string[] = []): boolean {
+  const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+  if (htmlFields.length === 0 || !isObject(a) || !isObject(b)) return canonicalJson(a) === canonicalJson(b);
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (Object.hasOwn(a, k) !== Object.hasOwn(b, k)) return false;
+    const x = a[k];
+    const y = b[k];
+    const same = htmlFields.includes(k) && typeof x === 'string' && typeof y === 'string' ? htmlEqual(x, y) : canonicalJson(x) === canonicalJson(y);
+    if (!same) return false;
+  }
+  return true;
+}
+
+/** What the rule would do to one target; `htmlFields` compare under `htmlEqual` ({@link sameValue}). */
+export function classifyChange(before: BeforeImage, after: unknown, htmlFields: readonly string[] = []): BulkChange {
   if (before.absent) return 'create';
-  return canonicalJson(before.value) === canonicalJson(after) ? 'unchanged' : 'update';
+  return sameValue(before.value, after, htmlFields) ? 'unchanged' : 'update';
 }
 
 /** The diff between a before-image and the planned after-state. Text is diffed by
@@ -1459,12 +1485,12 @@ export class BulkLedger {
       // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test.
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
          (applied_at IS NOT NULL AND found_unsent = 0 AND ${WRITING_SQL}) AS written, undone_at IS NOT NULL AS undone,
-         shop_added_markup
+         shop_added_markup, host_rewrote
        FROM bulk_targets WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
-      deselected_at: string | null; written: number; undone: number; shop_added_markup: number;
+      deselected_at: string | null; written: number; undone: number; shop_added_markup: number; host_rewrote: number;
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
@@ -1496,6 +1522,7 @@ export class BulkLedger {
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
         error: r.error, deselected: r.deselected_at !== null, written: r.written === 1, undone: r.undone === 1,
         ...(r.shop_added_markup === 1 ? { shopAddedMarkup: true as const } : {}),
+        ...(r.host_rewrote === 1 ? { hostRewrote: true as const } : {}),
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
       };
@@ -1515,10 +1542,10 @@ export class BulkLedger {
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
       `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone, SUM(found_unsent = 1 AND write_sent = 0) AS foundAsPlanned,
-         SUM(change != 'invalid' AND before IS NULL) AS unread, SUM(shop_added_markup) AS shopAddedMarkup,
+         SUM(change != 'invalid' AND before IS NULL) AS unread, SUM(shop_added_markup) AS shopAddedMarkup, SUM(host_rewrote) AS hostRewrote,
          SUM(${UNCLEAR_SQL}) AS sentUnknown
        FROM bulk_targets WHERE run_id = ?`,
-    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; sentUnknown: number | null };
+    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; hostRewrote: number | null; sentUnknown: number | null };
     const pass = db.prepare(
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent
@@ -1534,7 +1561,7 @@ export class BulkLedger {
       total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, deselected, invalidReasons,
       // The targets failed now, read off the targets like the conflicts — not `targets_failed`,
       // the halt's count of this pass, which a resume sets back while a `secret` target stays failed.
-      applied: row.targets_applied, foundAsPlanned: outcome.foundAsPlanned ?? 0, shopAddedMarkup: outcome.shopAddedMarkup ?? 0, failed: outcome.failed ?? 0,
+      applied: row.targets_applied, foundAsPlanned: outcome.foundAsPlanned ?? 0, shopAddedMarkup: outcome.shopAddedMarkup ?? 0, hostRewrote: outcome.hostRewrote ?? 0, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       sentUnknown: externalHostOf(row.target_system) === null ? 0 : outcome.sentUnknown ?? 0,
       maxTargets: row.max_targets,
@@ -1766,6 +1793,16 @@ export class BulkLedger {
     const fields = new Set(htmlFieldsOfListForm(this.listFormOfFamily(run)));
     if (this.shopifyFormOfRun(run) === 'shopify_product') for (const f of htmlFieldsOfListForm('shopify')) fields.add(f);
     return [...fields];
+  }
+
+  /**
+   * The fields a run compares under `htmlEqual` rather than byte for byte (PRD shopify-preset §21.2
+   * item 5): the HTML fields of a Shopify product run, its undos included. A WooCommerce run keeps
+   * today's comparison (§21.4, N5): its store's rewriting is not measured.
+   */
+  comparedAsHtml(runId: string): readonly string[] {
+    const run = this.runRow(runId);
+    return run !== undefined && this.shopifyFormOfRun(run) === 'shopify_product' ? this.htmlFieldsOf(runId) : [];
   }
 
   /** The list source form of a run, or of the first run up its `source_run_id` chain that has one; null without. */
@@ -2287,8 +2324,9 @@ export class BulkLedger {
     const form = this.shopifyFormOfFamily(run);
     const gidNumber = form === 'shopify_media_alt' ? mediaImageGidNumber : productGidNumber;
     const rows = this.engineDb.getDb().prepare(
-      `SELECT target_key, change, after_planned FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL} ORDER BY seq`,
-    ).all(runId) as { target_key: string; change: BulkChange; after_planned: string | null }[];
+      `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL} ORDER BY seq`,
+    ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
+    const html = form === 'shopify_product' ? this.htmlFieldsOf(runId) : [];
     const reads: string[] = [];
     const writes: ShopifyWrite[] = [];
     for (const r of rows) {
@@ -2296,10 +2334,53 @@ export class BulkLedger {
       if (gidNumber(key) === null) return null;
       reads.push(key);
       if (r.change === 'update' && r.after_planned !== null) {
-        writes.push({ form, gid: key, after: JSON.parse(this.engineDb.dec(r.after_planned)) as Record<string, unknown> });
+        const after = JSON.parse(this.engineDb.dec(r.after_planned)) as Record<string, unknown>;
+        // Left out, not refused: no grant is minted for it, so its request is refused before it is
+        // sent and the apply halts (`contract`). Nothing else changes here — this is also what the
+        // approve and resume routes ask whether a run is a Shopify run.
+        if (html.length > 0 && !this.mintsHtml(run, r, after, html, host)) continue;
+        writes.push({ form, gid: key, after });
       }
     }
     return { form, reads, writes };
+  }
+
+  /**
+   * The markup check once more before a Shopify product write is minted (PRD shopify-preset §21.2
+   * item 3): the preview or the settle step passed the same check on the same two values, so a
+   * failure here means the ledger changed after that, the call sites disagree, or the rule changed
+   * in an engine upgrade. A field the after-state leaves as its before-image is not checked, as at
+   * the settle step. An undo is not checked against the rule: its after-state is its source's
+   * before-image, which the rule would read as added. In its place each HTML field must be that
+   * before-image byte for byte — the ledger checked against itself, not a security bound.
+   */
+  private mintsHtml(
+    run: RunRow, row: { before: string | null; source_seq: number | null }, after: Record<string, unknown>,
+    html: readonly string[], host: string,
+  ): boolean {
+    const fields = html.filter((f) => Object.hasOwn(after, f));
+    if (fields.length === 0) return true;
+    if (run.kind === 'undo') {
+      if (run.source_run_id === null || row.source_seq === null) return false;
+      const src = this.engineDb.getDb().prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?')
+        .get(run.source_run_id, row.source_seq) as { before: string | null } | undefined;
+      if (!src || src.before === null) return false;
+      const image = JSON.parse(this.engineDb.dec(src.before)) as BeforeImage;
+      if (image.absent || image.value === null || typeof image.value !== 'object') return false;
+      const held = image.value as Record<string, unknown>;
+      return fields.every((f) => Object.hasOwn(held, f) && canonicalJson(held[f]) === canonicalJson(after[f]));
+    }
+    const image = row.before === null ? null : JSON.parse(this.engineDb.dec(row.before)) as BeforeImage;
+    const prior = image === null || image.absent || image.value === null || typeof image.value !== 'object'
+      ? {} : image.value as Record<string, unknown>;
+    const startDomains = this.startDomainsOfRow(run) ?? [];
+    return fields.every((f) => {
+      const value = after[f];
+      const was = prior[f];
+      if (value === was) return true;
+      if (typeof value !== 'string') return false;
+      return checkMarkup({ before: typeof was === 'string' ? was : null, after: value, storeHost: host, startDomains }).ok;
+    });
   }
 
   /** An unread external target: its URL and planned after-state. */
@@ -2337,7 +2418,7 @@ export class BulkLedger {
     const after = completedAfter ?? JSON.parse(this.engineDb.dec(row.after_planned)) as unknown;
     // The before-image holds exactly F, so comparing whole images compares over F (§6 P4). A
     // judged target's after-state is its template until the verdict: its change is not known.
-    const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : classifyChange(before, after);
+    const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : classifyChange(before, after, this.comparedAsHtml(runId));
     return db.transaction((): boolean => {
       const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ? WHERE ${guard}`)
         .run(this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)), runId, seq, runId).changes === 1;
@@ -2662,7 +2743,7 @@ export class BulkLedger {
         : verdict.after;
       return db.prepare(
         `UPDATE bulk_targets SET after_planned = ?, change = ?, error = NULL, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
-      ).run(this.engineDb.enc(JSON.stringify(after)), classifyChange(before, after), at, runId, seq, token, runId).changes === 1;
+      ).run(this.engineDb.enc(JSON.stringify(after)), classifyChange(before, after, this.comparedAsHtml(runId)), at, runId, seq, token, runId).changes === 1;
     })();
   }
 
@@ -2820,6 +2901,8 @@ export class BulkLedger {
     /** The read-back holds markup the write never sent (PRD shopify-preset §21.2 item 6): marked
      *  in the same transaction as the record, so no halt after it can leave the target unmarked. */
     shopAddedMarkup = false,
+    /** The host stored an HTML field otherwise than sent, within what the run may write: counted. */
+    hostRewrote = false,
   ): void {
     const db = this.engineDb.getDb();
     const at = new Date(now).toISOString();
@@ -2827,9 +2910,9 @@ export class BulkLedger {
       // `result` through enc() too: for an external target it is the host's own answer
       // class, and nothing about a target is stored in clear.
       const res = db.prepare(
-        `UPDATE bulk_targets SET applied_at = ?, result = ?, after_actual = ?, claimed_at = NULL, shop_added_markup = ?
+        `UPDATE bulk_targets SET applied_at = ?, result = ?, after_actual = ?, claimed_at = NULL, shop_added_markup = ?, host_rewrote = ?
            WHERE run_id = ? AND seq = ? AND applied_at IS NULL`,
-      ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), shopAddedMarkup ? 1 : 0, run.id, seq);
+      ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), shopAddedMarkup ? 1 : 0, hostRewrote ? 1 : 0, run.id, seq);
       if (res.changes !== 1) return;
       this.noteConnection(run.id, seq, 'write', via);
       // Found as planned and never sent to by this run: someone else set the value, so the run

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { BulkLedger, BULK_HALT_REASONS } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, classifyChange, sameValue } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { externalWriter, mintBulkContract, type ExternalClient, type ExternalImage, type ExternalRead } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
@@ -145,26 +145,30 @@ describe('the external writer\'s read-back check', () => {
     read: async (): Promise<ExternalRead> => (back === 'fail' ? { kind: 'error' } as unknown as ExternalRead : { kind: 'ok', value: back } as ExternalRead),
     write: async (): Promise<ExternalRead> => ({ kind: 'ok', value: {} } as ExternalRead),
   });
-  const check = (sent: ExternalImage, back: ExternalImage): boolean =>
-    typeof sent['description'] === 'string' && typeof back['description'] === 'string' && added(sent['description'], back['description']);
+  const check = (sent: ExternalImage, back: ExternalImage): 'added' | 'rewritten' | 'kept' => {
+    const s = sent['description'];
+    const b = back['description'];
+    if (typeof s !== 'string' || typeof b !== 'string') return 'kept';
+    return added(s, b) ? 'added' : s === b ? 'kept' : 'rewritten';
+  };
 
   it('reports the target written with what the host kept, and the mark', async () => {
-    const w = externalWriter(client, { io: io({ description: `<p>Neu</p>${SCRIPT}` }), addedByHost: check });
+    const w = externalWriter(client, { io: io({ description: `<p>Neu</p>${SCRIPT}` }), readBack: check });
     expect(await w.write('k', { absent: false, value: { description: '<p>Neu</p>' } })).toEqual({
       result: 'written', actual: { value: { description: `<p>Neu</p>${SCRIPT}` }, estimated: false }, hostAddedMarkup: true,
     });
   });
 
-  it('reports no mark for a read-back that only reformats, and none without a check', async () => {
-    const reformatted = externalWriter(client, { io: io({ description: '<p>Neu</p>\n' }), addedByHost: check });
+  it('reports a read-back that only reformats as rewritten, never marked, and nothing without a check', async () => {
+    const reformatted = externalWriter(client, { io: io({ description: '<p>Neu</p>\n' }), readBack: check });
     expect(await reformatted.write('k', { absent: false, value: { description: '<p>Neu</p>' } }))
-      .toEqual({ result: 'written', actual: { value: { description: '<p>Neu</p>\n' }, estimated: false } });
+      .toEqual({ result: 'written', actual: { value: { description: '<p>Neu</p>\n' }, estimated: false }, hostRewrote: true });
     const unchecked = externalWriter(client, { io: io({ description: `<p>Neu</p>${SCRIPT}` }) });
     expect(await unchecked.write('k', { absent: false, value: { description: '<p>Neu</p>' } })).not.toHaveProperty('hostAddedMarkup');
   });
 
   it('keeps what was sent, estimated and unmarked, when the read-back fails', async () => {
-    const w = externalWriter(client, { io: io('fail'), addedByHost: () => true });
+    const w = externalWriter(client, { io: io('fail'), readBack: () => 'added' });
     expect(await w.write('k', { absent: false, value: { description: '<p>Neu</p>' } }))
       .toEqual({ result: 'written', actual: { value: { description: '<p>Neu</p>' }, estimated: true } });
   });
@@ -333,5 +337,49 @@ describe('htmlFieldsOf: fail-closed on the product form (sec-core F6)', () => {
     insert.run('plain-run', `http:${HOST}`, JSON.stringify({ ...readContract, httpMethods: ['PUT'] }));
     expect(ledger.htmlFieldsOf('store-run')).toEqual(['descriptionHtml']);
     expect(ledger.htmlFieldsOf('plain-run')).toEqual([]);
+  });
+});
+
+describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.2 item 5)', () => {
+  it('takes a reformatted HTML field as the same, and one changed character, element or attribute as not', () => {
+    const html = ['description'];
+    expect(sameValue({ description: '<P>Neu<br/></P>', name: 'a' }, { description: '<p>Neu<br></p>', name: 'a' }, html)).toBe(true);
+    expect(sameValue({ description: '<p>Neu</p>' }, { description: '<p>Neu!</p>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>Neu</p>' }, { description: '<p>Neu</p><p></p>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>Neu</p>' }, { description: '<p class="x">Neu</p>' }, html)).toBe(false);
+  });
+
+  it('keeps every other field byte for byte, and a field one side lacks as a difference', () => {
+    expect(sameValue({ description: '<p>a</p>', name: '<b>x</b>' }, { description: '<p>a</p>', name: '<B>x</B>' }, ['description'])).toBe(false);
+    expect(sameValue({ description: '<p>a</p>' }, { description: '<p>a</p>', name: null }, ['description'])).toBe(false);
+    expect(sameValue({ description: null }, { description: '' }, ['description'])).toBe(false);
+    // Without HTML fields, the comparison is today's.
+    expect(sameValue({ description: '<P>a</P>' }, { description: '<p>a</p>' })).toBe(false);
+    expect(classifyChange({ absent: false, value: { description: '<P>a</P>' } }, { description: '<p>a</p>' }, ['description'])).toBe('unchanged');
+    expect(classifyChange({ absent: false, value: { description: '<P>a</P>' } }, { description: '<p>a</p>' })).toBe('update');
+  });
+});
+
+describe('a written description the store kept otherwise than sent (§21.2 item 6: counted, not halted)', () => {
+  it('counts the target on the run and names it on its row, and writes on to the next', async () => {
+    const id = approvedRun({ description: 'Neu' }, [{ description: '<p>Alt</p>' }, { description: '<p>Alt 2</p>' }]);
+    const store = new Map<string, Record<string, unknown>>([[`${LIST}/1`, { description: '<p>Alt</p>' }], [`${LIST}/2`, { description: '<p>Alt 2</p>' }]]);
+    const base = stubWriter(store, (v) => ({ ...v, description: `<p>${String(v['description'])}</p>` }));
+    // The first write comes back rewritten, the second as sent.
+    let n = 0;
+    const w: TargetWriter = {
+      ...base,
+      async write(key, after, sent, refused) {
+        const out = await base.write(key, after, sent, refused);
+        n += 1;
+        return n === 1 && typeof out !== 'string' ? { ...out, hostRewrote: true as const } : out;
+      },
+    };
+    const out = await run(id, w);
+    expect(out.status).toBe('done');
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 2, hostRewrote: 1, shopAddedMarkup: 0 });
+    const rows = ledger.getPreview(id);
+    expect(rows[0]).toMatchObject({ hostRewrote: true });
+    expect(rows[1]).not.toHaveProperty('hostRewrote');
   });
 });

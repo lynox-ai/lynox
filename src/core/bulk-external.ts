@@ -664,9 +664,10 @@ export function externalWriter(client: ExternalClient, opts: {
   method?: BulkWriteMethod;
   sleep?: (ms: number) => Promise<void>;
   io?: TargetIo;
-  /** Whether the read-back holds markup the write never sent (`markupAddedByHost`), for a form
-   *  whose HTML fields are checked after the write. The target stays written; the run halts. */
-  addedByHost?: (sent: ExternalImage, back: ExternalImage) => boolean;
+  /** What the read-back of a form whose HTML fields are checked after the write holds against the
+   *  value sent: markup the write never sent (`markupAddedByHost`; the target stays written, the
+   *  run halts), the value stored otherwise than sent (counted, not halted), or the bytes sent. */
+  readBack?: (sent: ExternalImage, back: ExternalImage) => 'added' | 'rewritten' | 'kept';
 } = {}): TargetWriter {
   const method = opts.method ?? 'PATCH';
   const io: TargetIo = opts.io ?? {
@@ -729,7 +730,9 @@ export function externalWriter(client: ExternalClient, opts: {
       } catch { /* estimated below */ }
       if (back === 'foreign') return { result: 'written', actual: { value: after.value, estimated: true } };
       const actual = { value: back, estimated: false };
-      return opts.addedByHost?.(value, back) === true ? { result: 'written', actual, hostAddedMarkup: true } : { result: 'written', actual };
+      const kept = opts.readBack?.(value, back) ?? 'kept';
+      if (kept === 'added') return { result: 'written', actual, hostAddedMarkup: true };
+      return kept === 'rewritten' ? { result: 'written', actual, hostRewrote: true } : { result: 'written', actual };
     },
   };
 }

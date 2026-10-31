@@ -21,7 +21,7 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkFoundAsPlannedNote, bulkWriteCap, canonicalJson,
+  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkFoundAsPlannedNote, bulkWriteCap, canonicalJson, sameValue,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
@@ -58,8 +58,9 @@ export interface TargetWriter {
   read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
   /** `hostAddedMarkup`: the read-back holds markup the write never sent (PRD shopify-preset
    *  §21.2 item 6). The target is written all the same — the value is in the store — and is
-   *  recorded with its mark; the run then halts. */
-  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true }>;
+   *  recorded with its mark; the run then halts. `hostRewrote`: the host stored the value otherwise
+   *  than sent, within what the run may write — counted on the target, not halted. */
+  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true; hostRewrote?: true }>;
 }
 
 /**
@@ -126,9 +127,10 @@ const MIN_RUN_BUDGET_MS = 60_000;
  *  than {@link bulkFailureLimit} in the pass. */
 const HALT_CONSECUTIVE = 3;
 
-function sameImage(a: BeforeImage, b: BeforeImage): boolean {
+/** Two images equal: both absent, or values equal — the run's HTML fields under `htmlEqual` ({@link sameValue}). */
+function sameImage(a: BeforeImage, b: BeforeImage, htmlFields: readonly string[] = []): boolean {
   if (a.absent || b.absent) return a.absent === b.absent;
-  return canonicalJson(a.value) === canonicalJson(b.value);
+  return sameValue(a.value, b.value, htmlFields);
 }
 
 function summarize(ledger: BulkLedger, runId: string, lead: string): string {
@@ -253,6 +255,8 @@ async function applyRunEffect(
   ledger.setPhase(runId, ['approved'], 'writing');
 
   const writingTotal = ledger.countWriting(runId);
+  // Compared under `htmlEqual` where a value is HTML: a store re-serialises a description.
+  const htmlFields = ledger.comparedAsHtml(runId);
   const pending = ledger.listPending(runId);
   const deadline = now() + Math.max(MIN_RUN_BUDGET_MS, pending.length * BULK_TARGET_BUDGET_MS);
   let consecutive = 0;
@@ -313,7 +317,7 @@ async function applyRunEffect(
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${outcome.reason}.`) };
     }
     if (outcome.kind === 'applied') {
-      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true);
+      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true);
       if (outcome.hostAddedMarkup === true) {
         // Written and recorded with its mark first, so a halt that another loop's reason
         // overwrites still leaves the target marked: the mark is the truth, not `halt_reason`.
@@ -397,18 +401,18 @@ async function applyRunEffect(
 
   /** One claimed target: what to record for it. */
   async function writeOne(w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null):
-    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
+    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
     try {
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
-      if (cur !== 'foreign' && sameImage(cur, t.after)) {
+      if (cur !== 'foreign' && sameImage(cur, t.after, htmlFields)) {
         // Found as planned: either a loop of this run wrote it and died before recording it
         // (the target is marked sent), or someone else set the value, and the run sends
         // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
         // also what an undo must expect.
         return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
       }
-      if (cur === 'foreign' || !sameImage(cur, t.expected)) return { kind: 'conflict' };
+      if (cur === 'foreign' || !sameImage(cur, t.expected, htmlFields)) return { kind: 'conflict' };
       // Still as expected, but an earlier send reached it without a clear answer: that write
       // may land later or not be visible yet, and sending it again could carry the change out
       // twice. A local writer's outcome is always known.
@@ -420,7 +424,11 @@ async function applyRunEffect(
       if (w.reportsSend !== true) sent();
       const out = await w.write(t.key, t.after, sent, refused);
       if (typeof out === 'string') return { kind: 'applied', result: out, actual: null };
-      return { kind: 'applied', result: out.result, actual: out.actual, ...(out.hostAddedMarkup === true ? { hostAddedMarkup: true as const } : {}) };
+      return {
+        kind: 'applied', result: out.result, actual: out.actual,
+        ...(out.hostAddedMarkup === true ? { hostAddedMarkup: true as const } : {}),
+        ...(out.hostRewrote === true ? { hostRewrote: true as const } : {}),
+      };
     } catch (err: unknown) {
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };
