@@ -410,6 +410,7 @@ const mockInsertWireSnapshot = vi.fn();
 /** Sub-agent spend rollup (session.ts run-end). Defaults to 0 = the turn
  *  delegated nothing; individual tests override it. */
 const mockGetDescendantCostUsd = vi.fn().mockReturnValue(0);
+const mockGetApiCallsOfRun = vi.fn().mockReturnValue({ calls: 0, usd: 0, estimated: false, unpriced: 0 });
 
 vi.mock('./run-history.js', () => ({
   RunHistory: vi.fn().mockImplementation(function () {
@@ -437,6 +438,7 @@ vi.mock('./run-history.js', () => ({
     this.insertToolCall = vi.fn();
     // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
     this.getDescendantCostUsd = mockGetDescendantCostUsd;
+    this.getApiCallsOfRun = mockGetApiCallsOfRun;
     // @ts-expect-error mock constructor
     this.getEmbeddings = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
@@ -1623,6 +1625,30 @@ describe('Engine + Session (Orchestrator)', () => {
       await session.run('no delegation here');
 
       expect(session.getLastRunUsage()).not.toHaveProperty('spawnCostUsd');
+    });
+
+    // The footer's API calls come from the run's rows, the same way: without this wiring the
+    // count could be deleted from `Session.run` with the SQL and the formatter still green.
+    it('puts the API calls of THIS run and its sub-agents into the run usage', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetApiCallsOfRun.mockClear().mockReturnValue({ calls: 4, usd: 0.36, estimated: false, unpriced: 0 });
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('look up keywords');
+
+      expect(mockGetApiCallsOfRun).toHaveBeenCalledWith('run-123');
+      expect(session.getLastRunUsage()).toMatchObject({ apiCalls: 4, apiCostUsd: 0.36, apiCostEstimated: false, apiCallsUnpriced: 0 });
+    });
+
+    it('omits the API calls when the run sent none', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetApiCallsOfRun.mockClear().mockReturnValue({ calls: 0, usd: 0, estimated: false, unpriced: 0 });
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('no API here');
+
+      expect(session.getLastRunUsage()).not.toHaveProperty('apiCalls');
+      expect(session.getLastRunUsage()).not.toHaveProperty('apiCostUsd');
     });
   });
 

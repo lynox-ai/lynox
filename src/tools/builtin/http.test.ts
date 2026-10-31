@@ -3777,6 +3777,119 @@ describe('httpRequestTool', () => {
     }, 5000);
   });
 
+  // The call's row counts the request and what it cost (`noteApiCost`); the run's footer sums the
+  // rows. The provider's own figure wins over the profile rate, and is read before the shaping.
+  describe('what a request to an API with a cost records on its call', () => {
+    let originalFlag: string | undefined;
+    beforeEach(() => { originalFlag = process.env.LYNOX_FEATURE_API_COST_DISPLAY; });
+    afterEach(() => {
+      if (originalFlag === undefined) delete process.env.LYNOX_FEATURE_API_COST_DISPLAY;
+      else process.env.LYNOX_FEATURE_API_COST_DISPLAY = originalFlag;
+    });
+    async function costStore(cost: Record<string, unknown>, shape?: Record<string, unknown>) {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'dataforseo', name: 'DataForSEO', base_url: 'https://api.dataforseo.com', description: 'SEO API',
+        cost: cost as never,
+        ...(shape !== undefined ? { response_shape: shape as never } : {}),
+      });
+      return store;
+    }
+    function costAgent(store: unknown, events: Array<Record<string, unknown>>) {
+      return {
+        principal: OWNER_PRINCIPAL,
+        name: 'main',
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store as never), apiStore: store, streamHandler: (e: Record<string, unknown>) => { events.push(e); } },
+        sessionCounters: testCounters,
+      } as never;
+    }
+    async function call(store: unknown, json: unknown, url = 'https://api.dataforseo.com/v3/keywords') {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ headers: { 'content-type': 'application/json' }, json })));
+      const events: Array<Record<string, unknown>> = [];
+      const slot: CallSlot = {};
+      const result = await runInCallSlot(slot, () => handler({ url }, costAgent(store, events)));
+      return { slot, events, result };
+    }
+
+    it('takes the answer\'s own figure, read before a response_shape that drops it', async () => {
+      process.env.LYNOX_FEATURE_API_COST_DISPLAY = '1';
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' }, { kind: 'reduce', include: ['tasks'] });
+      const { slot, events, result } = await call(store, { cost: 0.09, tasks: [{ keyword: 'aquarium' }] });
+      expect(slot.apiCost).toEqual({ usd: 0.09, source: 'response' });
+      // The model's copy no longer holds the field the figure came from.
+      expect(result).toContain('aquarium');
+      expect(result).not.toContain('0.09');
+      const event = events.find(e => e['type'] === 'api_cost');
+      expect(event?.['costUsd']).toBe(0.09);
+      expect(event?.['source']).toBe('response');
+    });
+
+    it('follows a dot path with an index', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'tasks.0.cost' });
+      const { slot } = await call(store, { tasks: [{ cost: 0.012 }] });
+      expect(slot.apiCost).toEqual({ usd: 0.012, source: 'response' });
+    });
+
+    it('falls back to the profile rate, as an estimate, where the answer gives no usable figure', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      for (const json of [{ ok: true }, { cost: -1 }, { cost: 101 }, { cost: '0.09' }, { cost: null }]) {
+        const { slot } = await call(store, json);
+        expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+      }
+      // Only the answer's own keys: an inherited name finds nothing.
+      const inherited = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'constructor' });
+      expect((await call(inherited, { ok: true })).slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    });
+
+    it('takes a figure of 0 and of 100 as given', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      expect((await call(store, { cost: 0 })).slot.apiCost).toEqual({ usd: 0, source: 'response' });
+      expect((await call(store, { cost: 100 })).slot.apiCost).toEqual({ usd: 100, source: 'response' });
+    });
+
+    it('counts a request without an amount when the cost model has no per-call rate', async () => {
+      process.env.LYNOX_FEATURE_API_COST_DISPLAY = '1';
+      const store = await costStore({ model: 'per_token', rate_usd: 0.00001 });
+      const { slot, events } = await call(store, { ok: true });
+      expect(slot.apiCost).toEqual({ usd: null, source: 'none' });
+      expect(events.some(e => e['type'] === 'api_cost')).toBe(false);
+    });
+
+    it('counts an error answer: the request went out', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 400, statusText: 'Bad Request', headers: { 'content-type': 'application/json' }, json: { error: 'too many keywords' } })));
+      const slot: CallSlot = {};
+      await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])));
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    });
+
+    it('counts a request whose answer stalled after the headers', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new ReadableStream({ start() { /* never ends */ } }), { status: 200, headers: { 'content-type': 'application/json' } })));
+      const slot: CallSlot = {};
+      await expect(runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords', timeout_ms: 50 }, costAgent(store, [])))).rejects.toThrow(/while reading the response/);
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    }, 5000);
+
+    it('records nothing for a request that never went out, or for a host without a cost', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED'));
+      vi.stubGlobal('fetch', fetchMock);
+      const refused: CallSlot = {};
+      await expect(runInCallSlot(refused, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, []))))
+        .rejects.toThrow();
+      expect(refused.apiCost).toBeUndefined();
+
+      const other = await call(store, { cost: 0.09 }, 'https://api.example.com/v1/x');
+      expect(other.slot.apiCost).toBeUndefined();
+    });
+  });
+
   // A request that changes something may have landed before its time ran out. "Timed out"
   // alone reads as "did not happen", and the model sends it again — a second order, a second
   // mail, wherever the receiver cannot tell a repeat from a new request.

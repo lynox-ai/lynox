@@ -8,7 +8,7 @@ import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGT
 import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
-import type { CallContract, CallFiled, GrantLift } from './call-connection.js';
+import type { CallApiCost, CallContract, CallFiled, GrantLift } from './call-connection.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
 import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -1622,6 +1622,14 @@ const MIGRATIONS: string[] = [
   // never changed. Not in HISTORY_KEPT_ON_ERASURE: the owner's erasure empties them with the
   // threads. No backfill here: the boot copies what engine.db holds (`ContainmentMirror.syncFrom`).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (70);${HISTORY_MARKERS_DDL}`,
+  // v71: the request a call sent to an API whose profile has a cost (`CallApiCost`), for the
+  // count and cost a run shows in its footer. `api_cost_source` is set exactly when the call sent
+  // one, so the count is the rows where it is not NULL; `api_cost_usd` is NULL for `none`. Written
+  // from the engine's own record of the call, never from tool input; the `response` amount is the
+  // provider's number, for display only. No backfill: nothing recorded it before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
+   ALTER TABLE run_tool_calls ADD COLUMN api_cost_usd REAL CHECK (api_cost_usd IS NULL OR api_cost_usd >= 0);
+   ALTER TABLE run_tool_calls ADD COLUMN api_cost_source TEXT CHECK (api_cost_source IN ('response', 'profile', 'none'));`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -1966,15 +1974,18 @@ export class RunHistory {
     contract?: CallContract | undefined;
     lift?: GrantLift | undefined;
     filed?: CallFiled | undefined;
+    /** v71 (see there). Absent writes NULL: the call sent no request to an API with a cost. */
+    apiCost?: CallApiCost | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
       INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id, tool_use_id,
-        is_error, contract_state, contract_grant_id, lift_grant_id, lift_entry, filing, approval_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        is_error, contract_state, contract_grant_id, lift_grant_id, lift_entry, filing, approval_id, api_cost_usd, api_cost_source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null, params.toolUseId ?? null,
       params.isError === undefined ? null : (params.isError ? 1 : 0), params.contract?.state ?? null, params.contract?.grantId ?? null,
-      params.lift?.grantId ?? null, params.lift?.entry ?? null, params.filed?.outcome ?? null, params.filed?.approvalId ?? null);
+      params.lift?.grantId ?? null, params.lift?.entry ?? null, params.filed?.outcome ?? null, params.filed?.approvalId ?? null,
+      params.apiCost?.usd ?? null, params.apiCost?.source ?? null);
     return id;
   }
 
@@ -2955,6 +2966,30 @@ export class RunHistory {
       )
     `).get(runId) as { total: number } | undefined;
     return row?.total ?? 0;
+  }
+
+  /**
+   * The requests to APIs with a cost that `runId` and every run it spawned, at any depth, sent
+   * (v71): how many, and the sum of the amounts known. `estimated` when any amount is a profile
+   * rate, `unpriced` how many had no amount. A sub-agent's calls are on its own run, so the
+   * spawn tree is walked like {@link getDescendantCostUsd}, here with the root and every status:
+   * a request a failed child sent was still sent. `UNION` for the same reason as there.
+   */
+  getApiCallsOfRun(runId: string): { calls: number; usd: number; estimated: boolean; unpriced: number } {
+    const row = this.db.prepare(`
+      WITH RECURSIVE tree AS (
+        SELECT id FROM runs WHERE id = ?
+        UNION
+        SELECT r.id FROM runs r JOIN tree t ON r.spawn_parent_id = t.id
+      )
+      SELECT COUNT(*) AS calls,
+             COALESCE(SUM(api_cost_usd), 0) AS usd,
+             COALESCE(MAX(api_cost_source = 'profile'), 0) AS estimated,
+             COALESCE(SUM(api_cost_source = 'none'), 0) AS unpriced
+      FROM run_tool_calls
+      WHERE run_id IN (SELECT id FROM tree) AND api_cost_source IS NOT NULL
+    `).get(runId) as { calls: number; usd: number; estimated: number; unpriced: number } | undefined;
+    return { calls: row?.calls ?? 0, usd: row?.usd ?? 0, estimated: (row?.estimated ?? 0) === 1, unpriced: row?.unpriced ?? 0 };
   }
 
   // === Analytics delegates ===

@@ -77,11 +77,11 @@ describe('the tables (history.db v70)', () => {
     const path = join(dir, 'old-history.db');
     new RunHistory(path).close();
     const raw = new Database(path);
-    raw.exec('DELETE FROM schema_version WHERE version >= 70; DROP TABLE contained_threads; DROP TABLE exact_marker_mirror;');
+    raw.exec('DELETE FROM schema_version WHERE version >= 70; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; DROP TABLE contained_threads; DROP TABLE exact_marker_mirror;');
     raw.close();
     const upgraded = new RunHistory(path);
     try {
-      expect((upgraded.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(70);
+      expect((upgraded.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(71);
       new ContainmentMirror(upgraded.getDb()).write('t1', SHOP);
       expect(new ContainmentMirror(upgraded.getDb()).has('t1')).toBe(true);
     } finally {

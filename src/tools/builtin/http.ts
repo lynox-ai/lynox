@@ -40,7 +40,7 @@ import {
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
-import { currentCallSignal, currentCallTwins, joinCallSignal, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
@@ -2886,6 +2886,43 @@ function withFrontNotes(result: string, writeNote: string | undefined, sizeNotes
   return whole.length > cut ? compose([...sizeNotes, resultCutNote(cut, parsedJson)]) : whole;
 }
 
+/** The profile of `url`'s host when it has a cost; `undefined` for any other URL. */
+function apiProfileOfUrl(url: string, toolContext: ToolContext | undefined): ApiProfile | undefined {
+  try {
+    const profile = toolContext?.apiStore?.getByHostname(new URL(url).hostname);
+    return profile?.cost === undefined ? undefined : profile;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The most a provider's own figure may say one request cost, as the profile rate's own bound
+ *  (`api-setup.ts`). A larger or a negative figure is not taken; the profile rate stands. */
+const MAX_RESPONSE_COST_USD = 100;
+
+/**
+ * What one answered request to `profile`'s API cost (`CallApiCost`). The answer's own figure at
+ * `cost.response_field` when it gives a finite number from 0 to {@link MAX_RESPONSE_COST_USD};
+ * otherwise the profile's `per_call` rate as an estimate; otherwise no amount. `json` is the
+ * answer as parsed, before any `response_shape`; `undefined` when it was not parsed.
+ * The figure is the provider's: it is shown, and nothing that limits spending reads it.
+ */
+export function apiCostOfAnswer(profile: ApiProfile, json: unknown): CallApiCost {
+  const cost = profile.cost;
+  const field = cost?.response_field;
+  if (field !== undefined && json !== undefined) {
+    let at: unknown = json;
+    for (const key of field.split('.')) {
+      at = at !== null && typeof at === 'object' && Object.hasOwn(at, key) ? (at as Record<string, unknown>)[key] : undefined;
+    }
+    if (typeof at === 'number' && Number.isFinite(at) && at >= 0 && at <= MAX_RESPONSE_COST_USD) {
+      return { usd: at, source: 'response' };
+    }
+  }
+  if (cost?.model === 'per_call') return { usd: cost.rate_usd, source: 'profile' };
+  return { usd: null, source: 'none' };
+}
+
 /**
  * Apply the API profile's response_shape (if any) to a parsed JSON response.
  * Falls back to standard JSON.stringify on any error; never throws.
@@ -3795,6 +3832,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // (the transport destroys the socket), which a name check took for an unrelated failure.
     let timedOut: 'abort' | 'wall' | 'stopped' | null = null;
     let answeredStatus: string | undefined;
+    // The request this call sent to an API whose profile has a cost, once an answer came back
+    // (`apiCostOfAnswer`). Recorded on the call at the success return and on the error path, so a
+    // body that stalled after the headers still counts: the request went out.
+    let apiCost: CallApiCost | undefined;
     // A write a redirect of this call carried as a method override (`onOverrideWrite`), for the
     // stop and timeout messages: they would otherwise go by `gatedMethod`, a read.
     let carriedWrite: SentWrite | undefined;
@@ -3903,6 +3944,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const status = `${response.status} ${response.statusText}`;
       // After a write turned into a GET on another origin, the answer is that GET's, not the write's.
       answeredStatus = writeFollowedAsRead === undefined ? status : `${status} to the GET it was redirected to on ${urlForNote(finalRequestUrl)}`;
+      // Attributed to the final URL after redirects, like the cost event below.
+      const costProfile = apiProfileOfUrl(finalRequestUrl, toolContext);
+      apiCost = costProfile === undefined ? undefined : apiCostOfAnswer(costProfile, undefined);
       // Strip sensitive response headers to prevent credential leakage to agent
       const REDACTED_HEADERS = new Set([
         'set-cookie', 'authorization', 'www-authenticate', 'proxy-authenticate',
@@ -3966,6 +4010,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         try {
           const json = JSON.parse(text) as unknown;
           parsedJson = true;
+          // The amount the answer gives, read before the shaping can drop its field.
+          if (costProfile !== undefined) apiCost = apiCostOfAnswer(costProfile, json);
           // Apply per-API response shaping if the profile defines one.
           const shapedBody = await maybeShapeJson(json, input.url, toolContext);
           body = shapedBody;
@@ -4125,39 +4171,32 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
       }
 
-      // Phase E (api-cost-display): if this hit a profiled API with a per_call
-      // cost model, surface the cost on the streamHandler so the web-ui can
-      // show "$0.0006" alongside the tool_result. per_token / per_unit are
-      // deferred — we have no reliable token counter for arbitrary HTTP bodies.
-      try {
-        // Attribute to the final URL after redirects, so a chain landing on a
-        // different host is profiled against its actual endpoint. This used to
-        // read `response.url || input.url`, and `response.url` is always ''
-        // because fetchPinned constructs the Response — so it silently did the
-        // opposite of what this comment promised.
-        const parsedFinal = new URL(finalRequestUrl);
-        const profile = toolContext?.apiStore?.getByHostname(parsedFinal.hostname);
-        if (profile?.cost?.model === 'per_call' && isFeatureEnabled('api-cost-display')) {
+      // Phase E (api-cost-display): the request's cost goes on the call's row, where the run's
+      // footer counts it, and on the streamHandler so the web-ui can show it beside the tool_result.
+      if (apiCost !== undefined) {
+        noteApiCost(apiCost);
+        try {
           const streamHandler = toolContext?.streamHandler;
-          if (streamHandler) {
+          if (streamHandler && apiCost.source !== 'none' && apiCost.usd !== null && costProfile !== undefined && isFeatureEnabled('api-cost-display')) {
             // Mirror emitBootstrapProgress: catch sync throws via the outer
             // try/catch, and chain .catch on the Promise so an async rejection
             // from the handler cannot escape as an unhandledRejection.
             const emitResult = streamHandler({
               type: 'api_cost',
               tool: 'http_request',
-              profileId: profile.id,
-              profileName: profile.name,
-              endpoint: parsedFinal.pathname,
-              costUsd: profile.cost.rate_usd,
+              profileId: costProfile.id,
+              profileName: costProfile.name,
+              endpoint: new URL(finalRequestUrl).pathname,
+              costUsd: apiCost.usd,
+              source: apiCost.source === 'response' ? 'response' : 'profile',
               agent: agent.name,
             });
             if (emitResult instanceof Promise) {
               emitResult.catch(() => { /* best-effort */ });
             }
           }
-        }
-      } catch { /* cost emission is best-effort */ }
+        } catch { /* cost emission is best-effort */ }
+      }
 
       // Append profile warning if this was an unregistered API
       const profileWarning = (input as unknown as Record<string, unknown>)['_profileWarning'];
@@ -4165,6 +4204,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const resultCut = agent.toolContext?.userConfig?.max_tool_result_chars ?? DEFAULT_MAX_TOOL_RESULT_CHARS;
       return withFrontNotes(result, writeNote, sizeNotes, resultCut, parsedJson);
     } catch (err: unknown) {
+      // The request went out and was answered, so it counts even though reading the answer failed.
+      if (answeredStatus !== undefined && apiCost !== undefined) noteApiCost(apiCost);
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
       // the REASON as its message, and `blockedFriendly`'s reason starts with
       // "Blocked:" — so the branch two lines down would match it, re-wrap it as

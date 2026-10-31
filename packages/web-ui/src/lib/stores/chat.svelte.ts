@@ -2045,8 +2045,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			if (!profileId || !Number.isFinite(costUsd) || costUsd < 0) break;
 			const entry: ApiCallCost = { tool, profileId, profileName, endpoint, costUsd };
 			msg.apiCalls = [...(msg.apiCalls ?? []), entry];
-			const existing = msg.usage ?? { tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
-			msg.usage = { ...existing, apiCostUsd: (existing.apiCostUsd ?? 0) + costUsd };
+			// The footer's count and cost come with `done`, counted from the run's stored calls.
 			break;
 		}
 		case 'tool_result': {
@@ -2240,9 +2239,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					// runs — typically only the final turn's model is shown.
 					...(turnModel ? { model: turnModel } : prev?.model ? { model: prev.model } : {}),
 					// Carry live-only fields the per-turn REPLACE would otherwise drop:
-					// third-party API cost (api_cost event) + the client-measured TTFB
-					// (set on the first content delta) + diagnostics signals.
-					...(prev?.apiCostUsd !== undefined ? { apiCostUsd: prev.apiCostUsd } : {}),
+					// the client-measured TTFB (set on the first content delta) + diagnostics signals.
 					...(prev?.ttfbMs !== undefined ? { ttfbMs: prev.ttfbMs } : {}),
 					...(turnStop !== undefined ? { stopReason: turnStop } : {}),
 					...(turnIters !== undefined ? { iterations: turnIters } : {}),
@@ -2252,6 +2249,10 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					// is dropped, and "the events happen to arrive in this order" is a
 					// weaker guarantee than naming the field.
 					...(prev?.spawnCostUsd !== undefined ? { spawnCostUsd: prev.spawnCostUsd } : {}),
+					// Likewise the third-party API calls, which only `done` writes.
+					...(prev?.apiCalls !== undefined
+						? { apiCalls: prev.apiCalls, apiCostUsd: prev.apiCostUsd, apiCostEstimated: prev.apiCostEstimated, apiCallsUnpriced: prev.apiCallsUnpriced }
+						: {}),
 				};
 				// Context budget is owned solely by the engine `context_budget`
 				// event (exact API usage). turn_end no longer writes it — the old
@@ -2376,9 +2377,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// spawn) fire one `turn_end` per LLM call in the loop, and the UI used
 			// to sum them while the engine reports a single per-run cumulative
 			// figure. The accumulation showed 3-6× actual cost — a credibility
-			// bug at HN-launch. Third-party `apiCostUsd` (DataForSEO etc.) is
-			// preserved across the replacement because the engine's run-usage
-			// covers LLM cost only.
+			// bug at HN-launch. The third-party API calls (DataForSEO etc.) come with
+			// it, counted by the engine from the run's stored calls.
 			const merged = mergeDoneUsage(msg.usage, data['usage']);
 			if (merged) msg.usage = merged;
 			// Silent-turn guard (2026-05-29): a run that the engine
