@@ -127,6 +127,47 @@ describe('an answer that arrives at a closed question', () => {
 		});
 	}
 
+	it('a 410 whose body is not JSON says the answer was not used', async () => {
+		const run = openRun((url) => (url.endsWith('/reply') ? new Response('gone', { status: 410 }) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { promptId: 'p1', question: 'Which?' });
+		await settle();
+		await store.replyPermission('a');
+		expect(store.getChatError()).toBe(await say('chat.prompt_expired'));
+	});
+
+	it('says nothing in another chat when the user left the one that asked before the 410 came', async () => {
+		let answer!: (r: Response) => void;
+		const run = openRun((url) => (url.endsWith('/reply') ? new Promise<Response>((r) => { answer = r; }) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { promptId: 'p1', question: 'Which?' });
+		await settle();
+		const replying = store.replyPermission('a');
+		await settle();
+		store.newChat();
+		answer(json({ error: 'Prompt expired' }, 410));
+		await replying;
+		expect(store.getChatError()).toBeNull();
+	});
+
+	it('does not put the sentence over an error already standing, and leaves that error up', async () => {
+		const run = openRun((url) => (url.endsWith('/reply') ? json({ error: 'Prompt expired' }, 410) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { promptId: 'p1', question: 'Which?' });
+		await settle();
+		// The run fails with an upstream error while its question card is still open.
+		run.send('error', { error: 'Mistral 401 unauthorized' });
+		await settle();
+		const standing = store.getChatError();
+		expect(standing).not.toBeNull();
+		expect(standing).not.toBe(await say('chat.prompt_expired'));
+		await store.replyPermission('a');
+		expect(store.getChatError()).toBe(standing);
+	});
+
 	it('the sentence stands until the next message is sent, also when that message waits in the queue', async () => {
 		await answerWith('reply', 410, { error: 'Prompt expired' });
 		await settle();

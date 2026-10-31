@@ -2503,7 +2503,8 @@ export async function replyPermission(answer: string): Promise<void> {
 	const promptId = pendingPermission?.promptId;
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
-	reportReply(await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply`, { answer, promptId }));
+	const sid = sessionId;
+	reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }));
 }
 
 /** One-shot reply for a multi-question tabs prompt. Answers are ordered to
@@ -2513,18 +2514,21 @@ export async function replyPermissionTabs(answers: string[]): Promise<void> {
 	const promptId = pendingTabsPrompt?.promptId;
 	if (!promptId) return;
 	pendingTabsPrompt = null;
-	reportReply(await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply-tabs`, { promptId, answers }));
+	const sid = sessionId;
+	reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply-tabs`, { promptId, answers }));
 }
 
 /**
  * What the user hears about an answer once its card is gone. An answer that did not arrive is a
  * toast. One that arrived at a closed question was not used, and nothing else would tell them:
- * it stands where the chat's other errors stand until the next message is sent. A stale (404)
- * or refused (409) answer stays silent; the question it named has no card left to answer.
+ * it stands where the chat's other errors stand until the next message is sent — in the thread
+ * that asked only, and never over another error, which says more than this sentence does. A
+ * stale (404) or refused (409) answer stays silent; the question it named has no card left.
  */
-function reportReply(outcome: ReplyOutcome): void {
+function reportReply(sid: string, outcome: ReplyOutcome): void {
 	if (outcome === 'lost') { addToast(t('chat.error_connection'), 'error', 6000); return; }
-	if (outcome === 'settled') return;
+	if (outcome === 'settled' || sessionId !== sid) return;
+	if (chatError !== null && chatError !== closedReplySentence) return;
 	chatError = closedReplySentence = t(outcome === 'restarted' ? 'chat.prompt_closed_restart' : 'chat.prompt_expired');
 	chatErrorDetail = null;
 }
