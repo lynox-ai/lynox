@@ -199,7 +199,7 @@ describe('a write the host kept with markup it was not sent (§21.2 item 6)', ()
     expect(ledger.getPreview(id)[0]).toMatchObject({ shopAddedMarkup: true });
   });
 
-  it('counts a read-back with only a paragraph added, or only reformatted, and does not halt', async () => {
+  it('does not halt on a read-back with only a paragraph added, or only reformatted', async () => {
     const id = approvedRun({ description: 'Neu' }, [{ description: '<p>Alt</p>' }, { description: '<p>Alt 2</p>' }]);
     const store = new Map<string, Record<string, unknown>>([[`${LIST}/1`, { description: '<p>Alt</p>' }], [`${LIST}/2`, { description: '<p>Alt 2</p>' }]]);
     const out = await run(id, stubWriter(store, (v) => ({ ...v, description: `<p>${String(v['description'])}</p>\n` })));
