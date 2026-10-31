@@ -57,7 +57,7 @@ function putConfigSites(src: string): { at: number; checked: boolean; shown: boo
 		const rest = call === -1 ? '' : after.slice(call);
 		const at = rest.search(/\}\s*catch\b|^\s*\.catch\(/m);
 		const handler = at === -1 ? '' : rest.slice(at, at + 400);
-		return { at: m.index, checked: call !== -1, shown: /(?:addToast\(|=)[^;]*(?:\bsaveFailedText\(|\b(?:e|err)\.message\b)/.test(handler) };
+		return { at: m.index, checked: call !== -1, shown: /(?:addToast\(|(?<![=!<>])=(?![=>]))[^;]*(?:\bsaveFailedText\(|\b(?:e|err)\.message\b)/.test(handler) };
 	});
 }
 
@@ -97,6 +97,9 @@ describe('every PUT on /config shows why the server refused it', () => {
 		// The message logged and a fixed text shown is still a dropped sentence.
 		const logged = `${read}\n} catch (e) {\n\tconsole.warn(e.message);\n\taddToast(t('x.save_failed'), 'error');\n}`;
 		expect(putConfigSites(logged).map((s) => s.shown)).toEqual([false]);
+		// A comparison is no assignment: the message is tested, not shown.
+		const compared = `${read}\n} catch (e) {\n\tif (e instanceof Error && e.message === 'x') return;\n\taddToast(t('x.save_failed'), 'error');\n}`;
+		expect(putConfigSites(compared).map((s) => s.shown)).toEqual([false]);
 		// A save in another form is seen by the loose scan, and not by the strict one.
 		const other = "const res = await fetch(url + '/config', { headers: {}, method: \"PUT\", body: '{}' });";
 		expect(loosePutConfigCount(other)).toBe(1);

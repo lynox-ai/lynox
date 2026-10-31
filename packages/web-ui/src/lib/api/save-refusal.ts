@@ -10,21 +10,21 @@
 // The sentence is shown behind a translated lead (ux U-102): the server's reasons are English,
 // and the lead says what did not happen. Some reasons repeat what was entered — the managed
 // provider check quotes the `api_base_url` it refused — so a URL loses its credentials, query
-// and fragment, and a long token-like run is cut, before the sentence reaches a toast.
+// and fragment before the sentence reaches a toast. Nothing else is cut: what else the route
+// repeats are model ids and preset names, which the person needs to read, and it repeats no key
+// field (the schema's messages name no values). The server stripping the URL itself is its own
+// register row.
 
 import { tf } from '../i18n.svelte.js';
 
 /** Longest sentence a toast shows; a longer one ends in "…". */
 const MAX_REASON = 200;
-/** A run this long of key characters reads as a token, not a word. */
-const TOKEN_RUN = /[A-Za-z0-9_-]{24,}/g;
-const URL_PART = /\b(https?:\/\/)(?:[^\s/?#'"@]*@)?([^\s/?#'"]+)([^\s?#'"]*)(?:[?#][^\s'"]*)?/g;
+/** A URL of any scheme: what stays is scheme, host and path. */
+const URL_PART = /\b([a-z][a-z0-9+.-]*:\/\/)(?:[^\s/?#'"@]*@)?([^\s/?#'"]+)([^\s?#'"]*)(?:[?#][^\s'"]*)?/gi;
 
-/** The server's sentence as a toast may show it: no URL credentials or query, no tokens, short. */
+/** The server's sentence as a toast may show it: no URL credentials, query or fragment, short. */
 export function shownReason(reason: string): string {
-	const masked = reason
-		.replace(URL_PART, (_m, scheme: string, host: string, path: string) => `${scheme}${host}${path}`)
-		.replace(TOKEN_RUN, '…');
+	const masked = reason.replace(URL_PART, (_m, scheme: string, host: string, path: string) => `${scheme}${host}${path}`);
 	return masked.length > MAX_REASON ? `${masked.slice(0, MAX_REASON - 1)}…` : masked;
 }
 

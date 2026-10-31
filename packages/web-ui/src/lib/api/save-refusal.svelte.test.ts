@@ -62,14 +62,24 @@ describe('shownReason — what of the server\'s sentence a toast may show', () =
 			.toBe("Managed instance: cannot set api_base_url to 'https://api.example.com/v1' — only the curated endpoints are allowed.");
 	});
 
-	it('cuts a token-like run, in a query-less URL path too', () => {
-		const token = ['sk', 'live', 'A1b2C3d4E5f6G7h8I9j0K1l2'].join('_');
-		expect(shownReason(`background_model "${token}" cannot run on this instance`)).toBe('background_model "…" cannot run on this instance');
-		expect(shownReason(`api_base_url 'https://h.example.com/key/${token}' does not belong`)).toBe("api_base_url 'https://h.example.com/key/…' does not belong");
+	it('drops the credentials of a URL in any scheme', () => {
+		expect(shownReason("api_base_url 'postgres://u:pw@db.example.com/x' is not a curated endpoint"))
+			.toBe("api_base_url 'postgres://db.example.com/x' is not a curated endpoint");
+	});
+
+	it('masks the sentence a refused save carries, not only the helper\'s answer', async () => {
+		setLocale('en');
+		const refused = Response.json({ error: "Managed instance: api_base_url 'https://u:pw@h.example.com/v1?key=abc' does not belong to provider 'anthropic'." }, { status: 403 });
+		expect(await failedText(refused)).toBe("Not saved: Managed instance: api_base_url 'https://h.example.com/v1' does not belong to provider 'anthropic'.");
 	});
 
 	it('leaves an ordinary sentence as it is, model ids and field names included', () => {
-		for (const s of [OWNER_ONLY, LOCKED, "provider:'openai' requires openai_model_id", "Unknown tier_preset 'eu-fast'.", 'Invalid config: Unrecognized key: "extra"']) {
+		for (const s of [
+			OWNER_ONLY, LOCKED, "provider:'openai' requires openai_model_id", "Unknown tier_preset 'eu-fast'.", 'Invalid config: Unrecognized key: "extra"',
+			// Ids the person needs to read, longer than any token rule would let through.
+			"Managed instance: tier_set slot 'fast' model 'accounts/fireworks/models/deepseek-v4p1-flash-1017' is not available on this instance (operator model blocklist).",
+			'background_model "3f2b6c1e-8a4d-4f7b-9c2e-1d5a6b7c8e9f" cannot run on this instance',
+		]) {
 			expect(shownReason(s)).toBe(s);
 		}
 	});
