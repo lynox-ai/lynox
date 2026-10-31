@@ -232,11 +232,11 @@ function formatTaskLine(
   // rather than concatenated on.
   suffix = '',
 ): string {
-  // Title, assignee and scope as stored, without the characters that render as nothing
+  // Title, assignee, scope and due date as stored, without the characters that render as nothing
   // (`hidden-text.ts`): the model's write tools refuse them, but a plan saved before, or through
   // another path, carries them.
   const scope = t.scope_type === 'context' && !t.scope_id ? '' : ` (${t.scope_type}:${stripHidden(t.scope_id)})`;
-  const due = t.due_date ? ` — due ${t.due_date}` : '';
+  const due = t.due_date ? ` — due ${stripHidden(t.due_date)}` : '';
   const assign = t.assignee ? ` @${stripHidden(t.assignee)}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
   return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine(t)}`;
