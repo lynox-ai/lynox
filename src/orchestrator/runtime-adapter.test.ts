@@ -932,7 +932,8 @@ describe('spawnInline + parentPrompt propagation', () => {
     it.each(['inline', 'agent'] as const)('a %s step without timeout_ms gets the default limit, 30 min', async (runtime) => {
       expect(DEFAULT_STEP_TIMEOUT_MS).toBe(1_800_000);
       vi.useFakeTimers();
-      mockSend.mockImplementationOnce(() => new Promise<string>(() => { /* hangs */ }));
+      // Hangs past the limit; the rejection it ends with is what the step reports.
+      mockSend.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => { setTimeout(() => reject(new Error('aborted')), DEFAULT_STEP_TIMEOUT_MS + 1_000); }));
       const run = runtime === 'inline'
         ? spawnInline({ id: 'hangs', agent: 'hangs', runtime: 'inline', task: 'work' }, {}, mockConfig, mockParentTools)
         : spawnViaAgent({ id: 'hangs', agent: 'hangs', runtime: 'agent' }, { name: 'hangs', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] },
@@ -945,6 +946,9 @@ describe('spawnInline + parentPrompt propagation', () => {
       expect(agent.abort).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
       expect(agent.abort).toHaveBeenCalled();
+      const outcome = expect(run).rejects.toThrow('Step "hangs" timed out after 1800000ms');
+      await vi.advanceTimersByTimeAsync(1_000);
+      await outcome;
     });
 
     it('control: a step that hangs without asking still times out', async () => {
