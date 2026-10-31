@@ -368,11 +368,15 @@ describe('checkMarkup: tags the fragment drops', () => {
     expect(reason('<p>a</p>', after.replace(/<\/?(body|html|div|section|head)\b[^>]*>/, ''))).toBe('ok');
   });
 
-  it('lets a text that swallowed a tag hold only the same text, not a prefix of another tag', () => {
-    // A `>` inside a quoted value: a match cut there would be the same for both tags.
+  it('lets a text that swallowed a tag hold only the same tags, not a prefix of another tag', () => {
+    // A `>` inside a quoted value: a match cut there would be the same for both tags. With
+    // attributes, neither is held at all.
     const before = '<p>x<body title="a>b">y</p>';
-    expect(reason(before, before)).toBe('ok');
     expect(reason(before, '<p>x<body title="a>" class="z">y</p>')).toBe('not_canonical');
+    expect(reason(before, before)).toBe('not_canonical');
+    // Without attributes, the same tags with what lies between them are held, a `>` in the text included.
+    expect(reason('<p>x</div>y > z</p>', '<p>w</div>y > z.</p>')).toBe('ok');
+    expect(reason('<p>x</div>y > z</p>', '<p>w</div>y</div> > z</p>')).toBe('not_canonical');
   });
 
   it('passes an edit of the text around a held tag, and whitespace around it normalised', () => {
@@ -385,11 +389,20 @@ describe('checkMarkup: tags the fragment drops', () => {
     expect(reason(before, '<p>Info<body class="z">!</p><svg><![CDATA[x> <body class="z">]]></svg>')).toBe('not_canonical');
   });
 
-  it('passes a dropped tag the before-image holds the same way, and refuses a second copy', () => {
-    const before = '<body class="x"><p>a</p>';
-    expect(reason(before, '<body class="x"><p>b</p>')).toBe('ok');
-    expect(reason(before, '<body class="x"><p>b</p><body class="x">')).toBe('not_canonical');
-    expect(reason(before, '<body class="y"><p>b</p>')).toBe('not_canonical');
+  it('passes a dropped tag without attributes the before-image holds the same way, and refuses a second copy', () => {
+    const before = '<p>a</p></div>';
+    expect(reason(before, '<p>b</p></div>')).toBe('ok');
+    expect(reason(before, '<p>b</p></div> </div>')).toBe('not_canonical');
+    expect(reason(before, '<p>b</p></section>')).toBe('not_canonical');
+  });
+
+  it('holds no dropped start tag with attributes, wherever the before-image has it', () => {
+    // Inert in a template or a select there, read by the page where the after-state puts it.
+    for (const before of ['<template><body class="z"></template>', '<select><option>a</option><body class="z"></select>', '<body class="z"><p>a</p>']) {
+      expect(reason(before, '<p>a<body class="z">b</p>'), before).toBe('not_canonical');
+      expect(reason(before, `${before}`), before).toBe('not_canonical');
+    }
+    expect(reason('<p>a</p>', '<p>a</p><body/class=z>')).toBe('not_canonical');
   });
 
   it('finds nothing in markup the fragment keeps, however it is written', () => {
