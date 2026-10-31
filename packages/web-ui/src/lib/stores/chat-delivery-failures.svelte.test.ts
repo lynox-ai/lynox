@@ -192,6 +192,26 @@ describe('an answer that arrives at a closed question', () => {
 		expect(store.getMessages().at(-1)).toMatchObject({ role: 'user', content: 'again', queued: true });
 		expect(store.getChatError()).toBe(standing);
 	});
+
+	it('a message queued after another error replaced the sentence leaves that error up', async () => {
+		const run = openRun((url) => (url.endsWith('/reply') ? json({ error: 'Prompt expired' }, 410) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { promptId: 'p1', question: 'Which?' });
+		await settle();
+		await store.replyPermission('a');
+		expect(store.getChatError()).toBe(await say('chat.prompt_expired'));
+		// The run goes on, and the provider's error takes the sentence's place.
+		run.send('text', { text: '429 {"type":"error","error":{"message":"rate limited"}}' });
+		await settle();
+		const standing = store.getChatError();
+		expect(standing).not.toBeNull();
+		expect(standing).not.toBe(await say('chat.prompt_expired'));
+		void store.sendMessage('again');
+		await settle();
+		expect(store.getMessages().at(-1)).toMatchObject({ role: 'user', content: 'again', queued: true });
+		expect(store.getChatError()).toBe(standing);
+	});
 });
 
 describe('a stop whose request fails', () => {
