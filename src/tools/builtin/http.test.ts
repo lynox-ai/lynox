@@ -3892,6 +3892,11 @@ describe('httpRequestTool', () => {
       expect((await call(store, { tasks: [1, 2, 3] })).slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
       const indexed = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: '0.cost' });
       expect((await call(indexed, [{ cost: 0.05 }])).slot.apiCost).toEqual({ usd: 0.05, source: 'response' });
+      // Only plain digits index: `1e0` and `0x1` are names, which an array has none of.
+      for (const field of ['tasks.1e0.cost', 'tasks.0x1.cost']) {
+        const named = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: field });
+        expect((await call(named, { tasks: [{ cost: 0.5 }, { cost: 0.07 }] })).slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+      }
     });
 
     it('marks the event an estimate when the amount is the profile rate', async () => {
