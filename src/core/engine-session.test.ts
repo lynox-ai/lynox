@@ -1120,6 +1120,22 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(plain!.grantId).toBeUndefined();
     });
 
+    it('passes the API request a call sent, and its cost, through to the ledger row (v71)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: false, apiCost: { usd: 0.09, source: 'response' } });
+        agent?.recordToolCall?.({ toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        throw new Error('stop after two calls');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('stop after two calls');
+
+      const rows = vi.mocked(engine.getRunHistory()!.insertToolCall).mock.calls.map(c => c[0]);
+      expect(rows.find(p => p.toolName === 'http_request')!.apiCost).toEqual({ usd: 0.09, source: 'response' });
+      expect(rows.find(p => p.toolName === 'read_file')!.apiCost).toBeUndefined();
+    });
+
     it('passes the call\'s outcome, contract, lift and filing through to the ledger row (PRD 3f-1b-α)', async () => {
       const { engine, session } = await createEngineAndSession();
       const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;

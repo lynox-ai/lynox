@@ -131,9 +131,10 @@ describe('a scheduled workflow under a grant writes each call\'s facts onto its 
     return id;
   }
 
-  function engine(): Engine {
+  function engine(apiStore?: ApiStore): Engine {
     const ctx = createToolContext({});
     ctx.tools = [httpRequestTool];
+    if (apiStore !== undefined) ctx.apiStore = apiStore;
     return {
       getTaskManager: () => tm,
       getUserConfig: () => ({ api_key: 'test-key' }),
@@ -150,8 +151,8 @@ describe('a scheduled workflow under a grant writes each call\'s facts onto its 
     } as unknown as Engine;
   }
 
-  async function fire(trigger: TriggerRecord): Promise<void> {
-    const loop = new WorkerLoop(engine(), { hasChannels: () => false, notify: vi.fn() } as never, 60_000);
+  async function fire(trigger: TriggerRecord, apiStore?: ApiStore): Promise<void> {
+    const loop = new WorkerLoop(engine(apiStore), { hasChannels: () => false, notify: vi.fn() } as never, 60_000);
     await (loop as unknown as { executePipeline: (t: TriggerRecord, starter: undefined, ownerStop: AbortSignal) => Promise<void> }).executePipeline(tm.getTrigger(trigger.id)!, undefined, new AbortController().signal);
   }
 
@@ -167,6 +168,17 @@ describe('a scheduled workflow under a grant writes each call\'s facts onto its 
     expect(callFactsOf(row!)).toEqual({ recorded: true, status: 'ok', contract: 'governing', contractGrantId: stampedGrantId('wf-post'), lift: null, filing: null });
     // The connection column stays its own: no connection was resolved for this host.
     expect(row!.grant_id).toBeNull();
+  });
+
+  it('a GET to an API with a cost puts the request and its cost on the step\'s row (v71)', async () => {
+    const trigger = accept(saveWorkflow());
+    const store = new ApiStore();
+    store.register({ id: 'reports', name: 'Reports', base_url: `https://${HOST}`, description: 'Reports API', cost: { model: 'per_call', rate_usd: 0.002 } });
+    mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'GET' })).mockResolvedValueOnce(endTurn('read'));
+    await fire(trigger, store);
+    const [row] = httpRows() as Array<ToolCallRecord & { api_cost_usd: number | null; api_cost_source: string | null }>;
+    expect(row).toBeDefined();
+    expect([row!.api_cost_usd, row!.api_cost_source]).toEqual([0.002, 'profile']);
   });
 
   it('a POST the grant lets through carries the lift, and the lift names the accepted grant', async () => {

@@ -135,6 +135,11 @@ describe('mergeDoneUsage — REPLACE-on-done contract (multi-turn cost footer)',
 		expect(result?.model).toBe('mistral-medium-2508');
 	});
 
+	it('never takes more unpriced calls than calls from the done payload', () => {
+		const result = applyDoneEvent(undefined, { tokensIn: 1, tokensOut: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0, apiCalls: 2, apiCostUsd: 0, apiCallsUnpriced: 9 });
+		expect(result?.apiCallsUnpriced).toBe(2);
+	});
+
 	it('drops a streamed API cost when the done payload names no API calls', () => {
 		const prior: UsageInfo = { tokensIn: 1, tokensOut: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.01, apiCostUsd: 0.004 };
 		const result = applyDoneEvent(prior, { tokensIn: 100, tokensOut: 50, cacheRead: 0, cacheWrite: 0, costUsd: 0.001 });

@@ -2913,7 +2913,9 @@ export function apiCostOfAnswer(profile: ApiProfile, json: unknown): CallApiCost
   if (field !== undefined && json !== undefined) {
     let at: unknown = json;
     for (const key of field.split('.')) {
-      at = at !== null && typeof at === 'object' && Object.hasOwn(at, key) ? (at as Record<string, unknown>)[key] : undefined;
+      // An array is entered by index only, so `tasks.length` reads no count as a cost.
+      at = Array.isArray(at) ? (/^\d+$/.test(key) ? (at as unknown[])[Number(key)] : undefined)
+        : at !== null && typeof at === 'object' ? (at as Record<string, unknown>)[key] : undefined;
     }
     if (typeof at === 'number' && Number.isFinite(at) && at >= 0 && at <= MAX_RESPONSE_COST_USD) {
       return { usd: at, source: 'response' };
@@ -3944,8 +3946,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const status = `${response.status} ${response.statusText}`;
       // After a write turned into a GET on another origin, the answer is that GET's, not the write's.
       answeredStatus = writeFollowedAsRead === undefined ? status : `${status} to the GET it was redirected to on ${urlForNote(finalRequestUrl)}`;
-      // Attributed to the final URL after redirects, like the cost event below.
-      const costProfile = apiProfileOfUrl(finalRequestUrl, toolContext);
+      // Attributed to the final URL after redirects; when that host has no cost but the first one
+      // has, the request still went to the priced API (a redirect to a CDN or a signed link).
+      const costProfile = apiProfileOfUrl(finalRequestUrl, toolContext) ?? apiProfileOfUrl(input.url, toolContext);
       apiCost = costProfile === undefined ? undefined : apiCostOfAnswer(costProfile, undefined);
       // Strip sensitive response headers to prevent credential leakage to agent
       const REDACTED_HEADERS = new Set([
@@ -4206,6 +4209,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     } catch (err: unknown) {
       // The request went out and was answered, so it counts even though reading the answer failed.
       if (answeredStatus !== undefined && apiCost !== undefined) noteApiCost(apiCost);
+      // So does a write whose redirect hop was refused: it was sent and answered before the hop.
+      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused) {
+        const sentTo = apiProfileOfUrl(input.url, toolContext);
+        if (sentTo !== undefined) noteApiCost(apiCostOfAnswer(sentTo, undefined));
+      }
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
       // the REASON as its message, and `blockedFriendly`'s reason starts with
       // "Blocked:" — so the branch two lines down would match it, re-wrap it as
