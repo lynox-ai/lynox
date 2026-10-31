@@ -376,6 +376,10 @@ describe('formatApiCalls — the run\'s API calls in the footer', () => {
 		expect(both?.title).toContain('1 of 4 without an amount');
 	});
 
+	it('a lower bound of exactly $0.001 is stated', () => {
+		expect(formatApiCalls({ ...base, apiCalls: 4, apiCostUsd: 0.001, apiCallsUnpriced: 1 })?.text).toMatch(/^4 API calls · at least \$/);
+	});
+
 	it('a lower bound under $0.001 states no amount: an upper bound nobody knows would read as one', () => {
 		for (const usd of [0.0004, 0]) {
 			const part = formatApiCalls({ ...base, apiCalls: 4, apiCostUsd: usd, apiCostEstimated: true, apiCallsUnpriced: 1 });

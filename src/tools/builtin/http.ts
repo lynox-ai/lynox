@@ -3947,8 +3947,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // After a write turned into a GET on another origin, the answer is that GET's, not the write's.
       answeredStatus = writeFollowedAsRead === undefined ? status : `${status} to the GET it was redirected to on ${urlForNote(finalRequestUrl)}`;
       // Attributed to the final URL after redirects; when that host has no cost but the first one
-      // has, the request still went to the priced API (a redirect to a CDN or a signed link).
-      const costProfile = apiProfileOfUrl(finalRequestUrl, toolContext) ?? apiProfileOfUrl(input.url, toolContext);
+      // has, the request still went to the priced API (a redirect to a CDN or a signed link). The
+      // answer is then another party's, so its cost field is not read: only the profile rate counts.
+      const answeringProfile = apiProfileOfUrl(finalRequestUrl, toolContext);
+      const costProfile = answeringProfile ?? apiProfileOfUrl(input.url, toolContext);
+      const costInAnswer = answeringProfile !== undefined;
       apiCost = costProfile === undefined ? undefined : apiCostOfAnswer(costProfile, undefined);
       // Strip sensitive response headers to prevent credential leakage to agent
       const REDACTED_HEADERS = new Set([
@@ -4014,7 +4017,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const json = JSON.parse(text) as unknown;
           parsedJson = true;
           // The amount the answer gives, read before the shaping can drop its field.
-          if (costProfile !== undefined) apiCost = apiCostOfAnswer(costProfile, json);
+          if (costProfile !== undefined && costInAnswer) apiCost = apiCostOfAnswer(costProfile, json);
           // Apply per-API response shaping if the profile defines one.
           const shapedBody = await maybeShapeJson(json, input.url, toolContext);
           body = shapedBody;
@@ -4189,7 +4192,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               tool: 'http_request',
               profileId: costProfile.id,
               profileName: costProfile.name,
-              endpoint: new URL(finalRequestUrl).pathname,
+              endpoint: new URL(costInAnswer ? finalRequestUrl : input.url).pathname,
               costUsd: apiCost.usd,
               source: apiCost.source === 'response' ? 'response' : 'profile',
               agent: agent.name,

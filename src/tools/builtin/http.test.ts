@@ -3912,6 +3912,32 @@ describe('httpRequestTool', () => {
       expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
     });
 
+    it('reads no cost field from another party\'s answer: after a redirect off the priced API only its rate counts', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.net/file.json' } }))
+        .mockResolvedValueOnce(createMockResponse({ headers: { 'content-type': 'application/json' }, json: { cost: 5 } })));
+      const slot: CallSlot = {};
+      await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/export' }, costAgent(store, [])));
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    });
+
+    it('counts a read whose redirect hop is refused as a write: the read itself went out', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.dataforseo.com/v3/x?_method=DELETE' } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const slot: CallSlot = {};
+      // Under delegated access a hop a server would act on as a write is not followed.
+      const delegated = { ...(costAgent(store, []) as object), principal: { kind: 'mandate', email: 'helper@example.test' } satisfies RequestPrincipal } as { toolContext: Record<string, unknown> };
+      delegated.toolContext = { ...delegated.toolContext, auditLog: { record: vi.fn() } };
+      const out = await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, delegated as never).then(String, (e: unknown) => String(e)));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(out).toMatch(/not followed/);
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    });
+
     it('counts a request redirected from a host without a profile to the priced API under that API', async () => {
       const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
       mockDnsPublic();
