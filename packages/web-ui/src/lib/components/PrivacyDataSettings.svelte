@@ -6,6 +6,7 @@
 <script lang="ts">
 	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 
@@ -48,10 +49,10 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ bugsink_enabled: bugsinkEnabled }),
 			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			await throwIfRefused(res);
 			addToast(t('privacy.saved'), 'success', 3000);
 		} catch (e) {
-			addToast(e instanceof Error ? e.message : t('privacy.save_failed'), 'error', 5000);
+			addToast(saveFailedText(e, t('privacy.save_failed')), 'error', 5000);
 		} finally {
 			saving = false;
 		}
@@ -65,13 +66,13 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ debug_wire_capture: debugWireCapture }),
 			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			await throwIfRefused(res);
 			addToast(t('privacy.saved'), 'success', 3000);
 		} catch (e) {
 			// Roll the checkbox back to the persisted value on failure so the UI
 			// never claims an unsaved state is saved.
 			debugWireCapture = !debugWireCapture;
-			addToast(e instanceof Error ? e.message : t('privacy.save_failed'), 'error', 5000);
+			addToast(saveFailedText(e, t('privacy.save_failed')), 'error', 5000);
 		} finally {
 			savingWire = false;
 		}

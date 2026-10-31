@@ -23,6 +23,7 @@
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
@@ -885,18 +886,11 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(body),
 			});
-			if (!res.ok) {
-				// Surface the server's named reason (e.g. "provider:'openai' requires
-				// openai_model_id") instead of a bare "HTTP 400" — otherwise a save
-				// that fails validation looks like a silent no-op (H-007: OpenAI-compat
-				// save with no model-id swallowed the 400). Falls back to the status.
-				let reason = `HTTP ${res.status}`;
-				try {
-					const errBody = (await res.json()) as { error?: string; disclosure?: string };
-					if (typeof errBody.error === 'string' && errBody.error) reason = errBody.error;
-				} catch { /* non-JSON body — keep the status string */ }
-				throw new Error(reason);
-			}
+			// Surface the server's named reason (e.g. "provider:'openai' requires
+			// openai_model_id") instead of a bare "HTTP 400" — otherwise a save
+			// that fails validation looks like a silent no-op (H-007: OpenAI-compat
+			// save with no model-id swallowed the 400). Falls back to the status.
+			await throwIfRefused(res);
 			// The routing/tier config may have changed → drop the shared tier-config
 			// cache so the composer + header model pickers re-fetch the new per-tier
 			// model labels immediately (else they'd show the pre-save model, e.g. the

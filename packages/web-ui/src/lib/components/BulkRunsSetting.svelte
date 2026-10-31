@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { bulkRunsView, type BulkRunsView } from './bulk-runs-setting.js';
@@ -35,11 +36,11 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ bulk_runs_enabled: next }),
 			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			await throwIfRefused(res);
 			addToast(t('tools.saved'), 'success', 2000);
-		} catch {
+		} catch (e) {
 			view = { ...view, on: !next };
-			addToast(t('tools.save_failed'), 'error', 5000);
+			addToast(saveFailedText(e, t('tools.save_failed')), 'error', 5000);
 		} finally {
 			saving = false;
 			await load();

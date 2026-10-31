@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 
@@ -82,10 +83,10 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(config),
 			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			await throwIfRefused(res);
 			addToast(t('voice.saved'), 'success', 3000);
 		} catch (e) {
-			addToast(e instanceof Error ? e.message : t('voice.save_failed'), 'error', 5000);
+			addToast(saveFailedText(e, t('voice.save_failed')), 'error', 5000);
 		} finally {
 			saving = false;
 		}
