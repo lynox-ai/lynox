@@ -68,6 +68,13 @@ import { timingSafeEqual } from 'node:crypto';
 // the validated IP (closes the DNS-rebinding window between validate + connect).
 
 /** Translate technical block reasons into business-friendly messages */
+/** After `Blocked: redirect to <url>`: a hop to a GraphQL URL that carries a mutation, with the way out. */
+export const GRAPHQL_REDIRECT_REFUSAL = 'carries a GraphQL mutation in its URL; the redirect was not followed. To run the mutation, send it as a POST with a JSON body directly to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation.';
+
+/** After `Blocked: <write> to <service>`: a JSON object that cannot be a GraphQL request at a
+ *  GraphQL-looking address, as a write to a file named `graphql.*` sends (`jsonObjectNotGraphql`). */
+export const GRAPHQL_NOT_A_REQUEST_REFUSAL = 'looks like a GraphQL address to this check, and the body is not a GraphQL request, so it was not sent. If this writes or changes a file whose name contains graphql, lynox cannot send it this way: tell the user which file it is and that they need to change it themselves. Otherwise send one JSON object with a query string and Content-Type: application/json.';
+
 function friendlyBlockMessage(technical: string): string {
   if (technical.includes('private IP')) return 'That address points to an internal network and cannot be reached.';
   if (technical.includes('enforce_https')) return 'Only secure HTTPS connections are allowed. HTTP is disabled.';
@@ -594,7 +601,7 @@ export async function fetchWithValidatedRedirects(
       // otherwise run the mutation without a question.
       if (isGraphqlEndpoint(nextUrl) && graphqlUrlWrites(nextUrl)) {
         if (sent !== undefined) throw new RedirectRefusedAfterWrite(sent, nextUrl, 'consent');
-        throw new Error(`Blocked: redirect to ${urlForNote(nextUrl)} carries a GraphQL mutation in its URL; the redirect was not followed. To run the mutation, send it as a POST with a JSON body directly to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation.`);
+        throw new Error(`Blocked: redirect to ${urlForNote(nextUrl)} ${GRAPHQL_REDIRECT_REFUSAL}`);
       }
       const verdict = redirectGuard ? redirectGuard(nextUrl, method) : true;
       if (verdict !== true) {
@@ -3183,7 +3190,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
       const reading = graphqlWrite(headers, input.body);
       if ('refusal' in reading && jsonObjectNotGraphql(input.body)) {
-        blockedVerbatim(`Blocked: ${writeShown} to ${service()} looks like a GraphQL address to this check, and the body is not a GraphQL request, so it was not sent. If this writes or changes a file whose name contains graphql, lynox cannot send it this way: tell the user which file it is and that they need to change it themselves. Otherwise send one JSON object with a query string and Content-Type: application/json.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${service()} ${GRAPHQL_NOT_A_REQUEST_REFUSAL}`);
       }
       if ('refusal' in reading) {
         blockedVerbatim(`Blocked: ${writeShown} to ${service()} is a GraphQL request this check cannot read: ${reading.refusal}. Send one JSON object with a query string and Content-Type: application/json.`);
