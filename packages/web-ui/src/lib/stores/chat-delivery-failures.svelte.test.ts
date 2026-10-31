@@ -85,6 +85,135 @@ describe('a tabbed prompt answer that does not arrive', () => {
 	});
 });
 
+describe('an answer that arrives at a closed question', () => {
+	type Route = 'reply' | 'reply-tabs';
+	async function answerWith(route: Route, status: number, body: unknown): Promise<void> {
+		const run = openRun((url) => (url.endsWith(`/${route}`) ? json(body, status) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		if (route === 'reply') {
+			run.send('prompt', { promptId: 'p1', question: 'Which?' });
+			await settle();
+			await store.replyPermission('a');
+		} else {
+			run.send('prompt_tabs', { promptId: 'p3', questions: [{ question: 'Which?', options: ['a', 'b'] }] });
+			await settle();
+			await store.replyPermissionTabs(['a']);
+		}
+	}
+	const say = async (key: string): Promise<string> => (await import('../i18n.svelte.js')).t(key);
+
+	for (const route of ['reply', 'reply-tabs'] as const) {
+		it(`${route}: an expired question says the answer was not used`, async () => {
+			await answerWith(route, 410, { error: 'Prompt expired' });
+			expect(store.getChatError()).toBe(await say('chat.prompt_expired'));
+			expect(toasts).toEqual([]);
+		});
+
+		it(`${route}: a question the restart closed says to start the task again`, async () => {
+			await answerWith(route, 410, { error: 'Prompt closed: the engine restarted', code: 'process_restarted' });
+			expect(store.getChatError()).toBe(await say('chat.prompt_closed_restart'));
+			expect(toasts).toEqual([]);
+		});
+
+		it(`${route}: a stale (404) or refused (409) answer says nothing`, async () => {
+			await answerWith(route, 404, { error: 'No pending prompt' });
+			expect(store.getChatError()).toBeNull();
+			vi.resetModules();
+			store = await import('./chat.svelte.js');
+			await answerWith(route, 409, { error: 'Prompt is a different kind of question' });
+			expect(store.getChatError()).toBeNull();
+			expect(toasts).toEqual([]);
+		});
+	}
+
+	it('a 410 whose body is not JSON says the answer was not used', async () => {
+		const run = openRun((url) => (url.endsWith('/reply') ? new Response('gone', { status: 410 }) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { promptId: 'p1', question: 'Which?' });
+		await settle();
+		await store.replyPermission('a');
+		expect(store.getChatError()).toBe(await say('chat.prompt_expired'));
+	});
+
+	it('says nothing in another chat when the user left the one that asked before the 410 came', async () => {
+		let answer!: (r: Response) => void;
+		const run = openRun((url) => (url.endsWith('/reply') ? new Promise<Response>((r) => { answer = r; }) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { promptId: 'p1', question: 'Which?' });
+		await settle();
+		const replying = store.replyPermission('a');
+		await settle();
+		store.newChat();
+		answer(json({ error: 'Prompt expired' }, 410));
+		await replying;
+		expect(store.getChatError()).toBeNull();
+	});
+
+	it('does not put the sentence over an error already standing, and leaves that error up', async () => {
+		const run = openRun((url) => (url.endsWith('/reply') ? json({ error: 'Prompt expired' }, 410) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { promptId: 'p1', question: 'Which?' });
+		await settle();
+		// The run fails with an upstream error while its question card is still open.
+		run.send('error', { error: 'Mistral 401 unauthorized' });
+		await settle();
+		const standing = store.getChatError();
+		expect(standing).not.toBeNull();
+		expect(standing).not.toBe(await say('chat.prompt_expired'));
+		await store.replyPermission('a');
+		expect(store.getChatError()).toBe(standing);
+	});
+
+	it('the sentence stands until the next message is sent, also when that message waits in the queue', async () => {
+		await answerWith('reply', 410, { error: 'Prompt expired' });
+		await settle();
+		expect(store.getChatError()).toBe(await say('chat.prompt_expired'));
+		// The run that asked is still streaming, so the message is queued.
+		void store.sendMessage('again');
+		await settle();
+		expect(store.getChatError()).toBeNull();
+	});
+
+	it('a message queued while another error stands leaves that error up', async () => {
+		const run = openRun(() => json({}));
+		void store.sendMessage('go');
+		await settle();
+		// The provider's error arrives as text in a run that goes on: the run is still streaming.
+		run.send('text', { text: '429 {"type":"error","error":{"message":"rate limited"}}' });
+		await settle();
+		const standing = store.getChatError();
+		expect(standing).not.toBeNull();
+		void store.sendMessage('again');
+		await settle();
+		expect(store.getMessages().at(-1)).toMatchObject({ role: 'user', content: 'again', queued: true });
+		expect(store.getChatError()).toBe(standing);
+	});
+
+	it('a message queued after another error replaced the sentence leaves that error up', async () => {
+		const run = openRun((url) => (url.endsWith('/reply') ? json({ error: 'Prompt expired' }, 410) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { promptId: 'p1', question: 'Which?' });
+		await settle();
+		await store.replyPermission('a');
+		expect(store.getChatError()).toBe(await say('chat.prompt_expired'));
+		// The run goes on, and the provider's error takes the sentence's place.
+		run.send('text', { text: '429 {"type":"error","error":{"message":"rate limited"}}' });
+		await settle();
+		const standing = store.getChatError();
+		expect(standing).not.toBeNull();
+		expect(standing).not.toBe(await say('chat.prompt_expired'));
+		void store.sendMessage('again');
+		await settle();
+		expect(store.getMessages().at(-1)).toMatchObject({ role: 'user', content: 'again', queued: true });
+		expect(store.getChatError()).toBe(standing);
+	});
+});
+
 describe('a stop whose request fails', () => {
 	it('is reported, leaves the run streaming, and still counts as the user stopping it', async () => {
 		const run = openRun((url) => {

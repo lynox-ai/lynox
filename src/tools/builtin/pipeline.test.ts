@@ -158,6 +158,16 @@ function seedStoredPipeline(steps?: InlinePipelineStep[]): string {
   return pipelineId;
 }
 
+describe('run_workflow — the schema names the step time limit the engine applies', () => {
+  it('timeout_ms says the default a step without one gets: 1800000 ms, 30 min', () => {
+    const steps = (runWorkflowTool.definition.input_schema.properties as Record<string, { items: { properties: Record<string, { description: string }> } }>)['steps']!;
+    const text = steps.items.properties['timeout_ms']!.description;
+    // Spelled out, not read from the shared constant: the step test in runtime-adapter.test.ts
+    // pins the same number on the running limit, so a change to one side fails here or there.
+    expect(text).toBe('Timeout in ms (default: 1800000, 30 min)');
+  });
+});
+
 describe('run_workflow — inline steps', () => {
   beforeEach(() => {
     vi.clearAllMocks();

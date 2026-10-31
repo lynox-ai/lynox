@@ -9,6 +9,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { isHostedInstance } from '../utils/billing-tier.js';
 	import {
 		initNotifications,
@@ -62,12 +63,12 @@
 				addToast(t('notifications.escalation_mail_owner_only'), 'error', 5000);
 				return;
 			}
-			if (!res.ok) throw new Error();
+			await throwIfRefused(res);
 			addToast(t('notifications.escalation_mail_saved'), 'success', 3000);
-		} catch {
+		} catch (e) {
 			// Back to the stored value: the checkbox must not show a state that was not saved.
 			escalationMail = !escalationMail;
-			addToast(t('notifications.escalation_mail_save_failed'), 'error', 5000);
+			addToast(saveFailedText(e, t('notifications.escalation_mail_save_failed')), 'error', 5000);
 		} finally {
 			escalationMailSaving = false;
 		}

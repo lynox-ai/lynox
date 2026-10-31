@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { pickBackupConfig, fetchBackupConfig, requestRestore, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
@@ -70,12 +71,12 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(payload)
 			});
-			if (!res.ok) throw new Error();
+			await throwIfRefused(res);
 			ok = true;
 			saved = true;
 			setTimeout(() => (saved = false), 2000);
-		} catch {
-			addToast(t('common.save_failed'), 'error');
+		} catch (e) {
+			addToast(saveFailedText(e, t('common.save_failed')), 'error');
 		}
 		saving = false;
 		return ok;

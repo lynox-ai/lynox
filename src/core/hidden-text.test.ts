@@ -199,6 +199,19 @@ describe('writing a plan or a workflow with a character that renders as nothing'
     expect(briefing).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
   });
 
+  it('a due date stored with them before update checked its form reaches task_list and the overview without them', async () => {
+    // `update` once took ten UTF-16 units unchecked: a date followed by tag characters.
+    const t = tm.create({ title: 'Weekly offer', dueDate: '2020-01-06' });
+    history.getDb().prepare('UPDATE tasks SET due_date = ? WHERE id = ?').run(`2020-01${tagged('m x')}`, t.id);
+    expect(tm.getTask(t.id)?.due_date).toMatch(/[\u{E0000}-\u{E007F}]/u);
+    const listing = await taskListTool.handler({}, agent());
+    expect(listing).toContain('Weekly offer — due 2020-01');
+    expect(listing).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+    const briefing = tm.getBriefingSummary();
+    expect(briefing).toContain('Overdue: "Weekly offer", due 2020-01,');
+    expect(briefing).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+  });
+
   it('import_workflow refuses a shared workflow whose steps carry it, and saves nothing', async () => {
     const planned = {
       id: 'wf_helper', name: 'Monthly report', goal: 'Fetch and send',

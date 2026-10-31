@@ -50,7 +50,7 @@ interface Proc {
 }
 
 /** One engine process on `dir`. Agent turns resolve at once; the router records what it sent. */
-function boot(dir: string, channelsOn = true): Proc {
+function boot(dir: string, channelsOn = true, language?: string): Proc {
   const history = new RunHistory(join(dir, 'history.db'));
   const engineDb = new EngineDb(join(dir, 'engine.db'));
   history.setVerbGraph(engineDb);
@@ -72,6 +72,7 @@ function boot(dir: string, channelsOn = true): Proc {
     escalateToUser: () => null,
     getEngineDb: () => null,
     getMandateEnds: () => null,
+    config: { language },
   } as unknown as Engine;
   const channels = { on: channelsOn };
   const notify = vi.fn().mockResolvedValue(undefined);
@@ -114,6 +115,18 @@ async function tickAt(p: Proc, t: number): Promise<void> {
 }
 
 describe('the consent reminder', () => {
+  // 966: the tick hands the instance's notice language to the reminder (ux U-099).
+  it('reminds in German on an instance set to German', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const p = boot(newDir(), true, 'de');
+    seed(p);
+    await tickAt(p, T0);
+    expect(reminders(p).map((m) => [m.title, m.body])).toEqual([[
+      '\u23F8 Eine geplante Aktion wartet auf deine Bestätigung',
+      'Fällig, aber nicht gelaufen. Prüf \u201EWeekly digest\u201C unter Automation \u2192 Trigger, bevor du bestätigst.',
+    ]]);
+  });
+
   it('tells the owner once when an unconfirmed agent trigger comes due, and leaves the trigger as it was', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const p = boot(newDir());

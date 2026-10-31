@@ -58,6 +58,14 @@ export class TriggerTierUnsupportedError extends Error {
   }
 }
 
+/** Thrown when a due date is not in the form YYYY-MM-DD, on create and on update alike. */
+export class InvalidDueDateError extends Error {
+  constructor(value: string) {
+    super(`Invalid due_date format: ${value}. Use YYYY-MM-DD.`);
+    this.name = 'InvalidDueDateError';
+  }
+}
+
 /** Thrown when a mandate acts on a to-do it did not create (PRD customer-granted-operator-access
  *  §3.12 points 1 and 3, §3.13 N10b: a mandate reaches only what it set up). */
 export class ForeignTodoError extends Error {
@@ -287,7 +295,7 @@ export class TaskManager {
     }
 
     if (params.dueDate && !/^\d{4}-\d{2}-\d{2}/.test(params.dueDate)) {
-      throw new Error(`Invalid due_date format: ${params.dueDate}. Use YYYY-MM-DD.`);
+      throw new InvalidDueDateError(params.dueDate);
     }
 
     // Auto-trigger: if assigned to lynox with no explicit schedule/watch,
@@ -637,6 +645,9 @@ export class TaskManager {
     if (params.status !== undefined) updateParams.status = params.status;
     if (params.priority !== undefined) updateParams.priority = params.priority;
     if (params.assignee !== undefined) updateParams.assignee = params.assignee;
+    if (params.dueDate && !/^\d{4}-\d{2}-\d{2}/.test(params.dueDate)) {
+      throw new InvalidDueDateError(params.dueDate);
+    }
     if (params.dueDate !== undefined) updateParams.dueDate = params.dueDate ? params.dueDate.slice(0, 10) : '';
     if (params.tags !== undefined) updateParams.tags = params.tags ? JSON.stringify(params.tags) : '';
 
@@ -751,7 +762,7 @@ export class TaskManager {
     for (const t of summary.overdue) {
       const scope = t.scope_type === 'context' ? '' : ` (${t.scope_type}:${stripHidden(t.scope_id)})`;
       const assignee = t.assignee ? ` [${stripHidden(t.assignee)}]` : '';
-      parts.push(`Overdue: "${stripHidden(t.title)}"${scope}, due ${t.due_date}, ${t.priority.toUpperCase()}${assignee}`);
+      parts.push(`Overdue: "${stripHidden(t.title)}"${scope}, due ${stripHidden(t.due_date ?? '')}, ${t.priority.toUpperCase()}${assignee}`);
     }
 
     // Highlight tasks assigned to lynox that aren't already shown as overdue

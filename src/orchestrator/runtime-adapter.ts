@@ -1,6 +1,6 @@
 import type { RequestPrincipal } from '../core/request-principal.js';
 import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
-import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { Agent } from '../core/agent.js';
@@ -334,6 +334,8 @@ export type StepToolRecorder = (call: {
   contract?: CallContract | undefined;
   /** How the call's filing for the owner's approval ended (`CallFiled`); absent when it filed nothing. */
   filed?: CallFiled | undefined;
+  /** The API request the call sent and its cost, from the result event (`CallApiCost`). */
+  apiCost?: CallApiCost | undefined;
   /** The connection and grant the call resolved its URL to, from the result event; absent when
    *  nothing was resolved (`CallConnection`). */
   connection?: CallConnection | undefined;
@@ -411,6 +413,7 @@ export function createStepStreamHandler(opts: {
         ...(event.grant !== undefined ? { grant: { ...event.grant } } : {}),
         ...(event.contract !== undefined ? { contract: { ...event.contract } } : {}),
         ...(event.filed !== undefined ? { filed: { ...event.filed } } : {}),
+        ...(event.apiCost !== undefined ? { apiCost: { ...event.apiCost } } : {}),
         ...(event.connection !== undefined ? { connection: { ...event.connection } } : {}),
         toolUseId: event.toolUseId,
       });
@@ -509,6 +512,10 @@ export function buildSubAgentPromptCallbacks(
       : undefined,
   };
 }
+
+/** A step's time limit when its manifest sets no `timeout_ms`. The pipeline tool's schema
+ *  names it to the model, so both read it from here. */
+export const DEFAULT_STEP_TIMEOUT_MS = 1_800_000;
 
 /**
  * A step's time limit, held while the step waits for its owner's answer (PRD 3b-2 G5 (a)). A
@@ -954,7 +961,7 @@ export async function spawnViaAgent(
     : { type: 'adaptive' };
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
-  const stepTimeout = new StepTimeout(step.timeout_ms ?? 1_800_000);
+  const stepTimeout = new StepTimeout(step.timeout_ms ?? DEFAULT_STEP_TIMEOUT_MS);
   const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
@@ -1343,7 +1350,7 @@ export async function spawnInline(
   const maxIter = 10;
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
-  const stepTimeout = new StepTimeout(step.timeout_ms ?? 1_800_000);
+  const stepTimeout = new StepTimeout(step.timeout_ms ?? DEFAULT_STEP_TIMEOUT_MS);
   const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({

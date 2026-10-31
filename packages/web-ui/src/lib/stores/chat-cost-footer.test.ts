@@ -6,6 +6,7 @@ import {
 	formatTurnTokens,
 	formatUsageMeta,
 	formatUsageMetaParts,
+	formatApiCalls,
 	shortModelLabel,
 	type UsageInfo,
 } from './chat-usage.js';
@@ -104,14 +105,18 @@ describe('mergeDoneUsage — REPLACE-on-done contract (multi-turn cost footer)',
 		expect(result?.costUsd).toBeLessThan(0.27);
 	});
 
-	it('preserves apiCostUsd (third-party DataForSEO etc.) on done replacement', () => {
+	it('takes the API calls from the done payload, not from what was streamed before it', () => {
+		// The engine counts them from the run's stored calls; a figure streamed earlier (a profile
+		// rate, measured 90 times too low once) must not survive the replacement.
 		const prior: UsageInfo = {
 			tokensIn: 50_000,
 			tokensOut: 2000,
 			cacheRead: 40_000,
 			cacheWrite: 1000,
 			costUsd: 0.08, // turn_end-accumulated, stale
-			apiCostUsd: 0.0006, // 1 DataForSEO call mid-run
+			apiCalls: 4,
+			apiCostUsd: 0.004, // stale
+			apiCostEstimated: true,
 		};
 		const result = applyDoneEvent(prior, {
 			tokensIn: 20_000,
@@ -120,10 +125,26 @@ describe('mergeDoneUsage — REPLACE-on-done contract (multi-turn cost footer)',
 			cacheWrite: 500,
 			costUsd: 0.025,
 			model: 'mistral-medium-2508',
+			apiCalls: 4,
+			apiCostUsd: 0.36,
+			apiCostEstimated: false,
+			apiCallsUnpriced: 0,
 		});
 		expect(result?.costUsd).toBe(0.025);
-		expect(result?.apiCostUsd).toBe(0.0006);
+		expect(result).toMatchObject({ apiCalls: 4, apiCostUsd: 0.36, apiCostEstimated: false, apiCallsUnpriced: 0 });
 		expect(result?.model).toBe('mistral-medium-2508');
+	});
+
+	it('never takes more unpriced calls than calls from the done payload', () => {
+		const result = applyDoneEvent(undefined, { tokensIn: 1, tokensOut: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0, apiCalls: 2, apiCostUsd: 0, apiCallsUnpriced: 9 });
+		expect(result?.apiCallsUnpriced).toBe(2);
+	});
+
+	it('drops a streamed API cost when the done payload names no API calls', () => {
+		const prior: UsageInfo = { tokensIn: 1, tokensOut: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.01, apiCostUsd: 0.004 };
+		const result = applyDoneEvent(prior, { tokensIn: 100, tokensOut: 50, cacheRead: 0, cacheWrite: 0, costUsd: 0.001 });
+		expect(result).not.toHaveProperty('apiCostUsd');
+		expect(result).not.toHaveProperty('apiCalls');
 	});
 
 	it('REPLACES even when prior usage exists (no !msg.usage guard)', () => {
@@ -194,9 +215,12 @@ describe('formatUsageMeta — footer tail (token count excluded)', () => {
 		expect(s).toContain('demo-model');
 	});
 
-	it('surfaces third-party API cost above the $0.001 threshold', () => {
-		const u: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02, apiCostUsd: 0.05 };
-		expect(formatUsageMeta(u, true)).toContain('API: $0.05');
+	it('shows the run\'s API calls next to the LLM cost (ux U-096)', () => {
+		const u: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02, apiCalls: 4, apiCostUsd: 0.36, apiCostEstimated: false, apiCallsUnpriced: 0 };
+		expect(formatUsageMeta(u, true)).toContain('4 API calls · $0.36');
+		expect(formatUsageMeta(u, true)).not.toContain('API: ');
+		// Demo tenants see no dollar figure, the count included with it.
+		expect(formatUsageMeta(u, false)).not.toContain('API call');
 	});
 
 	it('drops cache when there were no cache reads', () => {
@@ -320,3 +344,66 @@ describe('sub-agent cost rollup in the footer', () => {
 		expect(merged?.spawnCostUsd).toBe(0.0698);
 	});
 });
+
+/**
+ * The run's third-party API calls (ux U-096). The line has to stand without its tooltip, which a
+ * phone does not show, and say whether its amount is the provider's or an estimate: a profile
+ * rate once read $0.0040 where the provider billed $0.36.
+ */
+describe('formatApiCalls — the run\'s API calls in the footer', () => {
+	const base: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02 };
+	const line = (u: Partial<UsageInfo>) => formatApiCalls({ ...base, ...u })?.text;
+
+	it('every amount from the responses', () => {
+		expect(line({ apiCalls: 4, apiCostUsd: 0.36, apiCostEstimated: false, apiCallsUnpriced: 0 })).toBe('4 API calls · $0.36');
+		expect(formatApiCalls({ ...base, apiCalls: 4, apiCostUsd: 0.36 })?.title).toBe('From the responses');
+	});
+
+	it('any amount from a profile rate makes the whole sum an estimate', () => {
+		expect(line({ apiCalls: 4, apiCostUsd: 0.004, apiCostEstimated: true, apiCallsUnpriced: 0 })).toBe('4 API calls · $0.0040 estimated');
+	});
+
+	it('no amount known', () => {
+		expect(line({ apiCalls: 4, apiCostUsd: 0, apiCostEstimated: false, apiCallsUnpriced: 4 })).toBe('4 API calls · cost unknown');
+	});
+
+	it('a sum that leaves calls without an amount out is a lower bound, and says so', () => {
+		const part = formatApiCalls({ ...base, apiCalls: 4, apiCostUsd: 0.27, apiCostEstimated: false, apiCallsUnpriced: 1 });
+		expect(part?.text).toBe('4 API calls · at least $0.27');
+		expect(part?.title).toBe('1 of 4 without an amount; the rest from the responses');
+		const both = formatApiCalls({ ...base, apiCalls: 4, apiCostUsd: 0.27, apiCostEstimated: true, apiCallsUnpriced: 1 });
+		expect(both?.text).toBe('4 API calls · at least $0.27 estimated');
+		expect(both?.title).toContain('1 of 4 without an amount');
+	});
+
+	it('a lower bound of exactly $0.001 is stated', () => {
+		expect(formatApiCalls({ ...base, apiCalls: 4, apiCostUsd: 0.001, apiCallsUnpriced: 1 })?.text).toMatch(/^4 API calls · at least \$/);
+	});
+
+	it('a lower bound under $0.001 states no amount: an upper bound nobody knows would read as one', () => {
+		for (const usd of [0.0004, 0]) {
+			const part = formatApiCalls({ ...base, apiCalls: 4, apiCostUsd: usd, apiCostEstimated: true, apiCallsUnpriced: 1 });
+			expect(part?.text).toBe('4 API calls · cost partly unknown');
+			expect(part?.title).toBe('1 of 4 without an amount');
+		}
+	});
+
+	it('one call, a tiny amount and a zero', () => {
+		expect(line({ apiCalls: 1, apiCostUsd: 0.09 })).toBe('1 API call · $0.09');
+		expect(line({ apiCalls: 2, apiCostUsd: 0.0004 })).toBe('2 API calls · < $0.001');
+		expect(line({ apiCalls: 2, apiCostUsd: 0.0004, apiCostEstimated: true })).toBe('2 API calls · < $0.001 estimated');
+		expect(line({ apiCalls: 1, apiCostUsd: 0 })).toBe('1 API call · $0');
+	});
+
+	it('only the API part asks for its own line on a narrow screen, so it is never swiped out of view', () => {
+		const parts = formatUsageMetaParts({ ...base, apiCalls: 4, apiCostUsd: 0.27, apiCostEstimated: true, apiCallsUnpriced: 1, model: 'claude-sonnet-5' }, true);
+		expect(parts.filter((p) => p.ownLineWhenNarrow).map((p) => p.text)).toEqual(['4 API calls · at least $0.27 estimated']);
+		expect(parts.length).toBeGreaterThan(1);
+	});
+
+	it('nothing for a run that sent none', () => {
+		expect(formatApiCalls(base)).toBeNull();
+		expect(formatApiCalls({ ...base, apiCalls: 0 })).toBeNull();
+	});
+});
+

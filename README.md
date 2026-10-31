@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@lynox-ai/core)](https://www.npmjs.com/package/@lynox-ai/core)
 [![CI](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml/badge.svg)](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-15000%2B-brightgreen)](#testing-and-security)
+[![Tests](https://img.shields.io/badge/tests-20000%2B-brightgreen)](#testing-and-security)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![License: ELv2](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
@@ -124,13 +124,15 @@ On native Linux the container has to be able to write `~/.lynox`; the line after
 
 `npx @lynox-ai/core` walks you through an interactive installer: provider selection, API key, Docker Compose scaffolding, container pull, health check, and finally it opens the Web UI at [localhost:3000](http://localhost:3000). Save the access token and vault key it prints — the vault key cannot be recovered if lost.
 
+Without a terminal (a script, CI, a coding assistant), from version 2.18.0: `npx @lynox-ai/core --non-interactive --accept-terms --provider <anthropic|mistral|openai-compatible|none>`, with the key in the environment. It asks nothing and exits `0` only when lynox answers on `/api/health`. `--provider none` installs without a key; add one later in the Web UI. See [Getting started](https://docs.lynox.ai/getting-started/#without-a-terminal-scripts-ci-coding-assistants).
+
 ### Mobile access (PWA)
 
 Open [localhost:3000](http://localhost:3000) on your phone and use your browser's "Add to Home Screen" to install lynox as a PWA. The QR code in Web UI → Settings makes pairing instant — scan it on any device to get a pre-authenticated session.
 
 ## Testing and security
 
-- 15000+ tests across the engine, tools, orchestrator, and web UI. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
+- 20000+ tests across the engine, tools, orchestrator, and web UI. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
 - Layered defenses: input-guard, permission-guard, data-boundary, AES-256-GCM vault, security-audit, plus tool-result injection scanning. SSRF protection on every outbound URL via `fetchWithValidatedRedirects` — DNS resolves once, the connection is pinned to the validated IP at TCP-connect time (rebind-safe), and each redirect hop is re-validated.
 - Responsible disclosure → [`SECURITY.md`](SECURITY.md).
 

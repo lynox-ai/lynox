@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { throwIfRefused } from '../api/save-refusal.js';
 	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
@@ -214,16 +215,7 @@
 			// below dropped the server reason on the floor — saveCredentials
 			// was the worst-offender entry point because the cross-field
 			// validation for the OpenAI-compat provider lives there).
-			if (!configRes.ok) {
-				let serverMsg = '';
-				try {
-					const body = (await configRes.json()) as { error?: unknown };
-					if (typeof body.error === 'string') serverMsg = body.error;
-				} catch {
-					// non-JSON body — fall back to generic text
-				}
-				throw new Error(serverMsg || `Failed to save config (HTTP ${configRes.status})`);
-			}
+			await throwIfRefused(configRes);
 
 			saveSuccess = true;
 			apiKeyMissing = false;

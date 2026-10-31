@@ -64,6 +64,24 @@ function envelope(overrides: Partial<MailEnvelope> = {}): MailEnvelope {
 }
 
 describe('bootstrapInbox — wiring', () => {
+  // 966: the reminder poller gets the instance's language, so its title follows it.
+  it('titles a reminder in the language it is handed', async () => {
+    const titles: string[] = [];
+    const router = { notify: vi.fn(async (m: { title: string }) => { titles.push(m.title); return []; }) };
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({
+      mailStateDb: mail, anthropicClient: client, reminderPollIntervalMs: 10, language: () => 'de',
+      notificationRouter: router as unknown as Parameters<typeof bootstrapInbox>[0]['notificationRouter'],
+    });
+    const id = runtime.state.insertItem({
+      accountId: 'acct-1', channel: 'email', threadKey: 't-r', bucket: 'requires_user', confidence: 0.5,
+      reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', subject: 'Vertrag prüfen',
+    });
+    runtime.state.setSnooze(id, new Date(Date.now() - 5000), null, true, true);
+    await vi.waitFor(() => expect(titles).toEqual(['Erinnerung']));
+    await runtime.shutdown();
+  });
+
   it('returns a runtime bundle with all parts populated', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });

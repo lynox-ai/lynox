@@ -13,6 +13,7 @@
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { toolBlurb } from '../utils/tool-blurb.js';
@@ -135,13 +136,13 @@
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({ disabled_tools: snapshot }),
 				});
-				if (!res.ok) throw new Error(`HTTP ${res.status}`);
+				await throwIfRefused(res);
 				addToast(t('tools.saved'), 'success', 2000);
 			})
 			.catch((e: unknown) => {
 				// Revert optimistic state on failure
 				disabled = new Set(disabled.has(name) ? [...disabled].filter((d) => d !== name) : [...disabled, name]);
-				addToast(e instanceof Error ? e.message : t('tools.save_failed'), 'error', 5000);
+				addToast(saveFailedText(e, t('tools.save_failed')), 'error', 5000);
 			})
 			.finally(() => {
 				saving = false;

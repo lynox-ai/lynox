@@ -14,7 +14,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode, asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { DEFAULT_STEP_TIMEOUT_MS, undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import { UNKNOWN_GRANT } from '../../core/conversation-grants.js';
 import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { normalizeTier } from '../../types/index.js';
@@ -616,7 +616,9 @@ const MAX_WRITE_NOTES = 10;
 /** The mail tools that file for approval. */
 const QUEUEABLE_MAIL_TOOLS: ReadonlySet<string> = new Set(['mail_send', 'mail_reply']);
 const MAX_WRITE_NOTE_CHARS = 300;
-const MAX_MEMBER_NOTE_CHARS = 700;
+/** Long enough for the longest line a plan run's refusal writes: it names the member twice and
+ *  the profile once, and the sentence that says who decides comes last. */
+const MAX_MEMBER_NOTE_CHARS = 1500;
 
 /**
  * Collects the refused and possibly-landed write lines from the tool calls of a run's
@@ -1369,7 +1371,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
               model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Capability tier (omitted = fast)' },
               tools: { type: 'array', items: { type: 'string' }, description: 'Exact tool names this step needs, from your own toolset. bash only when a shell is essential.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'Step IDs whose output flows into this step\'s context' },
-              timeout_ms: { type: 'number', description: 'Timeout in ms (default: 600000)' },
+              timeout_ms: { type: 'number', description: `Timeout in ms (default: ${String(DEFAULT_STEP_TIMEOUT_MS)}, ${String(DEFAULT_STEP_TIMEOUT_MS / 60_000)} min)` },
             },
             required: ['id', 'task'],
           },

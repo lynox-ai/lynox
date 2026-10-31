@@ -170,6 +170,8 @@ const VALID_SHAPE_KINDS = new Set(['reduce', 'passthrough', 'graphql']);
 const VALID_REDUCERS = new Set(['avg', 'peak', 'avg+peak', 'count', 'first_n', 'last_n']);
 const VALID_OUTPUT_VOLUMES = new Set(['small', 'medium', 'large', 'streaming']);
 const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
+/** `cost.response_field`: names or indexes joined by dots, at most 8 of them. */
+const COST_RESPONSE_FIELD_RE = /^[A-Za-z0-9_]{1,64}(\.[A-Za-z0-9_]{1,64}){0,7}$/;
 const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 
 /** The built-in preset an oauth2 profile names, when the engine knows it. */
@@ -474,6 +476,10 @@ function validateProfile(profile: ApiProfile): string | null {
     if (profile.cost.output_ratio !== undefined && (!Number.isFinite(profile.cost.output_ratio) || profile.cost.output_ratio <= 0)) {
       return 'Invalid cost.output_ratio: must be positive number';
     }
+    const field: unknown = profile.cost.response_field;
+    if (field !== undefined && (typeof field !== 'string' || !COST_RESPONSE_FIELD_RE.test(field))) {
+      return 'Invalid cost.response_field: must be a dot path of names or indexes into the JSON answer, like "cost" or "tasks.0.cost"';
+    }
   }
   if (profile.provenance) {
     if (!VALID_PROVENANCE_SOURCES.has(profile.provenance.source)) {
@@ -736,6 +742,7 @@ const DOCS_EXTRACT_SCHEMA: ExtractSchema = {
         model: { type: 'string', enum: ['per_call', 'per_token', 'per_unit'] as const },
         rate_usd: { type: 'number', minimum: 0, maximum: 100 },
         output_ratio: { type: 'number', minimum: 0 },
+        response_field: { type: 'string', pattern: COST_RESPONSE_FIELD_RE.source, maxLength: 520 },
       },
       required: ['model', 'rate_usd'],
     },
@@ -1811,7 +1818,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         },
         profile: {
           type: 'object',
-          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, username_key, password_key, header_name, query_param, vault_keys[], oauth {preset_id: ' + OAUTH_PRESETS.ids().join('|') + ', scope, client_id_key, client_secret_key} — a built-in provider, with vault_keys listing those two keys; then action "connect"}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
+          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, username_key, password_key, header_name, query_param, vault_keys[], oauth {preset_id: ' + OAUTH_PRESETS.ids().join('|') + ', scope, client_id_key, client_secret_key} — a built-in provider, with vault_keys listing those two keys; then action "connect"}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio, response_field}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
         },
         id: {
           type: 'string',

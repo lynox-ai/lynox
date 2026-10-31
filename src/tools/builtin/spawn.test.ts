@@ -4685,6 +4685,26 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.currentRunId).toBe(MINTED_ID);
     });
 
+    // Register 1116: a child of a workflow step, or of another child, has no thread of its own.
+    // Its run names the chat it runs for, so a helper's own such runs can be read as theirs; only
+    // a parent with neither records none.
+    it.each([
+      ['a parent in a chat', { currentThreadId: 'thread-789', originThreadId: 'chat-other' }, 'thread-789'],
+      ['a workflow step or child, which knows only the chat it runs for', { originThreadId: 'chat-1' }, 'chat-1'],
+      ['a parent with no chat at all', {}, ''],
+    ])('records the chat of %s', async (_label, threads, expected) => {
+      const insertRun = vi.fn().mockReturnValue('run-child');
+      const agent = makeAgent({
+        currentRunId: 'parent-run',
+        ...threads,
+        toolContext: { sessionCounters: testCounters, runHistory: { insertRun, updateRun: vi.fn() } } as unknown as import('../../core/tool-context.js').ToolContext,
+      });
+
+      await spawnAgentTool.handler({ agents: [{ name: 'step-child', task: 'Work' }] }, agent);
+
+      expect((insertRun.mock.calls[0]![0] as { sessionId: string }).sessionId).toBe(expected);
+    });
+
     it('the child inherits the parent\'s tool-call sink, so its calls are still recorded', async () => {
       // Half of the attribution fix, and the half that fails SILENTLY. The
       // child's own run id (asserted above) only reaches history if the child
