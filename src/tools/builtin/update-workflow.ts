@@ -5,12 +5,13 @@ import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/hum
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
 import { validateContractAgainstSteps } from '../../orchestrator/contract-validation.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { stripHidden } from '../../core/hidden-text.js';
+import { findHiddenChar, findHiddenInName, stripHidden } from '../../core/hidden-text.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface UpdateWorkflowInput {
   workflow_id?: string | undefined;
   modifications?: StepModification[] | undefined;
+  goal?: string | undefined;
   confirm?: boolean | undefined;
 }
 
@@ -37,7 +38,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
   definition: {
     name: 'update_workflow_steps',
     description:
-      'Edit + save a stored workflow\'s steps. Re-validates and re-infers whether it can still run ' +
+      'Edit + save a stored workflow\'s steps (and its goal). Re-validates and re-infers whether it can still run ' +
       'unattended. Scheduled workflow → needs confirm:true.',
     input_schema: {
       type: 'object' as const,
@@ -49,18 +50,19 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
           items: {
             type: 'object',
             properties: {
-              action: { type: 'string', enum: ['remove', 'update_task', 'add_step'] },
+              action: { type: 'string', enum: ['remove', 'update_task', 'add_step', 'rename_step'] },
               step_id: { type: 'string', description: 'Target step id; the new id for add_step.' },
-              value: { type: 'string', description: 'New task text (update_task / add_step).' },
+              value: { type: 'string', description: 'New task text (update_task / add_step); the new id (rename_step), which the steps reading this one follow.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'add_step: dependency step ids.' },
               after: { type: 'string', description: 'add_step: insert after this step id (default: append).' },
             },
             required: ['action', 'step_id'],
           },
         },
+        goal: { type: 'string', description: 'A new goal for the workflow.' },
         confirm: { type: 'boolean', description: 'Proceed when the workflow is scheduled.' },
       },
-      required: ['workflow_id', 'modifications'],
+      required: ['workflow_id'],
     },
   },
   destructive: { mode: 'data' },
@@ -70,9 +72,11 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
       return 'Error: Run history is not available — editing a saved workflow requires persistence.';
     }
     if (!input.workflow_id) return 'Error: workflow_id is required.';
-    if (!input.modifications || input.modifications.length === 0) {
-      return 'Error: At least one modification is required.';
+    const modifications = input.modifications ?? [];
+    if (modifications.length === 0 && input.goal === undefined) {
+      return 'Error: At least one modification, or a new goal, is required.';
     }
+    if (input.goal !== undefined && input.goal.trim() === '') return 'Error: "goal" cannot be empty.';
 
     const planned = getPipeline(input.workflow_id, runHistory);
     if (!planned) {
@@ -107,7 +111,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
       ...s,
       ...(s.input_from ? { input_from: [...s.input_from] } : {}),
     }));
-    const modErr = applyModifications(steps, input.modifications);
+    const modErr = applyModifications(steps, modifications);
     if (modErr) return modErr;
 
     if (steps.length === 0) {
@@ -136,8 +140,24 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
 
     // Re-infer the interaction mode: adding an ask_user step flips an autonomous
     // (cron-eligible) workflow to interactive, which can no longer run headless.
+    // Text stored before the save refused characters that render as nothing: the save below would
+    // refuse it again, so name the way out for each place instead of the save's general sentence.
+    const hiddenId = steps.find(s => findHiddenInName(s.id, 'id') !== null);
+    if (hiddenId) {
+      return `Error: Step "${stripHidden(hiddenId.id)}" has an id saved with a character that does not show, which a save now refuses. Nothing was saved. Add a rename_step modification to this call (step_id "${stripHidden(hiddenId.id)}", value: a new id you type), and the steps that read it follow the new id.`;
+    }
+    const goal = input.goal ?? planned.goal;
+    if (findHiddenChar(goal) !== null) {
+      return input.goal !== undefined
+        ? 'Error: The new goal contains a character that renders as nothing. Nothing was saved. Type the goal again in your own words.'
+        : 'Error: The workflow\'s goal was saved with a character that does not show, which a save now refuses. Nothing was saved. Pass a new "goal" in this call, written in your own words.';
+    }
+    if (findHiddenChar(planned.name) !== null) {
+      return 'Error: The workflow\'s name was saved with a character that does not show, which a save now refuses. Nothing was saved. Ask the user to rename the workflow in the library, then edit it again.';
+    }
+
     const newMode = inferPipelineMode(steps);
-    const updated: PlannedPipeline = { ...planned, steps, mode: newMode };
+    const updated: PlannedPipeline = { ...planned, goal, steps, mode: newMode };
 
     // Re-validate the capability contract against the edited steps: an edit that
     // routes a new {{params.x}} the contract doesn't constrain into a tool call
@@ -202,6 +222,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
       ? ' Its first-run-confirm was reset — re-confirm before the next scheduled run.'
       : '';
     const stepList = steps.map((s, i) => `${i + 1}. ${s.id}: ${s.task}`).join('\n');
-    return `✓ Updated workflow "${planned.name}" (${steps.length} step${steps.length === 1 ? '' : 's'}).${modeNote}${confirmNote}\n\n${stepList}`;
+    const goalNote = input.goal !== undefined ? ' Its goal was replaced.' : '';
+    return `✓ Updated workflow "${planned.name}" (${steps.length} step${steps.length === 1 ? '' : 's'}).${goalNote}${modeNote}${confirmNote}\n\n${stepList}`;
   },
 };

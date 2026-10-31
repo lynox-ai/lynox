@@ -315,13 +315,18 @@ function buildProgressHooks(pipelineStreamHandler: EmittingStreamHandler | null,
 }
 
 function formatResult(state: RunState, name: string, resultLimit?: number): string {
+  // The name and the step ids are names, which take none of the places real text puts a character
+  // that renders as nothing; each goes in as a placeholder and is escaped on its own below.
+  const nonce = randomUUID();
+  const names: string[] = [];
+  const asName = (value: string): string => `__lynox_name_${names.push(value) - 1}_${nonce}__`;
   const steps: PipelineStepResult[] = [];
   let totalDuration = 0;
   let totalCost = 0;
 
   for (const [, output] of state.outputs) {
     steps.push({
-      stepId: output.stepId,
+      stepId: asName(output.stepId),
       result: truncateResult(output.result, resultLimit),
       durationMs: output.durationMs,
       tokensIn: output.tokensIn,
@@ -337,7 +342,7 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
 
   const result: PipelineResult = {
     pipelineId: state.runId,
-    name,
+    name: asName(name),
     status: state.status === 'completed' ? 'completed' : state.status === 'rejected' ? 'rejected' : 'failed',
     steps,
     totalDurationMs: totalDuration,
@@ -345,9 +350,14 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
   };
 
   // The name and the step ids are stored text, saved perhaps before the save refused characters
-  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show. The places
-  // real text puts one stay, so an emoji or a Persian word in a step's result reads as it is.
-  return escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
+  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show. In a step's
+  // result the places real text puts one stay, so an emoji or a Persian word reads as it is; in a
+  // name none does, so a ZWNJ an old step id carries between letters shows as well.
+  let json = escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
+  names.forEach((value, i) => {
+    json = json.replace(JSON.stringify(`__lynox_name_${i}_${nonce}__`), () => escapeHiddenInJson(JSON.stringify(value), { inPlace: false }));
+  });
+  return json;
 }
 
 // 2a/B3: both the pipeline_runs row and its pipeline_step_results rows are now

@@ -918,6 +918,23 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     expect(result).toBe('Error: Workflow execution failed: Step "analyze" declares unknown tool(s): gone');
   });
 
+  // A name takes none of the places real text puts one (register 1099): a ZWNJ an old step id holds
+  // between letters is escaped, while the same character in the step's result stays.
+  it('escapes a ZWNJ an old step id holds between letters, and keeps one in the step\'s result', async () => {
+    const stepId = `ab\u200Ccd`;
+    const text = 'می\u200Cخواهم';
+    const pipelineId = seedStoredPipeline([{ id: stepId, task: 'Analyze code' }]);
+    mockRunManifest.mockResolvedValueOnce(makeRunState({
+      outputs: new Map<string, AgentOutput>([[stepId, {
+        stepId, result: text, startedAt: '', completedAt: '', durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0, skipped: false,
+      }]]),
+    }));
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
+    expect(result).toContain('"stepId": "ab\\u200Ccd"');
+    expect(result).toContain(text);
+    expect((JSON.parse(result) as { steps: Array<{ stepId: string }> }).steps[0]!.stepId).toBe(stepId);
+  });
+
   it('a step result keeps the places real text puts one: an emoji sequence and a Persian word read as they are', async () => {
     const pipelineId = seedStoredPipeline([{ id: 'analyze', task: 'Analyze code' }]);
     const text = `Done 👩\u200D💻 می\u200Cخواهم`;
