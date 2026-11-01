@@ -7248,7 +7248,7 @@ export class LynoxHTTPApi {
 
     // ── Config ──
     this.addStatic('user', 'GET /api/config', async (req, res) => {
-      const { readUserConfig, loadConfig: loadEffectiveConfig } = await import('../core/config.js');
+      const { readUserConfig, loadConfig: loadEffectiveConfig, replacedTierSlots } = await import('../core/config.js');
       const config = readUserConfig();
       // The loader's OWN output. `readUserConfig()` above is the raw file;
       // `loadConfig()` additionally merges the CP-pinned env layers and applies
@@ -7623,6 +7623,11 @@ export class LynoxHTTPApi {
         debug_wire_capture: wireCaptureEnvOn || wireCaptureEnvOff,
         ...(pinIgnored ? { tier_preset_ignored: pinnedPreset } : {}),
       };
+      // A config.json `tier_set` slot whose model this engine does not know runs the strategy's
+      // model on the same provider instead (`config.ts`, the preset guard). Reported, like the
+      // ignored pin above, so the replacement does not read as the user's choice.
+      const replacedSlots = replacedTierSlots();
+      if (replacedSlots.length > 0) redacted['replaced_tier_slots'] = replacedSlots;
       if (wireCaptureEnvOn) {
         redacted['debug_wire_capture'] = true;
       } else if (wireCaptureEnvOff) {
@@ -7663,7 +7668,7 @@ export class LynoxHTTPApi {
     // Self-host: no admin secret → cookie users auto-promoted to admin scope
     // at the auth layer, so the allowlist branch is a no-op for them.
     this.addStatic('user', 'PUT /api/config', async (_req, res, _params, body) => {
-      const { readUserConfig, saveUserConfig, reloadConfig, loadConfig } = await import('../core/config.js');
+      const { readUserConfig, saveUserConfig, reloadConfig, loadConfig, checkCandidateConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       // Wave 5d BYOK liability gate (server-side): `confirm_custom_endpoint` is
       // a control-plane signal, not a config field — it acts as a per-call
@@ -7883,6 +7888,23 @@ export class LynoxHTTPApi {
         if (!prior.some((e) => e.host === acceptedHostToRecord)) {
           merged['accepted_custom_endpoints'] = [...prior, { host: acceptedHostToRecord, accepted_at: new Date().toISOString() }];
         }
+      }
+      // Checked BEFORE the write, by the loader itself: a file the loader refuses would answer
+      // every later GET and PUT here with a 500 and stop the next boot, and only a hand edit in
+      // the container brings it back. A slot whose model the loader would replace is refused
+      // too when this request sets it, so a new choice is never stored only to be overridden.
+      // One already stored does not block saving the rest: the UI re-sends every field.
+      const candidate = checkCandidateConfig(merged);
+      if (candidate.error !== undefined) {
+        errorResponse(res, 400, `This configuration cannot be loaded, so it was not saved: ${candidate.error}`);
+        return;
+      }
+      const storedSlots = (existing['tier_set'] ?? {}) as Record<string, unknown>;
+      const newlyReplaced = candidate.replacedSlots.filter((r) => JSON.stringify((merged['tier_set'] as Record<string, unknown> | undefined)?.[r.tier]) !== JSON.stringify(storedSlots[r.tier]));
+      if (newlyReplaced.length > 0) {
+        const r = newlyReplaced[0]!;
+        errorResponse(res, 400, `tier_set slot '${r.tier}' names model '${r.model_id}', which this version does not know. Choose a listed model for that slot.`);
+        return;
       }
       saveUserConfig(merged);
       reloadConfig();
