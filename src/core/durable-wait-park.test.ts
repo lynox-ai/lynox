@@ -191,7 +191,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     releases.push(() => {
       for (const thread of ['thread-park', 'thread-dead']) {
         const pending = prompts.getPending(thread);
-        if (pending) prompts.expirePrompt(pending.id);
+        if (pending) prompts.expirePrompt(pending.id, 'run_stopped');
       }
     });
 
@@ -584,9 +584,11 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // for its full TTL, and an answer arriving after the sweep would revive a
     // trigger the sweep had just ended.
     expect(h.prompts.getById(promptId)?.status).toBe('expired');
+    // A late answer hears that its time ran out.
+    expect(h.prompts.getById(promptId)?.closed_reason).toBe('timed_out');
     // The count is the only signal that a settle DID something; nothing reads it
     // in production, so without this it could return a constant.
-    expect(h.prompts.expirePendingForTrigger('trg-1')).toBe(0); // already settled
+    expect(h.prompts.expirePendingForTrigger('trg-1', 'plan_ended')).toBe(0); // already settled
     expect(h.prompts.answerUser(promptId, 'too late', OWNER_PRINCIPAL)).toBe(false);
 
     await h.run;
@@ -614,9 +616,9 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const calls: string[] = [];
     const realSettle = PromptStore.prototype.expirePendingForTrigger;
     const settle = vi.spyOn(h.prompts, 'expirePendingForTrigger');
-    settle.mockImplementation((id: string) => {
+    settle.mockImplementation((id, reason) => {
       calls.push('settle');
-      return realSettle.call(h.prompts, id);
+      return realSettle.call(h.prompts, id, reason);
     });
     const end = vi.spyOn(h.manager, 'endWait');
     const realEnd = TaskManager.prototype.endWait;
@@ -780,7 +782,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
     // Expire the question rather than answering it — the run resumes with the
     // fabricated answer, exactly as before this slice.
-    h.prompts.expirePrompt(h.promptIdOf()!);
+    h.prompts.expirePrompt(h.promptIdOf()!, 'run_stopped');
     await waitUntil('the run to finish', () => recorded.mock.calls.length > 0);
 
     expect(recorded.mock.calls[0]?.[2]).toBe('failed');
@@ -977,6 +979,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // hand-started run parks on a question of its own, so there IS one again — and an
     // assertion that counted rows would have failed for the right reason by accident.
     expect(h.prompts.getById(promptId)?.status, 'the orphan is settled on the way through').toBe('expired');
+    expect(h.prompts.getById(promptId)?.closed_reason, 'and a late answer hears the plan no longer waited on it').toBe('plan_ended');
 
     next.stop();
     await waitUntil('the hand-started run to unwind', () => next.activeTaskCount === 0);

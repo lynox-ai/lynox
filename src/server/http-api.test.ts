@@ -3327,7 +3327,7 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('an answer to a question the restart closed hears that the run is gone; one that timed out hears "expired"', async () => {
+    it('an answer to a question the restart closed hears that the run is gone; one that timed out hears that', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'lynox-reply-closed-'));
       const history = new RunHistory(join(dir, 'history.db'));
       const { PromptStore } = await import('../core/prompt-store.js');
@@ -3335,7 +3335,7 @@ describe('LynoxHTTPApi', () => {
       const restarted = store.insertAskUser('s-restart', 'Which list?');
       store.expireUnparked();
       const timedOut = store.insertAskUser('s-ttl', 'Which list?');
-      store.expirePrompt(timedOut);
+      store.expirePrompt(timedOut, 'timed_out');
       const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
       const original = engineRef.getPromptStore;
       engineRef.getPromptStore = (): unknown => store;
@@ -3372,7 +3372,47 @@ describe('LynoxHTTPApi', () => {
         const expired = await jsonFetch('/api/sessions/s-ttl/reply', { method: 'POST', body: JSON.stringify({ promptId: timedOut, answer: 'B' }) });
         expect(expired.status).toBe(410);
         const expiredBody = await expired.json() as { error: string; code?: string };
-        expect(expiredBody).toEqual({ error: 'Prompt expired' });
+        expect(expiredBody).toEqual({ error: 'Prompt closed: its time ran out.', code: 'timed_out' });
+
+        // A row closed before the reasons were written keeps the bare answer, without a code.
+        const legacy = store.insertAskUser('s-legacy', 'Which list?');
+        history.getDb().prepare("UPDATE pending_prompts SET status = 'expired' WHERE id = ?").run(legacy);
+        const old = await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ promptId: legacy, answer: 'B' }) });
+        expect(old.status).toBe(410);
+        expect(await old.json()).toEqual({ error: 'Prompt expired' });
+
+        // Pending, yet past its time: the answer finds it closed by its clock.
+        const lapsed = store.insertAskUser('s-lapsed', 'Which list?');
+        history.getDb().prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 3_000).toISOString(), lapsed);
+        const late = await jsonFetch('/api/sessions/s-lapsed/reply', { method: 'POST', body: JSON.stringify({ promptId: lapsed, answer: 'B' }) });
+        expect(late.status).toBe(410);
+        expect((await late.json() as { code?: string }).code).toBe('timed_out');
+      } finally {
+        engineRef.getPromptStore = original;
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('an answer to a closed question hears why it was closed, for every reason', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-reply-reason-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const store = new PromptStore(history.getDb());
+      const reasons = ['timed_out', 'run_stopped', 'run_taken_over', 'thread_deleted', 'mandate_ended', 'plan_paused', 'plan_taken_over', 'plan_ended', 'superseded'] as const;
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const original = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => store;
+      try {
+        for (const reason of reasons) {
+          const id = store.insertAskUser(`s-${reason}`, 'Which list?');
+          store.expirePrompt(id, reason);
+          const res = await jsonFetch(`/api/sessions/s-${reason}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'B' }) });
+          expect(res.status, reason).toBe(410);
+          const body = await res.json() as { error: string; code?: string };
+          expect(body.code, reason).toBe(reason);
+          expect(body.error, reason).toMatch(/^Prompt closed: /);
+        }
       } finally {
         engineRef.getPromptStore = original;
         history.close();
@@ -3431,7 +3471,7 @@ describe('LynoxHTTPApi', () => {
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
-        expires_at TEXT NOT NULL
+        closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
@@ -3459,7 +3499,7 @@ describe('LynoxHTTPApi', () => {
             // The real takeover expires the prompt and aborts the previous
             // session; here we inline the prompt-expiry path and schedule a
             // delete to mirror the previous handler's `finally` block.
-            realPromptStore.expirePrompt(promptId);
+            realPromptStore.expirePrompt(promptId, 'run_stopped');
             setTimeout(() => runningSessions.delete('stale-1'), drainDelay);
           },
         });
@@ -3525,7 +3565,7 @@ describe('LynoxHTTPApi', () => {
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
-        expires_at TEXT NOT NULL
+        closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
@@ -3642,9 +3682,11 @@ describe('LynoxHTTPApi', () => {
     async function withParkedRun(
       sid: string,
       body: (ctx: {
-        prompts: { getPending: (s: string) => unknown };
+        prompts: { getPending: (s: string) => unknown; getById: (id: string) => { closed_reason: string | null } | undefined };
         slots: Map<string, unknown>;
         runRes: Response;
+        /** The question the run is parked on. */
+        promptId: string;
       }) => Promise<void>,
     ): Promise<void> {
       const Database = (await import('better-sqlite3')).default;
@@ -3675,7 +3717,7 @@ describe('LynoxHTTPApi', () => {
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
-        expires_at TEXT NOT NULL
+        closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
@@ -3714,7 +3756,7 @@ describe('LynoxHTTPApi', () => {
         // only becomes a defect once teardown cannot clear it.
         expect(slots.has(sid)).toBe(true);
 
-        await body({ prompts: realPromptStore, slots, runRes });
+        await body({ prompts: realPromptStore, slots, runRes, promptId: pending!.id });
         await runRes.text();
       } finally {
         engineRef.getPromptStore = originalGetPromptStore;
@@ -3734,13 +3776,14 @@ describe('LynoxHTTPApi', () => {
     }
 
     it('POST /abort on a parked run frees the slot — the next message is not 409', async () => {
-      await withParkedRun('abort-parked-1', async ({ prompts, slots }) => {
+      await withParkedRun('abort-parked-1', async ({ prompts, slots, promptId }) => {
         const abortRes = await jsonFetch('/api/sessions/abort-parked-1/abort', { method: 'POST' });
         expect(abortRes.status).toBe(200);
 
         await expectSlotReclaimed(slots, 'abort-parked-1');
-        // Settled, not left pending for the 24 h TTL.
+        // Settled, not left pending for the 24 h TTL, and an answer that comes later hears it was stopped.
         expect(prompts.getPending('abort-parked-1')).toBeUndefined();
+        expect(prompts.getById(promptId)?.closed_reason).toBe('run_stopped');
 
         // The reported symptom: the user can send the next message.
         mockSessionRun.mockResolvedValueOnce('ok');
@@ -3758,6 +3801,20 @@ describe('LynoxHTTPApi', () => {
     // live on the Session, and the case that needs reclaiming most is the one
     // where the Session is already gone — a thread deleted while its run was
     // parked. Behind the guard, the backstop would be unreachable exactly there.
+    it('a new message that takes over a parked run with a dead stream closes its question as taken over', async () => {
+      await withParkedRun('takeover-parked-1', async ({ prompts, slots, promptId }) => {
+        (slots.get('takeover-parked-1') as { streamAlive: boolean }).streamAlive = false;
+        mockSessionRun.mockResolvedValueOnce('second response');
+        const next = await jsonFetch('/api/sessions/takeover-parked-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'something else', protocol: 1 }),
+        });
+        expect(next.status).toBe(200);
+        await next.text();
+        expect(prompts.getById(promptId)?.closed_reason).toBe('run_taken_over');
+      });
+    });
+
     it('POST /abort reclaims a parked run even when the Session is already gone', async () => {
       await withParkedRun('abort-parked-2', async ({ prompts, slots }) => {
         mockSessionGet.mockReturnValueOnce(undefined);
@@ -3789,7 +3846,7 @@ describe('LynoxHTTPApi', () => {
     // check, so this is a click away while a run is parked. Five stranded
     // reservations exhaust the run executor (capacity 5) and 429 every thread.
     it('DELETE /api/threads/:id reclaims a parked run instead of stranding its slot', async () => {
-      await withParkedRun('abort-parked-4', async ({ prompts, slots }) => {
+      await withParkedRun('abort-parked-4', async ({ prompts, slots, promptId }) => {
         const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
         const origGetThreadStore = engineRef.getThreadStore;
         engineRef.getThreadStore = (): unknown => ({
@@ -3802,6 +3859,8 @@ describe('LynoxHTTPApi', () => {
 
           await expectSlotReclaimed(slots, 'abort-parked-4');
           expect(prompts.getPending('abort-parked-4')).toBeUndefined();
+          // A late answer hears that the chat is gone, not that the run was stopped.
+          expect(prompts.getById(promptId)?.closed_reason).toBe('thread_deleted');
         } finally {
           engineRef.getThreadStore = origGetThreadStore;
         }
@@ -4748,7 +4807,7 @@ describe('LynoxHTTPApi', () => {
         answered_by TEXT,
         answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
-        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
       const { PromptStore } = await import('../core/prompt-store.js');
@@ -4846,7 +4905,7 @@ describe('LynoxHTTPApi', () => {
     // A tab left over from an earlier run reports on its own question; the session may have
     // asked a newer one since, which that report must not settle.
     it.each([
-      ['expired', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.expirePrompt(id), 410],
+      ['expired', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.expirePrompt(id, 'run_stopped'), 410],
       ['answered', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.answerSecret(id, 'saved', OWNER_PRINCIPAL), 200],
     ] as const)('a named question that was %s leaves the newer open one alone', async (_label, close, expected) => {
       repayRateWindow();
@@ -4945,7 +5004,7 @@ describe('LynoxHTTPApi', () => {
         answered_by TEXT,
         answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
-        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
       const { PromptStore } = await import('../core/prompt-store.js');
@@ -5025,7 +5084,7 @@ describe('LynoxHTTPApi', () => {
       repayRateWindow();
       await withStore(async (sid, ps) => {
         const old = ps.insertConnectMail(sid, 'q', payload);
-        ps.expirePrompt(old);
+        ps.expirePrompt(old, 'run_stopped');
         const fresh = ps.insertConnectMail(sid, 'q', payload);
         const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
           method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: old }),
@@ -8294,7 +8353,7 @@ describe('LynoxHTTPApi', () => {
         answered_by TEXT,
         answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
-        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pp_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
       const { PromptStore } = await import('../core/prompt-store.js');
@@ -8472,7 +8531,7 @@ describe('LynoxHTTPApi', () => {
         // db closes. Without this the timer fires ~30s later against a closed
         // handle and surfaces as an unhandled error charged to a LATER test.
         const pending = ps.getPending('sse-wf');
-        if (pending) ps.expirePrompt(pending.id);
+        if (pending) ps.expirePrompt(pending.id, 'run_stopped');
         await parked;
       });
     });
@@ -8598,7 +8657,7 @@ describe('LynoxHTTPApi', () => {
       const run = new AbortController();
       withdrawPromptOnAbort(failing, 'p1', run.signal);
       expect(() => run.abort()).not.toThrow();
-      expect(failing.expirePrompt).toHaveBeenCalledWith('p1');
+      expect(failing.expirePrompt).toHaveBeenCalledWith('p1', 'run_stopped');
 
       const store = { expirePrompt: vi.fn(() => true) };
       const later = new AbortController();
@@ -8609,6 +8668,17 @@ describe('LynoxHTTPApi', () => {
       expect(removed).toHaveBeenCalledWith('abort', added.mock.calls[0]![1]);
       later.abort();
       expect(store.expirePrompt).not.toHaveBeenCalled();
+    });
+
+    it('withdrawPromptOnAbort: the reason is read when the run ends, so a takeover that says so first is what the question records', async () => {
+      const { withdrawPromptOnAbort } = await import('./http-api.js');
+      const store = { expirePrompt: vi.fn(() => true) };
+      const run = new AbortController();
+      let endedBy: 'run_stopped' | 'run_taken_over' = 'run_stopped';
+      withdrawPromptOnAbort(store, 'p3', run.signal, () => endedBy);
+      endedBy = 'run_taken_over';
+      run.abort();
+      expect(store.expirePrompt).toHaveBeenCalledWith('p3', 'run_taken_over');
     });
 
     it('an Allow and a stop in the same moment: exactly one wins, and a withdrawn question never runs', async () => {

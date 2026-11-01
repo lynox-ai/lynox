@@ -48,7 +48,7 @@ interface Box {
   workflows: WorkflowStore;
   ends: MandateEnds;
   audit: AuditLog;
-  prompts: TakeoverPrompts & { calls: string[]; answered: Map<string, string[]> };
+  prompts: TakeoverPrompts & { calls: string[]; reasons: string[]; answered: Map<string, string[]> };
 }
 
 function box(): Box {
@@ -61,9 +61,10 @@ function box(): Box {
   closers.push(() => { try { engineDb.close(); } catch { /* twice is fine */ } });
   const answered = new Map<string, string[]>();
   const calls: string[] = [];
+  const reasons: string[] = [];
   const prompts = {
-    calls, answered,
-    expirePendingForTrigger: (id: string): number => { calls.push(`expire ${id}`); return 0; },
+    calls, reasons, answered,
+    expirePendingForTrigger: (id: string, reason: string): number => { calls.push(`expire ${id}`); reasons.push(reason); return 0; },
     getAnsweredForTrigger: (id: string): { id: string } | undefined => {
       const list = answered.get(id) ?? [];
       return list.length > 0 ? { id: list[0]! } : undefined;
@@ -514,9 +515,9 @@ describe('what the takeover is held to', () => {
   it('a change that lands while the questions are closed is caught inside the transaction', () => {
     const b = box();
     const expect0 = ready(b);
-    const racing = { ...b.prompts, expirePendingForTrigger: (id: string): number => {
+    const racing = { ...b.prompts, expirePendingForTrigger: (id: string, reason: 'plan_taken_over'): number => {
       b.db.prepare("UPDATE workflows SET definition_json = '{\"steps\":[9]}' WHERE id = 'w'").run();
-      return b.prompts.expirePendingForTrigger(id);
+      return b.prompts.expirePendingForTrigger(id, reason);
     } };
     expect(takeOver(deps(b, { prompts: racing }), 'p', expect0)).toEqual({ kind: 'refused', refusal: 'changed' });
     expect(row(b, 'p')['paused_at']).not.toBeNull();
@@ -636,6 +637,8 @@ describe('its questions, its status and its next run', () => {
     b.prompts.answered.set('o', ['q3']);
     take(b, 'p');
     expect(b.prompts.calls).toEqual(['expire p', 'release q1', 'release q2', 'expire o', 'release q3']);
+    // A late answer to a question closed here hears that the plan was taken over.
+    expect(b.prompts.reasons).toEqual(['plan_taken_over', 'plan_taken_over']);
   });
 
   it('a plan still waiting ends its wait once, through the store’s own end of a wait', () => {

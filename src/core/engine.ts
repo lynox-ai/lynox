@@ -2791,7 +2791,7 @@ export class Engine {
     try {
       pauseEndedPlans({
         db, endOf: (id) => ends.endRow(id), closedPromptOf: (id) => this.closedPromptOf(id),
-        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id); } } : {}),
+        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id, 'plan_paused'); } } : {}),
       });
     } catch (err: unknown) {
       process.stderr.write(`[lynox] pausing plans of ended mandates failed: ${processErrorText(err)}\n`);

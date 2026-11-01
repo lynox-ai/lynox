@@ -23,8 +23,22 @@ import { maskCredentialInput, withoutTypedCredentials } from './secret-store.js'
 
 export type PromptType = 'ask_user' | 'ask_secret' | 'connect_mail';
 export type PromptStatus = 'pending' | 'answered' | 'expired';
-/** Why a question was closed without an answer, where that was not its own expiry. */
-export type PromptClosedReason = 'process_restarted' | 'mandate_ended' | 'thread_deleted';
+/**
+ * Why a question was closed without an answer. An answer that comes too late is told this
+ * reason, so the page can say what happened and what to do instead. A row closed before the
+ * reasons were written everywhere carries none.
+ */
+export type PromptClosedReason =
+  | 'process_restarted' // the engine restarted, and the run that asked is gone
+  | 'timed_out'         // its own time ran out
+  | 'run_stopped'       // the run that asked was stopped, or ran past its time limit
+  | 'run_taken_over'    // a newer message in the chat took over the stuck run that asked
+  | 'thread_deleted'    // the chat it was asked in was deleted
+  | 'mandate_ended'     // the access it was asked under ended
+  | 'plan_paused'       // its plan was paused, because the access the plan ran under ended
+  | 'plan_taken_over'   // the owner took its plan over
+  | 'plan_ended'        // its plan was no longer waiting on it, and was run again or ended
+  | 'superseded';       // a newer question of the same kind replaced it
 
 export interface PendingPromptRow {
   id: string;
@@ -544,7 +558,7 @@ export class PromptStore {
         // ANSWERED card gets flipped to expired, and `/promote` then refuses it
         // with "Prompt not answered yet" — the basics the user typed never reach
         // durable knowledge.
-        `UPDATE pending_prompts SET status = 'expired'
+        `UPDATE pending_prompts SET status = 'expired', closed_reason = 'superseded'
           WHERE session_id = ? AND status = 'pending'
             AND json_valid(payload_json)
             AND json_extract(payload_json, '$.kind') = 'onboarding_basics'`,
@@ -794,13 +808,13 @@ export class PromptStore {
    * Returns how many rows it settled; 0 is normal (the run may have drained its
    * own row already).
    */
-  expirePendingForTrigger(triggerId: string): number {
+  expirePendingForTrigger(triggerId: string, reason: PromptClosedReason): number {
     const rows = this.db
       .prepare(`SELECT id FROM pending_prompts WHERE trigger_id = ? AND status = 'pending'`)
       .all(triggerId) as { id: string }[];
     const result = this.db
-      .prepare(`UPDATE pending_prompts SET status = 'expired' WHERE trigger_id = ? AND status = 'pending'`)
-      .run(triggerId);
+      .prepare(`UPDATE pending_prompts SET status = 'expired', closed_reason = ? WHERE trigger_id = ? AND status = 'pending'`)
+      .run(reason, triggerId);
     for (const row of rows) this._emitSettled(row.id);
     return result.changes;
   }
@@ -903,11 +917,11 @@ export class PromptStore {
    * superseded by a fresh /run for the same session: the previous run is
    * stuck on `waitForSettled`, so the only way to drain it is to mark its
    * prompt expired and let the wait resolve. Idempotent. Returns true only
-   * the first time the prompt transitions out of 'pending'. */
-  expirePrompt(promptId: string): boolean {
+   * the first time the prompt transitions out of 'pending'. `reason` is what a late answer is told. */
+  expirePrompt(promptId: string, reason: PromptClosedReason): boolean {
     const result = this.db
-      .prepare(`UPDATE pending_prompts SET status = 'expired' WHERE id = ? AND status = 'pending'`)
-      .run(promptId);
+      .prepare(`UPDATE pending_prompts SET status = 'expired', closed_reason = ? WHERE id = ? AND status = 'pending'`)
+      .run(reason, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
     return changed;
@@ -1040,7 +1054,7 @@ export class PromptStore {
   private _getExpireOldStmt(): Database.Statement {
     return (this._stmtExpireOld ??= this.db.prepare(`
       UPDATE pending_prompts
-      SET status = 'expired'
+      SET status = 'expired', closed_reason = 'timed_out'
       WHERE status = 'pending' AND ${EXPIRED}
     `));
   }
@@ -1051,7 +1065,7 @@ export class PromptStore {
       SET status = 'expired',
           -- A question whose own TTL already ran out (during downtime, or in the minutes before
           -- the TTL sweep's next tick) expired; the restart is not why it is closed.
-          closed_reason = CASE WHEN ${NOT_EXPIRED} THEN 'process_restarted' ELSE NULL END
+          closed_reason = CASE WHEN ${NOT_EXPIRED} THEN 'process_restarted' ELSE 'timed_out' END
       WHERE status = 'pending' AND trigger_id IS NULL
     `));
   }
