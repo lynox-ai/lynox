@@ -41,8 +41,7 @@ const EXEMPT: Record<string, string> = {
  * checked page by page apart from this detector. Listed so a NEW page still fails here.
  */
 const OUTSIDE_SETTINGS = [
-	'ContactsView.svelte', 'FileBrowserView.svelte', 'KnowledgeQueueView.svelte', 'MemoryView.svelte', 'TriggersView.svelte',
-	'WorkflowLibraryView.svelte',
+	'ContactsView.svelte', 'FileBrowserView.svelte', 'KnowledgeQueueView.svelte', 'MemoryView.svelte',
 ];
 /**
  * Pages a mandate does not see at all, hidden by themselves: they must ask whose session it is,

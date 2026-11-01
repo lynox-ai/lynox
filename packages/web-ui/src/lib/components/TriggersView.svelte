@@ -10,6 +10,7 @@
 	import { awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -62,6 +63,10 @@
 	// Who reads the list (`GET /api/triggers`). Only the owner takes a plan over; the route says
 	// so too (ownerOnly), the button only follows it.
 	let viewer = $state<'owner' | 'mandate' | 'none'>('none');
+	// Confirming a plan is the owner's (`POST /api/tasks/:id/confirm`). A mandate's session is told
+	// so by the list's own `viewer` or by the shared store, which this page loads itself: the store
+	// alone shows the owner's button while it has no answer.
+	const mandate = $derived(viewer === 'mandate' || isMandateSession());
 	let loading = $state(true);
 	let error = $state('');
 	// Per-trigger in-flight guard so a double-click can't fire two run-now /
@@ -494,7 +499,7 @@
 		stopped: 'tasks.run_stopped',
 	};
 
-	$effect(() => { void loadTriggers(); /* catches and sets its error */ });
+	$effect(() => { void loadTriggers(); void loadSettingsViewer(); /* both catch their errors */ });
 
 	// `running` and `stoppable` are snapshots, and a scheduled run starts on its own: without
 	// a refresh, the Stop button of a run that began while the page was open never appears.
@@ -590,7 +595,8 @@
 								     nothing to agree to. One gate for the button (`offersConfirmation`), so it can
 								     never outlive the thing it consents to. -->
 								<div class="mt-2 space-y-1.5" data-trigger-consent>
-									<p class="text-xs text-warning">{t('triggers.awaiting_hint')}</p>
+									<!-- A mandate cannot confirm: it is told who does, in place of the hint and the button. -->
+									<p class="text-xs text-warning" data-trigger-awaits>{t(mandate ? 'triggers.confirm_owner_only_notice' : 'triggers.awaiting_hint')}</p>
 									{#if showsInstruction(trigger)}
 										<div class="text-xs text-text-muted" data-consent-instruction>
 											<span class="font-medium" data-consent-label="instruction">{t('triggers.instruction')}:</span>
@@ -606,7 +612,7 @@
 											{/if}
 										</div>
 									{/if}
-									{#if offersConfirmation(trigger)}
+									{#if offersConfirmation(trigger) && !mandate}
 										<button onclick={() => confirmTrigger(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.confirm_label')} title={t('triggers.confirm_label')} class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-xs text-accent-text hover:bg-accent/15 disabled:opacity-40">{t('triggers.confirm')}</button>
 									{/if}
 								</div>
