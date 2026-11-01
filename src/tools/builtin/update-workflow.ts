@@ -1,5 +1,5 @@
 import type { ToolEntry, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
-import { applyModifications, byPosition, quotedId, type StepModification } from '../../orchestrator/workflow-edit.js';
+import { applyModifications, quotedId, type StepModification } from '../../orchestrator/workflow-edit.js';
 import { getPipeline, forgetPipeline, buildManifest } from './pipeline.js';
 import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
@@ -154,10 +154,18 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     }
     const goal = input.goal ?? planned.goal;
     const fixes: string[] = [];
+    const named = new Set<number>();
     steps.forEach((s, i) => {
-      if (findHiddenInName(s.id, 'id') !== null) fixes.push(`rename_step for step #${i + 1} (${quotedId(s.id)}): ${byPosition(steps, i)}, value a new id you type; the steps that read it follow`);
-      if (findHiddenChar(s.task) !== null) fixes.push(`update_task for step #${i + 1}: ${byPosition(steps, i)}, value its task typed again in your own words`);
+      if (findHiddenInName(s.id, 'id') !== null) { named.add(i); fixes.push(`rename_step for step #${i + 1} (${quotedId(s.id)}): step_id "#${i + 1}", value a new id you type; the steps that read it follow`); }
+      if (findHiddenChar(s.task) !== null) { named.add(i); fixes.push(`update_task for step #${i + 1}: step_id "#${i + 1}", value its task typed again in your own words`); }
     });
+    // A step stored with the id `#<n>` is what `#<n>` names (`stepIndex`): each one that takes a
+    // position named above is renamed first, once, so that the position means the step again.
+    const clears = [...named].flatMap((i) => {
+      const j = steps.findIndex((s, k) => k !== i && s.id === `#${i + 1}`);
+      return j === -1 ? [] : [`first, rename_step for step #${j + 1}, stored with the id "#${i + 1}": step_id "#${i + 1}", value a new id you type`];
+    });
+    fixes.unshift(...clears);
     if (findHiddenChar(goal) !== null) fixes.push('a new "goal", written in your own words');
     if (fixes.length > 0) {
       return `Error: This workflow holds text saved with a character that does not show, which a save now refuses. Nothing was saved. Call again with this call's modifications and, after them:\n${fixes.map(f => `- ${f}`).join('\n')}`;
