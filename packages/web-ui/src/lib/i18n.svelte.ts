@@ -528,6 +528,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.halt.awaitingStart_start': { de: 'Starte den Lauf mit „{button}“.', en: 'Start the run with “{button}”.' },
 	'bulk.halt.listed_start': { de: 'Prüf die Ziele, dann starte mit „{button}“.', en: 'Review the targets, then start with “{button}”.' },
 	'bulk.halt.wait_owner_only': { de: 'Starten kann diesen Lauf nur der Inhaber der Instanz.', en: 'Only the owner of the instance can start this run.' },
+	// A mandate's session sees a run without the owner's acts (ux U-111).
+	'bulk.owner_only': { de: 'Massenläufe freigeben, starten, weiterschreiben und zurücknehmen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber.', en: 'Only the owner of this instance can approve, start, continue or take back bulk runs. If you need that, ask the owner.' },
 	'bulk.halt.wait_no_start': { de: 'Der Lauf kann gerade nicht starten. Warum, steht im Hinweis bei diesem Lauf.', en: 'The run cannot start right now. The note on this run says why.' },
 	'bulk.halt.support_mail': { de: 'Mail an den Support', en: 'Email support' },
 	'bulk.halt.support_subject': { de: 'lynox: Massenlauf {run} auf {host} angehalten', en: 'lynox: bulk run {run} on {host} halted' },

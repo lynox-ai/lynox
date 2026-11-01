@@ -15,6 +15,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import BulkRunDetail from './BulkRunDetail.svelte';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { bulkHaltSuffixKey, bulkLabel, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
@@ -28,6 +29,10 @@
 	let mergeBusy = $state(false);
 
 	const selectedRun = $derived($page.url.searchParams.get('run'));
+	// Taking a merge back is the owner's (the route refuses a mandate): a mandate's session reads
+	// the merges without the button. Until `viewer` is read the button shows.
+	const mandate = $derived(isMandateSession());
+	void loadSettingsViewer();
 
 	function openRun(id: string | null): void {
 		const url = new URL($page.url);
@@ -179,7 +184,7 @@
 									</td>
 									<td class="py-2 pr-2 sm:pr-3 hidden sm:table-cell text-xs text-text-muted">{tf('bulk.merges.linked', { n: String(merge.dataStoreRows), m: String(merge.threadRows) })}</td>
 									<td class="py-2 text-right">
-										{#if bulkMergeTakeable(merge)}
+										{#if bulkMergeTakeable(merge) && !mandate}
 											{#if confirmingMerge === merge.id}
 												<div class="space-y-2 text-left">
 													<p class="text-xs">{tf('bulk.merges.confirm', { dup: bulkVisibleText(merge.dupName), canonical: bulkVisibleText(merge.canonicalName) })}</p>

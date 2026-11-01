@@ -539,18 +539,21 @@ export function bulkStateText(
 }
 
 /** What the page says under "halted because": its own sentence where it has one, else the
- *  engine's reason. `startButton` as for {@link bulkStateText}. */
+ *  engine's reason. `startButton` as for {@link bulkStateText}. A mandate's session is shown no
+ *  step that names a button it does not see: a run waiting for its start says who starts it. */
 export function bulkHaltCause(
 	run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0] & Parameters<typeof bulkStateText>[0],
 	managed: boolean | null,
 	startButton: string | null,
 	i18n: BulkI18n,
+	mandate = false,
 ): string {
 	if (bulkAtProbe(run) && run.haltKey === 'maxTargets') return i18n.t('bulk.halted_after_probe');
 	const own = bulkHaltText(run, managed, i18n)?.cause ?? bulkResumeText(run, managed, i18n)?.cause ?? bulkRollbackText(run, i18n)?.cause;
 	if (own !== undefined) return own;
-	const state = bulkStateText(run, startButton, i18n);
-	if (state !== null) return state.step === null ? state.cause : `${state.cause} ${state.step}`;
+	if (mandate && bulkWaitsForStart(run)) return i18n.t('bulk.halt.wait_owner_only');
+	const state = bulkStateText(run, mandate ? null : startButton, i18n);
+	if (state !== null) return state.step === null || mandate ? state.cause : `${state.cause} ${state.step}`;
 	return run.haltReason ?? '';
 }
 
