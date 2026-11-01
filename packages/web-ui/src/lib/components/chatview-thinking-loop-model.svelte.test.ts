@@ -85,8 +85,25 @@ describe('the thinking-loop note and the choice of model', () => {
 		expect(line()?.textContent).toBe('Das hängt auch vom Modell ab: In den Einstellungen unter „Konfiguration“ › „Modell-Strategie“ kannst du eine andere wählen.');
 	});
 
+	it('on a managed instance too: its locks cover custom endpoints, limits and presets, not the choice of model', async () => {
+		// The shape the server sends for a managed tier (http-api.ts, GET /api/config).
+		await render({ viewer: 'owner', locks: {
+			custom_provider_endpoints: { reason: 'managed-tier' },
+			limits: { reason: 'managed-tier' },
+			custom_endpoints: { reason: 'managed-tier' },
+			tier_preset: { reason: 'managed-tier' },
+		} });
+		expect(line()).not.toBeNull();
+	});
+
+	it('not when the answer says nothing about the locks', async () => {
+		await render({ viewer: 'owner' });
+		expect(target.textContent).toContain(t('chat.note.thinking_loop'));
+		expect(line()).toBeNull();
+	});
+
 	it('not on an instance whose provider is locked', async () => {
-		await render({ viewer: 'owner', locks: { provider: { reason: 'managed' } } });
+		await render({ viewer: 'owner', locks: { provider: { reason: 'managed-tier' } } });
 		// Positive control in the same render: the note itself is there, only the line is not.
 		expect(target.textContent).toContain(t('chat.note.thinking_loop'));
 		expect(line()).toBeNull();

@@ -47,8 +47,10 @@ export function noteSettingsViewer(body: unknown): void {
 	if (body === null || typeof body !== 'object' || !('viewer' in body)) return;
 	const v = (body as { viewer: unknown }).viewer;
 	if (v === 'owner' || v === 'mandate' || v === 'none') viewer = v;
+	// Every `GET /api/config` body carries `locks`; one without it says nothing about the lock, so
+	// the line that needs it stays hidden rather than assuming there is none.
 	const locks = (body as { locks?: unknown }).locks;
-	providerLocked = locks !== null && typeof locks === 'object' && (locks as { provider?: unknown }).provider != null;
+	providerLocked = locks !== null && typeof locks === 'object' ? (locks as { provider?: unknown }).provider != null : null;
 }
 
 /** Reads `viewer` once per page load; later calls share the first. */
