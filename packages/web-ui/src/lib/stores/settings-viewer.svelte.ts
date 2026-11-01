@@ -21,6 +21,15 @@ export function isMandateSession(): boolean {
 	return viewer === 'mandate';
 }
 
+/**
+ * True only when the server said this session is the owner's. For something the owner starts and
+ * a mandate must not even see for a moment (the introduction in an empty chat): it stays hidden
+ * while the answer is out, and when there is none.
+ */
+export function isOwnerSession(): boolean {
+	return viewer === 'owner';
+}
+
 /** Takes `viewer` from a `GET /api/config` body a page has read anyway. */
 export function noteSettingsViewer(body: unknown): void {
 	if (body === null || typeof body !== 'object' || !('viewer' in body)) return;

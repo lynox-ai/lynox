@@ -9,7 +9,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, isOwnerSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import {
 		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
@@ -324,8 +324,10 @@
 	// The start button's label, from the same source as the button itself: the halt sentence names it.
 	const startButton = $derived(run ? bulkStartButtonKey(run, startKind, supersedable !== null) : null);
 	const supportMail = $derived(run ? bulkSupportMailto(run, managed, i18n) : null);
-	// Every act on this page is the owner's (the routes refuse a mandate). Until `viewer` is read
-	// the owner's acts show; the server stays the boundary.
+	// Every act on this page is the owner's (the routes refuse a mandate), so its buttons show only
+	// once the server said the session is the owner's: a mandate does not see them even while the
+	// answer is out. The sentence and the wording for a mandate wait for the server to say so.
+	const ownerActs = $derived(isOwnerSession());
 	const mandate = $derived(isMandateSession());
 	// A sentence that names an owner's act names the owner to a mandate.
 	const view = $derived(mandate ? bulkMandateI18n(i18n) : i18n);
@@ -395,7 +397,7 @@
 				<p class="text-sm text-text-muted">{t('bulk.awaiting_start')}</p>
 			{/if}
 			{#if run.phase === 'planned' && run.haltKey === 'listed'}
-				{#if !mandate}
+				{#if ownerActs}
 					<p class="text-sm">{tf(run.judge !== null ? 'bulk.start.listed_judge' : 'bulk.start.listed', { n: String(run.total) })}</p>
 				{/if}
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.list_note')}</p>
@@ -452,7 +454,7 @@
 											{#if approving && (target.deselected || writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
 													{#if target.deselected}<span class="text-text-subtle">{view.t('bulk.deselect.taken_out')}</span>{/if}
-													{#if !mandate}
+													{#if ownerActs}
 														<button type="button" class="{btnPlain} text-xs" disabled={busy} onclick={() => toggleSelected(target)}>{t(target.deselected ? 'bulk.deselect.on' : 'bulk.deselect.off')}</button>
 													{/if}
 												</div>
@@ -477,6 +479,8 @@
 
 			{#if mandate}
 				<p class="text-sm border-t border-border pt-4">{t('bulk.owner_only_notice')}</p>
+			{:else if !ownerActs}
+				<!-- Whose session it is is not known yet: no act is offered. -->
 			{:else if startKind === 'read'}
 				<div class="space-y-3 border-t border-border pt-4">
 					<p class="text-sm">{tf('bulk.start.read_explain', { provider })}</p>

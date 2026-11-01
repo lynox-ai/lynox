@@ -47,7 +47,7 @@ const MERGE: BulkMerge = {
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let run: BulkRunDetailData;
-let viewer: 'owner' | 'mandate';
+let viewer: 'owner' | 'mandate' | 'none' | null;
 let shownTargets: BulkTarget[];
 
 beforeEach(() => {
@@ -60,7 +60,7 @@ beforeEach(() => {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
-		if (u.endsWith('/config')) return reply({ managed: true, viewer });
+		if (u.endsWith('/config')) return viewer === null ? new Response('', { status: 502 }) : reply({ managed: true, viewer });
 		if (u.endsWith('/bulk/runs')) return reply({ runs: [run] });
 		if (u.endsWith('/merges')) return reply({ merges: [MERGE] });
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
@@ -150,6 +150,24 @@ describe('a run\'s page as a mandate sees it', () => {
 		expect(target.textContent).not.toContain(t('bulk.start.listed').replace('{n}', '1'));
 		expect(target.textContent).toContain(t('bulk.start.list_note'));
 	});
+});
+
+describe('a session whose reader the server has not named as the owner', () => {
+	for (const [name, answer] of [['no answer', null], ['a viewer that is neither', 'none']] as const) {
+		it(`offers no act and says nothing about the owner on ${name}`, async () => {
+			viewer = answer;
+			await renderDetail();
+			expect(target.textContent).toContain('Product/1');
+			expect(buttonByText(t('bulk.approve.approve'))).toBeUndefined();
+			expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
+			expect(target.textContent).not.toContain(t('bulk.owner_only_notice'));
+			unmount(component!);
+			component = undefined;
+			await renderList();
+			expect(target.textContent).toContain('Anna Muster');
+			expect(buttonByText(t('bulk.merges.take_back'))).toBeUndefined();
+		});
+	}
 });
 
 describe('the run list as a mandate sees it', () => {
