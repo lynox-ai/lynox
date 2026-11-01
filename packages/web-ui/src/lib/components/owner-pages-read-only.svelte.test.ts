@@ -278,6 +278,10 @@ describe('ApiStoreView (Settings › API profiles)', () => {
 		expect(reconnect('CRM')).not.toBeNull();
 		expect(reconnect('ERP')).toBeNull();
 		expect(target.querySelectorAll('[data-testid="api-reconnect"]').length).toBe(1);
+		// Where the link is missing, the line says why: once, on the profile the mandate did not set up.
+		const why = [...target.querySelectorAll('[data-testid="api-reconnect-not-yours"]')];
+		expect(why.map((p) => p.textContent?.trim())).toEqual([t('apis.reconnect_not_yours')]);
+		expect(why[0]!.closest('div.rounded-\\[var\\(--radius-md\\)\\]')?.textContent).toContain('ERP');
 		// The built-in provider's app credentials are the owner's: no form on the foreign profile,
 		// and not its own owner-only line either, which the page's sentence already says.
 		expect(target.querySelector('[data-testid="preset-client-form"]')).toBeNull();
@@ -297,6 +301,7 @@ describe('ApiStoreView (Settings › API profiles)', () => {
 		expect(target.querySelectorAll('[data-testid="api-reconnect"]').length).toBe(2);
 		expect(target.querySelector('[data-testid="preset-client-form"]')).not.toBeNull();
 		expect(target.querySelector('[data-testid="api-import-waiting"]')).not.toBeNull();
+		expect(target.querySelector('[data-testid="api-reconnect-not-yours"]')).toBeNull();
 	});
 });
 

@@ -212,10 +212,15 @@
 									<p data-testid="api-erasure-avert">{t('apis.erasure_connected_again_avert')}</p>
 								{/if}
 							{/if}
-							{#if (view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)) && profile.reader_may_connect !== false}
-								<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
-								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
-									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+							{#if view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
+								{#if profile.reader_may_connect !== false}
+									<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
+									<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
+										class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+								{:else if isMandateSession()}
+									<!-- No link (ux U-109): a mandate reconnects only a profile it set up; the line says why. -->
+									<p data-testid="api-reconnect-not-yours">{t('apis.reconnect_not_yours')}</p>
+								{/if}
 							{/if}
 							{#if view.notice && view.kind !== 'pending'}
 								{@const dates = { revoked: localDay(view.notice.revokedAt, getLocale()), earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) }}

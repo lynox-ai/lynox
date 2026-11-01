@@ -1820,7 +1820,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.saving': { de: 'Speichern...', en: 'Saving...' },
 	'settings.saved': { de: 'Gespeichert', en: 'Saved' },
 	// A settings page in a mandate's session (ux U-104): the owner sets these, the mandate sees them.
-	'mail.owner_only_notice': { de: 'Postfächer verbindet nur der Inhaber dieser Instanz. Bitte ihn, das Postfach in den Einstellungen unter „{label}“ zu verbinden.', en: 'Only the owner of this instance connects mailboxes. Ask the owner to connect the mailbox in Settings under “{label}”.' },
+	'mail.owner_only_notice': { de: 'Postfächer verbindet nur der Inhaber dieser Instanz. Bitte den Inhaber, das Postfach in den Einstellungen unter „{label}“ zu verbinden.', en: 'Only the owner of this instance connects mailboxes. Ask the owner to connect the mailbox in Settings under “{label}”.' },
+	'apis.reconnect_not_yours': { de: 'Neu verbinden kannst du dieses Profil nicht, weil du es nicht angelegt hast. Brauchst du es, wende dich an den Inhaber.', en: 'You cannot reconnect this profile because you did not set it up. If you need it, ask the owner.' },
 	'apis.owner_only_notice': { de: 'Profile löschen und den App-Zugang eintragen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber.', en: 'Only the owner of this instance can delete profiles or enter app credentials. If you need that, ask the owner.' },
 	'settings.owner_only_notice': { de: 'Diese Einstellungen legt der Inhaber dieser Instanz fest. Du siehst sie, kannst sie aber nicht ändern. Brauchst du eine Änderung, wende dich an den Inhaber.', en: 'The owner of this instance sets these settings. You can see them but not change them. If you need a change, ask the owner.' },
 	'settings.value_on': { de: 'An', en: 'On' },
