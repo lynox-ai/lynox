@@ -61,6 +61,17 @@ describe('loadSettingsViewer', () => {
 		expect(isViewerUnavailable(), 'a reset forgets it').toBe(false);
 	});
 
+	it('is no longer unavailable once a later page gets an answer', async () => {
+		serve(new TypeError('network'));
+		await loadSettingsViewer();
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(isViewerUnavailable(), 'positive control: it gave up').toBe(true);
+		serve(json({ viewer: 'owner' }));
+		await loadSettingsViewer();
+		expect(isOwnerSession()).toBe(true);
+		expect(isViewerUnavailable()).toBe(false);
+	});
+
 	it('is never unavailable when a retry is answered', async () => {
 		serve(json({ error: 'down' }, 503), json({ viewer: 'owner' }));
 		await loadSettingsViewer();
