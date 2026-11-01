@@ -110,7 +110,7 @@
 	import ComposerModelPicker from './ComposerModelPicker.svelte';
 	import ThreadModelControl from './ThreadModelControl.svelte';
 	import OnboardingBasics from './OnboardingBasics.svelte';
-	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { canChooseModel, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
@@ -2775,6 +2775,9 @@
 						<div class="min-w-0">
 							<div class="text-text-muted">{noteTitle}</div>
 							<div class="text-text-subtle">{noteBody}</div>
+							{#if msg.note.code === 'thinking_loop' && canChooseModel()}
+								<div class="text-text-subtle" data-model-choice>{t('chat.note.thinking_loop.model')}</div>
+							{/if}
 							{#if approvalLines?.nextKey}
 								<div class="text-text-subtle" data-approval-next>{t(approvalLines.nextKey)}</div>
 							{/if}
