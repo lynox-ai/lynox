@@ -94,7 +94,7 @@ describe('a message sent without an AI provider key', () => {
 		i18n.setLocale('de');
 		await sendRefused({ error: 'x', code: 'llm_not_configured', may_configure: false });
 
-		expect(store.getChatError()).toBe('Auf dieser Instanz ist noch kein KI-Anbieter eingerichtet. Das kann nur der Inhaber. Wende dich an ihn.');
+		expect(store.getChatError()).toBe('Auf dieser Instanz ist noch kein KI-Anbieter eingerichtet. Das kann nur der Inhaber. Wende dich an den Inhaber.');
 		const user = store.getMessages().find((m) => m.role === 'user' && m.content === 'hello');
 		expect(user?.failed, 'kept, failed').toBe(true);
 	});
