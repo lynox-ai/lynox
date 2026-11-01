@@ -1546,6 +1546,10 @@ export class Engine {
       const db = this.engineDb?.getDb();
       if (db === undefined) return;
       pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+      // A run of a plan paused here would go on until the next sweep, up to 5 minutes, with its
+      // member live again and its connections open to it. So the parts that end runs follow at
+      // once, after the login commits: a login whose transaction fails paused nothing to stop.
+      queueMicrotask(() => this.endEndedMandateRuns());
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
