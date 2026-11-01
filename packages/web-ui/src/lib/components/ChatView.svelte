@@ -110,6 +110,7 @@
 	import ComposerModelPicker from './ComposerModelPicker.svelte';
 	import ThreadModelControl from './ThreadModelControl.svelte';
 	import OnboardingBasics from './OnboardingBasics.svelte';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
@@ -204,8 +205,13 @@
 		// (dismiss), NOT shown with the default memory tool — otherwise a transient failure on a
 		// DK-on instance would run the chips instructing the unregistered `memory_store`,
 		// silently losing every capture (RF-COH1).
+		// Asked alongside the status: a mandate's session never runs the owner's introduction
+		// (setting the instance up is the owner's), so its answers cannot get lost on a refusal.
+		const viewerRead = loadSettingsViewer();
 		try {
 			const res = await fetch(`${getApiBase()}/onboarding/status`);
+			await viewerRead;
+			if (isMandateSession()) { onboardingDismissed = true; return; }
 			if (!res.ok) { onboardingDismissed = true; return; }
 			const data = (await res.json()) as {
 				knowledgeDone?: boolean; skipped?: boolean; durableMemory?: boolean; firstSessionAt?: string | null;
