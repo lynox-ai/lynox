@@ -1109,7 +1109,9 @@ function planRefusalFinalForRun(): string {
  * mode, which a later access of the same person passes; the refresh slot's own check may stop it
  * in other words, or let it through while that earlier access is still live. A request through
  * it stays refused either way: its grant names the earlier access, and only connecting again
- * changes that, which a plan cannot.
+ * changes that, which a plan cannot. One window it does not cover: a login that extends an
+ * ended access pauses the plan at once, but the run in progress stops only at the next sweep
+ * (`stopEndedStarters`), and until then a request through the connection can pass again.
  */
 function ownRefusalFinalForRun(): string {
   return `This is final for this run: another request through it is refused as well, so do not try the connection again. ${RUN_REFUSAL_CLOSE}`;
