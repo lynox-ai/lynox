@@ -17,6 +17,8 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 
 	interface OnboardingStatus {
 		knowledgeDone: boolean;
@@ -31,7 +33,7 @@
 	let restarting = $state(false);
 	let restarted = $state(false);
 
-	$effect(() => { void load(); });
+	$effect(() => { void load(); void loadSettingsViewer(); });
 
 	async function load(): Promise<void> {
 		try {
@@ -92,7 +94,11 @@
 			{/if}
 		</div>
 
-		{#if knowledgeState === 'degraded'}
+		{#if isMandateSession()}
+			<!-- A mandate's session (ux 1148 cut, U-104): restarting the introduction is the owner's
+			     (`DELETE /api/onboarding/flags/:flag` is owner-only). The status stays in the header. -->
+			<div class="mt-4"><OwnerOnlyNotice /></div>
+		{:else if knowledgeState === 'degraded'}
 			<p class="text-sm text-text-subtle mt-4">{t('onboard.relayer_degraded')}</p>
 		{:else if restarted}
 			<div class="mt-4 flex flex-wrap items-center gap-3">

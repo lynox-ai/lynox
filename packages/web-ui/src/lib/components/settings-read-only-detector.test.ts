@@ -4,42 +4,94 @@ import { basename, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * A detector: every settings page that saves through `PUT /api/config` shows a mandate's session
- * its values as text under the owner-only notice (ux U-104), because the server refuses that save
- * to a mandate. A page counts when it sends the PUT itself, or when it uses a store module that
- * sends it (the SearXNG saves live in `stores/integrations/search.svelte.ts`). A new settings page
- * that copies a save without the branch would hand a mandate fields whose save is always refused.
+ * A detector: every page that writes through a route only the owner may use (`ownerOnly` in
+ * `src/server/http-api.ts`: `PUT /api/config`, `PUT /api/secrets/:name`, `POST /api/mail/accounts`
+ * …) shows a mandate's session a read-only view (ux U-104, U-109), because the server refuses the
+ * write to a mandate. A page counts when it sends the write itself, or when it uses a module under
+ * `stores/integrations/` or `api/` that sends it (the SearXNG saves live in
+ * `stores/integrations/search.svelte.ts`, the inbox rules in `api/inbox-rules.ts`). The routes are
+ * read from the server, so a route that turns owner-only brings its pages in by itself. A new page
+ * that copies a write without the branch would hand a mandate a form whose save is always refused.
+ *
+ * What it does not see: a URL built by a helper (`fetch(url(), …)`), a method passed as a variable,
+ * and writes in modules outside those two directories (the chat store is left out on purpose: every
+ * view imports it).
  */
-// `src`, not only `src/lib`: a route page that saves the config counts too.
+// `src`, not only `src/lib`: a route page that writes counts too.
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const SERVER = fileURLToPath(new URL('../../../../../src/server/http-api.ts', import.meta.url));
 
 /**
- * Pages that save through `PUT /api/config` and need no branch, each with its reason. Nothing else
- * belongs here.
+ * Pages that write through an owner-only route and need no branch, each with its reason. Nothing
+ * else belongs here.
  */
 const EXEMPT: Record<string, string> = {
 	'BulkRunsSetting.svelte': 'Its page leaves it out for a mandate (bulk runs are the owner\'s switch); the mandate is told the owner turns it on.',
 	'ChatView.svelte': 'Not a settings page: it reveals the vault key only for the owner\'s backup reminder, and a refused reveal shows nothing.',
 };
 /**
+ * Pages outside the settings that write through an owner-only route: the actions on them (approve,
+ * delete, run, edit memory …) are not settings, and whether a mandate is shown each of them is
+ * checked page by page apart from this detector. Listed so a NEW page still fails here.
+ */
+const OUTSIDE_SETTINGS = [
+	'ApprovalsView.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'KnowledgeQueueView.svelte',
+	'MemoryView.svelte', 'OnboardingBasics.svelte', 'TriggersView.svelte', 'WorkflowLibraryView.svelte',
+];
+/**
  * Pages a mandate does not see at all, hidden by themselves: they must ask whose session it is,
- * but show no notice. The setup banner is for setting up a provider, which is the owner's.
+ * but show no notice.
  */
 const HIDDEN: Record<string, string> = {
 	'SetupBanner.svelte': 'Setting up the provider is the owner\'s; GET /api/secrets/status answers a mandate too, so the banner asks.',
 	'WorkspaceSecurityView.svelte': 'Both of its values are secrets, so a mandate has nothing to see; the index and the palette leave it out.',
+	'SecretsView.svelte': 'Listing the secrets is the owner\'s (GET /api/secrets), so a mandate has nothing to see; the index and the palette leave it out.',
+	'KeysView.svelte': 'The library\'s older keys page, on the same owner-only list as SecretsView; no route mounts it.',
+	'CalendarSettings.svelte': 'Its feeds are read from the owner-only list of secrets, so a mandate has nothing to see; the channel list leaves it out.',
 };
 
-/** Whether `src` has a fetch whose URL names `/config` and whose options say PUT, in any form. */
-function putsConfig(src: string): boolean {
+/** Pages the scan counted when this landed; fewer means it went blind. */
+const PAGES_WHEN_LANDED = 33;
+
+/** A route only the owner may use, as `METHOD` and a pattern over the path after `/api`. */
+interface OwnerRoute { method: string; path: RegExp; name: string }
+
+/** The routes `server` registers with an `ownerOnly(…)` stance. */
+function ownerOnlyRoutes(server: string): OwnerRoute[] {
+	// A dynamic route's path may be a template (`/api/bulk/runs/:id/targets/:seq/${verb}`).
+	const START = /this\.addStatic\(\s*'\w+',\s*'([A-Z]+) (\/api\/[^']*)'|parseDynamicRoute\(\s*'\w+',\s*'([A-Z]+)',\s*['`](\/api\/[^'`]*)['`]/g;
+	const starts = [...server.matchAll(START)].map((m) => ({ at: m.index, method: (m[1] ?? m[3])!, path: (m[2] ?? m[4])! }));
+	const routes: OwnerRoute[] = [];
+	starts.forEach((s, i) => {
+		// The stance closes the registration, before the next one starts.
+		const body = server.slice(s.at, i + 1 < starts.length ? starts[i + 1]!.at : server.length);
+		if (!/^\s*\}, ownerOnly\(/m.test(body)) return;
+		const pattern = s.path.slice('/api'.length).replace(/\$\{[^}]*\}/g, ':x').replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/:\w+/g, '[^/]+');
+		routes.push({ method: s.method, path: new RegExp(`^${pattern}$`), name: `${s.method} ${s.path}` });
+	});
+	return routes;
+}
+
+/**
+ * The owner-only writes in `src`: each fetch whose method is not GET and whose URL, after the API
+ * base, matches an owner-only route. An interpolation in the URL stands for one path segment.
+ */
+function ownerOnlyWrites(src: string, routes: OwnerRoute[]): string[] {
+	const found: string[] = [];
 	for (const m of src.matchAll(/\bfetch\(/g)) {
 		const rest = src.slice(m.index + 6, m.index + 900);
 		const next = rest.search(/\bfetch\(/);
 		const call = `fetch(${next === -1 ? rest : rest.slice(0, next)}`;
-		const url = call.slice(0, 200).split(/,\s*\{/)[0]!;
-		if (/\/config\b(?![-\w./])/.test(url) && /method\s*:\s*['"`]PUT['"`]/.test(call)) return true;
+		const method = /method\s*:\s*['"`]([A-Z]+)['"`]/.exec(call)?.[1] ?? 'GET';
+		if (method === 'GET') continue;
+		const url = /^fetch\(\s*`([^`]*)`/.exec(call)?.[1];
+		if (url === undefined) continue;
+		// The API base first (`${getApiBase()}`, `${apiBase}`, `${base}`), then every other interpolation.
+		const path = url.replace(/^\$\{[^}]*\}/, '').replace(/\$\{[^}]*\}/g, 'x').split('?')[0]!;
+		const route = routes.find((r) => r.method === method && r.path.test(path));
+		if (route) found.push(route.name);
 	}
-	return false;
+	return found;
 }
 
 /** Whether `src` imports the module `moduleFile` (e.g. `search.svelte.ts`) by its `.js` name. */
@@ -50,26 +102,29 @@ function importsModule(src: string, moduleFile: string): boolean {
 
 /** A call that reveals an owner's secret (`/vault/key?reveal=true`, `/auth/token?reveal=true`). */
 const REVEALS = /[?&]reveal=true/;
+/** The modules a page's write may live in, by path: not the chat store, which every view imports. */
+const WRITE_MODULES = /^lib\/(stores\/integrations|api)\//;
 
+/** The mandate branch: it asks whose session it is, and says what the owner keeps. */
 function hasBranch(src: string): boolean {
-	return src.includes('isMandateSession(') && src.includes('OwnerOnlyNotice');
+	return src.includes('isMandateSession(') && /OwnerOnlyNotice|owner_only_notice/.test(src);
 }
 
 /**
- * The pages that save through `PUT /api/config`, and those of them without the mandate branch.
- * `files` maps a path to its source; `.svelte` files are pages, `.ts` files are store modules.
+ * The pages that write through an owner-only route, and those of them without the mandate branch.
+ * `files` maps a path to its source; `.svelte` files are pages, `.ts` files are modules.
  */
-function scan(files: Map<string, string>): { pages: string[]; missing: string[] } {
-	const stores = [...files].filter(([path, src]) => path.endsWith('.ts') && putsConfig(src)).map(([path]) => basename(path));
+function scan(files: Map<string, string>, routes: OwnerRoute[]): { pages: string[]; missing: string[] } {
+	const modules = [...files].filter(([path, src]) => path.endsWith('.ts') && WRITE_MODULES.test(path) && ownerOnlyWrites(src, routes).length > 0).map(([path]) => basename(path));
 	const pages: string[] = [];
 	const missing: string[] = [];
 	for (const [path, src] of files) {
 		if (!path.endsWith('.svelte')) continue;
 		// A page that reveals a secret counts too: the server refuses the reveal to a mandate.
-		if (!putsConfig(src) && !REVEALS.test(src) && !stores.some((store) => importsModule(src, store))) continue;
+		if (ownerOnlyWrites(src, routes).length === 0 && !REVEALS.test(src) && !modules.some((m) => importsModule(src, m))) continue;
 		pages.push(path);
 		const name = basename(path);
-		if (name in EXEMPT) continue;
+		if (name in EXEMPT || OUTSIDE_SETTINGS.includes(name)) continue;
 		if (name in HIDDEN ? !src.includes('isMandateSession(') : !hasBranch(src)) missing.push(path);
 	}
 	return { pages, missing };
@@ -84,12 +139,25 @@ function sources(dir: string, out = new Map<string, string>()): Map<string, stri
 	return out;
 }
 
-describe('every settings page that saves through PUT /api/config has a read-only view for a mandate', () => {
-	const { pages, missing } = scan(sources(ROOT));
+describe('every page that writes through an owner-only route has a read-only view for a mandate', () => {
+	const routes = ownerOnlyRoutes(readFileSync(SERVER, 'utf8'));
+	const { pages, missing } = scan(sources(ROOT), routes);
+
+	it('reads the owner-only routes from the server', () => {
+		// 63 when this landed; fewer means the parse went blind.
+		expect(routes.length).toBeGreaterThanOrEqual(63);
+		for (const name of ['PUT /api/config', 'PUT /api/secrets/:name', 'POST /api/mail/accounts', 'DELETE /api/api-profiles/:id', 'POST /api/inbox/rules', 'POST /api/google/disconnect']) {
+			expect(routes.map((r) => r.name)).toContain(name);
+		}
+		// A route a mandate may use is not among them.
+		expect(routes.map((r) => r.name)).not.toContain('GET /api/mail/accounts');
+		expect(routes.map((r) => r.name)).not.toContain('GET /api/oauth/connect/:id');
+	});
 
 	it('finds no page without the branch', () => {
-		// The 16 pages counted when this landed (12 with the branch, 2 hidden, 2 exempt); fewer means the scan went blind.
-		expect(pages.length).toBeGreaterThanOrEqual(16);
+		// The pages counted when this landed (with the branch, hidden, exempt, outside the settings);
+		// fewer means the scan went blind.
+		expect(pages.length).toBeGreaterThanOrEqual(PAGES_WHEN_LANDED);
 		expect(missing).toEqual([]);
 	});
 
@@ -97,43 +165,84 @@ describe('every settings page that saves through PUT /api/config has a read-only
 		expect([...sources(ROOT).keys()].some((p) => p.startsWith('routes/'))).toBe(true);
 	});
 
-	it('counts the page whose save lives in a store module', () => {
+	it('counts the pages whose write lives in a module', () => {
 		expect(pages.map((p) => basename(p))).toContain('SearchSettings.svelte');
+		expect(pages.map((p) => basename(p))).toContain('RulesView.svelte');
+		expect(pages.map((p) => basename(p))).toContain('GoogleSettings.svelte');
+	});
+
+	it('counts the pages that write outside /config', () => {
+		for (const name of ['MailSettings.svelte', 'ApiStoreView.svelte', 'SecretsView.svelte', 'CalendarSettings.svelte']) {
+			expect(pages.map((p) => basename(p))).toContain(name);
+		}
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
 		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'ChatView.svelte']);
-		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte']);
+		for (const name of OUTSIDE_SETTINGS) expect(pages.map((p) => basename(p))).toContain(name);
+		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte', 'SecretsView.svelte', 'KeysView.svelte', 'CalendarSettings.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {
 			expect(pages.map((p) => basename(p))).toContain(name);
 			expect(reason.length).toBeGreaterThan(20);
 		}
 	});
 
-	it('CONTROL: flags a page that saves without the branch, directly or through a store, and passes one with it', () => {
+	it('CONTROL: reads an owner-only stance, at any indent, and skips another stance', () => {
+		const server = [
+			"    this.addStatic('user', 'PUT /api/config', async () => {", '    }, ownerOnly(\'change the configuration\'));',
+			"    this.addStatic('user', 'GET /api/mail/accounts', async () => {", '    }, READS);',
+			"      this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/things/:id', async () => {", '      }, ownerOnly(\'delete a thing\')));',
+			"    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/oauth/connect/:id', () => {}, OWN));",
+			"      this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', `/api/runs/:id/${verb}`, async () => {", "      }, ownerOnly(verb)));",
+		].join('\n');
+		const routes = ownerOnlyRoutes(server);
+		expect(routes.map((r) => r.name)).toEqual(['PUT /api/config', 'DELETE /api/things/:id', 'POST /api/runs/:id/${verb}']);
+		expect(routes[2]!.path.test('/runs/r1/reselect')).toBe(true);
+	});
+
+	it('CONTROL: flags a page that writes without the branch, directly or through a module, and passes one with it', () => {
+		const server = [
+			"    this.addStatic('user', 'PUT /api/config', async () => {", "    }, ownerOnly('change the configuration'));",
+			"    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/things/:id', async () => {", "    }, ownerOnly('delete a thing')));",
+			"    this.addStatic('user', 'POST /api/notes', async () => {", "    }, free('a note of its own'));",
+		].join('\n');
+		const own = ownerOnlyRoutes(server);
 		const put = "const res = await fetch(`${getApiBase()}/config`, {\n\tmethod: 'PUT',\n\tbody: '{}',\n});";
+		const del = "await fetch(`${apiBase}/things/${encodeURIComponent(id)}`, { method: 'DELETE' });";
 		const branch = "import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';\n{#if isMandateSession()}<OwnerOnlyNotice />{/if}";
 		const files = new Map<string, string>([
 			['components/Bare.svelte', `<script>${put}</script>`],
 			['components/Branched.svelte', `<script>${put}</script>${branch}`],
 			// The notice alone, without asking whose session it is, is not the branch.
 			['components/NoticeOnly.svelte', `<script>${put}</script><OwnerOnlyNotice />`],
-			['stores/integrations/thing.svelte.ts', `export async function save() { ${put} }`],
+			// A page's own sentence counts like the notice.
+			['components/OwnSentence.svelte', `<script>${del}</script>{#if isMandateSession()}{t('things.owner_only_notice')}{/if}`],
+			['lib/stores/integrations/thing.svelte.ts', `export async function save() { ${put} }`],
 			['components/ThroughStore.svelte', "<script>import { save } from '../stores/integrations/thing.svelte.js';</script>"],
 			['components/ThroughStoreBranched.svelte', `<script>import { save } from '../stores/integrations/thing.svelte.js';</script>${branch}`],
-			// A GET of /config is no save.
+			// A write in a parametrised route, through a module under api/.
+			['lib/api/things.ts', `export async function drop(apiBase, id) { ${del} }`],
+			['components/ThroughApi.svelte', "<script>import { drop } from '../api/things.js';</script>"],
+			// The chat store is no write module: every view imports it.
+			['lib/stores/chat.svelte.ts', `export async function submit() { ${put} }`],
+			['components/ImportsChat.svelte', "<script>import { clearError } from '../stores/chat.svelte.js';</script>"],
+			// A GET of /config is no write, and neither is a write to a route a mandate may use.
 			['components/ReadsOnly.svelte', "<script>const res = await fetch(`${getApiBase()}/config`);</script>"],
+			['components/OwnNote.svelte', "<script>await fetch(`${getApiBase()}/notes`, { method: 'POST' });</script>"],
 			// A hidden page that does not ask whose session it is, and one that does.
 			['components/SetupBanner.svelte', `<script>${put}</script>`],
 			['hidden/SetupBanner.svelte', `<script>${put}</script>{#if !isMandateSession()}x{/if}`],
 			// A route page counts like a component.
 			['routes/app/x/+page.svelte', `<script>${put}</script>`],
-			// A page that reveals a secret counts without any PUT.
+			// A page that reveals a secret counts without any write.
 			['components/Reveals.svelte', "<script>const res = await fetch(`${getApiBase()}/auth/token?reveal=true`);</script>"],
 		]);
-		const result = scan(files);
-		expect(result.missing.sort()).toEqual(['components/Bare.svelte', 'components/NoticeOnly.svelte', 'components/Reveals.svelte', 'components/SetupBanner.svelte', 'components/ThroughStore.svelte', 'routes/app/x/+page.svelte']);
+		const result = scan(files, own);
+		expect(result.missing.sort()).toEqual(['components/Bare.svelte', 'components/NoticeOnly.svelte', 'components/Reveals.svelte', 'components/SetupBanner.svelte', 'components/ThroughApi.svelte', 'components/ThroughStore.svelte', 'routes/app/x/+page.svelte']);
 		expect(result.pages).not.toContain('components/ReadsOnly.svelte');
+		expect(result.pages).not.toContain('components/OwnNote.svelte');
+		expect(result.pages).not.toContain('components/ImportsChat.svelte');
+		expect(result.pages).toContain('components/OwnSentence.svelte');
 		expect(result.pages).toContain('hidden/SetupBanner.svelte');
 	});
 });
