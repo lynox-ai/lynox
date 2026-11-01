@@ -76,6 +76,10 @@ describe('Engine boot — the briefing warning and an API profile the engine wra
     const tail = tailOf(engine.createSession());
     expect(tail).toContain('Forecasts by city and date.');
     expect(tail).not.toContain(WARNING);
+    // Control on the same machinery: the same text as a caller's own briefing carries none of
+    // the engine's blocks, and warns. If the briefing were changed between wrapping and the scan,
+    // the exact match would fail and the first session would warn too.
+    expect(tailOf(engine.createSession({ briefing: briefing }))).toContain(WARNING);
   });
 
   it('still warns when the description itself carries an injection', async () => {

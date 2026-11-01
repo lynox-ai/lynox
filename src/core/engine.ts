@@ -2826,7 +2826,7 @@ export class Engine {
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
-  getBriefingOwnBlocks(): readonly string[] { return this.briefingOwnBlocks; }
+  getBriefingOwnBlocks(): readonly string[] { return [...this.briefingOwnBlocks]; }
   getSecretsBriefing(): string | undefined { return this.secretsBriefing; }
   /** Freshly compute the first-turn task overview (overdue / due tasks) — pure SQL,
    *  no LLM. Called per-Session so the overview is current, not frozen at engine boot.

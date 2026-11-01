@@ -558,7 +558,9 @@ export class Session {
     this.briefing = rawBriefing && rawBriefing.length > 8000
       ? rawBriefing.slice(0, 8000) + '\n[...truncated]'
       : rawBriefing;
-    // A caller's own briefing holds none of the engine's blocks.
+    // A caller's own briefing holds none of the engine's blocks. A block the cut below splits is
+    // not found whole, so it is simply scanned with the rest; its closer is cut off with it, so it
+    // cannot warn either. Keep the match exact: exempting a cut prefix would exempt forged text.
     this.briefingOwnBlocks = opts?.briefing === undefined ? engine.getBriefingOwnBlocks?.() : undefined;
     // Only on the default path, as before: a caller's own briefing never carried the listing.
     // `?.()` on the method: several suites hand Session a partial engine double.
