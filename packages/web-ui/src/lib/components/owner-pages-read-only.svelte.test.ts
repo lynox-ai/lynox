@@ -260,7 +260,7 @@ describe('ApiStoreView (Settings › API profiles)', () => {
 				{ ...own, reader_may_connect: true },
 				{ ...foreign, reader_may_connect: viewer === 'owner' },
 			],
-			importWaiting: [],
+			importWaiting: [{ file: 'shop.json', reason: 'malformed', deleteId: 'shop' }],
 		},
 		// The app credentials of the built-in provider: the server refuses them to a mandate
 		// (`ownerOnly('see the app credentials of a built-in provider')`).
@@ -285,6 +285,8 @@ describe('ApiStoreView (Settings › API profiles)', () => {
 		expect(fields()).toBe(0);
 		// Setting up and managing in chat stay the mandate's.
 		expect(buttonTexts()).toContain(`+ ${t('apis.create_in_chat')}`);
+		// The files the import waits on are the owner's to repair or delete.
+		expect(target.querySelector('[data-testid="api-import-waiting"]')).toBeNull();
 		expect(writes).toEqual([]);
 	});
 
@@ -294,6 +296,29 @@ describe('ApiStoreView (Settings › API profiles)', () => {
 		expect(buttonTexts().filter((b) => b === t('apis.delete')).length).toBe(2);
 		expect(target.querySelectorAll('[data-testid="api-reconnect"]').length).toBe(2);
 		expect(target.querySelector('[data-testid="preset-client-form"]')).not.toBeNull();
+		expect(target.querySelector('[data-testid="api-import-waiting"]')).not.toBeNull();
+	});
+});
+
+describe('OnboardingSettings (Settings › Account › Onboarding)', () => {
+	const load = () => import('./OnboardingSettings.svelte');
+	const routes = (viewer: Viewer) => ({
+		'/config': { viewer },
+		'/onboarding/status': { knowledgeDone: true, knowledgeThreadId: null, skipped: false, pushNudge: null, firstSessionAt: null, degraded: false },
+	});
+
+	it('shows a mandate the status under the notice, without the restart button', async () => {
+		await render(load, routes('mandate'));
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.textContent).toContain(t('onboard.relayer_status_done'));
+		expect(buttonTexts()).not.toContain(t('onboard.relayer_restart'));
+		expect(writes).toEqual([]);
+	});
+
+	it('keeps the owner\'s restart button', async () => {
+		await render(load, routes('owner'));
+		expect(notice()).toBeNull();
+		expect(buttonTexts()).toContain(t('onboard.relayer_restart'));
 	});
 });
 

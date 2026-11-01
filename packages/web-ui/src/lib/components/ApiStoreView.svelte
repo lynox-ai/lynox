@@ -148,7 +148,8 @@
 		</div>
 	{/if}
 
-	{#if importWaiting.length > 0}
+	<!-- Repairing or deleting the waiting files is the owner's; a mandate's session is not asked to. -->
+	{#if importWaiting.length > 0 && !isMandateSession()}
 		<div class="rounded-[var(--radius-md)] border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning mb-4 space-y-1" role="status" data-testid="api-import-waiting">
 			<p>{t('apis.import_waiting')}</p>
 			<ul class="list-disc pl-5 space-y-1">

@@ -12,6 +12,10 @@ import { fileURLToPath } from 'node:url';
  * `stores/integrations/search.svelte.ts`, the inbox rules in `api/inbox-rules.ts`). The routes are
  * read from the server, so a route that turns owner-only brings its pages in by itself. A new page
  * that copies a write without the branch would hand a mandate a form whose save is always refused.
+ *
+ * What it does not see: a URL built by a helper (`fetch(url(), …)`), a method passed as a variable,
+ * and writes in modules outside those two directories (the chat store is left out on purpose: every
+ * view imports it).
  */
 // `src`, not only `src/lib`: a route page that writes counts too.
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -32,7 +36,7 @@ const EXEMPT: Record<string, string> = {
  */
 const OUTSIDE_SETTINGS = [
 	'ApprovalsView.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'KnowledgeQueueView.svelte',
-	'MemoryView.svelte', 'OnboardingBasics.svelte', 'OnboardingSettings.svelte', 'TriggersView.svelte', 'WorkflowLibraryView.svelte',
+	'MemoryView.svelte', 'OnboardingBasics.svelte', 'TriggersView.svelte', 'WorkflowLibraryView.svelte',
 ];
 /**
  * Pages a mandate does not see at all, hidden by themselves: they must ask whose session it is,
