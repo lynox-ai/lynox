@@ -1228,6 +1228,17 @@ describe('LynoxHTTPApi', () => {
       expect(await viewerOf(webUiLoginSession(TEST_SECRET, null)!.token)).toBe('owner');
     });
 
+    it('GET /api/config says whose session asks, for the settings pages: the owner or a mandate', async () => {
+      repayRateWindow();
+      const viewerOf = async (token: string): Promise<unknown> => {
+        const res = await fetch(`${baseUrl}/api/config`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        return ((await res.json()) as { viewer: unknown }).viewer;
+      };
+      expect(await viewerOf(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token)).toBe('mandate');
+      expect(await viewerOf(webUiLoginSession(TEST_SECRET, null)!.token)).toBe('owner');
+    });
+
     it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
       repayRateWindow();
       const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;

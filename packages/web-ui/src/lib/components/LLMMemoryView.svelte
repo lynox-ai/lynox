@@ -15,6 +15,10 @@
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { onOff, orNotSet } from './settings-readonly/values.js';
 
 	interface UserConfig {
 		memory_extraction?: boolean;
@@ -30,6 +34,7 @@
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const body = (await res.json()) as UserConfig;
+			noteSettingsViewer(body);
 			config = {
 				memory_extraction: body.memory_extraction,
 				memory_half_life_days: body.memory_half_life_days,
@@ -75,6 +80,13 @@
 
 	{#if !loaded}
 		<p class="text-sm text-text-muted">{t('cost_limits.loading')}</p>
+	{:else if isMandateSession()}
+		<!-- A mandate's session: the values as text (ux U-104); PUT /api/config is the owner's. -->
+		<OwnerOnlyNotice />
+		<ReadOnlyRows rows={[
+			{ label: t('config.memory_extraction'), value: onOff(config.memory_extraction) },
+			{ label: t('config.memory_half_life'), value: orNotSet(config.memory_half_life_days) },
+		]} />
 	{:else}
 		<section aria-labelledby="mem-heading" class="space-y-4">
 			<h2 id="mem-heading" class="sr-only">{t('llm.memory.title')}</h2>

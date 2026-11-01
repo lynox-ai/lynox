@@ -6,6 +6,10 @@
 	import { pickBackupConfig, fetchBackupConfig, requestRestore, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
 	import { backupCoverageNotice, type BackupCoverageFields } from '../backup-coverage.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { onOff, orNotSet } from './settings-readonly/values.js';
 
 	interface Backup extends BackupCoverageFields { backup_id: string; version: string; created_at: string; encrypted: boolean; files: { path: string; size_bytes: number }[]; checksum: string; }
 
@@ -141,7 +145,7 @@
 		return `${(bytes / 1048576).toFixed(1)} MB`;
 	}
 
-	$effect(() => { void loadBackups(); /* catches and sets its error */ void loadConfig(); /* never rejects; a failed read hides the settings and shows an error */ void loadManagedStatus(); /* never rejects; picks the way out a coverage notice names */ });
+	$effect(() => { void loadBackups(); /* catches and sets its error */ void loadConfig(); /* never rejects; a failed read hides the settings and shows an error */ void loadManagedStatus(); /* never rejects; picks the way out a coverage notice names */ void loadSettingsViewer(); /* never rejects; a mandate gets the settings as text */ });
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
 	const cardClass = 'rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4';
@@ -151,11 +155,19 @@
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
 	<div class="flex items-center justify-between mb-4 mt-2">
 		<h1 class="text-xl font-light tracking-tight">{t('backups.title')}</h1>
+		<!-- Creating a backup and restoring one are the owner's (POST /api/backups is owner-only, a restore
+		     admin-only): a mandate sees the list and the settings as text (ux U-104). -->
+		{#if !isMandateSession()}
 		<button onclick={createBackup} disabled={creating}
 			class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50">
 			{creating ? t('backups.creating') : t('backups.create')}
 		</button>
+		{/if}
 	</div>
+
+	{#if isMandateSession()}
+		<div class="mb-4"><OwnerOnlyNotice /></div>
+	{/if}
 
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
@@ -191,7 +203,9 @@
 							<span>v{backup.version}</span>
 							<span>{formatSize(backup.files.reduce((s, f) => s + (f.size_bytes ?? 0), 0))}</span>
 						</div>
-						{#if unverified?.id === backup.backup_id}
+						{#if isMandateSession()}
+							<!-- no restore in a mandate's session -->
+						{:else if unverified?.id === backup.backup_id}
 							<div class="flex flex-col items-end gap-1.5">
 								<span class="text-xs text-warning">{t(unverified.mismatch ? 'backups.restore_mismatch' : 'backups.restore_unverified')}</span>
 								<div class="flex items-center gap-2">
@@ -248,6 +262,12 @@
 	{:else if !configLoading}
 		<h2 class="text-xs font-mono uppercase tracking-widest text-text-subtle mt-8 mb-3">{t('backups.settings')}</h2>
 
+		{#if isMandateSession()}
+			<ReadOnlyRows rows={[
+				{ label: t('config.backup_retention'), value: neverDelete ? t('backups.retention_never_value') : orNotSet(config.backup_retention_days) },
+				{ label: t('config.backup_encrypt'), value: onOff(config.backup_encrypt) },
+			]} />
+		{:else}
 		<div class="space-y-4">
 
 			<div class={cardClass}>
@@ -305,5 +325,6 @@
 				{/if}
 			</div>
 		</div>
+		{/if}
 	{/if}
 </div>

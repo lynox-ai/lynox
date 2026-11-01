@@ -17,6 +17,10 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { toolBlurb } from '../utils/tool-blurb.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { onOff } from './settings-readonly/values.js';
 
 	interface Tool { name: string; description: string }
 	interface CategorizedTool extends Tool { categoryKey: string }
@@ -114,6 +118,7 @@
 			const toolsBody = (await toolsRes.json()) as { tools: Tool[] };
 			tools = toolsBody.tools;
 			const configBody = (await configRes.json()) as { disabled_tools?: string[] };
+			noteSettingsViewer(configBody);
 			disabled = new Set(configBody.disabled_tools ?? []);
 			loaded = true;
 		} catch (e) {
@@ -160,6 +165,18 @@
 
 	{#if !loaded}
 		<p class="text-sm text-text-muted">{t('tools.loading')}</p>
+	{:else if isMandateSession()}
+		<!-- A mandate's session: each switch as text (ux U-104); PUT /api/config is the owner's. -->
+		<OwnerOnlyNotice />
+		{#if tools.length === 0}
+			<p class="text-sm text-text-muted italic">{t('tools.empty')}</p>
+		{/if}
+		{#each grouped as group}
+			<section class="space-y-1">
+				<h3 class="text-xs font-mono uppercase tracking-widest text-text-subtle pb-1.5">{t(group.labelKey)}</h3>
+				<ReadOnlyRows rows={group.tools.map((tool) => ({ label: tool.name, value: onOff(!disabled.has(tool.name)) }))} />
+			</section>
+		{/each}
 	{:else if tools.length === 0}
 		<p class="text-sm text-text-muted italic">{t('tools.empty')}</p>
 	{:else}

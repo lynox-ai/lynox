@@ -4,7 +4,8 @@
 	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
-	import { onMount } from 'svelte';
+	import { untrack } from 'svelte';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	type Provider = 'anthropic' | 'mistral' | 'openai';
 
@@ -30,7 +31,12 @@
 	let saveError = $state('');
 	let saveSuccess = $state(false);
 
-	onMount(async () => {
+	async function loadSetupState(): Promise<void> {
+		// Setting up the provider is the owner's (PUT /api/secrets and PUT /api/config are owner-only),
+		// so a mandate's session gets no banner and no wizard (ux U-104). Unknown viewer: as before.
+		// Asked alongside the status, not before it: the owner's banner waits for the slower of the two
+		// answers, not for both in turn.
+		const viewerRead = loadSettingsViewer();
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/status`);
 			if (res.ok) {
@@ -83,7 +89,13 @@
 				}
 			}
 		} catch { /* silent — StatusBar handles engine-down state */ }
+		await viewerRead;
 		loaded = true;
+	}
+
+	// Once, on mount: `untrack` keeps the state the load reads from re-running it.
+	$effect(() => {
+		untrack(() => void loadSetupState());
 	});
 
 	function dismiss() {
@@ -265,7 +277,7 @@
 </script>
 
 <!-- Setup Wizard Modal -->
-{#if loaded && showWizard && apiKeyMissing}
+{#if loaded && showWizard && apiKeyMissing && !isMandateSession()}
 	<div class="fixed inset-0 z-[60] flex items-center justify-center bg-bg-overlay/60 backdrop-blur-sm p-4">
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -457,7 +469,7 @@
 {/if}
 
 <!-- Banner (after wizard dismissed or on revisit) -->
-{#if loaded && apiKeyMissing && !showWizard && !dismissed}
+{#if loaded && apiKeyMissing && !showWizard && !dismissed && !isMandateSession()}
 	<div role="alert" class="flex items-center justify-between gap-3 border-b border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning shrink-0">
 		<div class="flex items-center gap-2 min-w-0">
 			<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor">

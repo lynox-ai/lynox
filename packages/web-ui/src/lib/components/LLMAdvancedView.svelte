@@ -33,6 +33,10 @@
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { optionLabel } from './settings-readonly/values.js';
 
 	// Settings v3 PR 4.6 (2026-05-19) — `embedded=true` skips the page chrome
 	// (back-link + h1 + subtitle) so this component can render inline inside
@@ -107,6 +111,7 @@
 				capabilities?: { mistral_available?: boolean };
 				active_model?: ActiveModel;
 			};
+			noteSettingsViewer(body);
 			// UX-fix 2026-05-24: when effort_level / thinking_mode are unset in
 			// stored config, prefer the engine's actual defaults so the dropdowns
 			// don't display a phantom "default" option that the user can't
@@ -196,6 +201,28 @@
 	});
 
 	$effect(() => { void load(); });
+
+	// A mandate's session (ux U-104): what each select shows, as its visible option text. The option
+	// lists are the ones the selects below render.
+	const EFFORT_OPTIONS = $derived([
+		{ value: 'low', label: t('config.effort_low') },
+		{ value: 'medium', label: t('config.effort_medium') },
+		{ value: 'high', label: t('config.effort_high') },
+		{ value: 'max', label: t('config.effort_max') },
+	]);
+	const THINKING_OPTIONS = $derived([
+		{ value: 'disabled', label: t('config.thinking_disabled') },
+		{ value: 'adaptive', label: t('config.thinking_adaptive') },
+	]);
+	const EMBEDDING_OPTIONS = $derived([{ value: 'onnx', label: t('config.embedding_onnx') }]);
+	const mandateRows = $derived.by(() => {
+		const rows: { label: string; value: string }[] = [{ label: t('config.effort'), value: optionLabel(config.effort_level, EFFORT_OPTIONS) }];
+		if (effectiveExtendedThinking) rows.push({ label: t('config.thinking'), value: optionLabel(config.thinking_mode, THINKING_OPTIONS) });
+		else if (activeModel || pendingProvider) rows.push({ label: t('config.thinking'), value: t('config.anthropic_only_hint') });
+		// The select has one option and shows it while nothing is stored.
+		rows.push({ label: t('config.embedding_provider'), value: optionLabel(config.embedding_provider ?? 'onnx', EMBEDDING_OPTIONS) });
+		return rows;
+	});
 </script>
 
 <div class="space-y-6 {embedded ? '' : 'max-w-3xl mx-auto p-4'}">
@@ -209,6 +236,10 @@
 
 	{#if !loaded}
 		<p class="text-sm text-text-muted">{t('cost_limits.loading')}</p>
+	{:else if isMandateSession()}
+		<!-- PUT /api/config is the owner's. Embedded in LLMSettings, the page above shows the notice. -->
+		{#if !embedded}<OwnerOnlyNotice />{/if}
+		<ReadOnlyRows rows={mandateRows} />
 	{:else}
 		<!-- 2026-05-24 UX-fix: removed LLM-MODE radio fieldset (Standard /
 		     EU-Sovereign). It was a functional duplicate of the Provider tile
