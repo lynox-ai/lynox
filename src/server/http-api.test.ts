@@ -2111,7 +2111,7 @@ describe('LynoxHTTPApi', () => {
       // No key from the environment either: the provider's own variable outranks the vault.
       beforeEach(() => {
         mockSecretResolve.mockReturnValue(null);
-        for (const name of ['ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'OPENAI_API_KEY']) vi.stubEnv(name, '');
+        for (const name of ['ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'OPENAI_API_KEY', 'CUSTOM_API_KEY']) vi.stubEnv(name, '');
         mockSessionRun.mockClear();
       });
       afterEach(() => { mockGetUserConfig.mockReturnValue({}); vi.unstubAllEnvs(); });
