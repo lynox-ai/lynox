@@ -111,9 +111,8 @@ describe('the workflow library in a mandate\'s session', () => {
 });
 
 describe('the schedules page in a mandate\'s session', () => {
-	it('offers the owner the confirmation of a plan that waits for it', async () => {
+	it('offers the owner the confirmation of a plan that waits for it, as the list says', async () => {
 		listViewer = 'owner';
-		configViewer = 'owner';
 		await open('triggers');
 		expect(buttons()).toContain('Bestätigen');
 		expect(target.querySelector('[data-trigger-awaits]')?.textContent?.trim()).toBe('Läuft erst, wenn du ihn bestätigst.');
