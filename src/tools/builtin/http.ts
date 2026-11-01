@@ -43,7 +43,7 @@ import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../.
 import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
@@ -68,6 +68,13 @@ import { timingSafeEqual } from 'node:crypto';
 // the validated IP (closes the DNS-rebinding window between validate + connect).
 
 /** Translate technical block reasons into business-friendly messages */
+/** After `Blocked: redirect to <url>`: a hop to a GraphQL URL that carries a mutation, with the way out. */
+export const GRAPHQL_REDIRECT_REFUSAL = 'carries a GraphQL mutation in its URL; the redirect was not followed. To run the mutation, send it as a POST with a JSON body directly to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation.';
+
+/** After `Blocked: <write> to <service>`: a JSON object that cannot be a GraphQL request at a
+ *  GraphQL-looking address, as a write to a file named `graphql.*` sends (`jsonObjectNotGraphql`). */
+export const GRAPHQL_NOT_A_REQUEST_REFUSAL = 'looks like a GraphQL address to this check, and the body is not a GraphQL request, so it was not sent. If this writes or changes a file whose name contains graphql, lynox cannot send it this way: tell the user which file it is and that they need to change it themselves. Otherwise send one JSON object with a query string and Content-Type: application/json.';
+
 function friendlyBlockMessage(technical: string): string {
   if (technical.includes('private IP')) return 'That address points to an internal network and cannot be reached.';
   if (technical.includes('enforce_https')) return 'Only secure HTTPS connections are allowed. HTTP is disabled.';
@@ -587,6 +594,14 @@ export async function fetchWithValidatedRedirects(
         }
         method = 'GET';
         body = undefined;
+      }
+      // A GraphQL endpoint runs a mutation it finds in the URL's `query`, for a GET as for a write,
+      // and a request that carries one is refused before it goes out (`graphqlUrlWrites`). A hop
+      // is held to the same, whatever guard the call has: a read has none, and a redirect would
+      // otherwise run the mutation without a question.
+      if (isGraphqlEndpoint(nextUrl) && graphqlUrlWrites(nextUrl)) {
+        if (sent !== undefined) throw new RedirectRefusedAfterWrite(sent, nextUrl, 'consent');
+        throw new Error(`Blocked: redirect to ${urlForNote(nextUrl)} ${GRAPHQL_REDIRECT_REFUSAL}`);
       }
       const verdict = redirectGuard ? redirectGuard(nextUrl, method) : true;
       if (verdict !== true) {
@@ -3169,10 +3184,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (graphqlEndpoint && isWriteMethod(gatedMethod)) {
       // Some servers read `query` from the URL before the body (express-graphql, graphene-django),
       // so a write there carries nothing in its URL: no list of parameter names a server might read.
-      if (new URL(input.url).search.length > 1) {
+      // The query string a proxy may make of a `?` decoded in the path counts as well.
+      if (urlQueryStrings(input.url).some((search) => search !== '')) {
         blockedVerbatim(`Blocked: ${writeShown} to ${service()} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
       }
       const reading = graphqlWrite(headers, input.body);
+      if ('refusal' in reading && jsonObjectNotGraphql(input.body)) {
+        blockedVerbatim(`Blocked: ${writeShown} to ${service()} ${GRAPHQL_NOT_A_REQUEST_REFUSAL}`);
+      }
       if ('refusal' in reading) {
         blockedVerbatim(`Blocked: ${writeShown} to ${service()} is a GraphQL request this check cannot read: ${reading.refusal}. Send one JSON object with a query string and Content-Type: application/json.`);
       }

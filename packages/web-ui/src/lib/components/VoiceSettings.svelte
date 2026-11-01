@@ -6,8 +6,13 @@
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { optionLabel } from './settings-readonly/values.js';
 
 	interface VoiceInfo {
 		/** The instance is connected to a Shopify store: no text or audio goes to a speech
@@ -61,8 +66,18 @@
 				fetch(`${getApiBase()}/config`),
 			]);
 			if (!infoRes.ok || !configRes.ok) throw new Error(`HTTP ${infoRes.status} / ${configRes.status}`);
-			info = (await infoRes.json()) as VoiceInfo;
-			const body = (await configRes.json()) as Config;
+			const infoBody = (await infoRes.json()) as VoiceInfo;
+			let body: Config;
+			try {
+				body = (await configRes.json()) as Config;
+			} catch (e) {
+				// As before: the pickers still show when only the config body is unreadable.
+				info = infoBody;
+				throw e;
+			}
+			// Whose session asks, before `info` shows a section: a mandate never sees the pickers flash.
+			noteSettingsViewer(body);
+			info = infoBody;
 			config = {
 				transcription_provider: body.transcription_provider,
 				tts_provider: body.tts_provider,
@@ -82,16 +97,36 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(config),
 			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			await throwIfRefused(res);
 			addToast(t('voice.saved'), 'success', 3000);
 		} catch (e) {
-			addToast(e instanceof Error ? e.message : t('voice.save_failed'), 'error', 5000);
+			addToast(saveFailedText(e, t('voice.save_failed')), 'error', 5000);
 		} finally {
 			saving = false;
 		}
 	}
 
 	$effect(() => { void load(); });
+
+	// A mandate's session (ux U-104): what each picker shows, as text, with the option's visible
+	// name. A section without a choice shows no picker to the owner, and no row here.
+	function providerRow(label: string, side: VoiceInfo['stt'], chosen: string | undefined): { label: string; value: string } {
+		const options = side.providers.map((p) => ({ value: p.id, label: p.name }));
+		// Pinned by the environment or locked on a managed instance: the picker shows the provider in use.
+		const value = side.env_override || side.locked ? side.provider : (chosen ?? 'auto');
+		return { label, value: optionLabel(value, options) };
+	}
+	const mandateRows = $derived.by(() => {
+		if (!info) return [];
+		const rows: { label: string; value: string }[] = [];
+		if (sttChoosable) rows.push(providerRow(t('voice.stt_heading'), info.stt, config.transcription_provider));
+		if (ttsChoosable) rows.push(providerRow(t('voice.tts_heading'), info.tts, config.tts_provider));
+		if (ttsChoosable && info.tts.voices.length > 0) {
+			const voices = info.tts.voices.map((v) => ({ value: v.id, label: `${v.id}${v.language ? ' (' + v.language + ')' : ''}` }));
+			rows.push({ label: t('voice.tts_voice'), value: config.tts_voice ? optionLabel(config.tts_voice, voices) : t('voice.default') });
+		}
+		return rows;
+	});
 </script>
 
 <div class="space-y-6 max-w-3xl mx-auto p-4">
@@ -102,6 +137,10 @@
 
 	{#if !info}
 		<p class="text-sm text-text-muted">{t('voice.loading')}</p>
+	{:else if isMandateSession()}
+		<!-- PUT /api/config is the owner's. -->
+		<OwnerOnlyNotice />
+		<ReadOnlyRows rows={mandateRows} />
 	{:else}
 		<!-- STT (speech-to-text) -->
 		<section class="space-y-3">

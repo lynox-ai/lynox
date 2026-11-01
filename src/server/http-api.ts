@@ -31,7 +31,7 @@ import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetC
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
-import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
+import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
@@ -7308,6 +7308,9 @@ export class LynoxHTTPApi {
           ? { tier: 'managed', contact_for_quotas: true }
           : limitsMod.getHardLimits(),
       };
+      // Whose session asks, as in `/api/approvals`. `PUT /api/config` is the owner's, so the
+      // settings pages show a mandate the values as text instead of fields it cannot save.
+      redacted['viewer'] = approvalScopeOf(this._principalOf(req))?.viewer ?? 'none';
       // Bulk runs as the engine runs them right now, and who decides (`core/bulk-switch.ts`):
       // on a managed pool tier the control plane opens them per instance and the owner can only
       // turn them off; elsewhere the config alone decides. `allowed` is whether turning them ON
@@ -8635,6 +8638,11 @@ export class LynoxHTTPApi {
         const { getPipeline, forgetPipeline } = await import('../tools/builtin/pipeline.js');
         const planned = getPipeline(pipelineId, history);
         if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`); return; }
+        // A schedule on another mandate's workflow ties both mandates into one plan, so a mandate
+        // schedules only its own workflows and the owner's (`foreignWorkflowScheduleRefusal`).
+        const { foreignWorkflowScheduleRefusal } = await import('../core/plan-stamp.js');
+        const refusal = foreignWorkflowScheduleRefusal(principal, planned.id, history);
+        if (refusal !== null) { errorResponse(res, 403, refusal); return; }
         if (!isSchedulableWorkflow(planned)) {
           errorResponse(res, 400, `Workflow "${planned.id}" asks for more than an answer from its owner and cannot be scheduled — remove its ask_secret / ask_human steps first.`); return;
         }
@@ -10250,7 +10258,11 @@ export class LynoxHTTPApi {
         // server-side context.
         errorResponse(res, 200, msg.startsWith('Blocked:') ? msg : 'Probe failed: timeout or network error');
       }
-    }, free('sends one test request to the model provider and stores nothing'));
+      // The owner's only: the test belongs to setting the instance up, which is the owner's, and it
+      // spends a model call on the owner's key (or sends the stored key to a base the body names).
+      // The web UI shows a mandate no such button (ux U-104). Refused at the dispatch, before the
+      // rate window, so a mandate's attempts take no probe from the owner's minute either.
+    }, ownerOnly('test the model connection'));
 
     // ── Voice info (combined STT + TTS capabilities for the Web UI) ──
     // Drives the privacy hint + auto-speak toggle visibility + the
@@ -11806,6 +11818,11 @@ export class LynoxHTTPApi {
             connected_by: by.tag,
           };
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
+          // A deleted profile's slot stays lapsed through a new consent: the consent is this
+          // profile's, and a `refresh_token_key` still naming that slot must not take it over
+          // (register 685). The refusal names the way out, removing the key.
+          const lapsed = lapsedSlots(fresh);
+          if (lapsed.length > 0) grantNext.lapsed_slots = lapsed;
           // What the token can do, as the provider says: a narrower grant is recorded as granted.
           // A broader one is recorded too, and the page below names what it holds beyond the ask.
           const grantedNow = scopesOfAnswer(parsed.scope);

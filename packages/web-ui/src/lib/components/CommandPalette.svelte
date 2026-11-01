@@ -7,6 +7,7 @@
 	import { keepSettingsItem } from '../utils/billing-tier.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { getApprovalsEnabled } from '../stores/approvals.svelte.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	interface PaletteItem {
 		id: string;
@@ -23,6 +24,8 @@
 		managedOnly?: boolean;
 		/** Shown only while the approval queue is on (its nav item shows then too). */
 		approvalsOnly?: boolean;
+		/** Hidden from a mandate's session, as in SettingsIndex (ux U-104). */
+		ownerOnly?: boolean;
 	}
 
 	let open = $state(false);
@@ -38,7 +41,7 @@
 	$effect(() => {
 		fetch(`${getApiBase()}/config`)
 			.then(r => r.json())
-			.then((data: Record<string, unknown>) => { managed = !!data['managed']; })
+			.then((data: Record<string, unknown>) => { managed = !!data['managed']; noteSettingsViewer(data); })
 			.catch(() => { managed = false; });
 	});
 
@@ -91,7 +94,7 @@
 		// `keepItem()`-equivalent below filters these out on Managed). Reuses
 		// `settings.workspace.*` keys — no new i18n needed.
 		{ id: 'nav-workspace-backups', label: t('settings.workspace.backups'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/backups'), keywords: 'backups backup wiederherstellen restore schedule plan workspace system', selfHostOnly: true },
-		{ id: 'nav-workspace-security', label: t('settings.workspace.security'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/security'), keywords: 'security sicherheit vault schlüssel key engine token access workspace system', selfHostOnly: true },
+		{ id: 'nav-workspace-security', label: t('settings.workspace.security'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/security'), keywords: 'security sicherheit vault schlüssel key engine token access workspace system', selfHostOnly: true, ownerOnly: true },
 		{ id: 'nav-workspace-limits', label: t('settings.workspace.limits'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/limits'), keywords: 'limits caps spend ausgaben session day tag month monat http rate workspace system', selfHostOnly: true },
 		{ id: 'nav-workspace-updates', label: t('settings.workspace.updates'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/updates'), keywords: 'updates versions versionen upgrade engine startup workspace system', selfHostOnly: true },
 		// IA reorg (M6): ToolToggles unified from two tier-split mounts
@@ -113,7 +116,7 @@
 	// SettingsIndex uses. Default-null pattern (hide both kinds until probed)
 	// lives inside the helper, so the palette stays flash-free without
 	// reimplementing the rule.
-	const visibleItems = $derived(items.filter((i) => keepSettingsItem(i, managed) && (!i.approvalsOnly || getApprovalsEnabled())));
+	const visibleItems = $derived(items.filter((i) => keepSettingsItem(i, managed) && (!i.approvalsOnly || getApprovalsEnabled()) && !(i.ownerOnly && isMandateSession())));
 
 	const filtered = $derived(
 		query.trim()
