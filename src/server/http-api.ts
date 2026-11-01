@@ -83,7 +83,7 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
-import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
+import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
 import type { ApprovalStore } from '../core/approval-store.js';
@@ -376,13 +376,15 @@ const STOPPED_BY_DELETE: ReadonlySet<string> = new Set(['run_workflow', 'run_age
  * would be an uncaught exception.
  */
 export function withdrawPromptOnAbort(
-  store: { expirePrompt(id: string): boolean },
+  store: { expirePrompt(id: string, reason: PromptClosedReason): boolean },
   promptId: string,
   signal: AbortSignal | undefined,
+  /** Why the run ended, read when it does: a takeover says so before it aborts. */
+  reason: () => PromptClosedReason = () => 'run_stopped',
 ): () => void {
   if (!signal) return () => undefined;
   const withdraw = (): void => {
-    try { store.expirePrompt(promptId); } catch { /* the row stays pending until its TTL — no worse than before */ }
+    try { store.expirePrompt(promptId, reason()); } catch { /* the row stays pending until its TTL — no worse than before */ }
   };
   if (signal.aborted) { withdraw(); return () => undefined; }
   signal.addEventListener('abort', withdraw, { once: true });
@@ -1240,16 +1242,26 @@ function maskForClient(text: string, opts?: { includeGeneric?: boolean }): strin
  * prose. For a message that is entirely uncontrolled the caller asks for more —
  * see the SSE error path, which also caps the length.
  */
-/** The answer to an answer that came too late: 410. A question the boot or shutdown sweep closed
- *  (`closed_reason`, prompt-store v59) says that the run which asked is gone and has to be
- *  started again; every other closed question keeps the bare "expired". */
+/** The answer to an answer that came too late: 410, with why the question was closed as its
+ *  `code` (`closed_reason`), so the page can say what happened and what to do instead. A row
+ *  closed before the reasons were written keeps the bare "expired". */
 function refuseClosedPrompt(res: ServerResponse, row: Pick<PendingPromptRow, 'closed_reason'>): void {
-  if (row.closed_reason === 'process_restarted') {
-    errorResponse(res, 410, 'Prompt closed: the engine restarted, so the run that asked is no longer waiting. Start it again.', 'process_restarted');
-    return;
-  }
-  errorResponse(res, 410, 'Prompt expired');
+  if (row.closed_reason === null) { errorResponse(res, 410, 'Prompt expired'); return; }
+  errorResponse(res, 410, CLOSED_PROMPT_MESSAGE[row.closed_reason], row.closed_reason);
 }
+
+const CLOSED_PROMPT_MESSAGE: Readonly<Record<PromptClosedReason, string>> = {
+  process_restarted: 'Prompt closed: the engine restarted, so the run that asked is no longer waiting. Start it again.',
+  timed_out: 'Prompt closed: its time ran out.',
+  run_stopped: 'Prompt closed: the run that asked was stopped.',
+  run_taken_over: 'Prompt closed: a newer message in this chat took over the run that asked.',
+  thread_deleted: 'Prompt closed: the chat it was asked in was deleted.',
+  mandate_ended: 'Prompt closed: the access it was asked under has ended.',
+  plan_paused: 'Prompt closed: the plan that asked is paused.',
+  plan_taken_over: 'Prompt closed: the plan that asked was taken over.',
+  plan_ended: 'Prompt closed: the plan that asked is no longer waiting on it.',
+  superseded: 'Prompt closed: a newer question replaced it.',
+};
 
 /** Whether the request reached this server over TLS: its own socket, or a trusted proxy's `x-forwarded-proto`. */
 function requestIsTls(req: IncomingMessage, trustProxy: boolean): boolean {
@@ -1761,7 +1773,7 @@ export class LynoxHTTPApi {
   // Per-session run tracking. `streamAlive=false` after the SSE connection
   // closes; if a pending prompt is then blocking the previous run, a fresh
   // /run can take it over instead of 409-looping forever (Bug 3).
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>();
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number }>();
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
@@ -1907,9 +1919,9 @@ export class LynoxHTTPApi {
    *     `insertAskUser` on this session hits the unique index. Strictly better
    *     than a wedged slot, not free.
    */
-  private reclaimRunSlot(sessionId: string): void {
+  private reclaimRunSlot(sessionId: string, reason: PromptClosedReason): void {
     try {
-      this.runningSessions.get(sessionId)?.takeover();
+      this.runningSessions.get(sessionId)?.takeover(reason);
     } catch { /* best-effort — the caller's teardown continues regardless */ }
   }
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
@@ -2762,7 +2774,8 @@ export class LynoxHTTPApi {
       if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
       if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
       if (!recorded(promptId)) return;
-      if (!settle(promptId)) { errorResponse(res, 410, 'Prompt expired'); return; }
+      // Pending a moment ago, so it is its time that ran out.
+      if (!settle(promptId)) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
       jsonResponse(res, 200, { ok: true });
       return;
     }
@@ -4407,7 +4420,7 @@ export class LynoxHTTPApi {
       // A parked run ignores abort() and would keep both the slot and its
       // run-executor reservation after the Session is dropped below — with no
       // handle left to reach it.
-      this.reclaimRunSlot(params['id']!);
+      this.reclaimRunSlot(params['id']!, 'run_stopped');
       this.sessionStore.reset(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }, OWN));
@@ -4447,7 +4460,7 @@ export class LynoxHTTPApi {
           // Taking over ends the parked run and lets its question lapse: only that run's
           // principal (or the owner) may, even in the mandate's own conversation (§3.13 E7).
           if (this._refuseUnlessOwns(req, res, 'take over a run of this conversation', () => [this._lastRunRow(session)])) return;
-          existingSlot.takeover();
+          existingSlot.takeover('run_taken_over');
           // Wait for the previous handler's `finally` to clear the slot.
           // Realistic drain after takeover() is sub-100 ms (one tick to
           // resolve waitForSettled, then session.run unwinds); the 1 s cap
@@ -4988,6 +5001,8 @@ export class LynoxHTTPApi {
       const promptStore = this.engine?.getPromptStore();
       // AbortController for the session — used to cancel prompt polling on disconnect
       const sessionAbortController = new AbortController();
+      // Why this run's open question closes if the run ends while it waits: a stop, unless whoever takes the run over says otherwise.
+      let endedBy: PromptClosedReason = 'run_stopped';
       let hasActivePendingPrompt = false;
 
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
@@ -5010,7 +5025,7 @@ export class LynoxHTTPApi {
         const promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: true }, sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
-        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
         // Best-effort SSE notification (client may not be connected). A question
         // withdrawn at birth (its run already stopped) is never announced.
         if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -5049,7 +5064,7 @@ export class LynoxHTTPApi {
           // Same rule as `promptUser` above: an empty answer list would be answers nobody gave.
           if (!promptStore) throw new InputRequiredError(questions.map(q => q.question).join(' / '));
           const promptId = promptStore.insertAskUserTabs(sessionId, questions, promptOriginOf(meta), askStamp);
-          const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+          const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
           hasActivePendingPrompt = true;
           pauseWallClock(); // parked on a human — don't spend the compute budget
           if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -5119,7 +5134,7 @@ export class LynoxHTTPApi {
         }
 
         const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType, promptOriginOf(meta), askStamp);
-        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -5162,7 +5177,7 @@ export class LynoxHTTPApi {
           promptOriginOf(meta),
           askStamp,
         );
-        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -5274,7 +5289,7 @@ export class LynoxHTTPApi {
         setTimeout(() => {
           const liveSlot = this.runningSessions.get(sessionId);
           if (liveSlot && !liveSlot.streamAlive && promptStore?.getPending(sessionId)) {
-            liveSlot.takeover();
+            liveSlot.takeover('run_stopped');
           }
         }, ORPHAN_PROMPT_WATCHDOG_MS);
         if (hasActivePendingPrompt) {
@@ -5301,15 +5316,16 @@ export class LynoxHTTPApi {
       // Run
       // Takeover hook: a future /run for this session can call this to free
       // the slot when our SSE stream is dead and we're stuck on a prompt.
-      const takeover = (): void => {
+      const takeover = (reason: PromptClosedReason): void => {
         // Unwind BEFORE the bookkeeping. `waitForSettled` resolves on the signal
         // alone, so aborting first means a throw from the prompt store (closed
         // db, SQLITE_BUSY) can no longer leave the run parked — which is the
         // exact failure this handle exists to prevent.
+        endedBy = reason;
         sessionAbortController.abort();
         session.abort();
         const pending = promptStore?.getPending(sessionId);
-        if (pending) promptStore?.expirePrompt(pending.id);
+        if (pending) promptStore?.expirePrompt(pending.id, reason);
       };
       this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now() });
       try {
@@ -5644,7 +5660,7 @@ export class LynoxHTTPApi {
         // Pending, yet not answered: its time ran out before the sweep marked it. Nothing between
         // the read above and this write yields, so another answer cannot settle it in between
         // today; should that change, this still names only this question.
-        if (!ps.answerUser(promptId, answer, by)) { errorResponse(res, 410, 'Prompt expired'); return; }
+        if (!ps.answerUser(promptId, answer, by)) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
         jsonResponse(res, 200, { ok: true });
         return;
       }
@@ -5797,7 +5813,7 @@ export class LynoxHTTPApi {
       // anything is reclaimed: the live session's last run, else the registry's row for the
       // thread, when there is one.
       if (this._refuseUnlessOwns(_req, res, 'stop this run', () => [this._threadRow(sessionId), ...this._liveRunRows(sessionId)])) return;
-      this.reclaimRunSlot(sessionId);
+      this.reclaimRunSlot(sessionId, 'run_stopped');
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
@@ -6114,7 +6130,7 @@ export class LynoxHTTPApi {
       // hatch, not a path any client walks. sessionId IS the threadId here
       // (POST /api/sessions returns `threadId: sessionId`), so this can only
       // ever reclaim this thread's own run.
-      this.reclaimRunSlot(params['id']!);
+      this.reclaimRunSlot(params['id']!, 'thread_deleted');
       this.sessionStore.reset(params['id']!);
       // What was learned in this chat stays; its source is marked as a deleted chat instead
       // of pointing at a transcript that is gone. Marked before the delete. Each store is
@@ -13467,7 +13483,7 @@ export class LynoxHTTPApi {
         const SqliteDatabase = (await import('better-sqlite3')).default;
         // Loaded lazily like every other inbox route, so a boot without the inbox never loads it.
         const { isBackfillRunning } = await import('../integrations/inbox/api.js');
-        for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id);
+        for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id, 'run_stopped');
         const drainStart = Date.now();
         while (this.runningSessions.size > 0 && Date.now() - drainStart < ERASURE_RUN_DRAIN_MS) {
           await new Promise<void>((r) => setTimeout(r, 25));

@@ -309,6 +309,7 @@ describe('a scheduled workflow that asks its owner', () => {
     await waitUntil('the run to end', () => h.records.length > 0);
     expect(h.records[0]![2]).toBe('stopped');
     expect(h.prompts.getById(q.id)!.status).toBe('expired');
+    expect(h.prompts.getById(q.id)!.closed_reason).toBe('run_stopped');
     expect(h.escalations()).toBe(0);
   });
 
@@ -346,7 +347,7 @@ describe('a scheduled workflow that asks its owner', () => {
     wf.step = askingStep([]);
     void h.loop.tick();
     const q = await openQuestion(h);
-    h.prompts.expirePrompt(q.id);
+    h.prompts.expirePrompt(q.id, 'run_stopped');
     await waitUntil('the run to end', () => h.records.length > 0);
     expect(h.records[0]![2]).toBe('failed');
     expect(wf.calls[0]!.questionWait?.unanswered).toBe(true);

@@ -88,6 +88,19 @@ describe('Engine boot — mandate ends', () => {
     expect(store.getById(owner)!.status).toBe('pending');
   });
 
+  it('closes the open question of a paused plan as paused, so a late answer hears why', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-planpausedq-'));
+    dirs.push(dir);
+    const engine = await boot(dir);
+    const t = engine.getTaskManager()!.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z' });
+    const store = engine.getPromptStore()!;
+    const id = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, t.id, { principal: OWNER_PRINCIPAL });
+    engine.getEngineDb()!.getDb().prepare('UPDATE triggers SET paused_at = ? WHERE id = ?').run(Math.floor(Date.now() / 1000), t.id);
+    // Any end runs the sweep; the question is the owner's, so only the pause can close it.
+    engine.getMandateEnds()!.revoke('M-other');
+    expect(store.getById(id)).toMatchObject({ status: 'expired', closed_reason: 'plan_paused' });
+  });
+
   it('closes, when it boots, a mandate\'s question whose grant ended while it was down', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-mandateendboot-'));
     dirs.push(dir);
