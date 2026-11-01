@@ -17,7 +17,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { toolBlurb } from '../utils/tool-blurb.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { onOff } from './settings-readonly/values.js';
@@ -110,6 +110,7 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const [toolsRes, configRes] = await Promise.all([
 				fetch(`${getApiBase()}/tools/available`),
 				fetch(`${getApiBase()}/config`),
@@ -118,7 +119,7 @@
 			const toolsBody = (await toolsRes.json()) as { tools: Tool[] };
 			tools = toolsBody.tools;
 			const configBody = (await configRes.json()) as { disabled_tools?: string[] };
-			noteSettingsViewer(configBody);
+			noteViewer(configBody);
 			disabled = new Set(configBody.disabled_tools ?? []);
 			loaded = true;
 		} catch (e) {

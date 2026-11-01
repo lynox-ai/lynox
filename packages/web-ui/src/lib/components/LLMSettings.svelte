@@ -33,7 +33,7 @@
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
 	import { cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { endpointText, optionLabel, orNotSet } from './settings-readonly/values.js';
@@ -383,6 +383,7 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const [catRes, configRes, statusRes] = await Promise.all([
 				fetch(`${getApiBase()}/llm/catalog`),
 				fetch(`${getApiBase()}/config`),
@@ -392,7 +393,7 @@
 			const catBody = (await catRes.json()) as { providers: CatalogProvider[] };
 			providers = catBody.providers;
 			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks; available_tier_presets?: Record<string, PresetInfo>; capabilities?: { durable_memory_capture_degraded?: boolean } };
-			noteSettingsViewer(configBody);
+			noteViewer(configBody);
 			config = configBody;
 			locks = configBody.locks ?? {};
 			availablePresets = configBody.available_tier_presets ?? {};

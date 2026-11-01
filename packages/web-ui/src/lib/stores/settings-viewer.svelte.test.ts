@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isOwnerSession, isMandateSession, isViewerUnavailable, loadSettingsViewer, resetSettingsViewer } from './settings-viewer.svelte.js';
+import { isOwnerSession, isMandateSession, isViewerUnavailable, loadSettingsViewer, resetSettingsViewer, viewerNote } from './settings-viewer.svelte.js';
 
 // Whose session the pages serve is asked once, when a page mounts. The owner's actions wait for the
 // answer, so a missing answer is asked again, a few times, and an answer without `viewer` is not.
@@ -141,6 +141,29 @@ describe('loadSettingsViewer', () => {
 		// Twin: a read after the reset asks the server again and takes its answer.
 		serve(json({ viewer: 'mandate' }));
 		await loadSettingsViewer();
+		expect(isMandateSession()).toBe(true);
+	});
+});
+
+describe('viewerNote, for a page that reads /config itself', () => {
+	it('does not take a body asked for before a reset', () => {
+		const note = viewerNote();
+		resetSettingsViewer();
+		note({ viewer: 'owner' });
+		expect(isOwnerSession()).toBe(false);
+		expect(isMandateSession()).toBe(false);
+	});
+
+	it('takes the same body when no reset came between', () => {
+		const note = viewerNote();
+		note({ viewer: 'owner' });
+		expect(isOwnerSession()).toBe(true);
+	});
+
+	it('takes a body asked for after the reset', () => {
+		resetSettingsViewer();
+		const note = viewerNote();
+		note({ viewer: 'mandate' });
 		expect(isMandateSession()).toBe(true);
 	});
 });

@@ -9,7 +9,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
-	import { isMandateSession, isOwnerSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, isOwnerSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import {
 		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
@@ -302,12 +302,13 @@
 
 	$effect(() => { void runId; void load(); });
 	$effect(() => {
+		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
 			.then(async (r) => {
 				const body: unknown = r.ok ? await r.json() : null;
 				managed = bulkManagedOf(r.ok, body);
 				// Whose session reads the run: a mandate's sees it without the owner's acts.
-				noteSettingsViewer(body);
+				noteViewer(body);
 			})
 			.catch(() => { managed = null; });
 	});
