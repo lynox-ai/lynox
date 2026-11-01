@@ -1,0 +1,76 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { isOwnerSession, isMandateSession, loadSettingsViewer, resetSettingsViewer } from './settings-viewer.svelte.js';
+
+// Whose session the pages serve is asked once, when a page mounts. The owner's actions wait for the
+// answer, so a missing answer is asked again, a few times, and an answer without `viewer` is not.
+
+const json = (body: unknown, status = 200): Response =>
+	new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+/** `GET /api/config` answers these in turn, the last one from then on. */
+function serve(...answers: Array<Response | Error>): ReturnType<typeof vi.fn> {
+	const fetchMock = vi.fn(async () => {
+		const next = answers.length > 1 ? answers.shift()! : answers[0]!;
+		if (next instanceof Error) throw next;
+		return next.clone();
+	});
+	vi.stubGlobal('fetch', fetchMock);
+	return fetchMock;
+}
+
+beforeEach(() => {
+	vi.useFakeTimers();
+	resetSettingsViewer();
+});
+
+afterEach(() => {
+	resetSettingsViewer();
+	vi.useRealTimers();
+	vi.unstubAllGlobals();
+});
+
+describe('loadSettingsViewer', () => {
+	it('asks again after a failed request, and the owner is known without a reload', async () => {
+		const fetchMock = serve(new TypeError('network'), json({ viewer: 'owner' }));
+		await loadSettingsViewer();
+		expect(isOwnerSession()).toBe(false);
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(isOwnerSession()).toBe(true);
+	});
+
+	it('asks again after a server error', async () => {
+		const fetchMock = serve(json({ error: 'down' }, 503), json({ viewer: 'mandate' }));
+		await loadSettingsViewer();
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(isMandateSession()).toBe(true);
+	});
+
+	it('gives up after three more tries', async () => {
+		const fetchMock = serve(new TypeError('network'));
+		await loadSettingsViewer();
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(fetchMock).toHaveBeenCalledTimes(4);
+		expect(isOwnerSession()).toBe(false);
+	});
+
+	it('does not ask again when the answer has no viewer', async () => {
+		const fetchMock = serve(json({ managed: 'self-host' }));
+		await loadSettingsViewer();
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('forgets a pending retry and what was read on reset', async () => {
+		const fetchMock = serve(new TypeError('network'), json({ viewer: 'owner' }));
+		await loadSettingsViewer();
+		resetSettingsViewer();
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		// Twin: a read after the reset asks the server again and takes its answer.
+		serve(json({ viewer: 'mandate' }));
+		await loadSettingsViewer();
+		expect(isMandateSession()).toBe(true);
+	});
+});

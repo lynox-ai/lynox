@@ -524,6 +524,17 @@ describe('SetupBanner', () => {
 		expect(writes).toEqual([]);
 	});
 
+	it('opens no wizard and no banner until the server said it is the owner\'s session', async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => { release = r; });
+		await render(load, { ...routes('owner'), '/config': async () => { await gate; return Response.json({ managed: SELF_HOST, viewer: 'owner' }); } });
+		expect(document.body.innerHTML).not.toContain('Claude (Anthropic)');
+		expect(target.textContent).not.toContain(t('banner.api_key_missing'));
+		release();
+		await settle();
+		expect(document.body.innerHTML).toContain('Claude (Anthropic)');
+	});
+
 	it('opens the owner the key wizard when no key is set', async () => {
 		// Not dismissed before: the wizard opens straight away, at the provider choice.
 		await render(load, routes('owner'));

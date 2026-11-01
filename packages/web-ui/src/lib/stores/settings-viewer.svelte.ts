@@ -16,6 +16,15 @@ export type SettingsViewer = 'owner' | 'mandate' | 'none';
 let viewer = $state<SettingsViewer | null>(null);
 let pending: Promise<void> | null = null;
 
+/**
+ * When `GET /api/config` gives no answer, it is asked again after these waits. The pages ask once,
+ * when they mount, and the owner's actions wait for the answer: without a retry the owner of a page
+ * already open would not see them until a reload, and nothing would say why.
+ */
+const RETRY_MS = [1_000, 3_000, 10_000];
+let retries = 0;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
 /** True only when the server said this session is a mandate's. */
 export function isMandateSession(): boolean {
 	return viewer === 'mandate';
@@ -41,20 +50,28 @@ export function noteSettingsViewer(body: unknown): void {
 export function loadSettingsViewer(): Promise<void> {
 	if (viewer !== null) return Promise.resolve();
 	pending ??= (async () => {
+		let answered = false;
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
-			if (res.ok) noteSettingsViewer(await res.json());
+			if (res.ok) { answered = true; noteSettingsViewer(await res.json()); }
 		} catch {
 			// No answer: the owner's fields stay, and the server refuses what it must.
 		} finally {
 			pending = null;
 		}
+		// An answer without `viewer` (an older engine) is not asked again; no answer is.
+		if (!answered && viewer === null && retries < RETRY_MS.length && retryTimer === null) {
+			retryTimer = setTimeout(() => { retryTimer = null; void loadSettingsViewer(); }, RETRY_MS[retries++]);
+		}
 	})();
 	return pending;
 }
 
-/** For tests: forget what was read. */
+/** Forget what was read: before a new sign-in, and in tests. */
 export function resetSettingsViewer(): void {
 	viewer = null;
 	pending = null;
+	retries = 0;
+	if (retryTimer !== null) clearTimeout(retryTimer);
+	retryTimer = null;
 }

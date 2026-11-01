@@ -58,8 +58,11 @@ export default defineConfig({
         // outside a SvelteKit build nothing provides them, so they point at inert stubs.
         resolve: {
           alias: {
+            '$app/forms': fileURLToPath(new URL('./scripts/vitest-app-stubs/forms.ts', import.meta.url)),
             '$app/navigation': fileURLToPath(new URL('./scripts/vitest-app-stubs/navigation.ts', import.meta.url)),
             '$app/stores': fileURLToPath(new URL('./scripts/vitest-app-stubs/stores.ts', import.meta.url)),
+            // A route page imports the library as SvelteKit does.
+            '$lib': fileURLToPath(new URL('./packages/web-ui/src/lib', import.meta.url)),
           },
         },
         test: {
