@@ -7898,7 +7898,9 @@ export class LynoxHTTPApi {
       // slot keys GET redacts, which is why the model alone decides "sets".
       const candidate = checkCandidateConfig(merged);
       if (candidate.error !== undefined) {
-        if (candidate.unknownModel === undefined) process.stderr.write(`[lynox] PUT /api/config refused a configuration the loader rejects: ${candidate.error}\n`);
+        // To the log, not the client: the first line only, masked like an error sent to a client,
+        // since a loader message may quote an environment value and operators read these logs.
+        if (candidate.unknownModel === undefined) process.stderr.write(`[lynox] PUT /api/config refused a configuration the loader rejects: ${maskForClient(candidate.error.split('\n')[0] ?? '', { includeGeneric: true })}\n`);
         errorResponse(res, 400, candidate.unknownModel !== undefined
           ? `A tier names the model '${candidate.unknownModel}', which this version does not know. Choose a listed model for that tier.`
           : 'This configuration could not be loaded, so it was not saved.');

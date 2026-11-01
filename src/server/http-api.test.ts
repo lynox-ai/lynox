@@ -6280,8 +6280,9 @@ describe('LynoxHTTPApi', () => {
 
       it('another loader error is refused with a fixed sentence: its own text may quote the environment', async () => {
         repayRateWindow();
+        const KEY_SHAPED = 'sk-ant-api03-' + 'Q'.repeat(40);
         const { checkCandidateConfig } = await import('../core/config.js');
-        (checkCandidateConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({ replacedSlots: [], error: 'boom LYNOX_SECRET=abc' });
+        (checkCandidateConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({ replacedSlots: [], error: `boom ANTHROPIC_API_KEY=${KEY_SHAPED}\nsecond line ${KEY_SHAPED}` });
         const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
         try {
           const before = await saves();
@@ -6289,8 +6290,11 @@ describe('LynoxHTTPApi', () => {
           expect(res.status).toBe(400);
           expect(((await res.json()) as { error: string }).error).toBe('This configuration could not be loaded, so it was not saved.');
           expect(await saves()).toBe(before);
-          // The text goes to the log instead.
-          expect(stderr.mock.calls.flat().join(' ')).toContain('boom LYNOX_SECRET=abc');
+          // The text goes to the log instead: its first line, with the key masked.
+          const logged = stderr.mock.calls.flat().join(' ');
+          expect(logged).toContain('refused a configuration the loader rejects: boom');
+          expect(logged).not.toContain(KEY_SHAPED);
+          expect(logged).not.toContain('second line');
         } finally {
           stderr.mockRestore();
         }
