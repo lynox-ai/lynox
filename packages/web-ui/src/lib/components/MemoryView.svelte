@@ -248,7 +248,7 @@
 		<h1 class="text-xl font-light tracking-tight">{t('memory.title')}</h1>
 		<span class="shrink-0 text-xs font-mono text-text-subtle">{dkEntries.length}&nbsp;{t('knowledge.active.count_label')}</span>
 	</div>
-	<p class="text-xs text-text-subtle mb-4">{t('knowledge.active.subtitle')}</p>
+	<p class="text-xs text-text-subtle mb-4">{t(mandate ? 'knowledge.active.subtitle_mandate' : 'knowledge.active.subtitle')}</p>
 
 	{#if dkError}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{dkError}</div>
@@ -276,7 +276,7 @@
 
 		{#if dkEntries.length === 0}
 			<div class="text-text-subtle text-sm border border-dashed border-border rounded-[var(--radius-md)] px-4 py-6 text-center">
-				{t('knowledge.active.empty')}
+				{t(mandate ? 'knowledge.active.empty_mandate' : 'knowledge.active.empty')}
 			</div>
 		{:else}
 			<div class="space-y-2">

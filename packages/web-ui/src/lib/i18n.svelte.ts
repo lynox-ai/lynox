@@ -173,6 +173,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.active.pinned': { de: 'angeheftet', en: 'pinned' },
 	// A mandate's session reads memory without changing it (the routes are the owner's, ux 1148). Not
 	// "only the owner changes memory": lynox writes entries itself too.
+	'knowledge.active.subtitle_mandate': { de: 'Was sich lynox auf dieser Instanz gemerkt hat.', en: 'What lynox has remembered on this instance.' },
+	'knowledge.active.empty_mandate': { de: 'Noch nichts gemerkt. Sobald lynox auf dieser Instanz etwas lernt, erscheint es hier.', en: 'Nothing remembered yet. Once lynox learns something on this instance, it shows up here.' },
 	'memory.owner_only_notice': { de: 'Einträge hier ändern kann nur der Inhaber dieser Instanz. Brauchst du eine Änderung, wende dich an den Inhaber.', en: 'Only the owner of this instance can change these entries. If you need a change, ask the owner.' },
 	'knowledge.active.edit_hint': { de: 'Etwas ändern? Sag es lynox im Chat. Einen falschen Eintrag entfernst du direkt hier.', en: 'Want to change something? Tell lynox in chat. To remove a wrong entry, use the button on it.' },
 	'knowledge.active.retire': { de: 'entfernen', en: 'remove' },
