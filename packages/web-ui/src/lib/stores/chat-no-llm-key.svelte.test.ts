@@ -55,6 +55,34 @@ describe('a message sent without an AI provider key', () => {
 		expect(store.getChatError()).toBe('No key is stored for Anthropic yet. Open Settings → Configuration and add one.');
 	});
 
+	it('names the one settings field the owner still has to fill in', async () => {
+		i18n.setLocale('de');
+		await sendRefused({ error: 'x', code: 'llm_not_configured', may_configure: true, provider: 'Google Vertex AI', missing: ['gcp_project_id'] });
+
+		expect(store.getChatError()).toBe('Für Google Vertex AI fehlt noch die GCP-Projekt-ID. Öffne Einstellungen → Konfiguration und trag sie ein.');
+	});
+
+	it('names two missing fields joined, in the page language', async () => {
+		i18n.setLocale('en');
+		await sendRefused({ error: 'x', code: 'llm_not_configured', may_configure: true, provider: 'OpenAI-compatible', missing: ['api_base_url', 'model_id'] });
+
+		expect(store.getChatError()).toBe('OpenAI-compatible is missing the base URL and the model ID. Open Settings → Configuration and fill it in.');
+	});
+
+	it('takes the key sentence when the key is among what is missing', async () => {
+		i18n.setLocale('de');
+		await sendRefused({ error: 'x', code: 'llm_not_configured', may_configure: true, provider: 'Mistral', missing: ['key', 'model_id'] });
+
+		expect(store.getChatError()).toBe('Für Mistral ist noch kein Schlüssel hinterlegt. Öffne Einstellungen → Konfiguration und füg einen hinzu.');
+	});
+
+	it('keeps the general sentence for a field it has no name for', async () => {
+		i18n.setLocale('de');
+		await sendRefused({ error: 'x', code: 'llm_not_configured', may_configure: true, provider: 'Mistral', missing: ['region'] });
+
+		expect(store.getChatError()).toBe(i18n.t('chat.error_invalid_request'));
+	});
+
 	it('tells a mandate to ask the owner, without a provider or a settings page', async () => {
 		i18n.setLocale('de');
 		await sendRefused({ error: 'x', code: 'llm_not_configured', may_configure: false });
