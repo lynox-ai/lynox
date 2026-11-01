@@ -50,7 +50,7 @@ export function noteSettingsViewer(body: unknown): void {
 	// Every `GET /api/config` body carries `locks`; one without it says nothing about the lock, so
 	// the line that needs it stays hidden rather than assuming there is none.
 	const locks = (body as { locks?: unknown }).locks;
-	providerLocked = locks !== null && typeof locks === 'object' ? (locks as { provider?: unknown }).provider != null : null;
+	providerLocked = locks !== null && typeof locks === 'object' ? ((locks as { provider?: unknown }).provider ?? null) !== null : null;
 }
 
 /** Reads `viewer` once per page load; later calls share the first. */
