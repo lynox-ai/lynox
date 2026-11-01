@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { isMandateSession, isOwnerSession, noteSettingsViewer, resetSettingsViewer } from '$lib/stores/settings-viewer.svelte.js';
+import { isMandateSession, isOwnerSession, loadSettingsViewer, noteSettingsViewer, resetSettingsViewer } from '$lib/stores/settings-viewer.svelte.js';
 
 // Signing in reaches `/app` without a reload (the forms post through `use:enhance`), so whose
 // session the pages served before is forgotten when the sign-in page opens: after an expired
@@ -21,6 +21,7 @@ let svelte: SvelteClient;
 const target = document.createElement('div');
 
 afterEach(() => {
+	vi.unstubAllGlobals();
 	if (component) svelte.unmount(component);
 	component = undefined;
 	resetSettingsViewer();
@@ -35,5 +36,17 @@ describe('the sign-in page', () => {
 		component = svelte.mount(Login, { target, props: { data: { hasPasskeys: false, isManaged: false }, form: null } });
 		expect(isOwnerSession()).toBe(false);
 		expect(isMandateSession()).toBe(false);
+	});
+
+	it('takes the owner who signs in after a mandate, in the same page load', async () => {
+		svelte = (await import('svelte')) as unknown as SvelteClient;
+		noteSettingsViewer({ viewer: 'mandate' });
+		const { default: Login } = await import('./+page.svelte');
+		component = svelte.mount(Login, { target, props: { data: { hasPasskeys: false, isManaged: false }, form: null } });
+		// The owner signs in; the next page asks whose session it is.
+		vi.stubGlobal('fetch', vi.fn(async () => Response.json({ viewer: 'owner' })));
+		await loadSettingsViewer();
+		expect(isMandateSession()).toBe(false);
+		expect(isOwnerSession()).toBe(true);
 	});
 });

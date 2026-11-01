@@ -246,6 +246,19 @@ describe('RulesView (Settings › Email › Rules)', () => {
 		expect(target.querySelector(`button[aria-label="${t('inbox.rules_delete')}"]`)).not.toBeNull();
 	});
 
+	it('shows the owner add and delete once a failed first answer is asked again, without a remount', async () => {
+		let asked = 0;
+		await render(load, { ...routes('owner'), '/config': () => (++asked === 1 ? Response.json({ error: 'unavailable' }, { status: 503 }) : Response.json({ viewer: 'owner' })) });
+		expect(target.textContent).toContain('news@shop.example');
+		expect(buttonTexts()).not.toContain(t('inbox.rules_add'));
+		// The store asks again after a second; the page is the same one.
+		await new Promise((r) => setTimeout(r, 1_100));
+		await settle();
+		expect(asked).toBe(2);
+		expect(buttonTexts()).toContain(t('inbox.rules_add'));
+		expect(target.querySelector(`button[aria-label="${t('inbox.rules_delete')}"]`)).not.toBeNull();
+	});
+
 	it('keeps the owner\'s add and delete', async () => {
 		await render(load, routes('owner'));
 		expect(notice()).toBeNull();
