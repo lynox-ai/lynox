@@ -407,11 +407,12 @@ export function normalizeWritePath(pathname: string): { path: string; ambiguous:
  * GraphQL API on another path (`/api`, `/v2`) is not recognised and is handled as any POST is.
  */
 /**
- * A path segment a server routes to its GraphQL endpoint: `graphql`, with a format suffix a
- * router strips or matches on (`graphql.json`, Rails' `(.:format)`), and with trailing dots, which
- * IIS drops. Read from the decoded, lower-cased segment.
+ * A path segment a server routes to its GraphQL endpoint: `graphql`, with format suffixes a
+ * router strips or matches on (`graphql.json`, Rails' `(.:format)`, `graphql.tar.gz`, Spring's
+ * `graphql..json`), and with trailing dots, which IIS drops. Read from the decoded, lower-cased
+ * segment.
  */
-const GRAPHQL_SEGMENT = /^graphql(?:\.[a-z0-9]*)?\.*$/i;
+const GRAPHQL_SEGMENT = /^graphql(?:\.[a-z0-9]*)*$/i;
 
 export function isGraphqlEndpoint(url: string): boolean {
   let parsed: URL;
@@ -421,12 +422,40 @@ export function isGraphqlEndpoint(url: string): boolean {
     return true;
   }
   if (parsed.hostname.toLowerCase().split('.').some((label) => label.startsWith('graphql'))) return true;
+  // WPGraphQL answers on any path that carries the query key `graphql` (`/?graphql`,
+  // `/index.php?graphql`), with or without a value; PHP reads `graphql[]` and ` graphql` (leading
+  // spaces dropped) as the same key.
+  if (urlQueryStrings(url).some((search) => [...new URLSearchParams(search).keys()].some((key) => key.trimStart().toLowerCase().replace(/\[.*$/, '') === 'graphql'))) return true;
   const { path, ambiguous } = normalizeWritePath(parsed.pathname);
   // A path whose routing is not known here (a double encoding, an escape that does not decode,
   // a character a router may strip) is read every way a server may decode it, and any reading
   // that names `graphql` anywhere counts. Not every such path: an encoded space is a REST path.
   if (ambiguous) return [parsed.pathname, ...serverReadings(parsed.pathname)].some((reading) => reading.toLowerCase().includes('graphql'));
-  return path.split('/').some((segment) => GRAPHQL_SEGMENT.test(segment));
+  // A decoded `?` or `#` in a segment (`/graphql%3Fquery=…`) is where a proxy that splits the
+  // URL again ends the path, so the segment is read up to it as well.
+  return path.split('/').some((segment) => GRAPHQL_SEGMENT.test(segment) || GRAPHQL_SEGMENT.test(segment.split(/[?#]/)[0]!));
+}
+
+/**
+ * The query strings a server may read from a URL: its own, and the rest after each `?` that a
+ * reading of the path decodes (`/graphql%3Fquery=…`), which a proxy that splits the URL again
+ * hands on as a query string. Each without its `?`; a URL that does not parse gives none. The
+ * readings are taken only for a path with an escape in it: a `?` decodes only from one, and the
+ * escapes that assemble one (`%%33F`, `%3%46`) cannot be listed.
+ */
+export function urlQueryStrings(url: string): string[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return [];
+  }
+  const out = [parsed.search.slice(1)];
+  if (!parsed.pathname.includes('%')) return out;
+  for (const reading of serverReadings(parsed.pathname)) {
+    for (let at = reading.indexOf('?'); at !== -1; at = reading.indexOf('?', at + 1)) out.push(reading.slice(at + 1).split('#')[0]!);
+  }
+  return out;
 }
 
 /** An operation that writes: `mutation` or `subscription` as a GraphQL name anywhere in the document. */
@@ -483,6 +512,25 @@ function jsonRepeatsAKey(text: string): boolean {
  * `operationName: "B"` runs B. A false hit (the word in a string or a field name) only means the
  * write is asked again.
  */
+/**
+ * Whether a body is one JSON object that cannot be a GraphQL request: none of the keys a GraphQL
+ * request sends (`query`, `operationName`, `variables`, `extensions`) and no key a persisted
+ * query names its document by (`id`, `documentId`, `doc_id`, `queryId`). A write to a file whose name reads as a GraphQL path sends such a body; it is
+ * refused all the same, with a note of its own.
+ */
+export function jsonObjectNotGraphql(body: unknown): boolean {
+  if (typeof body !== 'string') return false;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
+    // Keys compared without case: some servers bind the body to their fields that way.
+    const named = new Set([...GRAPHQL_BODY_KEYS, 'id', 'documentId', 'doc_id', 'queryId'].map((key) => key.toLowerCase()));
+    return !Object.keys(parsed).some((key) => named.has(key.toLowerCase()));
+  } catch {
+    return false;
+  }
+}
+
 export function graphqlWrite(headers: Readonly<Record<string, string>>, body: unknown): { refusal: string } | { mutates: boolean } {
   const types = Object.entries(headers).filter(([name]) => name.trim().toLowerCase() === 'content-type');
   if (types.length !== 1 || !GRAPHQL_CONTENT_TYPE.test(types[0]![1])) {
@@ -517,7 +565,8 @@ export function graphqlWrite(headers: Readonly<Record<string, string>>, body: un
  */
 export function graphqlUrlWrites(url: string): boolean {
   try {
-    return new URL(url).searchParams.getAll('query').some((query) => GRAPHQL_WRITE_OPERATION.test(query));
+    new URL(url);
+    return urlQueryStrings(url).some((search) => new URLSearchParams(search).getAll('query').some((query) => GRAPHQL_WRITE_OPERATION.test(query)));
   } catch {
     return true;
   }

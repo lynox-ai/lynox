@@ -9,6 +9,10 @@
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { onOff } from './settings-readonly/values.js';
 
 	let managed = $state(false);
 	let loaded = $state(false);
@@ -28,6 +32,7 @@
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const body = (await res.json()) as { managed?: string; bugsink_enabled?: boolean; bugsink_dsn_configured?: boolean; debug_wire_capture?: boolean; env_overrides?: { debug_wire_capture?: boolean } };
+			noteSettingsViewer(body);
 			managed = cpSuppliesLLMKey(body.managed);
 			bugsinkEnabled = body.bugsink_enabled !== false;
 			bugsinkDsnConfigured = body.bugsink_dsn_configured === true;
@@ -90,6 +95,13 @@
 	}
 
 	$effect(() => { void load(); });
+
+	// A mandate's session (ux U-104): the switches as text. Error reporting only where the owner's
+	// page shows its switch (a DSN is set, or the instance is managed).
+	const mandateRows = $derived([
+		...(!bugsinkDsnConfigured && !managed ? [] : [{ label: t('privacy.bugsink_label'), value: onOff(bugsinkEnabled) }]),
+		{ label: t('privacy.wire_capture_label'), value: onOff(debugWireCapture) },
+	]);
 </script>
 
 <div class="space-y-6 max-w-3xl mx-auto p-4">
@@ -99,6 +111,13 @@
 		<p class="text-sm text-text-muted">{t('privacy.subtitle')}</p>
 	</header>
 
+	{#if isMandateSession()}
+		<!-- PUT /api/config is the owner's, and so is the account the delete request names. -->
+		<OwnerOnlyNotice />
+		{#if loaded}
+			<ReadOnlyRows rows={mandateRows} />
+		{/if}
+	{:else}
 	<!-- Data export — placeholder until /api/privacy/export ships (Phase 5/6). -->
 	<section class="border-t border-border pt-6 space-y-2">
 		<h2 class="text-lg font-medium">{t('privacy.export_heading')}</h2>
@@ -163,4 +182,5 @@
 			{t('privacy.delete_button')}
 		</button>
 	</section>
+	{/if}
 </div>
