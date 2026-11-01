@@ -387,7 +387,7 @@ describe('a new question that arrives while an answer is being saved', () => {
 describe('why a question was closed, and the lost answer as a draft (UX-064, UX-068)', () => {
 	const say = async (key: string): Promise<string> => (await import('../i18n.svelte.js')).t(key);
 	/** Answers 'my answer' (or `answer`) to a question the server reports closed with `code`, as `viewer`. */
-	async function closedWith(code: string, opts: { viewer?: 'owner' | 'mandate'; field?: string; answer?: string; tabs?: boolean } = {}): Promise<{ field: string; asked: number }> {
+	async function closedWith(code: string, opts: { viewer?: 'owner' | 'mandate'; field?: string; answer?: string; tabs?: boolean; options?: string[] } = {}): Promise<{ field: string; asked: number }> {
 		let field = opts.field ?? '';
 		let asked = 0;
 		store.registerComposerDraft((text) => { asked++; if (field.trim() !== '') return false; field = text; return true; });
@@ -403,7 +403,7 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 			await settle();
 			await store.replyPermissionTabs(['my answer']);
 		} else {
-			run.send('prompt', { promptId: 'p1', question: 'Which?' });
+			run.send('prompt', { promptId: 'p1', question: 'Which?', ...(opts.options !== undefined ? { options: opts.options } : {}) });
 			await settle();
 			await store.replyPermission(opts.answer ?? 'my answer');
 		}
@@ -419,7 +419,7 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 		['thread_deleted', 'chat.prompt_closed.thread_deleted', false],
 		['mandate_ended', 'chat.prompt_closed.mandate_ended.owner', true],
 		['plan_paused', 'chat.prompt_closed.plan_paused.owner', false],
-		['plan_taken_over', 'chat.prompt_closed.plan_taken_over', true],
+		['plan_taken_over', 'chat.prompt_closed.plan_taken_over.owner', true],
 		['plan_ended', 'chat.prompt_closed.plan_ended', true],
 		['superseded', 'chat.prompt_closed.superseded', false],
 	];
@@ -443,6 +443,29 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 		const { field } = await closedWith('plan_paused', { viewer: 'mandate' });
 		expect(store.getChatError()).toBe(await say('chat.prompt_closed.plan_paused.mandate'));
 		expect(field).toBe('');
+	});
+
+	it('a helper whose plan the owner took over is told so and sent to the owner, without a draft', async () => {
+		const { field, asked } = await closedWith('plan_taken_over', { viewer: 'mandate' });
+		expect(store.getChatError()).toBe(await say('chat.prompt_closed.plan_taken_over.mandate'));
+		expect(field).toBe('');
+		expect(asked).toBe(0);
+	});
+
+	it('a consent card\'s answer is no draft: typed into the chat it would approve nothing', async () => {
+		for (const options of [['Allow', 'Deny'], ['Run on balanced', 'Cancel']]) {
+			vi.resetModules();
+			store = await import('./chat.svelte.js');
+			const { field, asked } = await closedWith('timed_out', { answer: 'y', options });
+			expect(asked, options.join('/')).toBe(0);
+			expect(field).toBe('');
+			expect(store.getChatError()).toBe(await say('chat.prompt_closed.timed_out'));
+		}
+	});
+
+	it('an option the user picked comes back as that option', async () => {
+		const { field } = await closedWith('run_stopped', { answer: 'lynox-pro', options: ['lynox', 'lynox-pro'] });
+		expect(field).toBe('lynox-pro');
 	});
 
 	it('a field with text in it keeps it, and the sentence does not claim the answer is back', async () => {

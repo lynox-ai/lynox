@@ -37,8 +37,8 @@ export type PromptClosedReason =
   | 'mandate_ended'     // the access it was asked under ended
   | 'plan_paused'       // its plan was paused, because the access the plan ran under ended
   | 'plan_taken_over'   // the owner took its plan over
-  | 'plan_ended'        // its plan was no longer waiting on it, and was run again or ended
-  | 'superseded';       // a newer question of the same kind replaced it
+  | 'plan_ended'        // its plan was no longer waiting on it, and was run again
+  | 'superseded';       // a question the agent asked replaced an open onboarding card
 
 export interface PendingPromptRow {
   id: string;

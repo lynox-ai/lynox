@@ -27,7 +27,7 @@ import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { containedPrefill } from './contained-way-out.js';
-import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, type ClosedCode } from './closed-question.js';
+import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, isConsentCard, type ClosedCode } from './closed-question.js';
 import { isMandateSession, loadSettingsViewer } from './settings-viewer.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
@@ -2533,10 +2533,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
+	// A consent card's answer is a click; as text in the message field it would approve nothing.
+	const draftable = isConsentCard(pendingPermission?.options) ? null : answer;
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
-	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), answer);
+	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable);
 }
 
 /** One-shot reply for a multi-question tabs prompt. Answers are ordered to

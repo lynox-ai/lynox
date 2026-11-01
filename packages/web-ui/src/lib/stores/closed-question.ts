@@ -37,6 +37,7 @@ export function closedSentenceKey(code: ClosedCode | null, reader: ClosedReader)
 		case 'process_restarted': return 'chat.prompt_closed_restart';
 		case 'mandate_ended': return `chat.prompt_closed.mandate_ended.${reader}`;
 		case 'plan_paused': return `chat.prompt_closed.plan_paused.${reader}`;
+		case 'plan_taken_over': return `chat.prompt_closed.plan_taken_over.${reader}`;
 		default: return `chat.prompt_closed.${code}`;
 	}
 }
@@ -53,10 +54,20 @@ export function closedDraftAllowed(code: ClosedCode | null, reader: ClosedReader
 		case 'plan_paused':
 			return false;
 		case 'mandate_ended':
+		case 'plan_taken_over':
 			return reader === 'owner';
 		default:
 			return true;
 	}
+}
+
+/**
+ * Whether the question was a consent card (Allow/Deny, or the deep-model consent): its answer
+ * is a click on the card, and the word typed into the chat would approve nothing.
+ */
+export function isConsentCard(options: readonly string[] | undefined): boolean {
+	const opts = options ?? [];
+	return (opts.includes('Allow') && opts.includes('Deny')) || opts.includes('Run on balanced');
 }
 
 /**
