@@ -10,9 +10,12 @@
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
 	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
-	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown }; }
+	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
+		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up. */
+		reader_may_connect?: boolean; }
 
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
 	function connectionText(line: ConnectionLine): string {
@@ -121,7 +124,7 @@
 		void goto('/app');
 	}
 
-	$effect(() => { void loadProfiles(); /* catches and sets its error */ void loadNotices(); });
+	$effect(() => { void loadProfiles(); /* catches and sets its error */ void loadNotices(); void loadSettingsViewer(); });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
@@ -129,6 +132,12 @@
 		<h1 class="text-xl font-light tracking-tight">{t('apis.title')}</h1>
 		<button onclick={createInChat} class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">+ {t('apis.create_in_chat')}</button>
 	</div>
+
+	{#if isMandateSession()}
+		<!-- A mandate's session (ux U-109): it sets up profiles in chat and connects its own, but
+		     deleting a profile and entering a built-in provider's app credentials are the owner's. -->
+		<p class="mb-4 border border-border rounded p-3 text-sm text-text-muted" data-testid="apis-owner-only">{t('apis.owner_only_notice')}</p>
+	{/if}
 
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
@@ -175,12 +184,14 @@
 							class="px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
 							<Icon name="chat" size="xs" />
 						</button>
+						{#if !isMandateSession()}
 						<button onclick={() => deleteProfile(profile)}
 							disabled={deleting === profile.id}
 							aria-label={t('apis.delete')}
 							class="px-3 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed border-l border-border">
 							{t('apis.delete')}
 						</button>
+						{/if}
 					</div>
 					{#if revocationView(profile.oauth_grant, notices.get(profile.id), now)}
 						{@const view = revocationView(profile.oauth_grant, notices.get(profile.id), now)!}
@@ -200,7 +211,7 @@
 									<p data-testid="api-erasure-avert">{t('apis.erasure_connected_again_avert')}</p>
 								{/if}
 							{/if}
-							{#if view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
+							{#if (view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)) && profile.reader_may_connect !== false}
 								<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
 									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
@@ -220,7 +231,7 @@
 							{/if}
 						</div>
 					{/if}
-					{#if onBuiltInProvider(profile)}
+					{#if onBuiltInProvider(profile) && !isMandateSession()}
 						<div class="border-t border-border px-4 py-3">
 							<PresetClientForm profileId={profile.id} />
 						</div>

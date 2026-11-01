@@ -19,6 +19,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	const PREFIX = 'CALENDAR_FEED_';
 
@@ -35,7 +36,11 @@
 		loading = true;
 		error = '';
 		try {
+			// Asked alongside the list: a mandate's session is refused the list and shows nothing.
+			const viewerRead = loadSettingsViewer();
 			const res = await fetch(`${getApiBase()}/secrets`);
+			await viewerRead;
+			if (isMandateSession()) return;
 			if (!res.ok) {
 				error = t('calendar.load_failed');
 				return;
@@ -106,6 +111,11 @@
 		<p class="text-sm text-text-muted mt-2">{t('calendar.intro')}</p>
 	</div>
 
+	{#if isMandateSession()}
+		<!-- A mandate's session (ux U-109): listing the feeds is the owner's (they are read
+		     from `GET /api/secrets`, which is owner-only), so the page has nothing to show and is left out of the navigation. -->
+	{:else}
+
 	<section class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-2">
 		<h2 class="text-sm font-medium">{t('calendar.where_title')}</h2>
 		<ol class="text-sm text-text-muted space-y-1 list-decimal list-inside">
@@ -167,5 +177,6 @@
 
 	{#if error}
 		<p class="text-sm text-danger">{error}</p>
+	{/if}
 	{/if}
 </div>

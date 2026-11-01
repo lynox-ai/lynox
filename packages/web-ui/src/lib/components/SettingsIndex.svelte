@@ -105,7 +105,7 @@
 				// config — moved here from the Automation Hub. Two distinct
 				// primitives (a callable endpoint profile vs a secret), so two tiles.
 				{ href: '/app/settings/apis', titleKey: 'settings.apis', descKey: 'settings.apis_desc' },
-				{ href: '/app/settings/llm/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc' },
+				{ href: '/app/settings/llm/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc', ownerOnly: true },
 				// IA reorg (M6): ToolToggles unified from two identical tier-split
 				// mounts (workspace/tools Self-Host + privacy/tools Managed) into
 				// one all-tier entry here. The legacy routes 301 to /policy-tools.

@@ -19,6 +19,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
 	import { secretWriteRefusal, type SecretWriteRefusal } from '../utils/secret-write-refusal.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	function refusalText(why: SecretWriteRefusal): string {
 		if (why === 'preset_client') return t('secrets.preset_client_use_form');
@@ -105,6 +106,7 @@
 			if (configRes.ok) {
 				const cfg = (await configRes.json()) as { managed?: string };
 				managed = cpSuppliesLLMKey(cfg.managed);
+				noteSettingsViewer(cfg);
 			}
 		} catch {
 			error = t('common.load_failed');
@@ -211,6 +213,10 @@
 		<p class="text-sm text-text-muted">{t('secrets.subtitle')}</p>
 	</header>
 
+	{#if isMandateSession()}
+		<!-- A mandate's session (ux U-109): listing the secrets is the owner's (`GET /api/secrets` is
+		     owner-only), so the page has nothing to show and is left out of the navigation. -->
+	{:else}
 	{#if managed}
 		<!-- Managed-tier notice: BYOK_USER_WRITABLE_SECRETS in http-api.ts only
 		     permits ANTHROPIC_API_KEY + OPENAI_API_KEY. Generic API-key writes
@@ -328,5 +334,6 @@
 				{saving ? t('settings.saving') : t('settings.save')}
 			</button>
 		</section>
+	{/if}
 	{/if}
 </div>

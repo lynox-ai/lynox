@@ -32,7 +32,7 @@ import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCall
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
-import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
+import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
@@ -215,6 +215,17 @@ const MARK: MandateStance = { kind: 'mark' };
 const OWN: MandateStance = { kind: 'own' };
 /** The connect route, which the consent page posts its confirmation to (see the dispatch). */
 const CONNECT_CONFIRM_PATH = /^\/api\/oauth\/connect\/[^/]+$/;
+/**
+ * Whether `principal` may start the consent of `profile`. A session under a mandate connects a
+ * profile it set up itself, and nothing else (PRD §3.13): the consent is recorded as its own, and
+ * an account the owner, or another mandate, prepared is theirs to connect. The connect start
+ * refuses on it, and the profile list tells the page, so the page offers the link only where the
+ * start goes through.
+ */
+function mayStartConnect(principal: RequestPrincipal, profile: ApiProfile | undefined): boolean {
+  if (principal.kind !== 'mandate') return true;
+  return profile !== undefined && profile.created_by === principalTag(principal) && principal.mandateId !== undefined;
+}
 /** A mandate may, for this reason. */
 const free = (why: string): MandateStance => ({ kind: 'free', why });
 /** A GET that only reads. */
@@ -11270,14 +11281,11 @@ export class LynoxHTTPApi {
       //   - `authenticated` is passed as a fact rather than assumed inside
       //     `decideConnect`, because the same function answers for the tool,
       //     where there is no dispatch to have done it.
-      // A session under a mandate connects a profile it set up itself, and nothing else (PRD
-      // §3.13): the consent is recorded as its own, and an account the owner, or another
-      // mandate, prepared is theirs to connect. One answer whether the id exists or not, so the
-      // session learns nothing about which ids do.
+      // `mayStartConnect`. One answer whether the id exists or not, so the session learns nothing
+      // about which ids do.
       const principal = this._principalOf(req);
       const profile = engine.getApiStore()?.get(id);
-      if (principal.kind === 'mandate'
-        && (profile === undefined || profile.created_by !== principalTag(principal) || principal.mandateId === undefined)) {
+      if (!mayStartConnect(principal, profile)) {
         sendOAuthHtml(res, 403, 'In this session you can connect only an API profile you set up yourself. Nothing was sent to the provider.');
         return;
       }
@@ -12708,9 +12716,10 @@ export class LynoxHTTPApi {
       // As the reader may see them (`profileForReader`): without the grant's credential
       // fingerprints, which are the engine's bookkeeping, and without the provider account of a
       // connection somebody else made. `importWaiting`: the files the import of the earlier
-      // profiles waits on, for the owner to repair or delete.
+      // profiles waits on, for the owner to repair or delete. `reader_may_connect`: whether this
+      // reader's connect start goes through (`mayStartConnect`), so the page offers the link only there.
       const reader = this._principalOf(req);
-      jsonResponse(res, 200, { profiles: store.getAll().map((p) => profileForReader(p, reader)), importWaiting: store.importWaitsOn() });
+      jsonResponse(res, 200, { profiles: store.getAll().map((p) => ({ ...profileForReader(p, reader), reader_may_connect: mayStartConnect(reader, p) })), importWaiting: store.importWaitsOn() });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (req, res, params) => {

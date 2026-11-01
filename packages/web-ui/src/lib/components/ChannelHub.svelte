@@ -8,6 +8,7 @@
 
 	import { t } from '../i18n.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	interface ChannelItem {
 		href: string;
@@ -28,6 +29,7 @@
 				const res = await fetch(`${getApiBase()}/config`);
 				if (!res.ok) return;
 				const body = (await res.json()) as { capabilities?: { has_calendar?: boolean } };
+				noteSettingsViewer(body);
 				hasCalendar = body.capabilities?.has_calendar === true;
 			} catch { /* leave the tile hidden on probe failure — fail closed */ }
 		})();
@@ -54,7 +56,8 @@
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels')}</h1>
 
 	<div class="space-y-2">
-		{#each channels as channel}
+		<!-- The calendar page lists the owner's feeds only; a mandate's session has nothing there (ux U-109). -->
+		{#each channels.filter((c) => !(c.href === CALENDAR_HREF && isMandateSession())) as channel}
 			<a
 				href={channel.href}
 				class="block rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 hover:border-border-hover transition-colors"
