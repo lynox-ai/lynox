@@ -71,7 +71,7 @@ export function loadSettingsViewer(): Promise<void> {
 
 /** For tests: forget what was read. */
 export function resetSettingsViewer(): void {
+	// `providerLocked` needs no reset: every body that sets `viewer` also sets it.
 	viewer = null;
-	providerLocked = null;
 	pending = null;
 }
