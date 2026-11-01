@@ -16,6 +16,7 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import BulkRunDetail from './BulkRunDetail.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import { bulkHaltSuffixKey, bulkLabel, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
@@ -108,6 +109,7 @@
 	<BulkRunDetail runId={selectedRun} onBack={() => openRun(null)} onOpen={(id) => openRun(id)} />
 {:else}
 	<div class="p-6 max-w-4xl mx-auto space-y-6">
+		<ViewerUnavailableNotice />
 		<section>
 			<h1 class="text-xl font-light tracking-tight mb-2">{t('bulk.title')}</h1>
 			<p class="text-sm text-text-muted mb-4">{t(mandate ? 'bulk.intro_mandate' : 'bulk.intro')}</p>

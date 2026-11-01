@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	interface FileEntry { name: string; isDirectory: boolean; size: number; }
 
@@ -111,6 +112,7 @@
 </script>
 
 <div class="p-6 max-w-5xl mx-auto">
+	<ViewerUnavailableNotice />
 	<div class="flex items-center justify-between mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('files.title')}</h1>
 		<button

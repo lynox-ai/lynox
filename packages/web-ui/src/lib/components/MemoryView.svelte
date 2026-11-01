@@ -3,6 +3,7 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	// DK-UX: when durable memory is on, "Wissen" browses the ACTIVE knowledge_entries +
 	// profile/playbook blocks instead of the legacy memory-file namespaces. Editing still
@@ -238,6 +239,7 @@
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
+<ViewerUnavailableNotice />
 {#if mandate}
 	<p class="text-sm text-text-muted mb-4">{t('memory.owner_only_notice')}</p>
 {/if}

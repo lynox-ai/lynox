@@ -8,6 +8,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { approveTargetLabel, type ApproveTarget } from '../stores/knowledge-queue-target.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	interface QueueEntry {
 		id: string;
@@ -99,6 +100,7 @@
 </script>
 
 <div class="p-4 sm:p-5 space-y-3">
+	<ViewerUnavailableNotice />
 	<div class="flex items-center justify-between">
 		<div>
 			<h2 class="text-sm font-semibold">{t('knowledge.queue.title')}</h2>

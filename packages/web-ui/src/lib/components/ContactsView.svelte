@@ -6,6 +6,7 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	interface Contact { _id?: number; name: string; email?: string; phone?: string; company?: string; type?: string; source?: string; tags?: string[]; notes?: string; _created_at?: string; }
 	interface Interaction { type: string; channel: string; summary: string; date?: string; }
@@ -142,6 +143,7 @@
 </script>
 
 <div class="p-6 max-w-5xl mx-auto">
+	<ViewerUnavailableNotice />
 	<div class="flex items-center gap-4 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('crm.title')}</h1>
 		{#if hasDeals}

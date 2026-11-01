@@ -54,6 +54,8 @@ beforeEach(() => {
 		if (u.endsWith('/knowledge/entries')) return reply({ entries: [{ id: 'k1', subjectName: null, kind: 'fact', text: 'Invoices go out on Fridays', pinned: false }] });
 		if (u.endsWith('/knowledge/blocks')) return reply({ profile: '', playbook: '' });
 		if (u.includes('/memory/')) return reply({ content: '[2026-11-01] Invoices go out on Fridays' });
+		if (u.endsWith('/bulk/runs')) return reply({ runs: [] });
+		if (u.endsWith('/merges')) return reply({ merges: [] });
 		if (u.endsWith('/kg/stats')) return reply({ memoryCount: 0, entityCount: 0, relationCount: 0, communityCount: 0 });
 		return reply({});
 	}));
@@ -239,6 +241,56 @@ describe('a session the server has not named as the owner\'s', () => {
 			const memory = await render('memory', { hasDurableMemory: true });
 			expect(buttonByText(t('knowledge.active.retire'))).toBeUndefined();
 			expect(memory).not.toContain(t('memory.owner_only_notice'));
+		});
+	}
+});
+
+describe('a page whose answer never comes', () => {
+	// Every try at `GET /api/config` unanswered: the page says so once instead of standing there
+	// without the owner's acts and without a reason (the sentence the settings pages show, ux U-117;
+	// on these pages too, ux U-115). An answer on a retry shows the acts and no sentence.
+	const BULK = () => import('./BulkRunsView.svelte');
+	const pages = { ...PAGES, bulk: BULK } as const;
+
+	async function mountWith(page: keyof typeof pages, configTry: (n: number) => Response): Promise<(ms: number) => Promise<void>> {
+		let n = 0;
+		const base = (globalThis.fetch as unknown as (u: string) => Promise<Response>);
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => (String(url).endsWith('/config') ? configTry(++n) : base(url))));
+		const { default: Page } = await pages[page]();
+		component = mount(Page, { target, props: page === 'memory' ? { hasDurableMemory: true } : {} });
+		const advance = async (ms: number): Promise<void> => { await vi.advanceTimersByTimeAsync(ms); flushSync(); };
+		await advance(0);
+		return advance;
+	}
+	const notices = (): number => target.querySelectorAll('[data-testid="viewer-unavailable"]').length;
+	const down = (): Response => new Response('', { status: 503 });
+
+	for (const page of ['contacts', 'files', 'queue', 'memory', 'bulk'] as const) {
+		it(`says so once on ${page}, only after the last retry, still without an owner's act`, async () => {
+			vi.useFakeTimers();
+			try {
+				const advance = await mountWith(page, down);
+				await advance(1_000 + 3_000);
+				expect(notices()).toBe(0);
+				await advance(10_000);
+				expect(notices()).toBe(1);
+				expect(target.textContent).toContain(t('settings.viewer_unavailable'));
+				for (const label of [t('knowledge.queue.approve'), t('knowledge.active.retire'), t('crm.remove')]) expect(buttonByText(label)).toBeUndefined();
+				expect(buttonByTitle('Delete')).toBeUndefined();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it(`says nothing on ${page} when a retry is answered`, async () => {
+			vi.useFakeTimers();
+			try {
+				const advance = await mountWith(page, (n) => (n === 1 ? down() : Response.json({ viewer: 'owner' })));
+				await advance(1_000 + 3_000 + 10_000);
+				expect(notices()).toBe(0);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 	}
 });
