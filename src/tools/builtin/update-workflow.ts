@@ -1,5 +1,5 @@
 import type { ToolEntry, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
-import { applyModifications, quotedId, type StepModification } from '../../orchestrator/workflow-edit.js';
+import { applyModifications, byPosition, quotedId, type StepModification } from '../../orchestrator/workflow-edit.js';
 import { getPipeline, forgetPipeline, buildManifest } from './pipeline.js';
 import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
@@ -155,8 +155,8 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const goal = input.goal ?? planned.goal;
     const fixes: string[] = [];
     steps.forEach((s, i) => {
-      if (findHiddenInName(s.id, 'id') !== null) fixes.push(`rename_step for step #${i + 1} (${quotedId(s.id)}): step_id "#${i + 1}", value a new id you type; the steps that read it follow`);
-      if (findHiddenChar(s.task) !== null) fixes.push(`update_task for step #${i + 1}: step_id "#${i + 1}", value its task typed again in your own words`);
+      if (findHiddenInName(s.id, 'id') !== null) fixes.push(`rename_step for step #${i + 1} (${quotedId(s.id)}): ${byPosition(steps, i)}, value a new id you type; the steps that read it follow`);
+      if (findHiddenChar(s.task) !== null) fixes.push(`update_task for step #${i + 1}: ${byPosition(steps, i)}, value its task typed again in your own words`);
     });
     if (findHiddenChar(goal) !== null) fixes.push('a new "goal", written in your own words');
     if (fixes.length > 0) {

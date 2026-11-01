@@ -49,17 +49,18 @@ function alikeIndexes(steps: readonly InlinePipelineStep[], id: string): number[
  * characters that render as nothing reaches the model without them (`hidden-text.ts`), so the model
  * cannot name it exactly: an id names the one step whose id reads the same without them. Where two
  * steps read alike, only an id typed with its hidden characters names one of them; the model names
- * either by its position instead, `#<n>` as the step list numbers it.
+ * either by its position instead, `#<n>` as the step list numbers it. A step stored with the id
+ * `#<n>` (before new ids refused it) is what `#<n>` names; renamed, `#<n>` is position n again.
  */
 function stepIndex(steps: readonly InlinePipelineStep[], id: string): number | 'missing' | 'ambiguous' {
-  // A position names its step. A step stored with the id `#<n>` before new ids refused it, at
-  // another position, makes `#<n>` name two steps: neither wins (`ambiguousText` names both).
+  // The stored id first, so every step stays reachable by its own id, whatever ids it shares a
+  // list with; a refusal that names a position someone's id takes says to rename that step first
+  // (`byPosition`).
   const position = /^#([1-9]\d{0,3})$/.exec(id);
   if (position) {
-    const at = Number(position[1]) - 1;
     const literal = steps.findIndex(s => s.id === id);
-    if (literal !== -1 && literal !== at) return 'ambiguous';
     if (literal !== -1) return literal;
+    const at = Number(position[1]) - 1;
     return at < steps.length ? at : 'missing';
   }
   const alike = alikeIndexes(steps, id);
@@ -68,14 +69,24 @@ function stepIndex(steps: readonly InlinePipelineStep[], id: string): number | '
   return exact !== -1 && id !== stripHiddenInName(id) ? exact : 'ambiguous';
 }
 
+/**
+ * How a refusal tells the model to name the step at index `i` by its position: `step_id "#<i+1>"`,
+ * and where another step is stored with that very id, which `#<i+1>` then names, to rename that one
+ * first in the same call.
+ */
+export function byPosition(steps: readonly InlinePipelineStep[], i: number): string {
+  const ref = `#${i + 1}`;
+  const other = steps.findIndex((s, j) => j !== i && s.id === ref);
+  return other === -1
+    ? `step_id "${ref}"`
+    : `step_id "${ref}", after a rename_step with step_id "${ref}" that gives step #${other + 1}, stored with the id "${ref}", a new id`;
+}
+
 /** The refusal for an id that names two steps, which `what` cannot choose between. */
 function ambiguousText(steps: readonly InlinePipelineStep[], id: string, what: string): string {
-  const literal = steps.findIndex(s => s.id === id);
-  if (/^#\d+$/.test(id) && literal !== -1) {
-    return `Error: ${quotedId(id)} is both a position and the id of step #${literal + 1}, so ${what} cannot tell which one is meant. First rename step #${literal + 1}: rename_step with step_id "#${literal + 1}" and a new id that does not start with "#".`;
-  }
-  const at = alikeIndexes(steps, id).map(i => `#${i + 1}`);
-  return `Error: Steps ${at.join(', ')} all read as ${quotedId(id)} (their ids differ only in characters that do not show), so ${what} cannot tell which one is meant. Name the step by its position instead, e.g. step_id "${at[at.length - 1]!}".`;
+  const alike = alikeIndexes(steps, id);
+  const last = alike[alike.length - 1]!;
+  return `Error: Steps ${alike.map(i => `#${i + 1}`).join(', ')} all read as ${quotedId(id)} (their ids differ only in characters that do not show), so ${what} cannot tell which one is meant. Name the step by its position instead, e.g. ${byPosition(steps, last)}.`;
 }
 
 /** `text` with every `{{<from>…}}` reference to a step's output pointed at `to`. */
