@@ -6,7 +6,7 @@ import type { ThreadStore } from './thread-store.js';
 import type { ContainmentMirror } from './history-markers.js';
 import { isShopifyAdminHost, normalizeHostForMatch } from './shopify-host.js';
 import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
-import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, type BodyReadings } from './outbound-write.js';
+import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, urlQueryStrings, writeMethodsNamed, type BodyReadings } from './outbound-write.js';
 
 /**
  * Containment: the record of which containers a store connection's credential was attached
@@ -412,9 +412,8 @@ export function containedStoreWrite(method: string, headers: Record<string, stri
   const named = writeMethodsNamed(method, headers, url, gateBody);
   if (named.length === 0) return false;
   if (method.trim().toUpperCase() !== 'POST' || named.length !== 1) return true;
-  let parsed: URL;
-  try { parsed = new URL(url); } catch { return true; }
-  if (!isGraphqlEndpoint(url) || parsed.search.length > 1) return true;
+  try { new URL(url); } catch { return true; }
+  if (!isGraphqlEndpoint(url) || urlQueryStrings(url).some((search) => search !== '')) return true;
   const reading = graphqlWrite(headers, body);
   return 'refusal' in reading || reading.mutates;
 }

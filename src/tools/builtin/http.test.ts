@@ -9463,6 +9463,161 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(prompt).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['/%u0067raphql'], ['/?graphql'], ['/?GraphQL=1'], ['/?graphql[]'], ['/?+graphql'], ['/index.php%3Fgraphql'], ['/index.php?graphql'], ['/%2567x?graphql'], ['/graphql.a.b'], ['/graphql.tar.gz'], ['/graphql..json'], ['/graphql.json.'], ['/graphql...'], ['/graphql%3Fquery=x'],
+    ])('reads %s as a GraphQL endpoint, so a write there it cannot read is refused and nothing is sent', async (path) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ url: `https://h.example${path}`, method: 'POST', body: 'a=1' }, agent);
+      expect(out).toMatch(/is a GraphQL (request this check cannot read|write with a query string)/);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each([['/graphqlx'], ['/?graphqlx'], ['/graphqlx.json']])('control: %s is a REST path, and the same write is asked and goes out', async (path) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ url: `https://h.example${path}`, method: 'POST', body: 'a=1' }, agent);
+      expect(out).toContain('HTTP 200');
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['a GET', { url: 'https://h.example/start', method: 'GET' }],
+      ['a HEAD', { url: 'https://h.example/start', method: 'HEAD' }],
+    ] as const)('does not follow %s redirected to a GraphQL URL that carries a mutation', async (_k, req) => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: `${GQL}?query=${encodeURIComponent('mutation{b}')}` } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(visible(req, agent270().agent)).rejects.toThrow('carries a GraphQL mutation in its URL; the redirect was not followed');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not follow a read redirected to a path form it reads as GraphQL, with a mutation in the URL', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: `https://h.example/index.php?graphql&query=${encodeURIComponent('mutation{b}')}` } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(visible({ url: 'https://h.example/start', method: 'GET' }, agent270().agent)).rejects.toThrow('carries a GraphQL mutation in its URL; the redirect was not followed');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['a GraphQL read', `${GQL}?query=${encodeURIComponent('{ a }')}`],
+      ['a REST path on the same host', 'https://h.example/v1/items'],
+      ['a mutation in the URL of a REST path', `https://h.example/v1/items?query=${encodeURIComponent('mutation{b}')}`],
+    ])('control: a read redirected to %s is followed', async (_k, location) => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(visible({ url: 'https://h.example/start', method: 'GET' }, agent270().agent)).resolves.toContain('HTTP 200');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a write that was sent and redirected to a GraphQL URL with a mutation is reported as possibly landed, and not followed', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: `${GQL}?query=${encodeURIComponent('mutation{b}')}` } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ url: 'https://h.example/v1/items', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"a":1}' }, agent);
+      expect(out).toContain('Write possibly landed: POST https://h.example/v1/items was sent and answered with a redirect');
+      expect(out).toContain('which needs its own approval; the redirect was not followed');
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['an approved REST POST to the GraphQL path', 'https://h.example/v1/items', GQL, '{"query":"mutation{b}"}'],
+      ['a GraphQL read to the same path with a mutation in its URL', GQL, `${GQL}?query=${encodeURIComponent('mutation{b}')}`, '{"query":"{ a }"}'],
+    ])('as before, a 307 that turns %s is not followed: the hop needs its own approval', async (_k, url, location, body) => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url, method: 'POST', headers: { 'Content-Type': 'application/json' }, body }, agent270().agent);
+      expect(out).toContain('the redirect was not followed');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('the refusal of a redirect names the way out: a POST with a JSON body to the endpoint', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: `${GQL}?query=${encodeURIComponent('mutation{b}')}` } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(visible({ url: 'https://h.example/start', method: 'GET' }, agent270().agent)).rejects.toThrow('To run the mutation, send it as a POST with a JSON body directly to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation.');
+    });
+
+    it('reads a mutation after a ? decoded in the path: a read redirected there and a GET to it are refused, a POST there is a GraphQL write with a query string', async () => {
+      const hidden = `https://h.example/graphql%3Fquery%3D${encodeURIComponent(encodeURIComponent('mutation{b}'))}`;
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: hidden } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      await expect(visible({ url: 'https://h.example/start', method: 'GET' }, agent)).rejects.toThrow('carries a GraphQL mutation in its URL; the redirect was not followed');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await expect(visible({ url: hidden, method: 'GET' }, agent)).resolves.toContain('carries a GraphQL mutation in its URL');
+      await expect(visible({ url: 'https://h.example/graphql%3Fquery=x', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"query":"{ a }"}' }, agent)).resolves.toContain('is a GraphQL write with a query string');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(prompt).not.toHaveBeenCalled();
+    });
+
+    it.each([['%%33F'], ['%3%46'], ['%u003%46']])('reads the query after a ? that the escapes %s assemble', async (escape) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: `https://h.example/graphql${escape}query=mutation%7Bb%7D`, method: 'GET' }, agent270().agent);
+      expect(out).toContain('carries a GraphQL mutation in its URL');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('reads the query after every decoded ?, not only the first', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: 'https://h.example/a%3Fb/graphql%3Fquery=mutation%7Bb%7D', method: 'GET' }, agent270().agent);
+      expect(out).toContain('carries a GraphQL mutation in its URL');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a body that names a GraphQL key in another case keeps the general refusal, not the file note', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: GQL, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"Query":"mutation{b}"}' }, agent270().agent);
+      expect(out).toContain('is a GraphQL request this check cannot read');
+      expect(out).not.toContain('file whose name contains graphql');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a JSON object that cannot be a GraphQL request, as a file write sends, gets its own refusal that tells the model to name the file to the user', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      await expect(visible({ url: 'https://h.example/repos/o/r/contents/src/graphql.schema.json', method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{"message":"m","content":"eA=="}' }, agent))
+        .resolves.toContain('If this writes or changes a file whose name contains graphql, lynox cannot send it this way: tell the user which file it is and that they need to change it themselves.');
+      expect(prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a query beside another field', '{"query":"{ a }","message":"m"}'],
+      ['a persisted id', '{"id":"abc","variables":{}}'],
+      ['a document id', '{"documentId":"abc"}'],
+      ['extensions', '{"extensions":{"persistedQuery":{}}}'],
+      ['a batch', '[{"message":"m"}]'],
+    ])('control: %s keeps the general refusal, not the file note', async (_k, body) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const err = await visible({ url: GQL, method: 'POST', headers: { 'Content-Type': 'application/json' }, body }, agent270().agent);
+      expect(err).toContain('is a GraphQL request this check cannot read');
+      expect(err).not.toContain('file whose name contains graphql');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it('a contract that grants POST on a GraphQL path grants neither a mutation nor a read; a REST POST under it goes out', async () => {
       const contract: CapabilityContract = {
         version: 7, grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
