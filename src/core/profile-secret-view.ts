@@ -1104,13 +1104,15 @@ function planRefusalFinalForRun(): string {
 }
 
 /**
- * For the member's own connection that their access does not cover: final for the run, but
- * without "the same answer". A token exchange asks in write mode, which a later access of the
- * same person passes, and is then stopped by the refresh slot's own check in other words; a
- * request through it stays refused, since only connecting again changes that and a plan cannot.
+ * For the member's own connection that their access does not cover: final for the run, but it
+ * promises neither the same words nor a refused token exchange. A token exchange asks in write
+ * mode, which a later access of the same person passes; the refresh slot's own check may stop it
+ * in other words, or let it through while that earlier access is still live. A request through
+ * it stays refused either way: its grant names the earlier access, and only connecting again
+ * changes that, which a plan cannot.
  */
 function ownRefusalFinalForRun(): string {
-  return `This is final for this run: the plan does not use this connection, so do not try it again. ${RUN_REFUSAL_CLOSE}`;
+  return `This is final for this run: another request through it is refused as well, so do not try the connection again. ${RUN_REFUSAL_CLOSE}`;
 }
 
 const RUN_REFUSAL_FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again.';

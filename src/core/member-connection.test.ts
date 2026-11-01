@@ -164,8 +164,8 @@ describe('a member\'s connection inside a plan\'s run', () => {
   const FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.';
   // The same end without who decides: for these the owner's stamp is not the way.
   const FINAL_RUN = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Say so in your reply, and do not ask for permission.';
-  // The member's own connection: no "same answer", a token exchange is stopped by another check.
-  const FINAL_OWN = 'This is final for this run: the plan does not use this connection, so do not try it again. Say so in your reply, and do not ask for permission.';
+  // The member's own connection: a token exchange is not promised the same answer, another check stops it.
+  const FINAL_OWN = 'This is final for this run: another request through it is refused as well, so do not try the connection again. Say so in your reply, and do not ask for permission.';
 
   it('is not read in a plan whose stamp lists no connection, and says the stamp does not list it', () => {
     const p = crm({ oauth_grant: G });
