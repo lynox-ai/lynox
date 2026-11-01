@@ -4574,12 +4574,12 @@ export class LynoxHTTPApi {
         preflightMissing.push('key');
       }
       if (preflightMissing.length > 0) {
-        // `code` is what the web UI translates (ux UX-069). Who may set it up decides the
+        // `code` is what the web UI translates. Who may set it up decides the
         // sentence: the provider settings are owner-only, so a mandate is told to ask the owner,
         // not sent to a page it cannot use. `provider` is the display name the status bar
         // shows, never the config key, and goes only to the one who can act on it, with what
         // is missing: without a key nothing else helps, so a missing key is named alone.
-        if (this._principalOf(req).kind === 'mandate') {
+        if (!isOwnerPrincipal(this._principalOf(req))) {
           errorResponse(res, 400, 'No AI provider is set up on this instance yet. Only the owner can do that, so ask the owner.',
             'llm_not_configured', { may_configure: false });
         } else {

@@ -1,7 +1,7 @@
 // Runs in the browser-compile project (vitest.config.ts): Svelte state behaves as in the browser.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// No AI provider key yet (ux UX-069): the run is refused with `code: 'llm_not_configured'`, and
+// No AI provider key yet: the run is refused with `code: 'llm_not_configured'`, and
 // the chat says why in the reader's language. The owner reads which provider lacks a key and
 // where to add it; a mandate, which cannot open that page, reads that only the owner can.
 

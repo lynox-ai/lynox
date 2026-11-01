@@ -1156,7 +1156,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_insufficient_quota': { de: 'Dein API-Guthaben ist aufgebraucht. [Guthaben aufladen](https://console.anthropic.com/settings/billing)', en: 'Your API credits are exhausted. [Top up credits](https://console.anthropic.com/settings/billing)' },
 	'chat.error_llm_unavailable': { de: 'Der Sprachdienst ist gerade nicht erreichbar. Bitte in wenigen Minuten erneut versuchen.', en: 'Language service is temporarily unavailable. Please try again in a few minutes.' },
 	'chat.error_invalid_request': { de: 'Ungültige Anfrage. Die Nachricht konnte nicht verarbeitet werden.', en: 'Invalid request. The message could not be processed.' },
-	// No AI provider key yet (`code: 'llm_not_configured'`, ux UX-069): one sentence per reader.
+	// No AI provider key yet (`code: 'llm_not_configured'`): one sentence per reader.
 	// {label} is the settings page's own title (`settings.config`), filled in where it is shown.
 	'chat.error_no_llm_key_owner': { de: 'Für {provider} ist noch kein Schlüssel hinterlegt. Öffne Einstellungen → {label} und füg einen hinzu.', en: 'No key is stored for {provider} yet. Open Settings → {label} and add one.' },
 	// The key is there, a settings field is not: {fields} is one or two of the names below.

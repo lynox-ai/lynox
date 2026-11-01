@@ -2103,7 +2103,7 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
-    describe('without an AI provider key (ux UX-069)', () => {
+    describe('without an AI provider key', () => {
       const run = (): Promise<Response> => jsonFetch('/api/sessions/test/run', {
         method: 'POST',
         body: JSON.stringify({ task: 'hello' }),
@@ -2156,6 +2156,16 @@ describe('LynoxHTTPApi', () => {
         mockGetUserConfig.mockReturnValue({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' });
         const res = await run();
         expect(((await res.json()) as { missing?: string[] }).missing).toEqual(['key']);
+      });
+
+      it('names the key alone on a custom endpoint that lacks both key and base URL, then the base URL', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'custom' });
+        vi.stubEnv('LYNOX_API_BASE_URL', '');
+        const both = await run();
+        expect(((await both.json()) as { missing?: string[] }).missing).toEqual(['key']);
+        mockSecretResolve.mockImplementation((name: string) => (name === 'CUSTOM_API_KEY' ? 'test-only-placeholder' : null));
+        const baseOnly = await run();
+        expect(((await baseOnly.json()) as { missing?: string[] }).missing).toEqual(['api_base_url']);
       });
 
       it('names the model alone once the endpoint has its key', async () => {
