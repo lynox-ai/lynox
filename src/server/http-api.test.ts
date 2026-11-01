@@ -3374,19 +3374,6 @@ describe('LynoxHTTPApi', () => {
         const expiredBody = await expired.json() as { error: string; code?: string };
         expect(expiredBody).toEqual({ error: 'Prompt closed: its time ran out.', code: 'timed_out' });
 
-        // A row closed before the reasons were written keeps the bare answer, without a code.
-        const legacy = store.insertAskUser('s-legacy', 'Which list?');
-        history.getDb().prepare("UPDATE pending_prompts SET status = 'expired' WHERE id = ?").run(legacy);
-        const old = await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ promptId: legacy, answer: 'B' }) });
-        expect(old.status).toBe(410);
-        expect(await old.json()).toEqual({ error: 'Prompt expired' });
-
-        // Pending, yet past its time: the answer finds it closed by its clock.
-        const lapsed = store.insertAskUser('s-lapsed', 'Which list?');
-        history.getDb().prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 3_000).toISOString(), lapsed);
-        const late = await jsonFetch('/api/sessions/s-lapsed/reply', { method: 'POST', body: JSON.stringify({ promptId: lapsed, answer: 'B' }) });
-        expect(late.status).toBe(410);
-        expect((await late.json() as { code?: string }).code).toBe('timed_out');
       } finally {
         engineRef.getPromptStore = original;
         history.close();
@@ -3395,6 +3382,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('an answer to a closed question hears why it was closed, for every reason', async () => {
+      repayRateWindow();
       const dir = mkdtempSync(join(tmpdir(), 'lynox-reply-reason-'));
       const history = new RunHistory(join(dir, 'history.db'));
       const { PromptStore } = await import('../core/prompt-store.js');
@@ -3413,6 +3401,20 @@ describe('LynoxHTTPApi', () => {
           expect(body.code, reason).toBe(reason);
           expect(body.error, reason).toMatch(/^Prompt closed: /);
         }
+
+        // A row closed before the reasons were written keeps the bare answer, without a code.
+        const legacy = store.insertAskUser('s-legacy', 'Which list?');
+        history.getDb().prepare("UPDATE pending_prompts SET status = 'expired' WHERE id = ?").run(legacy);
+        const old = await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ promptId: legacy, answer: 'B' }) });
+        expect(old.status).toBe(410);
+        expect(await old.json()).toEqual({ error: 'Prompt expired' });
+
+        // Pending, yet past its time: the answer finds it closed by its clock.
+        const lapsed = store.insertAskUser('s-lapsed', 'Which list?');
+        history.getDb().prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 3_000).toISOString(), lapsed);
+        const late = await jsonFetch('/api/sessions/s-lapsed/reply', { method: 'POST', body: JSON.stringify({ promptId: lapsed, answer: 'B' }) });
+        expect(late.status).toBe(410);
+        expect((await late.json() as { code?: string }).code).toBe('timed_out');
       } finally {
         engineRef.getPromptStore = original;
         history.close();
@@ -3802,6 +3804,7 @@ describe('LynoxHTTPApi', () => {
     // where the Session is already gone — a thread deleted while its run was
     // parked. Behind the guard, the backstop would be unreachable exactly there.
     it('a new message that takes over a parked run with a dead stream closes its question as taken over', async () => {
+      repayRateWindow();
       await withParkedRun('takeover-parked-1', async ({ prompts, slots, promptId }) => {
         (slots.get('takeover-parked-1') as { streamAlive: boolean }).streamAlive = false;
         mockSessionRun.mockResolvedValueOnce('second response');
