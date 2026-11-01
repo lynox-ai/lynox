@@ -132,9 +132,9 @@ describe('the schedules page in a mandate\'s session', () => {
 		expect(target.querySelector('[data-trigger-awaits]')?.textContent?.trim()).toBe('Läuft erst, wenn der Inhaber diesen Plan bestätigt.');
 	});
 
-	it('offers no confirmation while nobody has said whose session it is', async () => {
+	it('offers no confirmation while nobody has said whose session it is, and says the owner confirms', async () => {
 		await open('triggers');
-		expect(target.querySelector('[data-trigger-awaits]')).not.toBeNull();   // the plan is shown
+		expect(target.querySelector('[data-trigger-awaits]')?.textContent?.trim()).toBe('Läuft erst, wenn der Inhaber diesen Plan bestätigt.');
 		expect(buttons()).not.toContain('Bestätigen');
 	});
 
@@ -142,5 +142,6 @@ describe('the schedules page in a mandate\'s session', () => {
 		configViewer = 'owner';
 		await open('triggers');
 		expect(buttons()).toContain('Bestätigen');
+		expect(target.querySelector('[data-trigger-awaits]')?.textContent?.trim()).toBe('Läuft erst, wenn du ihn bestätigst.');
 	});
 });

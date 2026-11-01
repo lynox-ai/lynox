@@ -10,7 +10,7 @@
 	import { awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
-	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -65,9 +65,9 @@
 	let viewer = $state<'owner' | 'mandate' | 'none'>('none');
 	// Confirming a plan is the owner's (`POST /api/tasks/:id/confirm`). Whose session it is comes
 	// from the list's own `viewer` or from the shared store, which this page loads itself. The button
-	// waits for a known owner, so a mandate never sees it, not even while neither has answered.
+	// waits for a known owner, so a mandate never sees it, not even while neither has answered;
+	// without it the line says the owner confirms, which is true whoever reads it.
 	const ownerActs = $derived(viewer === 'owner' || isOwnerSession());
-	const mandate = $derived(viewer === 'mandate' || isMandateSession());
 	let loading = $state(true);
 	let error = $state('');
 	// Per-trigger in-flight guard so a double-click can't fire two run-now /
@@ -596,8 +596,8 @@
 								     nothing to agree to. One gate for the button (`offersConfirmation`), so it can
 								     never outlive the thing it consents to. -->
 								<div class="mt-2 space-y-1.5" data-trigger-consent>
-									<!-- A mandate cannot confirm: it is told who does, in place of the hint and the button. -->
-									<p class="text-xs text-warning" data-trigger-awaits>{t(mandate ? 'triggers.confirm_owner_only_notice' : 'triggers.awaiting_hint')}</p>
+									<!-- Only a known owner confirms here; anyone else is told who does, in place of the hint and the button. -->
+									<p class="text-xs text-warning" data-trigger-awaits>{t(ownerActs ? 'triggers.awaiting_hint' : 'triggers.confirm_owner_only_notice')}</p>
 									{#if showsInstruction(trigger)}
 										<div class="text-xs text-text-muted" data-consent-instruction>
 											<span class="font-medium" data-consent-label="instruction">{t('triggers.instruction')}:</span>
