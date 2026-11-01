@@ -1254,6 +1254,27 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // A test call to the model is the owner's (register 1141): it spends a call on the owner's key.
+    it('refuses a mandate the model connection test before the rate window, and lets the owner through', async () => {
+      repayRateWindow();
+      const probe = (token: string): Promise<Response> => fetch(`${baseUrl}/api/llm/test`, {
+        method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+      const statuses: number[] = [];
+      for (let i = 0; i < 7; i++) {
+        const res = await probe(mandate);
+        statuses.push(res.status);
+        if (i === 0) expect(await res.json()).toEqual({ error: 'Only the owner of this instance can test the model connection.' });
+      }
+      // Seven, one more than the probe window holds: none of them reached it.
+      expect(statuses).toEqual([403, 403, 403, 403, 403, 403, 403]);
+      // Twin: the owner's cookie reaches the handler, which answers the empty body itself.
+      const asOwner = await probe(webUiLoginSession(TEST_SECRET, null)!.token);
+      expect(asOwner.status).toBe(400);
+      expect(((await asOwner.json()) as { error: string }).error).toBe('Missing provider');
+    });
+
     for (const [path, field, value, what] of [
       ['/api/auth/token', 'token', TEST_SECRET, 'see the access token'],
       ['/api/vault/key', 'key', 'TEST-VAULT-KEY-0000000000000000', 'see the vault key'],
@@ -20650,7 +20671,6 @@ describe('mandate stance of every user route', () => {
       'PATCH /api/sessions/stance-probe/model own',
       'PATCH /api/tasks/stance-probe mark',
       'PATCH /api/threads/stance-probe own',
-      'POST /api/llm/test free',
       'POST /api/mail/accounts/test free',
       'POST /api/mail/autodiscover free',
       'POST /api/oauth/connect/stance-probe own',
