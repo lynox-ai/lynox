@@ -169,6 +169,15 @@ describe('a session whose reader the server has not named as the owner', () => {
 		});
 	}
 
+	it('tells a reader not known to be the owner who starts a waiting run, not which button to press', async () => {
+		viewer = null;
+		run = makeRun({ phase: 'planned', haltKey: 'awaitingStart', haltReason: 'engine English', total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		await renderDetail();
+		expect(buttonByText(t('bulk.start.read'))).toBeUndefined();
+		expect(target.textContent).toContain(t('bulk.halt.wait_owner_only'));
+		expect(target.textContent).not.toContain(t('bulk.halt.awaitingStart_start').replace('{button}', t('bulk.start.read')));
+	});
+
 	it('does not tell a reader not known to be the owner to check a read list and start it', async () => {
 		viewer = null;
 		run = makeRun({ phase: 'planned', haltKey: 'listed', haltReason: 'engine English', total: 1, listFirstPage: 'https://demo.myshopify.com/products.json', listStartChecksum: 'l1', changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });

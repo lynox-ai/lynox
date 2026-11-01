@@ -555,8 +555,9 @@ export function bulkStateText(
 }
 
 /** What the page says under "halted because": its own sentence where it has one, else the
- *  engine's reason. `startButton` as for {@link bulkStateText}. A mandate's session is shown no
- *  step that names a button it does not see: a run waiting for its start says who starts it. */
+ *  engine's reason. `startButton` as for {@link bulkStateText}. `mandate`: a session the page
+ *  offers no act (a mandate's, or one whose owner is not known yet) is shown no step that names a
+ *  button it does not see: a run waiting for its start says who starts it. */
 export function bulkHaltCause(
 	run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0] & Parameters<typeof bulkStateText>[0],
 	managed: boolean | null,

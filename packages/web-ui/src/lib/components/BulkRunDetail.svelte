@@ -386,7 +386,7 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
-					<dd>{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, mandate)}</dd>
+					<dd>{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}</dd>
 				{/if}
 			</dl>
 
