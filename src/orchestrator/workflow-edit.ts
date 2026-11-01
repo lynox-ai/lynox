@@ -34,8 +34,8 @@ function newIdProblem(id: string): string | null {
 
 /** A step id as a refusal quotes it: as it reads, escaped, and short. */
 export function quotedId(id: string): string {
-  const shown = stripHiddenInName(id);
-  return JSON.stringify(shown.length > 64 ? `${shown.slice(0, 64)}…` : shown);
+  const shown = Array.from(stripHiddenInName(id));
+  return shown.length > 64 ? `${JSON.stringify(shown.slice(0, 64).join(''))}…` : JSON.stringify(shown.join(''));
 }
 
 /** The indexes of the steps whose id reads as `id` once the characters that render as nothing go. */
@@ -52,10 +52,14 @@ function alikeIndexes(steps: readonly InlinePipelineStep[], id: string): number[
  * either by its position instead, `#<n>` as the step list numbers it.
  */
 function stepIndex(steps: readonly InlinePipelineStep[], id: string): number | 'missing' | 'ambiguous' {
-  // A position always names its step: a stored id that reads `#<n>` is named by its own position.
+  // A position names its step. A step stored with the id `#<n>` before new ids refused it, at
+  // another position, makes `#<n>` name two steps: neither wins (`ambiguousText` names both).
   const position = /^#([1-9]\d{0,3})$/.exec(id);
   if (position) {
     const at = Number(position[1]) - 1;
+    const literal = steps.findIndex(s => s.id === id);
+    if (literal !== -1 && literal !== at) return 'ambiguous';
+    if (literal !== -1) return literal;
     return at < steps.length ? at : 'missing';
   }
   const alike = alikeIndexes(steps, id);
@@ -66,6 +70,10 @@ function stepIndex(steps: readonly InlinePipelineStep[], id: string): number | '
 
 /** The refusal for an id that names two steps, which `what` cannot choose between. */
 function ambiguousText(steps: readonly InlinePipelineStep[], id: string, what: string): string {
+  const literal = steps.findIndex(s => s.id === id);
+  if (/^#\d+$/.test(id) && literal !== -1) {
+    return `Error: ${quotedId(id)} is both a position and the id of step #${literal + 1}, so ${what} cannot tell which one is meant. First rename step #${literal + 1}: rename_step with step_id "#${literal + 1}" and a new id that does not start with "#".`;
+  }
   const at = alikeIndexes(steps, id).map(i => `#${i + 1}`);
   return `Error: Steps ${at.join(', ')} all read as ${quotedId(id)} (their ids differ only in characters that do not show), so ${what} cannot tell which one is meant. Name the step by its position instead, e.g. step_id "${at[at.length - 1]!}".`;
 }

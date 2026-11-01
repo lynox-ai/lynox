@@ -192,16 +192,34 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(out).toContain('✓ Updated workflow');
   });
 
-  // A step stored as `#1` (review of 1099): a position names its step, whatever another id reads.
-  it('names a step by position even where another step\'s id reads "#1", and adds no step with such an id', async () => {
+  // A step stored as `#1` (review of 1099): beside it, the hidden step is renamed by the id it reads as.
+  it('renames a hidden step beside one stored as "#1" to an id with a space and an umlaut, and adds no step with an id like "#2"', async () => {
     const ZWSP = String.fromCodePoint(0x200B);
     storePipeline('wf-1', makePlanned({ steps: [{ id: `a${ZWSP}`, task: 'One' }, { id: '#1', task: 'Two' }, { id: 'Prüfung 2', task: 'Three' }] }));
-    const out = await updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications: [{ action: 'rename_step', step_id: '#1', value: 'Schritt 1' }] }, makeAgent(history));
+    const out = await updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications: [{ action: 'rename_step', step_id: 'a', value: 'Schritt 1' }] }, makeAgent(history));
     expect(out).toContain('✓ Updated workflow');
     _resetPipelineStore();
     expect(getPipeline('wf-1', history)!.steps.map((s) => s.id)).toEqual(['Schritt 1', '#1', 'Prüfung 2']);
     expect(await updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications: [{ action: 'add_step', step_id: '#2', value: 'Four' }] }, makeAgent(history)))
       .toBe('Error: add_step: the new id "#2" starts with "#", which names a step by its position. Choose another.');
+  });
+
+  it('refuses "#1" where it is both a position and another step\'s stored id, and names the way out', async () => {
+    storePipeline('wf-1', makePlanned({ steps: [{ id: 'a', task: 'One' }, { id: '#1', task: 'Two' }, { id: 'b', task: 'Three', input_from: ['#1'] }] }));
+    const edit = (modifications: unknown[]): Promise<string> =>
+      updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications } as never, makeAgent(history)) as Promise<string>;
+    expect(await edit([{ action: 'update_task', step_id: '#1', value: 'Changed' }]))
+      .toBe('Error: "#1" is both a position and the id of step #2, so task update cannot tell which one is meant. First rename step #2: rename_step with step_id "#2" and a new id that does not start with "#".');
+    expect(await edit([{ action: 'rename_step', step_id: '#2', value: 'two' }, { action: 'update_task', step_id: '#1', value: 'Changed' }])).toContain('✓ Updated workflow');
+    _resetPipelineStore();
+    expect(getPipeline('wf-1', history)!.steps).toMatchObject([{ id: 'a', task: 'Changed' }, { id: 'two', task: 'Two' }, { id: 'b', input_from: ['two'] }]);
+  });
+
+  it('cuts a long quoted id at 64 characters, not inside one', async () => {
+    const ZWSP = String.fromCodePoint(0x200B);
+    storePipeline('wf-1', makePlanned({ steps: [{ id: `${'x'.repeat(63)}😀😀${ZWSP}`, task: 'One' }] }));
+    const out = await updateWorkflowTool.handler({ workflow_id: 'wf-1', goal: 'Report' }, makeAgent(history));
+    expect(out).toContain(`step #1 ("${'x'.repeat(63)}😀"…)`);
   });
 
   it('quotes a stored id with a line break as one escaped string in the list of fixes', async () => {

@@ -51,7 +51,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
             type: 'object',
             properties: {
               action: { type: 'string', enum: ['remove', 'update_task', 'add_step', 'rename_step'] },
-              step_id: { type: 'string', description: 'Target step id, or its position as "#2"; the new id for add_step.' },
+              step_id: { type: 'string', description: 'Target step id, or its position as "#2"; the new id for add_step (no ".", "{", "}", not starting with "#").' },
               value: { type: 'string', description: 'New task text (update_task / add_step); the new id (rename_step), which the steps reading this one follow.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'add_step: dependency step ids.' },
               after: { type: 'string', description: 'add_step: insert after this step id (default: append).' },
