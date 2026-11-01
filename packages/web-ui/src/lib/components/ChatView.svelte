@@ -416,9 +416,11 @@
 		addToast(t('onboard.vault_confirmed'), 'success');
 	}
 
-	// Defer vault checkpoint until onboarding is complete or skipped
+	// Defer vault checkpoint until onboarding is complete or skipped. Not on `showOnboarding`: that
+	// stays false until the server said whose session it is, and the checkpoint must not open over an
+	// introduction that is still to come.
 	$effect(() => {
-		if (messages.length > 0 && !securityLoadTriggered && (onboardingDismissed || !showOnboarding)) {
+		if (messages.length > 0 && !securityLoadTriggered && (onboardingDismissed || onboardingStep >= ONBOARDING_CHIPS.length)) {
 			securityLoadTriggered = true;
 			void loadSecurityState();
 		}

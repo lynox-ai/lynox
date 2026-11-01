@@ -13,8 +13,8 @@ import { fileURLToPath } from 'node:url';
  * read from the server, so a route that turns owner-only brings its pages in by itself. A new page
  * that copies a write without the branch would hand a mandate a form whose save is always refused.
  *
- * A local helper that sends to the path it is handed (`post(path)` in BulkRunDetail) counts at
- * each of its calls. What it does not see: a URL a helper builds without being handed it
+ * A local helper that sends to the path it is handed (`post(path)` in BulkRunDetail,
+ * `post(apiBase, path, body)` in `api/person-erasure.ts`) counts at each of its calls. What it does not see: a URL a helper builds without being handed it
  * (`fetch(url(), …)`), a method passed as a variable, a helper imported from another module, and
  * writes in modules outside those two directories (the chat store is left out on purpose: every view
  * imports it).
@@ -40,7 +40,7 @@ const EXEMPT: Record<string, string> = {
  */
 const OUTSIDE_SETTINGS = [
 	'BulkRunDetail.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'KnowledgeQueueView.svelte',
-	'MemoryView.svelte', 'TriggersView.svelte', 'WorkflowLibraryView.svelte',
+	'MemoryView.svelte', 'PersonErasurePanel.svelte', 'TriggersView.svelte', 'WorkflowLibraryView.svelte',
 ];
 /**
  * Pages a mandate does not see at all, hidden by themselves: they must ask whose session it is,
@@ -55,7 +55,7 @@ const HIDDEN: Record<string, string> = {
 };
 
 /** Pages the scan counted when this landed; fewer means it went blind. */
-const PAGES_WHEN_LANDED = 34;
+const PAGES_WHEN_LANDED = 35;
 
 /** A route only the owner may use, as `METHOD` and a pattern over the path after `/api`. */
 interface OwnerRoute { method: string; path: RegExp; name: string }
@@ -88,40 +88,47 @@ function callAt(src: string, at: number, name: string): string {
 	return next === -1 ? rest : rest.slice(0, next + name.length + 1);
 }
 
+/** A local helper that sends to a path it is handed: its method, and which argument is the path. */
+interface PathHelper { method: string | null; at: number }
+
 /**
  * The local helpers in `src` that send to a path they are handed: `function post(path…)` whose
  * body calls `fetch(\`${base}${path}\`, …)`, directly or through another such helper
- * (`post` → `json` → `fetch` in BulkRunDetail). Each maps to the method it always sends, or to
- * `null` when its caller passes the options (`json(path, { method: 'POST' })`).
+ * (`post` → `json` → `fetch` in BulkRunDetail). The path may be any parameter
+ * (`post(apiBase, path, body)` in `api/person-erasure.ts`). Each maps to the method it always
+ * sends, or to `null` when its caller passes the options (`json(path, { method: 'POST' })`).
  */
-function pathHelpers(src: string): Map<string, string | null> {
-	const DEF = /(?:function\s+(\w+)\s*(?:<[^>]*>)?\s*\(\s*(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?\(\s*(\w+))/g;
+function pathHelpers(src: string): Map<string, PathHelper> {
+	const DEF = /(?:function\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)|const\s+(\w+)\s*=\s*(?:async\s*)?(?:<[^>]*>)?\s*\(([^)]*)\))/g;
 	const defs = [...src.matchAll(DEF)].map((m) => {
 		// The body ends at the closing brace on the definition's own indent, not at the next call.
 		const lineStart = src.lastIndexOf('\n', m.index) + 1;
 		const indent = /^[ \t]*/.exec(src.slice(lineStart))![0];
 		const rest = src.slice(m.index, m.index + 1500);
 		const end = rest.search(new RegExp(`\\n${indent}\\}`));
-		return { name: (m[1] ?? m[3])!, param: (m[2] ?? m[4])!, body: end === -1 ? rest : rest.slice(0, end) };
+		const params = (m[2] ?? m[4])!.split(',').map((x) => /^\s*(\w+)/.exec(x)?.[1] ?? '');
+		return { name: (m[1] ?? m[3])!, params, body: end === -1 ? rest : rest.slice(0, end) };
 	});
-	const helpers = new Map<string, string | null>();
+	const helpers = new Map<string, PathHelper>();
 	for (let changed = true; changed;) {
 		changed = false;
 		for (const d of defs) {
 			if (helpers.has(d.name)) continue;
-			const p = d.param.replace(/[$]/g, '\\$&');
-			if (new RegExp(`\\bfetch\\(\\s*\`\\$\\{[^}]*\\}\\$\\{${p}\\}`).test(d.body)) {
-				helpers.set(d.name, methodIn(d.body) ?? null);
-				changed = true;
-				continue;
-			}
-			for (const [name, method] of helpers) {
-				const m = new RegExp(`\\b${name}\\(\\s*${p}\\b`).exec(d.body);
-				if (!m) continue;
-				helpers.set(d.name, method ?? methodIn(d.body.slice(m.index)) ?? null);
-				changed = true;
-				break;
-			}
+			d.params.forEach((param, at) => {
+				if (!param || helpers.has(d.name)) return;
+				if (new RegExp(`\\bfetch\\(\\s*\`\\$\\{[^}]*\\}\\$\\{${param}\\}`).test(d.body)) {
+					helpers.set(d.name, { method: methodIn(d.body) ?? null, at });
+					changed = true;
+					return;
+				}
+				for (const [name, h] of helpers) {
+					const m = new RegExp(`\\b${name}\\(${'\\s*[^,()]+,'.repeat(h.at)}\\s*${param}\\b`).exec(d.body);
+					if (!m) continue;
+					helpers.set(d.name, { method: h.method ?? methodIn(d.body.slice(m.index)) ?? null, at });
+					changed = true;
+					return;
+				}
+			});
 		}
 	}
 	return helpers;
@@ -150,11 +157,12 @@ function ownerOnlyWrites(src: string, routes: OwnerRoute[]): string[] {
 		// The API base first (`${getApiBase()}`, `${apiBase}`, `${base}`), then every other interpolation.
 		if (url !== undefined) record(methodIn(call) ?? 'GET', pathOf(url, true));
 	}
-	for (const [name, method] of pathHelpers(src)) {
-		for (const m of src.matchAll(new RegExp(`\\b${name}\\(\\s*([\`'"])`, 'g'))) {
+	for (const [name, { method, at }] of pathHelpers(src)) {
+		// The arguments before the path are plain values (`apiBase`), not calls or strings.
+		for (const m of src.matchAll(new RegExp(`\\b${name}\\(${'\\s*[^,()`\'"]+,'.repeat(at)}\\s*([\`'"])`, 'g'))) {
 			const call = callAt(src, m.index, name);
 			const quote = m[1]!;
-			const url = call.slice(call.indexOf(quote) + 1).split(quote)[0]!;
+			const url = call.slice(m[0].length).split(quote)[0]!;
 			// A path handed to the helper starts at `/api`'s level: no base in front of it.
 			if (url.startsWith('/')) record(method ?? methodIn(call), pathOf(url, false));
 		}
@@ -274,6 +282,9 @@ describe('every page that writes through an owner-only route has a read-only vie
 		// A read of an owner-only route, straight or through the same helper, is no write.
 		expect(ownerOnlyWrites("\tconst res = await fetch(`${getApiBase()}/runs/${id}/secret`);\n", routes)).toEqual([]);
 		expect(ownerOnlyWrites(`${json}\tawait json(\`/runs/${'$'}{id}/secret\`);\n`, routes)).toEqual([]);
+		// The path as a later argument, after the base (`post(apiBase, path, body)`).
+		const based = "async function post(apiBase: string, path: string, body: unknown) {\n\tconst res = await fetch(`${apiBase}${path}`, { method: 'POST' });\n}\n";
+		expect(ownerOnlyWrites(`${based}\tconst a = await post(apiBase, '/runs/1/approve', {});\n`, routes)).toEqual(['POST /api/runs/:id/approve']);
 		// A helper whose fetch does not take its parameter as the path is no path helper.
 		const fixed = "\tfunction ping(id: string) {\n\t\treturn fetch(`${getApiBase()}/health`, { method: 'POST' });\n\t}\n";
 		expect(ownerOnlyWrites(`${fixed}\tawait ping(\`/runs/x/approve\`);\n`, routes)).toEqual([]);

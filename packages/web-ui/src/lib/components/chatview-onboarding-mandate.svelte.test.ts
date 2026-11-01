@@ -37,6 +37,8 @@ let component: Record<string, unknown> | undefined;
 let t: (key: string) => string;
 /** Every request other than a GET, as `METHOD path`. */
 let writes: string[];
+/** Whether the vault checkpoint asked for the key it shows. */
+let vaultKeyRead: boolean;
 /** Holds `GET /api/config` until released, to look at the page while the answer is out. */
 let configGate: Promise<void>;
 
@@ -50,6 +52,15 @@ async function renderFor(viewer: 'mandate' | 'owner'): Promise<void> {
 		}
 		if (path.endsWith('/onboarding/status')) return json({ knowledgeDone: false, skipped: false, durableMemory: false, firstSessionAt: null });
 		if (path.endsWith('/config')) { await configGate; return json({ viewer }); }
+		if (path.endsWith('/vault/key')) { vaultKeyRead = true; return json({ configured: true, key: 'k' }); }
+		if (path.endsWith('/sessions')) return json({ sessionId: 't1' });
+		if (path.endsWith('/run')) {
+			const enc = new TextEncoder();
+			const body = new ReadableStream<Uint8Array>({
+				start(c) { c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ agent: 'lynox' })}\n\n`)); c.close(); },
+			});
+			return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+		}
 		return json({});
 	}));
 	const { default: ChatView } = await import('./ChatView.svelte');
@@ -70,14 +81,17 @@ beforeEach(async () => {
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	writes = [];
+	vaultKeyRead = false;
 	configGate = Promise.resolve();
 });
 
-afterEach(() => {
+afterEach(async () => {
 	if (component) svelte.unmount(component);
 	component = undefined;
 	target.remove();
 	vi.unstubAllGlobals();
+	localStorage.clear();
+	(await import('../stores/chat.svelte.js')).newChat();
 });
 
 describe('ChatView and the owner\'s introduction', () => {
@@ -98,6 +112,23 @@ describe('ChatView and the owner\'s introduction', () => {
 		svelte.flushSync();
 		// Twin in the same test: the answer arrives, and the owner gets the introduction.
 		expect(target.textContent).toContain(t('onboard.skip_onboarding'));
+	});
+
+	it('keeps the vault checkpoint back while the owner\'s introduction may still come', async () => {
+		const chat = await import('../stores/chat.svelte.js');
+		let release!: () => void;
+		configGate = new Promise((r) => { release = r; });
+		await renderFor('owner');
+		// A chat with a message in it, as after a reload in the middle of the introduction.
+		await chat.sendMessage('Hallo', undefined, undefined, { typed: true });
+		await settle();
+		svelte.flushSync();
+		expect(chat.getMessages().length, 'positive control: the chat has a message').toBeGreaterThan(0);
+		release();
+		await settle();
+		svelte.flushSync();
+		// The answer says owner, the introduction is due: the checkpoint still waits for it.
+		expect(vaultKeyRead).toBe(false);
 	});
 
 	it('runs it in the owner\'s, and stamps the first session', async () => {
