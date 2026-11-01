@@ -1242,6 +1242,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
 
   if (input.modifications?.length) {
+    // One run's changes: drop a step or change its task. Ids and the step list change only in the
+    // stored workflow (`update_workflow_steps`), where they are saved and checked.
+    if (input.modifications.some(m => m.action !== 'remove' && m.action !== 'update_task')) {
+      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.';
+    }
     const error = applyModifications(steps, input.modifications);
     if (error) return error;
   }

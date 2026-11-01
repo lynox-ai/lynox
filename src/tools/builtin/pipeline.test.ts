@@ -920,6 +920,15 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
 
   // A name takes none of the places real text puts one (register 1099): a ZWNJ an old step id holds
   // between letters is escaped, while the same character in the step's result stays.
+  it('changes one run\'s steps by removal and task only: a rename or an added step goes to the stored workflow', async () => {
+    const pipelineId = seedStoredPipeline([{ id: 'analyze', task: 'Analyze code' }]);
+    for (const action of ['rename_step', 'add_step']) {
+      const result = await runWorkflowTool.handler({ workflow_id: pipelineId, modifications: [{ action, step_id: 'analyze', value: 'x' }] } as never, makePipelineAgent());
+      expect(result, action).toBe('Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.');
+    }
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
   it('escapes a ZWNJ an old step id holds between letters, and keeps one in the step\'s result', async () => {
     const stepId = `ab\u200Ccd`;
     const text = 'می\u200Cخواهم';

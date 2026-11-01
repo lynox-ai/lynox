@@ -5,7 +5,7 @@ import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/hum
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
 import { validateContractAgainstSteps } from '../../orchestrator/contract-validation.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { findHiddenChar, findHiddenInName, stripHidden } from '../../core/hidden-text.js';
+import { findHiddenChar, findHiddenInName, stripHiddenInName } from '../../core/hidden-text.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface UpdateWorkflowInput {
@@ -51,7 +51,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
             type: 'object',
             properties: {
               action: { type: 'string', enum: ['remove', 'update_task', 'add_step', 'rename_step'] },
-              step_id: { type: 'string', description: 'Target step id; the new id for add_step.' },
+              step_id: { type: 'string', description: 'Target step id, or its position as "#2"; the new id for add_step.' },
               value: { type: 'string', description: 'New task text (update_task / add_step); the new id (rename_step), which the steps reading this one follow.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'add_step: dependency step ids.' },
               after: { type: 'string', description: 'add_step: insert after this step id (default: append).' },
@@ -76,7 +76,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     if (modifications.length === 0 && input.goal === undefined) {
       return 'Error: At least one modification, or a new goal, is required.';
     }
-    if (input.goal !== undefined && input.goal.trim() === '') return 'Error: "goal" cannot be empty.';
+    if (input.goal !== undefined && (typeof input.goal !== 'string' || input.goal.trim() === '')) return 'Error: "goal" must be non-empty text.';
 
     const planned = getPipeline(input.workflow_id, runHistory);
     if (!planned) {
@@ -123,7 +123,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const seen = new Set<string>();
     for (const s of steps) {
       // An id the edit kept may be stored text from before the save refused hidden characters.
-      if (seen.has(s.id)) return `Error: Duplicate step id "${stripHidden(s.id)}" after the edit.`;
+      if (seen.has(s.id)) return `Error: Duplicate step id "${stripHiddenInName(s.id)}" after the edit.`;
       seen.add(s.id);
     }
 
@@ -142,18 +142,25 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     // (cron-eligible) workflow to interactive, which can no longer run headless.
     // Text stored before the save refused characters that render as nothing: the save below would
     // refuse it again, so name the way out for each place instead of the save's general sentence.
-    const hiddenId = steps.find(s => findHiddenInName(s.id, 'id') !== null);
-    if (hiddenId) {
-      return `Error: Step "${stripHidden(hiddenId.id)}" has an id saved with a character that does not show, which a save now refuses. Nothing was saved. Add a rename_step modification to this call (step_id "${stripHidden(hiddenId.id)}", value: a new id you type), and the steps that read it follow the new id.`;
-    }
-    const goal = input.goal ?? planned.goal;
-    if (findHiddenChar(goal) !== null) {
-      return input.goal !== undefined
-        ? 'Error: The new goal contains a character that renders as nothing. Nothing was saved. Type the goal again in your own words.'
-        : 'Error: The workflow\'s goal was saved with a character that does not show, which a save now refuses. Nothing was saved. Pass a new "goal" in this call, written in your own words.';
-    }
+    // What this tool cannot change comes first; the rest goes in one answer, so one call fixes all.
     if (findHiddenChar(planned.name) !== null) {
       return 'Error: The workflow\'s name was saved with a character that does not show, which a save now refuses. Nothing was saved. Ask the user to rename the workflow in the library, then edit it again.';
+    }
+    if (findHiddenChar((planned as { parameters?: unknown }).parameters) !== null) {
+      return 'Error: One of the workflow\'s parameters was saved with a character that does not show, which a save now refuses. Nothing was saved, and this tool cannot change parameters: tell the user the workflow has to be saved anew.';
+    }
+    if (input.goal !== undefined && findHiddenChar(input.goal) !== null) {
+      return 'Error: The new goal contains a character that renders as nothing. Nothing was saved. Type the goal again in your own words.';
+    }
+    const goal = input.goal ?? planned.goal;
+    const fixes: string[] = [];
+    steps.forEach((s, i) => {
+      if (findHiddenInName(s.id, 'id') !== null) fixes.push(`rename_step for step #${i + 1} ("${stripHiddenInName(s.id)}"): step_id "#${i + 1}", value a new id you type; the steps that read it follow`);
+      if (findHiddenChar(s.task) !== null) fixes.push(`update_task for step #${i + 1}: step_id "#${i + 1}", value its task typed again in your own words`);
+    });
+    if (findHiddenChar(goal) !== null) fixes.push('a new "goal", written in your own words');
+    if (fixes.length > 0) {
+      return `Error: This workflow holds text saved with a character that does not show, which a save now refuses. Nothing was saved. Call again with this call's modifications and, after them:\n${fixes.map(f => `- ${f}`).join('\n')}`;
     }
 
     const newMode = inferPipelineMode(steps);

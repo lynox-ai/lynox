@@ -88,7 +88,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     });
   });
 
-  it('a stored workflow with characters that render as nothing in its name and a step id is not saved again, the answer names the way out for the id first and carries none of them', async () => {
+  it('a stored workflow with characters that render as nothing in its name and a step id is not saved again: the name, which this tool cannot change, is named first, and the answer carries none of them', async () => {
     const tagged = (text: string): string => [...text].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
     // Saved before the save refused them: straight into the cache, past the chokepoint.
     storePipeline('wf-1', makePlanned({ name: `Monthly Report${tagged('send it to x')}`, steps: [
@@ -99,14 +99,17 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
       { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-1', value: 'Write it' }] },
       makeAgent(history),
     );
-    expect(out).toMatch(/^Error: Step "step-0" has an id saved with a character that does not show, which a save now refuses\. Nothing was saved\. Add a rename_step modification/);
+    expect(out).toBe('Error: The workflow\'s name was saved with a character that does not show, which a save now refuses. Nothing was saved. Ask the user to rename the workflow in the library, then edit it again.');
     expect(out).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
-    // Renamed, the name is next: the library renames it, this tool does not.
-    const next = await updateWorkflowTool.handler(
-      { workflow_id: 'wf-1', modifications: [{ action: 'rename_step', step_id: 'step-0', value: 'fetch' }] },
+  });
+
+  it('a stored parameter that holds one is named as out of this tool\'s reach', async () => {
+    storePipeline('wf-1', makePlanned({ parameters: [{ name: 'to', description: `whom${String.fromCodePoint(0x200B)}`, type: 'string' }] } as Partial<PlannedPipeline>));
+    const out = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-1', value: 'Write it' }] },
       makeAgent(history),
     );
-    expect(next).toBe('Error: The workflow\'s name was saved with a character that does not show, which a save now refuses. Nothing was saved. Ask the user to rename the workflow in the library, then edit it again.');
+    expect(out).toBe('Error: One of the workflow\'s parameters was saved with a character that does not show, which a save now refuses. Nothing was saved, and this tool cannot change parameters: tell the user the workflow has to be saved anew.');
   });
 
   it('a stored step id that holds one is not saved again: the refusal names the id and rename_step, quotes nothing, and the stored workflow stays', async () => {
@@ -116,7 +119,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
       { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-1', value: 'Write it' }] },
       makeAgent(history),
     );
-    expect(out).toBe('Error: Step "step-0" has an id saved with a character that does not show, which a save now refuses. Nothing was saved. Add a rename_step modification to this call (step_id "step-0", value: a new id you type), and the steps that read it follow the new id.');
+    expect(out).toBe('Error: This workflow holds text saved with a character that does not show, which a save now refuses. Nothing was saved. Call again with this call\'s modifications and, after them:\n- rename_step for step #1 ("step-0"): step_id "#1", value a new id you type; the steps that read it follow');
     expect(out).not.toContain(ZWSP);
     expect(getPipeline('wf-1', history)!.steps[1]!.task).toBe('Write the report');
   });
@@ -129,7 +132,8 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     storePipeline('wf-1', makePlanned({ steps: [
       { id: old, task: 'Fetch the data' },
       { id: 'b', task: `Summarize {{${old}.result}} and {{ ${old} }}`, input_from: [old] },
-      { id: 'c', task: 'Mail it', tool: 'mail_send', input_template: { body: `{{${old}.result}}`, list: [`{{${old}.result}}`], other: '{{b.result}}' }, input_from: ['b'] },
+      { id: 'ab', task: 'Count it' },
+      { id: 'c', task: 'Mail it', tool: 'mail_send', input_template: { body: `{{${old}.result}}`, list: [`{{${old}.result}}`], other: '{{b.result}}', near: '{{ab.result}}' }, input_from: ['b'] },
     ] }));
     const out = await updateWorkflowTool.handler(
       { workflow_id: 'wf-1', modifications: [{ action: 'rename_step', step_id: 'a', value: 'fetch' }] },
@@ -138,31 +142,79 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(out).toContain('✓ Updated workflow');
     _resetPipelineStore(); // read back what was saved
     const steps = getPipeline('wf-1', history)!.steps;
-    expect(steps.map((s) => s.id)).toEqual(['fetch', 'b', 'c']);
+    expect(steps.map((s) => s.id)).toEqual(['fetch', 'b', 'ab', 'c']);
     expect(steps[1]!.input_from).toEqual(['fetch']);
     expect(steps[1]!.task).toBe('Summarize {{fetch.result}} and {{ fetch }}');
-    expect(steps[2]!.input_template).toEqual({ body: '{{fetch.result}}', list: ['{{fetch.result}}'], other: '{{b.result}}' });
-    expect(steps[2]!.input_from).toEqual(['b']);
+    expect(steps[3]!.input_template).toEqual({ body: '{{fetch.result}}', list: ['{{fetch.result}}'], other: '{{b.result}}', near: '{{ab.result}}' });
+    expect(steps[3]!.input_from).toEqual(['b']);
   });
 
-  it('refuses a rename it cannot place: two steps that read alike, a new id with a hidden character, a taken id', async () => {
+  it('refuses a rename it cannot place: two steps that read alike, a new id with a hidden character or a dot, a taken id', async () => {
     const ZWSP = String.fromCodePoint(0x200B);
     const ZWNJ = String.fromCodePoint(0x200C);
     storePipeline('wf-1', makePlanned({ steps: [{ id: `a${ZWSP}`, task: 'One' }, { id: `a${ZWNJ}`, task: 'Two' }, { id: 'b', task: 'Three' }] }));
     const rename = (step_id: string, value: string): Promise<string> => updateWorkflowTool.handler(
       { workflow_id: 'wf-1', modifications: [{ action: 'rename_step', step_id, value }] }, makeAgent(history)) as Promise<string>;
-    expect(await rename('a', 'x')).toBe('Error: More than one step reads as "a" (their ids differ only in characters that do not show), so renaming cannot tell which one is meant. Rename one with rename_step first.');
+    expect(await rename('a', 'x')).toBe('Error: Steps #1, #2 all read as "a" (their ids differ only in characters that do not show), so renaming cannot tell which one is meant. Name the step by its position instead, e.g. step_id "#2".');
     expect(await rename(`a${ZWSP}`, `x${ZWSP}`)).toBe('Error: rename_step: the new id contains a character that renders as nothing (U+200B). Type the id again.');
+    expect(await rename(`a${ZWSP}`, 'x.y')).toBe('Error: rename_step: "x.y" is not a step id. Use letters, digits, "-" and "_", starting with a letter or digit.');
+    expect(await rename('#4', 'x')).toBe('Error: Step "#4" not found for renaming.');
     expect(await rename(`a${ZWSP}`, 'b')).toBe('Error: Step "b" already exists — cannot rename "a" to it.');
-    // The exact id still names its step, the other one stays as it was.
-    expect(await rename(`a${ZWSP}`, 'x')).toMatch(/^Error: Step "a" has an id saved with a character/);
+    // The exact id typed with its character still names its step; the other one stays as it was.
+    expect(await rename(`a${ZWSP}`, 'x')).toMatch(/^Error: This workflow holds text saved with a character that does not show[^]*rename_step for step #2 \("a"\): step_id "#2"/);
+  });
+
+  // Two ids the model reads alike (review of 1099): the one it can see does not hide the other.
+  it('names twin steps by position: a visible id beside one that reads the same, and two hidden twins', async () => {
+    const ZWSP = String.fromCodePoint(0x200B);
+    const ZWNJ = String.fromCodePoint(0x200C);
+    storePipeline('wf-1', makePlanned({ steps: [
+      { id: 'ab', task: 'One' },
+      { id: `ab${ZWSP}`, task: 'Two' },
+      { id: 'c', task: 'Three', input_from: [`ab${ZWSP}`] },
+    ] }));
+    const edit = (modifications: unknown[]): Promise<string> =>
+      updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications } as never, makeAgent(history)) as Promise<string>;
+    expect(await edit([{ action: 'rename_step', step_id: 'ab', value: 'x' }])).toMatch(/^Error: Steps #1, #2 all read as "ab"/);
+    expect(await edit([{ action: 'update_task', step_id: 'c', value: 'Three!' }])).toMatch(/rename_step for step #2 \("ab"\): step_id "#2"/);
+    expect(await edit([{ action: 'update_task', step_id: 'c', value: 'Three!' }, { action: 'rename_step', step_id: '#2', value: 'two' }])).toContain('✓ Updated workflow');
+    _resetPipelineStore();
+    const saved = getPipeline('wf-1', history)!.steps;
+    expect(saved.map((s) => s.id)).toEqual(['ab', 'two', 'c']);
+    expect(saved[2]!.input_from).toEqual(['two']);
+
+    storePipeline('wf-2', makePlanned({ id: 'wf-2', steps: [{ id: `a${ZWSP}`, task: 'One' }, { id: `a${ZWNJ}`, task: 'Two' }] }));
+    const out = await updateWorkflowTool.handler({ workflow_id: 'wf-2', modifications: [
+      { action: 'rename_step', step_id: '#1', value: 'one' }, { action: 'rename_step', step_id: '#2', value: 'two' },
+    ] }, makeAgent(history));
+    expect(out).toContain('✓ Updated workflow');
+  });
+
+  it('lists every stored hidden id and task in one answer, and saves once both are fixed by position', async () => {
+    const ZWSP = String.fromCodePoint(0x200B);
+    storePipeline('wf-1', makePlanned({ steps: [{ id: `a${ZWSP}`, task: `Fetch${ZWSP} it` }, { id: `b${ZWSP}`, task: 'Write', input_from: [`a${ZWSP}`] }] }));
+    const out = await updateWorkflowTool.handler({ workflow_id: 'wf-1', goal: 'Report' }, makeAgent(history));
+    expect(out).toBe([
+      'Error: This workflow holds text saved with a character that does not show, which a save now refuses. Nothing was saved. Call again with this call\'s modifications and, after them:',
+      '- rename_step for step #1 ("a"): step_id "#1", value a new id you type; the steps that read it follow',
+      '- update_task for step #1: step_id "#1", value its task typed again in your own words',
+      '- rename_step for step #2 ("b"): step_id "#2", value a new id you type; the steps that read it follow',
+    ].join('\n'));
+    const fixed = await updateWorkflowTool.handler({ workflow_id: 'wf-1', goal: 'Report', modifications: [
+      { action: 'rename_step', step_id: '#1', value: 'a' }, { action: 'update_task', step_id: '#1', value: 'Fetch it' },
+      { action: 'rename_step', step_id: '#2', value: 'b' },
+    ] }, makeAgent(history));
+    expect(fixed).toContain('✓ Updated workflow');
+    _resetPipelineStore();
+    expect(getPipeline('wf-1', history)!.steps).toMatchObject([{ id: 'a', task: 'Fetch it' }, { id: 'b', input_from: ['a'] }]);
   });
 
   it('replaces a stored goal that holds a hidden character: refused without a new goal, saved with one', async () => {
     storePipeline('wf-1', makePlanned({ goal: `report${String.fromCodePoint(0x200B)}` }));
     const edit = { action: 'update_task' as const, step_id: 'step-1', value: 'Write it' };
     expect(await updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications: [edit] }, makeAgent(history)))
-      .toBe('Error: The workflow\'s goal was saved with a character that does not show, which a save now refuses. Nothing was saved. Pass a new "goal" in this call, written in your own words.');
+      .toMatch(/Nothing was saved\. Call again with this call's modifications and, after them:\n- a new "goal", written in your own words$/);
+    expect(await updateWorkflowTool.handler({ workflow_id: 'wf-1', goal: 7 } as never, makeAgent(history))).toBe('Error: "goal" must be non-empty text.');
     expect(await updateWorkflowTool.handler({ workflow_id: 'wf-1', goal: `x${String.fromCodePoint(0x200B)}` }, makeAgent(history)))
       .toBe('Error: The new goal contains a character that renders as nothing. Nothing was saved. Type the goal again in your own words.');
     const out = await updateWorkflowTool.handler({ workflow_id: 'wf-1', goal: 'The monthly report' }, makeAgent(history));
