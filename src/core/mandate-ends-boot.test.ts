@@ -321,22 +321,25 @@ describe('Engine boot — mandate ends', () => {
       expect(owners).not.toHaveBeenCalled();
     });
 
-    it('asks the worker to stop the runs of plans a login paused, once the login commits, without waiting for the sweep', async () => {
+    it('asks the worker to stop paused plans\' runs right after a login extends an ended grant, outside its transaction, without the sweep', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'lynox-runextendboot-'));
       dirs.push(dir);
       const engine = await boot(dir);
       engine.startWorkerLoop(3_600_000);
       const now = Math.floor(Date.now() / 1000);
       live(engine, now + 2);
-      const worker = vi.spyOn(WorkerLoop.prototype, 'stopEndedStarters');
+      const db = engine.getEngineDb()!.getDb();
+      const inTransaction: boolean[] = [];
+      const worker = vi.spyOn(WorkerLoop.prototype, 'stopEndedStarters').mockImplementation(() => { inTransaction.push(db.inTransaction); return []; });
       const clock = vi.spyOn(Date, 'now').mockReturnValue((now + 3) * 1000);
       try {
-        // The grant ran out; a later login extends it.
+        // The grant ran out; a later login extends it. Not while the login records it: that is
+        // inside its transaction, where the pause it wrote is not committed.
         engine.getMandateEnds()!.record({ ...GRANT, mandateExp: now + 3_600 }, 200);
-        // Inside the login's transaction nothing is stopped yet: the pause it wrote is not committed.
         expect(worker).not.toHaveBeenCalled();
         await Promise.resolve();
         expect(worker).toHaveBeenCalledOnce();
+        expect(inTransaction).toEqual([false]);
         // Handed the store's own answer: the extended grant is live again, so only a paused plan stops.
         expect(worker.mock.calls[0]![0]('M-run')).toBe(true);
       } finally { clock.mockRestore(); worker.mockRestore(); }

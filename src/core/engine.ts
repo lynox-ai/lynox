@@ -1548,7 +1548,8 @@ export class Engine {
       pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
       // A run of a plan paused here would go on until the next sweep, up to 5 minutes, with its
       // member live again and its connections open to it. So the parts that end runs follow at
-      // once, after the login commits: a login whose transaction fails paused nothing to stop.
+      // once, outside the login's transaction, as on a revoke. They read what was committed: when
+      // the login's transaction fails, the pause is gone with it and so is the reason to stop.
       queueMicrotask(() => this.endEndedMandateRuns());
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
