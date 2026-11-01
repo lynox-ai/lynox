@@ -14,6 +14,12 @@ import { getApiBase } from '../config.svelte.js';
 export type SettingsViewer = 'owner' | 'mandate' | 'none';
 
 let viewer = $state<SettingsViewer | null>(null);
+/**
+ * Whether `viewer` is known, kept outside the reactive state: a page asks from an effect, and an
+ * effect that read `viewer` would run again when the answer arrives and reload what it loads
+ * alongside.
+ */
+let known = false;
 let pending: Promise<void> | null = null;
 
 /**
@@ -45,12 +51,12 @@ export function isOwnerSession(): boolean {
 export function noteSettingsViewer(body: unknown): void {
 	if (body === null || typeof body !== 'object' || !('viewer' in body)) return;
 	const v = (body as { viewer: unknown }).viewer;
-	if (v === 'owner' || v === 'mandate' || v === 'none') viewer = v;
+	if (v === 'owner' || v === 'mandate' || v === 'none') { viewer = v; known = true; }
 }
 
 /** Reads `viewer` once per page load; later calls share the first. */
 export function loadSettingsViewer(): Promise<void> {
-	if (viewer !== null) return Promise.resolve();
+	if (known) return Promise.resolve();
 	const asked = generation;
 	pending ??= (async () => {
 		let answered = false;
@@ -69,7 +75,7 @@ export function loadSettingsViewer(): Promise<void> {
 		}
 		if (asked !== generation) return;
 		// An answer without `viewer` (an older engine) is not asked again; no answer is.
-		if (!answered && viewer === null && retries < RETRY_MS.length && retryTimer === null) {
+		if (!answered && !known && retries < RETRY_MS.length && retryTimer === null) {
 			retryTimer = setTimeout(() => { retryTimer = null; void loadSettingsViewer(); }, RETRY_MS[retries++]);
 		}
 	})();
@@ -80,6 +86,7 @@ export function loadSettingsViewer(): Promise<void> {
 export function resetSettingsViewer(): void {
 	generation++;
 	viewer = null;
+	known = false;
 	pending = null;
 	retries = 0;
 	if (retryTimer !== null) clearTimeout(retryTimer);
