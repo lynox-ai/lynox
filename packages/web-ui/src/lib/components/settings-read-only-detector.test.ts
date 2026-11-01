@@ -27,6 +27,8 @@ const SERVER = fileURLToPath(new URL('../../../../../src/server/http-api.ts', im
  */
 const EXEMPT: Record<string, string> = {
 	'BulkRunsSetting.svelte': 'Its page leaves it out for a mandate (bulk runs are the owner\'s switch); the mandate is told the owner turns it on.',
+	'ContactsView.svelte': 'A mandate reads the contacts without "remove"; one button on a readable page gets no sentence.',
+	'FileBrowserView.svelte': 'A mandate browses and downloads without "delete"; one button on a readable page gets no sentence.',
 	'ChatView.svelte': 'Not a settings page: it reveals the vault key only for the owner\'s backup reminder, and a refused reveal shows nothing.',
 };
 /**
@@ -35,8 +37,8 @@ const EXEMPT: Record<string, string> = {
  * checked page by page apart from this detector. Listed so a NEW page still fails here.
  */
 const OUTSIDE_SETTINGS = [
-	'ApprovalsView.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'KnowledgeQueueView.svelte',
-	'MemoryView.svelte', 'OnboardingBasics.svelte', 'TriggersView.svelte', 'WorkflowLibraryView.svelte',
+	'ApprovalsView.svelte', 'BulkRunsView.svelte',
+	'OnboardingBasics.svelte', 'TriggersView.svelte', 'WorkflowLibraryView.svelte',
 ];
 /**
  * Pages a mandate does not see at all, hidden by themselves: they must ask whose session it is,
@@ -178,7 +180,7 @@ describe('every page that writes through an owner-only route has a read-only vie
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
-		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'ChatView.svelte']);
+		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'ChatView.svelte']);
 		for (const name of OUTSIDE_SETTINGS) expect(pages.map((p) => basename(p))).toContain(name);
 		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte', 'SecretsView.svelte', 'KeysView.svelte', 'CalendarSettings.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {

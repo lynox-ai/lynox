@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	// DK-UX: when durable memory is on, "Wissen" browses the ACTIVE knowledge_entries +
 	// profile/playbook blocks instead of the legacy memory-file namespaces. Editing still
@@ -22,6 +23,12 @@
 	let error = $state('');
 	let editingIdx = $state<number | null>(null);
 	let editingText = $state('');
+	// Every change here is the owner's (the routes refuse a mandate): the buttons and fields show
+	// only once the server said the session is the owner's. A mandate reads the entries, and once,
+	// who changes them.
+	const ownerActs = $derived(isOwnerSession());
+	const mandate = $derived(isMandateSession());
+	void loadSettingsViewer();
 
 	// Knowledge-graph stats surfaced in the Wissen header (M5): a glanceable
 	// "how much do I know" summary, mirroring StatusBar's /api/kg/stats panel.
@@ -231,6 +238,9 @@
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
+{#if mandate}
+	<p class="text-sm text-text-muted mb-4">{t('memory.owner_only_notice')}</p>
+{/if}
 {#if hasDurableMemory}
 	<!-- DK-UX read-surface: active durable knowledge. Edits go via chat; a wrong entry can
 	     be dropped here, because the chat path refuses on a turn that read external content. -->
@@ -276,12 +286,14 @@
 							{#if entry.pinned}<span class="rounded-full bg-accent/15 text-accent-text px-1.5">{t('knowledge.active.pinned')}</span>{/if}
 							{#if entry.subjectName}<span>→ {entry.subjectName}</span>{/if}
 							<span>{entry.kind}</span>
+							{#if ownerActs}
 							<button
 								type="button"
 								class="ml-auto -my-1 px-2 py-1 rounded-[var(--radius-sm)] text-text-subtle hover:text-danger hover:bg-danger/10 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-text-subtle disabled:hover:bg-transparent transition-colors"
 								disabled={dkRetiringId !== null}
 								onclick={() => void retireEntry(entry)}
 							>{dkRetiringId === entry.id ? t('knowledge.active.retiring') : t('knowledge.active.retire')}</button>
+							{/if}
 						</div>
 						<p class="text-sm text-text whitespace-pre-wrap leading-relaxed">{entry.text}</p>
 					</div>
@@ -289,7 +301,9 @@
 			</div>
 		{/if}
 
-		<p class="text-xs text-text-subtle mt-5">{t('knowledge.active.edit_hint')}</p>
+		{#if ownerActs}
+			<p class="text-xs text-text-subtle mt-5">{t('knowledge.active.edit_hint')}</p>
+		{/if}
 	{/if}
 {:else}
 	<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-4">
@@ -385,7 +399,8 @@
 						{#if date}
 							<p class="text-[10px] text-text-subtle mt-1.5 font-mono">{date}</p>
 						{/if}
-						<!-- Edit + Delete buttons (visible on hover) -->
+						<!-- Edit + Delete buttons (visible on hover), the owner's only -->
+						{#if ownerActs}
 						<div class="absolute top-2.5 right-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
 							<button
 								onclick={() => { editingIdx = i; editingText = text; }}
@@ -396,6 +411,7 @@
 								class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-colors"
 							>{t('memory.delete_button')}</button>
 						</div>
+						{/if}
 					{/if}
 				</div>
 			{/each}
@@ -403,10 +419,11 @@
 	{:else}
 		<div class="text-text-subtle text-sm space-y-1">
 			<p>{t('memory.no_entries')} {selectedNs}.</p>
-			<p class="text-xs">{t('memory.no_entries_hint')}</p>
+			{#if ownerActs}<p class="text-xs">{t('memory.no_entries_hint')}</p>{/if}
 		</div>
 	{/if}
 
+	{#if ownerActs}
 	<div class="mt-6 space-y-3">
 		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-3">
 			<p class="text-xs font-mono uppercase tracking-widest text-text-subtle">{t('memory.add_entry')}</p>
@@ -446,5 +463,6 @@
 		</div>
 
 	</div>
+	{/if}
 {/if}
 </div>

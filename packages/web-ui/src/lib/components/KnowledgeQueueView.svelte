@@ -7,6 +7,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { approveTargetLabel, type ApproveTarget } from '../stores/knowledge-queue-target.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	interface QueueEntry {
 		id: string;
@@ -31,6 +32,12 @@
 	let busyId = $state<string | null>(null);
 	let editingId = $state<string | null>(null);
 	let editText = $state('');
+	// Approving, editing and rejecting are the owner's (the route refuses a mandate): the buttons
+	// show only once the server said the session is the owner's. A mandate reads the queue, and
+	// once, who decides.
+	const ownerActs = $derived(isOwnerSession());
+	const mandate = $derived(isMandateSession());
+	void loadSettingsViewer();
 
 	const { onCountChange = undefined }: { onCountChange?: ((n: number) => void) | undefined } = $props();
 
@@ -95,11 +102,14 @@
 	<div class="flex items-center justify-between">
 		<div>
 			<h2 class="text-sm font-semibold">{t('knowledge.queue.title')}</h2>
-			<p class="text-xs text-text-muted mt-0.5">{t('knowledge.queue.subtitle')}</p>
+			<p class="text-xs text-text-muted mt-0.5">{t(mandate ? 'knowledge.queue.subtitle_mandate' : 'knowledge.queue.subtitle')}</p>
 		</div>
 		<button type="button" aria-label={t('knowledge.queue.reload_aria')} title={t('knowledge.queue.reload_aria')} class="text-xs text-text-muted hover:text-text px-2 py-1 rounded-[var(--radius-sm)] hover:bg-bg-muted" onclick={() => void load()}>↻</button>
 	</div>
 
+	{#if mandate}
+		<p class="text-xs text-text-muted">{t('knowledge.queue.owner_only_notice')}</p>
+	{/if}
 	{#if error}
 		<div class="text-xs text-red-500 border border-red-500/30 rounded-[var(--radius-sm)] px-3 py-2">{error}</div>
 	{/if}
@@ -129,7 +139,9 @@
 					<span>{entry.kind}</span>
 					<span class="ml-auto">{fmtDate(entry.createdAt)}</span>
 				</div>
-				{#if editingId === entry.id}
+				{#if !ownerActs}
+					<p class="text-xs whitespace-pre-wrap">{entry.text}</p>
+				{:else if editingId === entry.id}
 					<textarea
 						aria-label={t('knowledge.queue.edit_aria')}
 						class="w-full text-xs bg-bg-muted border border-border rounded-[var(--radius-sm)] p-2 min-h-[60px]"
