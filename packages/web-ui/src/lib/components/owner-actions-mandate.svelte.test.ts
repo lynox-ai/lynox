@@ -20,7 +20,8 @@ vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 // The owner's actions on the workflow library and the schedules page, in a mandate's session (ux
 // U-104, register 1148): running, renaming and deleting a workflow, and confirming a plan, are the
 // owner's (`ownerOnly` in http-api.ts). A mandate gets no button whose answer is always 403, and is
-// told who does it. Each page loads the shared store itself (`GET /api/config` says `viewer`); the
+// told who does it, and nobody sees those buttons before it is known that the owner reads. Each
+// page loads the shared store itself (`GET /api/config` says `viewer`); the
 // schedules page also reads the `viewer` its own list sends. The library's list sends none today,
 // so the mocks here send none for it either.
 
@@ -100,6 +101,13 @@ describe('the workflow library in a mandate\'s session', () => {
 		expect(buttons()).toEqual(expect.arrayContaining(['Planen', 'Bearbeiten']));
 		expect(notice()).toBe('Workflows hier ausführen, umbenennen oder löschen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber. Ausführen kannst du einen Workflow auch im Chat: bitte lynox darum.');
 	});
+
+	it('shows neither Run nor Rename nor Delete, nor the sentence, while nobody has said whose session it is', async () => {
+		await open('library');
+		expect(buttons()).toEqual(expect.arrayContaining(['Planen', 'Bearbeiten']));   // the list is shown
+		expect(buttons().filter((b) => ['Ausführen', 'Umbenennen', 'Löschen'].includes(b))).toEqual([]);
+		expect(notice()).toBeUndefined();
+	});
 });
 
 describe('the schedules page in a mandate\'s session', () => {
@@ -123,5 +131,17 @@ describe('the schedules page in a mandate\'s session', () => {
 		await open('triggers');
 		expect(buttons()).not.toContain('Bestätigen');
 		expect(target.querySelector('[data-trigger-awaits]')?.textContent?.trim()).toBe('Läuft erst, wenn der Inhaber diesen Plan bestätigt.');
+	});
+
+	it('offers no confirmation while nobody has said whose session it is', async () => {
+		await open('triggers');
+		expect(target.querySelector('[data-trigger-awaits]')).not.toBeNull();   // the plan is shown
+		expect(buttons()).not.toContain('Bestätigen');
+	});
+
+	it('offers the owner the confirmation when only the store says it is the owner', async () => {
+		configViewer = 'owner';
+		await open('triggers');
+		expect(buttons()).toContain('Bestätigen');
 	});
 });

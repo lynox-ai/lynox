@@ -101,7 +101,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const shape = body.split('\n').map((l) => l.trim()).filter((l) => l !== '').join('\n');
 		expect(shape).toBe([
 			'<div class="mt-2 space-y-1.5" data-trigger-consent>',
-			`<p class="text-xs text-warning">{t('triggers.awaiting_hint')}</p>`,
+			`<p class="text-xs text-warning" data-trigger-awaits>{t(mandate ? 'triggers.confirm_owner_only_notice' : 'triggers.awaiting_hint')}</p>`,
 			'{#if showsInstruction(trigger)}',
 			'<div class="text-xs text-text-muted" data-consent-instruction>',
 			`<span class="font-medium" data-consent-label="instruction">{t('triggers.instruction')}:</span>`,
@@ -118,7 +118,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 			'{/if}',
 			'</div>',
 			'{/if}',
-			'{#if offersConfirmation(trigger)}',
+			'{#if offersConfirmation(trigger) && ownerActs}',
 			'<button onclick={() => confirmTrigger(trigger)} disabled={busy[trigger.id]}'
 				+ " aria-label={t('triggers.confirm_label')} title={t('triggers.confirm_label')}"
 				+ ' class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-xs text-accent-text'
