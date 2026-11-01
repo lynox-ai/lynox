@@ -32,6 +32,7 @@ const EXEMPT: Record<string, string> = {
 	'ChatView.svelte': 'Not a settings page: it reveals the vault key only for the owner\'s backup reminder, and a refused reveal shows nothing.',
 	'ApprovalsView.svelte': 'A card without a checksum only reads, closing is offered at `viewer === \'owner\'` only, and a mandate is told the queue is read-only.',
 	'OnboardingBasics.svelte': 'Mounted only by ChatView, which never runs the owner\'s introduction in a mandate\'s session.',
+	'PersonErasurePanel.svelte': 'Mounted only by SubjectsView, behind a button shown in the owner\'s session only; a mandate is told where an erasure request goes.',
 };
 /**
  * Pages outside the settings that write through an owner-only route: the actions on them (approve,
@@ -40,7 +41,7 @@ const EXEMPT: Record<string, string> = {
  */
 const OUTSIDE_SETTINGS = [
 	'BulkRunDetail.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'KnowledgeQueueView.svelte',
-	'MemoryView.svelte', 'PersonErasurePanel.svelte', 'TriggersView.svelte', 'WorkflowLibraryView.svelte',
+	'MemoryView.svelte', 'TriggersView.svelte', 'WorkflowLibraryView.svelte',
 ];
 /**
  * Pages a mandate does not see at all, hidden by themselves: they must ask whose session it is,
@@ -254,7 +255,7 @@ describe('every page that writes through an owner-only route has a read-only vie
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
-		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte']);
+		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte']);
 		for (const name of OUTSIDE_SETTINGS) expect(pages.map((p) => basename(p))).toContain(name);
 		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte', 'SecretsView.svelte', 'KeysView.svelte', 'CalendarSettings.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {
