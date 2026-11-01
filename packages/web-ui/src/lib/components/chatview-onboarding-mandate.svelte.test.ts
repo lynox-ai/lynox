@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readable } from 'svelte/store';
 
-// The owner's introduction in an empty chat (ux 1148 cut): setting the instance up is the owner's,
+// The owner's introduction in an empty chat: setting the instance up is the owner's,
 // and the answers it asks for are saved through an owner-only route. A mandate's session never
 // runs it, so nothing it types there can be lost on a refusal; the owner's session still does.
 

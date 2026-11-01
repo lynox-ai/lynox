@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Erasing a person from the subjects page (ux 1148 cut, page 12): both erasure routes are the
+// Erasing a person from the subjects page: both erasure routes are the
 // owner's. The owner gets the button; a mandate, who may be the one a person asks, is told to pass
 // the request on; while the server has not said whose session it is, neither shows.
 
