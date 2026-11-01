@@ -197,6 +197,22 @@ describe('memory', () => {
 		expect(text).toContain(t('memory.owner_only_notice'));
 	});
 
+	it('does not tell a mandate to add an entry when the older memory is empty; the owner is told', async () => {
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+			const u = String(url);
+			const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			if (u.endsWith('/config')) return reply({ viewer });
+			if (u.includes('/memory/')) return reply({ content: null });
+			return reply({});
+		}));
+		expect(await render('memory')).not.toContain(t('memory.no_entries_hint'));
+		unmount(component!);
+		component = undefined;
+		resetSettingsViewer();
+		viewer = 'owner';
+		expect(await render('memory')).toContain(t('memory.no_entries_hint'));
+	});
+
 	it('offers the owner every change to the older memory', async () => {
 		viewer = 'owner';
 		await render('memory');
