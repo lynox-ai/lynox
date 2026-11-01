@@ -2,8 +2,13 @@
 	import { enhance } from '$app/forms';
 	import { onDestroy } from 'svelte';
 	import type { ActionData, PageData } from './$types.js';
+	import { resetSettingsViewer } from '$lib/stores/settings-viewer.svelte.js';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
+
+	// The sign-in below reaches `/app` without a reload, so whose session the pages served before
+	// (an expired one, maybe someone else's) is forgotten here and asked again after it.
+	resetSettingsViewer();
 	let loading = $state(false);
 
 	// OTP flow state
