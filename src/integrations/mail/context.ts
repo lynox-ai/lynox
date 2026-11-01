@@ -18,6 +18,7 @@
 // backed by its registry. Engine registers them on its own ToolRegistry.
 
 import type { ToolEntry } from '../../types/index.js';
+import type { InboxBucket, InboxUserAction } from '../../types/inbox.js';
 import type { GoogleAuth } from '../google/google-auth.js';
 import { SCOPES } from '../google/scopes.js';
 import type { MailCredentialBackend } from './auth/app-password.js';
@@ -185,6 +186,22 @@ export interface MailHooks {
    * should surface through their own observability surface.
    */
   onAccountAdded?: (accountId: string, provider: MailProvider) => Promise<void>;
+
+  /**
+   * Not an event but a read: what the inbox classifier made of one received message, or
+   * null when it has no item for it (inbox off, not yet classified, filtered as noise).
+   * `mail_triage` shows it next to each message, so the chat answers from the same verdict
+   * as the inbox instead of judging a 200-character snippet again. Synchronous and must
+   * not throw.
+   */
+  inboxLabelOf?: (accountId: string, messageId: string) => InboxLabel | null;
+}
+
+/** The inbox's verdict on one message, as `mail_triage` shows it. */
+export interface InboxLabel {
+  bucket: InboxBucket;
+  /** Set once the user archived, replied to or snoozed the item. */
+  userAction?: InboxUserAction | undefined;
 }
 
 /**

@@ -18,6 +18,7 @@ import { groupByThread } from '../triage/thread.js';
 import { prefilter } from '../triage/rules.js';
 import { resolveProviders, type MailRegistry, accountForRow } from './registry.js';
 import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
+import type { MailHooks, InboxLabel } from '../context.js';
 
 interface MailTriageInput {
   account?: string | undefined;
@@ -29,7 +30,26 @@ interface MailTriageInput {
   include_noise?: boolean | undefined;
 }
 
-export function createMailTriageTool(registry: MailRegistry): ToolEntry<MailTriageInput> {
+const BUCKETS = new Set(['requires_user', 'draft_ready', 'auto_handled']);
+const USER_ACTIONS = new Set(['archived', 'replied', 'snoozed', 'unhandled']);
+
+/**
+ * The header text for an inbox verdict: the bucket, and the user's action once there is
+ * one. Only known enum values pass, so nothing a sender wrote can reach the header.
+ */
+export function inboxLabelText(label: InboxLabel | null): string | null {
+  if (!label || !BUCKETS.has(label.bucket)) return null;
+  return label.userAction && USER_ACTIONS.has(label.userAction) ? `${label.bucket}/${label.userAction}` : label.bucket;
+}
+
+/** What the `inbox:` labels mean, shown once above the list when any message carries one. */
+export const INBOX_LABEL_LEGEND =
+  'inbox: is what the inbox classifier decided for that message, after reading all of it (the snippets below are cut at 200 characters): ' +
+  'requires_user and draft_ready mean it needs the user\'s answer or decision, auto_handled means it was dealt with; ' +
+  'a /replied, /archived or /snoozed suffix is what the user has done since. Answer from these verdicts. ' +
+  'Where you judge a message differently, say so and name the inbox\'s verdict.';
+
+export function createMailTriageTool(registry: MailRegistry, hooks?: MailHooks): ToolEntry<MailTriageInput> {
   return {
     // Which mailbox was listed.
     outwardRead: (input) => ['list', namedTarget([['account', accountForRow(registry, input.account)], ['folder', input.folder === undefined ? undefined : withoutAddresses(input.folder)]])].filter((s) => s !== '').join(' '),
@@ -122,7 +142,23 @@ export function createMailTriageTool(registry: MailRegistry): ToolEntry<MailTria
             : `All ${String(providers.length)} inbox(es) empty.`;
         }
 
+        // The inbox's verdict per message, when the inbox is on and has classified it.
+        const lookup = hooks?.inboxLabelOf;
+        let labelled = 0;
+        const labelFor = (accountId: string) => (env: MailEnvelope): string | null => {
+          if (!lookup || !env.messageId) return null;
+          let text: string | null = null;
+          try { text = inboxLabelText(lookup(accountId, env.messageId)); } catch { text = null; }
+          if (text) labelled++;
+          return text;
+        };
+        const rendered = new Map(reports.map((r) => [r.accountId, r.survivors.length > 0 ? renderTriageList(r.survivors, r.accountId, labelFor(r.accountId)) : '']));
+
         const lines: string[] = [];
+        if (labelled > 0) {
+          lines.push(INBOX_LABEL_LEGEND);
+          lines.push('');
+        }
         if (providers.length === 1) {
           const r = reports[0]!;
           lines.push(`Triage summary (${r.accountId}):`);
@@ -132,7 +168,7 @@ export function createMailTriageTool(registry: MailRegistry): ToolEntry<MailTria
           lines.push('');
           if (r.survivors.length > 0) {
             lines.push('Survivors:');
-            lines.push(renderTriageList(r.survivors, r.accountId));
+            lines.push(rendered.get(r.accountId)!);
           }
           if (r.noise > 0 && input.include_noise !== true) {
             lines.push('');
@@ -152,7 +188,7 @@ export function createMailTriageTool(registry: MailRegistry): ToolEntry<MailTria
             const header = `### ${r.accountId} — ${String(r.survivors.length)} survivor(s), ${String(r.noise)} noise, ${String(r.threadCount)} thread(s)`;
             lines.push(header);
             if (r.survivors.length > 0) {
-              lines.push(renderTriageList(r.survivors, r.accountId));
+              lines.push(rendered.get(r.accountId)!);
             } else {
               lines.push('(nothing new)');
             }

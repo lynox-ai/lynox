@@ -906,6 +906,18 @@ describe('getUidByMessageId (uid bridge for the chat reply context)', () => {
   });
 });
 
+describe('findItemByAccountMessageId (mail_triage verdict lookup)', () => {
+  it('finds the item only in its own account and tenant', () => {
+    const id = insertSampleItem({ messageId: '<mine@x>' });
+    expect(inbox.findItemByAccountMessageId(TEST_ACCOUNT.id, '<mine@x>')?.id).toBe(id);
+    // A Message-ID is the sender's header: the same one in another account or tenant is not this item.
+    expect(inbox.findItemByAccountMessageId('other-acct', '<mine@x>')).toBeNull();
+    expect(inbox.findItemByAccountMessageId(TEST_ACCOUNT.id, '<mine@x>', 'tenant-other')).toBeNull();
+    expect(inbox.findItemByAccountMessageId(TEST_ACCOUNT.id, '')).toBeNull();
+    expect(inbox.findItemByAccountMessageId(TEST_ACCOUNT.id, '<nope@x>')).toBeNull();
+  });
+});
+
 describe('findItemByMessageId (outbound-reply reconcile lookup)', () => {
   it('finds the item by message-id regardless of account, empty-guards, and null-misses', () => {
     const id = insertSampleItem({ messageId: '<find-me@x>' });

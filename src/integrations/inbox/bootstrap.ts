@@ -69,6 +69,8 @@ export interface InboxRuntime {
   /** Wire as `MailHooks.onOutboundSent` — marks an item `replied` when the user
    *  answers it in chat (the reply leaves via the generic mail_reply tool). */
   onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']>;
+  /** Wire as `MailHooks.inboxLabelOf` — the classifier's verdict for `mail_triage`. */
+  inboxLabelOf: NonNullable<import('../mail/context.js').MailHooks['inboxLabelOf']>;
   /**
    * Operator-driven cold-start re-run. The HTTP layer resolves the
    * `MailProvider` from its registry and hands it in; runtime closes over
@@ -353,6 +355,17 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       await runColdStartForAccount(adapterOpts);
     };
 
+  const inboxLabelOf: NonNullable<import('../mail/context.js').MailHooks['inboxLabelOf']> =
+    (accountId, messageId) => {
+      try {
+        const item = state.findItemByAccountMessageId(accountId, messageId, opts.tenantId);
+        return item ? { bucket: item.bucket, userAction: item.userAction } : null;
+      } catch {
+        // A read for display: a failed lookup shows no verdict rather than failing the triage.
+        return null;
+      }
+    };
+
   const onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']> =
     (accountId, outboundCtx) => {
       // Message-ID match is account-agnostic; the account scopes only the
@@ -401,6 +414,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     hook,
     onAccountAdded,
     onOutboundReconcile,
+    inboxLabelOf,
     runColdStart,
     sensitiveMode: opts.sensitiveMode ?? 'skip',
     shutdown: async (shutdownOpts) => {

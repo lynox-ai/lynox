@@ -505,6 +505,22 @@ export class InboxStateDb {
    * reply-from), so account-scoping here would silently MISS the item. Newest
    * -first if a re-classify ever duplicates a message-id across rows.
    */
+  /**
+   * The item the inbox made of one received message, in one account and tenant. For a
+   * read of the inbox's verdict (`mail_triage`), where the account is known: a Message-ID
+   * is the sender's own header, so an unscoped match could hand one account's verdict to
+   * a mail in another.
+   */
+  findItemByAccountMessageId(accountId: string, messageId: string, tenantId: string = DEFAULT_TENANT_ID): InboxItem | null {
+    if (!messageId) return null;
+    const row = this.db
+      .prepare<[string, string, string], ItemRow>(
+        'SELECT * FROM inbox_items WHERE tenant_id = ? AND account_id = ? AND message_id = ? ORDER BY classified_at DESC LIMIT 1',
+      )
+      .get(tenantId, accountId, messageId);
+    return row ? rowToItem(row) : null;
+  }
+
   findItemByMessageId(messageId: string): InboxItem | null {
     if (!messageId) return null;
     const row = this.db
