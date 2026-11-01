@@ -3886,7 +3886,7 @@ describe('LynoxHTTPApi', () => {
     // the way the thread delete stops its own, and waits for the slot BEFORE the
     // first wipe — so the witness is the slot's state at the moment of the wipe.
     it('DELETE /api/data stops a parked run and waits for its slot before it erases', async () => {
-      await withParkedRun('erase-parked-1', async ({ prompts, slots }) => {
+      await withParkedRun('erase-parked-1', async ({ prompts, slots, promptId }) => {
         const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown; getMemory: () => unknown } }).engine;
         const origGetThreadStore = engineRef.getThreadStore;
         const origGetMemory = engineRef.getMemory;
@@ -3919,6 +3919,7 @@ describe('LynoxHTTPApi', () => {
           expect(slotHeldAtWipe, 'fixture: the thread wipe must have run').toBeDefined();
           expect(slotHeldAtWipe, 'the run still held its slot when the threads were wiped').toBe(false);
           expect(prompts.getPending('erase-parked-1')).toBeUndefined();
+          expect(prompts.getById(promptId)?.closed_reason, 'the erasure stopped the run that asked').toBe('run_stopped');
           expect(order.lastIndexOf('memory'), 'every awaiting step before the first wipe').toBeLessThan(order.indexOf('threads'));
           // Sessions dropped inside the synchronous stretch: after the last await,
           // so none created during the flat-file step survives the wipe.
