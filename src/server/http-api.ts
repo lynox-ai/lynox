@@ -7890,20 +7890,25 @@ export class LynoxHTTPApi {
         }
       }
       // Checked BEFORE the write, by the loader itself: a file the loader refuses would answer
-      // every later GET and PUT here with a 500 and stop the next boot, and only a hand edit in
-      // the container brings it back. A slot whose model the loader would replace is refused
-      // too when this request sets it, so a new choice is never stored only to be overridden.
-      // One already stored does not block saving the rest: the UI re-sends every field.
+      // every later GET here with a 500 and stop the next boot, and on a managed instance every
+      // PUT too (its lock gate loads the stored file above), so only a hand edit in the container
+      // would bring it back. A slot whose model the loader would replace is refused too when this
+      // request sets that model, so a new choice is never stored only to be overridden. One
+      // already stored does not block saving the rest: the UI re-sends every field, without the
+      // slot keys GET redacts, which is why the model alone decides "sets".
       const candidate = checkCandidateConfig(merged);
       if (candidate.error !== undefined) {
-        errorResponse(res, 400, `This configuration cannot be loaded, so it was not saved: ${candidate.error}`);
+        if (candidate.unknownModel === undefined) process.stderr.write(`[lynox] PUT /api/config refused a configuration the loader rejects: ${candidate.error}\n`);
+        errorResponse(res, 400, candidate.unknownModel !== undefined
+          ? `A tier names the model '${candidate.unknownModel}', which this version does not know. Choose a listed model for that tier.`
+          : 'This configuration could not be loaded, so it was not saved.');
         return;
       }
-      const storedSlots = (existing['tier_set'] ?? {}) as Record<string, unknown>;
-      const newlyReplaced = candidate.replacedSlots.filter((r) => JSON.stringify((merged['tier_set'] as Record<string, unknown> | undefined)?.[r.tier]) !== JSON.stringify(storedSlots[r.tier]));
+      const storedSlots = (existing['tier_set'] ?? {}) as Record<string, { model_id?: unknown } | undefined>;
+      const newlyReplaced = candidate.replacedSlots.filter((r) => storedSlots[r.tier]?.model_id !== r.model_id);
       if (newlyReplaced.length > 0) {
         const r = newlyReplaced[0]!;
-        errorResponse(res, 400, `tier_set slot '${r.tier}' names model '${r.model_id}', which this version does not know. Choose a listed model for that slot.`);
+        errorResponse(res, 400, `A tier names the model '${r.model_id}', which this version does not know. Choose a listed model for that tier.`);
         return;
       }
       saveUserConfig(merged);

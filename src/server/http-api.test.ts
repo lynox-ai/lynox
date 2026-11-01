@@ -451,7 +451,7 @@ vi.mock('../core/config.js', async (importOriginal) => ({
   // The REAL pool endpoint pairing: the managed write gate and the loader must decide alike.
   poolEndpointFor: (await importOriginal<typeof import('../core/config.js')>()).poolEndpointFor,
   // The REAL pre-write check: it is the loader run on the candidate, and the route under test refuses by it.
-  checkCandidateConfig: (await importOriginal<typeof import('../core/config.js')>()).checkCandidateConfig,
+  checkCandidateConfig: vi.fn((await importOriginal<typeof import('../core/config.js')>()).checkCandidateConfig),
   replacedTierSlots: vi.fn().mockReturnValue([]),
   POOL_MISTRAL_ENDPOINTS: (await importOriginal<typeof import('../core/config.js')>()).POOL_MISTRAL_ENDPOINTS,
   POOL_ANTHROPIC_ENDPOINT: (await importOriginal<typeof import('../core/config.js')>()).POOL_ANTHROPIC_ENDPOINT,
@@ -6238,11 +6238,11 @@ describe('LynoxHTTPApi', () => {
           body: JSON.stringify({ tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model' } } }),
         });
         expect(res.status).toBe(400);
-        expect(((await res.json()) as { error: string }).error).toContain("tier_set slot 'deep' names model 'claude-retired-model'");
+        expect(((await res.json()) as { error: string }).error).toBe("A tier names the model 'claude-retired-model', which this version does not know. Choose a listed model for that tier.");
         expect(await saves()).toBe(before);
       });
 
-      it('refuses a candidate the loader would not load, and writes nothing', async () => {
+      it('refuses a candidate the loader would not load, names the model, and writes nothing', async () => {
         repayRateWindow();
         await stored({ ...DEFAULT_STORED, tier_preset: 'balanced' });
         const before = await saves();
@@ -6251,7 +6251,7 @@ describe('LynoxHTTPApi', () => {
           body: JSON.stringify({ tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } } }),
         });
         expect(res.status).toBe(400);
-        expect(((await res.json()) as { error: string }).error).toContain('cannot be loaded, so it was not saved');
+        expect(((await res.json()) as { error: string }).error).toBe("A tier names the model 'my-local-model', which this version does not know. Choose a listed model for that tier.");
         expect(await saves()).toBe(before);
       });
 
@@ -6278,7 +6278,37 @@ describe('LynoxHTTPApi', () => {
         expect((last['tier_set'] as Record<string, { model_id: string }>)['deep']!.model_id).toBe('claude-opus-5');
       });
 
-      it('a stored file the loader refuses is repaired by a PUT that clears the slot', async () => {
+      it('another loader error is refused with a fixed sentence: its own text may quote the environment', async () => {
+        repayRateWindow();
+        const { checkCandidateConfig } = await import('../core/config.js');
+        (checkCandidateConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({ replacedSlots: [], error: 'boom LYNOX_SECRET=abc' });
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          const before = await saves();
+          const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ thinking_mode: 'disabled' }) });
+          expect(res.status).toBe(400);
+          expect(((await res.json()) as { error: string }).error).toBe('This configuration could not be loaded, so it was not saved.');
+          expect(await saves()).toBe(before);
+          // The text goes to the log instead.
+          expect(stderr.mock.calls.flat().join(' ')).toContain('boom LYNOX_SECRET=abc');
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('a stored slot re-sent without the key GET redacted does not block saving the rest', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'max-quality', tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model', api_key: 'sk-user-own' } } });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ thinking_mode: 'disabled', tier_set: { deep: { model_id: 'claude-retired-model', provider: 'anthropic' } } }),
+        });
+        expect(res.status).toBe(200);
+        expect(await saves()).toBe(before + 1);
+      });
+
+      it('self-host: a stored file the loader refuses is repaired by a PUT that clears the slot', async () => {
         repayRateWindow();
         await stored({ ...DEFAULT_STORED, tier_preset: 'balanced', tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } } });
         const before = await saves();

@@ -760,6 +760,35 @@ describe('Config', () => {
       expect(() => loadConfig()).toThrow(/unregistered model "mistral-retired-model"/);
     });
 
+    it('checkCandidateConfig leaves the candidate as it was, even where the build deletes nested entries', async () => {
+      // On an instance connected to a Shopify store the build drops a profile on a provider not on
+      // the list. For a candidate that object is the one PUT /api/config then saves.
+      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+      try {
+        const { checkCandidateConfig } = await import('./config.js');
+        const candidate = { model_profiles: { worker: { provider: 'openai', model_id: 'mistral-small-2506', api_base_url: 'https://api.mistral.ai/v1' } } };
+        const copy = structuredClone(candidate);
+        checkCandidateConfig(candidate as never);
+        expect(candidate).toEqual(copy);
+      } finally {
+        delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+      }
+    });
+
+    it('a replacement the environment\'s tier_set overrides is not reported: that band does not run it', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      process.env['LYNOX_TIER_SET_JSON'] = JSON.stringify({ deep: { provider: 'anthropic', model_id: 'claude-sonnet-5' } });
+      try {
+        writeUserConfig({ tier_preset: 'max-quality', tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model' } } });
+        const { loadConfig, replacedTierSlots } = await import('./config.js');
+        expect(loadConfig().tier_set?.deep?.model_id).toBe('claude-sonnet-5');
+        expect(replacedTierSlots()).toEqual([]);
+      } finally {
+        delete process.env['LYNOX_TIER_SET_JSON'];
+        warn.mockRestore();
+      }
+    });
+
     it('checkCandidateConfig answers what the loader would do, and writes nothing', async () => {
       writeUserConfig({ tier_preset: 'max-quality' });
       const file = join(fakeHome, '.lynox', 'config.json');

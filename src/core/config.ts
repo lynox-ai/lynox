@@ -284,6 +284,18 @@ export function replacedTierSlots(): readonly ReplacedSlot[] {
   return _replacedSlots;
 }
 
+/**
+ * The loader's refusal of a `tier_set` slot whose model it does not know and has nowhere safe to
+ * run (see the preset guard). Its own class, so a writer can name the model to the user and pass
+ * no other loader message on: a later throw there might quote an environment value.
+ */
+export class UnregisteredSlotModelError extends Error {
+  constructor(readonly modelId: string, message: string) {
+    super(message);
+    this.name = 'UnregisteredSlotModelError';
+  }
+}
+
 /** Whether two slot endpoints are the same: unset, empty and a trailing slash do not differ. */
 function sameEndpoint(a: string | undefined, b: string | undefined): boolean {
   return (a ?? '').replace(/\/+$/, '') === (b ?? '').replace(/\/+$/, '');
@@ -313,19 +325,23 @@ interface BuildNotes {
  * two cannot drift apart. The project config and the environment are read as the real load
  * reads them.
  */
-export function checkCandidateConfig(candidate: LynoxUserConfig): { replacedSlots: ReplacedSlot[]; error?: string } {
+export function checkCandidateConfig(candidate: LynoxUserConfig): { replacedSlots: ReplacedSlot[]; error?: string; unknownModel?: string } {
   const notes: BuildNotes = { warn: () => undefined, replacedSlots: [] };
   try {
     buildConfig(candidate, readConfigFile(join(getProjectConfigDir(), CONFIG_FILENAME)), notes);
   } catch (err: unknown) {
-    return { replacedSlots: notes.replacedSlots, error: getErrorMessage(err) };
+    return err instanceof UnregisteredSlotModelError
+      ? { replacedSlots: notes.replacedSlots, error: err.message, unknownModel: err.modelId }
+      : { replacedSlots: notes.replacedSlots, error: getErrorMessage(err) };
   }
   return { replacedSlots: notes.replacedSlots };
 }
 
 /** Merges `userConfig` and `projectConfig` with the environment; `loadConfig` caches the result. */
 function buildConfig(userConfig: LynoxUserConfig | null, projectConfig: LynoxUserConfig | null, notes: BuildNotes): LynoxUserConfig {
-  const merged: LynoxUserConfig = { ...userConfig };
+  // A deep copy: the build deletes and replaces nested entries (refused `model_profiles`, the
+  // preset's slots), and for a candidate the input is the object PUT /api/config then saves.
+  const merged: LynoxUserConfig = structuredClone(userConfig ?? {});
 
   // Allowlist: project config cannot override security-sensitive fields
   const PROJECT_SAFE_KEYS: ReadonlySet<string> = new Set([
@@ -928,7 +944,8 @@ function buildConfig(userConfig: LynoxUserConfig | null, projectConfig: LynoxUse
     // to go. That one still costs the boot; PUT /api/config refuses to store it.
     for (const slot of Object.values(merged.tier_set)) {
       if (slot && !modelCapability(slot.model_id)) {
-        throw new Error(
+        throw new UnregisteredSlotModelError(
+          slot.model_id,
           `tier_preset "${merged.tier_preset}" resolves to an unregistered model "${slot.model_id}" — refusing to load (it would misbill at the Opus fallback rate and mis-disclose). Register the model in MODEL_CAPABILITIES first.`,
         );
       }
@@ -1114,6 +1131,12 @@ function buildConfig(userConfig: LynoxUserConfig | null, projectConfig: LynoxUse
     }
   }
 
+  // What a replacement report says must still be true of the result: a band the environment's
+  // tier_set took over, or the managed constraints dropped, does not run the preset's model.
+  for (let i = notes.replacedSlots.length - 1; i >= 0; i--) {
+    const r = notes.replacedSlots[i]!;
+    if (merged.tier_set?.[r.tier]?.model_id !== r.runs) notes.replacedSlots.splice(i, 1);
+  }
   return merged;
 }
 
