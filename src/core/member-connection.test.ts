@@ -268,6 +268,16 @@ describe('a member\'s connection inside a plan\'s run', () => {
       expect(memberConnectionRefusal(p, later, ends(['M-3']), 'write')).toBeNull();
     }, listed(p));
   });
+
+  it('a request through the member\'s own connection made under an earlier access is not read, the earlier access ended or still live', () => {
+    // What that refusal tells the run: another request through it is refused as well.
+    const p = crm({ oauth_grant: G });
+    const later = { ...B, mandateId: 'M-3' };
+    runAsPlanOf(later, () => {
+      expect(read(p, later, ACCESS, ['M-3'])).toBeNull();
+      expect(read(p, later, ACCESS, ['M-1', 'M-3'])).toBeNull();
+    }, listed(p));
+  });
 });
 
 describe('memberConnectionRefusal', () => {
