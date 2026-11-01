@@ -23,6 +23,7 @@
  */
 
 import { subscribe, unsubscribe } from 'node:diagnostics_channel';
+import { stripHidden } from '../../hidden-text.js';
 
 /**
  * Raw term sources for a session. All fields optional; undefined = not available.
@@ -82,7 +83,11 @@ export function buildSessionGlossary(
     out.push(trimmed);
   };
 
-  const expand = (raw: string, push: (s: string) => void): void => {
+  // Every source as stored, without the characters that render as nothing (`hidden-text.ts`): a
+  // contact or a profile name can come from someone else, and a fuzzy replacement would carry such
+  // a tail into the dictated text.
+  const expand = (stored: string, push: (s: string) => void): void => {
+    const raw = stripHidden(stored);
     push(raw);
     // Also expose individual word tokens from multi-word names so fuzzy match
     // can rewrite one token at a time. Strips punctuation like "," or "-".

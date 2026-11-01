@@ -78,6 +78,7 @@ describe('the calls a contained chat may make', () => {
       ['a GraphQL query sent as a PUT', { url: GQL, method: 'PUT', headers: json, body: query }],
       ['a GraphQL query sent as a GET overridden to POST', { url: GQL, method: 'GET', headers: { ...json, 'X-HTTP-Method-Override': 'POST' }, body: query }],
       ['a GraphQL query with a query string', { url: `${GQL}?query=x`, method: 'POST', headers: json, body: query }],
+      ['a GraphQL query with a query string after a decoded ?', { url: `${GQL}%3Fquery=x`, method: 'POST', headers: json, body: query }],
       ['a GraphQL body the check cannot read', { url: GQL, method: 'POST', headers: json, body: '[{"query":"{ shop { name } }"}]' }],
       ['a body that is not text', { method: 'POST', body: { a: 1 } }],
     ] as const) {

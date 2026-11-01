@@ -468,6 +468,14 @@ export interface OAuthGrantRecord {
    * that as changed credentials.
    */
   fingerprint_check?: string | undefined;
+  /**
+   * Token slots of a deleted profile that this one read as its refresh slot when that profile
+   * was deleted (written by {@link ApiStore.remove}). Such a name stays the deleted grant's: it
+   * never becomes this profile's own refresh slot, so a value stored under it later goes nowhere
+   * (`slotGrant` in `profile-secret-view.ts`). A save keeps it with the rest of the record; a new
+   * consent through the connect callback writes a grant without it.
+   */
+  lapsed_slots?: string[] | undefined;
 }
 
 /** One entry of {@link OAuthGrantRecord.written}. */
@@ -509,6 +517,12 @@ export function writtenNames(profile: ApiProfile): string[] {
     if (typeof name === 'string' && name !== '') names.push(name);
   }
   return names;
+}
+
+/** The names on a profile's {@link OAuthGrantRecord.lapsed_slots}, each one that is a string. */
+export function lapsedSlots(profile: ApiProfile): string[] {
+  const lapsed: unknown = profile.oauth_grant?.lapsed_slots;
+  return Array.isArray(lapsed) ? lapsed.filter((n): n is string => typeof n === 'string' && n !== '') : [];
 }
 
 /**
@@ -2803,6 +2817,8 @@ export class ApiStore {
    * recorded. The flat-JSON path records nothing.
    */
   remove(id: string, apisDir?: string, options?: { readonly record?: ConnectionRecordKind | undefined }): boolean {
+    // Before the profile goes, while it still names its slots. A write that throws keeps it in place.
+    this._markLapsedReaders(id, apisDir);
     const removed = this._removeStored(id, apisDir, options?.record);
     // Gone from the store, so no longer a profile any check has to see. Not before: a removal
     // that throws leaves the stored profile in place, and it stays known.
@@ -2816,6 +2832,32 @@ export class ApiStore {
       }
     }
     return removed;
+  }
+
+  /**
+   * Marks every other stored profile that reads a token slot of profile `id` as its refresh slot
+   * with that name in {@link OAuthGrantRecord.lapsed_slots} (register 685). Without the mark, once
+   * `id` is gone, a reader that alone still names the slot would take it over as its own refresh
+   * slot and exchange whatever value is stored there next. A mark on a reader that holds the name
+   * itself (the other half of a `-`/`_` pair) changes nothing: a held name is never `lapsed`. The
+   * mark is written as the reader is stored, past admission: it changes only the engine's own
+   * record, and no reader's state may keep its owner from being deleted. A held-back reader stays
+   * held back.
+   */
+  private _markLapsedReaders(id: string, apisDir: string | undefined): void {
+    const gone = this.knownProfiles().find((p) => p.id === id);
+    if (gone === undefined) return;
+    const names = grantTokenNames(gone);
+    for (const reader of this.knownProfiles()) {
+      if (reader.id === id || reader.auth?.type !== 'oauth2') continue;
+      const slot = readersRefreshSlot(reader);
+      if (!names.has(slot) || lapsedSlots(reader).includes(slot)) continue;
+      const next: ApiProfile = { ...reader, oauth_grant: { ...reader.oauth_grant, lapsed_slots: [...lapsedSlots(reader), slot] } };
+      if (this.connStore) this._writeRow(next);
+      else if (apisDir) writeFileSync(join(apisDir, `${next.id}.json`), JSON.stringify(next, null, 2), { mode: 0o600 });
+      if (this.profiles.has(next.id)) this.profiles.set(next.id, next);
+      else this.heldBack.set(next.id, next);
+    }
   }
 
   private _removeStored(id: string, apisDir: string | undefined, record: ConnectionRecordKind | undefined): boolean {

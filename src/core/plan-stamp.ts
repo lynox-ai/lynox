@@ -4,7 +4,7 @@ import { isMandateConnection } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import type { StampEntry } from './plan-run-context.js';
 import { bindingOf, memberConnectionReader } from './profile-secret-view.js';
-import { planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, type RequestPrincipal } from './request-principal.js';
+import { isOwnerPrincipal, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { RunHistory } from './run-history.js';
 import type { TriggerRecord } from '../types/index.js';
 
@@ -140,4 +140,39 @@ export async function planOfTrigger(
   } catch {
     return only(true);
   }
+}
+
+export const FOREIGN_WORKFLOW_SCHEDULE_REFUSAL =
+  'Not scheduled: this workflow holds steps another person with delegated access set up or last changed, so it cannot be scheduled for you as it is. '
+  + 'To schedule this task yourself, describe in chat what it should do and ask lynox to write a new workflow for it instead of copying or changing this one; '
+  + 'a newly written workflow is yours. Otherwise ask the owner to schedule this one.';
+export const UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL =
+  'Not scheduled: lynox could not read who set up this workflow, so only the owner may schedule it. '
+  + 'Ask the owner to schedule it, or describe in chat what it should do and ask lynox to write a new workflow for it; a newly written workflow is yours.';
+export const MISSING_WORKFLOW_SCHEDULE_REFUSAL =
+  'Not scheduled: lynox found no saved workflow with this id. Check the id against the saved workflows, '
+  + 'or describe in chat what the task should do and ask lynox to write a new workflow for it.';
+
+/**
+ * Why `principal` may not put a schedule on the workflow `workflowId` (its exact id), or null when
+ * it may. A schedule on a workflow ties the mandates of both into one plan, which acts for whichever
+ * of the two changed last (`planMembers`): a later change to the workflow by the other mandate moves
+ * the schedule's runs to that mandate. Refused here is the tie itself. The owner may schedule any
+ * workflow; a mandate its own, the owner's, and one it changed last (its change made it its own). A
+ * copy saved through `WorkflowStore.upsertCopy` carries its source's mark and is refused like the
+ * source; a workflow saved anew (an import, a capture) carries only its saver's. A workflow whose
+ * authorship cannot be read is refused to anyone but the owner.
+ */
+export function foreignWorkflowScheduleRefusal(principal: RequestPrincipal, workflowId: string, runHistory: RunHistory | null | undefined): string | null {
+  if (isOwnerPrincipal(principal)) return null;
+  let a: ReturnType<RunHistory['getWorkflowAuthorship']>;
+  try {
+    a = runHistory?.getWorkflowAuthorship(workflowId);
+  } catch {
+    a = undefined;
+  }
+  if (a === undefined) return UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL;
+  const mark = planMandate(planAuthorshipOfWorkflow(a));
+  if (mark === undefined || principalTag(mark.principal) === principalTag(principal)) return null;
+  return FOREIGN_WORKFLOW_SCHEDULE_REFUSAL;
 }

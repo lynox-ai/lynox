@@ -317,6 +317,12 @@ vi.mock('../core/engine.js', () => ({
       renamePlannedPipeline: mockHistoryRenamePlannedPipeline,
       deletePlannedPipeline: mockHistoryDeletePlannedPipeline,
       setWorkflowConfirmedAt: mockSetWorkflowConfirmedAt,
+      // Who set up a workflow: the owner, unless a test says otherwise. A mandate's schedule is
+      // refused on a workflow another mandate set up, and on one whose authorship cannot be read.
+      getWorkflowAuthorship: vi.fn().mockReturnValue({
+        createdBy: null, createdMandateId: null, createdAt: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null,
+        coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null, coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
+      }),
       getTask: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
@@ -1222,6 +1228,17 @@ describe('LynoxHTTPApi', () => {
       expect(await viewerOf(webUiLoginSession(TEST_SECRET, null)!.token)).toBe('owner');
     });
 
+    it('GET /api/config says whose session asks, for the settings pages: the owner or a mandate', async () => {
+      repayRateWindow();
+      const viewerOf = async (token: string): Promise<unknown> => {
+        const res = await fetch(`${baseUrl}/api/config`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        return ((await res.json()) as { viewer: unknown }).viewer;
+      };
+      expect(await viewerOf(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token)).toBe('mandate');
+      expect(await viewerOf(webUiLoginSession(TEST_SECRET, null)!.token)).toBe('owner');
+    });
+
     it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
       repayRateWindow();
       const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
@@ -1235,6 +1252,27 @@ describe('LynoxHTTPApi', () => {
         expect(((await asMandate.json()) as { error: string }).error).toContain('Only the owner');
         expect((await send(owner)).status, verb).not.toBe(403);
       }
+    });
+
+    // A test call to the model is the owner's (register 1141): it spends a call on the owner's key.
+    it('refuses a mandate the model connection test before the rate window, and lets the owner through', async () => {
+      repayRateWindow();
+      const probe = (token: string): Promise<Response> => fetch(`${baseUrl}/api/llm/test`, {
+        method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+      const statuses: number[] = [];
+      for (let i = 0; i < 7; i++) {
+        const res = await probe(mandate);
+        statuses.push(res.status);
+        if (i === 0) expect(await res.json()).toEqual({ error: 'Only the owner of this instance can test the model connection.' });
+      }
+      // Seven, one more than the probe window holds: none of them reached it.
+      expect(statuses).toEqual([403, 403, 403, 403, 403, 403, 403]);
+      // Twin: the owner's cookie reaches the handler, which answers the empty body itself.
+      const asOwner = await probe(webUiLoginSession(TEST_SECRET, null)!.token);
+      expect(asOwner.status).toBe(400);
+      expect(((await asOwner.json()) as { error: string }).error).toBe('Missing provider');
     });
 
     for (const [path, field, value, what] of [
@@ -1820,6 +1858,50 @@ describe('LynoxHTTPApi', () => {
         scheduleCron: '0 9 1 * *',
         pipelineParams: JSON.stringify({ month: '2026-06' }),
       }));
+    });
+
+    it('lets a mandate schedule only its own workflows and the owner\'s', async () => {
+      storeWf();
+      const ref = (api as unknown as { engine: { getRunHistory: () => Record<string, unknown> } }).engine;
+      const history = ref.getRunHistory();
+      type Resolver = Parameters<typeof api.setPrincipalResolverForTesting>[0];
+      const resolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+      let author: string | null | undefined = null;
+      const savedAuthorship = history['getWorkflowAuthorship'];
+      history['getWorkflowAuthorship'] = () => {
+        if (author === 'throws') throw new Error('engine.db closed');
+        return author === undefined ? undefined : {
+        createdBy: author, createdMandateId: author === null ? null : 'grant-x', createdAt: '2026-10-01 00:00:00',
+        mandateEditor: null, mandateEditorId: null, mandateEditedAt: null,
+        coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null, coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
+        };
+      };
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      const post = (): Promise<Response> => jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 1 * *', params: { month: '2026-06' } }) });
+      try {
+        author = 'mandate:jan@example.invalid';
+        const foreign = await post();
+        expect(foreign.status).toBe(403);
+        expect(((await foreign.json()) as { error: string }).error).toMatch(/^Not scheduled: this workflow holds steps another person with delegated access/);
+        author = undefined;
+        expect((await post()).status).toBe(403);
+        author = 'throws';
+        expect((await post()).status).toBe(403);
+        expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
+        author = 'mandate:eva@example.invalid';
+        expect((await post()).status).toBe(201);
+        author = null;
+        expect((await post()).status).toBe(201);
+        expect(mockTaskCreatePipeline).toHaveBeenCalledTimes(2);
+        // The owner schedules a workflow a mandate set up.
+        author = 'mandate:jan@example.invalid';
+        api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+        expect((await post()).status).toBe(201);
+        expect(mockTaskCreatePipeline).toHaveBeenCalledTimes(3);
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+        history['getWorkflowAuthorship'] = savedAuthorship;
+      }
     });
 
     it('rejects an invalid cron WITHOUT stamping the confirm (no spurious consent)', async () => {
@@ -19201,6 +19283,20 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         expect((await complete(cookie)).status).toBe(200);
         expect(store.get(PROFILE)?.oauth_grant?.account).toBeUndefined();
       });
+
+      // A deleted profile's slot stays lapsed through a new consent (register 685): the profile may
+      // still name it as its refresh slot, and a new consent must not hand it over.
+      it.each([
+        ['keeps', ['GONE_REFRESH_TOKEN']],
+        ['adds none', undefined],
+      ])('%s the lapsed slots of the profile it connects', async (_label, lapsed) => {
+        const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }) });
+        onBexio(store);
+        store.register({ ...store.get(PROFILE)!, oauth_grant: { connected_by: 'owner', ...(lapsed ? { lapsed_slots: lapsed } : {}) } });
+        expect((await complete(cookie)).status).toBe(200);
+        expect(store.get(PROFILE)?.oauth_grant?.state).toBe('connected');
+        expect(store.get(PROFILE)?.oauth_grant?.lapsed_slots).toEqual(lapsed);
+      });
     });
 
     it('control: the same mandate and profile complete while the mandate is live', async () => {
@@ -20575,7 +20671,6 @@ describe('mandate stance of every user route', () => {
       'PATCH /api/sessions/stance-probe/model own',
       'PATCH /api/tasks/stance-probe mark',
       'PATCH /api/threads/stance-probe own',
-      'POST /api/llm/test free',
       'POST /api/mail/accounts/test free',
       'POST /api/mail/autodiscover free',
       'POST /api/oauth/connect/stance-probe own',
