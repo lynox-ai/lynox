@@ -62,6 +62,7 @@
 		getThreadReadRefusal,
 		getContainedOrigin,
 		getContainedPrefill,
+		registerComposerDraft,
 		planInNewChat,
 		newChat,
 		type FileAttachment,
@@ -1792,6 +1793,14 @@
 		}
 	}
 	$effect(() => { focusInput(); });
+	// An answer that reached a closed question comes back here, into an empty field only (UX-064):
+	// a text the user is writing is theirs, and the sentence above says the answer was not used.
+	$effect(() => registerComposerDraft((text) => {
+		if (inputText.trim() !== '') return false;
+		inputText = text;
+		focusInput();
+		return true;
+	}));
 	// Re-focus after SvelteKit navigation (goto('/app') resets focus). Also
 	// the only path that clears leftover input — placeholder cycling must not.
 	// Releases the persistent mic stream too, since changing route / chat

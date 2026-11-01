@@ -27,6 +27,8 @@ import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { containedPrefill } from './contained-way-out.js';
+import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, type ClosedCode } from './closed-question.js';
+import { isMandateSession, loadSettingsViewer } from './settings-viewer.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
@@ -2534,7 +2536,7 @@ export async function replyPermission(answer: string): Promise<void> {
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
-	reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }));
+	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), answer);
 }
 
 /** One-shot reply for a multi-question tabs prompt. Answers are ordered to
@@ -2545,7 +2547,8 @@ export async function replyPermissionTabs(answers: string[]): Promise<void> {
 	if (!promptId) return;
 	pendingTabsPrompt = null;
 	const sid = sessionId;
-	reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply-tabs`, { promptId, answers }));
+	// Several answers are no single text for the message field: no draft here.
+	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply-tabs`, { promptId, answers }), null);
 }
 
 /**
@@ -2554,13 +2557,34 @@ export async function replyPermissionTabs(answers: string[]): Promise<void> {
  * it stands where the chat's other errors stand until the next message is sent — in the thread
  * that asked only, and never over another error, which says more than this sentence does. A
  * stale (404) or refused (409) answer stays silent; the question it named has no card left.
+ *
+ * The sentence says why the question was closed and what to do instead (ux U-113); where writing
+ * the answer again is the way, `answer` goes back into the message field if that is empty, and
+ * the sentence says so only then.
  */
-function reportReply(sid: string, outcome: ReplyOutcome): void {
+async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | null): Promise<void> {
 	if (outcome === 'lost') { addToast(t('chat.error_connection'), 'error', 6000); return; }
 	if (outcome === 'settled' || sessionId !== sid) return;
 	if (chatError !== null && chatError !== closedReplySentence) return;
-	chatError = closedReplySentence = t(outcome === 'restarted' ? 'chat.prompt_closed_restart' : 'chat.prompt_expired');
+	// Who reads it decides the way out where only the owner can act. Unknown reads as the owner,
+	// as on the settings pages; the server is the boundary either way.
+	await loadSettingsViewer();
+	if (sessionId !== sid || (chatError !== null && chatError !== closedReplySentence)) return;
+	const reader = isMandateSession() ? 'mandate' : 'owner';
+	const draft = answer !== null && closedDraftAllowed(outcome.closed, reader) ? draftOfAnswer(answer) : null;
+	const placed = draft !== null && composerDraft !== null && composerDraft(draft);
+	chatError = closedReplySentence = t(closedSentenceKey(outcome.closed, reader)) + (placed ? t('chat.prompt_closed.draft') : '');
 	chatErrorDetail = null;
+}
+
+/** Puts a draft into the chat's message field when it is empty, and says whether it did. */
+type ComposerDraft = (text: string) => boolean;
+let composerDraft: ComposerDraft | null = null;
+
+/** The chat view lends its message field for a lost answer; the returned function takes it back. */
+export function registerComposerDraft(fn: ComposerDraft): () => void {
+	composerDraft = fn;
+	return () => { if (composerDraft === fn) composerDraft = null; };
 }
 /** The sentence `reportReply` last put up, so a queued message takes down that one and no other error. */
 let closedReplySentence: string | null = null;
@@ -2578,10 +2602,10 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 	} catch { /* best-effort */ }
 }
 
-/** How a reply ended: `lost` when the server could not be reached or failed twice, `expired` or
- *  `restarted` when it answered 410 (a closed question, the second when the engine restart closed
- *  it), and `settled` for every other final word. */
-type ReplyOutcome = 'settled' | 'expired' | 'restarted' | 'lost';
+/** How a reply ended: `lost` when the server could not be reached or failed twice, `closed` when
+ *  it answered 410 (a closed question, with the reason the server gave, or null), and `settled`
+ *  for every other final word. */
+type ReplyOutcome = 'settled' | 'lost' | { readonly closed: ClosedCode | null };
 
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
  *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
@@ -2595,8 +2619,8 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 			});
 			if (res.status === 410) {
 				let code: unknown;
-				try { code = ((await res.json()) as { code?: unknown } | null)?.code; } catch { /* no body: a plain expiry */ }
-				return code === 'process_restarted' ? 'restarted' : 'expired';
+				try { code = ((await res.json()) as { code?: unknown } | null)?.code; } catch { /* no body: no reason given */ }
+				return { closed: closedCodeOf(code) };
 			}
 			// 5xx → retry once
 			if (res.status >= 500) {
