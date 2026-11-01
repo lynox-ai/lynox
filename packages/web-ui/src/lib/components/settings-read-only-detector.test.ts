@@ -97,8 +97,11 @@ function callAt(src: string, at: number, name: string): string {
 function pathHelpers(src: string): Map<string, string | null> {
 	const DEF = /(?:function\s+(\w+)\s*(?:<[^>]*>)?\s*\(\s*(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?\(\s*(\w+))/g;
 	const defs = [...src.matchAll(DEF)].map((m) => {
-		const rest = src.slice(m.index + 1, m.index + 700);
-		const end = rest.search(/\n\t?(?:async\s+)?function\s|\n\t?const\s+\w+\s*=/);
+		// The body ends at the closing brace on the definition's own indent, not at the next call.
+		const lineStart = src.lastIndexOf('\n', m.index) + 1;
+		const indent = /^[ \t]*/.exec(src.slice(lineStart))![0];
+		const rest = src.slice(m.index, m.index + 1500);
+		const end = rest.search(new RegExp(`\\n${indent}\\}`));
 		return { name: (m[1] ?? m[3])!, param: (m[2] ?? m[4])!, body: end === -1 ? rest : rest.slice(0, end) };
 	});
 	const helpers = new Map<string, string | null>();
@@ -268,7 +271,8 @@ describe('every page that writes through an owner-only route has a read-only vie
 		expect(ownerOnlyWrites(`${json}${post}\tawait post(\`/runs/${'$'}{id}/approve\`);\n`, routes)).toEqual(['POST /api/runs/:id/approve']);
 		// The method from the call itself.
 		expect(ownerOnlyWrites(`${json}\tawait json(\`/runs/${'$'}{id}\`, { method: 'DELETE' });\n`, routes)).toEqual(['DELETE /api/runs/:id']);
-		// A read through the same helper is no write.
+		// A read of an owner-only route, straight or through the same helper, is no write.
+		expect(ownerOnlyWrites("\tconst res = await fetch(`${getApiBase()}/runs/${id}/secret`);\n", routes)).toEqual([]);
 		expect(ownerOnlyWrites(`${json}\tawait json(\`/runs/${'$'}{id}/secret\`);\n`, routes)).toEqual([]);
 		// A helper whose fetch does not take its parameter as the path is no path helper.
 		const fixed = "\tfunction ping(id: string) {\n\t\treturn fetch(`${getApiBase()}/health`, { method: 'POST' });\n\t}\n";
