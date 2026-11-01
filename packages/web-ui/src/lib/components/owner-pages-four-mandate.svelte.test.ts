@@ -267,6 +267,8 @@ describe('a page whose answer never comes', () => {
 		component = mount(Page, { target, props: page === 'memory' ? { hasDurableMemory: true } : {} });
 		const advance = async (ms: number): Promise<void> => { await vi.advanceTimersByTimeAsync(ms); flushSync(); };
 		await advance(0);
+		// The run's own page, not the list: only it offers the way back.
+		expect(buttonByText(t('bulk.back')) !== undefined).toBe(page === 'bulkRun');
 		return advance;
 	}
 	const notices = (): number => target.querySelectorAll('[data-testid="viewer-unavailable"]').length;
