@@ -936,6 +936,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'erasure.changed': { de: 'Seit der Vorschau hat sich etwas geändert, es wurde nichts gelöscht. Die Liste ist neu geladen; prüfe sie und bestätige erneut.', en: 'Something changed since the preview, so nothing was erased. The list is reloaded; check it and confirm again.' },
 	'erasure.busy': { de: 'Gerade läuft ein Chat, es wurde nichts gelöscht. Stoppe ihn oder warte, bis er fertig ist, und versuche es dann erneut.', en: 'A chat is running, so nothing was erased. Stop it or let it finish, then try again.' },
 	'erasure.unreadable': { de: 'Ein Teil des Gedächtnisses lässt sich mit dem Schlüssel dieser Instanz nicht entschlüsseln. Die Suche wäre unvollständig, darum wird nichts gelöscht.', en: 'Part of the memory cannot be decrypted with this instance\'s key. The search would be incomplete, so nothing is erased.' },
+	'erasure.owner_only_notice': { de: 'Die Daten einer Person löschen kann nur der Inhaber dieser Instanz. Bittet dich jemand darum, gib die Anfrage an den Inhaber weiter.', en: 'Only the owner of this instance can erase a person\'s data. If someone asks you to, pass the request on to the owner.' },
 	'erasure.forbidden': { de: 'Nur der Inhaber dieser Instanz kann eine Person löschen.', en: 'Only the owner of this instance can erase a person.' },
 	'erasure.failed': { de: 'Das hat nicht geklappt. Lade die Vorschau neu, um zu sehen, was noch da ist.', en: 'That did not work. Reload the preview to see what is still there.' },
 	'erasure.step.durable_knowledge': { de: 'Wissensspeicher', en: 'durable knowledge' },
@@ -1217,6 +1218,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.note.tool_loop_break.title': { de: 'Wiederholung gestoppt', en: 'Repetition stopped' },
 	'chat.note.thinking_loop.title': { de: 'Abgebrochen: nur nachgedacht, keine Antwort', en: 'Stopped: only thinking, no answer' },
 	'chat.note.thinking_loop': { de: 'Der Agent hat zweimal hintereinander nur nachgedacht und dabei die ganze Länge einer Antwort aufgebraucht, ohne zu antworten oder einen Schritt zu tun. Ein dritter Versuch hätte wieder von vorn begonnen, deshalb hat lynox angehalten. Stell die Frage enger, oder bitte um die Auswertung in Teilen, zum Beispiel erst für einen Ausschnitt der Daten.', en: 'The agent only thought, twice in a row, and used up the full length of an answer without replying or taking a step. A third try would have started over, so lynox stopped. Ask a narrower question, or ask for the analysis in parts, for example for a slice of the data first.' },
+	// Only for the owner of an instance without `locks.provider` (ChatView, `canChooseModel`, ux U-116).
+	// Names no model on purpose: the models are rafael's to choose. Labels as in SettingsIndex
+	// (`settings.config`) and LLMSettings (`llm.preset.heading`).
+	'chat.note.thinking_loop.model': { de: 'Das hängt auch vom Modell ab: In den Einstellungen unter „Konfiguration“ › „Modell-Strategie“ kannst du eine andere wählen.', en: 'This also depends on the model: under Settings › “Configuration” › “Model strategy” you can choose another one.' },
 	'chat.note.continuation_loop.title': { de: 'Abgebrochen: Antwort ohne Fortschritt', en: 'Stopped: response without progress' },
 	'chat.note.continuation_loop': { de: 'Die Antwort wurde wiederholt abgeschnitten, ohne dass der Agent weiterkam — meist versucht er, eine sehr grosse Datei direkt in die Antwort zu schreiben. Teile die Aufgabe in kleinere Schritte oder lade die Datei erneut hoch (grosse Dateien werden automatisch als Datei gespeichert, nicht in die Nachricht eingebettet).', en: 'The response was truncated repeatedly without the agent making progress — usually it is trying to write a very large file into the reply itself. Split the task into smaller steps or upload the file again (large uploads are stored as a file automatically, not embedded in the message).' },
 	
@@ -2220,6 +2225,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'triggers.watch_url': { de: 'Beobachtete Seite', en: 'Watched page' },
 	'triggers.watch_every': { de: 'Prüft alle {minutes} Minuten.', en: 'Checks every {minutes} minutes.' },
 	'triggers.confirm': { de: 'Bestätigen', en: 'Confirm' },
+	'triggers.confirm_owner_only_notice': { de: 'Läuft erst, wenn der Inhaber diesen Plan bestätigt.', en: 'Runs only once the owner confirms this plan.' },
 	'triggers.confirm_label': { de: 'Bestätigen, dass dieser Trigger ohne dich laufen darf', en: 'Confirm that this trigger may run without you' },
 	'triggers.confirmed': { de: 'Bestätigt.', en: 'Confirmed.' },
 	'triggers.confirm_failed': { de: 'Bestätigen fehlgeschlagen. Bitte erneut versuchen.', en: 'Could not confirm. Please try again.' },
@@ -2245,6 +2251,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.edit_in_chat': { de: 'Bearbeiten', en: 'Edit' },
 	'workflow_library.edit_in_chat_prompt': { de: 'Ich möchte diesen gespeicherten Workflow bearbeiten:', en: "I'd like to edit this saved workflow:" },
 	'workflow_library.delete': { de: 'Löschen', en: 'Delete' },
+	'workflow_library.owner_only_notice': { de: 'Workflows hier ausführen, umbenennen oder löschen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber. Ausführen kannst du einen Workflow auch im Chat: bitte lynox darum.', en: 'Only the owner of this instance can run, rename or delete workflows here. If you need that, ask the owner. You can also run a workflow in the chat: just ask lynox.' },
 	'workflow_library.save': { de: 'Speichern', en: 'Save' },
 	'workflow_library.cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'workflow_library.run_started': { de: 'Workflow gestartet.', en: 'Workflow started.' },
