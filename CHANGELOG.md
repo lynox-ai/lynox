@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.17.1 — 2026-11-01
+
+This release contains security fixes in the image's Debian packages. Upgrading
+is recommended for every instance that runs the Docker image.
+
+### Security
+
+- The Docker image is rebuilt from the 2.17.0 code with current Debian security
+  updates. It fixes CVE-2026-111497 in `libbrotli1` (critical) and
+  CVE-2026-84782 in `libssl3`. The 2.17.0 image carried `libbrotli1
+  1.0.9-2+b6`; the fixed versions are `1.0.9-2+deb12u1` and `libssl3
+  3.0.22-1~deb12u2` or newer.
+
+### Upgrade notes
+
+- No code changes against 2.17.0 and no database migrations. The npm package
+  `@lynox-ai/core` is republished with the new version number only.
+
 ## 2.17.0 — 2026-10-23
 
 This release contains security fixes. Upgrading is recommended for every instance.
