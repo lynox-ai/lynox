@@ -1103,6 +1103,16 @@ function planRefusalFinalForRun(): string {
   return `${RUN_REFUSAL_FINAL} ${RUN_REFUSAL_CLOSE}`;
 }
 
+/**
+ * For the member's own connection that their access does not cover: final for the run, but
+ * without "the same answer". A token exchange asks in write mode, which a later access of the
+ * same person passes, and is then stopped by the refresh slot's own check in other words; a
+ * request through it stays refused, since only connecting again changes that and a plan cannot.
+ */
+function ownRefusalFinalForRun(): string {
+  return `This is final for this run: the plan does not use this connection, so do not try it again. ${RUN_REFUSAL_CLOSE}`;
+}
+
 const RUN_REFUSAL_FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again.';
 const RUN_REFUSAL_CLOSE = 'Say so in your reply, and do not ask for permission.';
 
@@ -1135,7 +1145,7 @@ export function memberConnectionRefusal(
     if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;
     // Not "only in their own session" for the member's own: their access does not carry this
     // request, there or here.
-    if (own) return `${lead}, and ${person}'s access does not cover this plan, so the connection is not used in this plan's run. ${planRefusalFinalForRun()}`;
+    if (own) return `${lead}, and ${person}'s access does not cover this plan, so the connection is not used in this plan's run. ${ownRefusalFinalForRun()}`;
     return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session. ${planRefusalFinalForRun()}`;
   }
   // The same person under a later access: the connection was made under the earlier one.

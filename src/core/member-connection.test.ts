@@ -164,6 +164,8 @@ describe('a member\'s connection inside a plan\'s run', () => {
   const FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.';
   // The same end without who decides: for these the owner's stamp is not the way.
   const FINAL_RUN = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Say so in your reply, and do not ask for permission.';
+  // The member's own connection: no "same answer", a token exchange is stopped by another check.
+  const FINAL_OWN = 'This is final for this run: the plan does not use this connection, so do not try it again. Say so in your reply, and do not ask for permission.';
 
   it('is not read in a plan whose stamp lists no connection, and says the stamp does not list it', () => {
     const p = crm({ oauth_grant: G });
@@ -251,7 +253,7 @@ describe('a member\'s connection inside a plan\'s run', () => {
       // A read under the same grant still reaches it; a token exchange needs the access live.
       expect(memberConnectionRefusal(p, B, ends(['M-2']))).toBeNull();
       const said = memberConnectionRefusal(p, B, ends(['M-2']), 'write');
-      expect(said).toBe(`${lead}, and setup@example.org's access does not cover this plan, so the connection is not used in this plan's run. ${FINAL_RUN}`);
+      expect(said).toBe(`${lead}, and setup@example.org's access does not cover this plan, so the connection is not used in this plan's run. ${FINAL_OWN}`);
       expect(said).not.toContain('own session');
     }, listed(p));
   });
@@ -260,7 +262,10 @@ describe('a member\'s connection inside a plan\'s run', () => {
     const p = crm({ oauth_grant: G });
     const later = { ...B, mandateId: 'M-3' };
     runAsPlanOf(later, () => {
-      expect(memberConnectionRefusal(p, later, ends(['M-3']))).toBe(`${lead}, and setup@example.org's access does not cover this plan, so the connection is not used in this plan's run. ${FINAL_RUN}`);
+      expect(memberConnectionRefusal(p, later, ends(['M-3']))).toBe(`${lead}, and setup@example.org's access does not cover this plan, so the connection is not used in this plan's run. ${FINAL_OWN}`);
+      // A token exchange (write) passes this check under the later access, so the text must not
+      // promise it the same answer.
+      expect(memberConnectionRefusal(p, later, ends(['M-3']), 'write')).toBeNull();
     }, listed(p));
   });
 });
