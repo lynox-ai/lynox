@@ -106,7 +106,7 @@ describe('a run\'s page as a mandate sees it', () => {
 		expect(target.textContent).toContain('Product/1');
 		expect(buttonByText(t('bulk.approve.approve'))).toBeUndefined();
 		expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
-		expect(target.textContent).toContain(t('bulk.owner_only'));
+		expect(target.textContent).toContain(t('bulk.owner_only_notice'));
 	});
 
 	it('keeps approving and taking a target out for the owner, without the sentence', async () => {
@@ -114,7 +114,7 @@ describe('a run\'s page as a mandate sees it', () => {
 		await renderDetail();
 		expect(buttonByText(t('bulk.approve.approve'))).toBeDefined();
 		expect(buttonByText(t('bulk.deselect.off'))).toBeDefined();
-		expect(target.textContent).not.toContain(t('bulk.owner_only'));
+		expect(target.textContent).not.toContain(t('bulk.owner_only_notice'));
 	});
 
 	it('says who starts a run that waits for its start, not which button to press', async () => {
@@ -157,7 +157,7 @@ describe('the run list as a mandate sees it', () => {
 		await renderList();
 		expect(target.textContent).toContain('Anna Muster');
 		expect(buttonByText(t('bulk.merges.take_back'))).toBeUndefined();
-		expect(target.textContent).not.toContain(t('bulk.owner_only'));
+		expect(target.textContent).not.toContain(t('bulk.owner_only_notice'));
 	});
 
 	it('offers the owner to take the merge back', async () => {

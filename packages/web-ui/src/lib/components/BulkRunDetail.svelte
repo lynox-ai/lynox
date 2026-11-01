@@ -476,7 +476,7 @@
 			{/if}
 
 			{#if mandate}
-				<p class="text-sm border-t border-border pt-4">{t('bulk.owner_only')}</p>
+				<p class="text-sm border-t border-border pt-4">{t('bulk.owner_only_notice')}</p>
 			{:else if startKind === 'read'}
 				<div class="space-y-3 border-t border-border pt-4">
 					<p class="text-sm">{tf('bulk.start.read_explain', { provider })}</p>
