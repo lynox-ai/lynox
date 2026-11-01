@@ -410,12 +410,12 @@ export class WorkflowStore {
     return { scanned: rows.length, migrated };
   }
 
-  /** Read a single workflow definition (prefix-matched). */
+  /** Read a single workflow definition (prefix-matched; the exact id first, as in {@link getPlanned}). */
   get(id: string): StoredWorkflow | undefined {
     if (id === '') return undefined; // empty id → likePrefix '%' would match ALL rows
     const row = this.db.prepare(
-      "SELECT id, name, description, definition_json, is_template, created_at FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' LIMIT 1",
-    ).get(id, likePrefix(id)) as {
+      "SELECT id, name, description, definition_json, is_template, created_at FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' ORDER BY id = ? DESC LIMIT 1",
+    ).get(id, likePrefix(id), id) as {
       id: string; name: string; description: string; definition_json: string;
       is_template: number; created_at: string;
     } | undefined;

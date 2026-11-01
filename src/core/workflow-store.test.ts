@@ -189,6 +189,23 @@ describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
     });
   });
 
+  it('a prefix of two names neither: confirming and deleting write nothing', () => {
+    const { store } = make();
+    for (const id of ['wf-ab', 'wf-ac']) store.upsert({ id, name: id, definitionJson: JSON.stringify({ id, name: id }), isTemplate: true }, null);
+    expect(store.setConfirmedAt('wf-a', '2026-11-01T00:00:00Z')).toBe(false);
+    expect(store.remove('wf-a')).toBe(false);
+    expect(store.list().map((w) => w.id).sort()).toEqual(['wf-ab', 'wf-ac']);
+    for (const w of store.list()) expect((JSON.parse(w.definitionJson) as { confirmedAt?: string }).confirmedAt).toBeUndefined();
+    expect(store.setConfirmedAt('wf-ab', '2026-11-01T00:00:00Z')).toBe(true);   // the exact id still writes
+  });
+
+  it('reads the exact id before a longer one it is a prefix of', () => {
+    const { store } = make();
+    // Inserted longer-first, so an unordered LIMIT 1 would tend to answer with it.
+    for (const id of ['wf-ab', 'wf-a']) store.upsert({ id, name: id, definitionJson: '{}', isTemplate: true }, null);
+    expect(store.get('wf-a')!.id).toBe('wf-a');
+  });
+
   it('LIKE metacharacters in an id are escaped — a "%" id does NOT wipe the table', () => {
     const { store } = make();
     store.upsert({ id: 'wf1', name: 'A', definitionJson: '{}', isTemplate: false }, null);
