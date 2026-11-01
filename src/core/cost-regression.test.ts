@@ -478,7 +478,11 @@ function measureStaticPrefixTokens(): number {
 // for a vault name of the owner's, and the `secret_name` field they take. The description must
 // name every action of the enum (api-setup-connect.test.ts), so they share one line with
 // `adopt_connection`, and the field's text is one short phrase.
-const STATIC_PREFIX_BUDGET = 24051;
+// 2026-11-01: +12 (24049 → 24061, both measured the same run, the base with update-workflow.ts of
+// main d33659095, the only file that differs) — `update_workflow_steps` gains `rename_step` and a
+// `goal` field: the way out for a workflow stored with a step id or goal the save now refuses, and
+// `#2` names a step by its position. The rules for a new id stay in the refusals, not the schema.
+const STATIC_PREFIX_BUDGET = 24061;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a
