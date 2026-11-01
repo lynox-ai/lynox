@@ -11,6 +11,22 @@ export interface BulkI18n {
 	tf: (key: string, vars: Record<string, string>) => string;
 }
 
+/** The sentences that name the owner's own act ("you approved", "you took out", "the limit you
+ *  set"). Every such act is the owner's alone (the routes refuse a mandate), so a mandate's
+ *  session reads each in its `_mandate` form, which names the owner instead (ux U-111). */
+export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
+	'bulk.intro', 'bulk.deselect.taken_out',
+	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
+	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
+	'bulk.halt.mandateEnded', 'bulk.halt.checksum',
+]);
+
+/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form. */
+export function bulkMandateI18n(i18n: BulkI18n): BulkI18n {
+	const key = (k: string): string => (BULK_MANDATE_KEYS.has(k) ? `${k}_mandate` : k);
+	return { t: (k) => i18n.t(key(k)), tf: (k, vars) => i18n.tf(key(k), vars) };
+}
+
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
 export type BulkChange = 'update' | 'create' | 'delete' | 'unchanged' | 'invalid';
 
@@ -539,18 +555,22 @@ export function bulkStateText(
 }
 
 /** What the page says under "halted because": its own sentence where it has one, else the
- *  engine's reason. `startButton` as for {@link bulkStateText}. */
+ *  engine's reason. `startButton` as for {@link bulkStateText}. `mandate`: a session the page
+ *  offers no act (a mandate's, or one whose owner is not known yet) is shown no step that names a
+ *  button it does not see: a run waiting for its start says who starts it. */
 export function bulkHaltCause(
 	run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0] & Parameters<typeof bulkStateText>[0],
 	managed: boolean | null,
 	startButton: string | null,
 	i18n: BulkI18n,
+	mandate = false,
 ): string {
 	if (bulkAtProbe(run) && run.haltKey === 'maxTargets') return i18n.t('bulk.halted_after_probe');
 	const own = bulkHaltText(run, managed, i18n)?.cause ?? bulkResumeText(run, managed, i18n)?.cause ?? bulkRollbackText(run, i18n)?.cause;
 	if (own !== undefined) return own;
+	if (mandate && bulkWaitsForStart(run)) return i18n.t('bulk.halt.wait_owner_only');
 	const state = bulkStateText(run, startButton, i18n);
-	if (state !== null) return state.step === null ? state.cause : `${state.cause} ${state.step}`;
+	if (state !== null) return state.step === null || mandate ? state.cause : `${state.cause} ${state.step}`;
 	return run.haltReason ?? '';
 }
 

@@ -1473,7 +1473,7 @@ export class WorkerLoop {
         if (planPauseOn() && this.notificationRouter.hasChannels()) {
           const db = this.engine.getEngineDb()?.getDb();
           if (db !== undefined) {
-            for (const message of claimPauseNotices(db)) void this.notificationRouter.notify(message);
+            for (const message of claimPauseNotices(db, undefined, noticeLanguage(this.engine.config?.language))) void this.notificationRouter.notify(message);
           }
         }
       } catch (err: unknown) {
@@ -1490,7 +1490,7 @@ export class WorkerLoop {
         if (planPauseOn() && this.notificationRouter.hasChannels()) {
           const db = this.engine.getEngineDb()?.getDb();
           if (db !== undefined) {
-            for (const { message, keys } of claimAdvanceWarnings(db)) {
+            for (const { message, keys } of claimAdvanceWarnings(db, undefined, noticeLanguage(this.engine.config?.language))) {
               void this.notificationRouter.notify(message)
                 .then((report) => { if (summarizeDelivery(report) === 'delivered') markWarningsDelivered(db, keys); })
                 .catch((err: unknown) => {

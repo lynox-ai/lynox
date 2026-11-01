@@ -13,9 +13,11 @@ import { fileURLToPath } from 'node:url';
  * read from the server, so a route that turns owner-only brings its pages in by itself. A new page
  * that copies a write without the branch would hand a mandate a form whose save is always refused.
  *
- * What it does not see: a URL built by a helper (`fetch(url(), …)`), a method passed as a variable,
- * and writes in modules outside those two directories (the chat store is left out on purpose: every
- * view imports it).
+ * A local helper that sends to the path it is handed (`post(path)` in BulkRunDetail,
+ * `post(apiBase, path, body)` in `api/person-erasure.ts`) counts at each of its calls. What it does not see: a URL a helper builds without being handed it
+ * (`fetch(url(), …)`), a method passed as a variable, a helper imported from another module, and
+ * writes in modules outside those two directories (the chat store is left out on purpose: every view
+ * imports it).
  */
 // `src`, not only `src/lib`: a route page that writes counts too.
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -27,7 +29,12 @@ const SERVER = fileURLToPath(new URL('../../../../../src/server/http-api.ts', im
  */
 const EXEMPT: Record<string, string> = {
 	'BulkRunsSetting.svelte': 'Its page leaves it out for a mandate (bulk runs are the owner\'s switch); the mandate is told the owner turns it on.',
+	'BulkRunsView.svelte': 'A mandate reads the runs and merges without "take back"; one button on a readable page gets no sentence (ux U-111), and a run\'s own page says who acts.',
 	'ChatView.svelte': 'Not a settings page: it reveals the vault key only for the owner\'s backup reminder, and a refused reveal shows nothing.',
+	'ApprovalsView.svelte': 'A card without a checksum only reads, closing is offered at `viewer === \'owner\'` only, and a mandate is told the queue is read-only.',
+	'OnboardingBasics.svelte': 'Mounted only by ChatView, which never runs the owner\'s introduction in a mandate\'s session.',
+	'PersonErasurePanel.svelte': 'Mounted only by SubjectsView, behind a button shown in the owner\'s session only; a mandate is told where an erasure request goes.',
+	'TriggersView.svelte': 'Its one owner-only button (confirming a plan) shows only to a known owner (isOwnerSession); anyone else reads, in its place, that the owner confirms the plan.',
 };
 /**
  * Pages outside the settings that write through an owner-only route: the actions on them (approve,
@@ -35,8 +42,7 @@ const EXEMPT: Record<string, string> = {
  * checked page by page apart from this detector. Listed so a NEW page still fails here.
  */
 const OUTSIDE_SETTINGS = [
-	'ApprovalsView.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'KnowledgeQueueView.svelte',
-	'MemoryView.svelte', 'OnboardingBasics.svelte', 'TriggersView.svelte', 'WorkflowLibraryView.svelte',
+	'ContactsView.svelte', 'FileBrowserView.svelte', 'KnowledgeQueueView.svelte', 'MemoryView.svelte',
 ];
 /**
  * Pages a mandate does not see at all, hidden by themselves: they must ask whose session it is,
@@ -51,7 +57,7 @@ const HIDDEN: Record<string, string> = {
 };
 
 /** Pages the scan counted when this landed; fewer means it went blind. */
-const PAGES_WHEN_LANDED = 33;
+const PAGES_WHEN_LANDED = 35;
 
 /** A route only the owner may use, as `METHOD` and a pattern over the path after `/api`. */
 interface OwnerRoute { method: string; path: RegExp; name: string }
@@ -72,24 +78,96 @@ function ownerOnlyRoutes(server: string): OwnerRoute[] {
 	return routes;
 }
 
+/** The method a call's options name (`method: 'POST'`), or none. */
+function methodIn(call: string): string | undefined {
+	return /method\s*:\s*['"`]([A-Z]+)['"`]/.exec(call)?.[1];
+}
+
+/** The text of the call starting at `at`, up to the next call of `name` (or 900 characters). */
+function callAt(src: string, at: number, name: string): string {
+	const rest = src.slice(at, at + 900);
+	const next = rest.slice(name.length + 1).search(new RegExp(`\\b${name}\\(`));
+	return next === -1 ? rest : rest.slice(0, next + name.length + 1);
+}
+
+/** A local helper that sends to a path it is handed: its method, and which argument is the path. */
+interface PathHelper { method: string | null; at: number }
+
+/**
+ * The local helpers in `src` that send to a path they are handed: `function post(path…)` whose
+ * body calls `fetch(\`${base}${path}\`, …)`, directly or through another such helper
+ * (`post` → `json` → `fetch` in BulkRunDetail). The path may be any parameter
+ * (`post(apiBase, path, body)` in `api/person-erasure.ts`). Each maps to the method it always
+ * sends, or to `null` when its caller passes the options (`json(path, { method: 'POST' })`).
+ */
+function pathHelpers(src: string): Map<string, PathHelper> {
+	const DEF = /(?:function\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)|const\s+(\w+)\s*=\s*(?:async\s*)?(?:<[^>]*>)?\s*\(([^)]*)\))/g;
+	const defs = [...src.matchAll(DEF)].map((m) => {
+		// The body ends at the closing brace on the definition's own indent, not at the next call.
+		const lineStart = src.lastIndexOf('\n', m.index) + 1;
+		const indent = /^[ \t]*/.exec(src.slice(lineStart))![0];
+		const rest = src.slice(m.index, m.index + 1500);
+		const end = rest.search(new RegExp(`\\n${indent}\\}`));
+		const params = (m[2] ?? m[4])!.split(',').map((x) => /^\s*(\w+)/.exec(x)?.[1] ?? '');
+		return { name: (m[1] ?? m[3])!, params, body: end === -1 ? rest : rest.slice(0, end) };
+	});
+	const helpers = new Map<string, PathHelper>();
+	for (let changed = true; changed;) {
+		changed = false;
+		for (const d of defs) {
+			if (helpers.has(d.name)) continue;
+			d.params.forEach((param, at) => {
+				if (!param || helpers.has(d.name)) return;
+				if (new RegExp(`\\bfetch\\(\\s*\`\\$\\{[^}]*\\}\\$\\{${param}\\}`).test(d.body)) {
+					helpers.set(d.name, { method: methodIn(d.body) ?? null, at });
+					changed = true;
+					return;
+				}
+				for (const [name, h] of helpers) {
+					const m = new RegExp(`\\b${name}\\(${'\\s*[^,()]+,'.repeat(h.at)}\\s*${param}\\b`).exec(d.body);
+					if (!m) continue;
+					helpers.set(d.name, { method: h.method ?? methodIn(d.body.slice(m.index)) ?? null, at });
+					changed = true;
+					return;
+				}
+			});
+		}
+	}
+	return helpers;
+}
+
+/** The path of a URL template after the API base; an interpolation stands for one segment. */
+function pathOf(url: string, base: boolean): string {
+	return (base ? url.replace(/^\$\{[^}]*\}/, '') : url).replace(/\$\{[^}]*\}/g, 'x').split('?')[0]!;
+}
+
 /**
  * The owner-only writes in `src`: each fetch whose method is not GET and whose URL, after the API
- * base, matches an owner-only route. An interpolation in the URL stands for one path segment.
+ * base, matches an owner-only route; and each call of a local helper that sends to the path it is
+ * handed (`post(\`/bulk/runs/${id}/approve\`)`), with the helper's method or the call's own.
  */
 function ownerOnlyWrites(src: string, routes: OwnerRoute[]): string[] {
 	const found: string[] = [];
-	for (const m of src.matchAll(/\bfetch\(/g)) {
-		const rest = src.slice(m.index + 6, m.index + 900);
-		const next = rest.search(/\bfetch\(/);
-		const call = `fetch(${next === -1 ? rest : rest.slice(0, next)}`;
-		const method = /method\s*:\s*['"`]([A-Z]+)['"`]/.exec(call)?.[1] ?? 'GET';
-		if (method === 'GET') continue;
-		const url = /^fetch\(\s*`([^`]*)`/.exec(call)?.[1];
-		if (url === undefined) continue;
-		// The API base first (`${getApiBase()}`, `${apiBase}`, `${base}`), then every other interpolation.
-		const path = url.replace(/^\$\{[^}]*\}/, '').replace(/\$\{[^}]*\}/g, 'x').split('?')[0]!;
+	const record = (method: string | undefined, path: string): void => {
+		if (method === undefined || method === 'GET') return;
 		const route = routes.find((r) => r.method === method && r.path.test(path));
 		if (route) found.push(route.name);
+	};
+	for (const m of src.matchAll(/\bfetch\(/g)) {
+		const call = callAt(src, m.index, 'fetch');
+		const url = /^fetch\(\s*`([^`]*)`/.exec(call)?.[1];
+		// The API base first (`${getApiBase()}`, `${apiBase}`, `${base}`), then every other interpolation.
+		if (url !== undefined) record(methodIn(call) ?? 'GET', pathOf(url, true));
+	}
+	for (const [name, { method, at }] of pathHelpers(src)) {
+		// The arguments before the path are plain values (`apiBase`), not calls or strings.
+		for (const m of src.matchAll(new RegExp(`\\b${name}\\(${'\\s*[^,()`\'"]+,'.repeat(at)}\\s*([\`'"])`, 'g'))) {
+			const call = callAt(src, m.index, name);
+			const quote = m[1]!;
+			const url = call.slice(m[0].length).split(quote)[0]!;
+			// A path handed to the helper starts at `/api`'s level: no base in front of it.
+			if (url.startsWith('/')) record(method ?? methodIn(call), pathOf(url, false));
+		}
 	}
 	return found;
 }
@@ -178,13 +256,40 @@ describe('every page that writes through an owner-only route has a read-only vie
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
-		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'ChatView.svelte']);
+		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'TriggersView.svelte']);
 		for (const name of OUTSIDE_SETTINGS) expect(pages.map((p) => basename(p))).toContain(name);
 		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte', 'SecretsView.svelte', 'KeysView.svelte', 'CalendarSettings.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {
 			expect(pages.map((p) => basename(p))).toContain(name);
 			expect(reason.length).toBeGreaterThan(20);
 		}
+	});
+
+	it('counts the page whose writes go through a local helper', () => {
+		expect(pages.map((p) => basename(p))).toContain('BulkRunDetail.svelte');
+	});
+
+	it('CONTROL: follows a local helper to its method, through a second helper or from the call', () => {
+		const routes = ownerOnlyRoutes([
+			"    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/runs/:id/approve', async () => {", "    }, ownerOnly('approve a run')));",
+			"    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/runs/:id', async () => {", "    }, ownerOnly('delete a run')));",
+			"    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/runs/:id/secret', async () => {", "    }, ownerOnly('read a secret')));",
+		].join('\n'));
+		const json = "\tasync function json<T>(path: string, init?: RequestInit) {\n\t\tconst res = await fetch(`${getApiBase()}${path}`, init);\n\t\treturn res;\n\t}\n";
+		const post = "\tfunction post(path: string, body?: unknown) {\n\t\treturn json(path, { method: 'POST', body: JSON.stringify(body) });\n\t}\n";
+		// Through a second helper with a fixed method.
+		expect(ownerOnlyWrites(`${json}${post}\tawait post(\`/runs/${'$'}{id}/approve\`);\n`, routes)).toEqual(['POST /api/runs/:id/approve']);
+		// The method from the call itself.
+		expect(ownerOnlyWrites(`${json}\tawait json(\`/runs/${'$'}{id}\`, { method: 'DELETE' });\n`, routes)).toEqual(['DELETE /api/runs/:id']);
+		// A read of an owner-only route, straight or through the same helper, is no write.
+		expect(ownerOnlyWrites("\tconst res = await fetch(`${getApiBase()}/runs/${id}/secret`);\n", routes)).toEqual([]);
+		expect(ownerOnlyWrites(`${json}\tawait json(\`/runs/${'$'}{id}/secret\`);\n`, routes)).toEqual([]);
+		// The path as a later argument, after the base (`post(apiBase, path, body)`).
+		const based = "async function post(apiBase: string, path: string, body: unknown) {\n\tconst res = await fetch(`${apiBase}${path}`, { method: 'POST' });\n}\n";
+		expect(ownerOnlyWrites(`${based}\tconst a = await post(apiBase, '/runs/1/approve', {});\n`, routes)).toEqual(['POST /api/runs/:id/approve']);
+		// A helper whose fetch does not take its parameter as the path is no path helper.
+		const fixed = "\tfunction ping(id: string) {\n\t\treturn fetch(`${getApiBase()}/health`, { method: 'POST' });\n\t}\n";
+		expect(ownerOnlyWrites(`${fixed}\tawait ping(\`/runs/x/approve\`);\n`, routes)).toEqual([]);
 	});
 
 	it('CONTROL: reads an owner-only stance, at any indent, and skips another stance', () => {

@@ -17,6 +17,7 @@
  */
 import type Database from 'better-sqlite3';
 import type { NotificationMessage } from './notification-router.js';
+import type { NoticeLanguage } from './notice-language.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { MANDATE_TAG_PREFIX, planMandate, planMembers } from './request-principal.js';
 import { processErrorText } from './error-egress.js';
@@ -431,7 +432,7 @@ interface PendingNotice {
  * to `paused_for` and not told again. If that plan was the member's only one, there is no notice
  * about it.
  */
-export function claimPauseNotices(db: Database.Database, nowS: number = nowSeconds()): NotificationMessage[] {
+export function claimPauseNotices(db: Database.Database, nowS: number = nowSeconds(), lang: NoticeLanguage = 'en'): NotificationMessage[] {
   if (!planPauseOn()) return [];
   const pending = db.prepare(
     "SELECT id, title, paused_for FROM triggers WHERE paused_at IS NOT NULL AND pause_noticed_at IS NULL AND status != 'completed'",
@@ -451,7 +452,7 @@ export function claimPauseNotices(db: Database.Database, nowS: number = nowSecon
       else { seen.plans += 1; seen.unwarned += unwarned; }
     }
   }
-  return [...byEnd.values()].map(({ entry, plans, unwarned }) => pauseNotice(entry, plans, unwarned === 0 ? 'all' : unwarned === plans ? 'none' : 'some'));
+  return [...byEnd.values()].map(({ entry, plans, unwarned }) => pauseNotice(entry, plans, unwarned === 0 ? 'all' : unwarned === plans ? 'none' : 'some', lang));
 }
 
 /** `YYYY-MM-DD` of a unix-seconds instant, in UTC. */
@@ -459,13 +460,25 @@ function dateOf(s: number): string {
   return new Date(s * 1000).toISOString().slice(0, 10);
 }
 
+/** The same UTC day as {@link dateOf}, written the way the notice's language writes a date. */
+function dateIn(s: number, lang: NoticeLanguage): string {
+  const iso = dateOf(s);
+  return lang === 'de' ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : iso;
+}
+
 /**
- * The owner's notice for one ended mandate (the approved wording, verbatim). Notices are
- * sent in English, like every other notice of the worker. "Had access until", not "ended": a grant
- * extended before its old end, by someone who has not signed in since, pauses too. "In which they
- * created or changed something" counts a plan through its workflow as well.
+ * The owner's notice for one ended mandate (the approved wording, verbatim), in the language of the
+ * engine's notices (`noticeLanguage`). "Had access until", not "ended": a grant extended before its
+ * old end, by someone who has not signed in since, pauses too. "In which they created or changed
+ * something" counts a plan through its workflow as well.
+ *
+ * German puts the name in the title: with it in the body, both clauses and the date do not fit in
+ * {@link PAUSE_NOTICE_BODY_MAX} for an ordinary address. The date there is the end the owner set,
+ * named as such ("Eingetragenes Ende"): in the present tense it would read as today's end after an
+ * extension (legal, 2026-11-01).
  */
-export function pauseNotice(entry: PausedFor, count: number, warned: 'all' | 'some' | 'none'): NotificationMessage {
+export function pauseNotice(entry: PausedFor, count: number, warned: 'all' | 'some' | 'none', lang: NoticeLanguage = 'en'): NotificationMessage {
+  if (lang === 'de') return pauseNoticeDe(entry, count, warned);
   // An expiry says when no advance warning was delivered for its plans, so the notice never reads
   // as if one had come (legal, POS-069 Nachtrag 5). A revocation never has one, so it is not said there.
   const noAdvance = warned === 'all' ? '' : warned === 'some' ? ' Not all had advance notice.' : ' There was no advance notice.';
@@ -495,11 +508,34 @@ export function pauseNotice(entry: PausedFor, count: number, warned: 'all' | 'so
  */
 export const PAUSE_NOTICE_BODY_MAX = 240;
 
-function fitName(name: string, body: (name: string) => string): string {
+/** The longest title a push carries: `web-push-channel.ts` cuts there too. */
+export const PAUSE_NOTICE_TITLE_MAX = 64;
+
+function fitName(name: string, body: (name: string) => string, max: number = PAUSE_NOTICE_BODY_MAX): string {
   const full = body(name);
-  if (full.length <= PAUSE_NOTICE_BODY_MAX) return full;
-  const keep = Math.max(1, name.length - (full.length - PAUSE_NOTICE_BODY_MAX) - 1);
+  if (full.length <= max) return full;
+  const keep = Math.max(1, name.length - (full.length - max) - 1);
   return body(`${name.slice(0, keep)}…`);
+}
+
+const ownerOnly = { priority: 'high', audience: 'owner' } as const;
+
+function pauseNoticeDe(entry: PausedFor, count: number, warned: 'all' | 'some' | 'none'): NotificationMessage {
+  const noAdvance = warned === 'all' ? '' : warned === 'some' ? ' Nicht alle hatten eine Vorwarnung.' : ' Eine Vorwarnung gab es nicht.';
+  const n = String(count);
+  const body = entry.reason === 'revoked'
+    ? (count === 1
+      ? 'Der Zugang wurde widerrufen. Ein Plan, in dem über diesen Zugang etwas angelegt oder geändert wurde, ist pausiert. Er läuft erst wieder, wenn du ihn übernimmst.'
+      : `Der Zugang wurde widerrufen. ${n} Pläne, in denen über diesen Zugang etwas angelegt oder geändert wurde, sind pausiert. Sie laufen erst wieder, wenn du sie übernimmst.`)
+    : (count === 1
+      ? `Eingetragenes Ende: ${dateIn(entry.endsAt, 'de')}. Ein Plan, in dem die Person etwas angelegt oder geändert hat, ist pausiert. Er läuft erst nach deiner Übernahme wieder, auch wenn der Zugang verlängert wurde.${noAdvance}`
+      : `Eingetragenes Ende: ${dateIn(entry.endsAt, 'de')}. ${n} Pläne, in denen die Person etwas angelegt oder geändert hat, sind pausiert. Sie laufen erst nach deiner Übernahme wieder, auch wenn der Zugang verlängert wurde.${noAdvance}`);
+  return {
+    title: fitName(entry.email, (name) => (count === 1 ? `⏸ Plan pausiert: Zugang von ${name}` : `⏸ ${n} Pläne pausiert: Zugang von ${name}`), PAUSE_NOTICE_TITLE_MAX),
+    body,
+    ...ownerOnly,
+    data: Object.freeze({ pausedPlans: '1' }),
+  };
 }
 
 /** How long before a mandate's known end the owner is warned: once it is less than this away. */
@@ -558,7 +594,7 @@ function wouldRunAt(row: WarnPlanState, endsAt: number): boolean {
  * warning; one named before is not named again. A plan whose workflow cannot be read is skipped and
  * tried again on the next tick.
  */
-export function claimAdvanceWarnings(db: Database.Database, nowS: number = nowSeconds()): AdvanceWarning[] {
+export function claimAdvanceWarnings(db: Database.Database, nowS: number = nowSeconds(), lang: NoticeLanguage = 'en'): AdvanceWarning[] {
   if (!planPauseOn()) return [];
   const ending = db.prepare(
     'SELECT mandate_id, ends_at FROM mandate_ends WHERE revoked_at IS NULL AND ends_at > ? AND ends_at - ? <= ?',
@@ -622,7 +658,7 @@ export function claimAdvanceWarnings(db: Database.Database, nowS: number = nowSe
       else g.keys.push({ triggerId: w.triggerId, mandateId: w.mandateId, endsAt: w.endsAt });
     }
   }).immediate();
-  return [...groups.values()].map((g) => ({ message: advanceWarning(g.email, g.endsAt, g.keys.length, g.more), keys: g.keys }));
+  return [...groups.values()].map((g) => ({ message: advanceWarning(g.email, g.endsAt, g.keys.length, g.more, lang), keys: g.keys }));
 }
 
 /** Marks the rows of a warning delivered, once a channel of the owner accepted it. */
@@ -634,12 +670,23 @@ export function markWarningsDelivered(db: Database.Database, keys: readonly Warn
 }
 
 /**
- * The owner's advance warning for one mandate and end (ux U-065; English, like every notice of the
- * worker). `more`: an earlier warning of this end, delivered, named other plans, and this one
+ * The owner's advance warning for one mandate and end (ux U-065), in the language of the engine's
+ * notices. `more`: an earlier warning of this end, delivered, named other plans, and this one
  * names one that joined since. It promises no lead time: it goes out once the end is less than a day away, if a
- * channel is registered then (legal, POS-069 Nachtrag 8).
+ * channel is registered then (legal, POS-069 Nachtrag 8). German puts the name in the title, as the
+ * pause notice does.
  */
-export function advanceWarning(email: string, endsAt: number, count: number, more: boolean): NotificationMessage {
+export function advanceWarning(email: string, endsAt: number, count: number, more: boolean, lang: NoticeLanguage = 'en'): NotificationMessage {
+  if (lang === 'de') {
+    const n = String(count);
+    const plans = count === 1 ? (more ? 'pausiert noch ein Plan, in dem' : 'pausiert ein Plan, in dem') : `pausieren ${n} Pläne, in denen`;
+    const after = count === 1 ? 'Pausiert er, kannst du ihn übernehmen.' : 'Pausieren sie, kannst du sie übernehmen.';
+    return {
+      title: fitName(email, (name) => (count === 1 ? `Plan pausiert bald: Zugang von ${name}` : `${n} Pläne pausieren bald: Zugang von ${name}`), PAUSE_NOTICE_TITLE_MAX),
+      body: `Zugang bis ${dateIn(endsAt, 'de')}. Dann ${plans} die Person etwas angelegt oder geändert hat, auch wenn du den Zugang verlängert hast, es sei denn, die Person meldet sich vorher einmal an. ${after}`,
+      ...ownerOnly,
+    };
+  }
   const plans = count === 1 ? (more ? 'one more plan' : 'a plan') : `${String(count)} plans`;
   const them = count === 1 ? 'it' : 'them';
   const body = (name: string): string =>
