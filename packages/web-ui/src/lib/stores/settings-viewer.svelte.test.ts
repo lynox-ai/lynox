@@ -55,6 +55,14 @@ describe('loadSettingsViewer', () => {
 		expect(isOwnerSession()).toBe(false);
 	});
 
+	it('asks once: a later read takes the answer it has', async () => {
+		const fetchMock = serve(json({ viewer: 'owner' }));
+		await loadSettingsViewer();
+		await loadSettingsViewer();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(isOwnerSession()).toBe(true);
+	});
+
 	it('does not ask again when the answer has no viewer', async () => {
 		const fetchMock = serve(json({ managed: 'self-host' }));
 		await loadSettingsViewer();
