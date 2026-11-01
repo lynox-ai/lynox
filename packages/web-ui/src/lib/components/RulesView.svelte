@@ -26,7 +26,7 @@
 	import { listMailAccounts, type MailAccountView } from '../api/mail-accounts.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import { isInboxAvailable, loadInboxCounts } from '../stores/inbox.svelte.js';
 
@@ -238,7 +238,7 @@
 	{:else}
 		<p class="text-[12px] text-text-muted mb-4">{t('inbox.rules_intro')}</p>
 		{#if isMandateSession()}
-			<!-- A mandate's session (ux U-109): adding and deleting a rule are the owner's. -->
+			<!-- A mandate's session: adding and deleting a rule are the owner's. -->
 			<div class="mb-4"><OwnerOnlyNotice /></div>
 		{/if}
 
@@ -272,7 +272,7 @@
 				<span class="text-[11px] text-text-subtle uppercase tracking-widest">
 					{rules.length} {rules.length === 1 ? '·' : ''}
 				</span>
-				{#if !formOpen && !isMandateSession()}
+				{#if !formOpen && isOwnerSession()}
 					<button
 						type="button"
 						onclick={openForm}
@@ -281,7 +281,7 @@
 				{/if}
 			</div>
 
-			{#if formOpen && !isMandateSession()}
+			{#if formOpen && isOwnerSession()}
 				<form
 					onsubmit={(e) => { e.preventDefault(); void submitForm(); }}
 					class="mb-4 rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 p-4 space-y-3"
@@ -360,8 +360,8 @@
 										→ {t(ruleDisplayLabelKey(rule))}
 									</p>
 								</div>
-								{#if isMandateSession()}
-									<!-- No delete for a mandate: the rule is the owner's. -->
+								{#if !isOwnerSession()}
+									<!-- No delete until the server said this is the owner's session: the rule is the owner's. -->
 								{:else if pendingDeleteId === rule.id}
 									<div class="flex items-center gap-1 shrink-0">
 										<button

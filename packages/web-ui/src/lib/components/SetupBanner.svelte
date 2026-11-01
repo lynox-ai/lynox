@@ -5,7 +5,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
 	import { untrack } from 'svelte';
-	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	type Provider = 'anthropic' | 'mistral' | 'openai';
 
@@ -277,7 +277,7 @@
 </script>
 
 <!-- Setup Wizard Modal -->
-{#if loaded && showWizard && apiKeyMissing && !isMandateSession()}
+{#if loaded && showWizard && apiKeyMissing && isOwnerSession()}
 	<div class="fixed inset-0 z-[60] flex items-center justify-center bg-bg-overlay/60 backdrop-blur-sm p-4">
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -469,7 +469,7 @@
 {/if}
 
 <!-- Banner (after wizard dismissed or on revisit) -->
-{#if loaded && apiKeyMissing && !showWizard && !dismissed && !isMandateSession()}
+{#if loaded && apiKeyMissing && !showWizard && !dismissed && isOwnerSession()}
 	<div role="alert" class="flex items-center justify-between gap-3 border-b border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning shrink-0">
 		<div class="flex items-center gap-2 min-w-0">
 			<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor">

@@ -10,7 +10,7 @@
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
 	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
-	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
 	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
@@ -134,7 +134,7 @@
 	</div>
 
 	{#if isMandateSession()}
-		<!-- A mandate's session (ux U-109): it sets up profiles in chat and connects its own, but
+		<!-- A mandate's session: it sets up profiles in chat and connects its own, but
 		     deleting a profile and entering a built-in provider's app credentials are the owner's. -->
 		<p class="mb-4 border border-border rounded p-3 text-sm text-text-muted" data-testid="apis-owner-only">{t('apis.owner_only_notice')}</p>
 	{/if}
@@ -148,8 +148,8 @@
 		</div>
 	{/if}
 
-	<!-- Repairing or deleting the waiting files is the owner's; a mandate's session is not asked to. -->
-	{#if importWaiting.length > 0 && !isMandateSession()}
+	<!-- Repairing or deleting the waiting files is the owner's; only the owner's session is asked to. -->
+	{#if importWaiting.length > 0 && isOwnerSession()}
 		<div class="rounded-[var(--radius-md)] border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning mb-4 space-y-1" role="status" data-testid="api-import-waiting">
 			<p>{t('apis.import_waiting')}</p>
 			<ul class="list-disc pl-5 space-y-1">
@@ -185,7 +185,7 @@
 							class="px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
 							<Icon name="chat" size="xs" />
 						</button>
-						{#if !isMandateSession()}
+						{#if isOwnerSession()}
 						<button onclick={() => deleteProfile(profile)}
 							disabled={deleting === profile.id}
 							aria-label={t('apis.delete')}
@@ -238,7 +238,7 @@
 							{/if}
 						</div>
 					{/if}
-					{#if onBuiltInProvider(profile) && !isMandateSession()}
+					{#if onBuiltInProvider(profile) && isOwnerSession()}
 						<div class="border-t border-border px-4 py-3">
 							<PresetClientForm profileId={profile.id} />
 						</div>

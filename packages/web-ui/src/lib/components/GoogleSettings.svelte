@@ -9,7 +9,7 @@
 	import { onDestroy, untrack } from 'svelte';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import { googleOAuthErrorNotice } from '../stores/integrations/google-oauth-error.js';
@@ -158,7 +158,7 @@
 	<a href="/app/settings/channels" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.channels.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.google')}</h1>
 
-	{#if pendingClaimNonce && !isMandateSession()}
+	{#if pendingClaimNonce && isOwnerSession()}
 		<!-- Deliberately a decision, not a notice. The wording says what cannot be shown —
 		     which account — because that absence is the reason the confirmation exists. -->
 		<div class="rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 p-5 space-y-3 text-warning">
@@ -195,7 +195,7 @@
 		{#if isGoogleLoading()}
 			<!-- loading -->
 		{:else if isMandateSession()}
-			<!-- A mandate's session (ux U-109): connecting, the access level and disconnecting are the
+			<!-- A mandate's session: connecting, the access level and disconnecting are the
 			     owner's. The status stays in the header; what the connection covers shows as text. -->
 			<div class="space-y-3" data-testid="google-read-only">
 				<OwnerOnlyNotice />
@@ -209,6 +209,8 @@
 					</div>
 				{/if}
 			</div>
+		{:else if !isOwnerSession()}
+			<!-- No control until the server said this is the owner's session. -->
 		{:else if isManagedGoogleClaiming() || isSwitchingToManaged()}
 			<div class="flex items-center gap-2 text-sm text-text-muted">
 				<span class="inline-block h-4 w-4 border-2 border-accent border-t-transparent rounded-full animate-spin"></span>
