@@ -38,7 +38,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
   definition: {
     name: 'update_workflow_steps',
     description:
-      'Edit + save a stored workflow\'s steps (and its goal). Re-validates and re-infers whether it can still run ' +
+      'Edit + save a stored workflow\'s steps. Re-validates and re-infers whether it can still run ' +
       'unattended. Scheduled workflow → needs confirm:true.',
     input_schema: {
       type: 'object' as const,
@@ -51,15 +51,15 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
             type: 'object',
             properties: {
               action: { type: 'string', enum: ['remove', 'update_task', 'add_step', 'rename_step'] },
-              step_id: { type: 'string', description: 'Target step id, or its position as "#2"; the new id for add_step (no ".", "{", "}", not starting with "#").' },
-              value: { type: 'string', description: 'New task text (update_task / add_step); the new id (rename_step), which the steps reading this one follow.' },
+              step_id: { type: 'string', description: 'Target step id or "#2" (position); new id for add_step.' },
+              value: { type: 'string', description: 'New task text, or new id for rename_step.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'add_step: dependency step ids.' },
               after: { type: 'string', description: 'add_step: insert after this step id (default: append).' },
             },
             required: ['action', 'step_id'],
           },
         },
-        goal: { type: 'string', description: 'A new goal for the workflow.' },
+        goal: { type: 'string' },
         confirm: { type: 'boolean', description: 'Proceed when the workflow is scheduled.' },
       },
       required: ['workflow_id'],
