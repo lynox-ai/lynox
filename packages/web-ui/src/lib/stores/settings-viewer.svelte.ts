@@ -20,6 +20,8 @@ let viewer = $state<SettingsViewer | null>(null);
  * alongside.
  */
 let known = false;
+/** Whether `GET /api/config` named a `locks.provider`; null until a body was read. */
+let providerLocked = $state<boolean | null>(null);
 let pending: Promise<void> | null = null;
 
 /**
@@ -47,11 +49,25 @@ export function isOwnerSession(): boolean {
 	return viewer === 'owner';
 }
 
-/** Takes `viewer` from a `GET /api/config` body a page has read anyway. */
+/**
+ * True only when the server said this session is the owner's AND named no `locks.provider`: the
+ * one who can pick another main model under Settings › Configuration › Model strategy. For a line
+ * that points there (the thinking-loop note, ux U-116): hidden while the answer is out, and when
+ * there is none, so it never points a mandate or a locked instance at a choice it does not have.
+ */
+export function canChooseModel(): boolean {
+	return viewer === 'owner' && providerLocked === false;
+}
+
+/** Takes `viewer` and whether the provider is locked from a `GET /api/config` body a page has read anyway. */
 export function noteSettingsViewer(body: unknown): void {
 	if (body === null || typeof body !== 'object' || !('viewer' in body)) return;
 	const v = (body as { viewer: unknown }).viewer;
 	if (v === 'owner' || v === 'mandate' || v === 'none') { viewer = v; known = true; }
+	// Every `GET /api/config` body carries `locks`; one without it says nothing about the lock, so
+	// the line that needs it stays hidden rather than assuming there is none.
+	const locks = (body as { locks?: unknown }).locks;
+	providerLocked = locks !== null && typeof locks === 'object' ? ((locks as { provider?: unknown }).provider ?? null) !== null : null;
 }
 
 /** Reads `viewer` once per page load; later calls share the first. */
@@ -85,6 +101,7 @@ export function loadSettingsViewer(): Promise<void> {
 /** Forget what was read: before a new sign-in, and in tests. */
 export function resetSettingsViewer(): void {
 	generation++;
+	// `providerLocked` needs no reset: every body that sets `viewer` also sets it.
 	viewer = null;
 	known = false;
 	pending = null;
