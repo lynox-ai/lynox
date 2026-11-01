@@ -37,6 +37,8 @@ let component: Record<string, unknown> | undefined;
 let t: (key: string) => string;
 /** Every request other than a GET, as `METHOD path`. */
 let writes: string[];
+/** Holds `GET /api/config` until released, to look at the page while the answer is out. */
+let configGate: Promise<void>;
 
 async function renderFor(viewer: 'mandate' | 'owner'): Promise<void> {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -47,7 +49,7 @@ async function renderFor(viewer: 'mandate' | 'owner'): Promise<void> {
 			return json({ error: 'Only the owner of this instance can do this.' }, viewer === 'owner' ? 200 : 403);
 		}
 		if (path.endsWith('/onboarding/status')) return json({ knowledgeDone: false, skipped: false, durableMemory: false, firstSessionAt: null });
-		if (path.endsWith('/config')) return json({ viewer });
+		if (path.endsWith('/config')) { await configGate; return json({ viewer }); }
 		return json({});
 	}));
 	const { default: ChatView } = await import('./ChatView.svelte');
@@ -68,6 +70,7 @@ beforeEach(async () => {
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	writes = [];
+	configGate = Promise.resolve();
 });
 
 afterEach(() => {
@@ -82,6 +85,19 @@ describe('ChatView and the owner\'s introduction', () => {
 		await renderFor('mandate');
 		expect(target.textContent).not.toContain(t('onboard.skip_onboarding'));
 		expect(writes.filter((w) => w.includes('/onboarding/'))).toEqual([]);
+	});
+
+	it('does not show it while the server has not said whose session it is', async () => {
+		let release!: () => void;
+		configGate = new Promise((r) => { release = r; });
+		await renderFor('owner');
+		expect(target.textContent).not.toContain(t('onboard.skip_onboarding'));
+		expect(writes.filter((w) => w.includes('/onboarding/'))).toEqual([]);
+		release();
+		await settle();
+		svelte.flushSync();
+		// Twin in the same test: the answer arrives, and the owner gets the introduction.
+		expect(target.textContent).toContain(t('onboard.skip_onboarding'));
 	});
 
 	it('runs it in the owner\'s, and stamps the first session', async () => {
