@@ -45,12 +45,13 @@ export function inboxLabelText(label: InboxLabel | null): string | null {
 
 /** What the `inbox:` labels mean, shown once above the list when any message carries one. */
 export const INBOX_LABEL_LEGEND =
-  'inbox: is the inbox classifier\'s verdict on the message\'s thread; it read the whole mail, while the snippets below stop at 200 characters. ' +
-  'draft_ready: a short reply is due (a confirmation, a yes or no). requires_user: the user has to act — decide, pay, answer at length, resolve a complaint (also where the classifier could not read the mail). ' +
-  'auto_handled: a newsletter, notice or receipt that asks nothing of the user. ' +
-  'A suffix (/replied, /archived, /snoozed, /unhandled) is what the user has done with it since. ' +
+  'inbox: is the inbox\'s verdict on the message\'s thread, made on the first mail of it the inbox saw, from more of that mail than the snippets below show (they stop at 200 characters); later mails in the thread are not judged again. ' +
+  'draft_ready: a short reply will do (a confirmation, a yes or no). ' +
+  'requires_user: the user has to act — decide, pay, answer at length, resolve a complaint — or no classification ran (queue full, sensitive content, budget). ' +
+  'auto_handled: a newsletter, notice or receipt that asks nothing of the user. A rule the user set can put a mail in any of these. ' +
+  'A suffix (/replied, /archived, /snoozed) is what the user has done with it since; /unhandled means the user took the verdict back. ' +
   'A message without inbox: has no verdict, which does not mean nothing is to be done. ' +
-  'Take the verdicts as a strong hint; where you judge a message differently, say so and name the inbox\'s verdict.';
+  'Take the verdicts as a strong hint, not as the answer: where a mail asks for something the verdict does not reflect, say so and name the inbox\'s verdict.';
 
 export function createMailTriageTool(registry: MailRegistry, hooks?: MailHooks): ToolEntry<MailTriageInput> {
   return {
