@@ -330,9 +330,9 @@
 	// A sentence that names an owner's act names the owner to a mandate.
 	const view = $derived(mandate ? bulkMandateI18n(i18n) : i18n);
 	const restartKind = $derived(run ? bulkRestartKind(run) : null);
-	const haltText = $derived(run ? bulkHaltText(run, managed, view) : null);
+	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
-	const resumeText = $derived(run ? bulkResumeText(run, managed, view) : null);
+	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
 	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
 	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');
