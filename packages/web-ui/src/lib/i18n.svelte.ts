@@ -147,6 +147,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.queue.reload_aria': { de: 'Prüf-Liste neu laden', en: 'Reload review list' },
 	'knowledge.queue.edit_aria': { de: 'Eintrag bearbeiten', en: 'Edit entry' },
 	'chat.knowledge.review_edit_aria': { de: 'Zur Prüfung bearbeiten', en: 'Edit for review' },
+	// A mandate's session reads the queue without approving or rejecting (the route is the owner's, ux 1148).
+	'knowledge.queue.subtitle_mandate': { de: 'Fakten aus Durchläufen mit externen Inhalten warten hier auf die Freigabe des Inhabers.', en: 'Facts captured on turns that read external content wait here for the owner\'s approval.' },
+	'knowledge.queue.owner_only_notice': { de: 'Wissen in der Warteschlange freigeben oder ablehnen kann nur der Inhaber dieser Instanz. Brauchst du eine Entscheidung, wende dich an den Inhaber.', en: 'Only the owner of this instance can approve or reject knowledge in the queue. If you need a decision, ask the owner.' },
 	'knowledge.queue.empty': { de: 'Nichts zu prüfen — die Warteschlange ist leer.', en: 'Nothing to review — the queue is empty.' },
 	'knowledge.queue.pending_tag': { de: 'ungeprüft', en: 'pending' },
 	// The subject a queued entry would bind to on approval. `target_new` is the one that
@@ -168,6 +171,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.active.playbook': { de: 'Playbook', en: 'Playbook' },
 	'knowledge.active.empty': { de: 'Noch nichts gemerkt. Sobald lynox etwas über dich lernt, erscheint es hier.', en: 'Nothing remembered yet. As lynox learns about you, it shows up here.' },
 	'knowledge.active.pinned': { de: 'angeheftet', en: 'pinned' },
+	// A mandate's session reads this page without its owner's acts (ux U-115).
+	'knowledge.active.subtitle_mandate': { de: 'Was sich lynox auf dieser Instanz gemerkt hat.', en: 'What lynox has remembered on this instance.' },
+	'knowledge.active.empty_mandate': { de: 'Noch nichts gemerkt. Sobald lynox auf dieser Instanz etwas lernt, erscheint es hier.', en: 'Nothing remembered yet. Once lynox learns something on this instance, it shows up here.' },
+	// The page's changes are the owner's (its routes refuse a mandate), but a mandate's turn keeps
+	// remember, memory_block_edit and memory_retire (`mandate-tool-lock.ts`): the chat stays its way
+	// to change an entry, so the sentence names the page and points there.
+	'memory.owner_only_notice': { de: 'Einträge auf dieser Seite ändern oder entfernen kann nur der Inhaber dieser Instanz. Etwas ändern? Sag es lynox im Chat.', en: 'Only the owner of this instance can change or remove entries on this page. Want to change something? Tell lynox in the chat.' },
 	'knowledge.active.edit_hint': { de: 'Etwas ändern? Sag es lynox im Chat. Einen falschen Eintrag entfernst du direkt hier.', en: 'Want to change something? Tell lynox in chat. To remove a wrong entry, use the button on it.' },
 	'knowledge.active.retire': { de: 'entfernen', en: 'remove' },
 	'knowledge.active.retiring': { de: 'wird entfernt...', en: 'removing...' },
@@ -1326,6 +1336,21 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_busy': { de: 'Der Agent arbeitet noch. Bitte warten.', en: 'The agent is still working. Please wait.' },
 	'chat.prompt_expired': { de: 'Diese Frage ist nicht mehr offen, deine Antwort wurde nicht verwendet. Schreib sie als neue Nachricht in den Chat.', en: 'This question is no longer open, so your answer was not used. Send it as a new message in the chat.' },
 	'chat.prompt_closed_restart': { de: 'Diese Frage wurde geschlossen, weil lynox neu gestartet ist. Der Lauf, der gefragt hat, wartet nicht mehr, und deine Antwort wurde nicht verwendet. Starte die Aufgabe noch einmal.', en: 'This question was closed because lynox restarted. The run that asked is no longer waiting, and your answer was not used. Start the task again.' },
+	// UX-068 (ux U-113): why a question was closed, by the 410's `code`, and what to do instead. The
+	// draft sentence is added only when the lost answer was put back into an empty message field.
+	'chat.prompt_closed.timed_out': { de: 'Diese Frage ist abgelaufen, deine Antwort wurde nicht verwendet. Schreib sie als neue Nachricht in den Chat.', en: 'This question has expired, so your answer was not used. Write it as a new message in the chat.' },
+	'chat.prompt_closed.run_stopped': { de: 'Der Lauf, der diese Frage gestellt hat, wurde gestoppt. Deine Antwort wurde nicht verwendet. Schreib sie als neue Nachricht in den Chat.', en: 'The run that asked this question was stopped. Your answer was not used. Write it as a new message in the chat.' },
+	'chat.prompt_closed.run_taken_over': { de: 'Eine neuere Nachricht in diesem Chat hat den Lauf abgelöst, der diese Frage gestellt hat. Deine Antwort wurde nicht verwendet. Schreib sie als neue Nachricht.', en: 'A newer message in this chat replaced the run that asked this question. Your answer was not used. Write it as a new message.' },
+	'chat.prompt_closed.thread_deleted': { de: 'Dieser Chat wurde gelöscht, deine Antwort wurde nicht verwendet. Schreib sie in einem anderen Chat als neue Nachricht.', en: 'This chat was deleted, so your answer was not used. Write it as a new message in another chat.' },
+	'chat.prompt_closed.mandate_ended.mandate': { de: 'Der Zugang, unter dem diese Frage gestellt wurde, ist beendet. Deine Antwort wurde nicht verwendet. Wende dich an den Inhaber.', en: 'The access this question was asked under has ended. Your answer was not used. Ask the owner.' },
+	'chat.prompt_closed.mandate_ended.owner': { de: 'Der Zugang, unter dem diese Frage gestellt wurde, ist beendet. Deine Antwort wurde nicht verwendet. Brauchst du sie, schreib sie als neue Nachricht in den Chat.', en: 'The access this question was asked under has ended. Your answer was not used. If you need it, write it as a new message in the chat.' },
+	'chat.prompt_closed.plan_paused.mandate': { de: 'Der Plan, der diese Frage gestellt hat, ist pausiert. Deine Antwort wurde nicht verwendet. Wende dich an den Inhaber.', en: 'The plan that asked this question is paused. Your answer was not used. Ask the owner.' },
+	'chat.prompt_closed.plan_paused.owner': { de: 'Der Plan, der diese Frage gestellt hat, ist pausiert. Deine Antwort wurde nicht verwendet. Pausierte Pläne übernimmst du unter Automation → Trigger.', en: 'The plan that asked this question is paused. Your answer was not used. You take over paused plans under Automation → Triggers.' },
+	'chat.prompt_closed.plan_taken_over.mandate': { de: 'Der Inhaber hat diesen Plan übernommen. Die offene Frage ist damit geschlossen, deine Antwort wurde nicht verwendet. Wende dich an den Inhaber.', en: 'The owner took over this plan, so its open question is closed and your answer was not used. Ask the owner.' },
+	'chat.prompt_closed.plan_taken_over.owner': { de: 'Du hast diesen Plan übernommen. Die offene Frage ist damit geschlossen, deine Antwort wurde nicht verwendet. Brauchst du sie, schreib sie als neue Nachricht in den Chat.', en: 'You took over this plan, so its open question is closed and your answer was not used. If you need it, write it as a new message in the chat.' },
+	'chat.prompt_closed.plan_ended': { de: 'Inzwischen hat ein neuer Lauf dieses Plans begonnen, die offene Frage ist damit geschlossen. Deine Antwort wurde nicht verwendet. Brauchst du sie, schreib sie als neue Nachricht in den Chat.', en: 'A new run of this plan has started since, so the open question is closed. Your answer was not used. If you need it, write it as a new message in the chat.' },
+	'chat.prompt_closed.superseded': { de: 'Diese Frage wurde durch eine neuere in diesem Chat ersetzt. Antworte dort.', en: 'A newer question in this chat replaced this one. Answer that one.' },
+	'chat.prompt_closed.draft': { de: ' Sie steht wieder im Eingabefeld.', en: ' It is back in the message field.' },
 	'chat.error_blocked_by_prompt': { de: 'Beantworte zuerst die offene Anfrage oben — sie blockiert den Agenten.', en: 'Answer the open prompt above first — it is blocking the agent.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
@@ -1854,6 +1879,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'mail.owner_only_notice': { de: 'Postfächer verbindet nur der Inhaber dieser Instanz. Bitte den Inhaber, das Postfach in den Einstellungen unter „{label}“ zu verbinden.', en: 'Only the owner of this instance connects mailboxes. Ask the owner to connect the mailbox in Settings under “{label}”.' },
 	'apis.reconnect_not_yours': { de: 'Neu verbinden kannst du dieses Profil nicht, weil du es nicht angelegt hast. Brauchst du es, wende dich an den Inhaber.', en: 'You cannot reconnect this profile because you did not set it up. If you need it, ask the owner.' },
 	'apis.owner_only_notice': { de: 'Profile löschen und den App-Zugang eintragen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber.', en: 'Only the owner of this instance can delete profiles or enter app credentials. If you need that, ask the owner.' },
+	'settings.viewer_unavailable': { de: 'Diese Seite konnte nicht vollständig geladen werden. Lade sie neu.', en: 'This page could not load completely. Reload it.' },
 	'settings.owner_only_notice': { de: 'Diese Einstellungen legt der Inhaber dieser Instanz fest. Du siehst sie, kannst sie aber nicht ändern. Brauchst du eine Änderung, wende dich an den Inhaber.', en: 'The owner of this instance sets these settings. You can see them but not change them. If you need a change, ask the owner.' },
 	'settings.value_on': { de: 'An', en: 'On' },
 	'settings.value_off': { de: 'Aus', en: 'Off' },

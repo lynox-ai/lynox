@@ -383,3 +383,120 @@ describe('a new question that arrives while an answer is being saved', () => {
 		expect(store.getPendingMailConnect()).toBeNull();
 	});
 });
+
+describe('why a question was closed, and the lost answer as a draft (UX-064, UX-068)', () => {
+	const say = async (key: string): Promise<string> => (await import('../i18n.svelte.js')).t(key);
+	/** Answers 'my answer' (or `answer`) to a question the server reports closed with `code`, as `viewer`. */
+	async function closedWith(code: string, opts: { viewer?: 'owner' | 'mandate'; field?: string; answer?: string; tabs?: boolean; options?: string[] } = {}): Promise<{ field: string; asked: number }> {
+		let field = opts.field ?? '';
+		let asked = 0;
+		store.registerComposerDraft((text) => { asked++; if (field.trim() !== '') return false; field = text; return true; });
+		const route = opts.tabs === true ? 'reply-tabs' : 'reply';
+		const run = openRun((url) => {
+			if (url.endsWith('/config')) return json(opts.viewer !== undefined ? { viewer: opts.viewer } : {});
+			return url.endsWith(`/${route}`) ? json({ error: 'Prompt closed', code }, 410) : json({});
+		});
+		void store.sendMessage('go');
+		await settle();
+		if (opts.tabs === true) {
+			run.send('prompt_tabs', { promptId: 'p3', questions: [{ question: 'Which?', options: ['a', 'b'] }] });
+			await settle();
+			await store.replyPermissionTabs(['my answer']);
+		} else {
+			run.send('prompt', { promptId: 'p1', question: 'Which?', ...(opts.options !== undefined ? { options: opts.options } : {}) });
+			await settle();
+			await store.replyPermission(opts.answer ?? 'my answer');
+		}
+		return { field, asked };
+	}
+
+	// Each code: its sentence, and whether the answer comes back (ux U-113).
+	const owner: Array<[code: string, key: string, draft: boolean]> = [
+		['process_restarted', 'chat.prompt_closed_restart', true],
+		['timed_out', 'chat.prompt_closed.timed_out', true],
+		['run_stopped', 'chat.prompt_closed.run_stopped', true],
+		['run_taken_over', 'chat.prompt_closed.run_taken_over', true],
+		['thread_deleted', 'chat.prompt_closed.thread_deleted', false],
+		['mandate_ended', 'chat.prompt_closed.mandate_ended.owner', true],
+		['plan_paused', 'chat.prompt_closed.plan_paused.owner', false],
+		['plan_taken_over', 'chat.prompt_closed.plan_taken_over.owner', true],
+		['plan_ended', 'chat.prompt_closed.plan_ended', true],
+		['superseded', 'chat.prompt_closed.superseded', false],
+	];
+	for (const [code, key, draft] of owner) {
+		it(`${code}: says why, and ${draft ? 'puts the answer back into the empty field and says so' : 'leaves the field alone'}`, async () => {
+			const { field } = await closedWith(code, { viewer: 'owner' });
+			const sentence = await say(key);
+			expect(store.getChatError()).toBe(draft ? sentence + (await say('chat.prompt_closed.draft')) : sentence);
+			expect(field).toBe(draft ? 'my answer' : '');
+		});
+	}
+
+	it('a helper whose access ended is sent to the owner, without a draft', async () => {
+		const { field, asked } = await closedWith('mandate_ended', { viewer: 'mandate' });
+		expect(store.getChatError()).toBe(await say('chat.prompt_closed.mandate_ended.mandate'));
+		expect(field).toBe('');
+		expect(asked).toBe(0);
+	});
+
+	it('a helper whose plan was paused is sent to the owner, without a draft', async () => {
+		const { field } = await closedWith('plan_paused', { viewer: 'mandate' });
+		expect(store.getChatError()).toBe(await say('chat.prompt_closed.plan_paused.mandate'));
+		expect(field).toBe('');
+	});
+
+	it('a helper whose plan the owner took over is told so and sent to the owner, without a draft', async () => {
+		const { field, asked } = await closedWith('plan_taken_over', { viewer: 'mandate' });
+		expect(store.getChatError()).toBe(await say('chat.prompt_closed.plan_taken_over.mandate'));
+		expect(field).toBe('');
+		expect(asked).toBe(0);
+	});
+
+	it('a consent card\'s answer is no draft: typed into the chat it would approve nothing', async () => {
+		for (const options of [['Allow', 'Deny'], ['Run on balanced', 'Cancel']]) {
+			vi.resetModules();
+			store = await import('./chat.svelte.js');
+			const { field, asked } = await closedWith('timed_out', { answer: 'y', options });
+			expect(asked, options.join('/')).toBe(0);
+			expect(field).toBe('');
+			expect(store.getChatError()).toBe(await say('chat.prompt_closed.timed_out'));
+		}
+	});
+
+	it('an option the user picked comes back as that option', async () => {
+		const { field } = await closedWith('run_stopped', { answer: 'lynox-pro', options: ['lynox', 'lynox-pro'] });
+		expect(field).toBe('lynox-pro');
+	});
+
+	it('a field with text in it keeps it, and the sentence does not claim the answer is back', async () => {
+		const { field, asked } = await closedWith('timed_out', { field: 'half a thought' });
+		expect(asked).toBe(1);
+		expect(field).toBe('half a thought');
+		expect(store.getChatError()).toBe(await say('chat.prompt_closed.timed_out'));
+	});
+
+	it('several answers to a tabs question are no draft', async () => {
+		const { field, asked } = await closedWith('timed_out', { tabs: true });
+		expect(asked).toBe(0);
+		expect(field).toBe('');
+		expect(store.getChatError()).toBe(await say('chat.prompt_closed.timed_out'));
+	});
+
+	it('a skipped question has no answer to give back', async () => {
+		const { field, asked } = await closedWith('timed_out', { answer: '__dismissed__' });
+		expect(asked).toBe(0);
+		expect(field).toBe('');
+		expect(store.getChatError()).toBe(await say('chat.prompt_closed.timed_out'));
+	});
+
+	it('a multi-select answer comes back as the chosen labels', async () => {
+		const { field } = await closedWith('run_stopped', { answer: JSON.stringify(['lynox', 'lynox-pro']) });
+		expect(field).toBe('lynox, lynox-pro');
+	});
+
+	it('an unknown code reads as no reason given', async () => {
+		const { field } = await closedWith('something_new');
+		expect(store.getChatError()).toBe((await say('chat.prompt_expired')) + (await say('chat.prompt_closed.draft')));
+		expect(field).toBe('my answer');
+	});
+});

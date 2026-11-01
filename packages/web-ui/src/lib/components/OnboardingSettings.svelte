@@ -17,7 +17,8 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 
 	interface OnboardingStatus {
@@ -78,6 +79,7 @@
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-1 mt-2">{t('onboard.relayer_title')}</h1>
 	<p class="text-sm text-text-muted mb-4">{t('onboard.relayer_desc')}</p>
+	<ViewerUnavailableNotice />
 
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-start justify-between gap-4">
@@ -95,9 +97,11 @@
 		</div>
 
 		{#if isMandateSession()}
-			<!-- A mandate's session (ux 1148 cut, U-104): restarting the introduction is the owner's
+			<!-- A mandate's session: restarting the introduction is the owner's
 			     (`DELETE /api/onboarding/flags/:flag` is owner-only). The status stays in the header. -->
 			<div class="mt-4"><OwnerOnlyNotice /></div>
+		{:else if !isOwnerSession()}
+			<!-- No restart until the server said this is the owner's session. -->
 		{:else if knowledgeState === 'degraded'}
 			<p class="text-sm text-text-subtle mt-4">{t('onboard.relayer_degraded')}</p>
 		{:else if restarted}

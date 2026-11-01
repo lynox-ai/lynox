@@ -10,6 +10,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { isMandateSession, isOwnerSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import {
 		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
@@ -359,6 +360,7 @@
 {/snippet}
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
+	<ViewerUnavailableNotice />
 	<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.back')}</button>
 
 	{#if loading && run === null}

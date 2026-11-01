@@ -43,6 +43,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	// A retry of an unanswered `/config` must not outlive the test.
+	resetSettingsViewer();
 	if (component) unmount(component);
 	component = undefined;
 	target.remove();
@@ -77,6 +79,16 @@ async function render(load: () => Promise<{ default: unknown }>, routes: Routes)
 	const { default: Page } = await load();
 	component = mount(Page, { target });
 	await settle();
+}
+
+/**
+ * `GET /api/config` held until `release()`: the page as it stands while the server has not said
+ * whose session it is, then as the owner once it has.
+ */
+function heldConfig(): { route: () => Promise<Response>; release: () => void } {
+	let release!: () => void;
+	const gate = new Promise<void>((r) => { release = r; });
+	return { route: async () => { await gate; return Response.json({ viewer: 'owner' }); }, release: () => release() };
 }
 
 function fields(): number {
@@ -180,6 +192,16 @@ describe('MailSettings', () => {
 		expect(writes).toEqual([]);
 	});
 
+	it('offers no add, default or delete when the server has not said whose session it is', async () => {
+		// The page waits for the answer before it lists; with none, the list shows without the owner's acts.
+		await render(load, { ...routes('owner'), '/config': () => Response.json({ error: 'unavailable' }, { status: 503 }) });
+		expect(target.textContent).toContain('info@example.com');
+		expect(target.querySelector('[data-testid="mail-add-button"]')).toBeNull();
+		expect(target.querySelector(`[data-testid="mail-delete-${account.id}"]`)).toBeNull();
+		expect(target.querySelector(`[data-testid="mail-default-${account.id}"]`)).toBeNull();
+		expect(target.querySelector('[data-testid="mail-owner-only"]')).toBeNull();
+	});
+
 	it('keeps the owner\'s add, default and delete', async () => {
 		await render(load, routes('owner'));
 		expect(target.querySelector('[data-testid="mail-owner-only"]')).toBeNull();
@@ -212,6 +234,31 @@ describe('RulesView (Settings › Email › Rules)', () => {
 		expect(writes).toEqual([]);
 	});
 
+	it('offers no add or delete until the server said it is the owner\'s session', async () => {
+		const config = heldConfig();
+		await render(load, { ...routes('owner'), '/config': config.route });
+		expect(target.textContent).toContain('news@shop.example');
+		expect(buttonTexts()).not.toContain(t('inbox.rules_add'));
+		expect(target.querySelector(`button[aria-label="${t('inbox.rules_delete')}"]`)).toBeNull();
+		config.release();
+		await settle();
+		expect(buttonTexts()).toContain(t('inbox.rules_add'));
+		expect(target.querySelector(`button[aria-label="${t('inbox.rules_delete')}"]`)).not.toBeNull();
+	});
+
+	it('shows the owner add and delete once a failed first answer is asked again, without a remount', async () => {
+		let asked = 0;
+		await render(load, { ...routes('owner'), '/config': () => (++asked === 1 ? Response.json({ error: 'unavailable' }, { status: 503 }) : Response.json({ viewer: 'owner' })) });
+		expect(target.textContent).toContain('news@shop.example');
+		expect(buttonTexts()).not.toContain(t('inbox.rules_add'));
+		// The store asks again after a second; the page is the same one.
+		await new Promise((r) => setTimeout(r, 1_100));
+		await settle();
+		expect(asked).toBe(2);
+		expect(buttonTexts()).toContain(t('inbox.rules_add'));
+		expect(target.querySelector(`button[aria-label="${t('inbox.rules_delete')}"]`)).not.toBeNull();
+	});
+
 	it('keeps the owner\'s add and delete', async () => {
 		await render(load, routes('owner'));
 		expect(notice()).toBeNull();
@@ -238,6 +285,16 @@ describe('GoogleSettings', () => {
 		expect(buttonTexts()).toEqual([]);
 		expect(fields()).toBe(0);
 		expect(writes).toEqual([]);
+	});
+
+	it('offers no control until the server said it is the owner\'s session', async () => {
+		const config = heldConfig();
+		await render(load, { ...routes('owner'), '/config': config.route });
+		expect(buttonTexts()).toEqual([]);
+		expect(fields()).toBe(0);
+		config.release();
+		await settle();
+		expect(buttonTexts().length).toBeGreaterThan(0);
 	});
 
 	it('keeps the owner\'s controls', async () => {
@@ -294,6 +351,21 @@ describe('ApiStoreView (Settings › API profiles)', () => {
 		expect(writes).toEqual([]);
 	});
 
+	it('offers no delete, app credentials or file repair until the server said it is the owner\'s session', async () => {
+		const config = heldConfig();
+		await render(load, { ...routes('owner'), '/config': config.route });
+		expect(target.textContent, 'positive control: the profiles are listed').toContain('CRM');
+		expect(target.textContent).toContain('ERP');
+		expect(buttonTexts()).not.toContain(t('apis.delete'));
+		expect(target.querySelector('[data-testid="preset-client-form"]')).toBeNull();
+		expect(target.querySelector('[data-testid="api-import-waiting"]')).toBeNull();
+		config.release();
+		await settle();
+		expect(buttonTexts().filter((b) => b === t('apis.delete')).length).toBe(2);
+		expect(target.querySelector('[data-testid="preset-client-form"]')).not.toBeNull();
+		expect(target.querySelector('[data-testid="api-import-waiting"]')).not.toBeNull();
+	});
+
 	it('keeps the owner\'s delete and connect links on every profile', async () => {
 		await render(load, routes('owner'));
 		expect(target.querySelector('[data-testid="apis-owner-only"]')).toBeNull();
@@ -318,6 +390,15 @@ describe('OnboardingSettings (Settings › Account › Onboarding)', () => {
 		expect(target.textContent).toContain(t('onboard.relayer_status_done'));
 		expect(buttonTexts()).not.toContain(t('onboard.relayer_restart'));
 		expect(writes).toEqual([]);
+	});
+
+	it('offers no restart until the server said it is the owner\'s session', async () => {
+		const config = heldConfig();
+		await render(load, { ...routes('owner'), '/config': config.route });
+		expect(buttonTexts()).not.toContain(t('onboard.relayer_restart'));
+		config.release();
+		await settle();
+		expect(buttonTexts()).toContain(t('onboard.relayer_restart'));
 	});
 
 	it('keeps the owner\'s restart button', async () => {

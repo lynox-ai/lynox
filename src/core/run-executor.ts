@@ -21,6 +21,7 @@
  */
 
 import { principalHasEnded, type RequestPrincipal } from './request-principal.js';
+import type { PromptClosedReason } from './prompt-store.js';
 
 /** Default max concurrent chat runs per engine (D-S2). Configurable via
  * `config.maxConcurrentRuns`. Five covers realistic multi-tab / parallel-thread
@@ -30,7 +31,8 @@ export const DEFAULT_MAX_CONCURRENT_RUNS = 5;
 interface ActiveRun {
   runId: string;
   threadId: string;
-  abort: () => void;
+  /** Ends the run; `reason` is what a question it left open tells an answer that comes too late. */
+  abort: (reason: PromptClosedReason) => void;
   /** Who started the run: the request's principal, not the thread's creator. */
   starter: RequestPrincipal;
 }
@@ -61,7 +63,7 @@ export class RunExecutor {
    * (a re-acquire replaces the handle — e.g. a takeover rewiring abort). The
    * caller MUST have checked `atCapacity()` first; acquire itself does not gate
    * (so an in-flight run being re-registered never trips the cap). */
-  acquire(runId: string, threadId: string, abort: () => void, starter: RequestPrincipal): void {
+  acquire(runId: string, threadId: string, abort: (reason: PromptClosedReason) => void, starter: RequestPrincipal): void {
     this.active.set(runId, { runId, threadId, abort, starter });
   }
 
@@ -79,7 +81,7 @@ export class RunExecutor {
   abort(runId: string): boolean {
     const run = this.active.get(runId);
     if (!run) return false;
-    try { run.abort(); } catch { /* abort is best-effort; the run unwinds itself */ }
+    try { run.abort('run_stopped'); } catch { /* abort is best-effort; the run unwinds itself */ }
     return true;
   }
 
@@ -92,7 +94,7 @@ export class RunExecutor {
     let aborted = 0;
     for (const run of [...this.active.values()]) {
       if (!principalHasEnded(run.starter, isLive)) continue;
-      try { run.abort(); } catch { /* abort is best-effort; the run unwinds itself */ }
+      try { run.abort('mandate_ended'); } catch { /* abort is best-effort; the run unwinds itself */ }
       aborted++;
     }
     return aborted;
