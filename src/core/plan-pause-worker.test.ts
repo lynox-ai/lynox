@@ -61,7 +61,7 @@ interface Proc {
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
 
-function boot(dir = mkdtempSync(join(tmpdir(), 'lynox-pause-w-')), opts: { hold?: boolean } = {}): Proc {
+function boot(dir = mkdtempSync(join(tmpdir(), 'lynox-pause-w-')), opts: { hold?: boolean; language?: string } = {}): Proc {
   if (!dirs.includes(dir)) dirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
   const engineDb = new EngineDb(join(dir, 'engine.db'));
@@ -100,6 +100,7 @@ function boot(dir = mkdtempSync(join(tmpdir(), 'lynox-pause-w-')), opts: { hold?
     getEngineDb: () => engineDb,
     getMandateEnds: () => ends,
     getAuditLog: () => audit,
+    ...(opts.language !== undefined ? { config: { language: opts.language } } : {}),
   } as unknown as Engine;
   const channels: Proc['channels'] = { on: true, outcome: 'delivered', hold: false };
   const sent: NotificationMessage[] = [];
@@ -279,6 +280,23 @@ describe("the owner's notice in the tick", () => {
     await Promise.all([a.loop.tick(), b.loop.tick()]);
     await settle();
     expect(pauseNotices(a).length + pauseNotices(b).length).toBe(1);
+  });
+});
+
+describe("the pause notice and the advance warning follow the engine's notice language", () => {
+  it('a German instance tells the pause and warns in German, an English one in English', async () => {
+    for (const [language, pause, warn] of [['de', '⏸ Plan pausiert: Zugang von h@x.ch', 'Plan pausiert bald: Zugang von w@x.ch'], ['en', '⏸ A plan is paused', 'A plan will pause soon']] as const) {
+      const p = boot(undefined, { language });
+      plan(p, 'a', 'h@x.ch');
+      login(p, 'h@x.ch', nowS() - H, nowS() - 2 * H);
+      plan(p, 'b', 'w@x.ch');
+      login(p, 'w@x.ch', nowS() + H, nowS() - H);
+      pauseEndedPlans({ db: p.db, endOf: (id) => p.ends.endRow(id) });
+      await tick(p);
+      await tick(p);
+      // Plan b is live and runs; only the pause notice and the warning are asked about here.
+      expect(p.sent.map((m) => m.title).filter((t) => /paus/i.test(t)).sort(), language).toEqual([pause, warn].sort());
+    }
   });
 });
 
