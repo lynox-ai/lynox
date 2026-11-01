@@ -204,6 +204,13 @@ export class WorkflowStore {
    * source's editor cover, or its creator cover when the mark copied was the creator. Without it
    * the copy of a workflow the owner took over would carry the ended mandate as a member again.
    * Not a new edit, so the mark is not uncovered here.
+   *
+   * Only a path on which the server itself knows the source copies this way (`save_workflow` from
+   * an existing workflow). A workflow that
+   * comes back through the user's hands (`import_workflow` from an exported block, `save_workflow`
+   * from what a session did) is saved by {@link upsert} and carries only its saver's mark: a source named in
+   * pasted text can be edited or dropped by whoever pastes it, so a mark taken from there would
+   * protect nothing. A copy that must carry another's mark needs a path on the server.
    */
   upsertCopy(row: WorkflowRow, author: RequestPrincipal | null, sourceId: string): void {
     this.db.transaction(() => {

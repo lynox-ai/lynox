@@ -270,10 +270,11 @@ describe('PromptStore', () => {
       const orphan = store.insertOnboardingBasics('s1', [{ question: 'What is the company called?' }], ['company']);
       expect(() => store.insertAskUser('s1', 'q2')).not.toThrow();
       const row = db
-        .prepare(`SELECT status FROM pending_prompts WHERE id = ?`)
-        .get(orphan) as { status: string };
-      // Expired, not deleted — the row still explains what happened.
+        .prepare(`SELECT status, closed_reason FROM pending_prompts WHERE id = ?`)
+        .get(orphan) as { status: string; closed_reason: string | null };
+      // Expired, not deleted — the row still explains what happened, to a late answer as well.
       expect(row.status).toBe('expired');
+      expect(row.closed_reason).toBe('superseded');
     });
 
     it('supersedes it for ask_secret too, not just ask_user', () => {
@@ -386,7 +387,7 @@ describe('PromptStore', () => {
     it('expirePrompt settles a single in-flight wait with expired and frees the session slot', async () => {
       const id = store.insertAskUser('s1', 'q');
       const wait = store.waitForSettled(id);
-      expect(store.expirePrompt(id)).toBe(true);
+      expect(store.expirePrompt(id, 'run_stopped')).toBe(true);
       const outcome = await wait;
       expect(outcome.status).toBe('expired');
       // Slot is free again — a fresh prompt for the same session must insert.
@@ -395,14 +396,14 @@ describe('PromptStore', () => {
 
     it('expirePrompt is idempotent', () => {
       const id = store.insertAskUser('s1', 'q');
-      expect(store.expirePrompt(id)).toBe(true);
-      expect(store.expirePrompt(id)).toBe(false);
+      expect(store.expirePrompt(id, 'run_stopped')).toBe(true);
+      expect(store.expirePrompt(id, 'run_stopped')).toBe(false);
     });
 
     it('expirePrompt is a no-op for an already-answered prompt', () => {
       const id = store.insertAskUser('s1', 'q');
       store.answerUser(id, 'a', OWNER_PRINCIPAL);
-      expect(store.expirePrompt(id)).toBe(false);
+      expect(store.expirePrompt(id, 'run_stopped')).toBe(false);
       expect(store.getById(id)?.status).toBe('answered');
     });
   });
@@ -871,24 +872,24 @@ describe('expireUnparked — the reason a restart leaves on the question', () =>
     expect(store.getById(parked)).toMatchObject({ status: 'pending', closed_reason: null });
   });
 
-  it('a question whose TTL ran out before the sweep is closed without the restart reason', () => {
+  it('a question whose TTL ran out before the sweep is closed as timed out, not by the restart', () => {
     // The boot sweep runs before the first TTL sweep: a question that timed out during the
     // downtime expired, and an answer to it must not hear that the engine restarted.
     const lapsed = store.insertAskUser('s-lapsed', 'q');
     db.prepare("UPDATE pending_prompts SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 3_000).toISOString(), lapsed);
     const live = store.insertAskUser('s-live', 'q');
     expect(store.expireUnparked()).toBe(2);
-    expect(store.getById(lapsed)).toMatchObject({ status: 'expired', closed_reason: null });
+    expect(store.getById(lapsed)).toMatchObject({ status: 'expired', closed_reason: 'timed_out' });
     expect(store.getById(live)).toMatchObject({ status: 'expired', closed_reason: 'process_restarted' });
   });
 
-  it('a question closed on its own clock, or withdrawn, carries no reason', () => {
+  it('a question closed on its own clock says so, and a withdrawn one says why it was withdrawn', () => {
     const timedOut = store.insertAskUser('s-ttl', 'q');
     db.prepare("UPDATE pending_prompts SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 3_000).toISOString(), timedOut);
     store.expireOld();
     const withdrawn = store.insertAskUser('s-withdrawn', 'q');
-    store.expirePrompt(withdrawn);
-    expect(store.getById(timedOut)).toMatchObject({ status: 'expired', closed_reason: null });
-    expect(store.getById(withdrawn)).toMatchObject({ status: 'expired', closed_reason: null });
+    store.expirePrompt(withdrawn, 'run_stopped');
+    expect(store.getById(timedOut)).toMatchObject({ status: 'expired', closed_reason: 'timed_out' });
+    expect(store.getById(withdrawn)).toMatchObject({ status: 'expired', closed_reason: 'run_stopped' });
   });
 });

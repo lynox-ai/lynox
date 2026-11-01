@@ -200,6 +200,8 @@ describe('how the wait ends (§4.5)', () => {
     h.controller.abort();
     await expect(answer).resolves.toBe('__dismissed__');
     expect(h.prompts.getById(id)!.status).toBe('expired');
+    // A late answer hears that the run was stopped.
+    expect(h.prompts.getById(id)!.closed_reason).toBe('run_stopped');
     expect(h.q.unanswered).toBe(false);
     expect(h.scopeMember.abort).not.toHaveBeenCalled();
   });
@@ -315,6 +317,7 @@ describe('how the wait ends (§4.5)', () => {
     step.abort();
     await expect(answer).resolves.toBe('__dismissed__');
     expect(h.prompts.getById(id)!.status).toBe('expired');
+    expect(h.prompts.getById(id)!.closed_reason).toBe('run_stopped');
     expect(h.q.unanswered).toBe(false);
     expect(h.scopeMember.abort).not.toHaveBeenCalled();
   });
