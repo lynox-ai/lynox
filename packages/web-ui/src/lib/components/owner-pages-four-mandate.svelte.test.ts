@@ -105,7 +105,7 @@ describe('contacts', () => {
 		await openContact();
 		expect(target.textContent).toContain('anna@example.invalid');
 		expect(buttonByText(t('crm.remove'))).toBeUndefined();
-		expect(target.textContent).not.toContain('owner');
+		expect(target.textContent).not.toContain('Inhaber');
 	});
 
 	it('offers the owner to remove it', async () => {
