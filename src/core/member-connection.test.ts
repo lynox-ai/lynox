@@ -162,6 +162,10 @@ describe('a member\'s connection inside a plan\'s run', () => {
   const lead = 'setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login';
   // Spelled out: the model reads this sentence, and the probe that tests it reads this wording.
   const FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.';
+  // The same end without who decides: for these the owner's stamp is not the way.
+  const FINAL_RUN = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Say so in your reply, and do not ask for permission.';
+  // The member's own connection: a token exchange is not promised the same answer, another check stops it.
+  const FINAL_OWN = 'This is final for this run: another request through it is refused as well, so do not try the connection again. Say so in your reply, and do not ask for permission.';
 
   it('is not read in a plan whose stamp lists no connection, and says the stamp does not list it', () => {
     const p = crm({ oauth_grant: G });
@@ -238,8 +242,41 @@ describe('a member\'s connection inside a plan\'s run', () => {
     const others = crm({ created_by: 'mandate:other@example.org', oauth_grant: { ...G, connected_by: 'mandate:other@example.org', connected_mandate_id: 'M-2' } as OAuthGrantRecord });
     runAsPlanOf(B, () => {
       expect(read(others, B)).toBeNull();
-      expect(memberConnectionRefusal(others, B, ends(['M-1', 'M-2']))).toBe('other@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so it is not used in the run of a scheduled plan, only in other@example.org\'s own session.');
+      expect(memberConnectionRefusal(others, B, ends(['M-1', 'M-2']))).toBe('other@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so it is not used in the run of a scheduled plan, only in other@example.org\'s own session. ' + FINAL_RUN);
+      expect(memberConnectionRefusal(others, B, ends(['M-1', 'M-2']))).not.toContain('only the owner');
     }, listed(others));
+  });
+
+  it('a write through the member\'s own connection, once their access has ended, is refused for the run without "their own session"', () => {
+    const p = crm({ oauth_grant: G });
+    runAsPlanOf(B, () => {
+      // A read under the same grant still reaches it; a token exchange needs the access live.
+      expect(memberConnectionRefusal(p, B, ends(['M-2']))).toBeNull();
+      const said = memberConnectionRefusal(p, B, ends(['M-2']), 'write');
+      expect(said).toBe(`${lead}, and setup@example.org's access does not cover this plan, so the connection is not used in this plan's run. ${FINAL_OWN}`);
+      expect(said).not.toContain('own session');
+    }, listed(p));
+  });
+
+  it('the member\'s own connection, made under an earlier access, is refused for the run in the same words', () => {
+    const p = crm({ oauth_grant: G });
+    const later = { ...B, mandateId: 'M-3' };
+    runAsPlanOf(later, () => {
+      expect(memberConnectionRefusal(p, later, ends(['M-3']))).toBe(`${lead}, and setup@example.org's access does not cover this plan, so the connection is not used in this plan's run. ${FINAL_OWN}`);
+      // A token exchange (write) passes this check under the later access, so the text must not
+      // promise it the same answer.
+      expect(memberConnectionRefusal(p, later, ends(['M-3']), 'write')).toBeNull();
+    }, listed(p));
+  });
+
+  it('a request through the member\'s own connection made under an earlier access is not read, the earlier access ended or still live', () => {
+    // What that refusal tells the run: another request through it is refused as well.
+    const p = crm({ oauth_grant: G });
+    const later = { ...B, mandateId: 'M-3' };
+    runAsPlanOf(later, () => {
+      expect(read(p, later, ACCESS, ['M-3'])).toBeNull();
+      expect(read(p, later, ACCESS, ['M-1', 'M-3'])).toBeNull();
+    }, listed(p));
   });
 });
 
