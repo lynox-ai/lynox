@@ -5573,6 +5573,38 @@ describe('LynoxHTTPApi', () => {
       expect(r.text).toContain(OWN_ONLY);
     });
 
+    // The profile list tells the page where the connect start goes through, by the same
+    // predicate (ux U-109): the page offers a mandate the link only on a profile it set up.
+    it('says per profile in the list whether this session may start the connection', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      const profile = (id: string, author: string | undefined) => ({
+        id, name: id, base_url: 'https://api.example.com', description: 'd', auth: { type: 'bearer' as const },
+        ...(author === undefined ? {} : { created_by: author }),
+      });
+      store.register(profile('own', TAG));
+      store.register(profile('owners', undefined));
+      store.register(profile('others', 'mandate:someone-else@example.invalid'));
+      mockGetApiStore.mockReturnValue(store);
+      const eng = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const priorEnds = eng['getMandateEnds'];
+      eng['getMandateEnds'] = () => ({ isLive: (mid: string) => mid === 'TEST-MANDATE-1' });
+      const mayConnect = async (asMandate: boolean): Promise<Record<string, unknown>> => {
+        const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
+        const res = await fetch(`${baseUrl}/api/api-profiles`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        const list = await res.json() as { profiles: { id: string; reader_may_connect?: unknown }[] };
+        return Object.fromEntries(list.profiles.map((p) => [p.id, p.reader_may_connect]));
+      };
+      try {
+        expect(await mayConnect(true)).toEqual({ own: true, owners: false, others: false });
+        expect(await mayConnect(false)).toEqual({ own: true, owners: true, others: true });
+      } finally {
+        eng['getMandateEnds'] = priorEnds;
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
     it('starts a mandate\'s connection on a profile it wrote, signing the mandate into the state', async () => {
       const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
       const r = await connect(TAG, true);
