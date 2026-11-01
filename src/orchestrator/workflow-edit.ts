@@ -22,8 +22,21 @@ export interface StepModification {
   after?: string | undefined;
 }
 
-/** A new step id: what a template reference (`{{<id>.result}}`, split at each dot) can name. */
-const STEP_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+/** Why `id` cannot be a new step's id, or null. A template reference (`{{<id>.result}}`) is cut at
+ *  each dot and ends at `}`, and `#<n>` names a step by its position. */
+function newIdProblem(id: string): string | null {
+  if (id.length === 0 || id.length > 64) return 'is empty or longer than 64 characters';
+  if (id.startsWith('#')) return 'starts with "#", which names a step by its position';
+  if (/[.{}]/.test(id)) return 'holds ".", "{" or "}", which a reference {{<id>.result}} cannot name';
+  if (id.trim() !== id || /\p{Cc}/u.test(id)) return 'starts or ends with a space, or holds a control character';
+  return null;
+}
+
+/** A step id as a refusal quotes it: as it reads, escaped, and short. */
+export function quotedId(id: string): string {
+  const shown = stripHiddenInName(id);
+  return JSON.stringify(shown.length > 64 ? `${shown.slice(0, 64)}…` : shown);
+}
 
 /** The indexes of the steps whose id reads as `id` once the characters that render as nothing go. */
 function alikeIndexes(steps: readonly InlinePipelineStep[], id: string): number[] {
@@ -39,8 +52,9 @@ function alikeIndexes(steps: readonly InlinePipelineStep[], id: string): number[
  * either by its position instead, `#<n>` as the step list numbers it.
  */
 function stepIndex(steps: readonly InlinePipelineStep[], id: string): number | 'missing' | 'ambiguous' {
+  // A position always names its step: a stored id that reads `#<n>` is named by its own position.
   const position = /^#([1-9]\d{0,3})$/.exec(id);
-  if (position && !steps.some(s => s.id === id)) {
+  if (position) {
     const at = Number(position[1]) - 1;
     return at < steps.length ? at : 'missing';
   }
@@ -53,7 +67,7 @@ function stepIndex(steps: readonly InlinePipelineStep[], id: string): number | '
 /** The refusal for an id that names two steps, which `what` cannot choose between. */
 function ambiguousText(steps: readonly InlinePipelineStep[], id: string, what: string): string {
   const at = alikeIndexes(steps, id).map(i => `#${i + 1}`);
-  return `Error: Steps ${at.join(', ')} all read as "${stripHiddenInName(id)}" (their ids differ only in characters that do not show), so ${what} cannot tell which one is meant. Name the step by its position instead, e.g. step_id "${at[at.length - 1]!}".`;
+  return `Error: Steps ${at.join(', ')} all read as ${quotedId(id)} (their ids differ only in characters that do not show), so ${what} cannot tell which one is meant. Name the step by its position instead, e.g. step_id "${at[at.length - 1]!}".`;
 }
 
 /** `text` with every `{{<from>…}}` reference to a step's output pointed at `to`. */
@@ -86,21 +100,23 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
   for (const mod of modifications) {
     if (mod.action === 'add_step') {
       if (steps.some(s => s.id === mod.step_id)) {
-        return `Error: Step "${mod.step_id}" already exists — cannot add a duplicate id.`;
+        return `Error: Step ${quotedId(mod.step_id)} already exists — cannot add a duplicate id.`;
       }
+      const problem = newIdProblem(mod.step_id);
+      if (problem) return `Error: add_step: the new id ${quotedId(mod.step_id)} ${problem}. Choose another.`;
       if (!mod.value) {
-        return `Error: "value" (the task) is required for add_step "${mod.step_id}".`;
+        return `Error: "value" (the task) is required for add_step ${quotedId(mod.step_id)}.`;
       }
       const inputFrom: string[] = [];
       const missing: string[] = [];
       for (const dep of mod.input_from ?? []) {
         const at = stepIndex(steps, dep);
-        if (at === 'ambiguous') return ambiguousText(steps, dep, `the input of add_step "${mod.step_id}"`);
-        if (at === 'missing') missing.push(stripHiddenInName(dep));
+        if (at === 'ambiguous') return ambiguousText(steps, dep, `the input of add_step ${quotedId(mod.step_id)}`);
+        if (at === 'missing') missing.push(quotedId(dep));
         else inputFrom.push(steps[at]!.id);
       }
       if (missing.length > 0) {
-        return `Error: add_step "${mod.step_id}" depends on unknown step(s): ${missing.join(', ')}.`;
+        return `Error: add_step ${quotedId(mod.step_id)} depends on unknown step(s): ${missing.join(', ')}.`;
       }
       const newStep: InlinePipelineStep = {
         id: mod.step_id,
@@ -109,8 +125,8 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       };
       if (mod.after !== undefined) {
         const at = stepIndex(steps, mod.after);
-        if (at === 'ambiguous') return ambiguousText(steps, mod.after, `the insertion after it (add_step "${mod.step_id}")`);
-        if (at === 'missing') return `Error: add_step "${mod.step_id}" requests insertion after "${stripHiddenInName(mod.after)}", which does not exist.`;
+        if (at === 'ambiguous') return ambiguousText(steps, mod.after, `the insertion after it (add_step ${quotedId(mod.step_id)})`);
+        if (at === 'missing') return `Error: add_step ${quotedId(mod.step_id)} requests insertion after ${quotedId(mod.after)}, which does not exist.`;
         steps.splice(at + 1, 0, newStep);
       } else {
         steps.push(newStep);
@@ -121,19 +137,20 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
     const what = mod.action === 'remove' ? 'removal' : mod.action === 'update_task' ? 'task update' : 'renaming';
     const idx = stepIndex(steps, mod.step_id);
     if (idx === 'ambiguous') return ambiguousText(steps, mod.step_id, what);
-    if (idx === 'missing') return `Error: Step "${stripHiddenInName(mod.step_id)}" not found for ${what}.`;
+    if (idx === 'missing') return `Error: Step ${quotedId(mod.step_id)} not found for ${what}.`;
 
     if (mod.action === 'rename_step') {
       // A new id for a step, and every reference to it follows: the steps that read its output
       // (`input_from`) and the `{{<id>.…}}` references in their tasks and input templates. The way
       // out for an id stored with a character the save now refuses.
       const to = mod.value;
-      if (!to) return `Error: "value" (the new id) is required for rename_step "${stripHiddenInName(mod.step_id)}".`;
+      if (!to) return `Error: "value" (the new id) is required for rename_step ${quotedId(mod.step_id)}.`;
       const hidden = findHiddenInName(to, 'the new id');
       if (hidden) return `Error: rename_step: the new id contains a character that renders as nothing (${hidden.codePoint}). Type the id again.`;
-      if (!STEP_ID_SHAPE.test(to)) return `Error: rename_step: "${to}" is not a step id. Use letters, digits, "-" and "_", starting with a letter or digit.`;
+      const problem = newIdProblem(to);
+      if (problem) return `Error: rename_step: the new id ${quotedId(to)} ${problem}. Choose another.`;
       const from = steps[idx]!.id;
-      if (to !== from && steps.some(s => s.id === to)) return `Error: Step "${to}" already exists — cannot rename "${stripHiddenInName(from)}" to it.`;
+      if (to !== from && steps.some(s => s.id === to)) return `Error: Step ${quotedId(to)} already exists — cannot rename ${quotedId(from)} to it.`;
       steps[idx]!.id = to;
       for (const s of steps) {
         if (s.input_from) s.input_from = s.input_from.map(dep => (dep === from ? to : dep));

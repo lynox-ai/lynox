@@ -1,11 +1,11 @@
 import type { ToolEntry, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
-import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
+import { applyModifications, quotedId, type StepModification } from '../../orchestrator/workflow-edit.js';
 import { getPipeline, forgetPipeline, buildManifest } from './pipeline.js';
 import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
 import { validateContractAgainstSteps } from '../../orchestrator/contract-validation.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { findHiddenChar, findHiddenInName, stripHiddenInName } from '../../core/hidden-text.js';
+import { findHiddenChar, findHiddenInName } from '../../core/hidden-text.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface UpdateWorkflowInput {
@@ -123,7 +123,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const seen = new Set<string>();
     for (const s of steps) {
       // An id the edit kept may be stored text from before the save refused hidden characters.
-      if (seen.has(s.id)) return `Error: Duplicate step id "${stripHiddenInName(s.id)}" after the edit.`;
+      if (seen.has(s.id)) return `Error: Duplicate step id ${quotedId(s.id)} after the edit.`;
       seen.add(s.id);
     }
 
@@ -155,7 +155,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const goal = input.goal ?? planned.goal;
     const fixes: string[] = [];
     steps.forEach((s, i) => {
-      if (findHiddenInName(s.id, 'id') !== null) fixes.push(`rename_step for step #${i + 1} ("${stripHiddenInName(s.id)}"): step_id "#${i + 1}", value a new id you type; the steps that read it follow`);
+      if (findHiddenInName(s.id, 'id') !== null) fixes.push(`rename_step for step #${i + 1} (${quotedId(s.id)}): step_id "#${i + 1}", value a new id you type; the steps that read it follow`);
       if (findHiddenChar(s.task) !== null) fixes.push(`update_task for step #${i + 1}: step_id "#${i + 1}", value its task typed again in your own words`);
     });
     if (findHiddenChar(goal) !== null) fixes.push('a new "goal", written in your own words');
