@@ -3690,6 +3690,8 @@ describe('LynoxHTTPApi', () => {
         /** The question the run is parked on. */
         promptId: string;
       }) => Promise<void>,
+      /** Ask with the run's abort signal, which `session.abort()` fires, as the real agent loop does. */
+      opts: { signalled?: boolean } = {},
     ): Promise<void> {
       const Database = (await import('better-sqlite3')).default;
       const db = new Database(':memory:');
@@ -3736,8 +3738,10 @@ describe('LynoxHTTPApi', () => {
         // exactly as the real one does.
         mockSessionRun.mockImplementationOnce(async () => {
           const promptUser = mockSessionInstance.promptUser as
-            (q: string, o?: string[]) => Promise<string>;
-          const answer = await promptUser('Which repo did you mean?', ['lynox', 'lynox-pro']);
+            (q: string, o?: string[], meta?: { signal?: AbortSignal }) => Promise<string>;
+          const run = new AbortController();
+          if (opts.signalled === true) mockSessionAbort.mockImplementationOnce(() => { run.abort(); });
+          const answer = await promptUser('Which repo did you mean?', ['lynox', 'lynox-pro'], opts.signalled === true ? { signal: run.signal } : undefined);
           return `settled:${answer}`;
         });
         const runRes = await jsonFetch(`/api/sessions/${sid}/run`, {
@@ -3815,7 +3819,7 @@ describe('LynoxHTTPApi', () => {
         expect(next.status).toBe(200);
         await next.text();
         expect(prompts.getById(promptId)?.closed_reason).toBe('run_taken_over');
-      });
+      }, { signalled: true });
     });
 
     it('POST /abort reclaims a parked run even when the Session is already gone', async () => {

@@ -309,6 +309,7 @@ describe('a scheduled workflow that asks its owner', () => {
     await waitUntil('the run to end', () => h.records.length > 0);
     expect(h.records[0]![2]).toBe('stopped');
     expect(h.prompts.getById(q.id)!.status).toBe('expired');
+    expect(h.prompts.getById(q.id)!.closed_reason).toBe('run_stopped');
     expect(h.escalations()).toBe(0);
   });
 
