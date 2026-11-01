@@ -1092,8 +1092,33 @@ function heldFromReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string,
  * with only "Tell the owner", it sometimes told the member instead.
  */
 function planRefusalFinal(person: string): string {
-  return `This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.`;
+  return `${RUN_REFUSAL_FINAL} Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. ${RUN_REFUSAL_CLOSE}`;
 }
+
+/**
+ * The same end without who decides, for a refusal the owner cannot lift by stamping the plan:
+ * another member's connection, or one whose own member's access does not carry the request.
+ */
+function planRefusalFinalForRun(): string {
+  return `${RUN_REFUSAL_FINAL} ${RUN_REFUSAL_CLOSE}`;
+}
+
+/**
+ * For the member's own connection that their access does not cover: final for the run, but it
+ * promises neither the same words nor a refused token exchange. A token exchange asks in write
+ * mode, which a later access of the same person passes; the refresh slot's own check may stop it
+ * in other words, or let it through while that earlier access is still live. A request through
+ * it stays refused either way: its grant names the earlier access, and only connecting again
+ * changes that, which a plan cannot. One window it does not cover: a login that extends an
+ * ended access pauses the plan at once, but the run in progress stops only at the next sweep
+ * (`stopEndedStarters`), and until then a request through the connection can pass again.
+ */
+function ownRefusalFinalForRun(): string {
+  return `This is final for this run: another request through it is refused as well, so do not try the connection again. ${RUN_REFUSAL_CLOSE}`;
+}
+
+const RUN_REFUSAL_FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again.';
+const RUN_REFUSAL_CLOSE = 'Say so in your reply, and do not ask for permission.';
 
 /**
  * What a request through `profile` says when it would carry a token of a connection someone
@@ -1122,7 +1147,10 @@ export function memberConnectionRefusal(
     const ownPlan = own && memberConnectionReader(profile, reader, mode, ends);
     if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${planRefusalFinal(person)}`;
     if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;
-    return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session.`;
+    // Not "only in their own session" for the member's own: their access does not carry this
+    // request, there or here.
+    if (own) return `${lead}, and ${person}'s access does not cover this plan, so the connection is not used in this plan's run. ${ownRefusalFinalForRun()}`;
+    return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session. ${planRefusalFinalForRun()}`;
   }
   // The same person under a later access: the connection was made under the earlier one.
   if (own) return `This connection (${provider}, profile ${shown}) was set up under an earlier access of ${person}'s, so it is not used now. Connect it again with api_setup action "connect".`;
