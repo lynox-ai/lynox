@@ -5,6 +5,8 @@
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
+	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	interface Contact { _id?: number; name: string; email?: string; phone?: string; company?: string; type?: string; source?: string; tags?: string[]; notes?: string; _created_at?: string; }
 	interface Interaction { type: string; channel: string; summary: string; date?: string; }
@@ -18,6 +20,10 @@
 	let interactions = $state<Interaction[]>([]);
 	let contactDeals = $state<Deal[]>([]);
 	let error = $state('');
+	// Removing a contact is the owner's (the route refuses a mandate): the button shows only once
+	// the server said the session is the owner's. Everything else here stays for every reader.
+	const ownerActs = $derived(isOwnerSession());
+	void loadSettingsViewer();
 
 	async function loadContacts() {
 		loading = true; error = '';
@@ -137,6 +143,7 @@
 </script>
 
 <div class="p-6 max-w-5xl mx-auto">
+	<ViewerUnavailableNotice />
 	<div class="flex items-center gap-4 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('crm.title')}</h1>
 		{#if hasDeals}
@@ -232,7 +239,7 @@
 						<!-- Last, and visually quiet: removal is the rare act, not the primary one.
 						     Only offered when the row has an id — an older list payload without
 						     one would otherwise render a button that cannot work. -->
-						{#if selected._id !== undefined}
+						{#if selected._id !== undefined && ownerActs}
 							<button
 								type="button"
 								class="w-full inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-subtle transition-colors hover:border-danger/40 hover:text-danger disabled:opacity-40 disabled:cursor-not-allowed"
