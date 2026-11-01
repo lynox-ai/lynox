@@ -3415,6 +3415,13 @@ describe('LynoxHTTPApi', () => {
         const late = await jsonFetch('/api/sessions/s-lapsed/reply', { method: 'POST', body: JSON.stringify({ promptId: lapsed, answer: 'B' }) });
         expect(late.status).toBe(410);
         expect((await late.json() as { code?: string }).code).toBe('timed_out');
+
+        // The same for a secret's question: settling it fails on its clock.
+        const lapsedSecret = store.insertAskSecret('s-lapsed-secret', 'API_KEY', 'Paste the key');
+        history.getDb().prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 3_000).toISOString(), lapsedSecret);
+        const lateSecret = await jsonFetch('/api/sessions/s-lapsed-secret/secret-saved', { method: 'POST', body: JSON.stringify({ promptId: lapsedSecret, status: 'saved' }) });
+        expect(lateSecret.status).toBe(410);
+        expect((await lateSecret.json() as { code?: string }).code).toBe('timed_out');
       } finally {
         engineRef.getPromptStore = original;
         history.close();
