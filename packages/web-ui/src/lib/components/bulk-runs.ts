@@ -552,7 +552,7 @@ export function bulkHaltCause(
 	const own = bulkHaltText(run, managed, i18n)?.cause ?? bulkResumeText(run, managed, i18n)?.cause ?? bulkRollbackText(run, i18n)?.cause;
 	if (own !== undefined) return own;
 	if (mandate && bulkWaitsForStart(run)) return i18n.t('bulk.halt.wait_owner_only');
-	const state = bulkStateText(run, mandate ? null : startButton, i18n);
+	const state = bulkStateText(run, startButton, i18n);
 	if (state !== null) return state.step === null || mandate ? state.cause : `${state.cause} ${state.step}`;
 	return run.haltReason ?? '';
 }
