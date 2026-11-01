@@ -528,7 +528,21 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.halt.awaitingStart_start': { de: 'Starte den Lauf mit „{button}“.', en: 'Start the run with “{button}”.' },
 	'bulk.halt.listed_start': { de: 'Prüf die Ziele, dann starte mit „{button}“.', en: 'Review the targets, then start with “{button}”.' },
 	'bulk.halt.wait_owner_only': { de: 'Starten kann diesen Lauf nur der Inhaber der Instanz.', en: 'Only the owner of the instance can start this run.' },
-	// A mandate's session sees a run without the owner's acts (ux U-111).
+	// A mandate's session sees a run without the owner's acts, and reads the sentences that name
+	// them as the owner's (`BULK_MANDATE_KEYS`, ux U-111).
+	'bulk.intro_mandate': { de: 'Änderungen über viele Ziele. Jeder Lauf zeigt erst eine Vorschau und schreibt erst nach der Freigabe des Inhabers. Was lynox geschrieben hat, kann der Inhaber zurücknehmen, solange es seither niemand geändert hat. Was versendet wurde, lässt sich nicht zurückholen.', en: 'Changes across many targets. Every run shows a preview first and writes only once the owner approves it. The owner can take back what lynox wrote, as long as nobody has changed it since. Anything that was sent cannot be taken back.' },
+	'bulk.deselect.taken_out_mandate': { de: 'Vom Inhaber herausgenommen.', en: 'Taken out by the owner.' },
+	'bulk.skipped.products_mandate': { de: '{n} Produkte lässt lynox aus.', en: 'lynox skips {n} products.' },
+	'bulk.skipped.targets_mandate': { de: '{n} Ziele lässt lynox aus.', en: 'lynox skips {n} targets.' },
+	'bulk.skipped.both_products_mandate': { de: '{n} Produkte lässt lynox aus, {m} hat der Inhaber herausgenommen.', en: 'lynox skips {n} products and the owner took out {m}.' },
+	'bulk.skipped.both_targets_mandate': { de: '{n} Ziele lässt lynox aus, {m} hat der Inhaber herausgenommen.', en: 'lynox skips {n} targets and the owner took out {m}.' },
+	'bulk.skipped.taken_out_mandate': { de: '{m} hat der Inhaber herausgenommen.', en: 'The owner took out {m}.' },
+	'bulk.halt.probeRequired_mandate': { de: 'Weitere Ziele schreibt lynox erst, wenn der Inhaber die Probe bestätigt hat.', en: 'lynox writes further targets only once the owner has confirmed the probe.' },
+	'bulk.halt.shopifyWriteOff_mandate': { de: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kann der Inhaber ihn hier fortsetzen.', en: 'Bulk changes to Shopify stores are not enabled on this instance. The run is stopped. Once they are enabled again, the owner can continue it here.' },
+	'bulk.halt.costCap_mandate': { de: 'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap} USD, verbraucht {spent} USD.', en: 'The run reached the AI cost limit the owner set at its start: {cap} USD, spent {spent} USD.' },
+	'bulk.halt.mandateEnded_mandate': { de: 'Geplant hat diesen Lauf jemand mit Zugang zu dieser Instanz. Der Zugang ist abgelaufen oder widerrufen, bevor der Inhaber den Lauf freigegeben hat. Er hat nichts geschrieben. Brauchst du ihn, bitte lynox im Chat, ihn neu zu planen.', en: 'Someone with access to this instance planned this run. The access ended or was revoked before the owner approved the run. It wrote nothing. If you need it, ask lynox in the chat to plan it again.' },
+	'bulk.halt.checksum_mandate': { de: 'Der Lauf hat sich seit der Freigabe des Inhabers geändert.', en: 'The run has changed since the owner approved it.' },
+	'bulk.halt.superseded_mandate': { de: 'Der Inhaber hat an seiner Stelle einen anderen Lauf gestartet, bei dem lynox die Ziele beurteilt. Offen sein kann nur einer davon. Dieser Lauf hat nichts geschrieben.', en: 'The owner started another run in its place in which lynox judges the targets. Only one of them can be open at a time. This run wrote nothing.' },
 	'bulk.owner_only': { de: 'Massenläufe freigeben, starten, weiterschreiben und zurücknehmen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber.', en: 'Only the owner of this instance can approve, start, continue or take back bulk runs. If you need that, ask the owner.' },
 	'bulk.halt.wait_no_start': { de: 'Der Lauf kann gerade nicht starten. Warum, steht im Hinweis bei diesem Lauf.', en: 'The run cannot start right now. The note on this run says why.' },
 	'bulk.halt.support_mail': { de: 'Mail an den Support', en: 'Email support' },

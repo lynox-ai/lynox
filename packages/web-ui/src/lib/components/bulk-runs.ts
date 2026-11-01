@@ -11,6 +11,22 @@ export interface BulkI18n {
 	tf: (key: string, vars: Record<string, string>) => string;
 }
 
+/** The sentences that name the owner's own act ("you approved", "you took out", "the limit you
+ *  set"). Every such act is the owner's alone (the routes refuse a mandate), so a mandate's
+ *  session reads each in its `_mandate` form, which names the owner instead (ux U-111). */
+export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
+	'bulk.intro', 'bulk.deselect.taken_out',
+	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
+	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
+	'bulk.halt.mandateEnded', 'bulk.halt.checksum',
+]);
+
+/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form. */
+export function bulkMandateI18n(i18n: BulkI18n): BulkI18n {
+	const key = (k: string): string => (BULK_MANDATE_KEYS.has(k) ? `${k}_mandate` : k);
+	return { t: (k) => i18n.t(key(k)), tf: (k, vars) => i18n.tf(key(k), vars) };
+}
+
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
 export type BulkChange = 'update' | 'create' | 'delete' | 'unchanged' | 'invalid';
 

@@ -109,7 +109,7 @@
 	<div class="p-6 max-w-4xl mx-auto space-y-6">
 		<section>
 			<h1 class="text-xl font-light tracking-tight mb-2">{t('bulk.title')}</h1>
-			<p class="text-sm text-text-muted mb-4">{t('bulk.intro')}</p>
+			<p class="text-sm text-text-muted mb-4">{t(mandate ? 'bulk.intro_mandate' : 'bulk.intro')}</p>
 
 			{#if error}
 				<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>

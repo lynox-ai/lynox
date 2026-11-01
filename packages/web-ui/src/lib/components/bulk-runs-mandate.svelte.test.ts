@@ -2,13 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
-import { t } from '../i18n.svelte.js';
+import { t, tf, setLocale, getLocale } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
-import type { BulkMerge, BulkRunDetailData, BulkTarget } from './bulk-runs.js';
+import { BULK_MANDATE_KEYS, bulkMandateI18n, type BulkMerge, type BulkRunDetailData, type BulkTarget } from './bulk-runs.js';
 
 // Every act on a bulk run, and taking a merge back, is the owner's: the routes refuse a mandate.
 // A mandate's session reads the runs and the merges without those buttons, and the run's page
-// says once who can act. The owner's session keeps every button.
+// says once who can act. The owner's session keeps every button. A sentence that names an act
+// of the owner's ("you approved", "you took out") names the owner to a mandate.
 
 vi.mock('$app/stores', () => ({ page: readable({ url: new URL('http://localhost/app/activity?tab=bulk') }) }));
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
@@ -47,6 +48,7 @@ let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let run: BulkRunDetailData;
 let viewer: 'owner' | 'mandate';
+let shownTargets: BulkTarget[];
 
 beforeEach(() => {
 	target = document.createElement('div');
@@ -54,6 +56,7 @@ beforeEach(() => {
 	resetSettingsViewer();
 	run = makeRun();
 	viewer = 'mandate';
+	shownTargets = TARGETS;
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -61,7 +64,7 @@ beforeEach(() => {
 		if (u.endsWith('/bulk/runs')) return reply({ runs: [run] });
 		if (u.endsWith('/merges')) return reply({ merges: [MERGE] });
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
-		if (page) return reply({ targets: TARGETS.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		if (page) return reply({ targets: shownTargets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
 });
@@ -136,7 +139,8 @@ describe('a run\'s page as a mandate sees it', () => {
 		await renderDetail();
 		expect(buttonByText(t('bulk.probe.continue'))).toBeUndefined();
 		expect(buttonByText(t('bulk.probe.undo_one'))).toBeUndefined();
-		expect(target.textContent).toContain(t('bulk.halt.probeRequired'));
+		expect(target.textContent).toContain(t('bulk.halt.probeRequired_mandate'));
+		expect(target.textContent).not.toContain(t('bulk.halt.probeRequired'));
 		expect(target.textContent).not.toContain(t('bulk.halt.probeRequired_confirm'));
 	});
 
@@ -160,5 +164,83 @@ describe('the run list as a mandate sees it', () => {
 		viewer = 'owner';
 		await renderList();
 		expect(buttonByText(t('bulk.merges.take_back'))).toBeDefined();
+	});
+});
+
+describe('a sentence that names an act of the owner\'s', () => {
+	it('has a form naming the owner, in both languages, for every key a mandate reads so', () => {
+		const locale = getLocale();
+		try {
+			for (const lang of ['de', 'en'] as const) {
+				setLocale(lang);
+				for (const key of BULK_MANDATE_KEYS) {
+					const mandate = t(`${key}_mandate`);
+					expect(mandate, `${lang} ${key}`).not.toBe(`${key}_mandate`);
+					expect(mandate, `${lang} ${key}`).not.toBe(t(key));
+					expect(bulkMandateI18n({ t, tf }).t(key), `${lang} ${key}`).toBe(mandate);
+				}
+				expect(bulkMandateI18n({ t, tf }).t('bulk.halt.wait_owner_only')).toBe(t('bulk.halt.wait_owner_only'));
+			}
+		} finally {
+			setLocale(locale);
+		}
+	});
+
+	const nothing = { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 };
+	const cases: { name: string; run: Partial<BulkRunDetailData>; targets?: BulkTarget[]; key: string; vars?: Record<string, string> }[] = [
+		{ name: 'lynox skips a target of a preview', run: { total: 2, changes: { ...nothing, update: 1, invalid: 1 } },
+			targets: [TARGETS[0]!, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false }],
+			key: 'bulk.skipped.products', vars: { n: '1' } },
+		{ name: 'a target was taken out', run: { total: 2, deselected: 1, changes: { ...nothing, update: 1 } },
+			targets: [TARGETS[0]!, { ...TARGETS[0]!, seq: 2, key: 'gid://shopify/Product/2', deselected: true }],
+			key: 'bulk.deselect.taken_out' },
+		{ name: 'a judged run reached its spend limit', run: { phase: 'planned', haltKey: 'costCap', haltReason: 'engine English', judge: {} as BulkRunDetailData['judge'], costCapUsd: 2, costUsd: 2, changes: nothing },
+			key: 'bulk.halt.costCap', vars: { cap: '2.00', spent: '2.00' } },
+		{ name: 'another judged run took its place', run: { phase: 'aborted', haltKey: 'superseded', haltReason: 'engine English', changes: nothing },
+			key: 'bulk.halt.superseded' },
+		{ name: 'the run changed since it was approved', run: { phase: 'writing', haltKey: 'checksum', haltReason: 'engine English', applied: 0 },
+			key: 'bulk.halt.checksum' },
+		{ name: 'Shopify writes were switched off while it wrote', run: { phase: 'writing', haltKey: 'shopifyWriteOff', haltReason: 'engine English', applied: 0 },
+			key: 'bulk.halt.shopifyWriteOff' },
+		{ name: 'the access of whoever planned it ended', run: { phase: 'aborted', haltKey: 'mandateEnded', haltReason: 'engine English', changes: nothing },
+			key: 'bulk.halt.mandateEnded' },
+		{ name: 'a probe waits for its confirmation', run: { phase: 'writing', haltKey: 'probeRequired', haltReason: 'engine English', applied: 1, probeConfirmed: false, probe: { key: 'gid://shopify/Product/1', fields: ['title'] } },
+			key: 'bulk.halt.probeRequired' },
+	];
+
+	for (const c of cases) {
+		it(`names the owner to a mandate, and keeps "you" for the owner, when ${c.name}`, async () => {
+			const text = (key: string): string => (c.vars ? tf(key, c.vars) : t(key));
+			const show = async (who: 'owner' | 'mandate'): Promise<string> => {
+				resetSettingsViewer();
+				viewer = who;
+				run = makeRun(c.run);
+				shownTargets = c.targets ?? TARGETS;
+				await renderDetail();
+				const seen = target.textContent ?? '';
+				if (component) unmount(component);
+				component = undefined;
+				return seen;
+			};
+			const asMandate = await show('mandate');
+			expect(asMandate).toContain(text(`${c.key}_mandate`));
+			expect(asMandate).not.toContain(text(c.key));
+			const asOwner = await show('owner');
+			expect(asOwner).toContain(text(c.key));
+			// A mandate's form may be the owner's first sentence alone; the owner's full one is asserted above.
+			if (!text(c.key).includes(text(`${c.key}_mandate`))) expect(asOwner).not.toContain(text(`${c.key}_mandate`));
+		});
+	}
+
+	it('tells a mandate on the list who approves and takes back, and the owner that it is them', async () => {
+		await renderList();
+		expect(target.textContent).toContain(t('bulk.intro_mandate'));
+		expect(target.textContent).not.toContain(t('bulk.intro'));
+		unmount(component!);
+		component = undefined;
+		resetSettingsViewer();
+		viewer = 'owner';
+		await renderList();
+		expect(target.textContent).toContain(t('bulk.intro'));
 	});
 });

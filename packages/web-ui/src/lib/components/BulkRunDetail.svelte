@@ -11,7 +11,7 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -327,14 +327,16 @@
 	// Every act on this page is the owner's (the routes refuse a mandate). Until `viewer` is read
 	// the owner's acts show; the server stays the boundary.
 	const mandate = $derived(isMandateSession());
+	// A sentence that names an owner's act names the owner to a mandate.
+	const view = $derived(mandate ? bulkMandateI18n(i18n) : i18n);
 	const restartKind = $derived(run ? bulkRestartKind(run) : null);
-	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
+	const haltText = $derived(run ? bulkHaltText(run, managed, view) : null);
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
-	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
+	const resumeText = $derived(run ? bulkResumeText(run, managed, view) : null);
 	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
 	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');
-	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, i18n) : { text: null, nothing: false });
+	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, view) : { text: null, nothing: false });
 	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
 	const foldedUnchanged = $derived(targets.length - shownTargets.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
@@ -382,7 +384,7 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
-					<dd>{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), i18n, mandate)}</dd>
+					<dd>{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, mandate)}</dd>
 				{/if}
 			</dl>
 
@@ -449,7 +451,7 @@
 											{/if}
 											{#if approving && (target.deselected || writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
-													{#if target.deselected}<span class="text-text-subtle">{t('bulk.deselect.taken_out')}</span>{/if}
+													{#if target.deselected}<span class="text-text-subtle">{view.t('bulk.deselect.taken_out')}</span>{/if}
 													{#if !mandate}
 														<button type="button" class="{btnPlain} text-xs" disabled={busy} onclick={() => toggleSelected(target)}>{t(target.deselected ? 'bulk.deselect.on' : 'bulk.deselect.off')}</button>
 													{/if}
