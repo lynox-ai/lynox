@@ -72,6 +72,29 @@ describe('loadSettingsViewer', () => {
 		expect(isViewerUnavailable()).toBe(false);
 	});
 
+	it('is not unavailable while the last retry still waits, though another page\'s request failed', async () => {
+		const fetchMock = serve(new TypeError('network'));
+		await loadSettingsViewer();
+		await vi.advanceTimersByTimeAsync(1_000 + 3_000);
+		// The last retry is scheduled; a second page asks and fails meanwhile.
+		await loadSettingsViewer();
+		expect(fetchMock).toHaveBeenCalledTimes(4);
+		expect(isViewerUnavailable()).toBe(false);
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(fetchMock).toHaveBeenCalledTimes(5);
+		expect(isViewerUnavailable(), 'twin: once the last retry failed too').toBe(true);
+	});
+
+	it('is no longer unavailable once an older engine answers without a viewer', async () => {
+		serve(new TypeError('network'));
+		await loadSettingsViewer();
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(isViewerUnavailable(), 'positive control: it gave up').toBe(true);
+		serve(json({ managed: 'self-host' }));
+		await loadSettingsViewer();
+		expect(isViewerUnavailable()).toBe(false);
+	});
+
 	it('is never unavailable when a retry is answered', async () => {
 		serve(json({ error: 'down' }, 503), json({ viewer: 'owner' }));
 		await loadSettingsViewer();

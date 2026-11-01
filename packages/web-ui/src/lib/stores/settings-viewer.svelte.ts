@@ -89,6 +89,8 @@ export function loadSettingsViewer(): Promise<void> {
 				const body: unknown = await res.json();
 				if (asked !== generation) return;
 				answered = true;
+				// An answer, even one without `viewer` (an older engine), means the page did load.
+				unavailable = false;
 				noteSettingsViewer(body);
 			}
 		} catch {
@@ -99,8 +101,10 @@ export function loadSettingsViewer(): Promise<void> {
 		if (asked !== generation) return;
 		// An answer without `viewer` (an older engine) is not asked again; no answer is.
 		if (answered || known) return;
+		// A retry still waiting will ask again: only with none left is the answer unavailable.
+		if (retryTimer !== null) return;
 		if (retries < RETRY_MS.length) {
-			if (retryTimer === null) retryTimer = setTimeout(() => { retryTimer = null; void loadSettingsViewer(); }, RETRY_MS[retries++]);
+			retryTimer = setTimeout(() => { retryTimer = null; void loadSettingsViewer(); }, RETRY_MS[retries++]);
 		} else {
 			unavailable = true;
 		}
