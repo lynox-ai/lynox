@@ -321,7 +321,7 @@ describe('Engine boot — mandate ends', () => {
       expect(owners).not.toHaveBeenCalled();
     });
 
-    it('asks the worker to stop paused plans\' runs right after a login extends an ended grant, outside its transaction, without the sweep', async () => {
+    it('calls the worker\'s stop right after a login extends an ended grant, outside its transaction, without the sweep', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'lynox-runextendboot-'));
       dirs.push(dir);
       const engine = await boot(dir);
