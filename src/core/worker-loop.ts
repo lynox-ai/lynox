@@ -1221,7 +1221,7 @@ export class WorkerLoop {
     const promptStore = this.engine.getPromptStore();
     const open = promptStore?.getPendingForTrigger(trigger.id);
     if (open && trigger.status === 'waiting') return { ok: false, reason: 'awaiting_answer' };
-    if (open) promptStore?.expirePendingForTrigger(trigger.id);
+    if (open) promptStore?.expirePendingForTrigger(trigger.id, 'plan_ended');
     // A run another engine process holds counts as running too. A lost run does not stop
     // a manual one: running it again is what the person asked for.
     const lease = this.takeLease(trigger.id);
@@ -1364,7 +1364,7 @@ export class WorkerLoop {
           // expiry may already have settled the question (register: hand-run question origin).
           const asked = this.engine.getPromptStore()?.getLatestForTrigger(parked.id);
           try {
-            this.engine.getPromptStore()?.expirePendingForTrigger(parked.id);
+            this.engine.getPromptStore()?.expirePendingForTrigger(parked.id, 'timed_out');
           } catch (err: unknown) {
             process.stderr.write(
               `[lynox:worker] prompt settle failed for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -3033,7 +3033,7 @@ export class WorkerLoop {
         // cannot leave its run parked. That option is not available here,
         // because here the abort is what ended the wait in the first place.)
         try {
-          promptStore.expirePrompt(promptId);
+          promptStore.expirePrompt(promptId, 'run_stopped');
         } catch (err: unknown) {
           // Silent would hide the cases that are NOT a shutdown: `stop()` is a
           // public method and can run with the DB wide open, where a failure

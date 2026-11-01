@@ -203,7 +203,8 @@ function scan(files: Map<string, string>, routes: OwnerRoute[]): { pages: string
 		pages.push(path);
 		const name = basename(path);
 		if (name in EXEMPT || OUTSIDE_SETTINGS.includes(name)) continue;
-		if (name in HIDDEN ? !src.includes('isMandateSession(') : !hasBranch(src)) missing.push(path);
+		// A hidden page asks whose session it is, either way round: hidden for a mandate, or shown to the owner only.
+		if (name in HIDDEN ? !/isMandateSession\(|isOwnerSession\(/.test(src) : !hasBranch(src)) missing.push(path);
 	}
 	return { pages, missing };
 }
@@ -337,6 +338,7 @@ describe('every page that writes through an owner-only route has a read-only vie
 			// A hidden page that does not ask whose session it is, and one that does.
 			['components/SetupBanner.svelte', `<script>${put}</script>`],
 			['hidden/SetupBanner.svelte', `<script>${put}</script>{#if !isMandateSession()}x{/if}`],
+			['shown/SetupBanner.svelte', `<script>${put}</script>{#if isOwnerSession()}x{/if}`],
 			// A route page counts like a component.
 			['routes/app/x/+page.svelte', `<script>${put}</script>`],
 			// A page that reveals a secret counts without any write.
@@ -349,5 +351,6 @@ describe('every page that writes through an owner-only route has a read-only vie
 		expect(result.pages).not.toContain('components/ImportsChat.svelte');
 		expect(result.pages).toContain('components/OwnSentence.svelte');
 		expect(result.pages).toContain('hidden/SetupBanner.svelte');
+		expect(result.pages).toContain('shown/SetupBanner.svelte');
 	});
 });

@@ -6,7 +6,8 @@
 	import { onMount } from 'svelte';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
-	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import Checkbox from '../primitives/Checkbox.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildMailAccountPayload } from '../api/mail-accounts.js';
@@ -433,6 +434,7 @@
 </script>
 
 <div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5" data-testid="mail-settings">
+	<ViewerUnavailableNotice />
 	<div class="mb-4 flex items-center justify-between">
 		<div>
 			<h2 class="font-medium">Mail (IMAP/SMTP)</h2>
@@ -451,7 +453,7 @@
 
 	{#if !loading}
 		{#if isMandateSession()}
-			<!-- A mandate's session (ux UX-059, U-109): adding, removing and the default are the
+			<!-- A mandate's session: adding, removing and the default are the
 			     owner's, so the accounts show as text and the sentence names who connects one. -->
 			<p class="mb-4 text-sm text-text-muted" data-testid="mail-owner-only">{tf('mail.owner_only_notice', { label: t('settings.channels.mail') })}</p>
 		{/if}
@@ -508,7 +510,7 @@
 								</div>
 							{/if}
 						</div>
-						{#if !isMandateSession()}
+						{#if isOwnerSession()}
 						<div class="ml-3 flex items-center gap-2">
 							{#if !account.isDefault}
 								<button
@@ -536,8 +538,9 @@
 			</div>
 		{/if}
 
-		{#if isMandateSession()}
-			<!-- No form: the owner connects mailboxes (the sentence above). -->
+		{#if !isOwnerSession()}
+			<!-- No form until the server said this is the owner's session: the owner connects
+			     mailboxes (a mandate reads the sentence above). -->
 		{:else if !showForm}
 			<button
 				type="button"
