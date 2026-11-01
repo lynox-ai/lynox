@@ -217,8 +217,9 @@
 									<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 									<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
 										class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
-								{:else if isMandateSession()}
-									<!-- No link (ux U-109): a mandate reconnects only a profile it set up; the line says why. -->
+								{:else}
+									<!-- No link (ux U-109): the server says `false` only to a mandate, which reconnects
+									     only a profile it set up; the line says why. -->
 									<p data-testid="api-reconnect-not-yours">{t('apis.reconnect_not_yours')}</p>
 								{/if}
 							{/if}
