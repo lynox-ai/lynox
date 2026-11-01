@@ -10,6 +10,12 @@ import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 // every reader, and tells a mandate who acts where it came to act (the queue, memory).
 
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+// The bulk page opens a run from the address (`?run=<id>`); the list is the address without it.
+const appPage = vi.hoisted(() => ({ url: 'http://localhost/app/activity?tab=bulk' }));
+vi.mock('$app/stores', async () => {
+	const { readable } = await import('svelte/store');
+	return { page: { subscribe: (fn: (v: { url: URL }) => void) => readable({ url: new URL(appPage.url) }).subscribe(fn) } };
+});
 vi.mock('../stores/chat.svelte.js', () => ({ newChat: vi.fn(), sendMessage: vi.fn() }));
 // Markdown is not compiled under vitest here: the entry is printed as its text.
 vi.mock('./MarkdownRenderer.svelte', () => ({
@@ -250,12 +256,13 @@ describe('a page whose answer never comes', () => {
 	// without the owner's acts and without a reason (the sentence the settings pages show, ux U-117;
 	// on these pages too, ux U-115). An answer on a retry shows the acts and no sentence.
 	const BULK = () => import('./BulkRunsView.svelte');
-	const pages = { ...PAGES, bulk: BULK } as const;
+	const pages = { ...PAGES, bulk: BULK, bulkRun: BULK } as const;
 
 	async function mountWith(page: keyof typeof pages, configTry: (n: number) => Response): Promise<(ms: number) => Promise<void>> {
 		let n = 0;
 		const base = (globalThis.fetch as unknown as (u: string) => Promise<Response>);
 		vi.stubGlobal('fetch', vi.fn(async (url: string) => (String(url).endsWith('/config') ? configTry(++n) : base(url))));
+		appPage.url = `http://localhost/app/activity?tab=bulk${page === 'bulkRun' ? '&run=r1' : ''}`;
 		const { default: Page } = await pages[page]();
 		component = mount(Page, { target, props: page === 'memory' ? { hasDurableMemory: true } : {} });
 		const advance = async (ms: number): Promise<void> => { await vi.advanceTimersByTimeAsync(ms); flushSync(); };
@@ -265,7 +272,7 @@ describe('a page whose answer never comes', () => {
 	const notices = (): number => target.querySelectorAll('[data-testid="viewer-unavailable"]').length;
 	const down = (): Response => new Response('', { status: 503 });
 
-	for (const page of ['contacts', 'files', 'queue', 'memory', 'bulk'] as const) {
+	for (const page of ['contacts', 'files', 'queue', 'memory', 'bulk', 'bulkRun'] as const) {
 		it(`says so once on ${page}, only after the last retry, still without an owner's act`, async () => {
 			vi.useFakeTimers();
 			try {
