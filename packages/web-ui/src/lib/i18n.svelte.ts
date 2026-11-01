@@ -2237,7 +2237,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.edit_in_chat': { de: 'Bearbeiten', en: 'Edit' },
 	'workflow_library.edit_in_chat_prompt': { de: 'Ich möchte diesen gespeicherten Workflow bearbeiten:', en: "I'd like to edit this saved workflow:" },
 	'workflow_library.delete': { de: 'Löschen', en: 'Delete' },
-	'workflow_library.owner_only_notice': { de: 'Workflows hier ausführen, umbenennen oder löschen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber. Ausführen kannst du einen Workflow auch im Chat: bitte lynox darum.', en: 'Only the owner of this instance can run, rename or delete workflows here. If you need that, ask the owner. You can also run a workflow in the chat: ask lynox to.' },
+	'workflow_library.owner_only_notice': { de: 'Workflows hier ausführen, umbenennen oder löschen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber. Ausführen kannst du einen Workflow auch im Chat: bitte lynox darum.', en: 'Only the owner of this instance can run, rename or delete workflows here. If you need that, ask the owner. You can also run a workflow in the chat: just ask lynox.' },
 	'workflow_library.save': { de: 'Speichern', en: 'Save' },
 	'workflow_library.cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'workflow_library.run_started': { de: 'Workflow gestartet.', en: 'Workflow started.' },

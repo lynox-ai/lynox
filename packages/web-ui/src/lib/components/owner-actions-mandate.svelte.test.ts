@@ -20,9 +20,9 @@ vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 // The owner's actions on the workflow library and the schedules page, in a mandate's session (ux
 // U-104, register 1148): running, renaming and deleting a workflow, and confirming a plan, are the
 // owner's (`ownerOnly` in http-api.ts). A mandate gets no button whose answer is always 403, and is
-// told who does it. Each page knows whose session it is from its own list (`viewer`) or from the
-// shared store, which it loads itself: the store alone shows the owner's buttons until it has an
-// answer.
+// told who does it. Each page loads the shared store itself (`GET /api/config` says `viewer`); the
+// schedules page also reads the `viewer` its own list sends. The library's list sends none today,
+// so the mocks here send none for it either.
 
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
@@ -48,7 +48,8 @@ beforeEach(() => {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		const viewer = listViewer ? { viewer: listViewer } : {};
-		if (u.endsWith('/workflows/library?limit=100')) return json(200, { workflows: [WF], ...viewer });
+		// As the engine answers today: no `viewer` in the library's list.
+		if (u.endsWith('/workflows/library?limit=100')) return json(200, { workflows: [WF], grantEnabled: false });
 		if (u.endsWith('/triggers')) return json(200, { triggers: [AWAITING], ...viewer });
 		if (u.endsWith('/config')) return json(200, configViewer ? { viewer: configViewer } : {});
 		if (u.endsWith('/secrets/status')) return json(200, {});
@@ -86,27 +87,18 @@ const notice = (): string | undefined => target.querySelector('[data-testid="own
 
 describe('the workflow library in a mandate\'s session', () => {
 	it('shows the owner Run, Rename and Delete, and no notice', async () => {
-		listViewer = 'owner';
 		configViewer = 'owner';
 		await open('library');
 		expect(buttons()).toEqual(expect.arrayContaining(['Ausführen', 'Umbenennen', 'Löschen', 'Planen', 'Bearbeiten']));
 		expect(notice()).toBeUndefined();
 	});
 
-	it('shows a mandate neither Run nor Rename nor Delete, keeps scheduling and the chat, and says who runs it and where it can', async () => {
-		listViewer = 'mandate';
-		await open('library');
-		expect(buttons()).not.toEqual(expect.arrayContaining(['Ausführen']));
-		expect(buttons().filter((b) => ['Ausführen', 'Umbenennen', 'Löschen'].includes(b))).toEqual([]);
-		expect(buttons()).toEqual(expect.arrayContaining(['Planen', 'Bearbeiten']));
-		expect(notice()).toBe('Workflows hier ausführen, umbenennen oder löschen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber. Ausführen kannst du einen Workflow auch im Chat: bitte lynox darum.');
-	});
-
-	it('takes a mandate from the store the page loads itself when the list does not say', async () => {
+	it('shows a mandate, as the store it loads itself says, neither Run nor Rename nor Delete, keeps scheduling and the chat, and says who runs it and where it can', async () => {
 		configViewer = 'mandate';
 		await open('library');
 		expect(buttons().filter((b) => ['Ausführen', 'Umbenennen', 'Löschen'].includes(b))).toEqual([]);
-		expect(notice()).toBeDefined();
+		expect(buttons()).toEqual(expect.arrayContaining(['Planen', 'Bearbeiten']));
+		expect(notice()).toBe('Workflows hier ausführen, umbenennen oder löschen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber. Ausführen kannst du einen Workflow auch im Chat: bitte lynox darum.');
 	});
 });
 

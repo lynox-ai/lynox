@@ -65,9 +65,10 @@
 	// Whose session reads the library (`owner` | `mandate`), as the engine names it. Only the owner
 	// stamps; absent from an older engine, which also sends no `awaitsStamp`.
 	let viewer = $state<string | undefined>(undefined);
-	// Running, renaming and deleting a workflow are the owner's (`ownerOnly` in http-api.ts). A
-	// mandate's session is told so by the library's own `viewer` or by the shared store, which this
-	// page loads itself: the store alone shows the owner's buttons while it has no answer.
+	// Running, renaming and deleting a workflow are the owner's (`ownerOnly` in http-api.ts). Whose
+	// session it is comes from the shared store, which this page loads itself (it shows the owner's
+	// buttons while it has no answer; the server refuses them either way). The library's own
+	// `viewer` counts too once the engine sends it: today `GET /api/workflows/library` does not.
 	const mandate = $derived(viewer === 'mandate' || isMandateSession());
 	let loading = $state(true);
 	let error = $state('');
