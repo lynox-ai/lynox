@@ -7,7 +7,7 @@ import { EngineDb } from './engine-db.js';
 import { TaskManager } from './task-manager.js';
 import { MandateEnds } from './mandate-ends.js';
 import { TriggerStore } from './trigger-store.js';
-import { ADVANCE_WARNING_S, PAUSE_NOTICE_BODY_MAX, advanceWarning, claimAdvanceWarnings, deliveredWarning, markWarningsDelivered, pauseNotice, pausePlanNow, type PausedFor } from './plan-pause.js';
+import { ADVANCE_WARNING_S, PAUSE_NOTICE_BODY_MAX, PAUSE_NOTICE_TITLE_MAX, advanceWarning, claimAdvanceWarnings, deliveredWarning, markWarningsDelivered, pauseNotice, pausePlanNow, type PausedFor } from './plan-pause.js';
 import {
   claimPauseNotices, pauseEndedPlans, pausedForOf, planEndedMembers, rowPlanMembers, setPlanPauseForTests,
   writePause, PLAN_PAUSE_DEFAULT, type PausePlanRow,
@@ -1018,5 +1018,66 @@ describe('the briefing', () => {
     const text = b.manager.getBriefingSummary();
     expect(text).toContain('paused until the owner takes it over');
     expect(text).not.toContain(`next run ${DUE}`);
+  });
+});
+
+describe('the German pause notice and advance warning (ux, legal 2026-11-01)', () => {
+  const ended = (email: string, reason: 'expired' | 'revoked'): PausedFor =>
+    ({ mandateId: 'g', email, reason, endsAt: Date.UTC(2026, 9, 31) / 1000, roles: ['created'], closedPrompt: false });
+  const end = Date.UTC(2026, 10, 12, 9) / 1000;
+  // Both clauses of the warning, which no shortening may drop (legal).
+  const EXTENDED_DE = 'auch wenn du den Zugang verlängert hast';
+  const SIGN_IN_DE = 'es sei denn, die Person meldet sich vorher einmal an';
+
+  it('the four pause wordings and their titles, exactly', () => {
+    expect([1, 3].map((c) => { const m = pauseNotice(ended('h@x.ch', 'expired'), c, 'none', 'de'); return [m.title, m.body]; })).toEqual([
+      ['⏸ Plan pausiert: Zugang von h@x.ch', 'Eingetragenes Ende: 31.10.2026. Ein Plan, in dem die Person etwas angelegt oder geändert hat, ist pausiert. Er läuft erst nach deiner Übernahme wieder, auch wenn der Zugang verlängert wurde. Eine Vorwarnung gab es nicht.'],
+      ['⏸ 3 Pläne pausiert: Zugang von h@x.ch', 'Eingetragenes Ende: 31.10.2026. 3 Pläne, in denen die Person etwas angelegt oder geändert hat, sind pausiert. Sie laufen erst nach deiner Übernahme wieder, auch wenn der Zugang verlängert wurde. Eine Vorwarnung gab es nicht.'],
+    ]);
+    expect([1, 3].map((c) => pauseNotice(ended('h@x.ch', 'revoked'), c, 'none', 'de').body)).toEqual([
+      'Der Zugang wurde widerrufen. Ein Plan, in dem über diesen Zugang etwas angelegt oder geändert wurde, ist pausiert. Er läuft erst wieder, wenn du ihn übernimmst.',
+      'Der Zugang wurde widerrufen. 3 Pläne, in denen über diesen Zugang etwas angelegt oder geändert wurde, sind pausiert. Sie laufen erst wieder, wenn du sie übernimmst.',
+    ]);
+  });
+
+  it('an expiry says whether its plans were warned; a revocation never does', () => {
+    expect(pauseNotice(ended('h@x.ch', 'expired'), 3, 'some', 'de').body.endsWith(' Nicht alle hatten eine Vorwarnung.')).toBe(true);
+    expect(pauseNotice(ended('h@x.ch', 'expired'), 3, 'all', 'de').body.endsWith('auch wenn der Zugang verlängert wurde.')).toBe(true);
+    for (const warned of ['all', 'some', 'none'] as const) expect(pauseNotice(ended('h@x.ch', 'revoked'), 3, warned, 'de').body).not.toContain('Vorwarnung');
+  });
+
+  it('the three warning wordings and their titles, exactly, to the owner only', () => {
+    expect([advanceWarning('h@x.ch', end, 3, false, 'de'), advanceWarning('h@x.ch', end, 1, false, 'de'), advanceWarning('h@x.ch', end, 1, true, 'de')]
+      .map((m) => [m.title, m.body, m.audience])).toEqual([
+      ['3 Pläne pausieren bald: Zugang von h@x.ch', 'Zugang bis 12.11.2026. Dann pausieren 3 Pläne, in denen die Person etwas angelegt oder geändert hat, auch wenn du den Zugang verlängert hast, es sei denn, die Person meldet sich vorher einmal an. Pausieren sie, kannst du sie übernehmen.', 'owner'],
+      ['Plan pausiert bald: Zugang von h@x.ch', 'Zugang bis 12.11.2026. Dann pausiert ein Plan, in dem die Person etwas angelegt oder geändert hat, auch wenn du den Zugang verlängert hast, es sei denn, die Person meldet sich vorher einmal an. Pausiert er, kannst du ihn übernehmen.', 'owner'],
+      ['Plan pausiert bald: Zugang von h@x.ch', 'Zugang bis 12.11.2026. Dann pausiert noch ein Plan, in dem die Person etwas angelegt oder geändert hat, auch wenn du den Zugang verlängert hast, es sei denn, die Person meldet sich vorher einmal an. Pausiert er, kannst du ihn übernehmen.', 'owner'],
+    ]);
+  });
+
+  it('every body fits a push with 999 plans and keeps both clauses; a long name gives way in the title, with "…"', () => {
+    const long = `${'a'.repeat(70)}@example.invalid`;
+    const bodies = [
+      ...(['expired', 'revoked'] as const).flatMap((r) => (['all', 'some', 'none'] as const).flatMap((w) => [1, 999].map((c) => pauseNotice(ended(long, r), c, w, 'de').body))),
+      ...([[999, false], [1, false], [1, true]] as const).map(([c, more]) => advanceWarning(long, end, c, more, 'de').body),
+    ];
+    for (const b of bodies) expect(b.length, b).toBeLessThanOrEqual(PAUSE_NOTICE_BODY_MAX);
+    for (const [c, more] of [[999, false], [1, false], [1, true]] as const) {
+      const b = advanceWarning(long, end, c, more, 'de').body;
+      expect([b.includes(EXTENDED_DE), b.includes(SIGN_IN_DE)]).toEqual([true, true]);
+    }
+    const titles = [pauseNotice(ended(long, 'expired'), 999, 'none', 'de').title, pauseNotice(ended(long, 'revoked'), 1, 'none', 'de').title, advanceWarning(long, end, 999, false, 'de').title, advanceWarning(long, end, 1, true, 'de').title];
+    for (const t of titles) expect([t.length, t.endsWith('…'), t.includes('Zugang von aaa')], t).toEqual([PAUSE_NOTICE_TITLE_MAX, true, true]);
+  });
+
+  it('claiming in German says it in German; without a language it stays English', () => {
+    const b = box();
+    plan(b, 'a', { by: 'h@x.ch' });
+    writePause(b.db, 'a', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: NOW - H, roles: ['created'], closedPrompt: false }], NOW);
+    expect(claimPauseNotices(b.db, NOW, 'de').map((m) => m.title)).toEqual(['⏸ Plan pausiert: Zugang von h@x.ch']);
+    const c = box();
+    plan(c, 'a', { by: 'h@x.ch' });
+    writePause(c.db, 'a', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: NOW - H, roles: ['created'], closedPrompt: false }], NOW);
+    expect(claimPauseNotices(c.db, NOW).map((m) => m.title)).toEqual(['⏸ A plan is paused']);
   });
 });
