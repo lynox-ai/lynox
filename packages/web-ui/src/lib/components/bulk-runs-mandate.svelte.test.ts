@@ -191,6 +191,13 @@ describe('a sentence that names an act of the owner\'s', () => {
 		{ name: 'lynox skips a target of a preview', run: { total: 2, changes: { ...nothing, update: 1, invalid: 1 } },
 			targets: [TARGETS[0]!, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false }],
 			key: 'bulk.skipped.products', vars: { n: '1' } },
+		{ name: 'lynox skips one target of another host and one was taken out', run: { targetSystem: 'http:api.example.com', total: 3, deselected: 1, changes: { ...nothing, update: 1, invalid: 1 } },
+			targets: [
+				{ ...TARGETS[0]!, key: 'https://api.example.com/items/1' },
+				{ seq: 2, key: 'https://api.example.com/items/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'not_found', deselected: false },
+				{ ...TARGETS[0]!, seq: 3, key: 'https://api.example.com/items/3', deselected: true },
+			],
+			key: 'bulk.skipped.both_targets', vars: { n: '1', m: '1' } },
 		{ name: 'a target was taken out', run: { total: 2, deselected: 1, changes: { ...nothing, update: 1 } },
 			targets: [TARGETS[0]!, { ...TARGETS[0]!, seq: 2, key: 'gid://shopify/Product/2', deselected: true }],
 			key: 'bulk.deselect.taken_out' },
