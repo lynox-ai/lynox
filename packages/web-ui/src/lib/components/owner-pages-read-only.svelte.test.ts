@@ -262,6 +262,11 @@ describe('ApiStoreView (Settings › API profiles)', () => {
 			],
 			importWaiting: [],
 		},
+		// The app credentials of the built-in provider: the server refuses them to a mandate
+		// (`ownerOnly('see the app credentials of a built-in provider')`).
+		'/client': () => viewer === 'owner'
+			? Response.json({ preset: 'google', client_id: null, client_secret_set: false, redirect_uri: 'https://app.example/cb' })
+			: Response.json({ error: 'Only the owner of this instance can see the app credentials.' }, { status: 403 }),
 	});
 	const reconnect = (profileName: string): Element | null =>
 		[...target.querySelectorAll('[data-testid="api-reconnect"]')].find((a) => a.closest('div.rounded-\\[var\\(--radius-md\\)\\]')?.textContent?.includes(profileName)) ?? null;
@@ -273,8 +278,10 @@ describe('ApiStoreView (Settings › API profiles)', () => {
 		expect(reconnect('CRM')).not.toBeNull();
 		expect(reconnect('ERP')).toBeNull();
 		expect(target.querySelectorAll('[data-testid="api-reconnect"]').length).toBe(1);
-		// The built-in provider's app credentials are the owner's: no form on the foreign profile.
-		expect(target.textContent).not.toContain(tf('integrations.preset_client_title', { provider: 'Google' }));
+		// The built-in provider's app credentials are the owner's: no form on the foreign profile,
+		// and not its own owner-only line either, which the page's sentence already says.
+		expect(target.querySelector('[data-testid="preset-client-form"]')).toBeNull();
+		expect(target.textContent).not.toContain(t('integrations.preset_client_owner_only'));
 		expect(fields()).toBe(0);
 		// Setting up and managing in chat stay the mandate's.
 		expect(buttonTexts()).toContain(`+ ${t('apis.create_in_chat')}`);
@@ -286,6 +293,7 @@ describe('ApiStoreView (Settings › API profiles)', () => {
 		expect(target.querySelector('[data-testid="apis-owner-only"]')).toBeNull();
 		expect(buttonTexts().filter((b) => b === t('apis.delete')).length).toBe(2);
 		expect(target.querySelectorAll('[data-testid="api-reconnect"]').length).toBe(2);
+		expect(target.querySelector('[data-testid="preset-client-form"]')).not.toBeNull();
 	});
 });
 
