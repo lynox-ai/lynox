@@ -2124,8 +2124,45 @@ describe('LynoxHTTPApi', () => {
           code: 'llm_not_configured',
           may_configure: true,
           provider: 'Anthropic',
+          missing: ['key'],
         });
         expect(mockSessionRun).not.toHaveBeenCalled();
+      });
+
+      it('names the settings field the owner still has to fill in when the key is not what is missing', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'vertex' });
+        vi.stubEnv('GCP_PROJECT_ID', '');
+        vi.stubEnv('ANTHROPIC_VERTEX_PROJECT_ID', '');
+        const res = await run();
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+          error: 'Google Vertex AI is missing the GCP project ID. Open Settings → Configuration and fill it in.',
+          code: 'llm_not_configured',
+          may_configure: true,
+          provider: 'Google Vertex AI',
+          missing: ['gcp_project_id'],
+        });
+      });
+
+      it('names both fields when an OpenAI-compatible endpoint has neither a base URL nor a model', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'openai' });
+        const res = await run();
+        const body = await res.json() as { missing?: string[]; error: string };
+        expect(body.missing).toEqual(['api_base_url', 'model_id']);
+        expect(body.error).toContain('is missing the base URL and the model ID.');
+      });
+
+      it('names only the key when the key and a field are both missing', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' });
+        const res = await run();
+        expect(((await res.json()) as { missing?: string[] }).missing).toEqual(['key']);
+      });
+
+      it('names the model alone once the endpoint has its key', async () => {
+        mockSecretResolve.mockImplementation((name: string) => (name === 'MISTRAL_API_KEY' ? 'test-only-placeholder' : null));
+        mockGetUserConfig.mockReturnValue({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' });
+        const res = await run();
+        expect(((await res.json()) as { missing?: string[] }).missing).toEqual(['model_id']);
       });
 
       it('names a provider behind the OpenAI wire by its brand, not the config key', async () => {
