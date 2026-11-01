@@ -2135,6 +2135,113 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
+    describe('without an AI provider key', () => {
+      const run = (): Promise<Response> => jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'hello' }),
+      });
+      // No key from the environment either: the provider's own variable outranks the vault.
+      beforeEach(() => {
+        mockSecretResolve.mockReturnValue(null);
+        for (const name of ['ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'OPENAI_API_KEY', 'CUSTOM_API_KEY']) vi.stubEnv(name, '');
+        mockSessionRun.mockClear();
+      });
+      afterEach(() => { mockGetUserConfig.mockReturnValue({}); vi.unstubAllEnvs(); });
+
+      it('tells the owner which provider lacks a key, by its display name, and where to add it', async () => {
+        const res = await run();
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+          error: 'No key is stored for Anthropic yet. Open Settings → Configuration and add one.',
+          code: 'llm_not_configured',
+          may_configure: true,
+          provider: 'Anthropic',
+          missing: ['key'],
+        });
+        expect(mockSessionRun).not.toHaveBeenCalled();
+      });
+
+      it('names the settings field the owner still has to fill in when the key is not what is missing', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'vertex' });
+        vi.stubEnv('GCP_PROJECT_ID', '');
+        vi.stubEnv('ANTHROPIC_VERTEX_PROJECT_ID', '');
+        const res = await run();
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+          error: 'Google Vertex AI is missing the GCP project ID. Open Settings → Configuration and fill it in.',
+          code: 'llm_not_configured',
+          may_configure: true,
+          provider: 'Google Vertex AI',
+          missing: ['gcp_project_id'],
+        });
+      });
+
+      it('names both fields when an OpenAI-compatible endpoint has neither a base URL nor a model', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'openai' });
+        const res = await run();
+        const body = await res.json() as { missing?: string[]; error: string };
+        expect(body.missing).toEqual(['api_base_url', 'model_id']);
+        expect(body.error).toContain('is missing the base URL and the model ID.');
+      });
+
+      it('names only the key when the key and a field are both missing', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' });
+        const res = await run();
+        expect(((await res.json()) as { missing?: string[] }).missing).toEqual(['key']);
+      });
+
+      it('names the key alone on a custom endpoint that lacks both key and base URL, then the base URL', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'custom' });
+        vi.stubEnv('LYNOX_API_BASE_URL', '');
+        const both = await run();
+        expect(((await both.json()) as { missing?: string[] }).missing).toEqual(['key']);
+        mockSecretResolve.mockImplementation((name: string) => (name === 'CUSTOM_API_KEY' ? 'test-only-placeholder' : null));
+        const baseOnly = await run();
+        expect(((await baseOnly.json()) as { missing?: string[] }).missing).toEqual(['api_base_url']);
+      });
+
+      it('names the model alone once the endpoint has its key', async () => {
+        mockSecretResolve.mockImplementation((name: string) => (name === 'MISTRAL_API_KEY' ? 'test-only-placeholder' : null));
+        mockGetUserConfig.mockReturnValue({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' });
+        const res = await run();
+        expect(((await res.json()) as { missing?: string[] }).missing).toEqual(['model_id']);
+      });
+
+      it('names a provider behind the OpenAI wire by its brand, not the config key', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-medium-2604' });
+        const res = await run();
+        expect(res.status).toBe(400);
+        const body = await res.json() as { provider?: string; error: string };
+        expect(body.provider).toBe('Mistral');
+        expect(body.error).not.toContain('openai');
+      });
+
+      it('tells a mandate to ask the owner, and names neither provider nor settings page', async () => {
+        const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+        // A chat the mandate started itself, on a live grant: the run is the mandate's to send.
+        const ref = (api as unknown as { engine: { getThreadStore: () => unknown; getMandateEnds: () => unknown } }).engine;
+        const origThreads = ref.getThreadStore;
+        const origEnds = ref.getMandateEnds;
+        ref.getThreadStore = (): unknown => ({ getThread: () => ({ created_by: 'mandate:eva@example.invalid' }) });
+        ref.getMandateEnds = (): unknown => ({ record: (): void => {}, isLive: (): boolean => true });
+        api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+        try {
+          const res = await run();
+          expect(res.status).toBe(400);
+          expect(await res.json()).toEqual({
+            error: 'No AI provider is set up on this instance yet. Only the owner can do that, so ask the owner.',
+            code: 'llm_not_configured',
+            may_configure: false,
+          });
+          expect(mockSessionRun).not.toHaveBeenCalled();
+        } finally {
+          api.setPrincipalResolverForTesting(resolver);
+          ref.getThreadStore = origThreads;
+          ref.getMandateEnds = origEnds;
+        }
+      });
+    });
+
     it('streams SSE events for a run', async () => {
       // Make run complete immediately
       mockSessionRun.mockImplementation(async () => {

@@ -1546,6 +1546,12 @@ export class Engine {
       const db = this.engineDb?.getDb();
       if (db === undefined) return;
       pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+      // A run of a plan paused here would go on until the next sweep, up to 5 minutes, with its
+      // member live again and its connections open to it. So the parts that end runs follow at
+      // once, outside the login's transaction, as on a revoke. They read what was committed: when
+      // the login's transaction fails, the pause is gone with it and so is the reason to stop.
+      // Outside any run group, as the sweeps are: ending runs belongs to no run.
+      runOutsideGroup(() => queueMicrotask(() => this.endEndedMandateRuns()));
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);

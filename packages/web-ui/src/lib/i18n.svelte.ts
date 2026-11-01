@@ -1174,6 +1174,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_insufficient_quota': { de: 'Dein API-Guthaben ist aufgebraucht. [Guthaben aufladen](https://console.anthropic.com/settings/billing)', en: 'Your API credits are exhausted. [Top up credits](https://console.anthropic.com/settings/billing)' },
 	'chat.error_llm_unavailable': { de: 'Der Sprachdienst ist gerade nicht erreichbar. Bitte in wenigen Minuten erneut versuchen.', en: 'Language service is temporarily unavailable. Please try again in a few minutes.' },
 	'chat.error_invalid_request': { de: 'Ungültige Anfrage. Die Nachricht konnte nicht verarbeitet werden.', en: 'Invalid request. The message could not be processed.' },
+	// No AI provider key yet (`code: 'llm_not_configured'`): one sentence per reader.
+	// {label} is the settings page's own title (`settings.config`), filled in where it is shown.
+	'chat.error_no_llm_key_owner': { de: 'Für {provider} ist noch kein Schlüssel hinterlegt. Öffne Einstellungen → {label} und füg einen hinzu.', en: 'No key is stored for {provider} yet. Open Settings → {label} and add one.' },
+	// The key is there, a settings field is not: {fields} is one or two of the names below.
+	'chat.error_no_llm_field_owner': { de: 'Für {provider} fehlt noch {fields}. Öffne Einstellungen → {label} und trag sie ein.', en: '{provider} is missing {fields}. Open Settings → {label} and fill it in.' },
+	'chat.llm_field.gcp_project_id': { de: 'die GCP-Projekt-ID', en: 'the GCP project ID' },
+	'chat.llm_field.api_base_url': { de: 'die Basis-URL', en: 'the base URL' },
+	'chat.llm_field.model_id': { de: 'die Modell-ID', en: 'the model ID' },
+	'chat.llm_fields_and': { de: '{a} und {b}', en: '{a} and {b}' },
+	'chat.error_no_llm_key_mandate': { de: 'Auf dieser Instanz ist noch kein KI-Anbieter eingerichtet. Das kann nur der Inhaber. Wende dich an den Inhaber.', en: 'No AI provider is set up on this instance yet. Only the owner can do that, so ask the owner.' },
 	'chat.error_content_policy': { de: 'Die Anfrage wurde aufgrund der Inhaltsrichtlinie abgelehnt. Bitte formuliere deine Nachricht um.', en: 'The request was rejected due to content policy. Please rephrase your message.' },
 	'chat.error_model_unavailable': { de: 'Das gewählte KI-Modell ist nicht verfügbar. Prüfe die [Einstellungen](/app/settings).', en: 'The selected AI model is not available. Check your [settings](/app/settings).' },
 	'chat.error_context_length': { de: 'Die Konversation ist zu lang. Starte einen neuen Chat.', en: 'The conversation is too long. Start a new chat.' },

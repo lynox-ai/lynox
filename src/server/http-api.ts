@@ -4554,24 +4554,43 @@ export class LynoxHTTPApi {
       const preflightStore = engine.getSecretStore();
       const preflightCfg = engine.getUserConfig();
       const preflightProvider = preflightCfg.provider ?? 'anthropic';
-      let preflightKeyOk: boolean;
+      // What the provider still lacks, in the order the settings page asks for it. `key` is the
+      // API key; the others are the settings fields without which no call can be made.
+      const preflightMissing: Array<'key' | 'gcp_project_id' | 'api_base_url' | 'model_id'> = [];
+      const preflightKey = (): string | undefined => preflightStore
+        ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg })
+        : undefined;
       if (preflightProvider === 'vertex') {
-        preflightKeyOk = !!(preflightCfg.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
+        if (!(preflightCfg.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID'])) preflightMissing.push('gcp_project_id');
       } else if (preflightProvider === 'custom') {
-        const base = preflightCfg.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!base && !!key;
+        if (!preflightKey()) preflightMissing.push('key');
+        if (!(preflightCfg.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL'))) preflightMissing.push('api_base_url');
       } else if (preflightProvider === 'openai') {
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!preflightCfg.api_base_url
-          && (!endpointNeedsCredential(preflightProvider, preflightCfg.api_base_url) || !!key)
-          && !!preflightCfg.openai_model_id;
-      } else {
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!key;
+        // Whether the endpoint needs a key is known only once there is an endpoint.
+        if (preflightCfg.api_base_url && endpointNeedsCredential(preflightProvider, preflightCfg.api_base_url) && !preflightKey()) preflightMissing.push('key');
+        if (!preflightCfg.api_base_url) preflightMissing.push('api_base_url');
+        if (!preflightCfg.openai_model_id) preflightMissing.push('model_id');
+      } else if (!preflightKey()) {
+        preflightMissing.push('key');
       }
-      if (!preflightKeyOk) {
-        errorResponse(res, 400, `No ${preflightProvider} API key configured. Open Settings → Providers and add one.`);
+      if (preflightMissing.length > 0) {
+        // `code` is what the web UI translates. Who may set it up decides the
+        // sentence: the provider settings are owner-only, so a mandate is told to ask the owner,
+        // not sent to a page it cannot use. `provider` is the display name the status bar
+        // shows, never the config key, and goes only to the one who can act on it, with what
+        // is missing: without a key nothing else helps, so a missing key is named alone.
+        if (!isOwnerPrincipal(this._principalOf(req))) {
+          errorResponse(res, 400, 'No AI provider is set up on this instance yet. Only the owner can do that, so ask the owner.',
+            'llm_not_configured', { may_configure: false });
+        } else {
+          const providerName = providerIdentity(preflightProvider, preflightCfg.api_base_url).label;
+          const missing = preflightMissing.includes('key') ? ['key'] : preflightMissing;
+          const fieldNames: Record<string, string> = { gcp_project_id: 'the GCP project ID', api_base_url: 'the base URL', model_id: 'the model ID' };
+          errorResponse(res, 400, missing[0] === 'key'
+            ? `No key is stored for ${providerName} yet. Open Settings → Configuration and add one.`
+            : `${providerName} is missing ${missing.map((m) => fieldNames[m]).join(' and ')}. Open Settings → Configuration and fill it in.`,
+            'llm_not_configured', { may_configure: true, provider: providerName, missing });
+        }
         return;
       }
 
