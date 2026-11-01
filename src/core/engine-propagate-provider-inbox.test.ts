@@ -385,19 +385,6 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     expect(engineHandle._inboxRuntime).toBeNull();
   });
 
-  /**
-   * D. Drain-window privacy guard (H-012 follow-up):
-   *   While `_rebootstrapInboxOnProviderSwitch` is mid-flight (`await
-   *   old.shutdown()` can take ~30s in production), new mail arriving
-   *   via the MailContext watcher must NOT fire into the OLD US-bound
-   *   runtime closure — that would be a GDPR Art. 44+ transfer for a
-   *   user who explicitly opted into EU residency. The engine flips
-   *   `_inboxClassifierSuspended` before the await; the hook wrapper
-   *   short-circuits while it is set. After the new runtime is wired
-   *   the flag clears and the new (EU) hook serves normally. Mail
-   *   stays unread on the server so the next polling cycle still
-   *   classifies it — no dropped mail.
-   */
   // 1070: mail_triage reads the classifier's verdict through hooks.inboxLabelOf. A rebootstrap
   // wires the new runtime's lookup in place of the old one.
   it('rewires the inbox verdict lookup to the fresh runtime', async () => {
@@ -425,6 +412,19 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     expect(fakeMailContext.hooks.inboxLabelOf).toBe(euRuntime.inboxLabelOf);
   });
 
+  /**
+   * D. Drain-window privacy guard (H-012 follow-up):
+   *   While `_rebootstrapInboxOnProviderSwitch` is mid-flight (`await
+   *   old.shutdown()` can take ~30s in production), new mail arriving
+   *   via the MailContext watcher must NOT fire into the OLD US-bound
+   *   runtime closure — that would be a GDPR Art. 44+ transfer for a
+   *   user who explicitly opted into EU residency. The engine flips
+   *   `_inboxClassifierSuspended` before the await; the hook wrapper
+   *   short-circuits while it is set. After the new runtime is wired
+   *   the flag clears and the new (EU) hook serves normally. Mail
+   *   stays unread on the server so the next polling cycle still
+   *   classifies it — no dropped mail.
+   */
   it('suspends classifier during rebootstrap drain window (privacy-residency guarantee)', async () => {
     process.env['MISTRAL_API_KEY'] = 'sk-mistral-test';
     const config: LynoxConfig = { model: 'balanced' };

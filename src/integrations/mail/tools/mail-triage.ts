@@ -19,6 +19,7 @@ import { prefilter } from '../triage/rules.js';
 import { resolveProviders, type MailRegistry, accountForRow } from './registry.js';
 import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 import type { MailHooks, InboxLabel } from '../context.js';
+import { resolveThreadKey } from '../thread-key.js';
 
 interface MailTriageInput {
   account?: string | undefined;
@@ -44,10 +45,12 @@ export function inboxLabelText(label: InboxLabel | null): string | null {
 
 /** What the `inbox:` labels mean, shown once above the list when any message carries one. */
 export const INBOX_LABEL_LEGEND =
-  'inbox: is what the inbox classifier decided for that message, after reading all of it (the snippets below are cut at 200 characters): ' +
-  'requires_user and draft_ready mean it needs the user\'s answer or decision, auto_handled means it was dealt with; ' +
-  'a /replied, /archived or /snoozed suffix is what the user has done since. Answer from these verdicts. ' +
-  'Where you judge a message differently, say so and name the inbox\'s verdict.';
+  'inbox: is the inbox classifier\'s verdict on the message\'s thread; it read the whole mail, while the snippets below stop at 200 characters. ' +
+  'draft_ready: a short reply is due (a confirmation, a yes or no). requires_user: the user has to act — decide, pay, answer at length, resolve a complaint (also where the classifier could not read the mail). ' +
+  'auto_handled: a newsletter, notice or receipt that asks nothing of the user. ' +
+  'A suffix (/replied, /archived, /snoozed, /unhandled) is what the user has done with it since. ' +
+  'A message without inbox: has no verdict, which does not mean nothing is to be done. ' +
+  'Take the verdicts as a strong hint; where you judge a message differently, say so and name the inbox\'s verdict.';
 
 export function createMailTriageTool(registry: MailRegistry, hooks?: MailHooks): ToolEntry<MailTriageInput> {
   return {
@@ -146,9 +149,9 @@ export function createMailTriageTool(registry: MailRegistry, hooks?: MailHooks):
         const lookup = hooks?.inboxLabelOf;
         let labelled = 0;
         const labelFor = (accountId: string) => (env: MailEnvelope): string | null => {
-          if (!lookup || !env.messageId) return null;
+          if (!lookup) return null;
           let text: string | null = null;
-          try { text = inboxLabelText(lookup(accountId, env.messageId)); } catch { text = null; }
+          try { text = inboxLabelText(lookup(accountId, resolveThreadKey(env))); } catch { text = null; }
           if (text) labelled++;
           return text;
         };

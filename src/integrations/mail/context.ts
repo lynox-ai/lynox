@@ -188,16 +188,18 @@ export interface MailHooks {
   onAccountAdded?: (accountId: string, provider: MailProvider) => Promise<void>;
 
   /**
-   * Not an event but a read: what the inbox classifier made of one received message, or
-   * null when it has no item for it (inbox off, not yet classified, filtered as noise).
-   * `mail_triage` shows it next to each message, so the chat answers from the same verdict
-   * as the inbox instead of judging a 200-character snippet again. Synchronous and must
-   * not throw.
+   * Not an event but a read: what the inbox classifier made of a thread, keyed as the
+   * watcher keys it (`resolveThreadKey`), or null when it has no item for it (inbox off,
+   * not yet classified, filtered as noise). The inbox keeps one item per thread and drops
+   * later mails of a known thread as duplicates, so a lookup by a single message would miss
+   * every mail after the first. `mail_triage` shows the verdict next to each message, so the
+   * chat answers from the same verdict as the inbox instead of judging a 200-character
+   * snippet again. Synchronous and must not throw.
    */
-  inboxLabelOf?: (accountId: string, messageId: string) => InboxLabel | null;
+  inboxLabelOf?: (accountId: string, threadKey: string) => InboxLabel | null;
 }
 
-/** The inbox's verdict on one message, as `mail_triage` shows it. */
+/** The inbox's verdict on one thread, as `mail_triage` shows it. */
 export interface InboxLabel {
   bucket: InboxBucket;
   /** Set once the user archived, replied to or snoozed the item. */
