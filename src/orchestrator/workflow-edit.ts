@@ -52,7 +52,7 @@ function alikeIndexes(steps: readonly InlinePipelineStep[], id: string): number[
  * either by its position instead, `#<n>` as the step list numbers it. A step stored with the id
  * `#<n>` (before new ids refused it) is what `#<n>` names; renamed, `#<n>` is position n again.
  */
-function stepIndex(steps: readonly InlinePipelineStep[], id: string): number | 'missing' | 'ambiguous' {
+function resolveStep(steps: readonly InlinePipelineStep[], id: string): number | 'missing' | 'ambiguous' {
   // The stored id first, so every step stays reachable by its own id, whatever ids it shares a
   // list with; a refusal that names a position someone's id takes says to rename that step first
   // (`byPosition`).
@@ -113,9 +113,18 @@ function renamedInTemplate(value: unknown, from: string, to: string): unknown {
  * Returns null on success or an error string on the first invalid modification
  * (leaving `steps` partially mutated — callers operate on a deep copy and
  * discard it on error). Modifications are applied in array order, so an
- * `add_step` followed by a `remove` of that same id is valid.
+ * `add_step` followed by a `remove` of that same id is valid. `notes`, when given, gets a sentence
+ * for each `#<n>` that named a step stored with that id at another position than n, so the answer
+ * says which step it reached.
  */
-export function applyModifications(steps: InlinePipelineStep[], modifications: StepModification[]): string | null {
+export function applyModifications(steps: InlinePipelineStep[], modifications: StepModification[], notes?: string[]): string | null {
+  const stepIndex = (list: readonly InlinePipelineStep[], id: string): number | 'missing' | 'ambiguous' => {
+    const at = resolveStep(list, id);
+    if (typeof at === 'number' && /^#\d+$/.test(id) && at !== Number(id.slice(1)) - 1) {
+      notes?.push(`${quotedId(id)} named step #${at + 1}, stored with that id, not the step at position ${id.slice(1)}.`);
+    }
+    return at;
+  };
   for (const mod of modifications) {
     if (mod.action === 'add_step') {
       if (steps.some(s => s.id === mod.step_id)) {

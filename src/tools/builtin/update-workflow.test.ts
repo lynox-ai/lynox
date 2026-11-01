@@ -232,6 +232,14 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(out).toBe('Error: Steps #1, #2 all read as "a" (their ids differ only in characters that do not show), so renaming cannot tell which one is meant. Name the step by its position instead, e.g. step_id "#2", after a rename_step with step_id "#2" that gives step #3, stored with the id "#2", a new id.');
   });
 
+  it('says which step "#1" reached when a step stored with that id sits elsewhere', async () => {
+    storePipeline('wf-1', makePlanned({ steps: [{ id: 'a', task: 'One' }, { id: '#1', task: 'Two' }] }));
+    const out = await updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: '#1', value: 'Changed' }] }, makeAgent(history));
+    expect(out).toContain('\n"#1" named step #2, stored with that id, not the step at position 1.\n');
+    const plain = await updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: '#1', value: 'Again' }, { action: 'update_task', step_id: 'a', value: 'One!' }] }, makeAgent(history));
+    expect(plain.match(/named step/g)).toHaveLength(1);
+  });
+
   it('reaches steps stored as "#2" and "#1" in swapped positions by their own ids', async () => {
     storePipeline('wf-1', makePlanned({ steps: [{ id: '#2', task: 'One' }, { id: '#1', task: 'Two', input_from: ['#2'] }] }));
     const out = await updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications: [

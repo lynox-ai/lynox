@@ -111,7 +111,8 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
       ...s,
       ...(s.input_from ? { input_from: [...s.input_from] } : {}),
     }));
-    const modErr = applyModifications(steps, modifications);
+    const notes: string[] = [];
+    const modErr = applyModifications(steps, modifications, notes);
     if (modErr) return modErr;
 
     if (steps.length === 0) {
@@ -238,6 +239,6 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
       : '';
     const stepList = steps.map((s, i) => `${i + 1}. ${s.id}: ${s.task}`).join('\n');
     const goalNote = input.goal !== undefined ? ' Its goal was replaced.' : '';
-    return `✓ Updated workflow "${planned.name}" (${steps.length} step${steps.length === 1 ? '' : 's'}).${goalNote}${modeNote}${confirmNote}\n\n${stepList}`;
+    return `✓ Updated workflow "${planned.name}" (${steps.length} step${steps.length === 1 ? '' : 's'}).${goalNote}${modeNote}${confirmNote}${notes.length > 0 ? `\n${notes.join('\n')}` : ''}\n\n${stepList}`;
   },
 };
