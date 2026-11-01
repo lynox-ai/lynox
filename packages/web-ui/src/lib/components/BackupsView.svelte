@@ -7,6 +7,7 @@
 	import { backupCoverageNotice, type BackupCoverageFields } from '../backup-coverage.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { onOff, orNotSet } from './settings-readonly/values.js';
@@ -153,6 +154,7 @@
 
 <div class="p-6 max-w-4xl mx-auto">
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
+	<ViewerUnavailableNotice />
 	<div class="flex items-center justify-between mb-4 mt-2">
 		<h1 class="text-xl font-light tracking-tight">{t('backups.title')}</h1>
 		<!-- Creating a backup and restoring one are the owner's (POST /api/backups is owner-only, a restore

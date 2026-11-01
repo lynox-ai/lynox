@@ -27,6 +27,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import { isInboxAvailable, loadInboxCounts } from '../stores/inbox.svelte.js';
 
@@ -226,6 +227,7 @@
 	role="region"
 	aria-label={t('inbox.rules_title')}
 >
+	<ViewerUnavailableNotice />
 	<div class="flex items-center justify-between flex-wrap gap-y-2 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('inbox.rules_title')}</h1>
 		<a href="/app/inbox" class="text-[11px] text-text-subtle hover:text-text-muted font-mono py-1">← {t('inbox.rules_back')}</a>

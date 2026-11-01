@@ -18,6 +18,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 
 	interface OnboardingStatus {
@@ -78,6 +79,7 @@
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-1 mt-2">{t('onboard.relayer_title')}</h1>
 	<p class="text-sm text-text-muted mb-4">{t('onboard.relayer_desc')}</p>
+	<ViewerUnavailableNotice />
 
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-start justify-between gap-4">

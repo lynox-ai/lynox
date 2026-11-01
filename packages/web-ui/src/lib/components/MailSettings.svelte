@@ -7,6 +7,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import Checkbox from '../primitives/Checkbox.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildMailAccountPayload } from '../api/mail-accounts.js';
@@ -433,6 +434,7 @@
 </script>
 
 <div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5" data-testid="mail-settings">
+	<ViewerUnavailableNotice />
 	<div class="mb-4 flex items-center justify-between">
 		<div>
 			<h2 class="font-medium">Mail (IMAP/SMTP)</h2>

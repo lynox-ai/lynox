@@ -34,6 +34,8 @@ let retries = 0;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 /** Bumped by a reset, so an answer asked for before it is not taken after it. */
 let generation = 0;
+/** Every try went unanswered: the pages say so once, instead of standing there without the owner's actions. */
+let unavailable = $state(false);
 
 /** True only when the server said this session is a mandate's. */
 export function isMandateSession(): boolean {
@@ -47,6 +49,11 @@ export function isMandateSession(): boolean {
  */
 export function isOwnerSession(): boolean {
 	return viewer === 'owner';
+}
+
+/** True only after the first request and every retry got no answer (ux U-117). */
+export function isViewerUnavailable(): boolean {
+	return unavailable;
 }
 
 /**
@@ -63,7 +70,7 @@ export function canChooseModel(): boolean {
 export function noteSettingsViewer(body: unknown): void {
 	if (body === null || typeof body !== 'object' || !('viewer' in body)) return;
 	const v = (body as { viewer: unknown }).viewer;
-	if (v === 'owner' || v === 'mandate' || v === 'none') { viewer = v; known = true; }
+	if (v === 'owner' || v === 'mandate' || v === 'none') { viewer = v; known = true; unavailable = false; }
 	// Every `GET /api/config` body carries `locks`; one without it says nothing about the lock, so
 	// the line that needs it stays hidden rather than assuming there is none.
 	const locks = (body as { locks?: unknown }).locks;
@@ -91,8 +98,11 @@ export function loadSettingsViewer(): Promise<void> {
 		}
 		if (asked !== generation) return;
 		// An answer without `viewer` (an older engine) is not asked again; no answer is.
-		if (!answered && !known && retries < RETRY_MS.length && retryTimer === null) {
-			retryTimer = setTimeout(() => { retryTimer = null; void loadSettingsViewer(); }, RETRY_MS[retries++]);
+		if (answered || known) return;
+		if (retries < RETRY_MS.length) {
+			if (retryTimer === null) retryTimer = setTimeout(() => { retryTimer = null; void loadSettingsViewer(); }, RETRY_MS[retries++]);
+		} else {
+			unavailable = true;
 		}
 	})();
 	return pending;
@@ -104,6 +114,7 @@ export function resetSettingsViewer(): void {
 	// `providerLocked` needs no reset: every body that sets `viewer` also sets it.
 	viewer = null;
 	known = false;
+	unavailable = false;
 	pending = null;
 	retries = 0;
 	if (retryTimer !== null) clearTimeout(retryTimer);

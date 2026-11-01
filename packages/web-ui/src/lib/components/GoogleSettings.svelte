@@ -10,6 +10,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import { googleOAuthErrorNotice } from '../stores/integrations/google-oauth-error.js';
@@ -157,6 +158,7 @@
 <div class="p-6 max-w-4xl mx-auto space-y-4">
 	<a href="/app/settings/channels" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.channels.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.google')}</h1>
+	<ViewerUnavailableNotice />
 
 	{#if pendingClaimNonce && isOwnerSession()}
 		<!-- Deliberately a decision, not a notice. The wording says what cannot be shown —

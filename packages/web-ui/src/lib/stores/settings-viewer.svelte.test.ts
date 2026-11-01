@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isOwnerSession, isMandateSession, loadSettingsViewer, resetSettingsViewer } from './settings-viewer.svelte.js';
+import { isOwnerSession, isMandateSession, isViewerUnavailable, loadSettingsViewer, resetSettingsViewer } from './settings-viewer.svelte.js';
 
 // Whose session the pages serve is asked once, when a page mounts. The owner's actions wait for the
 // answer, so a missing answer is asked again, a few times, and an answer without `viewer` is not.
@@ -47,12 +47,26 @@ describe('loadSettingsViewer', () => {
 		expect(isMandateSession()).toBe(true);
 	});
 
-	it('gives up after three more tries', async () => {
+	it('gives up after three more tries, and only then says the answer is unavailable', async () => {
 		const fetchMock = serve(new TypeError('network'));
 		await loadSettingsViewer();
+		await vi.advanceTimersByTimeAsync(1_000 + 3_000);
+		// Still trying: not yet unavailable.
+		expect(isViewerUnavailable()).toBe(false);
 		await vi.advanceTimersByTimeAsync(60_000);
 		expect(fetchMock).toHaveBeenCalledTimes(4);
 		expect(isOwnerSession()).toBe(false);
+		expect(isViewerUnavailable()).toBe(true);
+		resetSettingsViewer();
+		expect(isViewerUnavailable(), 'a reset forgets it').toBe(false);
+	});
+
+	it('is never unavailable when a retry is answered', async () => {
+		serve(json({ error: 'down' }, 503), json({ viewer: 'owner' }));
+		await loadSettingsViewer();
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(isOwnerSession()).toBe(true);
+		expect(isViewerUnavailable()).toBe(false);
 	});
 
 	it('asks once: a later read takes the answer it has', async () => {

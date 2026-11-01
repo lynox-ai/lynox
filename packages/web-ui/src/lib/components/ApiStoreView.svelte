@@ -11,6 +11,7 @@
 	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
 	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
@@ -128,6 +129,7 @@
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
+	<ViewerUnavailableNotice />
 	<div class="flex items-center justify-between mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('apis.title')}</h1>
 		<button onclick={createInChat} class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">+ {t('apis.create_in_chat')}</button>
