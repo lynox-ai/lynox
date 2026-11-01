@@ -6,7 +6,7 @@
 	import { pickBackupConfig, fetchBackupConfig, requestRestore, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
 	import { backupCoverageNotice, type BackupCoverageFields } from '../backup-coverage.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
-	import { isMandateSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { onOff, orNotSet } from './settings-readonly/values.js';
@@ -156,8 +156,9 @@
 	<div class="flex items-center justify-between mb-4 mt-2">
 		<h1 class="text-xl font-light tracking-tight">{t('backups.title')}</h1>
 		<!-- Creating a backup and restoring one are the owner's (POST /api/backups is owner-only, a restore
-		     admin-only): a mandate sees the list and the settings as text (ux U-104). -->
-		{#if !isMandateSession()}
+		     admin-only): a mandate sees the list and the settings as text, and the owner gets them once
+		     the server said whose session it is. -->
+		{#if isOwnerSession()}
 		<button onclick={createBackup} disabled={creating}
 			class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50">
 			{creating ? t('backups.creating') : t('backups.create')}
@@ -203,8 +204,8 @@
 							<span>v{backup.version}</span>
 							<span>{formatSize(backup.files.reduce((s, f) => s + (f.size_bytes ?? 0), 0))}</span>
 						</div>
-						{#if isMandateSession()}
-							<!-- no restore in a mandate's session -->
+						{#if !isOwnerSession()}
+							<!-- no restore until the server said this is the owner's session -->
 						{:else if unverified?.id === backup.backup_id}
 							<div class="flex flex-col items-end gap-1.5">
 								<span class="text-xs text-warning">{t(unverified.mismatch ? 'backups.restore_mismatch' : 'backups.restore_unverified')}</span>

@@ -24,6 +24,8 @@ let pending: Promise<void> | null = null;
 const RETRY_MS = [1_000, 3_000, 10_000];
 let retries = 0;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
+/** Bumped by a reset, so an answer asked for before it is not taken after it. */
+let generation = 0;
 
 /** True only when the server said this session is a mandate's. */
 export function isMandateSession(): boolean {
@@ -49,16 +51,23 @@ export function noteSettingsViewer(body: unknown): void {
 /** Reads `viewer` once per page load; later calls share the first. */
 export function loadSettingsViewer(): Promise<void> {
 	if (viewer !== null) return Promise.resolve();
+	const asked = generation;
 	pending ??= (async () => {
 		let answered = false;
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
-			if (res.ok) { answered = true; noteSettingsViewer(await res.json()); }
+			if (res.ok) {
+				const body: unknown = await res.json();
+				if (asked !== generation) return;
+				answered = true;
+				noteSettingsViewer(body);
+			}
 		} catch {
 			// No answer: the owner's fields stay, and the server refuses what it must.
 		} finally {
-			pending = null;
+			if (asked === generation) pending = null;
 		}
+		if (asked !== generation) return;
 		// An answer without `viewer` (an older engine) is not asked again; no answer is.
 		if (!answered && viewer === null && retries < RETRY_MS.length && retryTimer === null) {
 			retryTimer = setTimeout(() => { retryTimer = null; void loadSettingsViewer(); }, RETRY_MS[retries++]);
@@ -69,6 +78,7 @@ export function loadSettingsViewer(): Promise<void> {
 
 /** Forget what was read: before a new sign-in, and in tests. */
 export function resetSettingsViewer(): void {
+	generation++;
 	viewer = null;
 	pending = null;
 	retries = 0;

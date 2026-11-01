@@ -341,6 +341,8 @@ describe('ApiStoreView (Settings › API profiles)', () => {
 	it('offers no delete, app credentials or file repair until the server said it is the owner\'s session', async () => {
 		const config = heldConfig();
 		await render(load, { ...routes('owner'), '/config': config.route });
+		expect(target.textContent, 'positive control: the profiles are listed').toContain('CRM');
+		expect(target.textContent).toContain('ERP');
 		expect(buttonTexts()).not.toContain(t('apis.delete'));
 		expect(target.querySelector('[data-testid="preset-client-form"]')).toBeNull();
 		expect(target.querySelector('[data-testid="api-import-waiting"]')).toBeNull();

@@ -33,7 +33,7 @@
 
 	async function loadSetupState(): Promise<void> {
 		// Setting up the provider is the owner's (PUT /api/secrets and PUT /api/config are owner-only),
-		// so a mandate's session gets no banner and no wizard (ux U-104). Unknown viewer: as before.
+		// so only the owner's session gets the banner and the wizard, once the server said so.
 		// Asked alongside the status, not before it: the owner's banner waits for the slower of the two
 		// answers, not for both in turn.
 		const viewerRead = loadSettingsViewer();

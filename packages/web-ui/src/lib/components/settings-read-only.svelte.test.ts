@@ -301,6 +301,18 @@ describe('BackupsView', () => {
 		expect(target.textContent).toContain('v2.17.0');
 	});
 
+	it('offers no create or restore until the server said it is the owner\'s session', async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => { release = r; });
+		await render(load, { ...routes('owner'), '/config': async () => { await gate; return Response.json({ backup_retention_days: 14, backup_encrypt: true, managed: SELF_HOST, viewer: 'owner' }); } });
+		expect(target.textContent).toContain('v2.17.0');
+		expect(buttonTexts()).not.toContain(t('backups.create'));
+		expect(buttonTexts()).not.toContain(t('backups.restore'));
+		release();
+		await settle();
+		expect(buttonTexts()).toEqual(expect.arrayContaining([t('backups.create'), t('backups.restore')]));
+	});
+
 	it('keeps the owner\'s fields, create and restore', async () => {
 		await render(load, routes('owner'));
 		expectOwnerView();
@@ -524,15 +536,10 @@ describe('SetupBanner', () => {
 		expect(writes).toEqual([]);
 	});
 
-	it('opens no wizard and no banner until the server said it is the owner\'s session', async () => {
-		let release!: () => void;
-		const gate = new Promise<void>((r) => { release = r; });
-		await render(load, { ...routes('owner'), '/config': async () => { await gate; return Response.json({ managed: SELF_HOST, viewer: 'owner' }); } });
+	it('opens no wizard and no banner when the server has not said whose session it is', async () => {
+		await render(load, { ...routes('owner'), '/config': () => Response.json({ error: 'unavailable' }, { status: 503 }) });
 		expect(document.body.innerHTML).not.toContain('Claude (Anthropic)');
 		expect(target.textContent).not.toContain(t('banner.api_key_missing'));
-		release();
-		await settle();
-		expect(document.body.innerHTML).toContain('Claude (Anthropic)');
 	});
 
 	it('opens the owner the key wizard when no key is set', async () => {

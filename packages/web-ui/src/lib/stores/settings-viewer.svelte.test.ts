@@ -62,6 +62,20 @@ describe('loadSettingsViewer', () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
+	it('does not take an answer asked for before a reset', async () => {
+		let answer!: (r: Response) => void;
+		vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((r) => { answer = r; })));
+		const before = loadSettingsViewer();
+		resetSettingsViewer();
+		answer(json({ viewer: 'owner' }));
+		await before;
+		expect(isOwnerSession()).toBe(false);
+		// Twin: the same answer, asked for after the reset, is taken.
+		serve(json({ viewer: 'owner' }));
+		await loadSettingsViewer();
+		expect(isOwnerSession()).toBe(true);
+	});
+
 	it('forgets a pending retry and what was read on reset', async () => {
 		const fetchMock = serve(new TypeError('network'), json({ viewer: 'owner' }));
 		await loadSettingsViewer();
