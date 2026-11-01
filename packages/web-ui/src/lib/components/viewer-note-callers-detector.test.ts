@@ -43,7 +43,8 @@ describe('who hands /config bodies to the viewer store', () => {
 	it('the pages that read /config themselves use viewerNote', () => {
 		// The store's own `export function viewerNote()` does not count.
 		const users = files.filter(([rel, text]) => rel !== STORE && /\bviewerNote\(\)/.test(text)).map(([rel]) => rel);
-		// The 17 at the time of writing; fewer means one went back to a direct call or lost the note.
-		expect(users.length).toBeGreaterThanOrEqual(17);
+		// Exactly the 17 pages that read /config themselves. Fewer means one lost its note; a new
+		// page that reads /config itself raises the number here, on purpose and in its own diff.
+		expect(users).toHaveLength(17);
 	});
 });
