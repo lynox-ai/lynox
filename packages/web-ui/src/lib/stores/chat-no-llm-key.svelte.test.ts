@@ -76,6 +76,13 @@ describe('a message sent without an AI provider key', () => {
 		expect(store.getChatError()).toBe('Für Mistral ist noch kein Schlüssel hinterlegt. Öffne Einstellungen → Konfiguration und füg einen hinzu.');
 	});
 
+	it('does not tell an owner answer without a provider to ask the owner', async () => {
+		i18n.setLocale('de');
+		await sendRefused({ error: 'x', code: 'llm_not_configured', may_configure: true, missing: ['key'] });
+
+		expect(store.getChatError()).toBe(i18n.t('chat.error_invalid_request'));
+	});
+
 	it('keeps the general sentence for a field it has no name for', async () => {
 		i18n.setLocale('de');
 		await sendRefused({ error: 'x', code: 'llm_not_configured', may_configure: true, provider: 'Mistral', missing: ['region'] });
