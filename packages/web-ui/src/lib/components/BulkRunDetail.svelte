@@ -9,8 +9,9 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { isMandateSession, isOwnerSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -302,7 +303,12 @@
 	$effect(() => { void runId; void load(); });
 	$effect(() => {
 		fetch(`${getApiBase()}/config`)
-			.then(async (r) => { managed = bulkManagedOf(r.ok, r.ok ? await r.json() : null); })
+			.then(async (r) => {
+				const body: unknown = r.ok ? await r.json() : null;
+				managed = bulkManagedOf(r.ok, body);
+				// Whose session reads the run: a mandate's sees it without the owner's acts.
+				noteSettingsViewer(body);
+			})
 			.catch(() => { managed = null; });
 	});
 
@@ -318,6 +324,13 @@
 	// The start button's label, from the same source as the button itself: the halt sentence names it.
 	const startButton = $derived(run ? bulkStartButtonKey(run, startKind, supersedable !== null) : null);
 	const supportMail = $derived(run ? bulkSupportMailto(run, managed, i18n) : null);
+	// Every act on this page is the owner's (the routes refuse a mandate), so its buttons show only
+	// once the server said the session is the owner's: a mandate does not see them even while the
+	// answer is out. The sentence and the wording for a mandate wait for the server to say so.
+	const ownerActs = $derived(isOwnerSession());
+	const mandate = $derived(isMandateSession());
+	// A sentence that names an owner's act names the owner to a mandate.
+	const view = $derived(mandate ? bulkMandateI18n(i18n) : i18n);
 	const restartKind = $derived(run ? bulkRestartKind(run) : null);
 	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
@@ -325,7 +338,7 @@
 	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
 	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');
-	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, i18n) : { text: null, nothing: false });
+	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, view) : { text: null, nothing: false });
 	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
 	const foldedUnchanged = $derived(targets.length - shownTargets.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
@@ -373,7 +386,7 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
-					<dd>{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), i18n)}</dd>
+					<dd>{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}</dd>
 				{/if}
 			</dl>
 
@@ -384,7 +397,9 @@
 				<p class="text-sm text-text-muted">{t('bulk.awaiting_start')}</p>
 			{/if}
 			{#if run.phase === 'planned' && run.haltKey === 'listed'}
-				<p class="text-sm">{tf(run.judge !== null ? 'bulk.start.listed_judge' : 'bulk.start.listed', { n: String(run.total) })}</p>
+				{#if ownerActs}
+					<p class="text-sm">{tf(run.judge !== null ? 'bulk.start.listed_judge' : 'bulk.start.listed', { n: String(run.total) })}</p>
+				{/if}
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.list_note')}</p>
 			{/if}
 			{#if run.conflicts > 0}
@@ -438,8 +453,10 @@
 											{/if}
 											{#if approving && (target.deselected || writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
-													{#if target.deselected}<span class="text-text-subtle">{t('bulk.deselect.taken_out')}</span>{/if}
-													<button type="button" class="{btnPlain} text-xs" disabled={busy} onclick={() => toggleSelected(target)}>{t(target.deselected ? 'bulk.deselect.on' : 'bulk.deselect.off')}</button>
+													{#if target.deselected}<span class="text-text-subtle">{view.t('bulk.deselect.taken_out')}</span>{/if}
+													{#if ownerActs}
+														<button type="button" class="{btnPlain} text-xs" disabled={busy} onclick={() => toggleSelected(target)}>{t(target.deselected ? 'bulk.deselect.on' : 'bulk.deselect.off')}</button>
+													{/if}
 												</div>
 											{/if}
 											{#if target.sentUnchanged && target.sentUnchanged.length > 0}
@@ -460,7 +477,11 @@
 				</div>
 			{/if}
 
-			{#if startKind === 'read'}
+			{#if mandate}
+				<p class="text-sm border-t border-border pt-4">{t('bulk.owner_only_notice')}</p>
+			{:else if !ownerActs}
+				<!-- Whose session it is is not known yet: no act is offered. -->
+			{:else if startKind === 'read'}
 				<div class="space-y-3 border-t border-border pt-4">
 					<p class="text-sm">{tf('bulk.start.read_explain', { provider })}</p>
 					<div class="flex flex-wrap gap-2">
