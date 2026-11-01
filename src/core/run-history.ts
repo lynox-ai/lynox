@@ -3379,7 +3379,7 @@ export class RunHistory {
    *  makes. Required, so no caller can leave it out (`WorkflowStore.upsert`). `copiedFrom` names
    *  the workflow whose steps this one copies; the copy then carries that workflow's mandate mark
    *  (`WorkflowStore.upsertCopy`). Pass it only when the server knows the source itself; a
-   *  workflow imported from text or captured from a session carries its saver's mark alone. */
+   *  workflow imported from text or saved from what a session did carries its saver's mark alone. */
   insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; template?: boolean | undefined; capabilityContract?: CapabilityContract | undefined }, author: RequestPrincipal | null, copiedFrom?: string): void {
     // Fail-closed contract validation at the save chokepoint (Slice B / D2):
     // every producer (save_workflow, plan_task, the Slice-C edit tool) routes
