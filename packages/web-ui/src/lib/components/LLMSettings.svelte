@@ -942,7 +942,11 @@
 			// and mirror the chosen strategy into local config so a later re-derive
 			// (without a full reload) stays consistent with what was written.
 			dirty = false;
+			const presetBefore = config.tier_preset;
 			config.tier_preset = isPreset ? strategy : undefined;
+			// A line names the model the OLD preset ran; under another preset it would be false, so it
+			// goes until the engine says what runs now.
+			if (config.tier_preset !== presetBefore) config.replaced_tier_slots = undefined;
 			void refreshReplacedSlots();
 			addToast(t('llm.saved'), 'success', 3000);
 			// Tell the StatusBar (and any other live provider indicator) to refresh
