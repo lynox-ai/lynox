@@ -123,6 +123,7 @@
 	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { onMount, tick } from 'svelte';
+	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 
 	// Welcome screen state
 	let displayName = $state('');
@@ -1218,7 +1219,7 @@
 	/** Resolve the user-facing provider variant for the inline setup form. */
 	function inlineProviderVariant(): 'anthropic' | 'mistral' | 'openai-custom' {
 		if (activeProvider === 'anthropic') return 'anthropic';
-		if (activeProvider === 'openai' && activeApiBaseUrl === 'https://api.mistral.ai/v1') return 'mistral';
+		if (activeProvider === 'openai' && isMistralPresetBase(activeApiBaseUrl)) return 'mistral';
 		return 'openai-custom';
 	}
 

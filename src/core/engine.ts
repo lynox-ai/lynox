@@ -15,7 +15,7 @@ import type {
   ModelTier,
   ContextSource,
 } from '../types/index.js';
-import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier } from '../types/index.js';
+import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier, mistralCommitsEuInference } from '../types/index.js';
 import { setTierSetResolver, resolveDefaultChatTier, resolveAgentModel } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
@@ -244,14 +244,16 @@ async function settleWithin(work: Promise<void>, ms: number, what: string): Prom
  * Default the inbox classifier's LLM region from the user's main provider
  * choice. Env override `LYNOX_INBOX_LLM_REGION` always wins (explicit
  * override path for managed-EU tenants who want hard-pinning regardless
- * of UI). When the user picked Mistral in Settings (api.mistral.ai), the
+ * of UI). When the user picked Mistral in Settings (api.eu.mistral.ai), the
  * classifier inherits 'eu' automatically — pre-this-fix the classifier
  * always defaulted to 'us' (Anthropic) regardless of the UI choice,
  * leaking mail snippets + reply-draft bodies to Anthropic-US.
  *
- * Hostname-strict match (URL().hostname === 'api.mistral.ai') — a naive
- * substring would let an attacker-controlled `api.mistral.ai.evil.com`
- * misclassify as EU residency.
+ * 'eu' only for the endpoint Mistral commits to EU/EFTA inference for
+ * (`mistralCommitsEuInference`, exact hostname `api.eu.mistral.ai`). The global
+ * `api.mistral.ai` commits to no location, so it counts as 'us': the warning and
+ * the production gate stay on. A substring match would also let
+ * `api.eu.mistral.ai.evil.com` pass as EU.
  */
 export function resolveInboxLlmRegion(opts: {
   envOverride: string | undefined;
@@ -261,13 +263,7 @@ export function resolveInboxLlmRegion(opts: {
   if (opts.envOverride === 'eu') return 'eu';
   if (opts.envOverride === 'us') return 'us';
   if (opts.provider !== 'openai' || !opts.apiBaseURL) return 'us';
-  let hostname: string;
-  try {
-    hostname = new URL(opts.apiBaseURL).hostname.toLowerCase();
-  } catch {
-    return 'us';
-  }
-  return hostname === 'api.mistral.ai' ? 'eu' : 'us';
+  return mistralCommitsEuInference(opts.apiBaseURL) ? 'eu' : 'us';
 }
 
 /**
@@ -2219,8 +2215,8 @@ export class Engine {
         // EU residency: default the inbox classifier provider from the
         // user's chosen main provider. When the user picked Mistral in
         // Settings (`userConfig.provider === 'openai'` against
-        // api.mistral.ai), the classifier inherits that choice and uses
-        // Mistral (EU-resident) automatically — no env var required.
+        // api.eu.mistral.ai), the classifier inherits that choice and uses
+        // Mistral's EU endpoint automatically — no env var required.
         //
         // `LYNOX_INBOX_LLM_REGION` remains an explicit override (e.g.
         // managed-EU tenants who want hard-pinning regardless of the UI
