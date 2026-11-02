@@ -605,13 +605,15 @@ describe(`property 2 against checkMarkup (seed ${SEED}, ${PAIRS} pairs)`, () => 
     }
   });
 
-  it('takes what A2 holds that a strict rule would refuse: an allowed element\'s held class, an address domain lent to addresses', () => {
+  it('takes what A2 holds that a strict rule would refuse: an allowed element\'s held class, an address domain lent to addresses, an allowed element in a held template', () => {
     // The class is held at all, so a second paragraph may carry it.
     const p = ['<p class="x">a</p>', '<p class="x">a</p><p class="x">b</p>'] as const;
     // A held address lends its domain to another address, not to a web link.
     const m = ['<p><a href="mailto:info@partner.example">m</a></p>', '<p><a href="mailto:info@partner.example">m</a><a href="mailto:sales@partner.example">s</a></p>'] as const;
     const mw = '<p><a href="mailto:info@partner.example">m</a><a href="https://partner.example/x">w</a></p>';
-    for (const [before, after] of [p, m]) {
+    // An allowed element stands wherever it stands: inside a held template it adds nothing live.
+    const t = ['<template></template>', '<template><p>a</p></template>'] as const;
+    for (const [before, after] of [p, m, t]) {
       expect(a2(before, after), after).toBe(true);
       expect(violations(before, after), after).toEqual([]);
     }
