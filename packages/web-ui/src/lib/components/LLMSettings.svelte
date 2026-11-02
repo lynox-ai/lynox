@@ -599,15 +599,17 @@
 	const replacedWithoutRow = $derived(replacedSlots.filter((r) => !activePresetTiers.some((x) => x.tier === r.tier)));
 	/** After a save the engine has reloaded its config; ask it again whether a slot is still replaced.
 	 *  Not awaited by the save, so two saves can each have an answer on its way: only the answer to
-	 *  the latest question is taken, an older one arriving late would describe a config since replaced. */
+	 *  the latest question is taken, an older one arriving late would describe a config since replaced.
+	 *  Nor is an answer taken that was asked for before a sign-in reset: it was the earlier session's. */
 	let replacedAsk = 0;
 	async function refreshReplacedSlots(): Promise<void> {
 		const ask = ++replacedAsk;
+		const noteViewer = viewerNote();
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) return; // keep the last known lines: a stale warning beats a hidden one
 			const body = (await res.json()) as Pick<UserConfig, 'replaced_tier_slots'>;
-			if (ask !== replacedAsk) return;
+			if (!noteViewer(body) || ask !== replacedAsk) return;
 			config.replaced_tier_slots = body.replaced_tier_slots;
 		} catch {
 			// same as above

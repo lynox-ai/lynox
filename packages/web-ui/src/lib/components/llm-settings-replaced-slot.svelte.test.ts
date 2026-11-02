@@ -37,6 +37,7 @@ afterEach(() => {
 	refreshFails = false;
 	refreshHangs = null;
 	keepOnPut = false;
+	replaceOnPut = false;
 	setLocale(localeBefore);
 });
 
@@ -59,6 +60,8 @@ const PRESET = {
 let refreshFails = false;
 let refreshHangs: Promise<void> | null = null;
 let keepOnPut = false;
+/** The saved config carries a retired model: from the PUT on, the engine replaces deep. */
+let replaceOnPut = false;
 const REPLACED = [{ tier: 'deep', model_id: 'claude-retired-model', runs: 'claude-opus-5' }];
 
 async function render(viewer: 'owner' | 'mandate', replaced: unknown[] | undefined, extra: Record<string, unknown> = {}): Promise<void> {
@@ -82,7 +85,8 @@ async function render(viewer: 'owner' | 'mandate', replaced: unknown[] | undefin
 		if (init?.method === 'PUT') {
 			put = true;
 			// The saved config no longer carries the retired model, so the engine replaces nothing.
-			if (path.endsWith('/config') && !keepOnPut) delete (config as Record<string, unknown>)['replaced_tier_slots'];
+			if (path.endsWith('/config') && replaceOnPut) (config as Record<string, unknown>)['replaced_tier_slots'] = REPLACED;
+			else if (path.endsWith('/config') && !keepOnPut) delete (config as Record<string, unknown>)['replaced_tier_slots'];
 			return Response.json({ ok: true });
 		}
 		if (path.endsWith('/llm/catalog')) return Response.json({ providers: [anthropic] });
@@ -251,4 +255,32 @@ describe('a tier that runs another model than the stored one (ux U-118)', () => 
 		expect(target.textContent).toContain('Claude Sonnet 5');
 		expect(lines()).toEqual([]);
 	});
+	for (const reset of [false, true]) {
+		it(reset
+			? 'an answer to a save that arrives after a sign-in reset is not taken'
+			: 'control: the same answer without a reset in between is taken', async () => {
+			await render('owner', undefined);
+			expect(lines()).toEqual([]);
+			replaceOnPut = true;
+			const stored = radios().find((b) => b.getAttribute('aria-checked') === 'true')!;
+			card(t('llm.preset.custom')).click();
+			await settle();
+			stored.click();
+			await settle();
+			let answer!: () => void;
+			refreshHangs = new Promise<void>((r) => { answer = r; });
+			[...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === t('llm.save'))!.click();
+			await settle();
+			const fetchMock = fetch as unknown as { mock: { calls: [string, RequestInit?][] } };
+			expect(fetchMock.mock.calls.filter(([u, i]) => i?.method === 'PUT' && String(u).endsWith('/config'))).toHaveLength(1);
+			expect(lines()).toEqual([]);
+			// The re-check was asked before the reset and answers after it, naming a replaced deep tier.
+			if (reset) resetSettingsViewer();
+			answer();
+			await settle();
+			// Positive control: the stored preset's detail is on screen, where the line would sit.
+			expect(target.textContent).toContain('Claude Opus 5');
+			expect(lines()).toHaveLength(reset ? 0 : 1);
+		});
+	}
 });
