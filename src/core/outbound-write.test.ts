@@ -783,6 +783,13 @@ describe('graphqlUrlWrites', () => {
     ['https://h.example/graphql?query=%u007Ba%7D', false],
     // A lone surrogate decodes to nothing that names an operation, and does not throw.
     ['https://h.example/graphql?query=%uD800%7Ba%7D', false],
+    // The key as servers name it: leading spaces and `[]` (PHP), any case (ASP.NET).
+    ['https://wp.example/?graphql&+query=mutation%7Ba%7D', true],
+    ['https://wp.example/?graphql&%20query=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?QUERY=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?query%5B%5D=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?queryx=mutation%7Ba%7D', false],
+    ['https://h.example/graphql?x+query=mutation%7Ba%7D', false],
   ] as const)('%s → %s', (url, want) => {
     expect(graphqlUrlWrites(url)).toBe(want);
   });

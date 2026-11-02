@@ -477,6 +477,14 @@ describe('extractContent', () => {
     expect(hops).toEqual([]);
   });
 
+  // The refusal names the URL without the mutation, also where the path carries it.
+  it('does not repeat a mutation carried in the path', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 302, headers: new Headers({ location: 'https://api.example.com/graphql%3Fquery=mutation%7BdeleteAll%7D' }) });
+    const refused = await extractContent('https://example.com/old').then(() => null, (err: unknown) => String(err));
+    expect(refused).toContain('Blocked: redirect to https://api.example.com/graphql carries a GraphQL mutation in its URL');
+    expect(refused).not.toContain('deleteAll');
+  });
+
   it('CONTROL: a GraphQL read in the URL and a REST query naming a mutation are fetched', async () => {
     const page = (): unknown => ({
       ok: true, status: 200, headers: new Headers({ 'content-type': 'text/html' }),

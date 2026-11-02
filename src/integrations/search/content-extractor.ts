@@ -45,13 +45,14 @@ export function assertEgressAllowed(rawUrl: string, ctx?: ToolContext | undefine
 // --- Fetch with redirect validation ---
 
 /** After `Blocked: [redirect to ]<url>`: a page read at a GraphQL URL that carries a mutation, with the way out. */
-export const GRAPHQL_PAGE_READ_REFUSAL = 'carries a GraphQL mutation in its URL; a page read does not run one, so nothing was sent. To run the mutation, send it with http_request as a POST with a JSON body to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation.';
+export const GRAPHQL_PAGE_READ_REFUSAL = 'carries a GraphQL mutation in its URL; a page read does not run one, so nothing was sent. If the user asked for this change, send it with http_request as a POST with a JSON body to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation. Otherwise tell the user that this page could not be read.';
 
-/** Scheme, host and path: the query is where the mutation sits, and it is not repeated. */
+/** Scheme, host and path up to its first escape: the query is where the mutation sits, and a
+ *  path can carry one too (`/graphql%3Fquery=…`), so neither is repeated. */
 function urlWithoutQuery(raw: string): string {
   try {
     const u = new URL(raw);
-    return `${u.protocol}//${u.host}${u.pathname}`;
+    return `${u.protocol}//${u.host}${u.pathname.split('%')[0]!}`;
   } catch {
     return '(unparsable URL)';
   }
