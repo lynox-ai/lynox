@@ -143,8 +143,15 @@ const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: '
 const mockHistoryGetPlannedPipelines = vi.fn().mockReturnValue([]);
 const mockHistoryRenamePlannedPipeline = vi.fn().mockReturnValue(true);
 const mockHistoryDeletePlannedPipeline = vi.fn().mockReturnValue(true);
-// Who made a workflow (1055): undefined = no row, which the real runner refuses as unreadable.
-const mockHistoryGetWorkflowAuthorship = vi.fn().mockReturnValue(undefined);
+// Who set up a workflow: the owner, unless a test says otherwise. A mandate's schedule is refused
+// on a workflow another mandate set up, and on one whose authorship cannot be read; the Run
+// button runs a workflow as whoever shaped it (1055). One mock for both, so a test that sets it
+// is the one the route reads.
+const OWNER_WORKFLOW_AUTHORSHIP = {
+  createdBy: null, createdMandateId: null, createdAt: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null,
+  coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null, coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
+};
+const mockHistoryGetWorkflowAuthorship = vi.fn().mockReturnValue(OWNER_WORKFLOW_AUTHORSHIP);
 const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
 const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
@@ -320,12 +327,6 @@ vi.mock('../core/engine.js', () => ({
       deletePlannedPipeline: mockHistoryDeletePlannedPipeline,
       getWorkflowAuthorship: mockHistoryGetWorkflowAuthorship,
       setWorkflowConfirmedAt: mockSetWorkflowConfirmedAt,
-      // Who set up a workflow: the owner, unless a test says otherwise. A mandate's schedule is
-      // refused on a workflow another mandate set up, and on one whose authorship cannot be read.
-      getWorkflowAuthorship: vi.fn().mockReturnValue({
-        createdBy: null, createdMandateId: null, createdAt: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null,
-        coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null, coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
-      }),
       getTask: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
@@ -12316,7 +12317,7 @@ describe('LynoxHTTPApi', () => {
         engineRef()['getMandateEnds'] = () => ({ record: (): void => {}, isLive: (id: string): boolean => live && id === MID });
         mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-1', status: 'completed' });
       });
-      afterEach(() => { engineRef()['getMandateEnds'] = origEnds; mockHistoryGetWorkflowAuthorship.mockReturnValue(undefined); });
+      afterEach(() => { engineRef()['getMandateEnds'] = origEnds; mockHistoryGetWorkflowAuthorship.mockReturnValue(OWNER_WORKFLOW_AUTHORSHIP); });
       const runtimeOf = (): Record<string, unknown> => mockRunSavedWorkflow.mock.calls.at(-1)![4] as Record<string, unknown>;
 
       it('runs a live mandate\'s workflow as that mandate when the owner presses Run', async () => {
