@@ -31,6 +31,7 @@
 	import { buildMainModelOptions, selectMainModelKey, mainModelOptionKey, findMainModelOptionByKey, isExpensiveModel, formatContextWindow, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
+	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 	import { cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
@@ -673,11 +674,12 @@
 			};
 		} else if (entry.requires_base_url
 			&& config.api_base_url
-			&& providers.some((p) => p.base_url_default === config.api_base_url)) {
+			&& (providers.some((p) => p.base_url_default === config.api_base_url) || isMistralPresetBase(config.api_base_url))) {
 			// Switching FROM a pinned preset (Mistral) TO a free-text one
 			// (openai-compat). Detect "the URL we have was stamped by a
 			// pinned preset" via membership in `base_url_default` across
-			// the catalog. Also clear openai_model_id (mistral-large-2512
+			// the catalog — or Mistral's global endpoint, which the preset
+			// stamped before it moved to the EU one. Also clear openai_model_id (mistral-large-2512
 			// pinned against a free-text endpoint would 404 every probe).
 			config = { ...config, api_base_url: '', openai_model_id: '' };
 		} else if (!entry.requires_base_url && !entry.base_url_default) {

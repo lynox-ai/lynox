@@ -7197,7 +7197,8 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const provider = b && typeof b['provider'] === 'string' ? b['provider'] : '';
       const key = b && typeof b['key'] === 'string' ? b['key'] : '';
-      const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? b['api_base_url'] : '';
+      // Mistral's global endpoint is checked where a model request would go: the EU one.
+      const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? toMistralEuBase(b['api_base_url']) : '';
       if (!provider || !key) { errorResponse(res, 400, 'Missing provider or key'); return; }
       const { validateAnthropicKey, validateMistralKey, validateOpenAICompatKey } = await import('../cli/docker-installer.js');
       try {
@@ -10228,7 +10229,9 @@ export class LynoxHTTPApi {
         return;
       }
       const bodyKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
-      const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
+      // A page loaded before the move to Mistral's EU endpoint sends the global one: the probe goes
+      // where a model request would go, the EU endpoint, and pairs with the pool's endpoint.
+      const baseUrl = typeof b['base_url'] === 'string' ? toMistralEuBase(b['base_url']) : '';
       // On an instance connected to a Shopify store a probe goes only where a model request may
       // go (`contained-providers.ts`): a typed key is the user's, and another endpoint is refused
       // before anything is sent. An empty key is the stored one, which on a pool tier is the pool's.

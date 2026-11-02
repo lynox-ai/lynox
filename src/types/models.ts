@@ -63,8 +63,10 @@ export const VERTEX_MODEL_MAP: Record<ModelTier, string> = {
 
 /**
  * Canonical Mistral base URL: the EU regional endpoint. Mistral commits to EU/EFTA inference only
- * for this host; for the global `api.mistral.ai` it commits to no location. Every Mistral call
- * lynox makes goes here, and a stored global URL is moved here (`toMistralEuBase`).
+ * for this host; for the global `api.mistral.ai` it commits to no location. Every Mistral preset
+ * call lynox makes goes here, and a stored global URL is moved here (`toMistralEuBase`). A URL
+ * typed by hand that only resembles the global one (a trailing dot on the host, another
+ * `*.mistral.ai` host) is not moved: it is not the preset, and nothing calls it EU.
  */
 export const MISTRAL_API_BASE = 'https://api.eu.mistral.ai/v1';
 

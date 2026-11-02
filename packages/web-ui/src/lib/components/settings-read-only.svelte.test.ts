@@ -538,6 +538,20 @@ describe('LLMSettings', () => {
 			await render(load, routesAt('https://api.groq.com/openai/v1'));
 			expect(providerRow()).toBe(line(t('llm.provider_heading'), 'OpenAI-compatible'));
 		});
+
+		// The owner switches from the Mistral preset to the OpenAI-compatible tile: the endpoint the
+		// preset stamped is cleared, the global one written before the move as well as the EU one.
+		it.each(['https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'])('clears %s when the owner picks the OpenAI-compatible tile', async (url) => {
+			const owner = { ...routesAt(url), '/config': { ...routesAt(url)['/config'], viewer: 'owner' }, '/secrets/status': { configured: { api_key: true } } };
+			await render(load, owner);
+			const tile = [...target.querySelectorAll('button')].find((b) => b.textContent?.includes('OpenAI-compatible'));
+			expect(tile).toBeDefined();
+			tile!.click();
+			flushSync();
+			await tick();
+			const values = [...target.querySelectorAll('input')].map((i) => (i as HTMLInputElement).value);
+			expect(values).not.toContain(url);
+		});
 	});
 });
 

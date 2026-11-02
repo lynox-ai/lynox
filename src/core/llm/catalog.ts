@@ -964,9 +964,11 @@ export function resolveCatalogKey(
         }
 
         // Remote presets: apex + `api.*` + subdomain variants all match —
-        //   defHost='api.mistral.ai' matches 'api.mistral.ai',
-        //   'mistral.ai' (apex) and 'eu.mistral.ai' (subdomain).
-        // Crucially does NOT match 'api.mistral.ai.attacker.com', because the
+        //   defHost='api.eu.mistral.ai' matches 'api.eu.mistral.ai',
+        //   'eu.mistral.ai' (apex) and any '*.eu.mistral.ai' subdomain. Mistral's
+        //   global 'api.mistral.ai' is moved to the EU endpoint before this match
+        //   (`toMistralEuBase`); other '*.mistral.ai' hosts are not the preset.
+        // Crucially does NOT match 'api.eu.mistral.ai.attacker.com', because the
         // suffix check requires a leading `.`.
         if (host === defHost) return true;
         const apex = defHost.replace(/^api\./, '');
