@@ -147,6 +147,38 @@ describe('the read-back check of a written description (PRD shopify-preset §21.
   });
 });
 
+describe('the title a product read answers beside its image', () => {
+  const answering = (product: Record<string, unknown>): { client: ExternalClient; reads: () => number } => {
+    let n = 0;
+    const client = {
+      track: () => () => null,
+      graphqlRead: async () => { n++; return { kind: 'ok', value: { product: { id: P1, ...product } } }; },
+      get: async () => { n++; return { kind: 'ok', value: { id: 1, title: 'T', description: 'D' } }; },
+    } as unknown as ExternalClient;
+    return { client, reads: () => n };
+  };
+  const seoOnly = ['seo_title', 'seo_description'];
+
+  it('takes the title from the one read that answered the image, and never puts it in the image', async () => {
+    const { client, reads } = answering({ title: 'T1', descriptionHtml: '<p>x</p>', seo: { title: null, description: 'D1' } });
+    const w = externalRunWriter(run(`http:${HOST}`, store), { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] }, () => client)!;
+    expect(await w.read(P1, seoOnly)).toEqual({ absent: false, value: { seo_title: null, seo_description: 'D1' }, titleNow: 'T1' });
+    expect(reads()).toBe(1);
+  });
+
+  it('answers no title where the product read holds none, and none on any other form', async () => {
+    const untitled = answering({ seo: { title: null, description: 'D1' } });
+    const product = externalRunWriter(run(`http:${HOST}`, store), { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_product' as const }), startDomainsOf: () => [] }, () => untitled.client)!;
+    // The title is not one of the run's fields, so its absence is no missing field.
+    expect(await product.read(P1, seoOnly)).toEqual({ absent: false, value: { seo_title: null, seo_description: 'D1' }, titleNow: null });
+    const titled = answering({ title: 'T1', alt: 'A' });
+    const media = externalRunWriter(run(`http:${HOST}`, store), { shopifyApplyOf: () => ({ ...PHASE, form: 'shopify_media_alt' as const }), startDomainsOf: () => [] }, () => titled.client)!;
+    expect(await media.read(P1, ['alt'])).not.toHaveProperty('titleNow');
+    const woo = externalRunWriter(run('http:shop.example.invalid', ordinary), { shopifyApplyOf: () => null, startDomainsOf: () => [] }, () => titled.client)!;
+    expect(await woo.read('https://shop.example.invalid/items/1', ['title'])).toEqual({ absent: false, value: { title: 'T' } });
+  });
+});
+
 describe('bulkRunContract', () => {
   const post = (c: CapabilityContract | null, body: string | null): boolean =>
     c !== null && body !== null && contractGrants('http_request', { method: 'POST', url: ENDPOINT, headers: { 'content-type': 'application/json' }, body }, c);

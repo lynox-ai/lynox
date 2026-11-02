@@ -25,6 +25,7 @@ import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
 import { checkMarkup, droppedTagsOf, endsClosed, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
+import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
@@ -1815,6 +1816,16 @@ export class BulkLedger {
     return run !== undefined && this.shopifyFormOfRun(run) === 'shopify_product' ? this.htmlFieldsOf(runId) : [];
   }
 
+  /**
+   * Whether a run also compares a value in the form its store saves it in (`shopifySavedForm`):
+   * a Shopify product run and its undos, the one form whose saving is measured. Every other run
+   * compares as it did.
+   */
+  comparedInSavedForm(runId: string): boolean {
+    const run = this.runRow(runId);
+    return run !== undefined && this.shopifyFormOfRun(run) === 'shopify_product';
+  }
+
   /** The list source form of a run, or of the first run up its `source_run_id` chain that has one; null without. */
   private listFormOfFamily(run: RunRow): BulkListSourceForm | null {
     let current: RunRow | undefined = run;
@@ -2420,6 +2431,9 @@ export class BulkLedger {
     via: AttachedConnection | null = null,
     /** The after-state the read completed (a Shopify target's seo pair): stored with the image, in one transaction, and classified against. */
     completedAfter?: Readonly<Record<string, unknown>>,
+    /** The title the same read answered, on a run compared in its store's saved form
+     *  ({@link comparedInSavedForm}): classified with, never stored. */
+    titleNow?: string | null,
   ): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL
@@ -2434,7 +2448,12 @@ export class BulkLedger {
     const after = completedAfter ?? JSON.parse(this.engineDb.dec(row.after_planned)) as unknown;
     // The before-image holds exactly F, so comparing whole images compares over F (§6 P4). A
     // judged target's after-state is its template until the verdict: its change is not known.
-    const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : classifyChange(before, after, this.comparedAsHtml(runId));
+    const html = this.comparedAsHtml(runId);
+    // A value the store would save as the product already holds it is no change either (a SEO
+    // title equal to the title it keeps): only with the title this read answered.
+    const saved = titleNow !== undefined && this.comparedInSavedForm(runId)
+      && sameValue(shopifySavedForm(read.before, titleNow), shopifySavedForm(after, titleNow), html);
+    const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : saved ? 'unchanged' : classifyChange(before, after, html);
     return db.transaction((): boolean => {
       const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ? WHERE ${guard}`)
         .run(this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)), runId, seq, runId).changes === 1;
