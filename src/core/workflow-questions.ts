@@ -167,7 +167,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       if (cause === 'ttl') return this.#endUnanswered('expired');
       if (cause === 'thread_deleted') return this.#endUnanswered('thread_deleted');
       // A stop or a withdrawal: the question goes, so an answer given later finds it closed.
-      try { store.expirePrompt(promptId); } catch (err: unknown) {
+      try { store.expirePrompt(promptId, 'run_stopped'); } catch (err: unknown) {
         process.stderr.write(`[lynox:worker] withdrawing a workflow question failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
       return DISMISSED_ANSWER;

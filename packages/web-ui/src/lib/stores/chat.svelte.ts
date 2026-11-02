@@ -27,6 +27,8 @@ import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { containedPrefill } from './contained-way-out.js';
+import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, isConsentCard, type ClosedCode } from './closed-question.js';
+import { isMandateSession, loadSettingsViewer } from './settings-viewer.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
@@ -899,6 +901,29 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 	await _executeRun(task, files, displayText, runOptions);
 }
 
+/** The run refused because no AI provider is set up (`code: 'llm_not_configured'`): the
+ *  sentence for this reader, or null for any other answer. The server says whether this reader
+ *  may set it up; only then does it name the provider, what is missing and the page to go to.
+ *  `missing` is `['key']`, or the settings fields when the key is there. */
+function noLlmKeyText(status: number, detail: string): string | null {
+	if (status !== 400) return null;
+	let body: unknown;
+	try { body = JSON.parse(detail); } catch { return null; }
+	if (typeof body !== 'object' || body === null) return null;
+	const b = body as { code?: unknown; may_configure?: unknown; provider?: unknown; missing?: unknown };
+	if (b.code !== 'llm_not_configured') return null;
+	if (b.may_configure === false) return t('chat.error_no_llm_key_mandate');
+	if (b.may_configure !== true || typeof b.provider !== 'string' || b.provider === '') return null;
+	const label = t('settings.config');
+	const missing = Array.isArray(b.missing) ? b.missing : ['key'];
+	if (missing.includes('key')) return tf('chat.error_no_llm_key_owner', { provider: b.provider, label });
+	const names = missing.map((m) => (LLM_FIELDS.includes(m) ? t(`chat.llm_field.${String(m)}`) : null));
+	if (names.length === 0 || names.length > 2 || names.includes(null)) return null;
+	const fields = names.length === 1 ? names[0]! : tf('chat.llm_fields_and', { a: names[0]!, b: names[1]! });
+	return tf('chat.error_no_llm_field_owner', { provider: b.provider, fields, label });
+}
+const LLM_FIELDS: readonly unknown[] = ['gcp_project_id', 'api_base_url', 'model_id'];
+
 /** Map HTTP status + error detail to a user-friendly i18n message. */
 function mapApiError(status: number, detail: string): string {
 	const lower = detail.toLowerCase();
@@ -1546,7 +1571,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			return;
 		}
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
-		chatError = mapApiError(res.status, chatErrorDetail ?? '');
+		chatError = noLlmKeyText(res.status, chatErrorDetail ?? '') ?? mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
 		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 		if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
@@ -2508,10 +2533,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
+	// A consent card's answer is a click; as text in the message field it would approve nothing.
+	const draftable = isConsentCard(pendingPermission?.options) ? null : answer;
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
-	reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }));
+	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable);
 }
 
 /** One-shot reply for a multi-question tabs prompt. Answers are ordered to
@@ -2522,7 +2549,8 @@ export async function replyPermissionTabs(answers: string[]): Promise<void> {
 	if (!promptId) return;
 	pendingTabsPrompt = null;
 	const sid = sessionId;
-	reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply-tabs`, { promptId, answers }));
+	// Several answers are no single text for the message field: no draft here.
+	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply-tabs`, { promptId, answers }), null);
 }
 
 /**
@@ -2531,13 +2559,34 @@ export async function replyPermissionTabs(answers: string[]): Promise<void> {
  * it stands where the chat's other errors stand until the next message is sent — in the thread
  * that asked only, and never over another error, which says more than this sentence does. A
  * stale (404) or refused (409) answer stays silent; the question it named has no card left.
+ *
+ * The sentence says why the question was closed and what to do instead (ux U-113); where writing
+ * the answer again is the way, `answer` goes back into the message field if that is empty, and
+ * the sentence says so only then.
  */
-function reportReply(sid: string, outcome: ReplyOutcome): void {
+async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | null): Promise<void> {
 	if (outcome === 'lost') { addToast(t('chat.error_connection'), 'error', 6000); return; }
 	if (outcome === 'settled' || sessionId !== sid) return;
 	if (chatError !== null && chatError !== closedReplySentence) return;
-	chatError = closedReplySentence = t(outcome === 'restarted' ? 'chat.prompt_closed_restart' : 'chat.prompt_expired');
+	// Who reads it decides the way out where only the owner can act. Unknown reads as the owner,
+	// as on the settings pages; the server is the boundary either way.
+	await loadSettingsViewer();
+	if (sessionId !== sid || (chatError !== null && chatError !== closedReplySentence)) return;
+	const reader = isMandateSession() ? 'mandate' : 'owner';
+	const draft = answer !== null && closedDraftAllowed(outcome.closed, reader) ? draftOfAnswer(answer) : null;
+	const placed = draft !== null && composerDraft !== null && composerDraft(draft);
+	chatError = closedReplySentence = t(closedSentenceKey(outcome.closed, reader)) + (placed ? t('chat.prompt_closed.draft') : '');
 	chatErrorDetail = null;
+}
+
+/** Puts a draft into the chat's message field when it is empty, and says whether it did. */
+type ComposerDraft = (text: string) => boolean;
+let composerDraft: ComposerDraft | null = null;
+
+/** The chat view lends its message field for a lost answer; the returned function takes it back. */
+export function registerComposerDraft(fn: ComposerDraft): () => void {
+	composerDraft = fn;
+	return () => { if (composerDraft === fn) composerDraft = null; };
 }
 /** The sentence `reportReply` last put up, so a queued message takes down that one and no other error. */
 let closedReplySentence: string | null = null;
@@ -2555,10 +2604,10 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 	} catch { /* best-effort */ }
 }
 
-/** How a reply ended: `lost` when the server could not be reached or failed twice, `expired` or
- *  `restarted` when it answered 410 (a closed question, the second when the engine restart closed
- *  it), and `settled` for every other final word. */
-type ReplyOutcome = 'settled' | 'expired' | 'restarted' | 'lost';
+/** How a reply ended: `lost` when the server could not be reached or failed twice, `closed` when
+ *  it answered 410 (a closed question, with the reason the server gave, or null), and `settled`
+ *  for every other final word. */
+type ReplyOutcome = 'settled' | 'lost' | { readonly closed: ClosedCode | null };
 
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
  *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
@@ -2572,8 +2621,8 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 			});
 			if (res.status === 410) {
 				let code: unknown;
-				try { code = ((await res.json()) as { code?: unknown } | null)?.code; } catch { /* no body: a plain expiry */ }
-				return code === 'process_restarted' ? 'restarted' : 'expired';
+				try { code = ((await res.json()) as { code?: unknown } | null)?.code; } catch { /* no body: no reason given */ }
+				return { closed: closedCodeOf(code) };
 			}
 			// 5xx → retry once
 			if (res.status >= 500) {
