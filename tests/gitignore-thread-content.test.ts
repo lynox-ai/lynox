@@ -41,15 +41,9 @@ describe('.gitignore — real thread content cannot be committed by accident', (
     }
   });
 
-  // The comment in `.gitignore` calls this an HONEST LIMIT. Pinning it turns a
-  // sentence into a fact: if someone later believes the `.json` half is covered,
-  // this test is what contradicts them. It is also the assertion that must be
-  // DELETED, not edited, by whoever closes the gap with a structural guard.
-  it('does NOT ignore a GoldCorpus under a name that says nothing — the stated limit', () => {
-    for (const p of ['corpus.json', 'threads.json', 'data/export.json']) {
-      expect(isIgnored(p), p).toBe(false);
-    }
-  });
+  // A corpus under a name that says nothing (`corpus.json`) is not a `.gitignore` matter:
+  // names cannot carry it. scripts/corpus-structure-guard.mjs reads what an added file
+  // holds instead, and tests/corpus-structure-guard.test.ts covers that.
 
   // The negations. These matter for FUTURE files: the four tracked corpora are
   // unaffected either way, because .gitignore never applies to a tracked path.

@@ -322,7 +322,7 @@ describe('the cost a list read states', () => {
     const out = await runBulkPreview(id, deps({ costPerCallUsd: 0.01 }));
     expect(out.status).toBe('pending');
     expect(s.requests).toHaveLength(2);
-    expect(out.summary).toContain('2 API calls this tick');
+    expect(out.summary).toContain('2 API calls this pass');
   });
 });
 

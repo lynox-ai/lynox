@@ -13,10 +13,16 @@ export interface UsageInfo {
 	cacheRead: number;
 	cacheWrite: number;
 	costUsd: number;
-	/** Cumulative third-party API cost (DataForSEO etc.) charged this message,
-	 *  populated by the api_cost stream event. Distinct from `costUsd` which is
-	 *  LLM-only. Surfaces in the thread footer rollup. */
+	/** The run's requests to third-party APIs with a cost (DataForSEO etc.), counted by the
+	 *  engine from the run's stored calls and its sub-agents', never from the model's text. From
+	 *  the `done` payload and from `usage_json` on reload; absent when the run sent none.
+	 *  `apiCostUsd` sums the amounts known (LLM cost is `costUsd`); `apiCostEstimated` when any
+	 *  is a profile rate rather than the provider's own figure; `apiCallsUnpriced` how many
+	 *  had no amount at all. */
+	apiCalls?: number;
 	apiCostUsd?: number;
+	apiCostEstimated?: boolean;
+	apiCallsUnpriced?: number;
 	/** What this turn's sub-agents spent, at any spawn depth. Absent when the
 	 *  turn delegated nothing. Held apart from `costUsd` because the engine
 	 *  keeps each child as its own run row (folding it in would double-count
@@ -67,6 +73,21 @@ export function usageFromDoneEvent(raw: unknown): UsageInfo | null {
 		...(typeof u['model'] === 'string' ? { model: u['model'] } : {}),
 		...(typeof u['runId'] === 'string' ? { runId: u['runId'] } : {}),
 		...(typeof u['durationMs'] === 'number' ? { durationMs: u['durationMs'] } : {}),
+		...apiCallsFrom(u),
+	};
+}
+
+/** The API-call fields of a `done` payload; empty unless it names a positive whole count. */
+function apiCallsFrom(u: Record<string, unknown>): Partial<UsageInfo> {
+	const calls = u['apiCalls'];
+	if (typeof calls !== 'number' || !Number.isInteger(calls) || calls <= 0) return {};
+	const usd = u['apiCostUsd'];
+	const unpriced = u['apiCallsUnpriced'];
+	return {
+		apiCalls: calls,
+		apiCostUsd: typeof usd === 'number' && Number.isFinite(usd) && usd >= 0 ? usd : 0,
+		apiCostEstimated: u['apiCostEstimated'] === true,
+		apiCallsUnpriced: typeof unpriced === 'number' && Number.isInteger(unpriced) && unpriced > 0 ? Math.min(unpriced, calls) : 0,
 	};
 }
 
@@ -76,8 +97,8 @@ export function usageFromDoneEvent(raw: unknown): UsageInfo | null {
  * events which the UI accumulates while streaming for a live counter; on
  * `done` we REPLACE that running total with the engine's cumulative figure
  * — the same value RunHistory + `/api/history/cost/daily` use as truth.
- * `apiCostUsd` (third-party API cost) is preserved across the replacement
- * because the engine's run-usage covers LLM cost only. The live-only
+ * The third-party API calls come from the payload too: the engine counts them from the run's
+ * stored calls, so nothing streamed earlier is carried over them. The live-only
  * diagnostics fields (`stopReason`, `iterations`, `ttfbMs`) are likewise
  * carried over — they come from `turn_end` / client timing, not the `done`
  * payload, so a naive replace would drop them.
@@ -89,11 +110,41 @@ export function mergeDoneUsage(
 	const parsed = usageFromDoneEvent(rawDoneUsage);
 	if (!parsed) return prior;
 	const carried: Partial<UsageInfo> = {};
-	if (prior?.apiCostUsd !== undefined) carried.apiCostUsd = prior.apiCostUsd;
 	if (prior?.stopReason !== undefined) carried.stopReason = prior.stopReason;
 	if (prior?.iterations !== undefined) carried.iterations = prior.iterations;
 	if (prior?.ttfbMs !== undefined) carried.ttfbMs = prior.ttfbMs;
 	return { ...parsed, ...carried };
+}
+
+/**
+ * The run's third-party API calls for the footer (ux U-096): `4 API calls · $0.36` when every
+ * amount is the provider's own, `· $0.0040 estimated` when any is a profile rate (the whole sum
+ * then counts as an estimate; a profile rate missed by a factor of 90 once), `· cost unknown`
+ * when no amount is known. When only some calls have an amount the sum is a lower bound, so it
+ * says `at least`, and below $0.001 no bound is worth stating: `· cost partly unknown`. The line
+ * has to hold without its tooltip, which a phone does not show. `null` when the run sent none.
+ */
+export function formatApiCalls(u: UsageInfo): UsageMetaPart | null {
+	const calls = u.apiCalls ?? 0;
+	if (calls <= 0) return null;
+	const head = calls === 1 ? '1 API call' : `${calls.toLocaleString()} API calls`;
+	const unpriced = u.apiCallsUnpriced ?? 0;
+	if (unpriced >= calls) {
+		return { text: `${head} · cost unknown`, title: 'No amount is known for these calls' };
+	}
+	const usd = u.apiCostUsd ?? 0;
+	const estimated = u.apiCostEstimated === true;
+	const source = estimated ? 'estimated from the profile rate where the answer gave no cost' : 'from the responses';
+	const tag = estimated ? ' estimated' : '';
+	if (unpriced > 0) {
+		// Some calls have no amount, so the sum is only a lower bound — and `< $0.001` would be an
+		// upper bound nobody knows.
+		const missing = `${unpriced} of ${calls} without an amount`;
+		if (usd < 0.001) return { text: `${head} · cost partly unknown`, title: missing };
+		return { text: `${head} · at least ${formatCost(usd)}${tag}`, title: `${missing}; the rest ${source}` };
+	}
+	const amount = usd === 0 ? '$0' : usd < 0.001 ? '< $0.001' : formatCost(usd);
+	return { text: `${head} · ${amount}${tag}`, title: estimated ? `Estimated from the profile rate where the answer gave no cost` : 'From the responses' };
 }
 
 /**
@@ -115,6 +166,9 @@ export function formatTurnTokens(u: UsageInfo): string {
 export interface UsageMetaPart {
 	text: string;
 	title?: string;
+	/** On a narrow screen the part gets a line of its own under the footer instead of a place in
+	 *  its swipeable row, where it could be cut off mid-amount (ux U-096). */
+	ownLineWhenNarrow?: true;
 }
 
 /**
@@ -152,12 +206,8 @@ export function formatUsageMetaParts(u: UsageInfo, includeCost: boolean): UsageM
 				title: `main ${formatCost(u.costUsd)} · sub-agents ${formatCost(spawn)}`,
 			}
 			: { text: formatCost(u.costUsd) });
-		// Phase E: surface third-party API cost (DataForSEO etc.) next to the LLM
-		// cost when the message hit any profiled API. Threshold of >$0.001 keeps
-		// the row clean when nothing meaningful happened.
-		if (u.apiCostUsd !== undefined && u.apiCostUsd > 0.001) {
-			parts.push({ text: `API: ${formatCost(u.apiCostUsd)}` });
-		}
+		const api = formatApiCalls(u);
+		if (api) parts.push({ ...api, ownLineWhenNarrow: true });
 	}
 	const cachePct = u.tokensIn > 0 ? Math.round((u.cacheRead / u.tokensIn) * 100) : 0;
 	if (cachePct > 0) parts.push({ text: `${cachePct}% cache` });

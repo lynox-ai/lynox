@@ -160,13 +160,19 @@ describe('a member\'s connection inside a plan\'s run', () => {
   const G = { ...GRANT, grant_id: 'grant-1' } as OAuthGrantRecord;
   const listed = (p: ApiProfile): StampEntry[] => [{ profile: p.id, grant: p.oauth_grant!.grant_id!, binding: bindingOf(p) }];
   const lead = 'setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login';
+  // Spelled out: the model reads this sentence, and the probe that tests it reads this wording.
+  const FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Nobody in this run can change it, neither you nor setup@example.org: only the owner of this lynox instance decides which connections a plan may use. Say so in your reply, and do not ask for permission.';
+  // The same end without who decides: for these the owner's stamp is not the way.
+  const FINAL_RUN = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. Say so in your reply, and do not ask for permission.';
+  // The member's own connection: a token exchange is not promised the same answer, another check stops it.
+  const FINAL_OWN = 'This is final for this run: another request through it is refused as well, so do not try the connection again. Say so in your reply, and do not ask for permission.';
 
   it('is not read in a plan whose stamp lists no connection, and says the stamp does not list it', () => {
     const p = crm({ oauth_grant: G });
     runAsPlanOf(B, () => {
       expect(read(p, B)).toBeNull();
       expect(read(crm({ created_by: undefined, oauth_grant: G }), B)).toBeNull();
-      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`);
+      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${FINAL}`);
     });
     expect(read(crm({ created_by: undefined, oauth_grant: G }), B)).toBe('access-value');
   });
@@ -188,7 +194,7 @@ describe('a member\'s connection inside a plan\'s run', () => {
     const now = change(stamped);
     runAsPlanOf(B, () => {
       expect(read(now, B)).toBeNull();
-      expect(memberConnectionRefusal(now, B, ends(['M-1']))).toBe(`${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`);
+      expect(memberConnectionRefusal(now, B, ends(['M-1']))).toBe(`${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${FINAL}`);
     }, listed(stamped));
   });
 
@@ -236,8 +242,41 @@ describe('a member\'s connection inside a plan\'s run', () => {
     const others = crm({ created_by: 'mandate:other@example.org', oauth_grant: { ...G, connected_by: 'mandate:other@example.org', connected_mandate_id: 'M-2' } as OAuthGrantRecord });
     runAsPlanOf(B, () => {
       expect(read(others, B)).toBeNull();
-      expect(memberConnectionRefusal(others, B, ends(['M-1', 'M-2']))).toBe('other@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so it is not used in the run of a scheduled plan, only in other@example.org\'s own session.');
+      expect(memberConnectionRefusal(others, B, ends(['M-1', 'M-2']))).toBe('other@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so it is not used in the run of a scheduled plan, only in other@example.org\'s own session. ' + FINAL_RUN);
+      expect(memberConnectionRefusal(others, B, ends(['M-1', 'M-2']))).not.toContain('only the owner');
     }, listed(others));
+  });
+
+  it('a write through the member\'s own connection, once their access has ended, is refused for the run without "their own session"', () => {
+    const p = crm({ oauth_grant: G });
+    runAsPlanOf(B, () => {
+      // A read under the same grant still reaches it; a token exchange needs the access live.
+      expect(memberConnectionRefusal(p, B, ends(['M-2']))).toBeNull();
+      const said = memberConnectionRefusal(p, B, ends(['M-2']), 'write');
+      expect(said).toBe(`${lead}, and setup@example.org's access does not cover this plan, so the connection is not used in this plan's run. ${FINAL_OWN}`);
+      expect(said).not.toContain('own session');
+    }, listed(p));
+  });
+
+  it('the member\'s own connection, made under an earlier access, is refused for the run in the same words', () => {
+    const p = crm({ oauth_grant: G });
+    const later = { ...B, mandateId: 'M-3' };
+    runAsPlanOf(later, () => {
+      expect(memberConnectionRefusal(p, later, ends(['M-3']))).toBe(`${lead}, and setup@example.org's access does not cover this plan, so the connection is not used in this plan's run. ${FINAL_OWN}`);
+      // A token exchange (write) passes this check under the later access, so the text must not
+      // promise it the same answer.
+      expect(memberConnectionRefusal(p, later, ends(['M-3']), 'write')).toBeNull();
+    }, listed(p));
+  });
+
+  it('a request through the member\'s own connection made under an earlier access is not read, the earlier access ended or still live', () => {
+    // What that refusal tells the run: another request through it is refused as well.
+    const p = crm({ oauth_grant: G });
+    const later = { ...B, mandateId: 'M-3' };
+    runAsPlanOf(later, () => {
+      expect(read(p, later, ACCESS, ['M-3'])).toBeNull();
+      expect(read(p, later, ACCESS, ['M-1', 'M-3'])).toBeNull();
+    }, listed(p));
   });
 });
 
@@ -326,6 +365,21 @@ describe('collectWriteNotes and a member connection\'s line (A4)', () => {
     const into = new Set<string>();
     await runCollectingMemberNotes(async () => collectWriteNotes(into)({ toolName: 'http_request', outputJson: line })).done;
     expect(into.size).toBe(0);
+  });
+
+  it('a plan run\'s refusal with a long address and profile name is picked up whole, up to who decides', () => {
+    const email = `${'a'.repeat(64)}@${'b'.repeat(40)}.example.org`;
+    const tag = `mandate:${email}`;
+    const member = { kind: 'mandate', email, mandateId: 'M-1' } as RequestPrincipal;
+    const stamped = crm({ name: 'C'.repeat(80), created_by: tag, oauth_grant: { ...GRANT, connected_by: tag, grant_id: 'grant-1' } as OAuthGrantRecord });
+    const now = { ...stamped, oauth_grant: { ...stamped.oauth_grant!, grant_id: 'grant-2' } };
+    const text = runAsPlanOf(member, () => memberConnectionRefusal(now, member, ends(['M-1'])), [{ profile: stamped.id, grant: 'grant-1', binding: bindingOf(stamped) }]);
+    expect(text).toContain('it changed after the owner confirmed');
+    const long = `${MEMBER_CONNECTION_PREFIX} ${text!}`;
+    const into = new Set<string>();
+    collectWriteNotes(into)({ toolName: 'http_request', outputJson: long });
+    expect([...into]).toEqual([long]);
+    expect(long.endsWith('do not ask for permission.')).toBe(true);
   });
 
   it('a response body cannot write one: the line must start the result', () => {

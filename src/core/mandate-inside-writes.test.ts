@@ -570,8 +570,14 @@ const FIXTURES: Fixture[] = [
     }) },
 
   // tasks and workflows
-  { site: 'task_create#workflow', branch: 'workflow', created: true, row: { verb: 'create', target: 'tasks type=workflow' }, tool: taskCreateTool as ToolEntry, input: { title: 'Run X', workflow_id: 'wf-unknown' },
-    build: () => { const { tm, history } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] }, runHistory: { obj: history, reads: ['getPlannedPipeline'] } }, spy: 'ctx.taskManager.createPipelineTask' }; } },
+  { site: 'task_create#workflow', branch: 'workflow', created: true, row: { verb: 'create', target: 'tasks type=workflow workflow=wf-own' }, tool: taskCreateTool as ToolEntry, input: { title: 'Run X', workflow_id: 'wf-own' },
+    build: () => {
+      const { tm, history } = taskManager();
+      // The mandate's own workflow: it may schedule only those and the owner's.
+      history.insertPlannedPipeline({ id: 'wf-own', name: 'Own', goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, MANDATE);
+      history.setWorkflowConfirmedAt('wf-own', '2026-07-01T00:00:00.000Z');
+      return { ctx: { taskManager: { obj: tm, reads: [] }, runHistory: { obj: history, reads: ['getPlannedPipeline', 'getWorkflowAuthorship'] } }, spy: 'ctx.taskManager.createPipelineTask' };
+    } },
   { site: 'task_create#scheduled', branch: 'scheduled', created: true, row: { verb: 'create', target: 'tasks type=scheduled' }, tool: taskCreateTool as ToolEntry, input: { title: 'Bericht', schedule: '0 9 * * 1' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.createScheduled' }; } },
   { site: 'task_create#watch', branch: 'watch', created: true, row: { verb: 'create', target: 'tasks type=watch' }, tool: taskCreateTool as ToolEntry, input: { title: 'w', watch_url: 'https://example.org' },

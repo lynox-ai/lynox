@@ -2036,6 +2036,18 @@ describe('httpRequestTool', () => {
           expect(fetchMock).toHaveBeenCalledTimes(1);
         });
 
+        it('counts the write on its call when its API has a cost: it was sent and answered before the hop', async () => {
+          const { ApiStore } = await import('../../core/api-store.js');
+          testCtx.apiStore = new ApiStore();
+          testCtx.apiStore.register({ id: 'reports', name: 'Reports', base_url: 'https://example.com/v1', description: 'Reports API', cost: { model: 'per_call', rate_usd: 0.002 } });
+          mockDnsPublic();
+          vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(createMockResponse({ status: 303, headers: { location: 'https://example.com/elsewhere' } })));
+          const slot: CallSlot = {};
+          const res = await runInCallSlot(slot, () => visible({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: reviewed })));
+          expect(res).toMatch(/^Write possibly landed: POST/);
+          expect(slot.apiCost).toEqual({ usd: 0.002, source: 'profile' });
+        });
+
         it('a write refused for its header names the header, never its value', async () => {
           mockDnsPublic();
           const fetchMock = vi.fn();
@@ -3775,6 +3787,193 @@ describe('httpRequestTool', () => {
       expect(ms).toBeLessThan(3000);
       expect(message).toMatch(MAY_HAVE_LANDED);
     }, 5000);
+  });
+
+  // The call's row counts the request and what it cost (`noteApiCost`); the run's footer sums the
+  // rows. The provider's own figure wins over the profile rate, and is read before the shaping.
+  describe('what a request to an API with a cost records on its call', () => {
+    let originalFlag: string | undefined;
+    beforeEach(() => { originalFlag = process.env.LYNOX_FEATURE_API_COST_DISPLAY; });
+    afterEach(() => {
+      if (originalFlag === undefined) delete process.env.LYNOX_FEATURE_API_COST_DISPLAY;
+      else process.env.LYNOX_FEATURE_API_COST_DISPLAY = originalFlag;
+    });
+    async function costStore(cost: Record<string, unknown>, shape?: Record<string, unknown>) {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'dataforseo', name: 'DataForSEO', base_url: 'https://api.dataforseo.com', description: 'SEO API',
+        cost: cost as never,
+        ...(shape !== undefined ? { response_shape: shape as never } : {}),
+      });
+      return store;
+    }
+    function costAgent(store: unknown, events: Array<Record<string, unknown>>) {
+      return {
+        principal: OWNER_PRINCIPAL,
+        name: 'main',
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store as never), apiStore: store, streamHandler: (e: Record<string, unknown>) => { events.push(e); } },
+        sessionCounters: testCounters,
+      } as never;
+    }
+    async function call(store: unknown, json: unknown, url = 'https://api.dataforseo.com/v3/keywords') {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ headers: { 'content-type': 'application/json' }, json })));
+      const events: Array<Record<string, unknown>> = [];
+      const slot: CallSlot = {};
+      const result = await runInCallSlot(slot, () => handler({ url }, costAgent(store, events)));
+      return { slot, events, result };
+    }
+
+    it('takes the answer\'s own figure, read before a response_shape that drops it', async () => {
+      process.env.LYNOX_FEATURE_API_COST_DISPLAY = '1';
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' }, { kind: 'reduce', include: ['tasks'] });
+      const { slot, events, result } = await call(store, { cost: 0.09, tasks: [{ keyword: 'aquarium' }] });
+      expect(slot.apiCost).toEqual({ usd: 0.09, source: 'response' });
+      // The model's copy no longer holds the field the figure came from.
+      expect(result).toContain('aquarium');
+      expect(result).not.toContain('0.09');
+      const event = events.find(e => e['type'] === 'api_cost');
+      expect(event?.['costUsd']).toBe(0.09);
+      expect(event?.['source']).toBe('response');
+    });
+
+    it('follows a dot path with an index', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'tasks.0.cost' });
+      const { slot } = await call(store, { tasks: [{ cost: 0.012 }] });
+      expect(slot.apiCost).toEqual({ usd: 0.012, source: 'response' });
+    });
+
+    it('falls back to the profile rate, as an estimate, where the answer gives no usable figure', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      for (const json of [{ ok: true }, { cost: -1 }, { cost: 101 }, { cost: '0.09' }, { cost: null }]) {
+        const { slot } = await call(store, json);
+        expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+      }
+      // Only the answer's own keys: an inherited name finds nothing.
+      const inherited = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'constructor' });
+      expect((await call(inherited, { ok: true })).slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    });
+
+    it('takes a figure of 0 and of 100 as given', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      expect((await call(store, { cost: 0 })).slot.apiCost).toEqual({ usd: 0, source: 'response' });
+      expect((await call(store, { cost: 100 })).slot.apiCost).toEqual({ usd: 100, source: 'response' });
+    });
+
+    it('counts a request without an amount when the cost model has no per-call rate', async () => {
+      process.env.LYNOX_FEATURE_API_COST_DISPLAY = '1';
+      const store = await costStore({ model: 'per_token', rate_usd: 0.00001 });
+      const { slot, events } = await call(store, { ok: true });
+      expect(slot.apiCost).toEqual({ usd: null, source: 'none' });
+      expect(events.some(e => e['type'] === 'api_cost')).toBe(false);
+    });
+
+    it('counts an error answer: the request went out', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 400, statusText: 'Bad Request', headers: { 'content-type': 'application/json' }, json: { error: 'too many keywords' } })));
+      const slot: CallSlot = {};
+      await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])));
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    });
+
+    it('counts a request whose answer stalled after the headers', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new ReadableStream({ start() { /* never ends */ } }), { status: 200, headers: { 'content-type': 'application/json' } })));
+      const slot: CallSlot = {};
+      await expect(runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords', timeout_ms: 50 }, costAgent(store, [])))).rejects.toThrow(/while reading the response/);
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    }, 5000);
+
+    it('reads no array length as a cost: an array is entered by index only', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'tasks.length' });
+      expect((await call(store, { tasks: [1, 2, 3] })).slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+      const indexed = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: '0.cost' });
+      expect((await call(indexed, [{ cost: 0.05 }])).slot.apiCost).toEqual({ usd: 0.05, source: 'response' });
+      // Only plain digits index: `1e0` and `0x1` are names, which an array has none of.
+      for (const field of ['tasks.1e0.cost', 'tasks.0x1.cost']) {
+        const named = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: field });
+        expect((await call(named, { tasks: [{ cost: 0.5 }, { cost: 0.07 }] })).slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+      }
+    });
+
+    it('marks the event an estimate when the amount is the profile rate', async () => {
+      process.env.LYNOX_FEATURE_API_COST_DISPLAY = '1';
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      const { events } = await call(store, { ok: true });
+      expect(events.find(e => e['type'] === 'api_cost')?.['source']).toBe('profile');
+    });
+
+    it('counts a request the priced API answered with a redirect to a host without a profile', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.net/file.json' } }))
+        .mockResolvedValueOnce(createMockResponse({ headers: { 'content-type': 'application/json' }, json: { ok: true } })));
+      const slot: CallSlot = {};
+      await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/export' }, costAgent(store, [])));
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    });
+
+    it('reads no cost field from another party\'s answer: after a redirect off the priced API only its rate counts', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.net/file.json' } }))
+        .mockResolvedValueOnce(createMockResponse({ headers: { 'content-type': 'application/json' }, json: { cost: 5 } })));
+      const slot: CallSlot = {};
+      await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/export' }, costAgent(store, [])));
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    });
+
+    it('counts a read whose redirect hop is refused as a write: the read itself went out', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.dataforseo.com/v3/x?_method=DELETE' } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const slot: CallSlot = {};
+      // Under delegated access a hop a server would act on as a write is not followed.
+      const delegated = { ...(costAgent(store, []) as object), principal: { kind: 'mandate', email: 'helper@example.test' } satisfies RequestPrincipal } as { toolContext: Record<string, unknown> };
+      delegated.toolContext = { ...delegated.toolContext, auditLog: { record: vi.fn() } };
+      const out = await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, delegated as never).then(String, (e: unknown) => String(e)));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(out).toMatch(/not followed/);
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+    });
+
+    it('counts a request redirected from a host without a profile to the priced API under that API', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.dataforseo.com/v3/keywords' } }))
+        .mockResolvedValueOnce(createMockResponse({ headers: { 'content-type': 'application/json' }, json: { cost: 0.09 } })));
+      const slot: CallSlot = {};
+      await runInCallSlot(slot, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])));
+      expect(slot.apiCost).toEqual({ usd: 0.09, source: 'response' });
+    });
+
+    it('records nothing for a host whose profile has no cost', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({ id: 'free', name: 'Free', base_url: 'https://api.dataforseo.com', description: 'no cost here' });
+      expect((await call(store, { cost: 0.09 })).slot.apiCost).toBeUndefined();
+    });
+
+    it('records nothing for a request that never went out, or for a host without a cost', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED'));
+      vi.stubGlobal('fetch', fetchMock);
+      const refused: CallSlot = {};
+      await expect(runInCallSlot(refused, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, []))))
+        .rejects.toThrow();
+      expect(refused.apiCost).toBeUndefined();
+
+      const other = await call(store, { cost: 0.09 }, 'https://api.example.com/v1/x');
+      expect(other.slot.apiCost).toBeUndefined();
+    });
   });
 
   // A request that changes something may have landed before its time ran out. "Timed out"
@@ -9262,6 +9461,161 @@ describe('write approvals for the write the question showed (270)', () => {
       await visible({ url: `${GQL}?query=${encodeURIComponent('{ a }')}`, method }, agent);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(prompt).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['/%u0067raphql'], ['/?graphql'], ['/?GraphQL=1'], ['/?graphql[]'], ['/?+graphql'], ['/index.php%3Fgraphql'], ['/index.php?graphql'], ['/%2567x?graphql'], ['/graphql.a.b'], ['/graphql.tar.gz'], ['/graphql..json'], ['/graphql.json.'], ['/graphql...'], ['/graphql%3Fquery=x'],
+    ])('reads %s as a GraphQL endpoint, so a write there it cannot read is refused and nothing is sent', async (path) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ url: `https://h.example${path}`, method: 'POST', body: 'a=1' }, agent);
+      expect(out).toMatch(/is a GraphQL (request this check cannot read|write with a query string)/);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each([['/graphqlx'], ['/?graphqlx'], ['/graphqlx.json']])('control: %s is a REST path, and the same write is asked and goes out', async (path) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ url: `https://h.example${path}`, method: 'POST', body: 'a=1' }, agent);
+      expect(out).toContain('HTTP 200');
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['a GET', { url: 'https://h.example/start', method: 'GET' }],
+      ['a HEAD', { url: 'https://h.example/start', method: 'HEAD' }],
+    ] as const)('does not follow %s redirected to a GraphQL URL that carries a mutation', async (_k, req) => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: `${GQL}?query=${encodeURIComponent('mutation{b}')}` } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(visible(req, agent270().agent)).rejects.toThrow('carries a GraphQL mutation in its URL; the redirect was not followed');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not follow a read redirected to a path form it reads as GraphQL, with a mutation in the URL', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: `https://h.example/index.php?graphql&query=${encodeURIComponent('mutation{b}')}` } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(visible({ url: 'https://h.example/start', method: 'GET' }, agent270().agent)).rejects.toThrow('carries a GraphQL mutation in its URL; the redirect was not followed');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['a GraphQL read', `${GQL}?query=${encodeURIComponent('{ a }')}`],
+      ['a REST path on the same host', 'https://h.example/v1/items'],
+      ['a mutation in the URL of a REST path', `https://h.example/v1/items?query=${encodeURIComponent('mutation{b}')}`],
+    ])('control: a read redirected to %s is followed', async (_k, location) => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(visible({ url: 'https://h.example/start', method: 'GET' }, agent270().agent)).resolves.toContain('HTTP 200');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a write that was sent and redirected to a GraphQL URL with a mutation is reported as possibly landed, and not followed', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: `${GQL}?query=${encodeURIComponent('mutation{b}')}` } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ url: 'https://h.example/v1/items', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"a":1}' }, agent);
+      expect(out).toContain('Write possibly landed: POST https://h.example/v1/items was sent and answered with a redirect');
+      expect(out).toContain('which needs its own approval; the redirect was not followed');
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['an approved REST POST to the GraphQL path', 'https://h.example/v1/items', GQL, '{"query":"mutation{b}"}'],
+      ['a GraphQL read to the same path with a mutation in its URL', GQL, `${GQL}?query=${encodeURIComponent('mutation{b}')}`, '{"query":"{ a }"}'],
+    ])('as before, a 307 that turns %s is not followed: the hop needs its own approval', async (_k, url, location, body) => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url, method: 'POST', headers: { 'Content-Type': 'application/json' }, body }, agent270().agent);
+      expect(out).toContain('the redirect was not followed');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('the refusal of a redirect names the way out: a POST with a JSON body to the endpoint', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: `${GQL}?query=${encodeURIComponent('mutation{b}')}` } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(visible({ url: 'https://h.example/start', method: 'GET' }, agent270().agent)).rejects.toThrow('To run the mutation, send it as a POST with a JSON body directly to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation.');
+    });
+
+    it('reads a mutation after a ? decoded in the path: a read redirected there and a GET to it are refused, a POST there is a GraphQL write with a query string', async () => {
+      const hidden = `https://h.example/graphql%3Fquery%3D${encodeURIComponent(encodeURIComponent('mutation{b}'))}`;
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: hidden } }))
+        .mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      await expect(visible({ url: 'https://h.example/start', method: 'GET' }, agent)).rejects.toThrow('carries a GraphQL mutation in its URL; the redirect was not followed');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await expect(visible({ url: hidden, method: 'GET' }, agent)).resolves.toContain('carries a GraphQL mutation in its URL');
+      await expect(visible({ url: 'https://h.example/graphql%3Fquery=x', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"query":"{ a }"}' }, agent)).resolves.toContain('is a GraphQL write with a query string');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(prompt).not.toHaveBeenCalled();
+    });
+
+    it.each([['%%33F'], ['%3%46'], ['%u003%46']])('reads the query after a ? that the escapes %s assemble', async (escape) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: `https://h.example/graphql${escape}query=mutation%7Bb%7D`, method: 'GET' }, agent270().agent);
+      expect(out).toContain('carries a GraphQL mutation in its URL');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('reads the query after every decoded ?, not only the first', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: 'https://h.example/a%3Fb/graphql%3Fquery=mutation%7Bb%7D', method: 'GET' }, agent270().agent);
+      expect(out).toContain('carries a GraphQL mutation in its URL');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a body that names a GraphQL key in another case keeps the general refusal, not the file note', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: GQL, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"Query":"mutation{b}"}' }, agent270().agent);
+      expect(out).toContain('is a GraphQL request this check cannot read');
+      expect(out).not.toContain('file whose name contains graphql');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a JSON object that cannot be a GraphQL request, as a file write sends, gets its own refusal that tells the model to name the file to the user', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      await expect(visible({ url: 'https://h.example/repos/o/r/contents/src/graphql.schema.json', method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{"message":"m","content":"eA=="}' }, agent))
+        .resolves.toContain('If this writes or changes a file whose name contains graphql, lynox cannot send it this way: tell the user which file it is and that they need to change it themselves.');
+      expect(prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a query beside another field', '{"query":"{ a }","message":"m"}'],
+      ['a persisted id', '{"id":"abc","variables":{}}'],
+      ['a document id', '{"documentId":"abc"}'],
+      ['extensions', '{"extensions":{"persistedQuery":{}}}'],
+      ['a batch', '[{"message":"m"}]'],
+    ])('control: %s keeps the general refusal, not the file note', async (_k, body) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const err = await visible({ url: GQL, method: 'POST', headers: { 'Content-Type': 'application/json' }, body }, agent270().agent);
+      expect(err).toContain('is a GraphQL request this check cannot read');
+      expect(err).not.toContain('file whose name contains graphql');
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('a contract that grants POST on a GraphQL path grants neither a mutation nor a read; a REST POST under it goes out', async () => {

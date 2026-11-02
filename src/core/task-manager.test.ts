@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, admittedTriggerTier } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { stampFromRow } from './plan-stamp.js';
 import { runAsHandRun } from './hand-run-door.js';
@@ -139,6 +139,14 @@ describe('TaskManager', () => {
     it('should reject invalid date format', () => {
       expect(() => tm.create({ title: 'Bad', dueDate: '01-03-2026' }))
         .toThrow('Invalid due_date format');
+    });
+
+    it('update checks a due date as create does, and stores it unchanged', () => {
+      const t = tm.create({ title: 'Due' });
+      expect(() => tm.update(t.id, { dueDate: '2026-1x-01' })).toThrow(InvalidDueDateError);
+      expect(tm.getTask(t.id)?.due_date ?? null).toBeNull();
+      tm.update(t.id, { dueDate: '2026-11-01' });
+      expect(tm.getTask(t.id)?.due_date).toBe('2026-11-01');
     });
   });
 

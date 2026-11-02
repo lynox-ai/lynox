@@ -6,8 +6,13 @@
 <script lang="ts">
 	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { onOff } from './settings-readonly/values.js';
 
 	interface Config {
 		update_check?: boolean;
@@ -36,6 +41,7 @@
 			]);
 			if (!configRes.ok) throw new Error(`HTTP ${configRes.status}`);
 			const body = (await configRes.json()) as Config;
+			noteSettingsViewer(body);
 			config = {
 				update_check: body.update_check,
 			};
@@ -83,10 +89,10 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ update_check: config.update_check }),
 			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			await throwIfRefused(res);
 			addToast(t('system.saved'), 'success', 3000);
 		} catch (e) {
-			addToast(e instanceof Error ? e.message : t('system.save_failed'), 'error', 5000);
+			addToast(saveFailedText(e, t('system.save_failed')), 'error', 5000);
 		} finally {
 			saving = false;
 		}
@@ -101,7 +107,18 @@
 		<p class="text-sm text-text-muted">{t('system.subtitle')}</p>
 	</header>
 
-	{#if managed}
+	{#if isMandateSession()}
+		<!-- A mandate's session: the values as text (ux U-104); PUT /api/config is the owner's. The vault
+		     key and the access token are secrets and are left out, with their reveal buttons. -->
+		<OwnerOnlyNotice />
+		{#if managed}
+			<section class="border border-border rounded p-4 text-sm text-text-muted">
+				<p>{t('system.managed_minimal')}</p>
+			</section>
+		{:else}
+			<ReadOnlyRows rows={[{ label: t('system.update_label'), value: onOff(config.update_check) }]} />
+		{/if}
+	{:else if managed}
 		<section class="border border-border rounded p-4 text-sm text-text-muted">
 			<p>{t('system.managed_minimal')}</p>
 		</section>

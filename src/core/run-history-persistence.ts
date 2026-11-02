@@ -400,6 +400,16 @@ export function getRecentPipelineRuns(db: Database.Database, limit = 20): Array<
   }>;
 }
 
+/** The chat each run was started from, for the runs that have one (`origin_thread_id`). */
+export function getPipelineRunOrigins(db: Database.Database, ids: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  if (ids.length === 0) return out;
+  const rows = db.prepare(`SELECT id, origin_thread_id FROM pipeline_runs WHERE origin_thread_id IS NOT NULL AND id IN (${ids.map(() => '?').join(',')})`)
+    .all(...ids) as Array<{ id: string; origin_thread_id: string }>;
+  for (const r of rows) if (r.origin_thread_id !== '') out.set(r.id, r.origin_thread_id);
+  return out;
+}
+
 export function getPipelineRunOrigin(db: Database.Database, id: string): string | null | undefined {
   const row = db.prepare('SELECT origin_thread_id FROM pipeline_runs WHERE id = ?').get(id) as { origin_thread_id: string | null } | undefined;
   return row === undefined ? undefined : row.origin_thread_id;

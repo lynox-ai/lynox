@@ -41,6 +41,19 @@ function insertReminderItem(subject: string, snoozeUntil: Date, opts: { reasonDe
 }
 
 describe('inbox-reminder-poller', () => {
+  // 966: the title follows the instance's notice language (`notice-language.ts`), read per reminder.
+  it('titles the reminder in the instance\'s language', async () => {
+    let language: string | undefined = 'de';
+    insertReminderItem('Vertrag prüfen', new Date(Date.now() - 5000));
+    const poller = startReminderPoller({ state, router, language: () => language });
+    await poller.tickNow();
+    language = 'en';
+    insertReminderItem('Offerte senden', new Date(Date.now() - 5000));
+    await poller.tickNow();
+    poller.stop();
+    expect(captured.map((m) => m.title)).toEqual(['Erinnerung', 'Reminder']);
+  });
+
   it('fires a notification for each wakeable reminder + stamps notified_at', async () => {
     const past = new Date(Date.now() - 5000);
     const id = insertReminderItem('Vertrag prüfen', past);
