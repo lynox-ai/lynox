@@ -22,7 +22,8 @@ import { createMailReadTool } from './mail-read.js';
 import { createMailSendTool } from './mail-send.js';
 import { createMailReplyTool, prepareReply, commitReply } from './mail-reply.js';
 import { prepareSend, commitSend } from '../send-core.js';
-import { createMailTriageTool, inboxLabelText, INBOX_LABEL_LEGEND } from './mail-triage.js';
+import { createMailTriageTool, inboxGroupOf, inboxLabelText, INBOX_LABEL_LEGEND } from './mail-triage.js';
+import type { InboxLabel } from '../context.js';
 import { createMailTools } from './index.js';
 import { createMailConnectTool } from './mail-connect.js';
 import type { MailConnectPromptData } from '../../../types/index.js';
@@ -986,7 +987,54 @@ describe('mail_triage tool', () => {
       expect(out).toMatch(/^1\. uid:1 · date:\S+(?: \[[A-Z ]+\])?$/m);
       expect(out).not.toContain('inbox:');
       expect(out).not.toContain(INBOX_LABEL_LEGEND);
+      expect(out, 'no verdict, no groups').not.toContain('No inbox verdict');
     }
+  });
+
+  // 1070 live probe: with the label as a suffix the model still listed a draft_ready mail as
+  // "no action needed". The verdict now orders the list: what needs the user comes first, under
+  // its own heading, numbered on across the groups.
+  it('groups the list by the inbox verdict, needs-the-user first, numbering on across groups', async () => {
+    provider.list.mockResolvedValue([
+      envelope(1, { messageId: '<m-1@x>', from: 'a@example.com', subject: 'A' }),
+      envelope(2, { messageId: '<m-2@x>', from: 'b@example.com', subject: 'B' }),
+      envelope(3, { messageId: '<m-3@x>', from: 'c@example.com', subject: 'C' }),
+      envelope(4, { messageId: '<m-4@x>', from: 'd@example.com', subject: 'D' }),
+      envelope(5, { messageId: '<m-5@x>', from: 'e@example.com', subject: 'E' }),
+      envelope(6, { messageId: '<m-6@x>', from: 'f@example.com', subject: 'F' }),
+    ]);
+    const verdicts: Record<string, InboxLabel> = {
+      '<m-1@x>': { bucket: 'auto_handled' },
+      '<m-3@x>': { bucket: 'draft_ready' },
+      '<m-4@x>': { bucket: 'requires_user', userAction: 'replied' },
+      '<m-5@x>': { bucket: 'requires_user', userAction: 'unhandled' },
+      '<m-6@x>': { bucket: 'requires_user', userAction: 'snoozed' },
+    };
+    const out = await createMailTriageTool(registry, { inboxLabelOf: (_a, key) => verdicts[key] ?? null }).handler({}, noPromptAgent);
+    const order = [...out.matchAll(/^(\d+)\. uid:(\d+)/gm)].map((m) => `${m[1]}:${m[2]}`);
+    expect(order).toEqual(['1:3', '2:6', '3:4', '4:1', '5:2', '6:5']);
+    const at = (s: string): number => out.indexOf(s);
+    const needs = at('Inbox verdict: needs the user, a reply or a decision (draft_ready, requires_user) (2):');
+    const acted = at('Inbox verdict: the user has already replied or archived (1):');
+    const nothing = at('Inbox verdict: asks nothing of the user (auto_handled) (1):');
+    const none = at('No inbox verdict (2):');
+    expect([needs, acted, nothing, none].every((i) => i >= 0)).toBe(true);
+    expect(needs < at('1. uid:3') && at('2. uid:6') < acted && acted < at('3. uid:4')).toBe(true);
+    expect(at('3. uid:4') < nothing && nothing < at('4. uid:1') && at('4. uid:1') < none && none < at('5. uid:2')).toBe(true);
+    expect(out).toMatch(/^6\. uid:5 · date:\S+(?: \[[A-Z ]+\])? · inbox:requires_user\/unhandled$/m);
+  });
+
+  it('puts each verdict in its group: unhandled has none, replied and archived are done, snoozed still waits', () => {
+    expect(inboxGroupOf(null)).toBe('no_verdict');
+    expect(inboxGroupOf({ bucket: 'x' as never })).toBe('no_verdict');
+    expect(inboxGroupOf({ bucket: 'draft_ready', userAction: 'unhandled' })).toBe('no_verdict');
+    expect(inboxGroupOf({ bucket: 'draft_ready', userAction: 'replied' })).toBe('user_acted');
+    expect(inboxGroupOf({ bucket: 'auto_handled', userAction: 'archived' })).toBe('user_acted');
+    expect(inboxGroupOf({ bucket: 'requires_user', userAction: 'snoozed' })).toBe('needs_user');
+    expect(inboxGroupOf({ bucket: 'draft_ready' })).toBe('needs_user');
+    expect(inboxGroupOf({ bucket: 'requires_user' })).toBe('needs_user');
+    expect(inboxGroupOf({ bucket: 'auto_handled' })).toBe('asks_nothing');
+    expect(inboxGroupOf({ bucket: 'auto_handled', userAction: 'snoozed' })).toBe('asks_nothing');
   });
 
   // The engine sets hooks.inboxLabelOf on the MailContext after the tools are built, so the
@@ -1160,6 +1208,28 @@ describe('mail_triage fan-out across multiple accounts', () => {
     expect(out).toContain('### business');
     expect(out).toContain('Hi');
     expect(out).toContain('Contract');
+  });
+
+  it('groups each account by the inbox verdict when the inbox judged any of them', async () => {
+    const providerA = new FakeProvider('personal');
+    const providerB = new FakeProvider('business');
+    providerA.list.mockResolvedValue([
+      envelope(1, { messageId: '<a1@x>', from: 'friend@example.com', subject: 'Hi' }),
+      envelope(3, { messageId: '<a2@x>', from: 'shop@example.com', subject: 'Deal' }),
+    ]);
+    providerB.list.mockResolvedValue([envelope(2, { messageId: '<b1@x>', from: 'client@example.com', subject: 'Contract' })]);
+    const reg = new InMemoryMailRegistry();
+    reg.add(providerA);
+    reg.add(providerB);
+    const out = await createMailTriageTool(reg, {
+      inboxLabelOf: (account, key) => account === 'personal' && key === '<a2@x>' ? { bucket: 'draft_ready' } : null,
+    }).handler({}, noPromptAgent);
+    const personal = out.slice(out.indexOf('### personal'), out.indexOf('### business'));
+    expect(personal.indexOf('Inbox verdict: needs the user')).toBeGreaterThanOrEqual(0);
+    expect(personal.indexOf('1. uid:3')).toBeGreaterThan(personal.indexOf('Inbox verdict: needs the user'));
+    expect(personal.indexOf('No inbox verdict (1):')).toBeGreaterThan(personal.indexOf('1. uid:3'));
+    expect(personal).toMatch(/^2\. uid:1 · date:\S+(?: \[[A-Z ]+\])?$/m);
+    expect(out.slice(out.indexOf('### business'))).toContain('No inbox verdict (1):');
   });
 
   it('targets only the requested account when account is specified', async () => {

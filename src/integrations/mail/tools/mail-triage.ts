@@ -51,7 +51,51 @@ export const INBOX_LABEL_LEGEND =
   'auto_handled: a newsletter, notice or receipt that asks nothing of the user. A rule the user set can put a mail in any of these. ' +
   'A suffix (/replied, /archived, /snoozed) is what the user has done with it since; /unhandled means the user took the verdict back. ' +
   'A message without inbox: has no verdict, which does not mean nothing is to be done. ' +
+  'The list is grouped by these verdicts. ' +
   'Take the verdicts as a strong hint, not as the answer: where a mail asks for something the verdict does not reflect, say so and name the inbox\'s verdict.';
+
+/** Where a message stands by the inbox's verdict. The list is grouped in GROUP_ORDER. */
+export type InboxGroup = 'needs_user' | 'user_acted' | 'asks_nothing' | 'no_verdict';
+
+export function inboxGroupOf(label: InboxLabel | null): InboxGroup {
+  if (!label || !BUCKETS.has(label.bucket)) return 'no_verdict';
+  // The user took the verdict back, so none stands.
+  if (label.userAction === 'unhandled') return 'no_verdict';
+  if (label.userAction === 'replied' || label.userAction === 'archived') return 'user_acted';
+  // A snoozed mail still waits for the user, so it stays with its bucket.
+  return label.bucket === 'auto_handled' ? 'asks_nothing' : 'needs_user';
+}
+
+const GROUP_ORDER: readonly InboxGroup[] = ['needs_user', 'user_acted', 'asks_nothing', 'no_verdict'];
+const GROUP_HEADING: Record<InboxGroup, string> = {
+  needs_user: 'Inbox verdict: needs the user, a reply or a decision (draft_ready, requires_user)',
+  user_acted: 'Inbox verdict: the user has already replied or archived',
+  asks_nothing: 'Inbox verdict: asks nothing of the user (auto_handled)',
+  no_verdict: 'No inbox verdict',
+};
+
+/**
+ * The survivors of one account under a heading per verdict group, numbered on across the
+ * groups. The headings and labels are fixed text and the inbox's own enum values, so nothing
+ * a sender wrote reaches them.
+ */
+function renderByVerdict(
+  survivors: ReadonlyArray<MailEnvelope>,
+  accountId: string,
+  labels: ReadonlyMap<MailEnvelope, InboxLabel | null>,
+): string {
+  const parts: string[] = [];
+  let next = 1;
+  for (const group of GROUP_ORDER) {
+    const members = survivors.filter((env) => inboxGroupOf(labels.get(env) ?? null) === group);
+    if (members.length === 0) continue;
+    parts.push(`${GROUP_HEADING[group]} (${String(members.length)}):`);
+    parts.push(renderTriageList(members, accountId, (env) => inboxLabelText(labels.get(env) ?? null), next));
+    parts.push('');
+    next += members.length;
+  }
+  return parts.join('\n').trimEnd();
+}
 
 export function createMailTriageTool(registry: MailRegistry, hooks?: MailHooks): ToolEntry<MailTriageInput> {
   return {
@@ -149,14 +193,20 @@ export function createMailTriageTool(registry: MailRegistry, hooks?: MailHooks):
         // The inbox's verdict per message, when the inbox is on and has classified it.
         const lookup = hooks?.inboxLabelOf;
         let labelled = 0;
-        const labelFor = (accountId: string) => (env: MailEnvelope): string | null => {
-          if (!lookup) return null;
-          let text: string | null = null;
-          try { text = inboxLabelText(lookup(accountId, resolveThreadKey(env))); } catch { text = null; }
-          if (text) labelled++;
-          return text;
-        };
-        const rendered = new Map(reports.map((r) => [r.accountId, r.survivors.length > 0 ? renderTriageList(r.survivors, r.accountId, labelFor(r.accountId)) : '']));
+        const labels = new Map<MailEnvelope, InboxLabel | null>();
+        for (const r of reports) {
+          for (const env of r.survivors) {
+            let label: InboxLabel | null = null;
+            if (lookup) {
+              try { label = lookup(r.accountId, resolveThreadKey(env)); } catch { label = null; }
+            }
+            if (inboxLabelText(label)) labelled++;
+            labels.set(env, label);
+          }
+        }
+        // Grouped by verdict once the inbox has judged any of them; as before when it has not.
+        const rendered = new Map(reports.map((r) => [r.accountId, r.survivors.length === 0 ? ''
+          : labelled > 0 ? renderByVerdict(r.survivors, r.accountId, labels) : renderTriageList(r.survivors, r.accountId)]));
 
         const lines: string[] = [];
         if (labelled > 0) {
