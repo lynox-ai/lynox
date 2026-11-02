@@ -1,6 +1,7 @@
 import { channels } from './observability.js';
 import { ALL_PROVENANCE_KINDS, DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 import { singleLine } from './prompt-value.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { noteOwnWrapped } from './call-connection.js';
 
 interface InjectionResult {
@@ -662,10 +663,23 @@ ${safe}
 }
 
 /** Hand a produced block to the current call's slot, so the result scan can tell its
- *  closer from one in text the engine did not wrap. */
+ *  closer from one in text the engine did not wrap, and to a collector, if one runs. */
 function ownBlock(block: string): string {
   noteOwnWrapped(block);
+  ownBlockCollector.getStore()?.push(block);
   return block;
+}
+
+const ownBlockCollector = new AsyncLocalStorage<string[]>();
+
+/**
+ * Run `fn` and add to `into` every block {@link wrapUntrustedData} produces while it runs,
+ * awaited work included. For text the engine assembles outside a tool call, such as the
+ * briefing: its scan can then tell the engine's own closers from one in text it did not wrap
+ * (`scanRegionOf` in `output-guard.ts`), as the result scan does with a call's slot.
+ */
+export function collectOwnBlocks<T>(into: string[], fn: () => T): T {
+  return ownBlockCollector.run(into, fn);
 }
 
 /**

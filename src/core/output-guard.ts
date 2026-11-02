@@ -132,7 +132,7 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
  */
 const OWN_CLOSER = '\n</untrusted_data>';
 
-function scanRegionOf(result: string, ownBlocks: readonly string[] | undefined): string {
+export function scanRegionOf(result: string, ownBlocks: readonly string[] | undefined): string {
   if (!ownBlocks || ownBlocks.length === 0) return result;
   const taken: Array<[number, number]> = [];
   const closers: number[] = [];
