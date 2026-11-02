@@ -257,7 +257,9 @@ describe('docker-installer', () => {
     it('installer source surfaces actionable PORT= guidance', () => {
       // The user-facing copy is what makes the silent-failure mode go away;
       // assert the help text is present so a refactor doesn't drop it.
-      expect(INSTALLER_SRC).toMatch(/PORT=3001 npx @lynox-ai\/core/);
+      // The non-interactive line is tested in docker-installer-noninteractive.test.ts.
+      expect(INSTALLER_SRC).toContain('`PORT=${String(nextPort)} npx @lynox-ai/core`');
+      expect(INSTALLER_SRC).toContain('const nextPort = hostPort < 65535 ? hostPort + 1 : 3001;');
     });
   });
 
@@ -810,7 +812,8 @@ describe('which user each container runs as', () => {
   });
 
   it('says lynox is running only when the health check passed', () => {
-    expect(INSTALLER_SRC).toMatch(/healthy\s*\?\s*`[^`]*✨ lynox is running/);
+    // The behaviour itself is pinned in docker-installer-noninteractive.test.ts › startupReport.
+    expect(INSTALLER_SRC).toMatch(/if \(f\.healthy\) \{\s*out\.push\(`[^`]*✨ lynox is running/);
     expect(INSTALLER_SRC.match(/✨ lynox is running/g)).toHaveLength(1);
   });
 });

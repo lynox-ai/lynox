@@ -153,7 +153,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{"week":40}' })).mockResolvedValueOnce(endTurn('posted'));
     await fire(trigger);
     expect(posts().map((p) => p.url)).toEqual([TARGET]);
-    expect(lastRun(trigger.id)).toContain('Pipeline completed');
+    expect(lastRun(trigger.id)).toContain('Workflow completed');
   });
 
   describe('a headless run carries whom it is for down to its step agents (1055)', () => {
@@ -574,7 +574,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       const loop = new WorkerLoop(engine(), { hasChannels: () => false, notify } as never, 60_000);
       expect(await loop.runTriggerNow(trigger.id)).toEqual({ ok: true });
       await vi.waitFor(() => expect(runRows()).toHaveLength(1));
-      await vi.waitFor(() => expect(lastRun(trigger.id)).toContain('Pipeline completed'));
+      await vi.waitFor(() => expect(lastRun(trigger.id)).toContain('Workflow completed'));
       mockProcess.mockResolvedValueOnce(endTurn('done'));
       const lib = await runGuardedSavedWorkflow(engine(), 'wf-how', undefined, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'cookie:0123abcd' } });
       expect(lib.grantNote).toBeUndefined();
