@@ -774,8 +774,28 @@ describe('graphqlUrlWrites', () => {
     ['https://h.example/graphql?query=%7Ba%7D&query=subscription%7Bb%7D', true],
     ['https://h.example/graphql?query=%7Ba%7D', false],
     ['https://h.example/graphql?q=mutation', false],
+    // `;` as a separator (Rack before 3, older `parse_qs`): the second pair is `query`.
+    ['https://h.example/graphql?x=1;query=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?x=1;query=%7Ba%7D', false],
+    // `%uXXXX` (IIS/System.Web) in the value and in the key.
+    ['https://h.example/graphql?query=%u006Dutation%7Ba%7D', true],
+    ['https://h.example/graphql?%u0071uery=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?query=%u007Ba%7D', false],
+    // A lone surrogate decodes to nothing that names an operation, and does not throw.
+    ['https://h.example/graphql?query=%uD800%7Ba%7D', false],
   ] as const)('%s → %s', (url, want) => {
     expect(graphqlUrlWrites(url)).toBe(want);
+  });
+});
+
+describe('isGraphqlEndpoint — the query key read every way a server may', () => {
+  it.each([
+    ['https://wp.example/?x=1;graphql', true],
+    ['https://wp.example/?%u0067raphql', true],
+    ['https://wp.example/?x=1;graphqlx', false],
+    ['https://wp.example/?%u0067raphqlx', false],
+  ] as const)('%s → %s', (url, want) => {
+    expect(isGraphqlEndpoint(url)).toBe(want);
   });
 });
 
