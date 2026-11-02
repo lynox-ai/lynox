@@ -706,6 +706,108 @@ describe('Config', () => {
       expect(() => loadConfig()).toThrow(/unregistered model "ghost-override-model"/);
     });
 
+    it('an unregistered config slot on the preset\'s own provider runs the preset\'s model, and keeps the user\'s key', async () => {
+      // The registry-drift case: a release no longer knows the model, the provider is the same.
+      // It used to throw, which cost the boot and the settings page that could clear it.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        writeUserConfig({
+          tier_preset: 'max-quality',
+          tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model', api_key: 'sk-user-own' } },
+        });
+        const { loadConfig, replacedTierSlots } = await import('./config.js');
+        const config = loadConfig();
+        expect(config.tier_set?.deep).toEqual({ provider: 'anthropic', model_id: 'claude-opus-5', api_key: 'sk-user-own' });
+        expect(replacedTierSlots()).toEqual([{ tier: 'deep', model_id: 'claude-retired-model', runs: 'claude-opus-5' }]);
+        expect(warn.mock.calls.flat().join(' ')).toContain('claude-retired-model');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('the same endpoint written with a trailing slash still counts as the same provider', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const { FIREWORKS_API_BASE } = await import('./tier-presets.js');
+        writeUserConfig({
+          tier_preset: 'balanced',
+          tier_set: { deep: { provider: 'openai', model_id: 'accounts/fireworks/models/retired', api_base_url: `${FIREWORKS_API_BASE}/` } },
+        });
+        const { loadConfig } = await import('./config.js');
+        const deep = loadConfig().tier_set?.deep;
+        expect(deep?.model_id).toBe('accounts/fireworks/models/kimi-k3');
+        expect(deep?.api_base_url).toBe(`${FIREWORKS_API_BASE}/`);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('an unregistered config slot on ANOTHER endpoint still fails closed: its band is not sent elsewhere', async () => {
+      writeUserConfig({
+        tier_preset: 'balanced',
+        tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } },
+      });
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/unregistered model "my-local-model"/);
+    });
+
+    it('an unregistered config slot on ANOTHER provider still fails closed, even with no endpoint on either side', async () => {
+      writeUserConfig({
+        tier_preset: 'max-quality',
+        tier_set: { deep: { provider: 'mistral', model_id: 'mistral-retired-model' } },
+      });
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/unregistered model "mistral-retired-model"/);
+    });
+
+    it('checkCandidateConfig leaves the candidate as it was, even where the build deletes nested entries', async () => {
+      // On an instance connected to a Shopify store the build drops a profile on a provider not on
+      // the list. For a candidate that object is the one PUT /api/config then saves.
+      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+      try {
+        const { checkCandidateConfig } = await import('./config.js');
+        const candidate = { model_profiles: { worker: { provider: 'openai', model_id: 'mistral-small-2506', api_base_url: 'https://api.mistral.ai/v1' } } };
+        const copy = structuredClone(candidate);
+        checkCandidateConfig(candidate as never);
+        expect(candidate).toEqual(copy);
+      } finally {
+        delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+      }
+    });
+
+    it('a replacement the environment\'s tier_set overrides is not reported: that band does not run it', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      process.env['LYNOX_TIER_SET_JSON'] = JSON.stringify({ deep: { provider: 'anthropic', model_id: 'claude-sonnet-5' } });
+      try {
+        writeUserConfig({ tier_preset: 'max-quality', tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model' } } });
+        const { loadConfig, replacedTierSlots } = await import('./config.js');
+        expect(loadConfig().tier_set?.deep?.model_id).toBe('claude-sonnet-5');
+        expect(replacedTierSlots()).toEqual([]);
+      } finally {
+        delete process.env['LYNOX_TIER_SET_JSON'];
+        warn.mockRestore();
+      }
+    });
+
+    it('checkCandidateConfig answers what the loader would do, and writes nothing', async () => {
+      writeUserConfig({ tier_preset: 'max-quality' });
+      const file = join(fakeHome, '.lynox', 'config.json');
+      const before = readFileSync(file, 'utf-8');
+      const { checkCandidateConfig, loadConfig } = await import('./config.js');
+      expect(checkCandidateConfig({
+        tier_preset: 'max-quality',
+        tier_set: { fast: { provider: 'anthropic', model_id: 'claude-retired-model' } },
+      })).toEqual({ replacedSlots: [{ tier: 'fast', model_id: 'claude-retired-model', runs: 'claude-haiku-4-5-20251001' }] });
+      const refused = checkCandidateConfig({
+        tier_preset: 'balanced',
+        tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } },
+      });
+      expect(refused.error).toMatch(/unregistered model "my-local-model"/);
+      // Nothing written, and the real load still reads the file on disk.
+      expect(readFileSync(file, 'utf-8')).toBe(before);
+      expect(loadConfig().tier_set?.fast?.model_id).toBe('claude-haiku-4-5-20251001');
+    });
+
     it('expands the ⚡ efficient preset (all-Fireworks slots) end-to-end', async () => {
       // Reshaped 2026-08-10: every slot is an open-weight model on Fireworks with a
       // 1M window, so the expansion has to carry the endpoint on all three, not just

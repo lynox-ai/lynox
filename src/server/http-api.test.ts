@@ -143,6 +143,15 @@ const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: '
 const mockHistoryGetPlannedPipelines = vi.fn().mockReturnValue([]);
 const mockHistoryRenamePlannedPipeline = vi.fn().mockReturnValue(true);
 const mockHistoryDeletePlannedPipeline = vi.fn().mockReturnValue(true);
+// Who set up a workflow: the owner, unless a test says otherwise. A mandate's schedule is refused
+// on a workflow another mandate set up, and on one whose authorship cannot be read; the Run
+// button runs a workflow as whoever shaped it (1055). One mock for both, so a test that sets it
+// is the one the route reads.
+const OWNER_WORKFLOW_AUTHORSHIP = {
+  createdBy: null, createdMandateId: null, createdAt: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null,
+  coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null, coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
+};
+const mockHistoryGetWorkflowAuthorship = vi.fn().mockReturnValue(OWNER_WORKFLOW_AUTHORSHIP);
 const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
 const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
@@ -316,13 +325,8 @@ vi.mock('../core/engine.js', () => ({
       getPlannedPipelines: mockHistoryGetPlannedPipelines,
       renamePlannedPipeline: mockHistoryRenamePlannedPipeline,
       deletePlannedPipeline: mockHistoryDeletePlannedPipeline,
+      getWorkflowAuthorship: mockHistoryGetWorkflowAuthorship,
       setWorkflowConfirmedAt: mockSetWorkflowConfirmedAt,
-      // Who set up a workflow: the owner, unless a test says otherwise. A mandate's schedule is
-      // refused on a workflow another mandate set up, and on one whose authorship cannot be read.
-      getWorkflowAuthorship: vi.fn().mockReturnValue({
-        createdBy: null, createdMandateId: null, createdAt: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null,
-        coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null, coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
-      }),
       getTask: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
@@ -450,6 +454,9 @@ vi.mock('../core/config.js', async (importOriginal) => ({
   admitBackgroundModel: (await importOriginal<typeof import('../core/config.js')>()).admitBackgroundModel,
   // The REAL pool endpoint pairing: the managed write gate and the loader must decide alike.
   poolEndpointFor: (await importOriginal<typeof import('../core/config.js')>()).poolEndpointFor,
+  // The REAL pre-write check: it is the loader run on the candidate, and the route under test refuses by it.
+  checkCandidateConfig: vi.fn((await importOriginal<typeof import('../core/config.js')>()).checkCandidateConfig),
+  replacedTierSlots: vi.fn().mockReturnValue([]),
   POOL_MISTRAL_ENDPOINTS: (await importOriginal<typeof import('../core/config.js')>()).POOL_MISTRAL_ENDPOINTS,
   POOL_ANTHROPIC_ENDPOINT: (await importOriginal<typeof import('../core/config.js')>()).POOL_ANTHROPIC_ENDPOINT,
   // Not a stub: the REAL escaper, so this suite tests the same rendering the
@@ -513,11 +520,17 @@ vi.mock('../integrations/push/web-push-channel.js', () => ({
 const mockRunSavedWorkflow = vi.fn();
 const mockForgetPipeline = vi.fn();
 const mockGetPipeline = vi.fn();
-vi.mock('../tools/builtin/pipeline.js', () => ({
-  runSavedWorkflow: mockRunSavedWorkflow,
-  forgetPipeline: mockForgetPipeline,
-  getPipeline: mockGetPipeline,
-}));
+// The run record of a mandate's run (1055) is the real one: the rows it writes are what its tests read.
+vi.mock('../tools/builtin/pipeline.js', async (importActual) => {
+  const actual = await importActual<typeof import('../tools/builtin/pipeline.js')>();
+  return {
+    runSavedWorkflow: mockRunSavedWorkflow,
+    forgetPipeline: mockForgetPipeline,
+    getPipeline: mockGetPipeline,
+    workflowRunTrail: actual.workflowRunTrail,
+    WORKFLOW_RUN_UNRECORDED_RESULT: actual.WORKFLOW_RUN_UNRECORDED_RESULT,
+  };
+});
 
 // Partial mocks for the voice facades: spread the real module so the
 // capabilities endpoint keeps every export it reads (getActiveSpeakProvider,
@@ -2135,6 +2148,113 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
+    describe('without an AI provider key', () => {
+      const run = (): Promise<Response> => jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'hello' }),
+      });
+      // No key from the environment either: the provider's own variable outranks the vault.
+      beforeEach(() => {
+        mockSecretResolve.mockReturnValue(null);
+        for (const name of ['ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'OPENAI_API_KEY', 'CUSTOM_API_KEY']) vi.stubEnv(name, '');
+        mockSessionRun.mockClear();
+      });
+      afterEach(() => { mockGetUserConfig.mockReturnValue({}); vi.unstubAllEnvs(); });
+
+      it('tells the owner which provider lacks a key, by its display name, and where to add it', async () => {
+        const res = await run();
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+          error: 'No key is stored for Anthropic yet. Open Settings → Configuration and add one.',
+          code: 'llm_not_configured',
+          may_configure: true,
+          provider: 'Anthropic',
+          missing: ['key'],
+        });
+        expect(mockSessionRun).not.toHaveBeenCalled();
+      });
+
+      it('names the settings field the owner still has to fill in when the key is not what is missing', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'vertex' });
+        vi.stubEnv('GCP_PROJECT_ID', '');
+        vi.stubEnv('ANTHROPIC_VERTEX_PROJECT_ID', '');
+        const res = await run();
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+          error: 'Google Vertex AI is missing the GCP project ID. Open Settings → Configuration and fill it in.',
+          code: 'llm_not_configured',
+          may_configure: true,
+          provider: 'Google Vertex AI',
+          missing: ['gcp_project_id'],
+        });
+      });
+
+      it('names both fields when an OpenAI-compatible endpoint has neither a base URL nor a model', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'openai' });
+        const res = await run();
+        const body = await res.json() as { missing?: string[]; error: string };
+        expect(body.missing).toEqual(['api_base_url', 'model_id']);
+        expect(body.error).toContain('is missing the base URL and the model ID.');
+      });
+
+      it('names only the key when the key and a field are both missing', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' });
+        const res = await run();
+        expect(((await res.json()) as { missing?: string[] }).missing).toEqual(['key']);
+      });
+
+      it('names the key alone on a custom endpoint that lacks both key and base URL, then the base URL', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'custom' });
+        vi.stubEnv('LYNOX_API_BASE_URL', '');
+        const both = await run();
+        expect(((await both.json()) as { missing?: string[] }).missing).toEqual(['key']);
+        mockSecretResolve.mockImplementation((name: string) => (name === 'CUSTOM_API_KEY' ? 'test-only-placeholder' : null));
+        const baseOnly = await run();
+        expect(((await baseOnly.json()) as { missing?: string[] }).missing).toEqual(['api_base_url']);
+      });
+
+      it('names the model alone once the endpoint has its key', async () => {
+        mockSecretResolve.mockImplementation((name: string) => (name === 'MISTRAL_API_KEY' ? 'test-only-placeholder' : null));
+        mockGetUserConfig.mockReturnValue({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' });
+        const res = await run();
+        expect(((await res.json()) as { missing?: string[] }).missing).toEqual(['model_id']);
+      });
+
+      it('names a provider behind the OpenAI wire by its brand, not the config key', async () => {
+        mockGetUserConfig.mockReturnValue({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-medium-2604' });
+        const res = await run();
+        expect(res.status).toBe(400);
+        const body = await res.json() as { provider?: string; error: string };
+        expect(body.provider).toBe('Mistral');
+        expect(body.error).not.toContain('openai');
+      });
+
+      it('tells a mandate to ask the owner, and names neither provider nor settings page', async () => {
+        const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+        // A chat the mandate started itself, on a live grant: the run is the mandate's to send.
+        const ref = (api as unknown as { engine: { getThreadStore: () => unknown; getMandateEnds: () => unknown } }).engine;
+        const origThreads = ref.getThreadStore;
+        const origEnds = ref.getMandateEnds;
+        ref.getThreadStore = (): unknown => ({ getThread: () => ({ created_by: 'mandate:eva@example.invalid' }) });
+        ref.getMandateEnds = (): unknown => ({ record: (): void => {}, isLive: (): boolean => true });
+        api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+        try {
+          const res = await run();
+          expect(res.status).toBe(400);
+          expect(await res.json()).toEqual({
+            error: 'No AI provider is set up on this instance yet. Only the owner can do that, so ask the owner.',
+            code: 'llm_not_configured',
+            may_configure: false,
+          });
+          expect(mockSessionRun).not.toHaveBeenCalled();
+        } finally {
+          api.setPrincipalResolverForTesting(resolver);
+          ref.getThreadStore = origThreads;
+          ref.getMandateEnds = origEnds;
+        }
+      });
+    });
+
     it('streams SSE events for a run', async () => {
       // Make run complete immediately
       mockSessionRun.mockImplementation(async () => {
@@ -3220,7 +3340,7 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('an answer to a question the restart closed hears that the run is gone; one that timed out hears "expired"', async () => {
+    it('an answer to a question the restart closed hears that the run is gone; one that timed out hears that', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'lynox-reply-closed-'));
       const history = new RunHistory(join(dir, 'history.db'));
       const { PromptStore } = await import('../core/prompt-store.js');
@@ -3228,7 +3348,7 @@ describe('LynoxHTTPApi', () => {
       const restarted = store.insertAskUser('s-restart', 'Which list?');
       store.expireUnparked();
       const timedOut = store.insertAskUser('s-ttl', 'Which list?');
-      store.expirePrompt(timedOut);
+      store.expirePrompt(timedOut, 'timed_out');
       const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
       const original = engineRef.getPromptStore;
       engineRef.getPromptStore = (): unknown => store;
@@ -3265,7 +3385,56 @@ describe('LynoxHTTPApi', () => {
         const expired = await jsonFetch('/api/sessions/s-ttl/reply', { method: 'POST', body: JSON.stringify({ promptId: timedOut, answer: 'B' }) });
         expect(expired.status).toBe(410);
         const expiredBody = await expired.json() as { error: string; code?: string };
-        expect(expiredBody).toEqual({ error: 'Prompt expired' });
+        expect(expiredBody).toEqual({ error: 'Prompt closed: its time ran out.', code: 'timed_out' });
+
+      } finally {
+        engineRef.getPromptStore = original;
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('an answer to a closed question hears why it was closed, for every reason', async () => {
+      repayRateWindow();
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-reply-reason-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const store = new PromptStore(history.getDb());
+      const reasons = ['timed_out', 'run_stopped', 'run_taken_over', 'thread_deleted', 'mandate_ended', 'plan_paused', 'plan_taken_over', 'plan_ended', 'superseded'] as const;
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const original = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => store;
+      try {
+        for (const reason of reasons) {
+          const id = store.insertAskUser(`s-${reason}`, 'Which list?');
+          store.expirePrompt(id, reason);
+          const res = await jsonFetch(`/api/sessions/s-${reason}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'B' }) });
+          expect(res.status, reason).toBe(410);
+          const body = await res.json() as { error: string; code?: string };
+          expect(body.code, reason).toBe(reason);
+          expect(body.error, reason).toMatch(/^Prompt closed: /);
+        }
+
+        // A row closed before the reasons were written keeps the bare answer, without a code.
+        const legacy = store.insertAskUser('s-legacy', 'Which list?');
+        history.getDb().prepare("UPDATE pending_prompts SET status = 'expired' WHERE id = ?").run(legacy);
+        const old = await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ promptId: legacy, answer: 'B' }) });
+        expect(old.status).toBe(410);
+        expect(await old.json()).toEqual({ error: 'Prompt expired' });
+
+        // Pending, yet past its time: the answer finds it closed by its clock.
+        const lapsed = store.insertAskUser('s-lapsed', 'Which list?');
+        history.getDb().prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 3_000).toISOString(), lapsed);
+        const late = await jsonFetch('/api/sessions/s-lapsed/reply', { method: 'POST', body: JSON.stringify({ promptId: lapsed, answer: 'B' }) });
+        expect(late.status).toBe(410);
+        expect((await late.json() as { code?: string }).code).toBe('timed_out');
+
+        // The same for a secret's question: settling it fails on its clock.
+        const lapsedSecret = store.insertAskSecret('s-lapsed-secret', 'API_KEY', 'Paste the key');
+        history.getDb().prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 3_000).toISOString(), lapsedSecret);
+        const lateSecret = await jsonFetch('/api/sessions/s-lapsed-secret/secret-saved', { method: 'POST', body: JSON.stringify({ promptId: lapsedSecret, status: 'saved' }) });
+        expect(lateSecret.status).toBe(410);
+        expect((await lateSecret.json() as { code?: string }).code).toBe('timed_out');
       } finally {
         engineRef.getPromptStore = original;
         history.close();
@@ -3324,7 +3493,7 @@ describe('LynoxHTTPApi', () => {
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
-        expires_at TEXT NOT NULL
+        closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
@@ -3352,7 +3521,7 @@ describe('LynoxHTTPApi', () => {
             // The real takeover expires the prompt and aborts the previous
             // session; here we inline the prompt-expiry path and schedule a
             // delete to mirror the previous handler's `finally` block.
-            realPromptStore.expirePrompt(promptId);
+            realPromptStore.expirePrompt(promptId, 'run_stopped');
             setTimeout(() => runningSessions.delete('stale-1'), drainDelay);
           },
         });
@@ -3418,7 +3587,7 @@ describe('LynoxHTTPApi', () => {
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
-        expires_at TEXT NOT NULL
+        closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
@@ -3535,10 +3704,14 @@ describe('LynoxHTTPApi', () => {
     async function withParkedRun(
       sid: string,
       body: (ctx: {
-        prompts: { getPending: (s: string) => unknown };
+        prompts: { getPending: (s: string) => unknown; getById: (id: string) => { closed_reason: string | null } | undefined };
         slots: Map<string, unknown>;
         runRes: Response;
+        /** The question the run is parked on. */
+        promptId: string;
       }) => Promise<void>,
+      /** Ask with the run's abort signal, which `session.abort()` fires, as the real agent loop does. */
+      opts: { signalled?: boolean } = {},
     ): Promise<void> {
       const Database = (await import('better-sqlite3')).default;
       const db = new Database(':memory:');
@@ -3568,7 +3741,7 @@ describe('LynoxHTTPApi', () => {
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
-        expires_at TEXT NOT NULL
+        closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
@@ -3585,8 +3758,10 @@ describe('LynoxHTTPApi', () => {
         // exactly as the real one does.
         mockSessionRun.mockImplementationOnce(async () => {
           const promptUser = mockSessionInstance.promptUser as
-            (q: string, o?: string[]) => Promise<string>;
-          const answer = await promptUser('Which repo did you mean?', ['lynox', 'lynox-pro']);
+            (q: string, o?: string[], meta?: { signal?: AbortSignal }) => Promise<string>;
+          const run = new AbortController();
+          if (opts.signalled === true) mockSessionAbort.mockImplementationOnce(() => { run.abort(); });
+          const answer = await promptUser('Which repo did you mean?', ['lynox', 'lynox-pro'], opts.signalled === true ? { signal: run.signal } : undefined);
           return `settled:${answer}`;
         });
         const runRes = await jsonFetch(`/api/sessions/${sid}/run`, {
@@ -3607,7 +3782,7 @@ describe('LynoxHTTPApi', () => {
         // only becomes a defect once teardown cannot clear it.
         expect(slots.has(sid)).toBe(true);
 
-        await body({ prompts: realPromptStore, slots, runRes });
+        await body({ prompts: realPromptStore, slots, runRes, promptId: pending!.id });
         await runRes.text();
       } finally {
         engineRef.getPromptStore = originalGetPromptStore;
@@ -3627,13 +3802,14 @@ describe('LynoxHTTPApi', () => {
     }
 
     it('POST /abort on a parked run frees the slot — the next message is not 409', async () => {
-      await withParkedRun('abort-parked-1', async ({ prompts, slots }) => {
+      await withParkedRun('abort-parked-1', async ({ prompts, slots, promptId }) => {
         const abortRes = await jsonFetch('/api/sessions/abort-parked-1/abort', { method: 'POST' });
         expect(abortRes.status).toBe(200);
 
         await expectSlotReclaimed(slots, 'abort-parked-1');
-        // Settled, not left pending for the 24 h TTL.
+        // Settled, not left pending for the 24 h TTL, and an answer that comes later hears it was stopped.
         expect(prompts.getPending('abort-parked-1')).toBeUndefined();
+        expect(prompts.getById(promptId)?.closed_reason).toBe('run_stopped');
 
         // The reported symptom: the user can send the next message.
         mockSessionRun.mockResolvedValueOnce('ok');
@@ -3651,6 +3827,21 @@ describe('LynoxHTTPApi', () => {
     // live on the Session, and the case that needs reclaiming most is the one
     // where the Session is already gone — a thread deleted while its run was
     // parked. Behind the guard, the backstop would be unreachable exactly there.
+    it('a new message that takes over a parked run with a dead stream closes its question as taken over', async () => {
+      repayRateWindow();
+      await withParkedRun('takeover-parked-1', async ({ prompts, slots, promptId }) => {
+        (slots.get('takeover-parked-1') as { streamAlive: boolean }).streamAlive = false;
+        mockSessionRun.mockResolvedValueOnce('second response');
+        const next = await jsonFetch('/api/sessions/takeover-parked-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'something else', protocol: 1 }),
+        });
+        expect(next.status).toBe(200);
+        await next.text();
+        expect(prompts.getById(promptId)?.closed_reason).toBe('run_taken_over');
+      }, { signalled: true });
+    });
+
     it('POST /abort reclaims a parked run even when the Session is already gone', async () => {
       await withParkedRun('abort-parked-2', async ({ prompts, slots }) => {
         mockSessionGet.mockReturnValueOnce(undefined);
@@ -3682,7 +3873,7 @@ describe('LynoxHTTPApi', () => {
     // check, so this is a click away while a run is parked. Five stranded
     // reservations exhaust the run executor (capacity 5) and 429 every thread.
     it('DELETE /api/threads/:id reclaims a parked run instead of stranding its slot', async () => {
-      await withParkedRun('abort-parked-4', async ({ prompts, slots }) => {
+      await withParkedRun('abort-parked-4', async ({ prompts, slots, promptId }) => {
         const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
         const origGetThreadStore = engineRef.getThreadStore;
         engineRef.getThreadStore = (): unknown => ({
@@ -3695,6 +3886,8 @@ describe('LynoxHTTPApi', () => {
 
           await expectSlotReclaimed(slots, 'abort-parked-4');
           expect(prompts.getPending('abort-parked-4')).toBeUndefined();
+          // A late answer hears that the chat is gone, not that the run was stopped.
+          expect(prompts.getById(promptId)?.closed_reason).toBe('thread_deleted');
         } finally {
           engineRef.getThreadStore = origGetThreadStore;
         }
@@ -3706,7 +3899,7 @@ describe('LynoxHTTPApi', () => {
     // the way the thread delete stops its own, and waits for the slot BEFORE the
     // first wipe — so the witness is the slot's state at the moment of the wipe.
     it('DELETE /api/data stops a parked run and waits for its slot before it erases', async () => {
-      await withParkedRun('erase-parked-1', async ({ prompts, slots }) => {
+      await withParkedRun('erase-parked-1', async ({ prompts, slots, promptId }) => {
         const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown; getMemory: () => unknown } }).engine;
         const origGetThreadStore = engineRef.getThreadStore;
         const origGetMemory = engineRef.getMemory;
@@ -3739,6 +3932,7 @@ describe('LynoxHTTPApi', () => {
           expect(slotHeldAtWipe, 'fixture: the thread wipe must have run').toBeDefined();
           expect(slotHeldAtWipe, 'the run still held its slot when the threads were wiped').toBe(false);
           expect(prompts.getPending('erase-parked-1')).toBeUndefined();
+          expect(prompts.getById(promptId)?.closed_reason, 'the erasure stopped the run that asked').toBe('run_stopped');
           expect(order.lastIndexOf('memory'), 'every awaiting step before the first wipe').toBeLessThan(order.indexOf('threads'));
           // Sessions dropped inside the synchronous stretch: after the last await,
           // so none created during the flat-file step survives the wipe.
@@ -4641,7 +4835,7 @@ describe('LynoxHTTPApi', () => {
         answered_by TEXT,
         answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
-        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
       const { PromptStore } = await import('../core/prompt-store.js');
@@ -4739,7 +4933,7 @@ describe('LynoxHTTPApi', () => {
     // A tab left over from an earlier run reports on its own question; the session may have
     // asked a newer one since, which that report must not settle.
     it.each([
-      ['expired', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.expirePrompt(id), 410],
+      ['expired', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.expirePrompt(id, 'run_stopped'), 410],
       ['answered', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.answerSecret(id, 'saved', OWNER_PRINCIPAL), 200],
     ] as const)('a named question that was %s leaves the newer open one alone', async (_label, close, expected) => {
       repayRateWindow();
@@ -4838,7 +5032,7 @@ describe('LynoxHTTPApi', () => {
         answered_by TEXT,
         answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
-        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
       const { PromptStore } = await import('../core/prompt-store.js');
@@ -4918,7 +5112,7 @@ describe('LynoxHTTPApi', () => {
       repayRateWindow();
       await withStore(async (sid, ps) => {
         const old = ps.insertConnectMail(sid, 'q', payload);
-        ps.expirePrompt(old);
+        ps.expirePrompt(old, 'run_stopped');
         const fresh = ps.insertConnectMail(sid, 'q', payload);
         const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
           method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: old }),
@@ -5464,6 +5658,38 @@ describe('LynoxHTTPApi', () => {
       const r = await connect(TAG, true, 'no-such-profile');
       expect(r.status).toBe(403);
       expect(r.text).toContain(OWN_ONLY);
+    });
+
+    // The profile list tells the page where the connect start goes through, by the same
+    // predicate (ux U-109): the page offers a mandate the link only on a profile it set up.
+    it('says per profile in the list whether this session may start the connection', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      const profile = (id: string, author: string | undefined) => ({
+        id, name: id, base_url: 'https://api.example.com', description: 'd', auth: { type: 'bearer' as const },
+        ...(author === undefined ? {} : { created_by: author }),
+      });
+      store.register(profile('own', TAG));
+      store.register(profile('owners', undefined));
+      store.register(profile('others', 'mandate:someone-else@example.invalid'));
+      mockGetApiStore.mockReturnValue(store);
+      const eng = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const priorEnds = eng['getMandateEnds'];
+      eng['getMandateEnds'] = () => ({ isLive: (mid: string) => mid === 'TEST-MANDATE-1' });
+      const mayConnect = async (asMandate: boolean): Promise<Record<string, unknown>> => {
+        const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
+        const res = await fetch(`${baseUrl}/api/api-profiles`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        const list = await res.json() as { profiles: { id: string; reader_may_connect?: unknown }[] };
+        return Object.fromEntries(list.profiles.map((p) => [p.id, p.reader_may_connect]));
+      };
+      try {
+        expect(await mayConnect(true)).toEqual({ own: true, owners: false, others: false });
+        expect(await mayConnect(false)).toEqual({ own: true, owners: true, others: true });
+      } finally {
+        eng['getMandateEnds'] = priorEnds;
+        mockGetApiStore.mockReturnValue(null);
+      }
     });
 
     it('starts a mandate\'s connection on a profile it wrote, signing the mandate into the state', async () => {
@@ -6070,6 +6296,141 @@ describe('LynoxHTTPApi', () => {
       const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
       expect(lastCall).toBeDefined();
       expect(lastCall![0]['balanced_model']).toBe('claude-sonnet-5');
+    });
+
+    // ── The write is checked by the loader BEFORE it happens ──
+    // A file the loader refuses answered every later GET and PUT with a 500 and stopped the next
+    // boot. `checkCandidateConfig` is the real one here (see the mock), run on the merged file.
+    describe('PUT /api/config checks the candidate before it writes', () => {
+      const DEFAULT_STORED = { default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' };
+      const stored = async (cfg: Record<string, unknown>) => {
+        const { readUserConfig } = await import('../core/config.js');
+        (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue(cfg);
+      };
+      const saves = async () => {
+        const { saveUserConfig } = await import('../core/config.js');
+        return (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.length;
+      };
+      afterEach(async () => { await stored(DEFAULT_STORED); });
+
+      it('refuses a new slot whose model this version does not know, and writes nothing', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'max-quality' });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model' } } }),
+        });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toBe("A tier names the model 'claude-retired-model', which this version does not know. Choose a listed model for that tier.");
+        expect(await saves()).toBe(before);
+      });
+
+      it('refuses a candidate the loader would not load, names the model, and writes nothing', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'balanced' });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } } }),
+        });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toBe("A tier names the model 'my-local-model', which this version does not know. Choose a listed model for that tier.");
+        expect(await saves()).toBe(before);
+      });
+
+      it('an already stored replaced slot does not block saving the rest, and a valid PUT repairs it', async () => {
+        repayRateWindow();
+        const broken = { ...DEFAULT_STORED, tier_preset: 'max-quality', tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model' } } };
+        await stored(broken);
+        const before = await saves();
+        // The UI re-sends the stored slot with another field: saved.
+        const resend = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ thinking_mode: 'disabled', tier_set: broken.tier_set }),
+        });
+        expect(resend.status).toBe(200);
+        // A slot with a known model replaces it: saved, and the file carries the new slot.
+        const repair = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-5' } } }),
+        });
+        expect(repair.status).toBe(200);
+        expect(await saves()).toBe(before + 2);
+        const { saveUserConfig } = await import('../core/config.js');
+        const last = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1)![0];
+        expect((last['tier_set'] as Record<string, { model_id: string }>)['deep']!.model_id).toBe('claude-opus-5');
+      });
+
+      it('another loader error is refused with a fixed sentence: its own text may quote the environment', async () => {
+        repayRateWindow();
+        const KEY_SHAPED = 'sk-ant-api03-' + 'Q'.repeat(40);
+        const { checkCandidateConfig } = await import('../core/config.js');
+        (checkCandidateConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({ replacedSlots: [], error: `boom ANTHROPIC_API_KEY=${KEY_SHAPED}\nsecond line ${KEY_SHAPED}` });
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          const before = await saves();
+          const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ thinking_mode: 'disabled' }) });
+          expect(res.status).toBe(400);
+          expect(((await res.json()) as { error: string }).error).toBe('This configuration could not be loaded, so it was not saved.');
+          expect(await saves()).toBe(before);
+          // The text goes to the log instead: its first line, with the key masked.
+          const logged = stderr.mock.calls.flat().join(' ');
+          expect(logged).toContain('refused a configuration the loader rejects: boom');
+          expect(logged).not.toContain(KEY_SHAPED);
+          expect(logged).not.toContain('second line');
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('a stored slot re-sent without the key GET redacted does not block saving the rest', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'max-quality', tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model', api_key: 'sk-user-own' } } });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ thinking_mode: 'disabled', tier_set: { deep: { model_id: 'claude-retired-model', provider: 'anthropic' } } }),
+        });
+        expect(res.status).toBe(200);
+        expect(await saves()).toBe(before + 1);
+      });
+
+      it('self-host: a stored file the loader refuses is repaired by a PUT that clears the slot', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'balanced', tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } } });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ tier_set: {} }) });
+        expect(res.status).toBe(200);
+        expect(await saves()).toBe(before + 1);
+        const { saveUserConfig } = await import('../core/config.js');
+        const last = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1)![0];
+        expect(last['tier_set']).toEqual({});
+      });
+
+      it('GET reports a slot whose model the load replaced', async () => {
+        repayRateWindow();
+        const { replacedTierSlots } = await import('../core/config.js');
+        (replacedTierSlots as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce([{ tier: 'deep', model_id: 'claude-retired-model', runs: 'claude-opus-5' }]);
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as Record<string, unknown>)['replaced_tier_slots']).toEqual([{ tier: 'deep', model_id: 'claude-retired-model', runs: 'claude-opus-5' }]);
+        // And none without one: the field is absent, not an empty list.
+        const plain = await jsonFetch('/api/config');
+        expect(((await plain.json()) as Record<string, unknown>)['replaced_tier_slots']).toBeUndefined();
+      });
+
+      it('a slot with a known model passes the check', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'max-quality' });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-5' } } }),
+        });
+        expect(res.status).toBe(200);
+        expect(await saves()).toBe(before + 1);
+      });
     });
 
     it('PUT accepts resetting balanced_model to the Sonnet 4.6 default', async () => {
@@ -8155,7 +8516,7 @@ describe('LynoxHTTPApi', () => {
         answered_by TEXT,
         answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
-        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, closed_reason TEXT, expires_at TEXT NOT NULL
       )`).run();
       db.prepare(`CREATE UNIQUE INDEX idx_pp_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
       const { PromptStore } = await import('../core/prompt-store.js');
@@ -8333,7 +8694,7 @@ describe('LynoxHTTPApi', () => {
         // db closes. Without this the timer fires ~30s later against a closed
         // handle and surfaces as an unhandled error charged to a LATER test.
         const pending = ps.getPending('sse-wf');
-        if (pending) ps.expirePrompt(pending.id);
+        if (pending) ps.expirePrompt(pending.id, 'run_stopped');
         await parked;
       });
     });
@@ -8459,7 +8820,7 @@ describe('LynoxHTTPApi', () => {
       const run = new AbortController();
       withdrawPromptOnAbort(failing, 'p1', run.signal);
       expect(() => run.abort()).not.toThrow();
-      expect(failing.expirePrompt).toHaveBeenCalledWith('p1');
+      expect(failing.expirePrompt).toHaveBeenCalledWith('p1', 'run_stopped');
 
       const store = { expirePrompt: vi.fn(() => true) };
       const later = new AbortController();
@@ -8470,6 +8831,17 @@ describe('LynoxHTTPApi', () => {
       expect(removed).toHaveBeenCalledWith('abort', added.mock.calls[0]![1]);
       later.abort();
       expect(store.expirePrompt).not.toHaveBeenCalled();
+    });
+
+    it('withdrawPromptOnAbort: the reason is read when the run ends, so a takeover that says so first is what the question records', async () => {
+      const { withdrawPromptOnAbort } = await import('./http-api.js');
+      const store = { expirePrompt: vi.fn(() => true) };
+      const run = new AbortController();
+      let endedBy: 'run_stopped' | 'run_taken_over' = 'run_stopped';
+      withdrawPromptOnAbort(store, 'p3', run.signal, () => endedBy);
+      endedBy = 'run_taken_over';
+      run.abort();
+      expect(store.expirePrompt).toHaveBeenCalledWith('p3', 'run_taken_over');
     });
 
     it('an Allow and a stop in the same moment: exactly one wins, and a withdrawn question never runs', async () => {
@@ -12064,6 +12436,181 @@ describe('LynoxHTTPApi', () => {
       expect(body.status).toBe('completed');
       // No body → no re-target params (4th arg undefined); 5th = engine runtime.
       expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything(), undefined, expect.anything());
+    });
+
+    describe('the Run button runs a workflow as whoever shaped it (1055, decision A)', () => {
+      const MID = 'grant-eva';
+      const mandateMade = {
+        createdBy: 'mandate:eva@kanzlei.example', createdMandateId: MID, createdAt: '2026-10-01 00:00:00',
+        mandateEditor: null, mandateEditorId: null, mandateEditedAt: null,
+        coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null,
+        coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
+      };
+      const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+      let origEnds: unknown;
+      let live = true;
+      beforeEach(() => {
+        origEnds = engineRef()['getMandateEnds'];
+        live = true;
+        engineRef()['getMandateEnds'] = () => ({ record: (): void => {}, isLive: (id: string): boolean => live && id === MID });
+        mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-1', status: 'completed' });
+      });
+      afterEach(() => { engineRef()['getMandateEnds'] = origEnds; mockHistoryGetWorkflowAuthorship.mockReturnValue(OWNER_WORKFLOW_AUTHORSHIP); });
+      const runtimeOf = (): Record<string, unknown> => mockRunSavedWorkflow.mock.calls.at(-1)![4] as Record<string, unknown>;
+
+      it('runs a live mandate\'s workflow as that mandate when the owner presses Run', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+        expect(res.status).toBe(200);
+        expect(mockHistoryGetWorkflowAuthorship).toHaveBeenCalledWith('wf-1');
+        expect(runtimeOf()['principal']).toMatchObject({ kind: 'mandate', email: 'eva@kanzlei.example', mandateId: MID });
+      });
+
+      it('runs the owner\'s own workflow as the owner (control)', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: null, createdMandateId: null });
+        const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+        expect(res.status).toBe(200);
+        expect(runtimeOf()['principal']).toEqual({ kind: 'owner' });
+      });
+
+      it('refuses once that mandate\'s access ended, naming the person, and starts nothing', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        live = false;
+        const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+        expect(res.status).toBe(403);
+        const body = await res.json() as { code?: string; runs_as?: unknown };
+        expect(body.code).toBe('author_ended');
+        expect(body.runs_as).toBe('eva@kanzlei.example');
+        expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+      });
+
+      it('runs it as a plan\'s run with no stamp, so the mandate\'s own connections stay unlisted', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const { currentPlanOf, currentPlanStamp } = await import('../core/plan-run-context.js');
+        let seen: { planOf: unknown; stamp: unknown } | undefined;
+        mockRunSavedWorkflow.mockImplementation(async () => { seen = { planOf: currentPlanOf(), stamp: currentPlanStamp() }; return { ok: true, runId: 'run-1', status: 'completed' }; });
+        expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
+        expect(seen).toEqual({ planOf: expect.objectContaining({ kind: 'mandate', email: 'eva@kanzlei.example' }), stamp: null });
+      });
+
+      it('CONTROL: the owner\'s own workflow runs outside any plan', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: null, createdMandateId: null });
+        const { currentPlanOf } = await import('../core/plan-run-context.js');
+        let planOf: unknown = 'unset';
+        mockRunSavedWorkflow.mockImplementation(async () => { planOf = currentPlanOf(); return { ok: true, runId: 'run-1', status: 'completed' }; });
+        expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
+        expect(planOf).toBeUndefined();
+      });
+
+      it('records the mandate\'s run in the instance log, a start and an end under one key', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const record = vi.fn();
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record });
+        try {
+          expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
+        } finally { engineRef()['getAuditLog'] = origLog; }
+        const rows = record.mock.calls.map((c) => c[0] as { principal: { kind: string }; action: string; phase: string; correlationId: string; target: string });
+        const runRows = rows.filter((r) => r.action === 'workflow:run');
+        expect(runRows.map((r) => [r.principal.kind, r.phase])).toEqual([['mandate', 'attempt'], ['mandate', 'done']]);
+        expect(runRows[0]!.correlationId).toBe(runRows[1]!.correlationId);
+        // The start row says the owner started it by hand, unlike the mandate's own chat run, in the
+        // words the trail view reads: the view shows it as started by hand.
+        expect(runRows[0]!.target).toContain('started=hand');
+        expect(runRows[0]!.target).toContain('by=owner');
+        const { targetPairs } = await import('../core/audit-trail-view.js');
+        expect(targetPairs(runRows[0]!.target).get('started')).toBe('hand');
+      });
+
+      it('runs the steps under the key of that run record, which their rows take from the plan-run context', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const record = vi.fn();
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record });
+        const { currentPlanRun } = await import('../core/plan-run-context.js');
+        let stepKey: string | undefined;
+        mockRunSavedWorkflow.mockImplementation(async () => {
+          stepKey = currentPlanRun({ kind: 'mandate', email: 'eva@kanzlei.example', mandateId: MID });
+          return { ok: true, runId: 'run-1', status: 'completed' };
+        });
+        try {
+          expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
+        } finally { engineRef()['getAuditLog'] = origLog; }
+        const start = record.mock.calls.map((c) => c[0] as { action: string; correlationId: string }).find((r) => r.action === 'workflow:run');
+        expect(stepKey).toBeDefined();
+        expect(stepKey).toBe(start!.correlationId);
+      });
+
+      it('ends the run record as failed when the run fails', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-1', status: 'failed' });
+        const record = vi.fn();
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record });
+        try {
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+        } finally { engineRef()['getAuditLog'] = origLog; }
+        const phases = record.mock.calls.map((c) => c[0] as { action: string; phase: string }).filter((r) => r.action === 'workflow:run').map((r) => r.phase);
+        expect(phases).toEqual(['attempt', 'failed']);
+      });
+
+      it('does not run the mandate\'s workflow when its start cannot be recorded', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => null;
+        try {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          expect(res.status).toBe(400);
+          expect(((await res.json()) as { error: string }).error).toContain('cannot be recorded');
+        } finally { engineRef()['getAuditLog'] = origLog; }
+        expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+      });
+
+      it('hands the runner the check of the workflow as it reads it', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        expect((await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' })).status).toBe(200);
+        const check = runtimeOf()['checkWorkflow'] as (p: { id: string; confirmedAt?: string }) => string | null;
+        expect(check({ id: 'wf-1', confirmedAt: '2026-10-01T00:00:00Z' })).toBeNull();
+        // Someone else's edit after the route looked: the runner's read names another author.
+        mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: null, createdMandateId: null });
+        expect(check({ id: 'wf-1', confirmedAt: '2026-10-01T00:00:00Z' })).toContain('changed after Run was pressed');
+      });
+
+      it('lists whom each workflow runs as for the owner, and whether that person\'s access ended', async () => {
+        mockHistoryGetPlannedPipelines.mockReturnValue([
+          { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },
+          { id: 'wf-o', manifest_name: 'O', manifest_json: JSON.stringify({ template: true, name: 'O', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-20T00:00:00Z' },
+        ]);
+        mockHistoryGetWorkflowAuthorship.mockImplementation((id: string) => (id === 'wf-m' ? mandateMade : undefined));
+        live = false;
+        const res = await jsonFetch('/api/workflows/library');
+        const body = await res.json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+        expect(body.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true });
+        expect(body.workflows.find((w) => w.id === 'wf-o')).not.toHaveProperty('runs_as');
+        mockHistoryGetWorkflowAuthorship.mockReset();
+        mockHistoryGetPlannedPipelines.mockReturnValue([]);
+      });
+
+      it('lists no one\'s email to a mandate reading the library', async () => {
+        mockHistoryGetPlannedPipelines.mockReturnValue([
+          { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },
+        ]);
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+        const cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+        try {
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'ida@kanzlei.example', mandateId: MID }));
+          const asMandate = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+          expect(asMandate.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('runs_as');
+          // Twin on the same machinery: the owner gets it.
+          api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+          const asOwner = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+          expect(asOwner.workflows.find((w) => w.id === 'wf-m')).toHaveProperty('runs_as');
+        } finally {
+          api.setPrincipalResolverForTesting(cookieResolver);
+          mockHistoryGetPlannedPipelines.mockReturnValue([]);
+        }
+      });
     });
 
     // A library Run has no trigger, so its steps file no mail for approval and keep being

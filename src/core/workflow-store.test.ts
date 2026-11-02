@@ -113,13 +113,18 @@ describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
     expect((JSON.parse(got.definitionJson) as { goal: string }).goal).toBe('g');
   });
 
-  it('rename patches ALL prefix matches (mirrors legacy unbounded UPDATE)', () => {
+  it('rename lands on one row: the exact id, else the only one it is a prefix of, else none', () => {
     const { store } = make();
     store.upsert({ id: 'abc-1', name: 'Old', definitionJson: JSON.stringify({ id: 'abc-1', name: 'Old' }), isTemplate: true }, null);
     store.upsert({ id: 'abc-2', name: 'Old', definitionJson: JSON.stringify({ id: 'abc-2', name: 'Old' }), isTemplate: true }, null);
-    expect(store.rename('abc', 'New', null)).toBe(true); // short prefix hits both
-    expect(store.get('abc-1')!.name).toBe('New');
-    expect(store.get('abc-2')!.name).toBe('New');
+    expect(store.rename('abc', 'New', null)).toBe(false); // a prefix of two names neither
+    expect(store.get('abc-1')!.name).toBe('Old');
+    expect(store.get('abc-2')!.name).toBe('Old');
+    expect(store.rename('abc-2', 'New', null)).toBe(true);
+    expect(store.rename('abc-', 'X', null)).toBe(false); // still a prefix of two
+    store.remove('abc-1');
+    expect(store.rename('abc', 'Short', null)).toBe(true); // now a prefix of one
+    expect(store.get('abc-2')!.name).toBe('Short');
   });
 
   it('rename returns false for an unknown id', () => {
@@ -134,11 +139,71 @@ describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
     expect((JSON.parse(store.get('wf1')!.definitionJson) as { confirmedAt: string }).confirmedAt).toBe('2026-07-01T00:00:00Z');
   });
 
-  it('remove deletes by exact id and by prefix (mirrors deletePlannedPipeline)', () => {
+  it('remove deletes by exact id and by an unambiguous prefix', () => {
     const { store } = make();
     store.upsert({ id: 'abcdef-1234', name: 'W', definitionJson: '{}', isTemplate: false }, null);
-    expect(store.remove('abcdef')).toBe(true); // prefix match
+    expect(store.remove('abcdef')).toBe(true); // prefix of one row
     expect(store.get('abcdef-1234')).toBeUndefined();
+  });
+
+  // A write names one workflow. An id that is a prefix of another (`wf-a` of `wf-ab`, the latter
+  // possibly another mandate's) must not carry the write onto it.
+  describe('a write on wf-a leaves wf-ab alone', () => {
+    function two() {
+      const m = make();
+      for (const id of ['wf-a', 'wf-ab']) {
+        m.store.upsert({ id, name: id, definitionJson: JSON.stringify({ id, name: id }), isTemplate: true }, null);
+      }
+      return m.store;
+    }
+    const ab = (store: WorkflowStore) => store.list().find((w) => w.id === 'wf-ab')!;
+
+    it('confirming', () => {
+      const store = two();
+      expect(store.setConfirmedAt('wf-a', '2026-11-01T00:00:00Z')).toBe(true);
+      expect((JSON.parse(ab(store).definitionJson) as { confirmedAt?: string }).confirmedAt).toBeUndefined();
+      const a = store.list().find((w) => w.id === 'wf-a')!;
+      expect((JSON.parse(a.definitionJson) as { confirmedAt?: string }).confirmedAt).toBe('2026-11-01T00:00:00Z');
+    });
+
+    it('renaming, by the owner', () => {
+      const store = two();
+      expect(store.rename('wf-a', 'New', null)).toBe(true);
+      expect(ab(store).name).toBe('wf-ab');
+      expect(store.list().find((w) => w.id === 'wf-a')!.name).toBe('New');
+    });
+
+    it('renaming, by a mandate, which also marks the row it renames', () => {
+      const store = two();
+      const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+      expect(store.rename('wf-a', 'New', eva)).toBe(true);
+      expect(ab(store).name).toBe('wf-ab');
+      expect(store.authorship('wf-ab')!.mandateEditor).toBeNull();
+      expect(store.authorship('wf-a')!.mandateEditor).not.toBeNull();
+    });
+
+    it('deleting', () => {
+      const store = two();
+      expect(store.remove('wf-a')).toBe(true);
+      expect(store.list().map((w) => w.id)).toEqual(['wf-ab']);
+    });
+  });
+
+  it('a prefix of two names neither: confirming and deleting write nothing', () => {
+    const { store } = make();
+    for (const id of ['wf-ab', 'wf-ac']) store.upsert({ id, name: id, definitionJson: JSON.stringify({ id, name: id }), isTemplate: true }, null);
+    expect(store.setConfirmedAt('wf-a', '2026-11-01T00:00:00Z')).toBe(false);
+    expect(store.remove('wf-a')).toBe(false);
+    expect(store.list().map((w) => w.id).sort()).toEqual(['wf-ab', 'wf-ac']);
+    for (const w of store.list()) expect((JSON.parse(w.definitionJson) as { confirmedAt?: string }).confirmedAt).toBeUndefined();
+    expect(store.setConfirmedAt('wf-ab', '2026-11-01T00:00:00Z')).toBe(true);   // the exact id still writes
+  });
+
+  it('reads the exact id before a longer one it is a prefix of', () => {
+    const { store } = make();
+    // Inserted longer-first, so an unordered LIMIT 1 would tend to answer with it.
+    for (const id of ['wf-ab', 'wf-a']) store.upsert({ id, name: id, definitionJson: '{}', isTemplate: true }, null);
+    expect(store.get('wf-a')!.id).toBe('wf-a');
   });
 
   it('LIKE metacharacters in an id are escaped — a "%" id does NOT wipe the table', () => {
@@ -333,23 +398,22 @@ describe('WorkflowStore authorship (engine.db v45)', () => {
     expect(store.authorship('wf')).toMatchObject({ mandateEditor: 'mandate:eva@firm.example', mandateEditorId: null });
   });
 
-  it('a mandate\'s rename marks every row it renames; the owner\'s rename marks none; neither touches the creator', () => {
+  it('a mandate\'s rename marks the row it renames; the owner\'s rename marks none; neither touches the creator', () => {
     const { store, db } = make();
     save(store, 'abc-1', OWNER_PRINCIPAL);
     save(store, 'abc-2', EVA);
     save(store, 'xyz', OWNER_PRINCIPAL);
-    expect(store.rename('abc', 'Renamed', OWNER_PRINCIPAL)).toBe(true);
-    expect(store.authorship('abc-1')!.mandateEditor).toBeNull();
+    expect(store.rename('abc-2', 'Renamed', OWNER_PRINCIPAL)).toBe(true);
     expect(store.authorship('abc-2')!.mandateEditor).toBeNull();
-    expect(store.rename('abc', 'Renamed again', MAX)).toBe(true);
-    for (const id of ['abc-1', 'abc-2']) {
-      expect(store.authorship(id)).toMatchObject({ mandateEditor: 'mandate:max@firm.example', mandateEditorId: 'grant-max' });
-      expect(store.authorship(id)!.mandateEditedAt).not.toBeNull();
-    }
+    expect(store.rename('abc-1', 'Renamed again', MAX)).toBe(true);
+    expect(store.authorship('abc-1')).toMatchObject({ mandateEditor: 'mandate:max@firm.example', mandateEditorId: 'grant-max' });
+    expect(store.authorship('abc-1')!.mandateEditedAt).not.toBeNull();
+    expect(store.authorship('abc-2')!.mandateEditor).toBeNull();
     expect(store.authorship('abc-1')!.createdBy).toBeNull();
     expect(store.authorship('abc-2')!.createdBy).toBe('mandate:eva@firm.example');
     expect(store.authorship('xyz')!.mandateEditor).toBeNull();
     expect((db.prepare("SELECT name FROM workflows WHERE id = 'abc-1'").get() as { name: string }).name).toBe('Renamed again');
+    expect((db.prepare("SELECT name FROM workflows WHERE id = 'abc-2'").get() as { name: string }).name).toBe('Renamed');
   });
 
   it('the owner\'s stamps leave every authorship column', () => {

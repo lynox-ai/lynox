@@ -50,7 +50,7 @@ export type TakeoverSchedule = 'kept' | 'next_cron' | 'run_now_only_missed' | 'r
 
 /** The prompts of a plan, in history.db: settled and detached before the takeover writes. */
 export interface TakeoverPrompts {
-  expirePendingForTrigger(triggerId: string): number;
+  expirePendingForTrigger(triggerId: string, reason: 'plan_taken_over'): number;
   getAnsweredForTrigger(triggerId: string): { readonly id: string } | undefined;
   releaseTrigger(promptId: string): boolean;
 }
@@ -357,7 +357,7 @@ export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreview
 
 /** Settles a plan's open question and detaches an answered one, so no answer from the mandate's time reaches the owner's first run. */
 function clearPrompts(prompts: TakeoverPrompts, id: string): void {
-  prompts.expirePendingForTrigger(id);
+  prompts.expirePendingForTrigger(id, 'plan_taken_over');
   // Bounded: every release detaches one row, and a row that does not detach ends the loop.
   for (let i = 0; i < 100; i++) {
     const answered = prompts.getAnsweredForTrigger(id);

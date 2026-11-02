@@ -14,6 +14,7 @@
 		type SubjectTimelineEntry,
 	} from '../api/subject-footprint.js';
 	import PersonErasurePanel from './PersonErasurePanel.svelte';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { subjectsBody } from '../utils/subjects-view.js';
 
 	// Record-on-spine R2b — the read-only subject-graph surface. A subjects list
@@ -58,6 +59,10 @@
 		if (Number.isNaN(d.getTime())) return iso;
 		return d.toLocaleDateString(getLocale() === 'de' ? 'de-CH' : 'en-US');
 	}
+
+	// Erasing a person is the owner's: the button appears once the server said this is the owner's
+	// session, and a mandate is told where an erasure request goes instead.
+	$effect(() => { void loadSettingsViewer(); });
 
 	// Escape closes the footprint panel (matches the close button + KG precedent).
 	$effect(() => {
@@ -209,10 +214,14 @@
 						onerased={(id) => { erasedIds = new Set([...erasedIds, id]); subjects = subjects.filter(x => x.id !== id); }} />
 				{/key}
 			{:else if !erasedIds.has(selected!.id)}
-				<button onclick={() => { erasing = true; }}
-					class="mt-2 w-full rounded-[var(--radius-md)] border border-danger/30 px-3 py-2 text-sm text-danger hover:bg-danger/10 transition-colors">
-					{t('erasure.open')}
-				</button>
+				{#if isOwnerSession()}
+					<button onclick={() => { erasing = true; }}
+						class="mt-2 w-full rounded-[var(--radius-md)] border border-danger/30 px-3 py-2 text-sm text-danger hover:bg-danger/10 transition-colors">
+						{t('erasure.open')}
+					</button>
+				{:else if isMandateSession()}
+					<p data-testid="erasure-owner-only" class="mt-2 text-sm text-text-subtle">{t('erasure.owner_only_notice')}</p>
+				{/if}
 			{/if}
 		{/if}
 

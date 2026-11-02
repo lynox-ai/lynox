@@ -1630,6 +1630,12 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
    ALTER TABLE run_tool_calls ADD COLUMN api_cost_usd REAL CHECK (api_cost_usd IS NULL OR api_cost_usd >= 0);
    ALTER TABLE run_tool_calls ADD COLUMN api_cost_source TEXT CHECK (api_cost_source IN ('response', 'profile', 'none'));`,
+  // v72: the chat run whose turn started a pipeline run (`ChatOrigin.runId`), nested runs
+  // included, so the chat's footer counts the paid API calls its workflow's steps sent
+  // (`getApiCallsOfRun`). NULL for a run no chat turn started and on every older row.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (72);
+   ALTER TABLE pipeline_runs ADD COLUMN started_by_run_id TEXT;
+   CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started_by ON pipeline_runs(started_by_run_id);`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -2974,6 +2980,12 @@ export class RunHistory {
    * rate, `unpriced` how many had no amount. A sub-agent's calls are on its own run, so the
    * spawn tree is walked like {@link getDescendantCostUsd}, here with the root and every status:
    * a request a failed child sent was still sent. `UNION` for the same reason as there.
+   *
+   * A workflow a run of the tree started counts too (v72): its steps are `pipeline_step` runs
+   * under the pipeline run (`spawn_parent_id` = the pipeline's id), and the pipeline names the
+   * chat run that started it (`started_by_run_id`; a nested workflow carries the same chat run).
+   * Only calls are counted here, never `cost_usd`: a step's model spend stays out of every spend
+   * aggregate (A2), and this figure is a count of requests, not spend.
    */
   getApiCallsOfRun(runId: string): { calls: number; usd: number; estimated: boolean; unpriced: number } {
     const row = this.db.prepare(`
@@ -2981,6 +2993,10 @@ export class RunHistory {
         SELECT id FROM runs WHERE id = ?
         UNION
         SELECT r.id FROM runs r JOIN tree t ON r.spawn_parent_id = t.id
+        UNION
+        SELECT r.id FROM runs r
+          JOIN pipeline_runs p ON r.spawn_parent_id = p.id
+          JOIN tree t ON p.started_by_run_id = t.id
       )
       SELECT COUNT(*) AS calls,
              COALESCE(SUM(api_cost_usd), 0) AS usd,
@@ -3279,6 +3295,7 @@ export class RunHistory {
     grantId?: string | undefined;
     startedVia?: string | undefined;
     originThreadId?: string | undefined;
+    startedByRunId?: string | undefined;
   }): void {
     persistence.insertPipelineRun(this.db, params);
   }
@@ -3378,7 +3395,8 @@ export class RunHistory {
   /** `author` is the request that saves: its turn's principal, or `null` for a write no request
    *  makes. Required, so no caller can leave it out (`WorkflowStore.upsert`). `copiedFrom` names
    *  the workflow whose steps this one copies; the copy then carries that workflow's mandate mark
-   *  (`WorkflowStore.upsertCopy`). */
+   *  (`WorkflowStore.upsertCopy`). Pass it only when the server knows the source itself; a
+   *  workflow imported from text or saved from what a session did carries its saver's mark alone. */
   insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; template?: boolean | undefined; capabilityContract?: CapabilityContract | undefined }, author: RequestPrincipal | null, copiedFrom?: string): void {
     // Fail-closed contract validation at the save chokepoint (Slice B / D2):
     // every producer (save_workflow, plan_task, the Slice-C edit tool) routes

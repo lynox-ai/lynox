@@ -2,7 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { keepSettingsItem } from '../utils/billing-tier.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	interface SettingsItem {
 		href: string;
@@ -56,9 +56,10 @@
 	let probesShown = $state<ReadonlySet<string>>(new Set());
 
 	$effect(() => {
+		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
 			.then(r => r.json())
-			.then((data: Record<string, unknown>) => { managed = !!data['managed']; noteSettingsViewer(data); })
+			.then((data: Record<string, unknown>) => { managed = !!data['managed']; noteViewer(data); })
 			.catch(() => { managed = false; });
 	});
 
@@ -105,7 +106,7 @@
 				// config — moved here from the Automation Hub. Two distinct
 				// primitives (a callable endpoint profile vs a secret), so two tiles.
 				{ href: '/app/settings/apis', titleKey: 'settings.apis', descKey: 'settings.apis_desc' },
-				{ href: '/app/settings/llm/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc' },
+				{ href: '/app/settings/llm/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc', ownerOnly: true },
 				// IA reorg (M6): ToolToggles unified from two identical tier-split
 				// mounts (workspace/tools Self-Host + privacy/tools Managed) into
 				// one all-tier entry here. The legacy routes 301 to /policy-tools.

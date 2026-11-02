@@ -55,7 +55,7 @@ import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import { legacyMemoryReason, type LegacyMemoryReason } from './memory-tool-set.js';
-import { compose, engineText, renderFence } from '../core/data-boundary.js';
+import { collectOwnBlocks, compose, engineText, renderFence } from '../core/data-boundary.js';
 
 import {
   bashTool,
@@ -317,6 +317,8 @@ export class Engine {
   private securityAudit: import('./security-audit.js').SecurityAudit | null = null;
   private context: LynoxContext | null = null;
   private briefing: string | undefined = undefined;
+  /** The blocks wrapped into {@link briefing} as it was built; see `collectOwnBlocks`. */
+  private readonly briefingOwnBlocks: string[] = [];
   /** The vault's `<secrets>` listing at boot, apart from the briefing: an owner's turn only. */
   private secretsBriefing: string | undefined = undefined;
   private currentManifest: Map<string, number> | null = null;
@@ -1546,6 +1548,12 @@ export class Engine {
       const db = this.engineDb?.getDb();
       if (db === undefined) return;
       pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+      // A run of a plan paused here would go on until the next sweep, up to 5 minutes, with its
+      // member live again and its connections open to it. So the parts that end runs follow at
+      // once, outside the login's transaction, as on a revoke. They read what was committed: when
+      // the login's transaction fails, the pause is gone with it and so is the reason to stop.
+      // Outside any run group, as the sweeps are: ending runs belongs to no run.
+      runOutsideGroup(() => queueMicrotask(() => this.endEndedMandateRuns()));
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
@@ -1812,7 +1820,8 @@ export class Engine {
       // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
       this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
       if (loaded > 0) {
-        const apiContext = this._apiStore.formatForSystemPrompt();
+        const store = this._apiStore;
+        const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
         this.briefing = this.briefing ? `${this.briefing}\n\n${apiContext}` : apiContext;
       }
       // Inject the curated "bootstrap-suggestion" catalog regardless of how
@@ -2785,7 +2794,7 @@ export class Engine {
     try {
       pauseEndedPlans({
         db, endOf: (id) => ends.endRow(id), closedPromptOf: (id) => this.closedPromptOf(id),
-        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id); } } : {}),
+        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id, 'plan_paused'); } } : {}),
       });
     } catch (err: unknown) {
       process.stderr.write(`[lynox] pausing plans of ended mandates failed: ${processErrorText(err)}\n`);
@@ -2817,6 +2826,7 @@ export class Engine {
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
+  getBriefingOwnBlocks(): readonly string[] { return [...this.briefingOwnBlocks]; }
   getSecretsBriefing(): string | undefined { return this.secretsBriefing; }
   /** Freshly compute the first-turn task overview (overdue / due tasks) — pure SQL,
    *  no LLM. Called per-Session so the overview is current, not frozen at engine boot.
