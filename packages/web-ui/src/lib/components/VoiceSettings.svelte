@@ -9,7 +9,7 @@
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { optionLabel } from './settings-readonly/values.js';
@@ -61,6 +61,7 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const [infoRes, configRes] = await Promise.all([
 				fetch(`${getApiBase()}/voice/info`),
 				fetch(`${getApiBase()}/config`),
@@ -76,7 +77,7 @@
 				throw e;
 			}
 			// Whose session asks, before `info` shows a section: a mandate never sees the pickers flash.
-			noteSettingsViewer(body);
+			noteViewer(body);
 			info = infoBody;
 			config = {
 				transcription_provider: body.transcription_provider,

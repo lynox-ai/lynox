@@ -8,7 +8,7 @@
  * does not compile until it decides.
  */
 import type { MandateEnds } from '../core/mandate-ends.js';
-import { planAuthorshipOfWorkflow, planMandate, planMembers, principalHasEnded, type RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, planAuthorshipOfWorkflow, planMandate, mandateIdOf, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
 import type { WorkflowAuthorship } from '../core/workflow-store.js';
 
 export type RunSource =
@@ -53,6 +53,45 @@ export function savedWorkflowSource(
   if (a === undefined) return { kind: 'saved', workflowId, authors: 'unreadable', ends: ends ?? null };
   const mark = planMandate(planAuthorshipOfWorkflow(a));
   return { kind: 'saved', workflowId, authors: planMembers(undefined, mark).members, ends: ends ?? null };
+}
+
+/**
+ * Whom a run of a saved workflow is for when no plan names one: the mandate that made or last
+ * changed it, as a plan on that workflow runs (`planMembers`), else the owner. The library's Run
+ * button asks this, so the owner pressing it runs a mandate's workflow under that mandate's lock
+ * (1055, decision A). The route also runs it as a plan's run with no stamp (`runAsPlanOf`), so the
+ * mandate's own connections stay out of it, as they do on a schedule the owner has not listed
+ * them for. Unreadable authorship gives the owner here, and the run is refused by
+ * `sourceRefusal` before any step.
+ */
+export function workflowRunsAs(a: WorkflowAuthorship | undefined): RequestPrincipal {
+  if (a === undefined) return OWNER_PRINCIPAL;
+  return planMembers(undefined, planMandate(planAuthorshipOfWorkflow(a))).of ?? OWNER_PRINCIPAL;
+}
+
+export const LIBRARY_RUN_UNCONFIRMED = 'This workflow was changed after Run was pressed and waits for its steps to be reviewed again, so it did not run.';
+export const LIBRARY_RUN_AUTHOR_CHANGED = 'Whom this workflow runs for changed after Run was pressed, or could not be read again, so it did not run. Press Run again.';
+
+/**
+ * The check the library's Run hands the runner, asked on the workflow exactly as the runner read
+ * it: the route decided the run's principal and saw the workflow confirmed, then awaited the
+ * budget and the claim, and an edit in between must not run under the earlier decision. Refused
+ * when the read workflow is no longer confirmed, or when whoever made or last changed it is no
+ * longer `runAs` (another mandate's edit would run as the first one, an edit to the owner's as the
+ * owner without any lock).
+ */
+export function libraryRunCheck(
+  runAs: RequestPrincipal,
+  read: (id: string) => WorkflowAuthorship | undefined,
+): (planned: { readonly id: string; readonly confirmedAt?: string | undefined }) => string | null {
+  return (planned) => {
+    if (!planned.confirmedAt) return LIBRARY_RUN_UNCONFIRMED;
+    let a: WorkflowAuthorship | undefined;
+    try { a = read(planned.id); } catch { a = undefined; }
+    const now = workflowRunsAs(a);
+    // The grant too: the same person under a later access is not the one the route decided on.
+    return principalTag(now) === principalTag(runAs) && mandateIdOf(now) === mandateIdOf(runAs) ? null : LIBRARY_RUN_AUTHOR_CHANGED;
+  };
 }
 
 /** Why a run of this source must not start, or undefined when it may. `depth` is the run's

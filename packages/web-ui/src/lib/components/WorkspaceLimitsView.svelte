@@ -25,7 +25,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { formatContextWindow } from '../utils/context-window.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { orNotSet } from './settings-readonly/values.js';
@@ -67,13 +67,14 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const body = (await res.json()) as UserConfig & {
 				managed?: string;
 				capabilities?: { hard_limits?: HardLimits };
 			};
-			noteSettingsViewer(body);
+			noteViewer(body);
 			// Narrow to the 4 fields this surface owns — preserves type safety
 			// and avoids stomping unrelated config on save.
 			config = {

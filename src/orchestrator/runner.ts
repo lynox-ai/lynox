@@ -54,7 +54,9 @@ export interface RunManifestOptions {
    * Who started the run. Every step agent is built for it, so a mandate's step runs under
    * the mandate's lock — its tool list is the parent's filtered one already, and the
    * principal is what also refuses the protected secrets and stamps the step's writes
-   * (PRD customer-granted-operator-access D1, §3.13 E5). Absent = the owner.
+   * (PRD customer-granted-operator-access D1, §3.13 E5). Absent = the owner: this is the
+   * public `runManifest` API, and its one default. Every engine entrypoint goes through
+   * `buildRunCtx`, which requires it.
    */
   principal?: import('../core/request-principal.js').RequestPrincipal | undefined;
   cachedOutputs?: Map<string, AgentOutput> | undefined;
@@ -247,8 +249,9 @@ export interface RunCtxInput {
   parentTools?: ToolEntry[] | undefined;
   parentToolContext?: import('../types/index.js').ToolContext | undefined;
   parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined;
-  /** See `RunManifestOptions.principal`. */
-  principal?: import('../core/request-principal.js').RequestPrincipal | undefined;
+  /** See `RunManifestOptions.principal`. Required here, unlike there: every entrypoint of the
+   *  engine names whom its run is for, the owner included (1055). */
+  principal: import('../core/request-principal.js').RequestPrincipal;
   parentMemory?: IMemory | null | undefined;
   userTimezone?: string | undefined;
   parentPrompt?: SubAgentPromptHandles | undefined;
