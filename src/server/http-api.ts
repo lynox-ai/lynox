@@ -7271,7 +7271,7 @@ export class LynoxHTTPApi {
 
     // ── Config ──
     this.addStatic('user', 'GET /api/config', async (req, res) => {
-      const { readUserConfig, loadConfig: loadEffectiveConfig } = await import('../core/config.js');
+      const { readUserConfig, loadConfig: loadEffectiveConfig, replacedTierSlots } = await import('../core/config.js');
       const config = readUserConfig();
       // The loader's OWN output. `readUserConfig()` above is the raw file;
       // `loadConfig()` additionally merges the CP-pinned env layers and applies
@@ -7646,6 +7646,11 @@ export class LynoxHTTPApi {
         debug_wire_capture: wireCaptureEnvOn || wireCaptureEnvOff,
         ...(pinIgnored ? { tier_preset_ignored: pinnedPreset } : {}),
       };
+      // A config.json `tier_set` slot whose model this engine does not know runs the strategy's
+      // model on the same provider instead (`config.ts`, the preset guard). Reported, like the
+      // ignored pin above, so the replacement does not read as the user's choice.
+      const replacedSlots = replacedTierSlots();
+      if (replacedSlots.length > 0) redacted['replaced_tier_slots'] = replacedSlots;
       if (wireCaptureEnvOn) {
         redacted['debug_wire_capture'] = true;
       } else if (wireCaptureEnvOff) {
@@ -7686,7 +7691,7 @@ export class LynoxHTTPApi {
     // Self-host: no admin secret → cookie users auto-promoted to admin scope
     // at the auth layer, so the allowlist branch is a no-op for them.
     this.addStatic('user', 'PUT /api/config', async (_req, res, _params, body) => {
-      const { readUserConfig, saveUserConfig, reloadConfig, loadConfig } = await import('../core/config.js');
+      const { readUserConfig, saveUserConfig, reloadConfig, loadConfig, checkCandidateConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       // Wave 5d BYOK liability gate (server-side): `confirm_custom_endpoint` is
       // a control-plane signal, not a config field — it acts as a per-call
@@ -7906,6 +7911,30 @@ export class LynoxHTTPApi {
         if (!prior.some((e) => e.host === acceptedHostToRecord)) {
           merged['accepted_custom_endpoints'] = [...prior, { host: acceptedHostToRecord, accepted_at: new Date().toISOString() }];
         }
+      }
+      // Checked BEFORE the write, by the loader itself: a file the loader refuses would answer
+      // every later GET here with a 500 and stop the next boot, and on a managed instance every
+      // PUT too (its lock gate loads the stored file above), so only a hand edit in the container
+      // would bring it back. A slot whose model the loader would replace is refused too when this
+      // request sets that model, so a new choice is never stored only to be overridden. One
+      // already stored does not block saving the rest: the UI re-sends every field, without the
+      // slot keys GET redacts, which is why the model alone decides "sets".
+      const candidate = checkCandidateConfig(merged);
+      if (candidate.error !== undefined) {
+        // To the log, not the client: the first line only, masked like an error sent to a client,
+        // since a loader message may quote an environment value and operators read these logs.
+        if (candidate.unknownModel === undefined) process.stderr.write(`[lynox] PUT /api/config refused a configuration the loader rejects: ${maskForClient(candidate.error.split('\n')[0] ?? '', { includeGeneric: true })}\n`);
+        errorResponse(res, 400, candidate.unknownModel !== undefined
+          ? `A tier names the model '${candidate.unknownModel}', which this version does not know. Choose a listed model for that tier.`
+          : 'This configuration could not be loaded, so it was not saved.');
+        return;
+      }
+      const storedSlots = (existing['tier_set'] ?? {}) as Record<string, { model_id?: unknown } | undefined>;
+      const newlyReplaced = candidate.replacedSlots.filter((r) => storedSlots[r.tier]?.model_id !== r.model_id);
+      if (newlyReplaced.length > 0) {
+        const r = newlyReplaced[0]!;
+        errorResponse(res, 400, `A tier names the model '${r.model_id}', which this version does not know. Choose a listed model for that tier.`);
+        return;
       }
       saveUserConfig(merged);
       reloadConfig();
