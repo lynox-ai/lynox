@@ -76,7 +76,7 @@ import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns, maskEngineEnvSecrets } from './secret-store.js';
 import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
-import { applyRunStops, completedPrefixEnd, loopBreakDetail, withRunStop, type RunStop } from './run-stop.js';
+import { applyRunStops, completedPrefixEnd, continuationLoopDetail, loopBreakDetail, withRunStop, type RunStop } from './run-stop.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT, THINKING_ONLY_CONTINUATION_PROMPT } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
@@ -113,10 +113,10 @@ import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-pr
 import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
-import { callFiledOf, currentCallFiling, currentCallSignal, grantLiftOf, noteCallFiled, runInCallSlot, trackCallAnswer, type CallContract, type CallFiled, type GrantLift } from './call-connection.js';
+import { apiCostOf, callFiledOf, currentCallFiling, currentCallSignal, grantLiftOf, noteCallFiled, runInCallSlot, trackCallAnswer, type CallApiCost, type CallContract, type CallFiled, type GrantLift } from './call-connection.js';
 
 /** What a call's row carries beyond its outcome (PRD 3f-1b-α §2.1). */
-interface CallFacts { contract: CallContract; grant?: GrantLift; filed?: CallFiled }
+interface CallFacts { contract: CallContract; grant?: GrantLift; filed?: CallFiled; apiCost?: CallApiCost }
 import { MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, STOPPED_MESSAGE, notQueuedMessage, queuedMessage, storeFailedMessage, type ApprovalFilingContext, type FilingOutcome } from './approval-filing.js';
 import { approvalQueueEnabled, type ApprovalFiling } from './approval-store.js';
 import { inSessionPromptChain } from './prompt-chain.js';
@@ -778,6 +778,8 @@ export class Agent implements IAgent {
   private _continuationToolCount = 0;
   /** Truncated thinking-only turns in a row with no tool dispatched — see the max_tokens branch in _loop. */
   private _thinkingOnlyStreak = 0;
+  /** Truncated turns in a row with no visible text and no tool dispatched between them. */
+  private _blankTruncatedStreak = 0;
   private readonly maxContinuations: number;
   private static readonly MAX_RETRIES = 3;
   private static readonly ABSOLUTE_MAX_ITERATIONS = 500;
@@ -1081,17 +1083,20 @@ export class Agent implements IAgent {
     return taken;
   }
 
-  /** What a call's row carries beyond its outcome: the contract, the lift and the filing. */
+  /** What a call's row carries beyond its outcome: the contract, the lift, the filing and the API request it sent. */
   private _factsOfCall(tc: BetaToolUseBlock, slot: CallSlot): CallFacts {
     const grant = grantLiftOf(slot);
     const filed = callFiledOf(slot);
-    return { contract: this._contractOfCall(tc), ...(grant !== undefined ? { grant } : {}), ...(filed !== undefined ? { filed } : {}) };
+    const apiCost = apiCostOf(slot);
+    return { contract: this._contractOfCall(tc), ...(grant !== undefined ? { grant } : {}), ...(filed !== undefined ? { filed } : {}), ...(apiCost !== undefined ? { apiCost } : {}) };
   }
 
-  /** The part of {@link _factsOfCall} the result event adds; `grant` already rides on it. */
-  private _eventFactsOfCall(tc: BetaToolUseBlock, slot: CallSlot): { contract: CallContract; filed?: CallFiled } {
+  /** The part of {@link _factsOfCall} the result event adds; `grant` already rides on it. The step
+   *  recorder builds a workflow step's row from this event, so the API request rides on it too. */
+  private _eventFactsOfCall(tc: BetaToolUseBlock, slot: CallSlot): { contract: CallContract; filed?: CallFiled; apiCost?: CallApiCost } {
     const filed = callFiledOf(slot);
-    return { contract: this._contractOfCall(tc), ...(filed !== undefined ? { filed } : {}) };
+    const apiCost = apiCostOf(slot);
+    return { contract: this._contractOfCall(tc), ...(filed !== undefined ? { filed } : {}), ...(apiCost !== undefined ? { apiCost } : {}) };
   }
   /** Wave 1.2: mark this run tainted (spawn propagates a shared-Memory child's taint here).
    *  Also arms the sticky conversation latch (DK.1 F5). */
@@ -2627,6 +2632,7 @@ export class Agent implements IAgent {
     this._continuationLoopCount = 0;
     this._continuationToolCount = 0;
     this._thinkingOnlyStreak = 0;
+    this._blankTruncatedStreak = 0;
     this._loopToolCount = 0;
     this._repeatGuard.reset();
     this._sawUntrustedData = false;
@@ -2732,6 +2738,12 @@ export class Agent implements IAgent {
       // the question and the fetched data still in the context.
       if (err instanceof ThinkingOnlyLoopError
         && this._keepCompletedPrefix(userTurn, { code: 'thinking_loop' })) {
+        throw err;
+      }
+      // And for a continuation loop: its note, too, asks to go on in smaller steps, and the
+      // completed tool pairs before the cut-off turns are work the next turn can build on.
+      if (err instanceof ContinuationLoopError
+        && this._keepCompletedPrefix(userTurn, { code: 'continuation_loop', detail: continuationLoopDetail(err.loopPrefix) })) {
         throw err;
       }
       this.messages.length = Math.min(snapshot, this.messages.length);
@@ -2988,6 +3000,18 @@ export class Agent implements IAgent {
         const thinkingOnly = contentForHistory.every((b) => b.type === 'text' && b.text.trim().length === 0);
         if (!thinkingOnly || toolsDelta > 0) this._thinkingOnlyStreak = 0;
         if (thinkingOnly && ++this._thinkingOnlyStreak >= 2) throw new ThinkingOnlyLoopError();
+        // Both counters above reset on the other's shape: a turn cut off inside a tool call with
+        // no text is not thinking-only, and its blank prefix clears the prefix guard. So turns
+        // that alternate between the two, or repeat the cut-off call alone, passed both until
+        // the continuation cap. Neither shape gave the model anything to build on: the thinking
+        // is stripped, the cut-off call is discarded. Three in a row with no tool dispatched
+        // between them is a loop. Decided on what stays in the history, as `thinkingOnly` is: a
+        // server tool's result block or a redacted thinking block is something to build on. A
+        // server tool call without its result is no more than a cut-off `tool_use`.
+        const blank = contentForHistory.every((b) => (b.type === 'text' && b.text.trim().length === 0)
+          || b.type === 'tool_use' || b.type === 'server_tool_use');
+        if (!blank || toolsDelta > 0) this._blankTruncatedStreak = 0;
+        if (blank && ++this._blankTruncatedStreak >= 3) throw new ContinuationLoopError('');
         if (prefix.trim().length === 0) {
           this._continuationLoopPrefix = '';
           this._continuationLoopCount = 0;

@@ -14,7 +14,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode, asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { DEFAULT_STEP_TIMEOUT_MS, undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import { UNKNOWN_GRANT } from '../../core/conversation-grants.js';
 import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { normalizeTier } from '../../types/index.js';
@@ -107,13 +107,17 @@ function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipel
 export function getPipeline(id: string, runHistory?: RunHistory | null): PlannedPipeline | undefined {
   const direct = pipelineStore.get(id);
   if (direct) return direct;
-  // Prefix match in memory
-  for (const [key, val] of pipelineStore) {
-    if (key.startsWith(id)) return val;
+  // A saved workflow with exactly this id answers before any longer id that starts with it: a
+  // schedule checked and bound to the answer would otherwise target another workflow.
+  const row = runHistory?.getPlannedPipeline(id);
+  if (row?.id !== id) {
+    // Prefix match in memory
+    for (const [key, val] of pipelineStore) {
+      if (key.startsWith(id)) return val;
+    }
   }
   // Fall back to SQLite for cross-session persistence
   if (runHistory) {
-    const row = runHistory.getPlannedPipeline(id);
     if (row) {
       try {
         const planned = JSON.parse(row.manifest_json) as PlannedPipeline;
@@ -311,13 +315,18 @@ function buildProgressHooks(pipelineStreamHandler: EmittingStreamHandler | null,
 }
 
 function formatResult(state: RunState, name: string, resultLimit?: number): string {
+  // The name and the step ids are names, which take none of the places real text puts a character
+  // that renders as nothing; each goes in as a placeholder and is escaped on its own below.
+  const nonce = randomUUID();
+  const names: string[] = [];
+  const asName = (value: string): string => `__lynox_name_${names.push(value) - 1}_${nonce}__`;
   const steps: PipelineStepResult[] = [];
   let totalDuration = 0;
   let totalCost = 0;
 
   for (const [, output] of state.outputs) {
     steps.push({
-      stepId: output.stepId,
+      stepId: asName(output.stepId),
       result: truncateResult(output.result, resultLimit),
       durationMs: output.durationMs,
       tokensIn: output.tokensIn,
@@ -333,7 +342,7 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
 
   const result: PipelineResult = {
     pipelineId: state.runId,
-    name,
+    name: asName(name),
     status: state.status === 'completed' ? 'completed' : state.status === 'rejected' ? 'rejected' : 'failed',
     steps,
     totalDurationMs: totalDuration,
@@ -341,9 +350,14 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
   };
 
   // The name and the step ids are stored text, saved perhaps before the save refused characters
-  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show. The places
-  // real text puts one stay, so an emoji or a Persian word in a step's result reads as it is.
-  return escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
+  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show. In a step's
+  // result the places real text puts one stay, so an emoji or a Persian word reads as it is; in a
+  // name none does, so a ZWNJ an old step id carries between letters shows as well.
+  let json = escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
+  names.forEach((value, i) => {
+    json = json.replace(JSON.stringify(`__lynox_name_${i}_${nonce}__`), () => escapeHiddenInJson(JSON.stringify(value), { inPlace: false }));
+  });
+  return json;
 }
 
 // 2a/B3: both the pipeline_runs row and its pipeline_step_results rows are now
@@ -612,7 +626,9 @@ const MAX_WRITE_NOTES = 10;
 /** The mail tools that file for approval. */
 const QUEUEABLE_MAIL_TOOLS: ReadonlySet<string> = new Set(['mail_send', 'mail_reply']);
 const MAX_WRITE_NOTE_CHARS = 300;
-const MAX_MEMBER_NOTE_CHARS = 700;
+/** Long enough for the longest line a plan run's refusal writes: it names the member twice and
+ *  the profile once, and the sentence that says who decides comes last. */
+const MAX_MEMBER_NOTE_CHARS = 1500;
 
 /**
  * Collects the refused and possibly-landed write lines from the tool calls of a run's
@@ -1226,6 +1242,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
 
   if (input.modifications?.length) {
+    // One run's changes: drop a step or change its task. Ids and the step list change only in the
+    // stored workflow (`update_workflow_steps`), where they are saved and checked.
+    if (input.modifications.some(m => m.action !== 'remove' && m.action !== 'update_task')) {
+      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.';
+    }
     const error = applyModifications(steps, input.modifications);
     if (error) return error;
   }
@@ -1365,7 +1386,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
               model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Capability tier (omitted = fast)' },
               tools: { type: 'array', items: { type: 'string' }, description: 'Exact tool names this step needs, from your own toolset. bash only when a shell is essential.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'Step IDs whose output flows into this step\'s context' },
-              timeout_ms: { type: 'number', description: 'Timeout in ms (default: 600000)' },
+              timeout_ms: { type: 'number', description: `Timeout in ms (default: ${String(DEFAULT_STEP_TIMEOUT_MS)}, ${String(DEFAULT_STEP_TIMEOUT_MS / 60_000)} min)` },
             },
             required: ['id', 'task'],
           },

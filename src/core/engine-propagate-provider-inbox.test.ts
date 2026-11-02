@@ -157,8 +157,8 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
 
   /** Switches the engine from Anthropic to Mistral, so the inbox is bootstrapped again for the EU
    *  region, with `vault` as the secret store; returns the options that bootstrap got. */
-  async function rebootstrapToEu(vault: Record<string, string>): Promise<{ mistralApiKey?: string; meteredHost?: unknown; engine: Engine }> {
-    const engine = new Engine({ model: 'balanced' });
+  async function rebootstrapToEu(vault: Record<string, string>, language?: string): Promise<{ mistralApiKey?: string; meteredHost?: unknown; language?: () => string | undefined; engine: Engine }> {
+    const engine = new Engine({ model: 'balanced', ...(language !== undefined ? { language } : {}) });
     const handle = engine as unknown as {
       _inboxRuntime: MockRuntime | null; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
       _inboxRebootstrapInflight: Promise<void> | null; secretStore: { resolve(n: string): string | null } | null;
@@ -173,8 +173,14 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     await engine.reloadCredentials();
     if (handle._inboxRebootstrapInflight) await handle._inboxRebootstrapInflight;
     expect(mockBootstrapInbox).toHaveBeenCalledTimes(1);
-    return { ...(mockBootstrapInbox.mock.calls[0]![0] as { mistralApiKey?: string; meteredHost?: unknown }), engine };
+    return { ...(mockBootstrapInbox.mock.calls[0]![0] as { mistralApiKey?: string; meteredHost?: unknown; language?: () => string | undefined }), engine };
   }
+
+  // 966: the inbox's reminder titles follow the instance's notice language.
+  it('hands the instance\'s language to the inbox it bootstraps again', async () => {
+    const opts = await rebootstrapToEu({}, 'de');
+    expect(opts.language?.()).toBe('de');
+  });
 
   describe('the EU classifier on a pool tier: which Mistral key, and whether the instance is debited', () => {
     it('uses the pool\'s key, not the user\'s own vault key, and debits the instance', async () => {

@@ -99,6 +99,42 @@ describe('with a pass', () => {
     expect(sent).toHaveLength(0);
   });
 
+  it('does not carry the bound token to the store\'s token endpoint in any spelling a URL keeps', async () => {
+    for (const [path, reason] of [
+      ['/admin/oauth/access_token', /OAuth endpoints/],
+      ['/admin//oauth/access_token', /not for the Admin API/],
+      ['/admin/oauth//access_token', /not for the Admin API/],
+      ['/admin/OAuth/access_token', /not for the Admin API/],
+      ['/ADMIN/oauth/access_token', /not for the Admin API/],
+      ['/admin/oauth/access_token.json', /OAuth endpoints/],
+      ['/admin/oauth/access_token/', /not for the Admin API/],
+      ['/admin/api/2025-01/oauth/access_token', /OAuth endpoints/],
+      ['/admin/oauth.json', /OAuth endpoints/],
+      ['/admin/oauth/authorize', /OAuth endpoints/],
+      ['/admin/./oauth/access_token', /OAuth endpoints/],
+      ['/admin/api/../oauth/access_token', /OAuth endpoints/],
+      ['/admin\\oauth/access_token', /OAuth endpoints/],
+    ] as const) {
+      for (const method of ['GET', 'POST']) {
+        await expect(fetchPinned(`${ORIGIN}${path}`, { method, headers: { [H]: TOKEN } }, pass()), `${method} ${path}`).rejects.toThrow(reason);
+      }
+    }
+    expect(sent).toHaveLength(0);
+  });
+
+  it('reaches the Admin API in the shapes it has, and the read of the token\'s own scopes', async () => {
+    const paths = [
+      '/admin/oauth/access_scopes.json',
+      '/admin/api/2025-10/graphql.json',
+      '/admin/api/unstable/graphql.json',
+      '/admin/api/2026-01/products/632910392/images.json',
+      '/admin/api/2025-10/shopify_payments/balance.json',
+      '/admin/products.json',
+    ];
+    for (const path of paths) await expect(send(`${ORIGIN}${path}`, { [H]: TOKEN }, pass()), path).resolves.toHaveProperty('status', 200);
+    expect(sent.map((s) => new URL(s.url).pathname)).toEqual(paths);
+  });
+
   it('refuses a Host header, whether it names another server or the same one', async () => {
     await expect(send(`${ORIGIN}/admin/x`, { [H]: TOKEN, Host: 'other.myshopify.com' }, pass()))
       .rejects.toThrow(/re-targets/);
@@ -136,6 +172,146 @@ describe('with a pass', () => {
   it('matches the header name in any case', async () => {
     await send(`${ORIGIN}/admin/x`, { 'x-SHOPIFY-access-TOKEN': TOKEN }, pass());
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe('a credential pass does not reach the store\'s access tokens', () => {
+  const GRAPHQL = `${ORIGIN}/admin/api/2025-10/graphql.json`;
+  const JSON_TYPE = { 'Content-Type': 'application/json' };
+  const post = (url: string, body: string, headers: Record<string, string> = JSON_TYPE): Promise<Response> =>
+    fetchPinned(url, { method: 'POST', headers: { [H]: TOKEN, ...headers }, body }, pass());
+  const query = (document: string): string => JSON.stringify({ query: document });
+
+  it('refuses the REST paths that mint, list or revoke a token, by every method', async () => {
+    for (const path of [
+      '/admin/api/2025-10/storefront_access_tokens.json',
+      '/admin/api/2025-10/storefront_access_tokens/1.json',
+      '/admin/storefront_access_tokens.json',
+      '/admin/access_tokens/delegate.json',
+      '/admin/api/2025-10/access_tokens/delegate.json',
+    ]) {
+      for (const method of ['GET', 'POST', 'DELETE']) {
+        await expect(fetchPinned(`${ORIGIN}${path}`, { method, headers: { [H]: TOKEN } }, pass()), `${method} ${path}`)
+          .rejects.toThrow(/does not reach the store's access tokens/);
+      }
+    }
+    expect(sent).toHaveLength(0);
+  });
+
+  it('refuses a GraphQL document that names a token field, however it is written', async () => {
+    const documents: [string, string][] = [
+      ['mutation, delegate', query('mutation { delegateAccessTokenCreate(input: { delegateAccessScope: ["read_products"] }) { delegateAccessToken { accessToken } } }')],
+      ['mutation, storefront', query('mutation { storefrontAccessTokenCreate(input: { title: "x" }) { storefrontAccessToken { accessToken } } }')],
+      ['read', query('{ shop { storefrontAccessTokens(first: 1) { nodes { accessToken } } } }')],
+      ['alias', query('query { a: storefrontAccessTokens(first: 1) { nodes { t: id } } }')],
+      ['fragment', query('query { shop { ...f } } fragment f on Shop { storefrontAccessTokens(first: 1) { nodes { id } } }')],
+      ['node by id', query('query($id: ID!) { node(id: $id) { ... on StorefrontAccessToken { accessToken } } }')],
+      ['JSON escape', '{"query":"{ shop { storefront\\u0041ccessTokens(first: 1) { nodes { id } } } }"}'],
+      ['nested document, escaped in its string literal',
+        '{"query":"mutation{bulkOperationRunQuery(query:\\"{shop{storefront\\\\u0041ccessTokens{edges{node{\\\\u0061ccessToken}}}}}\\"){bulkOperation{id}}}"}'],
+      ['nested, escaped in the middle of the word',
+        '{"query":"mutation{bulkOperationRunQuery(query:\\"{shop{storefrontAcc\\\\u0065ssTokens{edges{node{id}}}}}\\"){bulkOperation{id}}}"}'],
+      ['an escape that writes the backslash of the next one', '{"query":"{ shop { storefront\\\\u005cu0041ccessTokens { nodes { id } } } }"}'],
+      ['nested, braced escape', query('mutation { bulkOperationRunQuery(query: "{ shop { storefront\\u{41}ccessTokens { edges { node { id } } } } }") { bulkOperation { id } } }')],
+      ['in the variables', JSON.stringify({ query: 'query($q: String!) { shop { name } }', variables: { q: 'access_token' } })],
+      ['in a key', '{"query":"{ shop { name } }","variables":{"accessToken":1}}'],
+    ];
+    for (const [label, body] of documents) {
+      await expect(post(GRAPHQL, body), label).rejects.toThrow(/the body names an access token/);
+    }
+    expect(sent).toHaveLength(0);
+  });
+
+  it('refuses a GraphQL document in the address', async () => {
+    for (const url of [
+      `${GRAPHQL}?query=${encodeURIComponent('{ shop { storefrontAccessTokens(first: 1) { nodes { id } } } }')}`,
+      `${GRAPHQL}?query=%7Bshop%7Bstorefront%41ccessTokens%7D%7D`,
+    ]) {
+      await expect(send(url, { [H]: TOKEN }, pass()), url).rejects.toThrow(/the address names an access token/);
+    }
+    await expect(send(`${GRAPHQL}?extensions=%7B%22persistedQuery%22%3A1%7D`, { [H]: TOKEN }, pass())).rejects.toThrow(/persisted query/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('refuses a persisted query, a body that is not JSON, and a body it could not read as sent', async () => {
+    await expect(post(GRAPHQL, '{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"ab"}}}')).rejects.toThrow(/persisted query/);
+    await expect(post(GRAPHQL, '{"extensions":{"persisted\\u0051uery":{"version":1,"sha256Hash":"ab"}}}')).rejects.toThrow(/persisted query/);
+    await expect(post(GRAPHQL, '{/**/"query":"{ shop { storefrontAccessTokens { nodes { id } } } }"}')).rejects.toThrow(/sends its body as JSON/);
+    await expect(post(GRAPHQL, query('{ shop { name } }'), { ...JSON_TYPE, 'Content-Encoding': 'gzip' })).rejects.toThrow(/sent encoded/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('sends a body only as one Content-Type, application/json', async () => {
+    const ONE_JSON = /sends one Content-Type, application\/json/;
+    const document = query('{ shop { name } }');
+    for (const headers of [
+      { 'Content-Type': 'application/graphql' },
+      { 'Content-Type': 'application/json; charset=utf-16' },
+      { 'Content-Type': 'application/json; charset=utf-8; charset=utf-7' },
+      { 'Content-Type': 'application/json; charset*=utf-7\'\'' },
+      { 'Content-Type': 'application/x-www-form-urlencoded' },
+      { 'Content-Type': 'application/json', 'content-type': 'application/json' },
+      { 'Content-Type': ' application/json' },
+    ]) {
+      await expect(post(GRAPHQL, document, headers), JSON.stringify(headers)).rejects.toThrow(ONE_JSON);
+    }
+    // A JSON body that a form type would read as a query naming the token.
+    await expect(post(GRAPHQL, '{"x":"&query=%7Bshop%7Bstorefront%41ccessTokens%7D%7D&y="}', { 'Content-Type': 'application/x-www-form-urlencoded' }))
+      .rejects.toThrow(ONE_JSON);
+    // A Content-Type is held to the list on a read as well.
+    await expect(send(`${ORIGIN}/admin/api/2025-10/shop.json`, { [H]: TOKEN, 'Content-Type': 'text/plain' }, pass())).rejects.toThrow(ONE_JSON);
+    // A body with no Content-Type: Rack reads a POST without one as a form.
+    await expect(post(GRAPHQL, document, {})).rejects.toThrow(ONE_JSON);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('looks for the word in the text as sent too, where resolving an escape eats the letters after it', async () => {
+    await expect(post(GRAPHQL, JSON.stringify({ query: '{ shop { name } }', variables: { v: '\\u{0000005c}u\\u{61}accesstoken' } })))
+      .rejects.toThrow(/the body names an access token/);
+    await expect(send(`${GRAPHQL}?v=${encodeURIComponent('\\u{0000005c}u\\u{61}accesstoken')}`, { [H]: TOKEN }, pass()))
+      .rejects.toThrow(/the address names an access token/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('reads an escape with leading zeros in braces, and a long run of backslashes in one pass', async () => {
+    await expect(post(GRAPHQL, '{"query":"mutation{bulkOperationRunQuery(query:\\"{shop{storefront\\\\u{00000041}ccessTokens{edges{node{id}}}}}\\"){bulkOperation{id}}}"}'))
+      .rejects.toThrow(/the body names an access token/);
+    const run = JSON.stringify({ query: '{ shop { name } }', variables: { v: '\\'.repeat(200_000) } });
+    const started = performance.now();
+    await expect(post(GRAPHQL, run)).resolves.toHaveProperty('status', 200);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('tells the model to stop on a token, and how to send it again on a form it cannot read (ux U-086)', async () => {
+    const STOP = /tell the user that lynox does not create or read access tokens through the connected store\. Do not retry it with changed headers or a changed address\.$/;
+    const AGAIN = /\. Send it again as JSON text with exactly one Content-Type: application\/json header, no Content-Encoding, and the full query text instead of a persisted query\.$/;
+    await expect(send(`${ORIGIN}/admin/api/2025-10/storefront_access_tokens.json`, { [H]: TOKEN }, pass())).rejects.toThrow(STOP);
+    await expect(send(`${GRAPHQL}?query=${encodeURIComponent('{ shop { storefrontAccessTokens { nodes { id } } } }')}`, { [H]: TOKEN }, pass())).rejects.toThrow(STOP);
+    await expect(post(GRAPHQL, query('{ shop { name } }'), {})).rejects.toThrow(AGAIN);
+    await expect(post(GRAPHQL, query('{ shop { name } }'), { ...JSON_TYPE, 'Content-Encoding': 'gzip' })).rejects.toThrow(AGAIN);
+    await expect(post(GRAPHQL, '{ shop { name } }')).rejects.toThrow(AGAIN);
+    await expect(post(GRAPHQL, '{"extensions":{"persistedQuery":{"version":1}}}')).rejects.toThrow(AGAIN);
+    await expect(send(`${GRAPHQL}?extensions=%7B%22persistedQuery%22%3A1%7D`, { [H]: TOKEN }, pass())).rejects.toThrow(AGAIN);
+    // A body that names a token: stop, and say that such a text is refused as well (ux U-086).
+    await expect(post(GRAPHQL, JSON.stringify({ query: 'mutation { productUpdate(product: { id: "1", descriptionHtml: "accessToken" }) { product { id } } }' })))
+      .rejects.toThrow(/and that a request whose text names one is refused as well\. Do not retry it with changed headers or a changed address\.$/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('sends what names no token: a read, a write, a REST call, an empty body, UTF-8 named and identity', async () => {
+    const bodies = [
+      query('{ shop { name } }'),
+      query('mutation { productUpdate(product: { id: "gid://shopify/Product/1", title: "Tokens of access" }) { product { id } } }'),
+      JSON.stringify({ query: 'query($id: ID!) { product(id: $id) { id title } }', variables: { id: 'gid://shopify/Product/1' } }),
+    ];
+    for (const body of bodies) await expect(post(GRAPHQL, body), body).resolves.toHaveProperty('status', 200);
+    await expect(post(`${ORIGIN}/admin/api/2025-10/products/1.json`, JSON.stringify({ product: { title: 'x' } }), { 'Content-Type': 'application/json; charset=UTF-8', 'Content-Encoding': 'identity' }))
+      .resolves.toHaveProperty('status', 200);
+    await expect(fetchPinned(`${ORIGIN}/admin/api/2025-10/products/1.json`, { method: 'DELETE', headers: { [H]: TOKEN }, body: '' }, pass()))
+      .resolves.toHaveProperty('status', 200);
+    await expect(send(`${ORIGIN}/admin/api/2025-10/products.json?limit=5&fields=id,title`, { [H]: TOKEN }, pass())).resolves.toHaveProperty('status', 200);
+    expect(sent).toHaveLength(bodies.length + 3);
   });
 });
 
@@ -310,7 +486,7 @@ describe('the token exchange\'s pass (kind exchange)', () => {
 
   it('an exchange pass does not carry an Admin request, and a credential pass does not carry the exchange as it is sent', async () => {
     await expect(fetchPinned(`${ORIGIN}/admin/x`, { method: 'GET', headers: { [H]: TOKEN } }, xpass())).rejects.toThrow(/only the store's token endpoint/);
-    await expect(post(TOKEN_URL, pass())).rejects.toThrow(/exactly the verified credential/);
+    await expect(post(TOKEN_URL, pass())).rejects.toThrow(/does not reach the store's OAuth endpoints/);
     expect(sent).toHaveLength(0);
   });
 

@@ -610,9 +610,9 @@ export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> 
   pre_approval_events: ['set_id', 'tool_name', 'decision', 'autonomy_level', 'run_id', 'created_at'],
   pre_approval_sets: ['id', 'approved_by', 'run_id', 'created_at'],
   processes: ['id', 'name', 'source_run_id', 'promoted_to_pipeline_id', 'created_at'],
-  // v69's text columns are enumerated values and ids, never free text: kept (held
-  // to their value sets by a test). `is_error` is an INTEGER and outside this list.
-  run_tool_calls: ['id', 'run_id', 'tool_name', 'connection_id', 'connection_created_at', 'grant_id', 'tool_use_id', 'contract_state', 'contract_grant_id', 'lift_grant_id', 'lift_entry', 'filing', 'approval_id'],
+  // v69's and v71's text columns are enumerated values and ids, never free text: kept (held
+  // to their value sets by a CHECK). `is_error` and `api_cost_usd` are numbers and outside this list.
+  run_tool_calls: ['id', 'run_id', 'tool_name', 'connection_id', 'connection_created_at', 'grant_id', 'tool_use_id', 'contract_state', 'contract_grant_id', 'lift_grant_id', 'lift_entry', 'filing', 'approval_id', 'api_cost_source'],
   runs: ['id', 'session_id', 'model_tier', 'model_id', 'stop_reason', 'status', 'run_type', 'batch_parent_id', 'spawn_parent_id', 'context_id', 'created_at', 'tenant_id', 'archetype_id', 'kind', 'provider', 'composition_json', 'trigger_origin'],
   security_events: ['event_type', 'tool_name', 'decision', 'autonomy_level', 'agent_name', 'run_id', 'source', 'created_at'],
   wire_snapshots: ['run_id', 'model', 'provider', 'system_prompt_hash', 'tool_names', 'tool_choice'],

@@ -32,11 +32,31 @@
 		getRerankerCapability,
 		loadRerankerCapability,
 	} from '../stores/integrations/search.svelte.js';
+	import { getApiBase } from '../config.svelte.js';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { endpointText } from './settings-readonly/values.js';
+
+	// A mandate's session (ux U-104): the URL as text, from the same source as the owner's card
+	// (`/api/secrets/status`, which a mandate may read and which also names a URL set only by the
+	// environment). `GET /api/config` says whose session asks; its own `searxng_url` is the fallback.
+	let configuredUrl = $state<string | null>(null);
+	async function loadSearchConfig(): Promise<void> {
+		try {
+			const res = await fetch(`${getApiBase()}/config`);
+			if (!res.ok) return;
+			const body = (await res.json()) as { searxng_url?: unknown };
+			noteSettingsViewer(body);
+			configuredUrl = typeof body.searxng_url === 'string' ? body.searxng_url : null;
+		} catch { /* the owner's card stays; the server refuses what it must */ }
+	}
 
 	$effect(() => {
 		void loadManagedStatus();
 		void loadSecretStatuses();
 		void loadRerankerCapability();
+		void loadSearchConfig();
 	});
 
 	// Reactive snapshot — Svelte 5 forbids `{@const}` at the top level of the
@@ -48,7 +68,17 @@
 	<a href="/app/settings/channels" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.channels.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.search')}</h1>
 
-	{#if isManaged()}
+	{#if isMandateSession()}
+		<!-- No save, no removal and no health check in a mandate's session: PUT /api/config is the owner's. -->
+		<OwnerOnlyNotice />
+		{#if isManaged()}
+			<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
+				<p class="text-sm text-text-muted">{t('integrations.search_managed_hint')}</p>
+			</div>
+		{:else}
+			<ReadOnlyRows rows={[{ label: t('integrations.searxng_label'), value: endpointText(getSearxngConfiguredUrl() || configuredUrl) }]} />
+		{/if}
+	{:else if isManaged()}
 		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 			<p class="text-sm text-text-muted">{t('integrations.search_managed_hint')}</p>
 		</div>

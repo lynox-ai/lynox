@@ -6,6 +6,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, stepHeading, templateText, timeoutText, visible, type StampPreview } from '../utils/workflow-stamp.js';
 
 	// The card actions show on hover only where there is room beside the name AND a pointer that
@@ -64,6 +65,13 @@
 	// Whose session reads the library (`owner` | `mandate`), as the engine names it. Only the owner
 	// stamps; absent from an older engine, which also sends no `awaitsStamp`.
 	let viewer = $state<string | undefined>(undefined);
+	// Running, renaming and deleting a workflow are the owner's (`ownerOnly` in http-api.ts). Whose
+	// session it is comes from the shared store, which this page loads itself; the library's own
+	// `viewer` counts too once the engine sends it (today `GET /api/workflows/library` does not).
+	// The buttons wait for a known owner, so a mandate never sees them, not even while the store
+	// has no answer; the sentence waits for a known mandate.
+	const ownerActs = $derived(viewer === 'owner' || isOwnerSession());
+	const mandate = $derived(viewer === 'mandate' || isMandateSession());
 	let loading = $state(true);
 	let error = $state('');
 	let notice = $state('');
@@ -615,7 +623,7 @@
 		}
 	}
 
-	$effect(() => { void loadWorkflows(); /* catches and sets its error */ });
+	$effect(() => { void loadWorkflows(); void loadSettingsViewer(); /* both catch their errors */ });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
@@ -634,6 +642,9 @@
 	{#if loading}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 	{:else if workflows.length > 0}
+		{#if mandate}
+			<p class="border border-border rounded p-3 text-sm text-text-muted mb-4" data-testid="owner-only-notice">{t('workflow_library.owner_only_notice')}</p>
+		{/if}
 		<div class="space-y-2">
 			{#each workflows as wf (wf.id)}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3 group">
@@ -704,7 +715,7 @@
 										{t('workflow_library.stamp.review')}
 									</button>
 								{/if}
-								{#if !asksOwner(wf)}
+								{#if !asksOwner(wf) && ownerActs}
 								<button
 									onclick={() => onRunClick(wf)}
 									disabled={runningId !== null}
@@ -730,6 +741,7 @@
 									<Icon name="chat" size="xs" />
 									{t('workflow_library.edit_in_chat')}
 								</button>
+								{#if ownerActs}
 								<button onclick={() => startRename(wf)} class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-border bg-bg-muted {actionSize} text-text-muted hover:bg-bg transition-opacity">
 									<Icon name="pencil" size="xs" />
 									{t('workflow_library.rename')}
@@ -738,6 +750,7 @@
 									<Icon name="trash" size="xs" />
 									{t('workflow_library.delete')}
 								</button>
+								{/if}
 							{/if}
 						</div>
 					</div>

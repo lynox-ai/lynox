@@ -19,6 +19,7 @@
 
 import { captureError } from './error-reporting.js';
 import { getErrorMessage } from './utils.js';
+import { providerListApplies } from './contained-providers.js';
 
 const MODELS_URL = 'https://api.mistral.ai/v1/models';
 const TIMEOUT_MS = 5_000;
@@ -80,6 +81,9 @@ export async function checkMistralAccountHealth(): Promise<MistralHealthStatus> 
  * is too noisy to warrant a Bugsink event.
  */
 export async function reportMistralAccountHealth(): Promise<void> {
+  // On an instance connected to a Shopify store nothing contacts Mistral, a key check included
+  // (`contained-providers.ts`).
+  if (providerListApplies()) return;
   let result: MistralHealthStatus;
   try {
     result = await checkMistralAccountHealth();

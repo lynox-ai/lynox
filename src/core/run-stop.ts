@@ -23,7 +23,7 @@ import type { BetaContentBlockParam, BetaMessageParam } from '@anthropic-ai/sdk/
 import type { ThreadMessageRecord } from './thread-store.js';
 import { sanitizeNoteDetail } from './render-projection.js';
 
-export type RunStopCode = 'run_interrupted' | 'tool_loop_break' | 'thinking_loop';
+export type RunStopCode = 'run_interrupted' | 'tool_loop_break' | 'thinking_loop' | 'continuation_loop';
 
 export interface RunStop {
   readonly code: RunStopCode;
@@ -36,7 +36,7 @@ const RUN_STOP = Symbol('lynox.runStop');
 type WithStop = BetaMessageParam & { [RUN_STOP]?: RunStop };
 
 export function isRunStopCode(code: unknown): code is RunStopCode {
-  return code === 'run_interrupted' || code === 'tool_loop_break' || code === 'thinking_loop';
+  return code === 'run_interrupted' || code === 'tool_loop_break' || code === 'thinking_loop' || code === 'continuation_loop';
 }
 
 /** The display-note detail for a loop break, from `ToolLoopBreakError.loopKey`
@@ -44,6 +44,12 @@ export function isRunStopCode(code: unknown): code is RunStopCode {
  *  text the model reads is the same before and after a reload. */
 export function loopBreakDetail(loopKey: string): string {
   return sanitizeNoteDetail(`repeated call: ${loopKey.split('\x00').join(' ')}`);
+}
+
+/** The display-note detail for a continuation loop, from `ContinuationLoopError.loopPrefix`;
+ *  none when the loop had no text (the guard against blank truncated turns). */
+export function continuationLoopDetail(loopPrefix: string): string | undefined {
+  return loopPrefix.trim().length > 0 ? sanitizeNoteDetail(`repeated truncated response: ${loopPrefix.slice(0, 140)}…`) : undefined;
 }
 
 /** A copy of `msg` that carries `stop`. */
@@ -71,6 +77,9 @@ export function runStopText(stop: RunStop): string {
   }
   if (stop.code === 'thinking_loop') {
     return '[This run was stopped because two turns in a row spent the whole output limit on thinking, with no answer and no tool call. The steps above are kept. Next time, answer from what is there or take a smaller step.]';
+  }
+  if (stop.code === 'continuation_loop') {
+    return '[This run was stopped because the answer was cut off at the output limit several times in a row without progress. The steps above are kept. Next time, take a smaller step instead of writing everything in one answer.]';
   }
   return '[This run was interrupted before it finished. The steps above are kept.]';
 }
@@ -103,6 +112,16 @@ function toolUseIds(msg: BetaMessageParam): string[] {
   return ids;
 }
 
+/** Whether `msg` holds a server tool call whose result block is not in it. The server runs the
+ *  call and returns the result in the same message; a call cut off before that never ran, and
+ *  a context that keeps it orphaned is one the API may refuse. */
+function hasOrphanServerCall(msg: BetaMessageParam): boolean {
+  if (!Array.isArray(msg.content)) return false;
+  const results = new Set<string>();
+  for (const b of msg.content) if (b.type.endsWith('_tool_result') && 'tool_use_id' in b) results.add(b.tool_use_id);
+  return msg.content.some((b) => b.type === 'server_tool_use' && !results.has(b.id));
+}
+
 function toolResultIds(msg: BetaMessageParam): Set<string> {
   const ids = new Set<string>();
   if (!Array.isArray(msg.content)) return ids;
@@ -113,7 +132,7 @@ function toolResultIds(msg: BetaMessageParam): Set<string> {
 /**
  * End (exclusive) of a stopped run's completed prefix: the question at
  * `questionIdx`, then every (assistant, user) pair whose tool calls all have
- * their results. The first pair that is not complete, and everything after it,
+ * their results, and whose server tool calls carry theirs. The first pair that is not complete, and everything after it,
  * is the unfinished step.
  */
 export function completedPrefixEnd(messages: readonly BetaMessageParam[], questionIdx: number): number {
@@ -121,7 +140,7 @@ export function completedPrefixEnd(messages: readonly BetaMessageParam[], questi
   while (i + 1 < messages.length) {
     const a = messages[i]!;
     const u = messages[i + 1]!;
-    if (a.role !== 'assistant' || u.role !== 'user') break;
+    if (a.role !== 'assistant' || u.role !== 'user' || hasOrphanServerCall(a)) break;
     const results = toolResultIds(u);
     if (!toolUseIds(a).every((id) => results.has(id))) break;
     i += 2;

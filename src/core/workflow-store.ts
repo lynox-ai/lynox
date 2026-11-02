@@ -204,6 +204,13 @@ export class WorkflowStore {
    * source's editor cover, or its creator cover when the mark copied was the creator. Without it
    * the copy of a workflow the owner took over would carry the ended mandate as a member again.
    * Not a new edit, so the mark is not uncovered here.
+   *
+   * Only a path on which the server itself knows the source copies this way (`save_workflow` from
+   * an existing workflow). A workflow that
+   * comes back through the user's hands (`import_workflow` from an exported block, `save_workflow`
+   * from what a session did) is saved by {@link upsert} and carries only its saver's mark: a source named in
+   * pasted text can be edited or dropped by whoever pastes it, so a mark taken from there would
+   * protect nothing. A copy that must carry another's mark needs a path on the server.
    */
   upsertCopy(row: WorkflowRow, author: RequestPrincipal | null, sourceId: string): void {
     this.db.transaction(() => {
@@ -237,15 +244,16 @@ export class WorkflowStore {
    * in the same statement, like {@link upsert}.
    */
   rename(id: string, name: string, author: RequestPrincipal | null): boolean {
-    if (id === '') return false; // empty id → likePrefix '%' would match ALL rows
+    const target = this._resolveWriteId(id);
+    if (target === null) return false;
     const by = authorColumns(author);
     const res = by.mandate === null
       ? this.db.prepare(
-        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?) WHERE id = ? OR id LIKE ? ESCAPE '\\'",
-      ).run(name, name, id, likePrefix(id))
+        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?) WHERE id = ?",
+      ).run(name, name, target)
       : this.db.prepare(
-        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?), mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now'), covered_edited_by = NULL, covered_edited_id = NULL, covered_edited_at = NULL WHERE id = ? OR id LIKE ? ESCAPE '\\'",
-      ).run(name, name, by.mandate, by.mandateId, id, likePrefix(id));
+        "UPDATE workflows SET name = ?, definition_json = json_set(definition_json, '$.name', ?), mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now'), covered_edited_by = NULL, covered_edited_id = NULL, covered_edited_at = NULL WHERE id = ?",
+      ).run(name, name, by.mandate, by.mandateId, target);
     return res.changes > 0;
   }
 
@@ -275,18 +283,19 @@ export class WorkflowStore {
    *  Like {@link rename}, does NOT bump `updated_at` — the legacy
    *  `setWorkflowConfirmedAt` leaves `started_at` untouched (no list reorder). */
   setConfirmedAt(id: string, confirmedAt: string): boolean {
-    if (id === '') return false; // empty id → likePrefix '%' would match ALL rows
+    const target = this._resolveWriteId(id);
+    if (target === null) return false;
     const res = this.db.prepare(
-      "UPDATE workflows SET definition_json = json_set(definition_json, '$.confirmedAt', ?) WHERE id = ? OR id LIKE ? ESCAPE '\\'",
-    ).run(confirmedAt, id, likePrefix(id));
+      "UPDATE workflows SET definition_json = json_set(definition_json, '$.confirmedAt', ?) WHERE id = ?",
+    ).run(confirmedAt, target);
     return res.changes > 0;
   }
 
   /**
    * Write a reviewed grant: the contract, its stamp and the first-run-confirm, in ONE
    * statement, so no reader sees a stamp without its contract or a confirm without
-   * either. Exact id only — unlike the prefix-matched writers above, this one must never
-   * land on a second row. Does not bump `updated_at` (same as {@link setConfirmedAt}).
+   * either. Exact id only, not even an unambiguous prefix like the writers above: this one
+   * must land on exactly the row its caller read. Does not bump `updated_at` (same as {@link setConfirmedAt}).
    * A concurrent edit between the caller's read and this write is not lost silently: the
    * stamp's checksum covers the steps, so the run check refuses the mismatch.
    */
@@ -344,13 +353,26 @@ export class WorkflowStore {
     };
   }
 
-  /** Prefix-matched delete (mirrors legacy `deletePlannedPipeline`). */
+  /** Delete one workflow, named by its id or an unambiguous prefix of it ({@link _resolveWriteId}). */
   remove(id: string): boolean {
-    if (id === '') return false; // empty id → likePrefix '%' would match ALL rows
-    const res = this.db.prepare(
-      "DELETE FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\'",
-    ).run(id, likePrefix(id));
-    return res.changes > 0;
+    const target = this._resolveWriteId(id);
+    if (target === null) return false;
+    return this.db.prepare('DELETE FROM workflows WHERE id = ?').run(target).changes > 0;
+  }
+
+  /**
+   * The one row a write names: the exact id, else the only id that starts with it, else none.
+   * A write never lands on every row an id is a prefix of: confirming, renaming or deleting
+   * `wf-a` must leave `wf-ab`, possibly another mandate's, alone. Same rule as
+   * `TriggerStore._resolveTargetWorkflowId`.
+   */
+  private _resolveWriteId(id: string): string | null {
+    if (id === '') return null; // likePrefix('') is a bare '%', which would match every row
+    const exact = this.db.prepare('SELECT id FROM workflows WHERE id = ?').get(id) as { id: string } | undefined;
+    if (exact) return exact.id;
+    const hits = this.db.prepare("SELECT id FROM workflows WHERE id LIKE ? ESCAPE '\\' LIMIT 2")
+      .all(likePrefix(id)) as Array<{ id: string }>;
+    return hits.length === 1 ? hits[0]!.id : null;
   }
 
   /**
@@ -395,12 +417,12 @@ export class WorkflowStore {
     return { scanned: rows.length, migrated };
   }
 
-  /** Read a single workflow definition (prefix-matched). */
+  /** Read a single workflow definition (prefix-matched; the exact id first, as in {@link getPlanned}). */
   get(id: string): StoredWorkflow | undefined {
     if (id === '') return undefined; // empty id → likePrefix '%' would match ALL rows
     const row = this.db.prepare(
-      "SELECT id, name, description, definition_json, is_template, created_at FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' LIMIT 1",
-    ).get(id, likePrefix(id)) as {
+      "SELECT id, name, description, definition_json, is_template, created_at FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' ORDER BY id = ? DESC LIMIT 1",
+    ).get(id, likePrefix(id), id) as {
       id: string; name: string; description: string; definition_json: string;
       is_template: number; created_at: string;
     } | undefined;
@@ -435,9 +457,11 @@ export class WorkflowStore {
    */
   getPlanned(id: string): { id: string; manifest_json: string } | undefined {
     if (id === '') return undefined;
+    // The exact id first: a longer id that only starts with it must not answer for it, or a schedule
+    // checked and bound to that answer would target another workflow than the one named.
     const row = this.db.prepare(
-      "SELECT id, definition_json FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' LIMIT 1",
-    ).get(id, likePrefix(id)) as { id: string; definition_json: string } | undefined;
+      "SELECT id, definition_json FROM workflows WHERE id = ? OR id LIKE ? ESCAPE '\\' ORDER BY id = ? DESC LIMIT 1",
+    ).get(id, likePrefix(id), id) as { id: string; definition_json: string } | undefined;
     if (!row) return undefined;
     return { id: row.id, manifest_json: row.definition_json };
   }
