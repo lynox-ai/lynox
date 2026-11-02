@@ -609,7 +609,10 @@
 	}
 	function replacedSlotLine(r: { tier: ModelTier; model_id: string; runs: string }, viewer: 'owner' | 'mandate'): string {
 		const runs = presetInfoFor(strategy)?.tiers.find((x) => x.tier === r.tier && x.model_id === r.runs)?.label ?? r.runs;
-		return tf(`llm.replaced_slot.${viewer}`, { model_id: r.model_id, tier: t(`llm.tier.${r.tier}`), runs });
+		// Under a locked provider every strategy card is disabled, so the owner has no way to "Custom"
+		// either and reads the sentences without it.
+		const sentences = viewer === 'owner' && !providerLocked ? 'owner' : 'mandate';
+		return tf(`llm.replaced_slot.${sentences}`, { model_id: r.model_id, tier: t(`llm.tier.${r.tier}`), runs });
 	}
 
 	function selectStrategy(next: Strategy): void {
@@ -947,7 +950,9 @@
 			// A line names the model the OLD preset ran; under another preset it would be false, so it
 			// goes until the engine says what runs now.
 			if (config.tier_preset !== presetBefore) config.replaced_tier_slots = undefined;
-			void refreshReplacedSlots();
+			// Awaited inside `saving`, which disables Save: a second save cannot start while this
+			// answer is still on its way and overwrite the newer one.
+			await refreshReplacedSlots();
 			addToast(t('llm.saved'), 'success', 3000);
 			// Tell the StatusBar (and any other live provider indicator) to refresh
 			// NOW instead of waiting up to 30s for its next poll — otherwise the

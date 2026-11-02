@@ -35,6 +35,7 @@ afterEach(() => {
 	target.remove();
 	vi.unstubAllGlobals();
 	refreshFails = false;
+	refreshHangs = null;
 	setLocale(localeBefore);
 });
 
@@ -55,6 +56,7 @@ const PRESET = {
 	},
 };
 let refreshFails = false;
+let refreshHangs: Promise<void> | null = null;
 const REPLACED = [{ tier: 'deep', model_id: 'claude-retired-model', runs: 'claude-opus-5' }];
 
 async function render(viewer: 'owner' | 'mandate', replaced: unknown[] | undefined, extra: Record<string, unknown> = {}): Promise<void> {
@@ -68,6 +70,7 @@ async function render(viewer: 'owner' | 'mandate', replaced: unknown[] | undefin
 	let put = false;
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const path = String(url).split('?')[0]!;
+		if (refreshHangs && init?.method !== 'PUT' && path.endsWith('/config') && put) await refreshHangs;
 		if (refreshFails && init?.method !== 'PUT' && path.endsWith('/config') && put) return new Response('', { status: 500 });
 		if (init?.method === 'PUT') {
 			put = true;
@@ -194,7 +197,41 @@ describe('a tier that runs another model than the stored one (ux U-118)', () => 
 		expect(fetchMock.mock.calls.some(([u, i]) => i?.method === 'PUT' && String(u).endsWith('/config'))).toBe(true);
 		// Positive control: the new preset's detail is on screen, and it is the stored one now.
 		expect(target.textContent).toContain('Claude Sonnet 5');
+		// The page did ask again after the save, and that request failed (the mock answers it 500).
+		const calls = fetchMock.mock.calls.map(([u, i]) => `${i?.method ?? 'GET'} ${String(u).split('?')[0]}`);
+		const putAt = calls.findIndex((c) => c.startsWith('PUT ') && c.endsWith('/config'));
+		expect(calls.slice(putAt + 1).some((c) => c.startsWith('GET ') && c.endsWith('/config'))).toBe(true);
 		// The line said "runs with Claude Opus 5", what max-quality ran; under efficient that is false.
 		expect(lines()).toEqual([]);
+	});
+	it('under a locked provider the owner reads the first two sentences only: no card leads to Custom there', async () => {
+		await render('owner', REPLACED, { locks: { provider: { reason: 'Set by the operator.' } } });
+		// Positive control: the strategy cards are there and every one is disabled.
+		expect(radios().length).toBeGreaterThan(0);
+		expect(radios().every((b) => b.disabled)).toBe(true);
+		expect(lines()).toEqual(['Das Modell claude-retired-model gibt es in dieser Version nicht mehr. Die Stufe „Tief“ läuft deshalb mit Claude Opus 5.']);
+	});
+	it('while the page is still asking the engine after a save, a second save cannot start', async () => {
+		await render('owner', REPLACED);
+		const stored = radios().find((b) => b.getAttribute('aria-checked') === 'true')!;
+		card(t('llm.preset.custom')).click();
+		await settle();
+		stored.click();
+		await settle();
+		let answer!: () => void;
+		refreshHangs = new Promise<void>((r) => { answer = r; });
+		const saveButton = (): HTMLButtonElement | undefined =>
+			[...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => [t('llm.save'), t('llm.saving')].includes(b.textContent?.trim() ?? ''));
+		saveButton()!.click();
+		await settle();
+		// A new change while the answer is outstanding brings the save bar back.
+		card(t('llm.preset.custom')).click();
+		await settle();
+		expect(saveButton()).toBeDefined();
+		expect(saveButton()!.disabled).toBe(true);
+		answer();
+		await settle();
+		// Positive control: once the answer is in, saving works again.
+		expect(saveButton()!.disabled).toBe(false);
 	});
 });
