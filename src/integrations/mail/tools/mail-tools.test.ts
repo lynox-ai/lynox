@@ -942,6 +942,7 @@ describe('mail_triage tool', () => {
     expect(out).toMatch(/^1\. uid:1 · date:\S+(?: \[[A-Z ]+\])? · inbox:draft_ready$/m);
     expect(out, 'a message the inbox has no item for carries no label').toMatch(/^2\. uid:2 · date:\S+(?: \[[A-Z ]+\])?$/m);
     expect(out).toContain(INBOX_LABEL_LEGEND);
+    expect(INBOX_LABEL_LEGEND, 'the legend tells the model the list is grouped').toContain('The list is grouped by these verdicts.');
     expect(asked).toEqual([['rafael-gmail', '<m-1@x>'], ['rafael-gmail', '<m-2@x>']]);
   });
 
@@ -989,6 +990,16 @@ describe('mail_triage tool', () => {
       expect(out).not.toContain(INBOX_LABEL_LEGEND);
       expect(out, 'no verdict, no groups').not.toContain('No inbox verdict');
     }
+  });
+
+  it('a lookup that returns only values the inbox does not use adds no legend and no groups', async () => {
+    provider.list.mockResolvedValue([envelope(1, { messageId: '<m-1@x>', from: 'alice@example.com', subject: 'A' })]);
+    const out = await createMailTriageTool(registry, {
+      inboxLabelOf: () => ({ bucket: 'not_a_bucket' as never, userAction: undefined }),
+    }).handler({}, noPromptAgent);
+    expect(out).toMatch(/^1\. uid:1 · date:\S+(?: \[[A-Z ]+\])?$/m);
+    expect(out).not.toContain(INBOX_LABEL_LEGEND);
+    expect(out).not.toContain('No inbox verdict');
   });
 
   // 1070 live probe: with the label as a suffix the model still listed a draft_ready mail as
