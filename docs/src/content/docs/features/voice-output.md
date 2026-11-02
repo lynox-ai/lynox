@@ -25,7 +25,7 @@ Toggling the speaker off mid-stream stops current audio and clears the queue.
 
 | Property              | Mistral Voxtral TTS                     |
 |-----------------------|-----------------------------------------|
-| Hosting               | Mistral La Plateforme (hosted in the EU by default)       |
+| Hosting               | Mistral La Plateforme (EU endpoint, inference in EU and EFTA countries) |
 | Model                 | `voxtral-mini-tts-latest`               |
 | Default voice         | `en_paul_neutral` (English)             |
 | Languages             | 9 supported; voice catalog currently EN-only |
