@@ -11,7 +11,7 @@ import type { Session } from './session.js';
 /**
  * The briefing warning on a REAL boot with an API profile whose description the engine wraps.
  *
- * On engine.lynox.cloud (sec-core, 2026-10-28) every turn on an instance with such a profile
+ * On staging (2026-10-28) every turn on an instance with such a profile
  * carried "Injection patterns detected in briefing": the briefing's scan read the closer of the
  * engine's own `<untrusted_data>` block as a boundary escape. A unit test that hands the agent
  * the list of its own blocks cannot see whether the engine collects them while it builds the
