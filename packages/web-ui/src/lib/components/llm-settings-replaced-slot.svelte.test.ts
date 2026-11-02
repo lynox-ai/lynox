@@ -36,6 +36,7 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	refreshFails = false;
 	refreshHangs = null;
+	keepOnPut = false;
 	setLocale(localeBefore);
 });
 
@@ -57,6 +58,7 @@ const PRESET = {
 };
 let refreshFails = false;
 let refreshHangs: Promise<void> | null = null;
+let keepOnPut = false;
 const REPLACED = [{ tier: 'deep', model_id: 'claude-retired-model', runs: 'claude-opus-5' }];
 
 async function render(viewer: 'owner' | 'mandate', replaced: unknown[] | undefined, extra: Record<string, unknown> = {}): Promise<void> {
@@ -70,12 +72,17 @@ async function render(viewer: 'owner' | 'mandate', replaced: unknown[] | undefin
 	let put = false;
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const path = String(url).split('?')[0]!;
-		if (refreshHangs && init?.method !== 'PUT' && path.endsWith('/config') && put) await refreshHangs;
+		if (refreshHangs && init?.method !== 'PUT' && path.endsWith('/config') && put) {
+			// The answer describes the config as it was when asked, and arrives when the test says so.
+			const asked = JSON.parse(JSON.stringify(config)) as unknown;
+			await refreshHangs;
+			return Response.json(asked);
+		}
 		if (refreshFails && init?.method !== 'PUT' && path.endsWith('/config') && put) return new Response('', { status: 500 });
 		if (init?.method === 'PUT') {
 			put = true;
 			// The saved config no longer carries the retired model, so the engine replaces nothing.
-			if (path.endsWith('/config')) delete (config as Record<string, unknown>)['replaced_tier_slots'];
+			if (path.endsWith('/config') && !keepOnPut) delete (config as Record<string, unknown>)['replaced_tier_slots'];
 			return Response.json({ ok: true });
 		}
 		if (path.endsWith('/llm/catalog')) return Response.json({ providers: [anthropic] });
@@ -211,27 +218,37 @@ describe('a tier that runs another model than the stored one (ux U-118)', () => 
 		expect(radios().every((b) => b.disabled)).toBe(true);
 		expect(lines()).toEqual(['Das Modell claude-retired-model gibt es in dieser Version nicht mehr. Die Stufe „Tief“ läuft deshalb mit Claude Opus 5.']);
 	});
-	it('while the page is still asking the engine after a save, a second save cannot start', async () => {
-		await render('owner', REPLACED);
+	it('an answer to an earlier save that arrives after a later one is not taken', async () => {
+		const efficient = { name: 'efficient', available: true, tiers: [{ tier: 'deep', model_id: 'claude-sonnet-5', label: 'Claude Sonnet 5' }] };
+		await render('owner', REPLACED, { available_tier_presets: { ...PRESET, efficient } });
+		keepOnPut = true;
 		const stored = radios().find((b) => b.getAttribute('aria-checked') === 'true')!;
+		const saveButton = (): HTMLButtonElement =>
+			[...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === t('llm.save'))!;
+		// Save 1, on max-quality: its re-check is asked now (while max-quality still replaces deep) and held back.
 		card(t('llm.preset.custom')).click();
 		await settle();
 		stored.click();
 		await settle();
 		let answer!: () => void;
 		refreshHangs = new Promise<void>((r) => { answer = r; });
-		const saveButton = (): HTMLButtonElement | undefined =>
-			[...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => [t('llm.save'), t('llm.saving')].includes(b.textContent?.trim() ?? ''));
-		saveButton()!.click();
+		saveButton().click();
 		await settle();
-		// A new change while the answer is outstanding brings the save bar back.
-		card(t('llm.preset.custom')).click();
+		// Save 2, to efficient: its own re-check fails.
+		refreshHangs = null;
+		refreshFails = true;
+		card(t('llm.preset.efficient')).click();
 		await settle();
-		expect(saveButton()).toBeDefined();
-		expect(saveButton()!.disabled).toBe(true);
+		saveButton().click();
+		await settle();
+		const fetchMock = fetch as unknown as { mock: { calls: [string, RequestInit?][] } };
+		expect(fetchMock.mock.calls.filter(([u, i]) => i?.method === 'PUT' && String(u).endsWith('/config'))).toHaveLength(2);
+		expect(lines()).toEqual([]);
+		// Now the answer to save 1 arrives. It describes max-quality; under efficient it is false.
 		answer();
 		await settle();
-		// Positive control: once the answer is in, saving works again.
-		expect(saveButton()!.disabled).toBe(false);
+		// Positive control: efficient's detail with a deep row is on screen, where the line would sit.
+		expect(target.textContent).toContain('Claude Sonnet 5');
+		expect(lines()).toEqual([]);
 	});
 });

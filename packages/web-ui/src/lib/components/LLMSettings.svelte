@@ -596,12 +596,17 @@
 	const replacedSlots = $derived(strategy === config.tier_preset ? (config.replaced_tier_slots ?? []) : []);
 	// Replaced tiers the preset detail has no row for still need a line (under the rows).
 	const replacedWithoutRow = $derived(replacedSlots.filter((r) => !activePresetTiers.some((x) => x.tier === r.tier)));
-	/** After a save the engine has reloaded its config; ask it again whether a slot is still replaced. */
+	/** After a save the engine has reloaded its config; ask it again whether a slot is still replaced.
+	 *  Not awaited by the save, so two saves can each have an answer on its way: only the answer to
+	 *  the latest question is taken, an older one arriving late would describe a config since replaced. */
+	let replacedAsk = 0;
 	async function refreshReplacedSlots(): Promise<void> {
+		const ask = ++replacedAsk;
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) return; // keep the last known lines: a stale warning beats a hidden one
 			const body = (await res.json()) as Pick<UserConfig, 'replaced_tier_slots'>;
+			if (ask !== replacedAsk) return;
 			config.replaced_tier_slots = body.replaced_tier_slots;
 		} catch {
 			// same as above
@@ -950,9 +955,7 @@
 			// A line names the model the OLD preset ran; under another preset it would be false, so it
 			// goes until the engine says what runs now.
 			if (config.tier_preset !== presetBefore) config.replaced_tier_slots = undefined;
-			// Awaited inside `saving`, which disables Save: a second save cannot start while this
-			// answer is still on its way and overwrite the newer one.
-			await refreshReplacedSlots();
+			void refreshReplacedSlots();
 			addToast(t('llm.saved'), 'success', 3000);
 			// Tell the StatusBar (and any other live provider indicator) to refresh
 			// NOW instead of waiting up to 30s for its next poll — otherwise the
