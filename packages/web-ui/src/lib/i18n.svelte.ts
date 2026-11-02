@@ -692,6 +692,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.tier.fast':          { de: 'Schnell',                                                                   en: 'Fast' },
 	'llm.tier.balanced':      { de: 'Ausgewogen',                                                                en: 'Balanced' },
 	'llm.tier.deep':          { de: 'Tief',                                                                      en: 'Deep' },
+	// ux U-118: a tier whose stored model this version no longer knows runs the strategy's model.
+	// {tier} is the tier's label, {model_id} the stored id, {runs} the replacing model's shown name.
+	'llm.replaced_slot.owner':   { de: 'Das Modell {model_id} gibt es in dieser Version nicht mehr. Die Stufe „{tier}“ läuft deshalb mit {runs}. Wähle hier ein anderes Modell, wenn du das nicht willst.', en: 'The model {model_id} is no longer available in this version, so the “{tier}” tier runs with {runs}. Choose another model here if you do not want that.' },
+	'llm.replaced_slot.mandate': { de: 'Das Modell {model_id} gibt es in dieser Version nicht mehr. Die Stufe „{tier}“ läuft deshalb mit {runs}.', en: 'The model {model_id} is no longer available in this version, so the “{tier}” tier runs with {runs}.' },
 	'llm.tier.fast_desc':     { de: 'Hohes Volumen, Orchestrierung & Klassifizierung',                           en: 'High-volume orchestration & classification' },
 	'llm.tier.balanced_desc': { de: 'Standard-Arbeitspferd für die meisten Aufgaben',                            en: 'The workhorse for most tasks' },
 	'llm.tier.deep_desc':     { de: 'Komplexes Denken & schwierige Aufgaben',                                    en: 'Complex reasoning & hard tasks' },

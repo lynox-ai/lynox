@@ -24,7 +24,7 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { throwIfRefused } from '../api/save-refusal.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
 	import { clearTierConfigCache } from '../utils/tier-config.js';
@@ -166,6 +166,9 @@
 		// while verifying a provider switch — turned the fix into a silent no-op
 		// under the env-recommending docs path).
 		env_overrides?: { provider?: boolean };
+		// A tier whose stored model this version does not know runs the strategy's model on the
+		// same provider instead (`config.ts`, the preset guard); GET reports it so the page can say so.
+		replaced_tier_slots?: { tier: ModelTier; model_id: string; runs: string }[];
 		// F1b: effective active provider + base, surfaced ONLY when env-pinned
 		// (the provider then never lands in config.json, so `provider` /
 		// `api_base_url` above are empty). Used as a fallback to highlight the
@@ -585,6 +588,14 @@
 	}
 	// The active preset's resolved per-tier rows (for the inline detail panel).
 	const activePresetTiers = $derived(presetInfoFor(strategy)?.tiers ?? []);
+
+	// ux U-118: a tier that runs another model than the one chosen says so where it is listed,
+	// in the names the page shows. The owner is told how to change it; a mandate only reads it.
+	const replacedSlots = $derived(config.replaced_tier_slots ?? []);
+	function replacedSlotLine(r: { tier: ModelTier; model_id: string; runs: string }, viewer: 'owner' | 'mandate'): string {
+		const runs = presetInfoFor(strategy)?.tiers.find((x) => x.tier === r.tier && x.model_id === r.runs)?.label ?? r.runs;
+		return tf(`llm.replaced_slot.${viewer}`, { model_id: r.model_id, tier: t(`llm.tier.${r.tier}`), runs });
+	}
 
 	function selectStrategy(next: Strategy): void {
 		if (next === strategy) return;
@@ -1113,6 +1124,9 @@
 		<OwnerOnlyNotice />
 		{#if loaded}
 			<ReadOnlyRows rows={mandateRows} />
+			{#each replacedSlots as r (r.tier)}
+				<p class="text-xs text-warning" data-replaced-slot={r.tier}>{replacedSlotLine(r, 'mandate')}</p>
+			{/each}
 		{/if}
 	{:else}
 	{#if config.env_overrides?.provider}
@@ -1257,6 +1271,10 @@
 								</span>
 							{/if}
 						</div>
+						{@const replaced = replacedSlots.find((r) => r.tier === tier.tier)}
+						{#if replaced}
+							<p class="ml-24 text-xs text-warning" data-replaced-slot={replaced.tier}>{replacedSlotLine(replaced, 'owner')}</p>
+						{/if}
 						{#if expandedDetails[strategy]}
 							<dl class="ml-24 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px] text-text-muted">
 								{#if tier.residency}
@@ -1283,6 +1301,11 @@
 						<span class="text-[11px] text-text-subtle">{t('llm.preset.applies_hint')}</span>
 					</div>
 				</div>
+			{:else}
+				<!-- No preset detail to sit beside: the lines stand under the strategy cards. -->
+				{#each replacedSlots as r (r.tier)}
+					<p class="text-xs text-warning" data-replaced-slot={r.tier}>{replacedSlotLine(r, 'owner')}</p>
+				{/each}
 			{/if}
 		</section>
 	{/if}
