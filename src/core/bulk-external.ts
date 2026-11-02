@@ -664,6 +664,9 @@ export function externalWriter(client: ExternalClient, opts: {
   method?: BulkWriteMethod;
   sleep?: (ms: number) => Promise<void>;
   io?: TargetIo;
+  /** Whether the read-back holds markup the write never sent (`markupAddedByHost`), for a form
+   *  whose HTML fields are checked after the write. The target stays written; the run halts. */
+  addedByHost?: (sent: ExternalImage, back: ExternalImage) => boolean;
 } = {}): TargetWriter {
   const method = opts.method ?? 'PATCH';
   const io: TargetIo = opts.io ?? {
@@ -720,11 +723,13 @@ export function externalWriter(client: ExternalClient, opts: {
       // Read back once. When that fails the write stands; the undo then expects what was
       // sent, and a host that changed it answers as a conflict.
       // Even a halt here does not unwrite the target: it is recorded, and the next one halts.
+      let back: ExternalImage | 'foreign' = 'foreign';
       try {
-        const back = await readOver(key, fields);
-        if (back !== 'foreign') return { result: 'written', actual: { value: back, estimated: false } };
+        back = await readOver(key, fields);
       } catch { /* estimated below */ }
-      return { result: 'written', actual: { value: after.value, estimated: true } };
+      if (back === 'foreign') return { result: 'written', actual: { value: after.value, estimated: true } };
+      const actual = { value: back, estimated: false };
+      return opts.addedByHost?.(value, back) === true ? { result: 'written', actual, hostAddedMarkup: true } : { result: 'written', actual };
     },
   };
 }
