@@ -6,6 +6,7 @@
  */
 
 import type { LLMProvider, ModelTier } from '../../types/models.js';
+import { toMistralEuBase } from '../../types/models.js';
 import type { TierSet } from '../../types/config.js';
 import type { ProviderKey } from '../../types/provider-registry.js';
 import {
@@ -613,10 +614,10 @@ export const LLM_CATALOG: LLMCatalog = [
     models: MISTRAL_MODELS,
     requires_base_url: false,
     requires_region: false,
-    base_url_default: 'https://api.mistral.ai/v1',
-    default_residency: 'EU-Paris (Mistral SAS; DPA + GDPR)',
+    base_url_default: 'https://api.eu.mistral.ai/v1',
+    default_residency: 'EU/EFTA inference (Mistral SAS, regional endpoint; DPA + GDPR)',
     verification: 'native',
-    notes: 'EU-sovereign option. Pinned to api.mistral.ai — no base URL needed. Tier-aware: ministral / mistral-large picked from the model dropdown.',
+    notes: 'EU-sovereign option. Pinned to the EU regional endpoint api.eu.mistral.ai — no base URL needed. Tier-aware: ministral / mistral-large picked from the model dropdown.',
   },
   ...OPENAI_COMPAT_PRESETS,
   {
@@ -926,7 +927,9 @@ export function resolveCatalogKey(
     let host = '';       // hostname only        — 'localhost', 'api.mistral.ai'
     let hostPort = '';   // hostname:port if any — 'localhost:11434'
     try {
-      const u = new URL(baseUrl);
+      // A URL saved on Mistral's global endpoint is the Mistral preset too: it is moved to
+      // the EU endpoint everywhere it is used, so it matches as that.
+      const u = new URL(toMistralEuBase(baseUrl));
       host = u.hostname.toLowerCase();
       hostPort = u.host.toLowerCase();
     } catch { /* leave empty — falls through to the generic tile */ }

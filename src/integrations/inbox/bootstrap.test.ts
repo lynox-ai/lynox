@@ -256,7 +256,7 @@ describe('bootstrapInbox — wiring', () => {
     expect(create).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const url = fetchSpy.mock.calls[0]![0] as string;
-    expect(url).toContain('api.mistral.ai');
+    expect(url).toContain('api.eu.mistral.ai');
     expect(runtime.state.listItems()[0]?.bucket).toBe('requires_user');
     expect(runtime.budget.snapshot().spentUSD).toBeGreaterThan(0);
     fetchSpy.mockRestore();

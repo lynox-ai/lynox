@@ -168,7 +168,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     handle._inboxLlmRegion = 'us';
     handle.secretStore = { resolve: (n) => vault[n] ?? null };
     mockBootstrapInbox.mockReturnValueOnce(makeRuntime('eu-runtime'));
-    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' });
+    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.eu.mistral.ai/v1', openai_model_id: 'mistral-large-2512' });
     mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
     await engine.reloadCredentials();
     if (handle._inboxRebootstrapInflight) await handle._inboxRebootstrapInflight;
@@ -280,7 +280,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     // Switch to Mistral.
     const mistralConfig: LynoxUserConfig = {
       provider: 'openai',
-      api_base_url: 'https://api.mistral.ai/v1',
+      api_base_url: 'https://api.eu.mistral.ai/v1',
       openai_model_id: 'mistral-large-2512',
     };
     mockLoadConfig.mockReturnValueOnce(mistralConfig);
@@ -367,7 +367,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
 
     const mistralConfig: LynoxUserConfig = {
       provider: 'openai',
-      api_base_url: 'https://api.mistral.ai/v1',
+      api_base_url: 'https://api.eu.mistral.ai/v1',
       openai_model_id: 'mistral-large-2512',
     };
     mockLoadConfig.mockReturnValueOnce(mistralConfig);
@@ -452,7 +452,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     // the inflight yet, because we want to probe the drain window.
     const mistralConfig: LynoxUserConfig = {
       provider: 'openai',
-      api_base_url: 'https://api.mistral.ai/v1',
+      api_base_url: 'https://api.eu.mistral.ai/v1',
       openai_model_id: 'mistral-large-2512',
     };
     mockLoadConfig.mockReturnValueOnce(mistralConfig);
@@ -538,7 +538,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       return heldDrain;
     });
     mockBootstrapInbox.mockReturnValueOnce(makeRuntime('eu-runtime'));
-    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' } satisfies LynoxUserConfig);
+    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.eu.mistral.ai/v1', openai_model_id: 'mistral-large-2512' } satisfies LynoxUserConfig);
     mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
     await engine.reloadCredentials();
     await Promise.resolve();

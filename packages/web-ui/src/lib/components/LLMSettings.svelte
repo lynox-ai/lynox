@@ -356,6 +356,9 @@
 				const u = new URL(baseUrl);
 				host = u.hostname.toLowerCase();
 				hostPort = u.host.toLowerCase();
+				// A config saved on Mistral's global endpoint is the Mistral preset too; the
+				// engine reads it as the EU endpoint the preset now names (core catalog.ts).
+				if (host === 'api.mistral.ai') { host = 'api.eu.mistral.ai'; hostPort = host; }
 			} catch { /* invalid — falls through to the generic tile */ }
 			if (host) {
 				const matched = candidates.find((c) => {
@@ -1376,7 +1379,7 @@
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.base_url')}</span>
 					<input type="url" disabled={!loaded || providerLocked}
-						placeholder="https://api.mistral.ai/v1"
+						placeholder="https://api.eu.mistral.ai/v1"
 						bind:value={config.api_base_url} oninput={markDirty}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 				</label>

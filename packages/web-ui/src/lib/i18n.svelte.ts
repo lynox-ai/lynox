@@ -1969,7 +1969,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.custom_url': { de: 'Proxy URL', en: 'Proxy URL' },
 	'config.custom_url_desc': { de: 'LiteLLM oder anderer Anthropic-kompatibler Proxy', en: 'LiteLLM or other Anthropic-compatible proxy' },
 	'config.openai_url': { de: 'Base URL', en: 'Base URL' },
-	'config.openai_url_desc': { de: 'OpenAI-kompatibler Endpoint (z.B. https://api.mistral.ai/v1).', en: 'OpenAI-compatible endpoint (e.g. https://api.mistral.ai/v1).' },
+	'config.openai_url_desc': { de: 'OpenAI-kompatibler Endpoint (z.B. https://api.eu.mistral.ai/v1).', en: 'OpenAI-compatible endpoint (e.g. https://api.eu.mistral.ai/v1).' },
 	'config.model': { de: 'KI-Modell', en: 'AI Model' },
 	'config.model_desc': { de: 'Welches KI-Modell verwendet wird. Stärkere Modelle kosten mehr pro Anfrage.', en: 'Which AI model is used. Stronger models cost more per request.' },
 	'config.model_haiku': { de: 'Haiku — schnell & günstig', en: 'Haiku — fast & affordable' },

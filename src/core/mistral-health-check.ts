@@ -21,7 +21,7 @@ import { captureError } from './error-reporting.js';
 import { getErrorMessage } from './utils.js';
 import { providerListApplies } from './contained-providers.js';
 
-const MODELS_URL = 'https://api.mistral.ai/v1/models';
+const MODELS_URL = 'https://api.eu.mistral.ai/v1/models';
 const TIMEOUT_MS = 5_000;
 
 export type MistralHealthStatus =

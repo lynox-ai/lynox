@@ -61,8 +61,51 @@ export const VERTEX_MODEL_MAP: Record<ModelTier, string> = {
   'fast':     'claude-haiku-4-5',
 };
 
-/** Canonical Mistral base URL (used for tier-map detection). */
-export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
+/**
+ * Canonical Mistral base URL: the EU regional endpoint. Mistral commits to EU/EFTA inference only
+ * for this host; for the global `api.mistral.ai` it commits to no location. Every Mistral call
+ * lynox makes goes here, and a stored global URL is moved here (`toMistralEuBase`).
+ */
+export const MISTRAL_API_BASE = 'https://api.eu.mistral.ai/v1';
+
+/** Mistral's global endpoint, which commits to no inference location. Kept only to recognise it. */
+export const MISTRAL_GLOBAL_HOST = 'api.mistral.ai';
+
+/** The host of `MISTRAL_API_BASE`. */
+export const MISTRAL_EU_HOST = 'api.eu.mistral.ai';
+
+/**
+ * True only when `apiBaseURL`'s host is the EU regional endpoint, the one Mistral commits to
+ * EU/EFTA inference for. Exact hostname, parsed: the global endpoint, another `*.mistral.ai`
+ * subdomain or a spoof like `api.eu.mistral.ai.evil.com` is false. This, not `isMistralHost`,
+ * decides anything that depends on where the data is processed.
+ */
+export function mistralCommitsEuInference(apiBaseURL: string | undefined): boolean {
+  if (!apiBaseURL) return false;
+  try {
+    return new URL(apiBaseURL).hostname.toLowerCase() === MISTRAL_EU_HOST;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Moves a URL on Mistral's global endpoint to the EU regional one, keeping scheme-less parts
+ * (path, query) as they were. Any other URL, including other `*.mistral.ai` hosts and spoofs,
+ * comes back unchanged.
+ */
+export function toMistralEuBase(url: string): string;
+export function toMistralEuBase(url: string | undefined): string | undefined;
+export function toMistralEuBase(url: string | undefined): string | undefined {
+  if (!url) return url;
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return url; }
+  if (parsed.hostname.toLowerCase() !== MISTRAL_GLOBAL_HOST) return url;
+  parsed.hostname = MISTRAL_EU_HOST;
+  const moved = parsed.toString();
+  // `URL` adds a trailing slash to a bare origin; keep the caller's form.
+  return !url.endsWith('/') && moved.endsWith('/') && parsed.pathname === '/' ? moved.slice(0, -1) : moved;
+}
 
 /**
  * Mistral tier-set for openai-provider mode.

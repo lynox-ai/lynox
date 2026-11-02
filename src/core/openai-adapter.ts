@@ -15,7 +15,7 @@ import { createHash, randomUUID, randomBytes } from 'node:crypto';
 
 import { getLynoxDir } from './config.js';
 import { newToolUseId } from './tool-use-id.js';
-import { modelCapability } from '../types/models.js';
+import { modelCapability, MISTRAL_EU_HOST, toMistralEuBase } from '../types/models.js';
 
 import type {
   BetaRawMessageStreamEvent,
@@ -734,7 +734,7 @@ export class OpenAIAdapter {
   // Precomputed once at construction — Mistral is the only OpenAI-compat
   // endpoint we forward `prompt_cache_key` to. Hostname-gate is case-
   // insensitive (DNS is); exact-match prevents subdomain attacks like
-  // `api.mistral.ai.evil.com` which would otherwise pass a `.endsWith` check.
+  // `api.eu.mistral.ai.evil.com` which would otherwise pass a `.endsWith` check.
   private readonly _isMistralHost: boolean;
   // Fireworks gets its documented `prompt_cache_isolation_key`, derived per
   // instance (see `fireworksCacheIsolationKey`). Same exact-match hostname gate
@@ -742,12 +742,14 @@ export class OpenAIAdapter {
   private readonly _isFireworksHost: boolean;
 
   constructor(opts: { baseURL: string; apiKey: ApiKeyProvider; modelId: string }) {
-    this.baseURL = opts.baseURL.replace(/\/+$/, '');
+    // A stored URL on Mistral's global endpoint goes to the EU regional one, the only one
+    // Mistral commits to an inference location for (EU/EFTA).
+    this.baseURL = toMistralEuBase(opts.baseURL).replace(/\/+$/, '');
     this.apiKeyProvider = opts.apiKey;
     this.modelId = opts.modelId;
     let host = '';
     try { host = new URL(this.baseURL).hostname.toLowerCase(); } catch { /* malformed baseURL → gates stay closed */ }
-    this._isMistralHost = host === 'api.mistral.ai';
+    this._isMistralHost = host === MISTRAL_EU_HOST;
     this._isFireworksHost = host === 'api.fireworks.ai';
   }
 

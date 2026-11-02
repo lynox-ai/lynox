@@ -92,7 +92,7 @@ describe('docker-installer', () => {
       // OpenAI-compatible adapter); Mistral additionally pre-fills the
       // canonical Mistral endpoint.
       expect(INSTALLER_SRC).toMatch(/LYNOX_LLM_PROVIDER'\]\s*=\s*'openai'/);
-      expect(INSTALLER_SRC).toMatch(/https:\/\/api\.mistral\.ai\/v1/);
+      expect(INSTALLER_SRC).toMatch(/https:\/\/api\.eu\.mistral\.ai\/v1/);
     });
 
     it('uses MISTRAL_API_KEY (primary slot) for the Mistral branch', () => {
@@ -317,7 +317,7 @@ describe('docker-installer', () => {
       );
       await validateMistralKey('test-key-xyz');
       expect(fetchSpy).toHaveBeenCalledWith(
-        'https://api.mistral.ai/v1/models',
+        'https://api.eu.mistral.ai/v1/models',
         expect.objectContaining({
           method: 'GET',
           headers: expect.objectContaining({ Authorization: 'Bearer test-key-xyz' }) as unknown,

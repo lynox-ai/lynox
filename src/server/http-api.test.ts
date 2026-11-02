@@ -14333,7 +14333,7 @@ describe('LynoxHTTPApi', () => {
       // A curated host is not enough: it must belong to the provider the save leaves in place,
       // or the pool's key goes to the other vendor (the Anthropic key to Mistral, or back).
       describe('PUT /api/config pairs api_base_url with the provider', () => {
-        const MISTRAL = 'https://api.mistral.ai/v1';
+        const MISTRAL = 'https://api.eu.mistral.ai/v1';
         // This file shares ONE per-IP rate window; the requests below are paid back so a test
         // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
         const rateCounts = (): Map<string, { count: number }> =>
@@ -14385,6 +14385,12 @@ describe('LynoxHTTPApi', () => {
             expect((await put({ api_base_url: 'https://api.anthropic.com' })).status).toBe(200);
           });
           await withStored({ provider: 'openai', api_base_url: MISTRAL }, async () => {
+            expect((await put({ api_base_url: 'https://api.eu.mistral.ai' })).status).toBe(200);
+          });
+          // A page loaded before the move, or a file written before it, names Mistral's global
+          // endpoint. It is taken, as the EU one.
+          await withStored({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' }, async () => {
+            expect((await put({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' })).status).toBe(200);
             expect((await put({ api_base_url: 'https://api.mistral.ai' })).status).toBe(200);
           });
           // The Web UI sends every field back on each save; an unpaired value already in the
@@ -23337,5 +23343,31 @@ describe('the connection form of a built-in provider (/api/api-profiles/:id/clie
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can enter the app credentials of a built-in provider.');
     expect(h.set).not.toHaveBeenCalled();
+  });
+});
+
+describe('moveMistralEndpointsToEu', () => {
+  it('moves the global endpoint to the EU one, at the top level and in every tier slot', async () => {
+    const { moveMistralEndpointsToEu } = await import('./http-api.js');
+    const update = {
+      api_base_url: 'https://api.mistral.ai/v1',
+      tier_set: {
+        fast: { api_base_url: 'https://api.mistral.ai' },
+        deep: { api_base_url: 'https://api.fireworks.ai/inference/v1' },
+        balanced: {},
+      },
+    };
+    moveMistralEndpointsToEu(update);
+    expect(update.api_base_url).toBe('https://api.eu.mistral.ai/v1');
+    expect(update.tier_set.fast.api_base_url).toBe('https://api.eu.mistral.ai');
+    expect(update.tier_set.deep.api_base_url).toBe('https://api.fireworks.ai/inference/v1');
+    expect(update.tier_set.balanced).toEqual({});
+  });
+
+  it('leaves a spoof of the Mistral host as written', async () => {
+    const { moveMistralEndpointsToEu } = await import('./http-api.js');
+    const update = { api_base_url: 'https://api.mistral.ai.evil.com/v1' };
+    moveMistralEndpointsToEu(update);
+    expect(update.api_base_url).toBe('https://api.mistral.ai.evil.com/v1');
   });
 });
