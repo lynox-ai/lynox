@@ -117,6 +117,25 @@ describe('a run\'s page as a mandate sees it', () => {
 		expect(target.textContent).not.toContain(t('bulk.owner_only_notice'));
 	});
 
+	// The cause names no owner act and is the same for both; what to do next (write on, take the run
+	// back) is the owner's alone.
+	it('names markup the store added to a mandate, without writing on or the owner\'s next steps', async () => {
+		const halted = { phase: 'writing', haltKey: 'markupAddedByShop', haltReason: 'engine English', applied: 1, probeConfirmed: true, total: 1, shopAddedMarkup: 1 } as const;
+		run = makeRun(halted);
+		await renderDetail();
+		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop'));
+		expect(target.textContent).not.toContain(t('bulk.halt.markupAddedByShop_before'));
+		expect(buttonByText(t('bulk.resume.write'))).toBeUndefined();
+		unmount(component!);
+		component = undefined;
+		resetSettingsViewer();
+		viewer = 'owner';
+		run = makeRun(halted);
+		await renderDetail();
+		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop_before'));
+		expect(buttonByText(t('bulk.resume.write'))).toBeDefined();
+	});
+
 	it('says who starts a run that waits for its start, not which button to press', async () => {
 		run = makeRun({ phase: 'planned', haltKey: 'awaitingStart', haltReason: 'engine English', total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
 		await renderDetail();
