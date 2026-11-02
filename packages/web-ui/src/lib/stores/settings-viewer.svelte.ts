@@ -69,12 +69,15 @@ export function canChooseModel(): boolean {
 /**
  * For a page that reads `GET /api/config` itself: take this before the request, and hand the
  * body to what it returns. A body asked for before a reset (a sign-in) is then not taken after
- * it, the same as `loadSettingsViewer`'s own answers.
+ * it, the same as `loadSettingsViewer`'s own answers. It returns whether the body was taken, so a
+ * page that keeps more of the body can drop that part too.
  */
-export function viewerNote(): (body: unknown) => void {
+export function viewerNote(): (body: unknown) => boolean {
 	const asked = generation;
 	return (body) => {
-		if (asked === generation) noteSettingsViewer(body);
+		if (asked !== generation) return false;
+		noteSettingsViewer(body);
+		return true;
 	};
 }
 
