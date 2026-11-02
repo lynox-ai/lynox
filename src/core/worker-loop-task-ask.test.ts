@@ -151,8 +151,9 @@ describe('a background task question on an instance the control plane runs', () 
     const posts = escalationPosts(fetchSpy);
     expect(posts).toHaveLength(1);
     expect(String(posts[0]![0])).toBe('https://cp.test/internal/usage/inst-tq/escalation');
-    // A class signal and nothing else: the question stays on the instance.
-    expect(JSON.parse(String((posts[0]![1] as { body: string }).body))).toEqual({ kind: 'escalation' });
+    // A class signal and nothing else: the question stays on the instance. The class is a
+    // question, so the control plane mails that a run is waiting, not that something failed.
+    expect(JSON.parse(String((posts[0]![1] as { body: string }).body))).toEqual({ kind: 'question' });
   });
 
   it('one whose push reached the owner is recorded and not reported', async () => {

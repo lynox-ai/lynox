@@ -30,6 +30,7 @@ import type {
   UsageStatusResponse,
   ProviderIncidentRequest,
   EscalationNoticeRequest,
+  EscalationNoticeKind,
 } from '../contract/http.js';
 import { readExactHeld } from '../contract/http.js';
 import type { ProviderBillingFailure } from './provider-failure.js';
@@ -54,9 +55,11 @@ const PROVIDER_INCIDENT_COALESCE_MS = 10 * 60_000;
 // or hostile host-cycling proxy from growing the map without bound — same shape as
 // SEEN_RUN_IDS_CAP.
 const INCIDENT_HOSTS_CAP = 100;
-// At most one escalation notice per window. The CP throttles the MAIL on its side (one per six
-// hours per instance); this only keeps a burst of failing schedules, or a CP that does not have
-// the route yet and answers 404, from turning every escalation into a POST.
+// At most one escalation notice per kind per window. The CP throttles the MAIL on its side (one
+// per six hours per instance and kind); this only keeps a burst of failing schedules, or a CP
+// that does not have the route yet and answers 404, from turning every escalation into a POST.
+// Per kind, as the CP's throttle is: a failure reported a minute ago must not hold back the
+// notice that a run is waiting for its owner's answer.
 const ESCALATION_NOTICE_COALESCE_MS = 10 * 60_000;
 const SYNC_TIMEOUT_MS = 5_000;
 // Stale threshold: how long we trust the cached `allowed` flag when the
@@ -408,28 +411,35 @@ export function createManagedHook(opts: {
   // An escalation whose push reached nobody: tell the CP, which may mail the owner from a lynox
   // sender (fixed text, nothing from the run). Every CP-provisioned instance, whatever its tier:
   // the hook is installed only where the CP set LYNOX_BILLING_TIER, so self-host never posts.
-  let lastEscalationNoticeAtMs: number | undefined;
+  const lastEscalationNoticeAtMs = new Map<EscalationNoticeKind, number>();
 
-  function reportEscalation(delivery: DeliverySummary): void {
+  function reportEscalation(delivery: DeliverySummary, kind: EscalationNoticeKind): void {
     if (delivery === 'delivered') return;
     const now = Date.now();
-    if (lastEscalationNoticeAtMs !== undefined && now - lastEscalationNoticeAtMs < ESCALATION_NOTICE_COALESCE_MS) return;
+    const last = lastEscalationNoticeAtMs.get(kind);
+    if (last !== undefined && now - last < ESCALATION_NOTICE_COALESCE_MS) return;
     // The stamp holds whether or not the POST lands. Unlike the incident report, a failed notice
     // is not retried at once: a CP without the route, or a slow one, would otherwise get a POST
     // for every escalation. The next one after the window tries again.
-    lastEscalationNoticeAtMs = now;
-    const body: EscalationNoticeRequest = { kind: 'escalation' };
+    lastEscalationNoticeAtMs.set(kind, now);
+    const body: EscalationNoticeRequest = { kind };
     void fetch(`${controlPlaneUrl}/internal/usage/${instanceId}/escalation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-instance-secret': secret },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(FLUSH_TIMEOUT_MS),
-    }).catch(() => { /* a liveness signal, not money owed: the next escalation tries again */ });
+    })
+      // A refusal is said in the log: a control plane that predates a kind answers it with 400,
+      // and then the owner gets no mail at all. Nothing else tells anyone.
+      .then((res) => {
+        if (!res.ok) process.stderr.write(`[lynox] escalation notice (${kind}) refused by the control plane: HTTP ${res.status}\n`);
+      })
+      .catch(() => { /* a liveness signal, not money owed: the next escalation tries again */ });
   }
 
   return {
-    onEscalationReported(delivery: DeliverySummary) {
-      reportEscalation(delivery);
+    onEscalationReported(delivery: DeliverySummary, kind: EscalationNoticeKind) {
+      reportEscalation(delivery, kind);
     },
 
     async onInit() {
