@@ -788,6 +788,7 @@ describe('graphqlUrlWrites', () => {
     ['https://wp.example/?graphql&%20query=mutation%7Ba%7D', true],
     ['https://h.example/graphql?QUERY=mutation%7Ba%7D', true],
     ['https://h.example/graphql?query%5B%5D=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?query%5Bq%5D=mutation%7Ba%7D', true],
     ['https://h.example/graphql?queryx=mutation%7Ba%7D', false],
     ['https://h.example/graphql?x+query=mutation%7Ba%7D', false],
   ] as const)('%s → %s', (url, want) => {
@@ -801,6 +802,11 @@ describe('isGraphqlEndpoint — the query key read every way a server may', () =
     ['https://wp.example/?%u0067raphql', true],
     ['https://wp.example/?x=1;graphqlx', false],
     ['https://wp.example/?%u0067raphqlx', false],
+    // The key as PHP and ASP.NET name it: leading space, any case, `[...]` suffix.
+    ['https://wp.example/?+graphql', true],
+    ['https://wp.example/?GRAPHQL', true],
+    ['https://wp.example/?graphql%5B%5D', true],
+    ['https://wp.example/?x+graphql', false],
   ] as const)('%s → %s', (url, want) => {
     expect(isGraphqlEndpoint(url)).toBe(want);
   });
