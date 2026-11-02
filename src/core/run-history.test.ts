@@ -3002,21 +3002,26 @@ describe('RunHistory', () => {
     /**
      * v72: a workflow the chat's turn started. Its steps are `pipeline_step` runs under the
      * pipeline run, which names the chat run that started it; a nested workflow names the same
-     * chat run, and a workflow a sub-agent started names the sub-agent's run.
+     * chat run, a workflow a sub-agent started names the sub-agent's run, and one a step's agent
+     * started names the step's run.
      */
     it('counts the calls of the steps of every workflow the run or its sub-agents started, and no other', () => {
       const h = createHistory();
       const chat = h.insertRun({ taskText: 'chat', modelTier: 'balanced', modelId: 'm' });
       const step = (pipelineId: string): string =>
         h.insertRun({ sessionId: pipelineId, taskText: 'step', modelTier: '', modelId: '', runType: 'pipeline_step', spawnParentId: pipelineId, spawnDepth: 1 });
-      const pipeline = (id: string, startedByRunId?: string): void =>
-        h.insertPipelineRun({ id, manifestName: 'wf', status: 'completed', manifestJson: '{}', ...(startedByRunId !== undefined ? { startedByRunId } : {}) });
+      const pipeline = (id: string, startedByRunId?: string, parentRunId?: string): void =>
+        h.insertPipelineRun({ id, manifestName: 'wf', status: 'completed', manifestJson: '{}', ...(startedByRunId !== undefined ? { startedByRunId } : {}), ...(parentRunId !== undefined ? { parentRunId } : {}) });
 
       pipeline('wf-chat', chat);
-      call(h, step('wf-chat'), 0, { usd: 0.05, source: 'response' });
-      // A nested workflow carries the chat's run too.
-      pipeline('wf-nested', chat);
+      const chatStep = step('wf-chat');
+      call(h, chatStep, 0, { usd: 0.05, source: 'response' });
+      // A workflow nested in it (`parent_run_id`) carries the chat's run too.
+      pipeline('wf-nested', chat, 'wf-chat');
       call(h, step('wf-nested'), 0, { usd: 0.02, source: 'profile' });
+      // A workflow a step's agent started itself names the step's run.
+      pipeline('wf-from-step', chatStep);
+      call(h, step('wf-from-step'), 0, { usd: 0.04, source: 'response' });
       // A sub-agent that started a workflow: its own run is in the tree.
       const child = h.insertRun({ taskText: 'child', modelTier: 'fast', modelId: 'm', spawnParentId: chat, spawnDepth: 1 });
       pipeline('wf-child', child);
@@ -3033,8 +3038,8 @@ describe('RunHistory', () => {
       call(h, step('wf-schedule'), 0, { usd: 9, source: 'response' });
 
       const sum = h.getApiCallsOfRun(chat);
-      expect(sum.calls).toBe(4);
-      expect(sum.usd).toBeCloseTo(0.11, 9);
+      expect(sum.calls).toBe(5);
+      expect(sum.usd).toBeCloseTo(0.15, 9);
       expect(sum.estimated).toBe(true);
       expect(h.getApiCallsOfRun(other).calls).toBe(1);
       h.close();
