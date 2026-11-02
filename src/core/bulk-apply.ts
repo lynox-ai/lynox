@@ -138,14 +138,14 @@ function sameImage(a: BeforeImage, b: BeforeImage, htmlFields: readonly string[]
 }
 
 /**
- * A read and a planned image the same in the form the store saves a product in
- * ({@link shopifySavedForm}), both taking the title the read answered where they set none. A read
- * without that title compares its `seo_title` as it is: unknown is not equal.
+ * A read holding what the store would have saved of a planned image ({@link shopifySavedForm}),
+ * with the title the read answered where the plan sets none. The read is taken as it is. A read
+ * without that title leaves the planned `seo_title` as it is: unknown is not equal.
  */
 function sameInSavedForm(cur: BeforeImage & { readonly titleNow?: string | null }, planned: BeforeImage, htmlFields: readonly string[] = []): boolean {
   if (cur.absent || planned.absent) return false;
   const titleNow = cur.titleNow ?? null;
-  return sameValue(shopifySavedForm(cur.value, titleNow), shopifySavedForm(planned.value, titleNow), htmlFields);
+  return sameValue(cur.value, shopifySavedForm(planned.value, titleNow), htmlFields);
 }
 
 function summarize(ledger: BulkLedger, runId: string, lead: string, say: BulkNotices = BULK_NOTICES.en): string {
@@ -430,7 +430,8 @@ async function applyRunEffect(
         // also what an undo must expect.
         // Found only under the HTML comparison: the store holds the planned description in its own
         // form — counted like a read-back stored otherwise than sent. A title or SEO title the store
-        // saved in its measured form is no description and not counted.
+        // saved in its measured form is no description and not counted; neither is HTML, so that
+        // comparison runs without the HTML fields.
         const rewritten = htmlFields.length > 0 && !sameImage(cur, t.after) && !(savedForm && sameInSavedForm(cur, t.after));
         return {
           kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null,

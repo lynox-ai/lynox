@@ -2449,10 +2449,10 @@ export class BulkLedger {
     // The before-image holds exactly F, so comparing whole images compares over F (§6 P4). A
     // judged target's after-state is its template until the verdict: its change is not known.
     const html = this.comparedAsHtml(runId);
-    // A value the store would save as the product already holds it is no change either (a SEO
+    // A plan the store would save as the product already holds it is no change either (a SEO
     // title equal to the title it keeps): only with the title this read answered.
     const saved = titleNow !== undefined && this.comparedInSavedForm(runId)
-      && sameValue(shopifySavedForm(read.before, titleNow), shopifySavedForm(after, titleNow), html);
+      && sameValue(read.before, shopifySavedForm(after, titleNow), html);
     const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : saved ? 'unchanged' : classifyChange(before, after, html);
     return db.transaction((): boolean => {
       const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ? WHERE ${guard}`)

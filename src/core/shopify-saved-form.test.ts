@@ -16,29 +16,33 @@ describe('SHOPIFY_PRODUCT_SAVED_FORMS', () => {
   });
 
   it(TITLE.name, () => {
-    const value: Record<string, unknown> = { title: '  M009​ Rand  ' };
+    const value: Record<string, unknown> = { title: '  M009\u200B Rand  ' };
     TITLE.apply(value, null);
     expect(value).toEqual({ title: 'M009 Rand' });
     // The values measured as kept byte for byte (m009): spaces inside, tab and line breaks inside,
     // a no-break space; of the hidden characters only U+200B goes, U+200D and U+FEFF stay.
-    for (const kept of ['M009  doppelt   drei', 'M009\tTab\nZeile\r\nCRLF', 'M009 geschuetzt']) {
+    for (const kept of ['M009  doppelt   drei', 'M009\tTab\nZeile\r\nCRLF', 'M009\u00A0geschuetzt']) {
       const other: Record<string, unknown> = { title: kept };
       TITLE.apply(other, null);
       expect(other).toEqual({ title: kept });
     }
-    const hidden: Record<string, unknown> = { title: 'M009​null‍breit﻿' };
+    const hidden: Record<string, unknown> = { title: 'M009\u200Bnull\u200Dbreit\uFEFF' };
     TITLE.apply(hidden, null);
-    expect(hidden).toEqual({ title: 'M009null‍breit﻿' });
+    expect(hidden).toEqual({ title: 'M009null\u200Dbreit\uFEFF' });
   });
 
   it(SEO_TITLE.name, () => {
     const equal: Record<string, unknown> = { seo_title: 'Neu' };
     SEO_TITLE.apply(equal, 'Neu');
     expect(equal).toEqual({ seo_title: null });
-    // Compared as titles are saved: a space at the end or a U+200B makes no other title.
+    // The title as sent decides (m009: both sent as the same untrimmed text). A SEO title that
+    // differs from it only at its edges is not measured, so it stays.
+    const untrimmed: Record<string, unknown> = { seo_title: '  M009 Rand  ' };
+    SEO_TITLE.apply(untrimmed, '  M009 Rand  ');
+    expect(untrimmed).toEqual({ seo_title: null });
     const spaced: Record<string, unknown> = { seo_title: 'Neu ' };
-    SEO_TITLE.apply(spaced, '​Neu');
-    expect(spaced).toEqual({ seo_title: null });
+    SEO_TITLE.apply(spaced, 'Neu');
+    expect(spaced).toEqual({ seo_title: 'Neu ' });
     // Another title, or none known, leaves the SEO title as it is.
     const other: Record<string, unknown> = { seo_title: 'Neu' };
     SEO_TITLE.apply(other, 'Alt');

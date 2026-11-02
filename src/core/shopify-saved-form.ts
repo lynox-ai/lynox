@@ -12,9 +12,12 @@ function savedTitle(title: string): string {
 
 /**
  * What a Shopify store does to a product's fields when it saves them, measured on a development
- * store (m009 and m009c, 2026-10-31), each by the name its test carries. Only these: a value the
- * store keeps in any other form is a difference. `titleAfter` is the title the product carries
- * after the write; where it is not known (null), a `seo_title` is compared as it is.
+ * store (m009, m009b and m009c, 2026-10-31), each by the name its test carries. Only these: a value
+ * the store keeps in any other form is a difference. Applied to what a run plans, never to what a
+ * read answers: a read is what the store holds. `titleAfter` is the title the write leaves, as sent:
+ * m009 sent title and SEO title as the same untrimmed text and read the SEO title as null. A SEO
+ * title that differs from it only at its edges is not measured and stays as it is, as does every
+ * SEO title where the title is not known (null).
  */
 export const SHOPIFY_PRODUCT_SAVED_FORMS: ReadonlyArray<{
   readonly name: string;
@@ -28,15 +31,15 @@ export const SHOPIFY_PRODUCT_SAVED_FORMS: ReadonlyArray<{
     name: 'seo_title null where it equals the title after the write',
     apply: (value, titleAfter) => {
       const seo = value['seo_title'];
-      if (typeof seo === 'string' && titleAfter !== null && savedTitle(seo) === savedTitle(titleAfter)) value['seo_title'] = null;
+      if (typeof seo === 'string' && titleAfter !== null && seo === titleAfter) value['seo_title'] = null;
     },
   },
 ]);
 
 /**
- * A product's value (a before-image or an after-state, over the fields a run writes) in the form
- * the store saves it ({@link SHOPIFY_PRODUCT_SAVED_FORMS}). The title after the write is the
- * value's own `title` where it holds one, else `titleNow`: the title read with the product.
+ * A planned value (an after-state, over the fields a run writes) in the form the store would save
+ * it ({@link SHOPIFY_PRODUCT_SAVED_FORMS}). The title after the write is the value's own `title`
+ * where it sets one, else `titleNow`: the title the store holds, read with the product.
  */
 export function shopifySavedForm(value: unknown, titleNow: string | null): unknown {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;

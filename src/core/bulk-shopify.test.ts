@@ -1029,9 +1029,9 @@ describe('applying a Shopify run', () => {
       expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
     };
 
-    it('finds a title trimmed and a SEO title equal to it as planned, and sends nothing (m009c)', async () => {
+    it('finds a title trimmed and a SEO title sent as the same text as planned, and sends nothing (m009)', async () => {
       fill(1);
-      const id = await previewedWith({ title: 'Neu ', seo_title: 'Neu' });
+      const id = await previewedWith({ title: 'Neu ', seo_title: 'Neu ' });
       approved(id);
       // A dead loop's write, as the store keeps it: the title trimmed, the SEO title equal to it read as null.
       s.products.set(10, { title: 'Neu', descriptionHtml: '<p>1</p>', seo: { title: null, description: 'D1' } });
@@ -1065,8 +1065,13 @@ describe('applying a Shopify run', () => {
       expect(row(undo.status.id).after_planned).toEqual({ seo_title: 'Old', seo_description: 'D1' });
     });
 
-    it('takes a SEO title read as null for a conflict where the read holds no title, or another title', async () => {
-      for (const kept of [{ seo: { title: null, description: 'D1' } }, { title: 'Fremd', seo: { title: null, description: 'D1' } }]) {
+    it('takes a SEO title for a conflict where the read holds no title, another title, or another SEO title', async () => {
+      for (const kept of [
+        { seo: { title: null, description: 'D1' } },
+        { title: 'Fremd', seo: { title: null, description: 'D1' } },
+        // Someone else's SEO title, one space off the title: the store holds it, and it is not the plan.
+        { title: 'T1', seo: { title: 'T1 ', description: 'D1' } },
+      ]) {
         s.products.clear();
         fill(1);
         s.products.set(10, { ...s.products.get(10)!, seo: { title: 'Old', description: 'D1' } });
@@ -1089,31 +1094,17 @@ describe('applying a Shopify run', () => {
       s.products.set(10, { title: 'Alt', descriptionHtml: '<p>1</p>', seo: { title: null, description: 'D1' } });
       s.requests.length = 0;
       await applyLive(id);
-      expect(ledger.getStatus(id)).toMatchObject({ applied: 0 });
-    });
-
-    it('finds an undo to a SEO title read as null as planned where the product holds that title as its SEO title, and sends nothing', async () => {
-      fill(1);
-      const id = await previewed();
-      approved(id);
-      await applyLive(id);
-      expect(s.products.get(10)!['seo']).toEqual({ title: 'New title', description: 'D1' });
-      const undo = ledger.planUndo(id);
-      if (!undo.ok) throw new Error(undo.reason);
-      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! })).toMatchObject({ ok: true });
-      // The undo restores a SEO title read as null; the product holds its title there instead.
-      s.products.set(10, { ...s.products.get(10)!, seo: { title: 'T1', description: 'D1' } });
-      s.requests.length = 0;
-      await applyLive(undo.status.id, 'bulk_undo');
       expect(writes()).toEqual([]);
-      expect(ledger.getStatus(undo.status.id)).toMatchObject({ applied: 1, conflicts: 0 });
+      expect(ledger.getStatus(id)).toMatchObject({ applied: 0, conflicts: 1 });
     });
 
     it('classifies a SEO title equal to the product\'s title as no change, and another one as a change', async () => {
-      fill(2);
+      fill(3);
       s.products.set(10, { ...s.products.get(10)!, title: 'New title' });
+      // The owner's own SEO title, one space off the title: the store holds it, so planning the title is a change.
+      s.products.set(30, { ...s.products.get(30)!, title: 'New title', seo: { title: 'New title ', description: 'D3' } });
       const id = await previewed();
-      expect(ledger.getPreview(id).map((t) => [t.key, t.change])).toEqual([[gid(10), 'unchanged'], [gid(20), 'update']]);
+      expect(ledger.getPreview(id).map((t) => [t.key, t.change])).toEqual([[gid(10), 'unchanged'], [gid(20), 'update'], [gid(30), 'update']]);
     });
   });
 });
