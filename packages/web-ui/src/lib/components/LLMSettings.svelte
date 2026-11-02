@@ -591,7 +591,22 @@
 
 	// ux U-118: a tier that runs another model than the one chosen says so where it is listed,
 	// in the names the page shows. The owner is told how to change it; a mandate only reads it.
-	const replacedSlots = $derived(config.replaced_tier_slots ?? []);
+	// The engine replaces a slot only under the STORED preset, so the lines describe the saved state:
+	// they stand while that strategy is shown and leave while another card is only being tried.
+	const replacedSlots = $derived(strategy === config.tier_preset ? (config.replaced_tier_slots ?? []) : []);
+	// Replaced tiers the preset detail has no row for still need a line (under the rows).
+	const replacedWithoutRow = $derived(replacedSlots.filter((r) => !activePresetTiers.some((x) => x.tier === r.tier)));
+	/** After a save the engine has reloaded its config; ask it again whether a slot is still replaced. */
+	async function refreshReplacedSlots(): Promise<void> {
+		try {
+			const res = await fetch(`${getApiBase()}/config`);
+			if (!res.ok) return; // keep the last known lines: a stale warning beats a hidden one
+			const body = (await res.json()) as Pick<UserConfig, 'replaced_tier_slots'>;
+			config.replaced_tier_slots = body.replaced_tier_slots;
+		} catch {
+			// same as above
+		}
+	}
 	function replacedSlotLine(r: { tier: ModelTier; model_id: string; runs: string }, viewer: 'owner' | 'mandate'): string {
 		const runs = presetInfoFor(strategy)?.tiers.find((x) => x.tier === r.tier && x.model_id === r.runs)?.label ?? r.runs;
 		return tf(`llm.replaced_slot.${viewer}`, { model_id: r.model_id, tier: t(`llm.tier.${r.tier}`), runs });
@@ -928,6 +943,7 @@
 			// (without a full reload) stays consistent with what was written.
 			dirty = false;
 			config.tier_preset = isPreset ? strategy : undefined;
+			void refreshReplacedSlots();
 			addToast(t('llm.saved'), 'success', 3000);
 			// Tell the StatusBar (and any other live provider indicator) to refresh
 			// NOW instead of waiting up to 30s for its next poll — otherwise the
@@ -1291,6 +1307,9 @@
 								{/if}
 							</dl>
 						{/if}
+					{/each}
+					{#each replacedWithoutRow as r (r.tier)}
+						<p class="text-xs text-warning" data-replaced-slot={r.tier}>{replacedSlotLine(r, 'owner')}</p>
 					{/each}
 					<div class="flex items-center justify-between pt-1">
 						<button type="button" onclick={() => toggleDetails(strategy)}

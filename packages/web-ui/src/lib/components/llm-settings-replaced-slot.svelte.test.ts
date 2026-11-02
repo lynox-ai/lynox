@@ -63,8 +63,13 @@ async function render(viewer: 'owner' | 'mandate', replaced: unknown[] | undefin
 		...(replaced ? { replaced_tier_slots: replaced } : {}),
 		...extra,
 	};
-	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const path = String(url).split('?')[0]!;
+		if (init?.method === 'PUT') {
+			// The saved config no longer carries the retired model, so the engine replaces nothing.
+			if (path.endsWith('/config')) delete (config as Record<string, unknown>)['replaced_tier_slots'];
+			return Response.json({ ok: true });
+		}
 		if (path.endsWith('/llm/catalog')) return Response.json({ providers: [anthropic] });
 		if (path.endsWith('/config')) return Response.json(config);
 		if (path.endsWith('/secrets/status')) return Response.json({ configured: { api_key: true } });
@@ -79,12 +84,21 @@ async function render(viewer: 'owner' | 'mandate', replaced: unknown[] | undefin
 	}
 }
 
+async function settle(): Promise<void> {
+	for (let i = 0; i < 10; i++) {
+		await new Promise((r) => setTimeout(r, 0));
+		await tick();
+		flushSync();
+	}
+}
+const radios = (): HTMLButtonElement[] => [...target.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+const card = (label: string): HTMLButtonElement => radios().find((b) => b.textContent?.includes(label))!;
 const lines = (): string[] => [...target.querySelectorAll('[data-replaced-slot]')].map((el) => el.textContent?.trim() ?? '');
 
 describe('a tier that runs another model than the stored one (ux U-118)', () => {
 	it('the owner reads it at that tier, with the names the page shows and how to change it', async () => {
 		await render('owner', REPLACED);
-		expect(lines()).toEqual(['Das Modell claude-retired-model gibt es in dieser Version nicht mehr. Die Stufe „Tief“ läuft deshalb mit Claude Opus 5. Wähle hier ein anderes Modell, wenn du das nicht willst.']);
+		expect(lines()).toEqual(['Das Modell claude-retired-model gibt es in dieser Version nicht mehr. Die Stufe „Tief“ läuft deshalb mit Claude Opus 5. Willst du das nicht, wähle „Eigene“ und dort ein anderes Modell für diese Stufe.']);
 		// At the tier: the line follows that tier's row in the strategy's detail.
 		const el = target.querySelector('[data-replaced-slot="deep"]')!;
 		expect(el.previousElementSibling?.textContent).toContain(t('llm.tier.deep'));
@@ -111,13 +125,53 @@ describe('a tier that runs another model than the stored one (ux U-118)', () => 
 	});
 
 	it('without a strategy detail to sit beside, the owner still reads it under the strategy cards', async () => {
-		await render('owner', REPLACED, { tier_preset: null, available_tier_presets: {} });
-		expect(lines()).toEqual(['Das Modell claude-retired-model gibt es in dieser Version nicht mehr. Die Stufe „Tief“ läuft deshalb mit claude-opus-5. Wähle hier ein anderes Modell, wenn du das nicht willst.']);
+		// The stored preset is not among the ones the server offers, so there is no detail panel.
+		await render('owner', REPLACED, { available_tier_presets: {} });
+		expect(target.querySelector('[role="radio"][aria-checked="true"]')).not.toBeNull();
+		expect(lines()).toEqual(['Das Modell claude-retired-model gibt es in dieser Version nicht mehr. Die Stufe „Tief“ läuft deshalb mit claude-opus-5. Willst du das nicht, wähle „Eigene“ und dort ein anderes Modell für diese Stufe.']);
 	});
 
 	it('the English line', async () => {
 		setLocale('en');
 		await render('owner', REPLACED);
-		expect(lines()).toEqual(['The model claude-retired-model is no longer available in this version, so the “Deep” tier runs with Claude Opus 5. Choose another model here if you do not want that.']);
+		expect(lines()).toEqual(['The model claude-retired-model is no longer available in this version, so the “Deep” tier runs with Claude Opus 5. If you do not want that, choose “Custom” and pick another model for this tier.']);
+	});
+	it('while another card is only being tried, the line leaves; back on the stored one, it returns', async () => {
+		await render('owner', REPLACED);
+		const stored = radios().find((b) => b.getAttribute('aria-checked') === 'true')!;
+		expect(lines()).toHaveLength(1);
+		card(t('llm.preset.custom')).click();
+		await settle();
+		expect(card(t('llm.preset.custom')).getAttribute('aria-checked')).toBe('true');
+		expect(lines()).toEqual([]);
+		stored.click();
+		await settle();
+		expect(lines()).toHaveLength(1);
+	});
+
+	it('after a save the page asks the engine again, and the line leaves once nothing is replaced', async () => {
+		await render('owner', REPLACED);
+		const stored = radios().find((b) => b.getAttribute('aria-checked') === 'true')!;
+		// Try another card and come back: the page has something to save, on the same strategy.
+		card(t('llm.preset.custom')).click();
+		await settle();
+		stored.click();
+		await settle();
+		expect(lines()).toHaveLength(1);
+		const save = [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === t('llm.save'))!;
+		expect(save).toBeDefined();
+		save.click();
+		await settle();
+		const fetchMock = fetch as unknown as { mock: { calls: [string, RequestInit?][] } };
+		expect(fetchMock.mock.calls.some(([u, i]) => i?.method === 'PUT' && String(u).endsWith('/config'))).toBe(true);
+		expect(lines()).toEqual([]);
+	});
+
+	it('a replaced tier the strategy detail has no row for still gets its line there', async () => {
+		const twoRows = { 'max-quality': { ...PRESET['max-quality'], tiers: PRESET['max-quality'].tiers.filter((x) => x.tier !== 'deep') } };
+		await render('owner', REPLACED, { available_tier_presets: twoRows });
+		// Positive control: the detail panel is on screen, without a deep row.
+		expect(target.textContent).toContain('Claude Sonnet 5');
+		expect(lines()).toEqual(['Das Modell claude-retired-model gibt es in dieser Version nicht mehr. Die Stufe „Tief“ läuft deshalb mit claude-opus-5. Willst du das nicht, wähle „Eigene“ und dort ein anderes Modell für diese Stufe.']);
 	});
 });
