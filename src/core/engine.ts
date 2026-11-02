@@ -952,6 +952,8 @@ export class Engine {
         this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
         // Mark an inbox item `replied` when the user answers it in chat.
         this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+        // What the classifier made of each mail, for mail_triage.
+        this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -2294,6 +2296,8 @@ export class Engine {
           this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
           // Mark an inbox item `replied` when the user answers it in chat.
           this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+          // What the classifier made of each mail, for mail_triage.
+          this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —

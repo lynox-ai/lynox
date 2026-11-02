@@ -34,7 +34,7 @@ export function createMailTools(registry: MailRegistry, ctx?: MailContext): Tool
     createMailReadTool(registry) as ToolEntry,
     createMailSendTool(registry, ctx) as ToolEntry,
     createMailReplyTool(registry, ctx) as ToolEntry,
-    createMailTriageTool(registry) as ToolEntry,
+    createMailTriageTool(registry, ctx?.hooks) as ToolEntry,
     createMailConnectTool() as ToolEntry,
   ];
 }
