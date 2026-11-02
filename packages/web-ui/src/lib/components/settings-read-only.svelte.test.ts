@@ -505,6 +505,40 @@ describe('LLMSettings', () => {
 		expect(target.querySelector('input[type="password"]')).not.toBeNull();
 		expect(buttonTexts()).toContain(t('llm.test_connection'));
 	});
+
+	// The Mistral preset now names the EU regional endpoint. A config saved before the move names
+	// the global one, and still reads as the Mistral preset, not as an unknown endpoint.
+	describe('a config saved on Mistral\'s global endpoint', () => {
+		const mistral = {
+			provider: 'openai', preset_id: 'mistral', display_name: 'Mistral', requires_base_url: false, requires_region: false,
+			base_url_default: 'https://api.eu.mistral.ai/v1', default_residency: 'EU/EFTA inference', vault_slot: 'MISTRAL_API_KEY',
+			models: [{ id: 'mistral-medium-2604', tier: 'sonnet', label: 'Mistral Medium 3.5', context_window: 128_000, pricing: { input: 1.5, output: 7.5 }, residency: 'EU' }],
+		};
+		const compat = {
+			provider: 'openai', preset_id: 'openai-compat', display_name: 'OpenAI-compatible', requires_base_url: true, requires_region: false,
+			default_residency: 'depends on endpoint', vault_slot: 'OPENAI_API_KEY', models: [],
+		};
+		const routesAt = (apiBaseUrl: string) => ({
+			'/llm/catalog': { providers: [anthropic, mistral, compat] },
+			'/config': {
+				provider: 'openai', api_base_url: apiBaseUrl, openai_model_id: 'mistral-medium-2604', default_tier: 'deep',
+				routing_mode: 'standard', tier_preset: null, available_tier_presets: {}, managed: SELF_HOST, viewer: 'mandate',
+			},
+			'/secrets/status': () => Response.json({ error: 'owner only' }, { status: 403 }),
+		});
+		const providerRow = (): string | undefined =>
+			rows().find((r) => r.startsWith(t('llm.provider_heading')));
+
+		it.each(['https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'])('reads %s as the Mistral preset', async (url) => {
+			await render(load, routesAt(url));
+			expect(providerRow()).toBe(line(t('llm.provider_heading'), 'Mistral'));
+		});
+
+		it('twin: another endpoint reads as the generic one', async () => {
+			await render(load, routesAt('https://api.groq.com/openai/v1'));
+			expect(providerRow()).toBe(line(t('llm.provider_heading'), 'OpenAI-compatible'));
+		});
+	});
 });
 
 describe('endpointText — an endpoint the owner entered, as a mandate reads it', () => {
