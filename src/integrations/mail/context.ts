@@ -149,7 +149,7 @@ export interface OutboundContext {
 }
 
 export interface MailHooks {
-  /** Fires for every fresh (post-dedup, post-prefilter) inbound envelope. */
+  /** Fires for every fresh (post-dedup) inbound envelope. */
   onInboundMail?: (accountId: string, envelope: MailEnvelope) => Promise<void>;
 
   /** Fires after a successful mail_send or mail_reply. */

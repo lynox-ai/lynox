@@ -21,6 +21,7 @@ function env(from: string, opts: Partial<MailEnvelope> = {}): MailEnvelope {
     attachmentCount: 0,
     sizeBytes: 0,
     isAutoReply: false,
+    listId: opts.listId,
   };
 }
 
@@ -56,8 +57,7 @@ describe('prefilter — sender patterns', () => {
   it('keeps 2-level transactional bulk senders (audit K-LE-08: Stripe/DocuSign)', () => {
     // The previous 2-level heuristic silently dropped Stripe invoices,
     // DocuSign signing requests, Outlook protection rewrites. These have
-    // to reach the inbox; List-Unsubscribe handles the actual marketing
-    // case via Rule 1.
+    // to reach the inbox.
     expect(prefilter(env('invoice@mail.stripe.com')).category).toBe('unknown');
     expect(prefilter(env('signing@info.docusign.com')).category).toBe('unknown');
     expect(prefilter(env('postmaster-quarantine@mail.protection.outlook.com')).category).toBe('unknown');
@@ -70,21 +70,41 @@ describe('prefilter — sender patterns', () => {
   });
 });
 
-describe('prefilter — header rules', () => {
-  it('flags messages with List-Unsubscribe header', () => {
-    const headers = new Map<string, string>([['list-unsubscribe', '<mailto:unsub@x.com>']]);
-    const result = prefilter(env('alice@example.com'), headers);
-    expect(result.category).toBe('noise');
-    expect(result.reason).toContain('list-unsubscribe');
+describe('prefilter — no header decides', () => {
+  // The prefilter judges the sender only: the mail_triage tool still counts a
+  // noreply newsletter as noise, list-id or not.
+  it('judges a list mail by its sender like any other', () => {
+    expect(prefilter(env('alice@example.com', { listId: 'acme.list.example.com' })).category).toBe('unknown');
+    expect(prefilter(env('noreply@example.com', { listId: 'acme.list.example.com' })).category).toBe('noise');
+  });
+});
+
+describe('prefilter — which rule fired', () => {
+  it('names the rule, and the domain for a domain rule', () => {
+    expect(prefilter(env('notifications@github.com'))).toMatchObject({ rule: 'automated_sender' });
+    expect(prefilter(env('notifications@github.com')).domain).toBeUndefined();
+    expect(prefilter(env('hello@newsletter.acme.com'))).toMatchObject({ rule: 'newsletter_domain', domain: 'newsletter.acme.com' });
+    expect(prefilter(env('news@mail.notifications.uber.com'))).toMatchObject({ rule: 'bulk_subdomain', domain: 'mail.notifications.uber.com' });
+    expect(prefilter(env('alice@example.com')).rule).toBeUndefined();
+    expect(prefilter(env('mailer-daemon@bounces.aws'))).toMatchObject({ category: 'noise', rule: 'bounce' });
+    expect(prefilter(env('Postmaster@example.com')).rule).toBe('bounce');
+    expect(prefilter(env('noreply@example.com')).rule).toBe('automated_sender');
   });
 
-  it('flags messages with List-Id header', () => {
-    const headers = new Map<string, string>([['list-id', '<acme.list>']]);
-    expect(prefilter(env('alice@example.com'), headers).category).toBe('noise');
+  // The domain is shown in the reason; only a host name may decide.
+  it('a domain rule decides only on a host name', () => {
+    expect(prefilter(env('x@newsletter.bank.example \u202E Konto gesperrt')).category).toBe('unknown');
+    expect(prefilter(env('x@newsletter.bank.example\u200B')).category).toBe('unknown');
+    expect(prefilter(env(`x@newsletter.${'a'.repeat(250)}.example`)).category).toBe('unknown');
+    expect(prefilter(env('x@newsletter.bank.example')), 'CONTROL').toMatchObject({ rule: 'newsletter_domain' });
   });
 
-  it('keeps messages without bulk headers when sender is human', () => {
-    const headers = new Map<string, string>([['date', 'Wed, 15 Apr 2026 10:00:00 +0000']]);
-    expect(prefilter(env('alice@example.com'), headers).category).toBe('unknown');
+  // A company under a two-label suffix (`firma.co.uk`) has one level fewer than
+  // its dots say; its `info.` address is its own, not a bulk subdomain.
+  it('counts a two-label suffix as one level', () => {
+    expect(prefilter(env('billing@info.firma.co.uk')).category).toBe('unknown');
+    expect(prefilter(env('rechnung@e.firma.gv.at')).category).toBe('unknown');
+    expect(prefilter(env('news@mail.news.firma.co.uk')), 'one level more is bulk').toMatchObject({ rule: 'bulk_subdomain' });
+    expect(prefilter(env('news@info.firma.example.de')), 'CONTROL: a one-label suffix').toMatchObject({ rule: 'bulk_subdomain' });
   });
 });

@@ -57,6 +57,7 @@ import {
   type MailWatchHandle,
   type MailWatchHandler,
   type MailWatchOptions,
+  listIdFromHeader,
 } from '../provider.js';
 import { GRAPH_API_HOSTS, graphFetch } from '../../../core/connector-egress.js';
 import { joinCallSignal } from '../../../core/call-connection.js';
@@ -900,6 +901,7 @@ export class OAuthGraphProvider implements MailProvider {
       attachmentCount: hasAttachments ? 1 : 0,
       sizeBytes: undefined,
       isAutoReply: isAutoSubmittedHeader(headerValue(msg, 'Auto-Submitted')),
+      listId: listIdFromHeader(headerValue(msg, 'List-Id')),
     };
   }
 

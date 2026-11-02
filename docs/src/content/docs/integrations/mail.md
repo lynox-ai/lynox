@@ -88,7 +88,9 @@ Compliance types (abuse, privacy, security, legal) always escalate to you — ly
 - *"Triage my unread emails"*
 - *"Show me anything important from today"*
 
-lynox filters noise automatically (newsletters, no-reply senders, List-Unsubscribe headers) and groups messages by thread.
+When you ask for a triage in chat, lynox groups messages by thread and leaves out obvious noise: newsletters, no-reply and notification senders, delivery failure notices.
+
+The inbox (when it is on) drops no new mail on its sender. Mail from a newsletter domain (`newsletter.*`, or a bulk-mail subdomain such as `mail.news.shop.example`) appears there as handled, with the domain named, and costs no AI call. A delivery failure notice (from a mailer daemon or postmaster) appears as needing you, without an AI call and without a push notification, since it may mean a mail you sent did not arrive; check your sent mail to see whether it did. Mail from an automated sender (no-reply, notifications, alerts) is sorted like any other mail, since invoices and warnings come from there too. Only the sender shown decides. A mailing list's `List-Id` header does not decide on its own, since the sender writes it: a rule on the list decides first, except for mail with sensitive content (a code, a credential), which goes through the sensitive filter. IMAP and Gmail read the header for new mail; Outlook (Microsoft Graph) does not return headers when it lists mail, so there a list rule does not match new mail.
 
 ### Search
 
@@ -159,7 +161,7 @@ lynox supports multiple email accounts simultaneously. Each account has its own 
 
 lynox is designed to minimize LLM cost for email operations:
 
-- **Triage prefilter** — deterministic noise filter skips ~60% of mail with zero LLM tokens (newsletters, no-reply, List-Unsubscribe)
+- **Triage prefilter** — deterministic sender rules: chat triage leaves noise out with zero LLM tokens; the inbox files newsletters as handled and delivery failure notices as needing you, both with zero LLM tokens, and classifies automated senders' mail
 - **Envelope-only search** — ~100 tokens per message (subject, from, date, 500-char snippet)
 - **Thread grouping** — related messages shown as a single thread, not individual items
 - **Body cleaning** — quoted history and signatures stripped, reducing token count by 30–70%

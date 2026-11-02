@@ -289,6 +289,7 @@ describe('OAuthGraphProvider — fetch', () => {
             { name: 'In-Reply-To', value: '<parent@example.com>' },
             { name: 'References', value: '<root@example.com> <parent@example.com>' },
             { name: 'Auto-Submitted', value: 'auto-replied' },
+            { name: 'List-Id', value: 'Acme News <news.acme.example>' },
           ],
         });
       }
@@ -307,6 +308,8 @@ describe('OAuthGraphProvider — fetch', () => {
     expect(msg.inReplyTo).toBe('<parent@example.com>');
     expect(msg.references).toBe('<root@example.com> <parent@example.com>');
     expect(msg.envelope.isAutoReply, 'the reply tool reads this, from the FETCHED envelope').toBe(true);
+    expect(msg.envelope.listId).toBe('news.acme.example');
+    expect(env!.listId, 'a collection carries no headers').toBeUndefined();
     expect(msg.attachments).toEqual([
       { partId: 'att-1', filename: 'offer.pdf', contentType: 'application/pdf', sizeBytes: 1234, contentId: undefined, inline: false },
       { partId: 'att-2', filename: 'logo.png', contentType: 'image/png', sizeBytes: 99, contentId: undefined, inline: true },

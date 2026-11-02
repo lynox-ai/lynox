@@ -30,6 +30,7 @@ import type { InboxCostBudget } from './cost-budget.js';
 import { fireBeforeRunGate, type HookHost } from '../../core/metered-request.js';
 import type { InboxNotifier } from './notifier.js';
 import type { InboxStateDb, ThreadMessageInput } from './state.js';
+import type { PrefilterRule } from '../mail/triage/rules.js';
 
 /**
  * Payload threaded through the queue: the prompt input the classifier
@@ -58,6 +59,8 @@ export interface InboxQueuePayload {
     snippet: string | undefined;
     messageId: string | undefined;
     inReplyTo: string | undefined;
+    /** The prefilter rule the mail met, carried onto the item. */
+    prefilterRule?: PrefilterRule | undefined;
   } | undefined;
   /**
    * Set when the watcher hook detected sensitive content and either
