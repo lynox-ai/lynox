@@ -1100,7 +1100,7 @@ describe('applying a Shopify run', () => {
 
     // The store was measured to read a SEO title equal to the title as null, so a read holding it as
     // text is not expected. What a read answers is taken as it is: should the store ever hold it, a
-    // plan that clears the SEO title is a change, and a resumed one a conflict, never a match.
+    // plan that clears the SEO title is a change, and the write is sent.
     it('takes a read as it is: a SEO title held equal to the title is no null', async () => {
       fill(2);
       s.products.set(10, { ...s.products.get(10)!, seo: { title: 'T1', description: 'D1' } });
@@ -1116,7 +1116,7 @@ describe('applying a Shopify run', () => {
     it('classifies a SEO title equal to the product\'s title as no change, and another one as a change', async () => {
       fill(3);
       s.products.set(10, { ...s.products.get(10)!, title: 'New title' });
-      // The owner's own SEO title, one space off the title: the store holds it, so planning the title is a change.
+      // The owner's own SEO title, one space off the title: the store holds it, so planning that SEO title is a change.
       s.products.set(30, { ...s.products.get(30)!, title: 'New title', seo: { title: 'New title ', description: 'D3' } });
       const id = await previewed();
       expect(ledger.getPreview(id).map((t) => [t.key, t.change])).toEqual([[gid(10), 'unchanged'], [gid(20), 'update'], [gid(30), 'update']]);
