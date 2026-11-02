@@ -85,7 +85,9 @@ describe('the library names whom Run runs a workflow as', () => {
 
 describe('a run refused because that person\'s access ended', () => {
 	it('names the person and the way out, a new workflow from the chat', async () => {
-		await open({ ...WF, runs_as: { person: 'eva@kanzlei.example', ended: true } }, { status: 403, body: { error: 'engine sentence', code: 'author_ended', runs_as: 'eva@kanzlei.example' } });
+		// The library still read the access as live; it ended before Run was pressed (a library that
+		// knows it ended turns Run off, workflow-library-ended-foreign.svelte.test.ts).
+		await open({ ...WF, runs_as: { person: 'eva@kanzlei.example', ended: false } }, { status: 403, body: { error: 'engine sentence', code: 'author_ended', runs_as: 'eva@kanzlei.example' } });
 		await pressRun();
 		const text = target.textContent ?? '';
 		expect(text).toContain('eva@kanzlei.example hat den Workflow „Monthly report“ angelegt oder zuletzt geändert, und ihr Zugang ist beendet.');

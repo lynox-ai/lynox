@@ -34,7 +34,7 @@ import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
+import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
@@ -134,7 +134,7 @@ import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
-import { takeOver, takeoverPreview, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
+import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -2389,9 +2389,16 @@ export class LynoxHTTPApi {
    * prompt store may be missing; the takeover then refuses, since it could not close the questions.
    */
   #takeoverDeps(res: ServerResponse): TakeoverDeps | null {
+    const deps = this.#takeoverDepsIfReady();
+    if (deps === null) errorResponse(res, 503, 'Taking over a plan is not available on this instance right now.');
+    return deps;
+  }
+
+  /** The takeover's reads and writes, or null when engine.db is not there; answers nothing. */
+  #takeoverDepsIfReady(): TakeoverDeps | null {
     const engine = this.engine;
     const engineDb = engine?.getEngineDb() ?? null;
-    if (engine === null || engine === undefined || engineDb === null) { errorResponse(res, 503, 'Taking over a plan is not available on this instance right now.'); return null; }
+    if (engine === null || engine === undefined || engineDb === null) return null;
     const ends = engine.getMandateEnds();
     return {
       db: engineDb.getDb(),
@@ -8128,10 +8135,23 @@ export class LynoxHTTPApi {
       // library agrees with the schedule handler on cron-eligibility (otherwise a
       // legacy autonomous workflow with no stored mode hides its Schedule button).
       const { inferPipelineMode, stepsThatAsk } = await import('../orchestrator/human-in-the-loop.js');
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean } }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind }> = [];
       // Whom the Run button runs each one as, for the owner only: a mandate's email is not another
       // mandate's to read (1055, ux U-063). Absent for the owner's own workflows.
-      const ownerViews = isOwnerPrincipal(this._principalOf(req));
+      const viewer = this._principalOf(req);
+      const ownerViews = isOwnerPrincipal(viewer);
+      // For a workflow whose mandate has ended: how many of its paused plans would move it to the
+      // owner when taken over (ux U-079 (b), U-119). Read once, by the takeover's own decision; a
+      // failed read counts none, which leaves the card with the sentence that holds either way.
+      const coveredByTakeover = ownerViews ? (() => {
+        try {
+          const deps = this.#takeoverDepsIfReady();
+          return deps === null ? new Map<string, number>() : workflowsCoveredByTakeover(deps);
+        } catch {
+          return new Map<string, number>();
+        }
+      })() : new Map<string, number>();
+      const { foreignWorkflowScheduleRefusalKind } = await import('../core/plan-stamp.js');
       for (const row of rows) {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
         try {
@@ -8187,11 +8207,15 @@ export class LynoxHTTPApi {
           ...(typeof parsed.confirmedAt === 'string' ? { confirmedAt: parsed.confirmedAt } : {}),
           ...(parsed.capabilityContract !== undefined ? { capabilityContract: parsed.capabilityContract } : {}),
           ...(() => {
-            if (!ownerViews) return {};
+            if (!ownerViews) {
+              // A mandate learns that a workflow is not its to schedule (UX-058, ux U-085), never whose it is.
+              const refusal = foreignWorkflowScheduleRefusalKind(viewer, row.id, history);
+              return refusal === null ? {} : { schedule_refusal: refusal };
+            }
             const runAs = workflowRunsAs(authorshipOrNone(() => history.getWorkflowAuthorship(row.id)));
-            return runAs.kind === 'mandate'
-              ? { runs_as: { person: runAs.email, ended: principalHasEnded(runAs, (id) => this._mandateLive(id)) } }
-              : {};
+            if (runAs.kind !== 'mandate') return {};
+            const ended = principalHasEnded(runAs, (id) => this._mandateLive(id));
+            return { runs_as: { person: runAs.email, ended, ...(ended ? { covered_by_takeover: coveredByTakeover.get(row.id) ?? 0 } : {}) } };
           })(),
         });
       }
@@ -8767,12 +8791,16 @@ export class LynoxHTTPApi {
         }
         const { getPipeline, forgetPipeline } = await import('../tools/builtin/pipeline.js');
         const planned = getPipeline(pipelineId, history);
-        if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`); return; }
+        if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`, 'missing_workflow'); return; }
         // A schedule on another mandate's workflow ties both mandates into one plan, so a mandate
         // schedules only its own workflows and the owner's (`foreignWorkflowScheduleRefusal`).
-        const { foreignWorkflowScheduleRefusal } = await import('../core/plan-stamp.js');
-        const refusal = foreignWorkflowScheduleRefusal(principal, planned.id, history);
-        if (refusal !== null) { errorResponse(res, 403, refusal); return; }
+        const { foreignWorkflowScheduleRefusal, foreignWorkflowScheduleRefusalKind } = await import('../core/plan-stamp.js');
+        const refusalKind = foreignWorkflowScheduleRefusalKind(principal, planned.id, history);
+        if (refusalKind !== null) {
+          // The code lets the page word it in the reader's language (ux U-085); the text stays for every other client.
+          errorResponse(res, 403, foreignWorkflowScheduleRefusal(principal, planned.id, history) ?? '', refusalKind === 'foreign' ? 'foreign_workflow' : 'unreadable_workflow');
+          return;
+        }
         if (!isSchedulableWorkflow(planned)) {
           errorResponse(res, 400, `Workflow "${planned.id}" asks for more than an answer from its owner and cannot be scheduled — remove its ask_secret / ask_human steps first.`); return;
         }

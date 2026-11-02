@@ -331,6 +331,25 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
   };
 }
 
+/**
+ * The workflows a takeover would move to the owner, each with the number of its paused plans whose
+ * takeover covers the workflow's mark (`coverWorkflow`); a workflow no such plan runs is absent. Read with the same `planOf` the takeover
+ * runs, so a page that says "take the plan over and this workflow runs under you" promises no more
+ * than the takeover does. Empty while plan pausing is off: there is nothing to take over then.
+ */
+export function workflowsCoveredByTakeover(deps: TakeoverDeps): Map<string, number> {
+  const covered = new Map<string, number>();
+  if (!planPauseOn()) return covered;
+  const paused = deps.db.prepare(
+    `SELECT id FROM triggers WHERE paused_at IS NOT NULL AND effect = 'run_workflow' AND target_workflow_id IS NOT NULL`,
+  ).all() as Array<{ id: string }>;
+  for (const { id } of paused) {
+    const plan = planOf(deps, id);
+    if (typeof plan === 'object' && plan.coverWorkflow && plan.wf !== undefined) covered.set(plan.wf.id, (covered.get(plan.wf.id) ?? 0) + 1);
+  }
+  return covered;
+}
+
 /** What the owner is shown before taking the plan over: one read, no await. */
 export function takeoverPreview(deps: TakeoverDeps, id: string): TakeoverPreviewResult {
   if (!planPauseOn()) return { kind: 'refused', refusal: 'not_available' };
