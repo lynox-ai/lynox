@@ -366,6 +366,8 @@ export class Session {
   } = {};
   readonly sessionId: string;
   private briefing: string | undefined;
+  /** The blocks the engine wrapped into its briefing (`Engine.getBriefingOwnBlocks`). */
+  private briefingOwnBlocks: readonly string[] | undefined;
   /** The vault's `<secrets>` listing, consumed with the briefing; the agent gives it to an owner's
    *  turn only, since the principal is per run and this is per session. */
   private secretsBriefing: string | undefined;
@@ -557,6 +559,10 @@ export class Session {
     this.briefing = rawBriefing && rawBriefing.length > 8000
       ? rawBriefing.slice(0, 8000) + '\n[...truncated]'
       : rawBriefing;
+    // A caller's own briefing holds none of the engine's blocks. A block the cut below splits is
+    // not found whole, so it is simply scanned with the rest; its closer is cut off with it, so it
+    // cannot warn either. Keep the match exact: exempting a cut prefix would exempt forged text.
+    this.briefingOwnBlocks = opts?.briefing === undefined ? engine.getBriefingOwnBlocks?.() : undefined;
     // Only on the default path, as before: a caller's own briefing never carried the listing.
     // `?.()` on the method: several suites hand Session a partial engine double.
     const rawSecrets = opts?.briefing === undefined ? engine.getSecretsBriefing?.() : undefined;
@@ -2880,6 +2886,7 @@ export class Session {
       // model looks Anthropic; a cross-provider slot pins it to the slot model.
       openaiModelId: slotCfg.crossProviderSlot ? slotCfg.openaiModelId : (this._profileOverride?.model_id ?? userConfig.openai_model_id),
       briefing: this._briefingConsumed ? undefined : this.briefing,
+      briefingOwnBlocks: this._briefingConsumed ? undefined : this.briefingOwnBlocks,
       secretsBriefing: this._briefingConsumed ? undefined : this.secretsBriefing,
       autonomy: this.agentOverrides.autonomy,
       secretStore: engine.getSecretStore() ?? undefined,

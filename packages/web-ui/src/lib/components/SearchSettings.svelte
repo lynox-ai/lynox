@@ -33,7 +33,7 @@
 		loadRerankerCapability,
 	} from '../stores/integrations/search.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { endpointText } from './settings-readonly/values.js';
@@ -44,10 +44,11 @@
 	let configuredUrl = $state<string | null>(null);
 	async function loadSearchConfig(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) return;
 			const body = (await res.json()) as { searxng_url?: unknown };
-			noteSettingsViewer(body);
+			noteViewer(body);
 			configuredUrl = typeof body.searxng_url === 'string' ? body.searxng_url : null;
 		} catch { /* the owner's card stays; the server refuses what it must */ }
 	}

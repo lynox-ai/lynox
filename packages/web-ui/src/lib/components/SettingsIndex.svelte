@@ -2,7 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { keepSettingsItem } from '../utils/billing-tier.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	interface SettingsItem {
 		href: string;
@@ -56,9 +56,10 @@
 	let probesShown = $state<ReadonlySet<string>>(new Set());
 
 	$effect(() => {
+		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
 			.then(r => r.json())
-			.then((data: Record<string, unknown>) => { managed = !!data['managed']; noteSettingsViewer(data); })
+			.then((data: Record<string, unknown>) => { managed = !!data['managed']; noteViewer(data); })
 			.catch(() => { managed = false; });
 	});
 

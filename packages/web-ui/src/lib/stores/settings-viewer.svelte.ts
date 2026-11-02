@@ -66,6 +66,18 @@ export function canChooseModel(): boolean {
 	return viewer === 'owner' && providerLocked === false;
 }
 
+/**
+ * For a page that reads `GET /api/config` itself: take this before the request, and hand the
+ * body to what it returns. A body asked for before a reset (a sign-in) is then not taken after
+ * it, the same as `loadSettingsViewer`'s own answers.
+ */
+export function viewerNote(): (body: unknown) => void {
+	const asked = generation;
+	return (body) => {
+		if (asked === generation) noteSettingsViewer(body);
+	};
+}
+
 /** Takes `viewer` and whether the provider is locked from a `GET /api/config` body a page has read anyway. */
 export function noteSettingsViewer(body: unknown): void {
 	if (body === null || typeof body !== 'object' || !('viewer' in body)) return;

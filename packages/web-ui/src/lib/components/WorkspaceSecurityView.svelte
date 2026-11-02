@@ -9,7 +9,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	interface ConfigResponse { managed?: string }
 
@@ -27,13 +27,14 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const [configRes, vaultRes] = await Promise.all([
 				fetch(`${getApiBase()}/config`),
 				fetch(`${getApiBase()}/vault/key?reveal=false`),
 			]);
 			if (!configRes.ok) throw new Error(`HTTP ${configRes.status}`);
 			const body = (await configRes.json()) as ConfigResponse;
-			noteSettingsViewer(body);
+			noteViewer(body);
 			managed = cpSuppliesLLMKey(body.managed);
 			if (vaultRes.ok) {
 				const vaultBody = (await vaultRes.json()) as { configured: boolean; vault_key?: unknown };
