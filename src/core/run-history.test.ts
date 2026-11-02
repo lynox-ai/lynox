@@ -2999,6 +2999,47 @@ describe('RunHistory', () => {
       h.close();
     });
 
+    /**
+     * v72: a workflow the chat's turn started. Its steps are `pipeline_step` runs under the
+     * pipeline run, which names the chat run that started it; a nested workflow names the same
+     * chat run, and a workflow a sub-agent started names the sub-agent's run.
+     */
+    it('counts the calls of the steps of every workflow the run or its sub-agents started, and no other', () => {
+      const h = createHistory();
+      const chat = h.insertRun({ taskText: 'chat', modelTier: 'balanced', modelId: 'm' });
+      const step = (pipelineId: string): string =>
+        h.insertRun({ sessionId: pipelineId, taskText: 'step', modelTier: '', modelId: '', runType: 'pipeline_step', spawnParentId: pipelineId, spawnDepth: 1 });
+      const pipeline = (id: string, startedByRunId?: string): void =>
+        h.insertPipelineRun({ id, manifestName: 'wf', status: 'completed', manifestJson: '{}', ...(startedByRunId !== undefined ? { startedByRunId } : {}) });
+
+      pipeline('wf-chat', chat);
+      call(h, step('wf-chat'), 0, { usd: 0.05, source: 'response' });
+      // A nested workflow carries the chat's run too.
+      pipeline('wf-nested', chat);
+      call(h, step('wf-nested'), 0, { usd: 0.02, source: 'profile' });
+      // A sub-agent that started a workflow: its own run is in the tree.
+      const child = h.insertRun({ taskText: 'child', modelTier: 'fast', modelId: 'm', spawnParentId: chat, spawnDepth: 1 });
+      pipeline('wf-child', child);
+      const childStep = step('wf-child');
+      call(h, childStep, 0, { usd: 0.01, source: 'response' });
+      // A step's own sub-agent.
+      const stepChild = h.insertRun({ taskText: 'step child', modelTier: 'fast', modelId: 'm', spawnParentId: childStep, spawnDepth: 2 });
+      call(h, stepChild, 0, { usd: 0.03, source: 'response' });
+      // Not this chat's: a workflow another run started, and one no chat started.
+      const other = h.insertRun({ taskText: 'other chat', modelTier: 'balanced', modelId: 'm' });
+      pipeline('wf-other', other);
+      call(h, step('wf-other'), 0, { usd: 7, source: 'response' });
+      pipeline('wf-schedule');
+      call(h, step('wf-schedule'), 0, { usd: 9, source: 'response' });
+
+      const sum = h.getApiCallsOfRun(chat);
+      expect(sum.calls).toBe(4);
+      expect(sum.usd).toBeCloseTo(0.11, 9);
+      expect(sum.estimated).toBe(true);
+      expect(h.getApiCallsOfRun(other).calls).toBe(1);
+      h.close();
+    });
+
     it('stores the cost on the row, and refuses a negative amount or an unknown source', () => {
       const h = createHistory();
       const run = h.insertRun({ taskText: 'run', modelTier: 'balanced', modelId: 'm' });
@@ -3061,13 +3102,13 @@ describe('history.db v58 — who created a to-do', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.insertTask({ id: 'old1', title: 'kept' });
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; DROP INDEX idx_pipeline_runs_started_by; ALTER TABLE pipeline_runs DROP COLUMN started_by_run_id; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare('SELECT id, title, created_by FROM tasks').get()).toEqual({ id: 'old1', title: 'kept', created_by: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(71);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(72);
     } finally { after.close(); }
   });
 });
@@ -3083,13 +3124,13 @@ describe('history.db v59 — why a question was closed', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.getDb().prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, expires_at) VALUES ('p-old', 's1', 'ask_user', 'q', '2099-01-01T00:00:00.000Z')").run();
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 59; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 59; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; DROP INDEX idx_pipeline_runs_started_by; ALTER TABLE pipeline_runs DROP COLUMN started_by_run_id; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare("SELECT id, status, closed_reason FROM pending_prompts WHERE id = 'p-old'").get()).toEqual({ id: 'p-old', status: 'pending', closed_reason: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(71);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(72);
     } finally { after.close(); }
   });
 });
@@ -3105,14 +3146,14 @@ describe('history.db v60 — which mandate asked a question', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.getDb().prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, expires_at, created_by) VALUES ('p-old', 's1', 'ask_user', 'q', '2099-01-01T00:00:00.000Z', 'mandate:old@example.org')").run();
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 60; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 60; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; DROP INDEX idx_pipeline_runs_started_by; ALTER TABLE pipeline_runs DROP COLUMN started_by_run_id; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via; ALTER TABLE pipeline_runs DROP COLUMN origin_thread_id; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare("SELECT id, status, created_by, mandate_id FROM pending_prompts WHERE id = 'p-old'").get())
         .toEqual({ id: 'p-old', status: 'pending', created_by: 'mandate:old@example.org', mandate_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(71);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(72);
     } finally { after.close(); }
   });
 });
@@ -3130,7 +3171,7 @@ describe('history.db v65 — the grant a call went out under', () => {
     const runId = before.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
     before.getDb().prepare(`INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at)
       VALUES ('c-old', ?, 'http_request', '{}', '', 1, 0, 'shop', '2026-01-01 00:00:00')`).run(runId);
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 65; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 65; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; DROP INDEX idx_pipeline_runs_started_by; ALTER TABLE pipeline_runs DROP COLUMN started_by_run_id; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; DROP INDEX IF EXISTS idx_run_tool_calls_connection_grant; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE run_tool_calls DROP COLUMN grant_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
     return path;
   }
@@ -3142,7 +3183,7 @@ describe('history.db v65 — the grant a call went out under', () => {
         .toEqual({ connection_id: 'shop', grant_id: null });
       const cols = (after.getDb().prepare("SELECT name FROM pragma_index_info('idx_run_tool_calls_connection_grant') ORDER BY seqno").all() as { name: string }[]).map((r) => r.name);
       expect(cols).toEqual(['connection_id', 'grant_id']);
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(71);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(72);
     } finally { after.close(); }
   });
 
@@ -3184,7 +3225,7 @@ describe('history.db v66 — the tool_use block a call row records', () => {
     const runId = before.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
     before.getDb().prepare(`INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id)
       VALUES ('c-old', ?, 'http_request', '{}', '', 1, 0, 'shop', '2026-01-01 00:00:00', 'g-1')`).run(runId);
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 66; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 66; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; DROP INDEX idx_pipeline_runs_started_by; ALTER TABLE pipeline_runs DROP COLUMN started_by_run_id; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE run_tool_calls DROP COLUMN tool_use_id; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
     return path;
   }
@@ -3194,7 +3235,7 @@ describe('history.db v66 — the tool_use block a call row records', () => {
     try {
       expect(after.getDb().prepare("SELECT connection_id, grant_id, tool_use_id FROM run_tool_calls WHERE id = 'c-old'").get())
         .toEqual({ connection_id: 'shop', grant_id: 'g-1', tool_use_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(71);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(72);
     } finally { after.close(); }
   });
 
@@ -3233,7 +3274,7 @@ describe('history.db v68 — who answered a question', () => {
     const before = new RunHistory(path);
     before.getDb().prepare(`INSERT INTO pending_prompts (id, session_id, prompt_type, question, answer, status, answered_at, expires_at)
       VALUES ('p-old', 's-1', 'ask_user', 'Which list?', 'B', 'answered', '2026-10-01 10:00:00', '2026-10-01 11:00:00')`).run();
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 68; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 68; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; DROP INDEX idx_pipeline_runs_started_by; ALTER TABLE pipeline_runs DROP COLUMN started_by_run_id; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
     before.close();
     return path;
   }
@@ -3257,7 +3298,7 @@ describe('history.db v68 — who answered a question', () => {
     try {
       expect(after.getDb().prepare("SELECT answer, status, answered_by, answered_mandate_id FROM pending_prompts WHERE id = 'p-old'").get())
         .toEqual({ answer: 'B', status: 'answered', answered_by: null, answered_mandate_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(71);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(72);
     } finally { after.close(); }
   });
 

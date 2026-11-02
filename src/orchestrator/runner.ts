@@ -705,6 +705,7 @@ async function runManifestInGroup(
           startedVia: options.parentRunId !== undefined ? `nested:${options.parentRunId}` : options.startedVia,
         } : {}),
         ...(originThreadId !== undefined && originThreadId !== '' ? { originThreadId } : {}),
+        ...(options.chatOrigin?.runId !== undefined ? { startedByRunId: options.chatOrigin.runId } : {}),
       });
       grantRecorded = true;
     } catch { insertFailed = true; /* fire-and-forget — but see the two checks below */ }

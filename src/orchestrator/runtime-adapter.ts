@@ -227,6 +227,9 @@ export interface ChatOrigin {
   readonly threadId: string | undefined;
   /** Whether the chat has private mode on right now. */
   readonly skipsCapture: () => boolean;
+  /** The chat run whose turn started the workflow, recorded on the pipeline run so the chat's
+   *  footer counts the paid API calls of its steps (`RunHistory.getApiCallsOfRun`). */
+  readonly runId?: string | undefined;
 }
 
 /**
@@ -237,11 +240,12 @@ export interface ChatOrigin {
  * `memory_extraction: false`, which stands a step's capture down as it does the chat's.
  */
 export function chatOriginOf(
-  agent: Pick<IAgent, 'currentThreadId' | 'originThreadId' | 'skipMemoryExtraction'> & Partial<Pick<IAgent, 'toolContext'>>,
+  agent: Pick<IAgent, 'currentThreadId' | 'originThreadId' | 'skipMemoryExtraction'> & Partial<Pick<IAgent, 'toolContext' | 'currentRunId'>>,
 ): ChatOrigin {
   const threadId = agent.currentThreadId ?? agent.originThreadId;
   return {
     threadId,
+    runId: agent.currentRunId,
     skipsCapture: () => agent.skipMemoryExtraction === true
       || (threadId !== undefined && agent.toolContext?.threadStore?.getThread(threadId)?.skip_extraction === 1),
   };
