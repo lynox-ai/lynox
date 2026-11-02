@@ -385,6 +385,33 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     expect(engineHandle._inboxRuntime).toBeNull();
   });
 
+  // 1070: mail_triage reads the classifier's verdict through hooks.inboxLabelOf. A rebootstrap
+  // wires the new runtime's lookup in place of the old one.
+  it('rewires the inbox verdict lookup to the fresh runtime', async () => {
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-test';
+    const engine = new Engine({ model: 'balanced' });
+    const oldLookup = vi.fn(() => null);
+    const usRuntime = { ...makeRuntime('us-runtime'), inboxLabelOf: oldLookup };
+    const euRuntime = { ...makeRuntime('eu-runtime'), inboxLabelOf: vi.fn(() => null) };
+    const fakeMailContext = { hooks: { inboxLabelOf: oldLookup } as { inboxLabelOf?: unknown } };
+    const handle = engine as unknown as {
+      _inboxRuntime: unknown; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
+      _inboxRebootstrapInflight: Promise<void> | null; _mailContext: typeof fakeMailContext | null;
+    };
+    handle._inboxRuntime = usRuntime;
+    handle._mailStateDb = { __sentinel: 'mail-db' };
+    handle._inboxLlmRegion = 'us';
+    handle._mailContext = fakeMailContext;
+    mockBootstrapInbox.mockReturnValueOnce(euRuntime);
+    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
+
+    await engine.reloadCredentials();
+    if (handle._inboxRebootstrapInflight) await handle._inboxRebootstrapInflight;
+    expect(usRuntime.shutdown).toHaveBeenCalledTimes(1);
+    expect(fakeMailContext.hooks.inboxLabelOf).toBe(euRuntime.inboxLabelOf);
+  });
+
   /**
    * D. Drain-window privacy guard (H-012 follow-up):
    *   While `_rebootstrapInboxOnProviderSwitch` is mid-flight (`await
