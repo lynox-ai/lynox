@@ -308,6 +308,34 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
   }
 }
 
+/**
+ * Whether a field the host read back holds markup the run never sent (PRD shopify-preset §21.2
+ * item 6): an occurrence or a triple outside the allowlist and outside the value sent, or a link
+ * to a domain the rule does not take. Checked against the value SENT, not the before-image: an
+ * undo's before-image may already hold the shop's markup, and against it that would pass unmarked.
+ * Only the tree the host serialised is read, the one a shopper's browser parses, and its end must
+ * be as closed as the value sent was (`endsClosed`). Formatting,
+ * allowlisted additions and removals are not refused here; hidden characters are not either.
+ * Like {@link checkMarkup}, it never throws: a value that cannot be read counts as added markup.
+ */
+export function markupAddedByHost(input: { sent: string; back: string; storeHost: string; startDomains: readonly string[] }): MarkupCheckResult {
+  try {
+    // A tag, comment or attribute value left open at the end falls away from the fragment's tree,
+    // so no tree check sees it, nor what the host writes into it; the theme's next `>` closes it,
+    // live. A value read back open counts as added unless it is the bytes sent: a before-image an
+    // undo restores, or an unchanged field a verdict carries, may itself end open.
+    if (!endsClosed(input.back) && input.back !== input.sent) {
+      return refused('not_canonical', 'The value read back leaves a tag, a comment, raw text or an element open at its end.');
+    }
+    const got = checkTrees(parseHtmlFragment(input.sent), parseHtmlFragment(input.back), {
+      before: input.sent, after: input.back, storeHost: input.storeHost, startDomains: input.startDomains,
+    });
+    return !got.ok && got.reason === 'hidden_char' ? { ok: true } : got;
+  } catch {
+    return refused('not_canonical', 'The value could not be read as HTML.');
+  }
+}
+
 const END_MARK = 'lynox-end-of-value';
 
 /** Elements a value may leave open at its end: the theme's next closing tag ends them, and they
