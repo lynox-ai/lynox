@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { prefilter } from './rules.js';
+import { domainOf, mailingListOf, prefilter } from './rules.js';
 import type { MailEnvelope } from '../provider.js';
 
 function env(from: string, opts: Partial<MailEnvelope> = {}): MailEnvelope {
@@ -21,6 +21,7 @@ function env(from: string, opts: Partial<MailEnvelope> = {}): MailEnvelope {
     attachmentCount: 0,
     sizeBytes: 0,
     isAutoReply: false,
+    listId: opts.listId,
   };
 }
 
@@ -56,8 +57,7 @@ describe('prefilter — sender patterns', () => {
   it('keeps 2-level transactional bulk senders (audit K-LE-08: Stripe/DocuSign)', () => {
     // The previous 2-level heuristic silently dropped Stripe invoices,
     // DocuSign signing requests, Outlook protection rewrites. These have
-    // to reach the inbox; List-Unsubscribe handles the actual marketing
-    // case via Rule 1.
+    // to reach the inbox.
     expect(prefilter(env('invoice@mail.stripe.com')).category).toBe('unknown');
     expect(prefilter(env('signing@info.docusign.com')).category).toBe('unknown');
     expect(prefilter(env('postmaster-quarantine@mail.protection.outlook.com')).category).toBe('unknown');
@@ -70,21 +70,43 @@ describe('prefilter — sender patterns', () => {
   });
 });
 
-describe('prefilter — header rules', () => {
-  it('flags messages with List-Unsubscribe header', () => {
-    const headers = new Map<string, string>([['list-unsubscribe', '<mailto:unsub@x.com>']]);
-    const result = prefilter(env('alice@example.com'), headers);
-    expect(result.category).toBe('noise');
-    expect(result.reason).toContain('list-unsubscribe');
+describe('prefilter — no header decides', () => {
+  // The prefilter judges the sender only. The watcher keeps list mail out of
+  // its silent drop, and the mail_triage tool still counts a noreply
+  // newsletter as noise, list-id or not.
+  it('judges a list mail by its sender like any other', () => {
+    expect(prefilter(env('alice@example.com', { listId: 'acme.list.example.com' })).category).toBe('unknown');
+    expect(prefilter(env('noreply@example.com', { listId: 'acme.list.example.com' })).category).toBe('noise');
+  });
+});
+
+describe('mailingListOf — the one place that decides', () => {
+  const list = (listId: string | undefined, own: string[]) => mailingListOf(env('alice@example.com', { listId }), own);
+
+  it('a list-id under no connected domain is a mailing list', () => {
+    expect(list('news.example.org', ['acme.example'])).toBe('news.example.org');
   });
 
-  it('flags messages with List-Id header', () => {
-    const headers = new Map<string, string>([['list-id', '<acme.list>']]);
-    expect(prefilter(env('alice@example.com'), headers).category).toBe('noise');
+  it('a list-id under a connected domain is the business\'s own group', () => {
+    expect(list('info.acme.example', ['acme.example'])).toBeUndefined();
+    expect(list('Info.ACME.example', ['acme.example']), 'case does not matter').toBeUndefined();
+    expect(list('acme.example', ['acme.example'])).toBeUndefined();
+    expect(list('info.acme.ch', ['acme.example', 'acme.ch']), 'any connected domain').toBeUndefined();
+    expect(list('info.acme.example.', ['acme.example']), 'a trailing dot').toBeUndefined();
   });
 
-  it('keeps messages without bulk headers when sender is human', () => {
-    const headers = new Map<string, string>([['date', 'Wed, 15 Apr 2026 10:00:00 +0000']]);
-    expect(prefilter(env('alice@example.com'), headers).category).toBe('unknown');
+  it('only at a dot boundary', () => {
+    expect(list('info.notacme.example', ['acme.example'])).toBe('info.notacme.example');
+    expect(list('info.acme.example.evil', ['acme.example'])).toBe('info.acme.example.evil');
+    expect(list('news.example.org', [''])).toBe('news.example.org');
+  });
+
+  it('no list-id, no list', () => {
+    expect(list(undefined, ['acme.example'])).toBeUndefined();
+  });
+
+  it('domainOf', () => {
+    expect(domainOf('Me@ACME.example')).toBe('acme.example');
+    expect(domainOf('no-at')).toBe('');
   });
 });

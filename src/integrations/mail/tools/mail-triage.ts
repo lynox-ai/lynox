@@ -36,7 +36,7 @@ export function createMailTriageTool(registry: MailRegistry): ToolEntry<MailTria
     definition: {
       name: 'mail_triage',
       description:
-        'Get a quick inbox overview: lists recent (unseen) messages, drops obvious noise (newsletters, no-reply notifications, list-unsubscribe), groups remaining messages by thread, and returns a token-efficient summary. Use this BEFORE mail_search/mail_read when the user asks "what\'s new" or "anything important". Read-only.',
+        'Get a quick inbox overview: lists recent (unseen) messages, drops obvious noise (newsletters, no-reply notifications), groups remaining messages by thread, and returns a token-efficient summary. Use this BEFORE mail_search/mail_read when the user asks "what\'s new" or "anything important". Read-only.',
       input_schema: {
         type: 'object' as const,
         properties: {

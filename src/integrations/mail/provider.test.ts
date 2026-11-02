@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MailError, type MailErrorCode } from './provider.js';
+import { MailError, listIdFromHeader, type MailErrorCode } from './provider.js';
 
 describe('MailError', () => {
   it('carries code and message', () => {
@@ -32,5 +32,35 @@ describe('MailError', () => {
       const err = new MailError(code, code);
       expect(err.code).toBe(code);
     }
+  });
+});
+
+describe('listIdFromHeader', () => {
+  it('takes the list identifier between the brackets (RFC 2919)', () => {
+    expect(listIdFromHeader('Acme News <news.acme.example>')).toBe('news.acme.example');
+    expect(listIdFromHeader('<announcements.example.com>')).toBe('announcements.example.com');
+  });
+
+  it('takes the last bracketed part when the phrase holds brackets of its own', () => {
+    expect(listIdFromHeader('"Team <dev>" <dev.acme.example>')).toBe('dev.acme.example');
+  });
+
+  it('takes a bare value whole', () => {
+    expect(listIdFromHeader('  news.acme.example ')).toBe('news.acme.example');
+  });
+
+  it('gives nothing for a missing, empty, spaced, too long or control-carrying value', () => {
+    expect(listIdFromHeader(undefined)).toBeUndefined();
+    expect(listIdFromHeader('<>')).toBeUndefined();
+    expect(listIdFromHeader('two words')).toBeUndefined();
+    expect(listIdFromHeader(`<${'a'.repeat(256)}>`)).toBeUndefined();
+    expect(listIdFromHeader('<a\u0007b.example>')).toBeUndefined();
+    expect(listIdFromHeader(`<${'a'.repeat(255)}>`), 'CONTROL: 255 is allowed').toBe('a'.repeat(255));
+    expect(listIdFromHeader(`<${'ä'.repeat(128)}>`), '256 octets in 128 characters').toBeUndefined();
+    expect(listIdFromHeader(`<${'ä'.repeat(127)}>`), 'CONTROL: 254 octets').toBe('ä'.repeat(127));
+    expect(listIdFromHeader('<news\u200B.acme.example>'), 'an invisible character').toBeUndefined();
+    expect(listIdFromHeader(`${'x'.repeat(2040)} <news.acme.example>`), 'a header over 2048 characters is not parsed').toBeUndefined();
+    expect(listIdFromHeader(`${'x'.repeat(2020)} <news.acme.example>`), 'CONTROL: under the cap').toBe('news.acme.example');
+    expect(listIdFromHeader('<news\u202E.acme.example>'), 'a direction override').toBeUndefined();
   });
 });
