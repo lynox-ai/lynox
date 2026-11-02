@@ -403,7 +403,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     handle._inboxLlmRegion = 'us';
     handle._mailContext = fakeMailContext;
     mockBootstrapInbox.mockReturnValueOnce(euRuntime);
-    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' });
+    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.eu.mistral.ai/v1', openai_model_id: 'mistral-large-2512' });
     mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
 
     await engine.reloadCredentials();
