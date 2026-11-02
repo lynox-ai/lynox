@@ -1,9 +1,9 @@
 # Changelog
 
-## 2.17.1 — 2026-11-01
+## 2.17.1 — 2026-11-02
 
-This release contains security fixes in the image's Debian packages. Upgrading
-is recommended for every instance that runs the Docker image.
+This release contains security fixes in the image's Debian packages and in two
+npm dependencies. Upgrading is recommended for every instance.
 
 ### Security
 
@@ -12,11 +12,14 @@ is recommended for every instance that runs the Docker image.
   CVE-2026-84782 in `libssl3`. The 2.17.0 image carried `libbrotli1
   1.0.9-2+b6`; the fixed versions are `1.0.9-2+deb12u1` and `libssl3
   3.0.22-1~deb12u2` or newer.
+- `undici` moves from 7.30.0 to 7.30.1 and `zod` from 4.4.3 to 4.6.7, past
+  high-severity advisories. This is the same lockfile change as on main
+  (#2131). The docs site drops an unused `zod` dependency.
 
 ### Upgrade notes
 
-- No code changes against 2.17.0 and no database migrations. The npm package
-  `@lynox-ai/core` is republished with the new version number only.
+- Apart from these two dependency versions, the code is the same as 2.17.0.
+  There are no database migrations.
 
 ## 2.17.0 — 2026-10-23
 
