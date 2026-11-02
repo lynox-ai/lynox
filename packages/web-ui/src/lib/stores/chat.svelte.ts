@@ -3,6 +3,7 @@ import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t, tf } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
+import { containedReadKey, type ContainedReadKey } from '../utils/contained-read.js';
 import {
 	recordToolCall,
 	recordToolResult,
@@ -26,6 +27,8 @@ import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { containedPrefill } from './contained-way-out.js';
+import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, isConsentCard, type ClosedCode } from './closed-question.js';
+import { isMandateSession, loadSettingsViewer } from './settings-viewer.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
@@ -604,6 +607,9 @@ let changesetLoading = $state(false);
 let skipExtraction = $state(false);
 /** The open chat read data through a store connection (`contained` on the thread). */
 let threadContained = $state(false);
+/** The engine refused this reader the open chat or its live run (register 1112, ux U-091): the
+ *  text key the page shows instead of the history, or null. */
+let threadReadRefusal = $state<ContainedReadKey | null>(null);
 /** Set while `threadContained` comes only from a record the engine could not read
  *  (`contained_unknown`): the chat may never have read store data (`contained-text.ts`). */
 let threadContainedUnknown = $state<ContainedUnknown | null>(null);
@@ -881,14 +887,42 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const id = newQueueId();
 		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, ...(runOptions?.typed === true ? { typed: true } : {}), queued: true, queueId: id, createdAt: new Date().toISOString() });
 		messageQueue.push({ id, task, files, ...(runOptions ? { runOptions } : {}) });
+		// The message a closed question's sentence asked for is sent; the sentence goes with it.
+		if (chatError !== null && chatError === closedReplySentence) chatError = null;
 		// Flush immediately so a reload before the next persist tick (or before
 		// the run ends) can recover the queued turn instead of losing it.
 		persistChatNow();
 		return;
 	}
 
+	// The reason for a refused chat or run is about what came before: the reader's own message
+	// starts what follows, so it goes (register 1112).
+	threadReadRefusal = null;
 	await _executeRun(task, files, displayText, runOptions);
 }
+
+/** The run refused because no AI provider is set up (`code: 'llm_not_configured'`): the
+ *  sentence for this reader, or null for any other answer. The server says whether this reader
+ *  may set it up; only then does it name the provider, what is missing and the page to go to.
+ *  `missing` is `['key']`, or the settings fields when the key is there. */
+function noLlmKeyText(status: number, detail: string): string | null {
+	if (status !== 400) return null;
+	let body: unknown;
+	try { body = JSON.parse(detail); } catch { return null; }
+	if (typeof body !== 'object' || body === null) return null;
+	const b = body as { code?: unknown; may_configure?: unknown; provider?: unknown; missing?: unknown };
+	if (b.code !== 'llm_not_configured') return null;
+	if (b.may_configure === false) return t('chat.error_no_llm_key_mandate');
+	if (b.may_configure !== true || typeof b.provider !== 'string' || b.provider === '') return null;
+	const label = t('settings.config');
+	const missing = Array.isArray(b.missing) ? b.missing : ['key'];
+	if (missing.includes('key')) return tf('chat.error_no_llm_key_owner', { provider: b.provider, label });
+	const names = missing.map((m) => (LLM_FIELDS.includes(m) ? t(`chat.llm_field.${String(m)}`) : null));
+	if (names.length === 0 || names.length > 2 || names.includes(null)) return null;
+	const fields = names.length === 1 ? names[0]! : tf('chat.llm_fields_and', { a: names[0]!, b: names[1]! });
+	return tf('chat.error_no_llm_field_owner', { provider: b.provider, fields, label });
+}
+const LLM_FIELDS: readonly unknown[] = ['gcp_project_id', 'api_base_url', 'model_id'];
 
 /** Map HTTP status + error detail to a user-friendly i18n message. */
 function mapApiError(status: number, detail: string): string {
@@ -1537,7 +1571,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			return;
 		}
 		try { chatErrorDetail = await res.text(); } catch { chatErrorDetail = `HTTP ${res.status}`; }
-		chatError = mapApiError(res.status, chatErrorDetail ?? '');
+		chatError = noLlmKeyText(res.status, chatErrorDetail ?? '') ?? mapApiError(res.status, chatErrorDetail ?? '');
 		// Remove empty assistant message and mark user message as failed
 		if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
 		if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
@@ -2038,8 +2072,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			if (!profileId || !Number.isFinite(costUsd) || costUsd < 0) break;
 			const entry: ApiCallCost = { tool, profileId, profileName, endpoint, costUsd };
 			msg.apiCalls = [...(msg.apiCalls ?? []), entry];
-			const existing = msg.usage ?? { tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
-			msg.usage = { ...existing, apiCostUsd: (existing.apiCostUsd ?? 0) + costUsd };
+			// The footer's count and cost come with `done`, counted from the run's stored calls.
 			break;
 		}
 		case 'tool_result': {
@@ -2233,9 +2266,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					// runs — typically only the final turn's model is shown.
 					...(turnModel ? { model: turnModel } : prev?.model ? { model: prev.model } : {}),
 					// Carry live-only fields the per-turn REPLACE would otherwise drop:
-					// third-party API cost (api_cost event) + the client-measured TTFB
-					// (set on the first content delta) + diagnostics signals.
-					...(prev?.apiCostUsd !== undefined ? { apiCostUsd: prev.apiCostUsd } : {}),
+					// the client-measured TTFB (set on the first content delta) + diagnostics signals.
 					...(prev?.ttfbMs !== undefined ? { ttfbMs: prev.ttfbMs } : {}),
 					...(turnStop !== undefined ? { stopReason: turnStop } : {}),
 					...(turnIters !== undefined ? { iterations: turnIters } : {}),
@@ -2245,6 +2276,10 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					// is dropped, and "the events happen to arrive in this order" is a
 					// weaker guarantee than naming the field.
 					...(prev?.spawnCostUsd !== undefined ? { spawnCostUsd: prev.spawnCostUsd } : {}),
+					// Likewise the third-party API calls, which only `done` writes.
+					...(prev?.apiCalls !== undefined
+						? { apiCalls: prev.apiCalls, apiCostUsd: prev.apiCostUsd, apiCostEstimated: prev.apiCostEstimated, apiCallsUnpriced: prev.apiCallsUnpriced }
+						: {}),
 				};
 				// Context budget is owned solely by the engine `context_budget`
 				// event (exact API usage). turn_end no longer writes it — the old
@@ -2369,9 +2404,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// spawn) fire one `turn_end` per LLM call in the loop, and the UI used
 			// to sum them while the engine reports a single per-run cumulative
 			// figure. The accumulation showed 3-6× actual cost — a credibility
-			// bug at HN-launch. Third-party `apiCostUsd` (DataForSEO etc.) is
-			// preserved across the replacement because the engine's run-usage
-			// covers LLM cost only.
+			// bug at HN-launch. The third-party API calls (DataForSEO etc.) come with
+			// it, counted by the engine from the run's stored calls.
 			const merged = mergeDoneUsage(msg.usage, data['usage']);
 			if (merged) msg.usage = merged;
 			// Silent-turn guard (2026-05-29): a run that the engine
@@ -2499,11 +2533,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
+	// A consent card's answer is a click; as text in the message field it would approve nothing.
+	const draftable = isConsentCard(pendingPermission?.options) ? null : answer;
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
-	if (!await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply`, { answer, promptId })) {
-		addToast(t('chat.error_connection'), 'error', 6000);
-	}
+	const sid = sessionId;
+	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable);
 }
 
 /** One-shot reply for a multi-question tabs prompt. Answers are ordered to
@@ -2513,10 +2548,48 @@ export async function replyPermissionTabs(answers: string[]): Promise<void> {
 	const promptId = pendingTabsPrompt?.promptId;
 	if (!promptId) return;
 	pendingTabsPrompt = null;
-	if (!await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply-tabs`, { promptId, answers })) {
-		addToast(t('chat.error_connection'), 'error', 6000);
-	}
+	const sid = sessionId;
+	// Several answers are no single text for the message field: no draft here.
+	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply-tabs`, { promptId, answers }), null);
 }
+
+/**
+ * What the user hears about an answer once its card is gone. An answer that did not arrive is a
+ * toast. One that arrived at a closed question was not used, and nothing else would tell them:
+ * it stands where the chat's other errors stand until the next message is sent — in the thread
+ * that asked only, and never over another error, which says more than this sentence does. A
+ * stale (404) or refused (409) answer stays silent; the question it named has no card left.
+ *
+ * The sentence says why the question was closed and what to do instead (ux U-113); where writing
+ * the answer again is the way, `answer` goes back into the message field if that is empty, and
+ * the sentence says so only then.
+ */
+async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | null): Promise<void> {
+	if (outcome === 'lost') { addToast(t('chat.error_connection'), 'error', 6000); return; }
+	if (outcome === 'settled' || sessionId !== sid) return;
+	if (chatError !== null && chatError !== closedReplySentence) return;
+	// Who reads it decides the way out where only the owner can act. Unknown reads as the owner,
+	// as on the settings pages; the server is the boundary either way.
+	await loadSettingsViewer();
+	if (sessionId !== sid || (chatError !== null && chatError !== closedReplySentence)) return;
+	const reader = isMandateSession() ? 'mandate' : 'owner';
+	const draft = answer !== null && closedDraftAllowed(outcome.closed, reader) ? draftOfAnswer(answer) : null;
+	const placed = draft !== null && composerDraft !== null && composerDraft(draft);
+	chatError = closedReplySentence = t(closedSentenceKey(outcome.closed, reader)) + (placed ? t('chat.prompt_closed.draft') : '');
+	chatErrorDetail = null;
+}
+
+/** Puts a draft into the chat's message field when it is empty, and says whether it did. */
+type ComposerDraft = (text: string) => boolean;
+let composerDraft: ComposerDraft | null = null;
+
+/** The chat view lends its message field for a lost answer; the returned function takes it back. */
+export function registerComposerDraft(fn: ComposerDraft): () => void {
+	composerDraft = fn;
+	return () => { if (composerDraft === fn) composerDraft = null; };
+}
+/** The sentence `reportReply` last put up, so a queued message takes down that one and no other error. */
+let closedReplySentence: string | null = null;
 
 /** Optionally persist partial answers so a mid-batch reconnect restores
  * progress. Best-effort — failure does not surface to the user. */
@@ -2531,11 +2604,14 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 	} catch { /* best-effort */ }
 }
 
+/** How a reply ended: `lost` when the server could not be reached or failed twice, `closed` when
+ *  it answered 410 (a closed question, with the reason the server gave, or null), and `settled`
+ *  for every other final word. */
+type ReplyOutcome = 'settled' | 'lost' | { readonly closed: ClosedCode | null };
+
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
- *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Resolves false
- *  only when the server could not be reached or failed twice; any other answer is the server's
- *  final word. Never rejects. */
-async function postReplyWithRetry(url: string, body: Record<string, unknown>): Promise<boolean> {
+ *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
+async function postReplyWithRetry(url: string, body: Record<string, unknown>): Promise<ReplyOutcome> {
 	for (let attempt = 0; attempt < 2; attempt++) {
 		try {
 			const res = await fetch(url, {
@@ -2543,26 +2619,30 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(body),
 			});
-			// 2xx or expected terminal states (410 expired, 404 stale) are all "done".
-			if (res.ok || res.status === 404 || res.status === 410) return true;
+			if (res.status === 410) {
+				let code: unknown;
+				try { code = ((await res.json()) as { code?: unknown } | null)?.code; } catch { /* no body: no reason given */ }
+				return { closed: closedCodeOf(code) };
+			}
 			// 5xx → retry once
 			if (res.status >= 500) {
 				if (attempt === 0) {
 					await new Promise(r => setTimeout(r, 500));
 					continue;
 				}
-				return false;
+				return 'lost';
 			}
-			return true;
+			// 2xx and the other final answers (404 stale, 409 refused, 400) are all "done".
+			return 'settled';
 		} catch {
 			if (attempt === 0) {
 				await new Promise(r => setTimeout(r, 500));
 				continue;
 			}
-			return false;
+			return 'lost';
 		}
 	}
-	return false;
+	return 'lost';
 }
 
 /** Result of a vault write attempt — distinguishes the three failure modes
@@ -3238,6 +3318,9 @@ export function getThreadContained() {
 export function getThreadContainedUnknown(): ContainedUnknown | null {
 	return threadContainedUnknown;
 }
+export function getThreadReadRefusal(): ContainedReadKey | null {
+	return threadReadRefusal;
+}
 /**
  * Whether the open chat is contained now: a run may have contained it since it was opened (a
  * store request). Read from the thread itself, not the list, which holds only its first page.
@@ -3401,6 +3484,7 @@ export function newChat() {
 	skipExtraction = false;
 	threadContained = false;
 	threadContainedUnknown = null;
+	threadReadRefusal = null;
 	containedOrigin = null;
 	containedPrefillText = null;
 	chatError = null;
@@ -3586,6 +3670,9 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	} catch {
 		return; // network drop — nav poll still reflects the run; user can reload
 	}
+	// Refused (register 1112): the live part is not this reader's; say so, the transcript stays.
+	const refused = res.ok ? null : await containedReadKey(res);
+	if (refused !== null) { if (gen === _resumeGeneration) threadReadRefusal = refused; return; }
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
@@ -3757,6 +3844,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	skipExtraction = false;
 	threadContained = false;
 	threadContainedUnknown = null;
+	threadReadRefusal = null;
 	containedOrigin = null;
 	containedPrefillText = null;
 	// Restore any pending send-queue for this thread (durable across reload).
@@ -3814,6 +3902,16 @@ export async function resumeThread(threadId: string): Promise<void> {
 			chatError = t('chat.error_thread_deleted');
 			return;
 		}
+		// Not this reader's chat to read (register 1112, ux U-091): the reason instead of the chat,
+		// no copy this page kept of it, and the next message starts a new chat.
+		const openRefused = res.status === 403 ? await containedReadKey(res) : null;
+		if (gen !== _resumeGeneration) return;
+		if (openRefused !== null) {
+			newChat();
+			dropPersistedThread(threadId);
+			threadReadRefusal = openRefused;
+			return;
+		}
 		if (!res.ok) {
 			// The server responded with an error status (not a dropped
 			// connection) — opening the conversation failed. Don't blame the
@@ -3854,6 +3952,15 @@ export async function resumeThread(threadId: string): Promise<void> {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
+		// Not this reader's to read: no history, the reason instead (register 1112). A copy this
+		// page kept from before is not shown either.
+		const refused = msgRes.ok ? null : await containedReadKey(msgRes);
+		if (gen !== _resumeGeneration) return;
+		if (refused !== null) {
+			threadReadRefusal = refused;
+			messages = [];
+			return;
+		}
 		if (msgRes.ok) {
 			// Server returns RenderedMessage[] — already shaped for the UI
 			// (tool_result carriers merged into preceding tool_use, safety

@@ -172,7 +172,9 @@ describe('the view refreshes while the tab is visible', () => {
 	it('a first load that fails after a newer refresh answered shows no error', async () => {
 		// The first load is the loud one; if it is overtaken, its failure is about a list nobody sees.
 		let failFirst!: () => void;
-		vi.stubGlobal('fetch', vi.fn(() => {
+		vi.stubGlobal('fetch', vi.fn((url: string) => {
+			// The page also asks whose session it is (`/config`); only the list's loads count here.
+			if (String(url).endsWith('/config')) return Promise.resolve(new Response('{}', { status: 200 }));
 			loads++;
 			if (loads === 1) return new Promise<Response>((resolve) => { failFirst = () => resolve(new Response('', { status: 502 })); });
 			return Promise.resolve(new Response(JSON.stringify({ triggers: [{ ...ROW, running: true, stoppable: true }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -191,7 +193,8 @@ describe('the view refreshes while the tab is visible', () => {
 		// Overtaken by a load that then failed is no reason to drop it: the view would say there
 		// are no triggers.
 		let answerFirst!: () => void;
-		vi.stubGlobal('fetch', vi.fn(() => {
+		vi.stubGlobal('fetch', vi.fn((url: string) => {
+			if (String(url).endsWith('/config')) return Promise.resolve(new Response('{}', { status: 200 }));
 			loads++;
 			if (loads === 1) return new Promise<Response>((resolve) => {
 				answerFirst = () => resolve(new Response(JSON.stringify({ triggers: [{ ...ROW, running: true, stoppable: true }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));

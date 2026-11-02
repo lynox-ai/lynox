@@ -74,7 +74,8 @@ beforeEach(() => {
 			return reply({});
 		}
 		gets.push(u);
-		if (u.endsWith('/config')) return reply({ managed: true });
+		// The owner's session: the page offers its acts only once the server says so.
+		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
 		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
@@ -200,6 +201,42 @@ describe('writing on a halted run', () => {
 		buttonByText(t('bulk.resume.write'))!.click();
 		await settle();
 		expect(target.textContent).toContain('engine English');
+	});
+});
+
+// A run halted on markup its store added to a written description: the page names it in its own
+// words, marks the product, wherever it sits in the list, and offers writing on.
+describe('a run halted on markup its store added', () => {
+	it('marks exactly the product the store changed, past the first page, and offers writing on', async () => {
+		run = makeRun({
+			phase: 'writing', haltKey: 'markupAddedByShop', haltReason: 'engine English', applied: 8, probeConfirmed: true, total: 9, shopAddedMarkup: 1,
+			changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+		});
+		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false,
+			written: i < 8, ...(i === 7 ? { shopAddedMarkup: true as const } : {}),
+		}));
+		await render();
+		const marked = [...target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')]
+			.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+		expect(marked).toEqual(['gid://shopify/Product/8']);
+		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop'));
+		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop_before'));
+		expect(target.textContent).not.toContain('engine English');
+		expect(buttonByText(t('bulk.resume.write'))).toBeDefined();
+	});
+
+	it('still loads the marked product past the first page once another halt replaced the reason', async () => {
+		run = makeRun({
+			phase: 'writing', haltKey: 'unavailable', haltReason: 'engine English', applied: 8, probeConfirmed: true, total: 9, shopAddedMarkup: 1,
+			changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+		});
+		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false,
+			written: i < 8, ...(i === 7 ? { shopAddedMarkup: true as const } : {}),
+		}));
+		await render();
+		expect(target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')).toHaveLength(1);
 	});
 });
 

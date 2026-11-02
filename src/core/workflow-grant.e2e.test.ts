@@ -153,7 +153,49 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{"week":40}' })).mockResolvedValueOnce(endTurn('posted'));
     await fire(trigger);
     expect(posts().map((p) => p.url)).toEqual([TARGET]);
-    expect(lastRun(trigger.id)).toContain('Pipeline completed');
+    expect(lastRun(trigger.id)).toContain('Workflow completed');
+  });
+
+  describe('a headless run carries whom it is for down to its step agents (1055)', () => {
+    const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'grant-eva' };
+    beforeEach(() => { recalledAs = []; });
+    function scheduled(steps: PlannedPipeline['steps']): TriggerRecord {
+      const planned = saveWorkflow('wf-for', steps);
+      history.setWorkflowConfirmedAt(planned.id, '2026-10-01T00:00:00.000Z');
+      forgetPipeline(planned.id);
+      return tm.createPipelineTask({ title: 'Weekly', pipelineId: planned.id, scheduleCron: CRON, pipelineParams: '{}' });
+    }
+
+    it('a run for a mandate builds its step agent for that mandate', async () => {
+      const trigger = scheduled([{ id: 's1', task: 'recall where the report goes', tools: ['memory_recall'] }]);
+      mockProcess.mockResolvedValueOnce(toolUse('memory_recall', {})).mockResolvedValueOnce(endTurn('finance'));
+      await fire(trigger, MANDATE);
+      expect(recalledAs).toEqual([MANDATE]);
+      expect(lastRun(trigger.id)).toContain('Workflow completed');
+    });
+
+    it('CONTROL: the same run with no one named builds its step agent for the owner', async () => {
+      const trigger = scheduled([{ id: 's1', task: 'recall where the report goes', tools: ['memory_recall'] }]);
+      mockProcess.mockResolvedValueOnce(toolUse('memory_recall', {})).mockResolvedValueOnce(endTurn('finance'));
+      await fire(trigger);
+      expect(recalledAs).toEqual([OWNER_PRINCIPAL]);
+    });
+
+    it('a run for a mandate refuses a step that names a tool the mandate\'s lock withholds, before the model is asked', async () => {
+      const trigger = scheduled([{ id: 's1', task: 'clean up', tools: ['bash'] }]);
+      await fire(trigger, MANDATE);
+      expect(mockProcess).not.toHaveBeenCalled();
+      const [run] = history.getRecentPipelineRuns(1);
+      expect(history.getPipelineStepResults(run!.id).map((r) => r.error ?? '').join('\n')).toContain('needs bash');
+    });
+
+    it('CONTROL: the owner\'s run of that step is not refused for it', async () => {
+      const trigger = scheduled([{ id: 's1', task: 'clean up', tools: ['bash'] }]);
+      mockProcess.mockResolvedValueOnce(endTurn('nothing to clean'));
+      await fire(trigger);
+      expect(lastRun(trigger.id)).not.toContain('needs bash');
+      expect(mockProcess).toHaveBeenCalled();
+    });
   });
 
   describe('a headless run carries whom it is for down to its step agents (1055)', () => {
@@ -574,7 +616,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       const loop = new WorkerLoop(engine(), { hasChannels: () => false, notify } as never, 60_000);
       expect(await loop.runTriggerNow(trigger.id)).toEqual({ ok: true });
       await vi.waitFor(() => expect(runRows()).toHaveLength(1));
-      await vi.waitFor(() => expect(lastRun(trigger.id)).toContain('Pipeline completed'));
+      await vi.waitFor(() => expect(lastRun(trigger.id)).toContain('Workflow completed'));
       mockProcess.mockResolvedValueOnce(endTurn('done'));
       const lib = await runGuardedSavedWorkflow(engine(), 'wf-how', undefined, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'cookie:0123abcd' } });
       expect(lib.grantNote).toBeUndefined();

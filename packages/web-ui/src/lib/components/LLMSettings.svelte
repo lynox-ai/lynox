@@ -23,6 +23,7 @@
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
@@ -32,9 +33,15 @@
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
 	import { cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
+	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { endpointText, optionLabel, orNotSet } from './settings-readonly/values.js';
 	import Icon from '../primitives/Icon.svelte';
 	import type { IconName } from '../primitives/icons.js';
-	import { TIER_PRESET_NAMES, type TierPresetName } from '$lib/contract/vocab.js';
+	// Relative, as every other import here: `$lib` resolves only inside a SvelteKit build, so the
+	// alias kept this page from being mounted in a test.
+	import { TIER_PRESET_NAMES, type TierPresetName } from '../contract/vocab.js';
 	import { buildRoutingUpdate, type Strategy } from '../utils/llm-routing-update.js';
 	import { tierPickerModels, defaultTierModelId, isHybridTierOption, presetTierSeed } from '../utils/llm-tier-picker.js';
 	// Shared vocabulary from the vendored wire-contract copy (byte-identical to
@@ -385,6 +392,7 @@
 			const catBody = (await catRes.json()) as { providers: CatalogProvider[] };
 			providers = catBody.providers;
 			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks; available_tier_presets?: Record<string, PresetInfo>; capabilities?: { durable_memory_capture_degraded?: boolean } };
+			noteSettingsViewer(configBody);
 			config = configBody;
 			locks = configBody.locks ?? {};
 			availablePresets = configBody.available_tier_presets ?? {};
@@ -885,18 +893,11 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(body),
 			});
-			if (!res.ok) {
-				// Surface the server's named reason (e.g. "provider:'openai' requires
-				// openai_model_id") instead of a bare "HTTP 400" — otherwise a save
-				// that fails validation looks like a silent no-op (H-007: OpenAI-compat
-				// save with no model-id swallowed the 400). Falls back to the status.
-				let reason = `HTTP ${res.status}`;
-				try {
-					const errBody = (await res.json()) as { error?: string; disclosure?: string };
-					if (typeof errBody.error === 'string' && errBody.error) reason = errBody.error;
-				} catch { /* non-JSON body — keep the status string */ }
-				throw new Error(reason);
-			}
+			// Surface the server's named reason (e.g. "provider:'openai' requires
+			// openai_model_id") instead of a bare "HTTP 400" — otherwise a save
+			// that fails validation looks like a silent no-op (H-007: OpenAI-compat
+			// save with no model-id swallowed the 400). Falls back to the status.
+			await throwIfRefused(res);
 			// The routing/tier config may have changed → drop the shared tier-config
 			// cache so the composer + header model pickers re-fetch the new per-tier
 			// model labels immediately (else they'd show the pre-save model, e.g. the
@@ -1043,6 +1044,51 @@
 		titleKey: string;
 		descKey: string;
 	}
+	// A mandate's session (ux U-104): what the page shows the owner, as text — the strategy, the
+	// provider and the model, each with the visible text of its card, tile or option. Left out: the
+	// API keys (secrets, not even "stored"), the connection test (it calls a model), the endpoint
+	// bookmarks' buttons and the save bar.
+	const mandateRows = $derived.by(() => {
+		const rows: { label: string; value: string }[] = [{
+			label: t('llm.preset.heading'),
+			value: optionLabel(strategy, STRATEGY_CARDS.map((c) => ({ value: c.id, label: t(`llm.preset.${c.key}`) }))),
+		}];
+		if (strategy === 'standard') {
+			rows.push({ label: t('llm.provider_heading'), value: optionLabel(activeCatalogKey, providers.map((p) => ({ value: catalogEntryKey(p), label: p.display_name }))) });
+		}
+		if (presetSelected) {
+			for (const tier of activePresetTiers) rows.push({ label: t(`llm.tier.${tier.tier}`), value: tier.label });
+			return rows;
+		}
+		if (!activeProviderEntry) return rows;
+		if (hybridActive) {
+			for (const tier of TIER_ORDER) {
+				const { catalogKey, modelId } = tierSlots[tier];
+				const entry = catalogEntryByKey(catalogKey);
+				const model = entry ? tierPickerModels(entry).find((m) => m.id === modelId) : undefined;
+				rows.push({ label: t(`llm.tier.${tier}`), value: entry ? `${entry.display_name} · ${model?.label ?? orNotSet(modelId)}` : orNotSet(null) });
+			}
+			return rows;
+		}
+		if (activeProviderEntry.requires_base_url) {
+			rows.push({ label: t('llm.base_url'), value: endpointText(config.api_base_url) });
+			if (activeProvider === 'custom') {
+				rows.push({ label: t('llm.endpoints_heading'), value: orNotSet((config.custom_endpoints ?? []).map((ep) => `${ep.name} (${endpointText(ep.base_url)})`).join(', ')) });
+			}
+		}
+		if (activeProviderEntry.requires_region) {
+			rows.push({ label: t('llm.gcp_project'), value: orNotSet(config.gcp_project_id) });
+			rows.push({ label: t('llm.gcp_region'), value: orNotSet(config.gcp_region) });
+		}
+		if (mainModelOptions.length > 0) {
+			rows.push({ label: t('llm.main_model.heading'), value: optionLabel(mainModelSelection, mainModelOptions.map((o) => ({ value: mainModelOptionKey(o), label: o.label }))) });
+		} else if (activeProviderEntry.models.length === 0) {
+			rows.push({ label: t('llm.custom_model_id'), value: orNotSet(config.openai_model_id) });
+		}
+		rows.push({ label: t('llm.residency'), value: activeProviderEntry.default_residency });
+		return rows;
+	});
+
 	const llmSubRoutes: ReadonlyArray<SubRoute> = [
 		// IA reorg (D2): API keys for 3rd-party tools (DataForSEO, etc.) live at
 		// /app/settings/llm/keys (low-frequency config — Settings is the home).
@@ -1061,6 +1107,14 @@
 		<p class="text-sm text-text-muted">{t('llm.subtitle')}</p>
 	</header>
 
+	{#if isMandateSession()}
+		<!-- A mandate's session: the values as text (ux U-104); PUT /api/config is the owner's. The
+		     memory link and the advanced section below stay, the latter as text too. -->
+		<OwnerOnlyNotice />
+		{#if loaded}
+			<ReadOnlyRows rows={mandateRows} />
+		{/if}
+	{:else}
 	{#if config.env_overrides?.provider}
 		<!-- Self-host docs recommend setting LYNOX_LLM_PROVIDER in .env, which
 		     overrides config.json on every engine reload. Without this banner,
@@ -1265,6 +1319,7 @@
 		</div>
 	</section>
 	{/if}
+	{/if}
 
 	<!--
 		LLM sub-route nav (PRD-IA-V2 P3-PR-C). Data-driven so the OpenAI-native
@@ -1283,6 +1338,9 @@
 		{/each}
 	</nav>
 
+	{#if isMandateSession()}
+		<!-- No form, no connection test and no save bar in a mandate's session. -->
+	{:else}
 	{#if activeProviderEntry}
 		<!-- Per-provider config form — Standard (single provider: key/base/model/test)
 		     or Eigene (per-tier editor). Hidden for a fixed preset: its tiers show in
@@ -1548,6 +1606,7 @@
 				</div>
 			</div>
 		{/if}
+	{/if}
 
 	{#if activeProviderEntry}
 		<!-- Settings v3 PR 4.6 (Items 3 + 5): Advanced sub-page collapsed inline

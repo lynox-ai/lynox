@@ -103,6 +103,15 @@ export function stripHidden(text: string): string {
   return Array.from(text).filter((_, i) => !drop.has(i)).join('');
 }
 
+/** `name` without any hidden character, in any place: a stored name or step id as it reads, for one
+ *  saved before the save refused them. A name takes none of the places real text may carry one. */
+export function stripHiddenInName(name: string): string {
+  const at = hiddenCharIndexes(name, { inPlace: false });
+  if (at.length === 0) return name;
+  const drop = new Set(at);
+  return Array.from(name).filter((_, i) => !drop.has(i)).join('');
+}
+
 /** The refusal the model reads when a write carries a hidden character; the caller adds its own `Error:` prefix. */
 export function hiddenCharRefusal(what: string, hit: HiddenChar): string {
   return `refused to save this ${what} — ${hit.path} contains a character that renders as nothing (${hit.codePoint}). Nothing was saved. `

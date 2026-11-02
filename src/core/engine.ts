@@ -853,11 +853,15 @@ export class Engine {
    * pool's spend only: on a pool tier, the US classifier (the pool's Anthropic client) and the
    * EU one on the pool's Mistral key. A classifier on the user's own key is not debited, as the
    * user already pays the provider for it and would pay twice.
+   *
+   * And the instance's language, for the reminder poller's title (`notice-language.ts`): set here
+   * so the cold boot and the rebootstrap cannot hand the inbox different ones.
    */
   private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
     const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
     if (key !== undefined) bootOpts.mistralApiKey = key;
     if (poolSuppliesLLMKeys() && (bootOpts.llmRegion !== 'eu' || poolPays)) bootOpts.meteredHost = this;
+    bootOpts.language = () => this.config.language;
   }
 
   /**
@@ -1542,6 +1546,12 @@ export class Engine {
       const db = this.engineDb?.getDb();
       if (db === undefined) return;
       pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+      // A run of a plan paused here would go on until the next sweep, up to 5 minutes, with its
+      // member live again and its connections open to it. So the parts that end runs follow at
+      // once, outside the login's transaction, as on a revoke. They read what was committed: when
+      // the login's transaction fails, the pause is gone with it and so is the reason to stop.
+      // Outside any run group, as the sweeps are: ending runs belongs to no run.
+      runOutsideGroup(() => queueMicrotask(() => this.endEndedMandateRuns()));
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
@@ -2781,7 +2791,7 @@ export class Engine {
     try {
       pauseEndedPlans({
         db, endOf: (id) => ends.endRow(id), closedPromptOf: (id) => this.closedPromptOf(id),
-        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id); } } : {}),
+        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id, 'plan_paused'); } } : {}),
       });
     } catch (err: unknown) {
       process.stderr.write(`[lynox] pausing plans of ended mandates failed: ${processErrorText(err)}\n`);

@@ -1147,6 +1147,7 @@ async function executeStep(
                 contract: call.contract,
                 lift: call.grant,
                 filed: call.filed,
+                apiCost: call.apiCost,
               });
             } catch { /* best-effort: observability must never break the run */ }
           }

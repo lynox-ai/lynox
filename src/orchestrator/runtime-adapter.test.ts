@@ -41,7 +41,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 
 import { Agent } from '../core/agent.js';
 import { ConversationGrants } from '../core/conversation-grants.js';
-import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopToolsWithout, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, StepTimeout, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopToolsWithout, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, StepTimeout, DEFAULT_STEP_TIMEOUT_MS, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import { applyPluginToolGate } from '../core/session.js';
 import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
@@ -929,6 +929,28 @@ describe('spawnInline + parentPrompt propagation', () => {
       expect(agent.abort).not.toHaveBeenCalled();
     });
 
+    it.each(['inline', 'agent'] as const)('a %s step without timeout_ms gets the default limit, 30 min', async (runtime) => {
+      expect(DEFAULT_STEP_TIMEOUT_MS).toBe(1_800_000);
+      vi.useFakeTimers();
+      // Hangs past the limit; the rejection it ends with is what the step reports.
+      mockSend.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => { setTimeout(() => reject(new Error('aborted')), DEFAULT_STEP_TIMEOUT_MS + 1_000); }));
+      const run = runtime === 'inline'
+        ? spawnInline({ id: 'hangs', agent: 'hangs', runtime: 'inline', task: 'work' }, {}, mockConfig, mockParentTools)
+        : spawnViaAgent({ id: 'hangs', agent: 'hangs', runtime: 'agent' }, { name: 'hangs', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] },
+          {}, mockConfig, undefined, 'run-1');
+      let settled = false;
+      run.then(() => { settled = true; }, () => { settled = true; });
+      await vi.advanceTimersByTimeAsync(DEFAULT_STEP_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      const agent = vi.mocked(Agent).mock.results.at(-1)!.value as { abort: ReturnType<typeof vi.fn> };
+      expect(agent.abort).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(agent.abort).toHaveBeenCalled();
+      const outcome = expect(run).rejects.toThrow('Step "hangs" timed out after 1800000ms');
+      await vi.advanceTimersByTimeAsync(1_000);
+      await outcome;
+    });
+
     it('control: a step that hangs without asking still times out', async () => {
       vi.useFakeTimers();
       mockSend.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => { setTimeout(() => reject(new Error('aborted')), 5_000); }));
@@ -1662,6 +1684,17 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     expect(calls[0]).toMatchObject({ contract: { state: 'withheld', grantId: 'g-1' }, filed: { outcome: 'queued', approvalId: 'ap-1' } });
     expect(calls[1]!.contract).toBeUndefined();
     expect(calls[1]!.filed).toBeUndefined();
+  });
+
+  it('copies the API request a call sent onto the step\'s record, and adds none the event lacks (v71)', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'http_request', input: {}, agent: 'step', toolUseId: 'tu_h' });
+    h({ type: 'tool_result', name: 'http_request', result: 'HTTP 200', agent: 'step', toolUseId: 'tu_h', apiCost: { usd: 0.09, source: 'response' } });
+    h({ type: 'tool_call', name: 'read_file', input: {}, agent: 'step', toolUseId: 'tu_r' });
+    h({ type: 'tool_result', name: 'read_file', result: 'x', agent: 'step', toolUseId: 'tu_r' });
+    expect(calls[0]!.apiCost).toEqual({ usd: 0.09, source: 'response' });
+    expect(calls[1]!.apiCost).toBeUndefined();
   });
 
   it('pairs same-named concurrent calls FIFO (input order preserved)', () => {

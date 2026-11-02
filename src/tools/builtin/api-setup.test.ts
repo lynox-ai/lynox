@@ -1754,6 +1754,18 @@ describe('api_setup tool', () => {
       expect(result).toContain('cost.output_ratio');
     });
 
+    it('takes a cost.response_field that is a dot path, and rejects any other', async () => {
+      for (const field of ['cost', 'tasks.0.cost', 'data.billing.total_usd']) {
+        const store = new ApiStore();
+        const result = await apiSetupTool.handler({ action: 'create', profile: withV2({ cost: { model: 'per_call', rate_usd: 0.001, response_field: field } }) }, createMockAgent(store));
+        expect(result).not.toContain('cost.response_field');
+      }
+      for (const field of ['', 'cost.', '.cost', 'a..b', 'tasks[0].cost', '$.cost', 'a b', 7, 'a.b.c.d.e.f.g.h.i']) {
+        const result = await apiSetupTool.handler({ action: 'create', profile: withV2({ cost: { model: 'per_call', rate_usd: 0.001, response_field: field as never } }) }, createMockAgent(new ApiStore()));
+        expect(result).toContain('Invalid cost.response_field');
+      }
+    });
+
     it('rejects unknown provenance.source', async () => {
       const agent = createMockAgent(new ApiStore());
       const result = await apiSetupTool.handler(
