@@ -8,7 +8,7 @@
 
 	import { t } from '../i18n.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	interface ChannelItem {
 		href: string;
@@ -26,10 +26,11 @@
 	$effect(() => {
 		void (async () => {
 			try {
+				const noteViewer = viewerNote();
 				const res = await fetch(`${getApiBase()}/config`);
 				if (!res.ok) return;
 				const body = (await res.json()) as { capabilities?: { has_calendar?: boolean } };
-				noteSettingsViewer(body);
+				noteViewer(body);
 				hasCalendar = body.capabilities?.has_calendar === true;
 			} catch { /* leave the tile hidden on probe failure — fail closed */ }
 		})();

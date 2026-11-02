@@ -640,7 +640,7 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	list_item_mismatch: 'list_item_mismatch',
 	list_item_truncated: 'list_item_truncated',
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
-	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', shop_added_markup: 'shop_added_markup',
+	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused', shop_added_markup: 'shop_added_markup',
 };
 /** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
  *  of tags the page reads, whose way out differs from planning again (U-103). */

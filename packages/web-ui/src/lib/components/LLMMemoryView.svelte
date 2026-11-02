@@ -15,7 +15,7 @@
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { onOff, orNotSet } from './settings-readonly/values.js';
@@ -31,10 +31,11 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const body = (await res.json()) as UserConfig;
-			noteSettingsViewer(body);
+			noteViewer(body);
 			config = {
 				memory_extraction: body.memory_extraction,
 				memory_half_life_days: body.memory_half_life_days,
