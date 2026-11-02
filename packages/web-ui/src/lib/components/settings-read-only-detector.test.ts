@@ -30,6 +30,8 @@ const SERVER = fileURLToPath(new URL('../../../../../src/server/http-api.ts', im
 const EXEMPT: Record<string, string> = {
 	'BulkRunsSetting.svelte': 'Its page leaves it out for a mandate (bulk runs are the owner\'s switch); the mandate is told the owner turns it on.',
 	'BulkRunsView.svelte': 'A mandate reads the runs and merges without "take back"; one button on a readable page gets no sentence (ux U-111), and a run\'s own page says who acts.',
+	'ContactsView.svelte': 'A mandate reads the contacts without "remove"; one button on a readable page gets no sentence.',
+	'FileBrowserView.svelte': 'A mandate browses and downloads without "delete"; one button on a readable page gets no sentence.',
 	'ChatView.svelte': 'Not a settings page: it reveals the vault key only for the owner\'s backup reminder, and a refused reveal shows nothing.',
 	'ApprovalsView.svelte': 'A card without a checksum only reads, closing is offered at `viewer === \'owner\'` only, and a mandate is told the queue is read-only.',
 	'OnboardingBasics.svelte': 'Mounted only by ChatView, which never runs the owner\'s introduction in a mandate\'s session.',
@@ -41,9 +43,7 @@ const EXEMPT: Record<string, string> = {
  * delete, run, edit memory …) are not settings, and whether a mandate is shown each of them is
  * checked page by page apart from this detector. Listed so a NEW page still fails here.
  */
-const OUTSIDE_SETTINGS = [
-	'ContactsView.svelte', 'FileBrowserView.svelte', 'KnowledgeQueueView.svelte', 'MemoryView.svelte',
-];
+const OUTSIDE_SETTINGS: string[] = [];
 /**
  * Pages a mandate does not see at all, hidden by themselves: they must ask whose session it is,
  * but show no notice.
@@ -257,7 +257,7 @@ describe('every page that writes through an owner-only route has a read-only vie
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
-		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'TriggersView.svelte']);
+		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'TriggersView.svelte']);
 		for (const name of OUTSIDE_SETTINGS) expect(pages.map((p) => basename(p))).toContain(name);
 		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte', 'SecretsView.svelte', 'KeysView.svelte', 'CalendarSettings.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {

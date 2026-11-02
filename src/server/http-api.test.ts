@@ -450,6 +450,9 @@ vi.mock('../core/config.js', async (importOriginal) => ({
   admitBackgroundModel: (await importOriginal<typeof import('../core/config.js')>()).admitBackgroundModel,
   // The REAL pool endpoint pairing: the managed write gate and the loader must decide alike.
   poolEndpointFor: (await importOriginal<typeof import('../core/config.js')>()).poolEndpointFor,
+  // The REAL pre-write check: it is the loader run on the candidate, and the route under test refuses by it.
+  checkCandidateConfig: vi.fn((await importOriginal<typeof import('../core/config.js')>()).checkCandidateConfig),
+  replacedTierSlots: vi.fn().mockReturnValue([]),
   POOL_MISTRAL_ENDPOINTS: (await importOriginal<typeof import('../core/config.js')>()).POOL_MISTRAL_ENDPOINTS,
   POOL_ANTHROPIC_ENDPOINT: (await importOriginal<typeof import('../core/config.js')>()).POOL_ANTHROPIC_ENDPOINT,
   // Not a stub: the REAL escaper, so this suite tests the same rendering the
@@ -6283,6 +6286,141 @@ describe('LynoxHTTPApi', () => {
       const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
       expect(lastCall).toBeDefined();
       expect(lastCall![0]['balanced_model']).toBe('claude-sonnet-5');
+    });
+
+    // ── The write is checked by the loader BEFORE it happens ──
+    // A file the loader refuses answered every later GET and PUT with a 500 and stopped the next
+    // boot. `checkCandidateConfig` is the real one here (see the mock), run on the merged file.
+    describe('PUT /api/config checks the candidate before it writes', () => {
+      const DEFAULT_STORED = { default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' };
+      const stored = async (cfg: Record<string, unknown>) => {
+        const { readUserConfig } = await import('../core/config.js');
+        (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue(cfg);
+      };
+      const saves = async () => {
+        const { saveUserConfig } = await import('../core/config.js');
+        return (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.length;
+      };
+      afterEach(async () => { await stored(DEFAULT_STORED); });
+
+      it('refuses a new slot whose model this version does not know, and writes nothing', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'max-quality' });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model' } } }),
+        });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toBe("A tier names the model 'claude-retired-model', which this version does not know. Choose a listed model for that tier.");
+        expect(await saves()).toBe(before);
+      });
+
+      it('refuses a candidate the loader would not load, names the model, and writes nothing', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'balanced' });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } } }),
+        });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toBe("A tier names the model 'my-local-model', which this version does not know. Choose a listed model for that tier.");
+        expect(await saves()).toBe(before);
+      });
+
+      it('an already stored replaced slot does not block saving the rest, and a valid PUT repairs it', async () => {
+        repayRateWindow();
+        const broken = { ...DEFAULT_STORED, tier_preset: 'max-quality', tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model' } } };
+        await stored(broken);
+        const before = await saves();
+        // The UI re-sends the stored slot with another field: saved.
+        const resend = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ thinking_mode: 'disabled', tier_set: broken.tier_set }),
+        });
+        expect(resend.status).toBe(200);
+        // A slot with a known model replaces it: saved, and the file carries the new slot.
+        const repair = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-5' } } }),
+        });
+        expect(repair.status).toBe(200);
+        expect(await saves()).toBe(before + 2);
+        const { saveUserConfig } = await import('../core/config.js');
+        const last = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1)![0];
+        expect((last['tier_set'] as Record<string, { model_id: string }>)['deep']!.model_id).toBe('claude-opus-5');
+      });
+
+      it('another loader error is refused with a fixed sentence: its own text may quote the environment', async () => {
+        repayRateWindow();
+        const KEY_SHAPED = 'sk-ant-api03-' + 'Q'.repeat(40);
+        const { checkCandidateConfig } = await import('../core/config.js');
+        (checkCandidateConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({ replacedSlots: [], error: `boom ANTHROPIC_API_KEY=${KEY_SHAPED}\nsecond line ${KEY_SHAPED}` });
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          const before = await saves();
+          const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ thinking_mode: 'disabled' }) });
+          expect(res.status).toBe(400);
+          expect(((await res.json()) as { error: string }).error).toBe('This configuration could not be loaded, so it was not saved.');
+          expect(await saves()).toBe(before);
+          // The text goes to the log instead: its first line, with the key masked.
+          const logged = stderr.mock.calls.flat().join(' ');
+          expect(logged).toContain('refused a configuration the loader rejects: boom');
+          expect(logged).not.toContain(KEY_SHAPED);
+          expect(logged).not.toContain('second line');
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('a stored slot re-sent without the key GET redacted does not block saving the rest', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'max-quality', tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model', api_key: 'sk-user-own' } } });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ thinking_mode: 'disabled', tier_set: { deep: { model_id: 'claude-retired-model', provider: 'anthropic' } } }),
+        });
+        expect(res.status).toBe(200);
+        expect(await saves()).toBe(before + 1);
+      });
+
+      it('self-host: a stored file the loader refuses is repaired by a PUT that clears the slot', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'balanced', tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } } });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ tier_set: {} }) });
+        expect(res.status).toBe(200);
+        expect(await saves()).toBe(before + 1);
+        const { saveUserConfig } = await import('../core/config.js');
+        const last = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1)![0];
+        expect(last['tier_set']).toEqual({});
+      });
+
+      it('GET reports a slot whose model the load replaced', async () => {
+        repayRateWindow();
+        const { replacedTierSlots } = await import('../core/config.js');
+        (replacedTierSlots as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce([{ tier: 'deep', model_id: 'claude-retired-model', runs: 'claude-opus-5' }]);
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as Record<string, unknown>)['replaced_tier_slots']).toEqual([{ tier: 'deep', model_id: 'claude-retired-model', runs: 'claude-opus-5' }]);
+        // And none without one: the field is absent, not an empty list.
+        const plain = await jsonFetch('/api/config');
+        expect(((await plain.json()) as Record<string, unknown>)['replaced_tier_slots']).toBeUndefined();
+      });
+
+      it('a slot with a known model passes the check', async () => {
+        repayRateWindow();
+        await stored({ ...DEFAULT_STORED, tier_preset: 'max-quality' });
+        const before = await saves();
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-5' } } }),
+        });
+        expect(res.status).toBe(200);
+        expect(await saves()).toBe(before + 1);
+      });
     });
 
     it('PUT accepts resetting balanced_model to the Sonnet 4.6 default', async () => {

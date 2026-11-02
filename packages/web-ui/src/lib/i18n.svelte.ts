@@ -147,6 +147,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.queue.reload_aria': { de: 'Prüf-Liste neu laden', en: 'Reload review list' },
 	'knowledge.queue.edit_aria': { de: 'Eintrag bearbeiten', en: 'Edit entry' },
 	'chat.knowledge.review_edit_aria': { de: 'Zur Prüfung bearbeiten', en: 'Edit for review' },
+	// A mandate's session reads the queue without approving or rejecting (the route is the owner's, ux 1148).
+	'knowledge.queue.subtitle_mandate': { de: 'Fakten aus Durchläufen mit externen Inhalten warten hier auf die Freigabe des Inhabers.', en: 'Facts captured on turns that read external content wait here for the owner\'s approval.' },
+	'knowledge.queue.owner_only_notice': { de: 'Wissen in der Warteschlange freigeben oder ablehnen kann nur der Inhaber dieser Instanz. Brauchst du eine Entscheidung, wende dich an den Inhaber.', en: 'Only the owner of this instance can approve or reject knowledge in the queue. If you need a decision, ask the owner.' },
 	'knowledge.queue.empty': { de: 'Nichts zu prüfen — die Warteschlange ist leer.', en: 'Nothing to review — the queue is empty.' },
 	'knowledge.queue.pending_tag': { de: 'ungeprüft', en: 'pending' },
 	// The subject a queued entry would bind to on approval. `target_new` is the one that
@@ -168,6 +171,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.active.playbook': { de: 'Playbook', en: 'Playbook' },
 	'knowledge.active.empty': { de: 'Noch nichts gemerkt. Sobald lynox etwas über dich lernt, erscheint es hier.', en: 'Nothing remembered yet. As lynox learns about you, it shows up here.' },
 	'knowledge.active.pinned': { de: 'angeheftet', en: 'pinned' },
+	// A mandate's session reads this page without its owner's acts (ux U-115).
+	'knowledge.active.subtitle_mandate': { de: 'Was sich lynox auf dieser Instanz gemerkt hat.', en: 'What lynox has remembered on this instance.' },
+	'knowledge.active.empty_mandate': { de: 'Noch nichts gemerkt. Sobald lynox auf dieser Instanz etwas lernt, erscheint es hier.', en: 'Nothing remembered yet. Once lynox learns something on this instance, it shows up here.' },
+	// The page's changes are the owner's (its routes refuse a mandate), but a mandate's turn keeps
+	// remember, memory_block_edit and memory_retire (`mandate-tool-lock.ts`): the chat stays its way
+	// to change an entry, so the sentence names the page and points there.
+	'memory.owner_only_notice': { de: 'Einträge auf dieser Seite ändern oder entfernen kann nur der Inhaber dieser Instanz. Etwas ändern? Sag es lynox im Chat.', en: 'Only the owner of this instance can change or remove entries on this page. Want to change something? Tell lynox in the chat.' },
 	'knowledge.active.edit_hint': { de: 'Etwas ändern? Sag es lynox im Chat. Einen falschen Eintrag entfernst du direkt hier.', en: 'Want to change something? Tell lynox in chat. To remove a wrong entry, use the button on it.' },
 	'knowledge.active.retire': { de: 'entfernen', en: 'remove' },
 	'knowledge.active.retiring': { de: 'wird entfernt...', en: 'removing...' },
