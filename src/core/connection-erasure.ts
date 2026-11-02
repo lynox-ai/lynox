@@ -611,7 +611,7 @@ export const FALLBACK_CONTENT_COLUMNS: Readonly<Record<string, readonly string[]
 export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   advisor_suggestions: ['run_id', 'type', 'priority', 'context_id', 'created_at', 'dismissed_at'],
   pending_prompts: ['id', 'session_id', 'prompt_type', 'secret_name', 'secret_key_type', 'status', 'created_at', 'answered_at', 'expires_at', 'trigger_id', 'created_by', 'closed_reason', 'mandate_id', 'answered_by', 'answered_mandate_id'],
-  pipeline_runs: ['id', 'manifest_name', 'status', 'parent_run_id', 'started_at', 'completed_at', 'workflow_id', 'workflow_grant_id', 'started_via', 'origin_thread_id'],
+  pipeline_runs: ['id', 'manifest_name', 'status', 'parent_run_id', 'started_at', 'completed_at', 'workflow_id', 'workflow_grant_id', 'started_via', 'origin_thread_id', 'started_by_run_id'],
   pipeline_step_results: ['pipeline_run_id', 'step_id', 'status', 'model_tier'],
   pre_approval_events: ['set_id', 'tool_name', 'decision', 'autonomy_level', 'run_id', 'created_at'],
   pre_approval_sets: ['id', 'approved_by', 'run_id', 'created_at'],
