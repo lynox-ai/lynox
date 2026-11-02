@@ -942,7 +942,7 @@ describe('mail_triage tool', () => {
     expect(out).toMatch(/^1\. uid:1 · date:\S+(?: \[[A-Z ]+\])? · inbox:draft_ready$/m);
     expect(out, 'a message the inbox has no item for carries no label').toMatch(/^2\. uid:2 · date:\S+(?: \[[A-Z ]+\])?$/m);
     expect(out).toContain(INBOX_LABEL_LEGEND);
-    expect(INBOX_LABEL_LEGEND, 'the legend tells the model the list is grouped').toContain('The list is grouped by these verdicts.');
+    expect(out, 'the legend tells the model how the list is grouped').toContain('a verdict the user took back (/unhandled) counts as none');
     expect(asked).toEqual([['rafael-gmail', '<m-1@x>'], ['rafael-gmail', '<m-2@x>']]);
   });
 
@@ -1028,7 +1028,7 @@ describe('mail_triage tool', () => {
     const needs = at('Inbox verdict: needs the user, a reply or a decision (draft_ready, requires_user) (2):');
     const acted = at('Inbox verdict: the user has already replied or archived (1):');
     const nothing = at('Inbox verdict: asks nothing of the user (auto_handled) (1):');
-    const none = at('No inbox verdict (2):');
+    const none = at('No inbox verdict, or the user took it back (2):');
     expect([needs, acted, nothing, none].every((i) => i >= 0)).toBe(true);
     expect(needs < at('1. uid:3') && at('2. uid:6') < acted && acted < at('3. uid:4')).toBe(true);
     expect(at('3. uid:4') < nothing && nothing < at('4. uid:1') && at('4. uid:1') < none && none < at('5. uid:2')).toBe(true);
@@ -1238,9 +1238,9 @@ describe('mail_triage fan-out across multiple accounts', () => {
     const personal = out.slice(out.indexOf('### personal'), out.indexOf('### business'));
     expect(personal.indexOf('Inbox verdict: needs the user')).toBeGreaterThanOrEqual(0);
     expect(personal.indexOf('1. uid:3')).toBeGreaterThan(personal.indexOf('Inbox verdict: needs the user'));
-    expect(personal.indexOf('No inbox verdict (1):')).toBeGreaterThan(personal.indexOf('1. uid:3'));
+    expect(personal.indexOf('No inbox verdict, or the user took it back (1):')).toBeGreaterThan(personal.indexOf('1. uid:3'));
     expect(personal).toMatch(/^2\. uid:1 · date:\S+(?: \[[A-Z ]+\])?$/m);
-    expect(out.slice(out.indexOf('### business'))).toContain('No inbox verdict (1):');
+    expect(out.slice(out.indexOf('### business'))).toContain('No inbox verdict, or the user took it back (1):');
   });
 
   it('targets only the requested account when account is specified', async () => {

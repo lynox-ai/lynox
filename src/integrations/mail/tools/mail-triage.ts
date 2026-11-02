@@ -51,7 +51,7 @@ export const INBOX_LABEL_LEGEND =
   'auto_handled: a newsletter, notice or receipt that asks nothing of the user. A rule the user set can put a mail in any of these. ' +
   'A suffix (/replied, /archived, /snoozed) is what the user has done with it since; /unhandled means the user took the verdict back. ' +
   'A message without inbox: has no verdict, which does not mean nothing is to be done. ' +
-  'The list is grouped by these verdicts. ' +
+  'The list is grouped by these verdicts and by what the user has done since: a replied or archived mail stands apart, and a verdict the user took back (/unhandled) counts as none. ' +
   'Take the verdicts as a strong hint, not as the answer: where a mail asks for something the verdict does not reflect, say so and name the inbox\'s verdict.';
 
 /** Where a message stands by the inbox's verdict. The list is grouped in GROUP_ORDER. */
@@ -71,7 +71,7 @@ const GROUP_HEADING: Record<InboxGroup, string> = {
   needs_user: 'Inbox verdict: needs the user, a reply or a decision (draft_ready, requires_user)',
   user_acted: 'Inbox verdict: the user has already replied or archived',
   asks_nothing: 'Inbox verdict: asks nothing of the user (auto_handled)',
-  no_verdict: 'No inbox verdict',
+  no_verdict: 'No inbox verdict, or the user took it back',
 };
 
 /**
