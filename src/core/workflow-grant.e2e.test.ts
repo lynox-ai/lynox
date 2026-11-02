@@ -171,7 +171,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       mockProcess.mockResolvedValueOnce(toolUse('memory_recall', {})).mockResolvedValueOnce(endTurn('finance'));
       await fire(trigger, MANDATE);
       expect(recalledAs).toEqual([MANDATE]);
-      expect(lastRun(trigger.id)).toContain('Pipeline completed');
+      expect(lastRun(trigger.id)).toContain('Workflow completed');
     });
 
     it('CONTROL: the same run with no one named builds its step agent for the owner', async () => {
