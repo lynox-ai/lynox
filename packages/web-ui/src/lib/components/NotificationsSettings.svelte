@@ -29,7 +29,7 @@
 		patchThrottle,
 		defaultBrowserTz,
 	} from '../stores/integrations/notifications.svelte.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { onOff } from './settings-readonly/values.js';
@@ -42,10 +42,11 @@
 
 	async function loadEscalationMail(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) return;
 			const body = (await res.json()) as { managed?: string; escalation_mail?: boolean };
-			noteSettingsViewer(body);
+			noteViewer(body);
 			cpInstance = isHostedInstance(body.managed);
 			escalationMail = body.escalation_mail !== false;
 		} catch { /* the card stays hidden */ }

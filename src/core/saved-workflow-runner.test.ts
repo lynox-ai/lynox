@@ -1,3 +1,4 @@
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import type { Engine, LynoxHooks } from './engine.js';
@@ -50,7 +51,7 @@ describe('runGuardedSavedWorkflow — the headless pool is the engine set, on pu
       getMemory: () => null,
     } as unknown as Engine;
 
-    await runGuardedSavedWorkflow(engine, 'wf-headless');
+    await runGuardedSavedWorkflow(engine, 'wf-headless', undefined, { principal: OWNER_PRINCIPAL });
 
     expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(1);
     const opts = mockRunSavedWorkflow.mock.calls[0]![4] as { tools?: unknown[] };
@@ -70,7 +71,7 @@ describe('runGuardedSavedWorkflow — the stop seam', () => {
   it('hands the owner\'s stop signal and the abort scope to the run, by identity', async () => {
     const stop = new AbortController();
     const abortScope = { members: new Set<{ abort: () => void }>() };
-    await runGuardedSavedWorkflow(makeEngine([]), 'wf-stop', undefined, { stopSignal: stop.signal, abortScope });
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-stop', undefined, { principal: OWNER_PRINCIPAL, stopSignal: stop.signal, abortScope });
     const opts = mockRunSavedWorkflow.mock.calls[0]![4] as { stopSignal?: unknown; abortScope?: unknown };
     expect(opts.stopSignal).toBe(stop.signal);
     expect(opts.abortScope).toBe(abortScope);
@@ -78,9 +79,9 @@ describe('runGuardedSavedWorkflow — the stop seam', () => {
 
   // A webhook run's params stay out of what its step agents read; every other run's do not.
   it('keeps the params from the step agents for a webhook run, and only for it', async () => {
-    await runGuardedSavedWorkflow(makeEngine([]), 'wf-hook', { note: 'x' }, { origin: { kind: 'webhook', triggerId: 't', eventId: 'e' } });
-    await runGuardedSavedWorkflow(makeEngine([]), 'wf-cron', { note: 'x' }, { origin: { kind: 'schedule', triggerId: 't' } as never });
-    await runGuardedSavedWorkflow(makeEngine([]), 'wf-plain', { note: 'x' });
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-hook', { note: 'x' }, { principal: OWNER_PRINCIPAL, origin: { kind: 'webhook', triggerId: 't', eventId: 'e' } });
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-cron', { note: 'x' }, { principal: OWNER_PRINCIPAL, origin: { kind: 'schedule', triggerId: 't' } as never });
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-plain', { note: 'x' }, { principal: OWNER_PRINCIPAL });
     const kept = mockRunSavedWorkflow.mock.calls.map((c) => (c[4] as { paramsKeptFromSteps?: boolean }).paramsKeptFromSteps);
     expect(kept).toEqual([true, false, false]);
   });
@@ -88,7 +89,7 @@ describe('runGuardedSavedWorkflow — the stop seam', () => {
   // The webhook run's mapping check reaches the runner, which asks it of the workflow it read.
   it('hands the caller\'s check of the workflow to the run, by identity', async () => {
     const checkWorkflow = (): string | null => null;
-    await runGuardedSavedWorkflow(makeEngine([]), 'wf-check', undefined, { checkWorkflow });
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-check', undefined, { principal: OWNER_PRINCIPAL, checkWorkflow });
     const opts = mockRunSavedWorkflow.mock.calls[0]![4] as { checkWorkflow?: unknown };
     expect(opts.checkWorkflow).toBe(checkWorkflow);
   });
@@ -105,7 +106,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
   it('blocks when the persistent daily/monthly cap is exceeded — no run, no hooks', async () => {
     mockCheckPersistentBudget.mockReturnValue({ allowed: false, reason: 'Daily budget exceeded.' });
     const onBeforeRun = vi.fn();
-    const result = await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun }]), 'wf-1');
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
     expect(result).toEqual({ ok: false, error: 'Daily budget exceeded.' });
     expect(onBeforeRun).not.toHaveBeenCalled();
     expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
@@ -114,7 +115,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
   it('blocks when an onBeforeRun credit gate throws — workflow never runs', async () => {
     const onBeforeRun = vi.fn().mockRejectedValue(new Error('Managed AI budget exhausted'));
     const onAfterRun = vi.fn();
-    const result = await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun, onAfterRun }]), 'wf-1');
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun, onAfterRun }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
     expect(result.ok).toBe(false);
     expect(result.error).toContain('Run blocked');
     expect(result.error).toContain('Managed AI budget exhausted');
@@ -125,7 +126,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
   it('runs and reports the cost via onAfterRun on the happy path', async () => {
     const onBeforeRun = vi.fn();
     const onAfterRun = vi.fn();
-    const result = await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun, onAfterRun }]), 'wf-1');
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun, onAfterRun }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
     expect(result).toMatchObject({ ok: true, runId: 'run-9', status: 'completed' });
     expect(onBeforeRun).toHaveBeenCalledOnce();
     expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(1);
@@ -143,7 +144,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
     // by the same id and an absent group means "its own id". The context object is built
     // before the run with the gate's id, which must never become the group.
     const onAfterRun = vi.fn();
-    await runGuardedSavedWorkflow(makeEngine([{ onAfterRun }]), 'wf-1');
+    await runGuardedSavedWorkflow(makeEngine([{ onAfterRun }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
     const [runIdArg, , ctxArg] = onAfterRun.mock.calls[0]!;
     expect(runIdArg).toBe('run-9');
     expect(ctxArg).not.toHaveProperty('runGroupId');
@@ -152,7 +153,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
   it('skips the cost report for a zero-cost run', async () => {
     mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-0', status: 'completed', costUsd: 0 });
     const onAfterRun = vi.fn();
-    const result = await runGuardedSavedWorkflow(makeEngine([{ onAfterRun }]), 'wf-1');
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onAfterRun }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
     expect(result.ok).toBe(true);
     expect(onAfterRun).not.toHaveBeenCalled();
   });
@@ -160,7 +161,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
   it('passes the underlying failure through (and still does not report a cost when none was incurred)', async () => {
     mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Workflow "wf-x" not found.' });
     const onAfterRun = vi.fn();
-    const result = await runGuardedSavedWorkflow(makeEngine([{ onAfterRun }]), 'wf-x');
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onAfterRun }]), 'wf-x', undefined, { principal: OWNER_PRINCIPAL });
     expect(result).toEqual({ ok: false, error: 'Workflow "wf-x" not found.' });
     expect(onAfterRun).not.toHaveBeenCalled();
   });
@@ -170,7 +171,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
     const b = vi.fn();
     const result = await runGuardedSavedWorkflow(
       makeEngine([{ onBeforeRun: vi.fn() }, { onAfterRun: a }, { onAfterRun: b }]),
-      'wf-1',
+      'wf-1', undefined, { principal: OWNER_PRINCIPAL }
     );
     expect(result.ok).toBe(true);
     expect(a).toHaveBeenCalledOnce();
@@ -182,7 +183,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
   it('treats an onAfterRun that throws as non-fatal and still fires the remaining hooks', async () => {
     const throwing = vi.fn(() => { throw new Error('billing flush failed'); });
     const after = vi.fn();
-    const result = await runGuardedSavedWorkflow(makeEngine([{ onAfterRun: throwing }, { onAfterRun: after }]), 'wf-1');
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onAfterRun: throwing }, { onAfterRun: after }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
     expect(result).toMatchObject({ ok: true, runId: 'run-9' });
     expect(throwing).toHaveBeenCalledOnce();
     expect(after).toHaveBeenCalledOnce();
@@ -191,7 +192,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
   it('falls back to the generated runId when the run returns no runId', async () => {
     mockRunSavedWorkflow.mockResolvedValue({ ok: true, status: 'completed', costUsd: 0.1 });
     const onAfterRun = vi.fn();
-    await runGuardedSavedWorkflow(makeEngine([{ onAfterRun }]), 'wf-1');
+    await runGuardedSavedWorkflow(makeEngine([{ onAfterRun }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
     const runIdArg = onAfterRun.mock.calls[0]?.[0] as string;
     expect(typeof runIdArg).toBe('string');
     expect(runIdArg.length).toBeGreaterThan(0);
@@ -200,9 +201,9 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
   it('hands the filing context through, and none when the caller gave none', async () => {
     mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'r', status: 'completed', costUsd: 0 });
     const approvalFiling = { source: 'workflow', triggerId: 'trg-1', store: {}, createdBy: 'owner', mandateId: null } as never;
-    await runGuardedSavedWorkflow(makeEngine([]), 'wf-1', undefined, { approvalFiling });
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL, approvalFiling });
     expect(mockRunSavedWorkflow.mock.calls.at(-1)![4]).toMatchObject({ approvalFiling });
-    await runGuardedSavedWorkflow(makeEngine([]), 'wf-1', undefined, { origin: { kind: 'library', by: 'owner' } });
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL, origin: { kind: 'library', by: 'owner' } });
     expect((mockRunSavedWorkflow.mock.calls.at(-1)![4] as Record<string, unknown>)['approvalFiling']).toBeUndefined();
   });
 
@@ -211,7 +212,7 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
       ok: true, runId: 'run-e', status: 'failed', costUsd: 0.03, error: 'step "b" failed',
       stepErrors: [{ stepId: 'b', error: 'boom', costUsd: 0.03 }],
     });
-    const result = await runGuardedSavedWorkflow(makeEngine([{ onAfterRun: vi.fn() }]), 'wf-1');
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onAfterRun: vi.fn() }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
     expect(result.status).toBe('failed');
     expect(result.stepErrors).toEqual([{ stepId: 'b', error: 'boom', costUsd: 0.03 }]);
     expect(result.error).toBe('step "b" failed');
@@ -245,10 +246,10 @@ describe('S6 tenant-isolation invariant', () => {
   });
 
   it('runs for the first tenant, then REFUSES a second distinct tenant — the second workflow never executes', async () => {
-    const first = await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf');
+    const first = await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf', undefined, { principal: OWNER_PRINCIPAL });
     expect(first.ok).toBe(true);
 
-    const second = await runGuardedSavedWorkflow(engineForTenant('tenant-b'), 'wf');
+    const second = await runGuardedSavedWorkflow(engineForTenant('tenant-b'), 'wf', undefined, { principal: OWNER_PRINCIPAL });
     expect(second.ok).toBe(false);
     expect(second.error).toContain('Tenant-isolation invariant violated');
     // The wrong tenant's workflow MUST NOT have run.
@@ -256,8 +257,8 @@ describe('S6 tenant-isolation invariant', () => {
   });
 
   it('allows repeated runs for the SAME tenant', async () => {
-    expect((await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf')).ok).toBe(true);
-    expect((await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf')).ok).toBe(true);
+    expect((await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf', undefined, { principal: OWNER_PRINCIPAL })).ok).toBe(true);
+    expect((await runGuardedSavedWorkflow(engineForTenant('tenant-a'), 'wf', undefined, { principal: OWNER_PRINCIPAL })).ok).toBe(true);
     expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(2);
   });
 });
