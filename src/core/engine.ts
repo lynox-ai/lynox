@@ -2213,8 +2213,8 @@ export class Engine {
         // EU residency: default the inbox classifier provider from the
         // user's chosen main provider. When the user picked Mistral in
         // Settings (`userConfig.provider === 'openai'` against
-        // api.mistral.ai), the classifier inherits that choice and uses
-        // Mistral (EU-resident) automatically — no env var required.
+        // api.eu.mistral.ai), the classifier inherits that choice and uses
+        // Mistral's EU endpoint automatically — no env var required.
         //
         // `LYNOX_INBOX_LLM_REGION` remains an explicit override (e.g.
         // managed-EU tenants who want hard-pinning regardless of the UI

@@ -122,7 +122,7 @@ export interface CatalogProviderEntry {
   /**
    * Pre-filled api_base_url for this preset. Used when `requires_base_url` is
    * false but the entry still needs a non-default URL (e.g. Mistral preset
-   * implies api.mistral.ai without making the user type it).
+   * implies api.eu.mistral.ai without making the user type it).
    */
   base_url_default?: string;
   /**
@@ -756,7 +756,7 @@ export interface ProviderIdentity {
 /**
  * The first-class registry key `'mistral'` (provider-registry.ts) IS the pinned
  * Mistral endpoint — it carries the host in its identity and arrives without a
- * base URL. It must therefore share a key with `openai` + `api.mistral.ai`, or
+ * base URL. It must therefore share a key with `openai` + `api.eu.mistral.ai`, or
  * one provider would be listed twice under two spellings.
  */
 // A Map, not an object literal: the lookup key comes from LYNOX_TIER_SET_JSON,

@@ -699,7 +699,7 @@
 		// 404s against Ollama, which has never heard of that model.
 		const freeTextModel = entry.models.length === 0;
 		if (entry.base_url_default && !entry.requires_base_url) {
-			// Pinned preset (e.g. Mistral → api.mistral.ai). Stamp it so
+			// Pinned preset (e.g. Mistral → api.eu.mistral.ai). Stamp it so
 			// save→reload round-trips back to this preset and the user
 			// doesn't have to type a URL they didn't choose.
 			config = {

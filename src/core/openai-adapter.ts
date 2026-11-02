@@ -39,7 +39,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 // Fallback for read-only-FS: in-memory crypto.randomBytes (still
 // cross-tenant-safe, just loses cache benefit across restarts).
 //
-// Salt only appears in outgoing request bodies to api.mistral.ai —
+// Salt only appears in outgoing request bodies to api.eu.mistral.ai —
 // no console.log/debug-trace prints it.
 
 // Module-scoped salt: one process = one tenant = one salt
@@ -1072,7 +1072,7 @@ export class OpenAIAdapter {
     }
 
     // Mistral-native prompt cache: forward prompt_cache_key when caller sets
-    // it AND outgoing endpoint is api.mistral.ai. Hostname-gate keeps the
+    // it AND outgoing endpoint is api.eu.mistral.ai. Hostname-gate keeps the
     // Mistral-shaped key from leaking into other OpenAI-compat endpoints
     // (future PRD-OPENAI-NATIVE native cells, etc.). Salt-prefix ensures
     // cross-tenant safety on shared MISTRAL_MANAGED_API_KEY.
