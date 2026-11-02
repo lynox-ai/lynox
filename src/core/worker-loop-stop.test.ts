@@ -1121,6 +1121,7 @@ describe('the recorded word for a run that returns rather than throws', () => {
     await waitUntil('the run to be recorded', () => lastStatus(h) !== null);
     expect(lastStatus(h)).toBe('stopped');
     expect(h.prompts.getPending('thread-stop'), 'nothing left to re-arm it').toBeUndefined();
+    expect(h.history.getDb().prepare("SELECT closed_reason FROM pending_prompts WHERE session_id = 'thread-stop'").all(), 'and a late answer hears the run was stopped').toEqual([{ closed_reason: 'run_stopped' }]);
     expect(h.history.getTrigger('trg-stop')?.status).not.toBe('waiting');
   });
 

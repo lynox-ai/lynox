@@ -32,7 +32,7 @@ import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCall
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
-import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
+import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
@@ -83,7 +83,7 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
-import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
+import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
 import type { ApprovalStore } from '../core/approval-store.js';
@@ -215,6 +215,17 @@ const MARK: MandateStance = { kind: 'mark' };
 const OWN: MandateStance = { kind: 'own' };
 /** The connect route, which the consent page posts its confirmation to (see the dispatch). */
 const CONNECT_CONFIRM_PATH = /^\/api\/oauth\/connect\/[^/]+$/;
+/**
+ * Whether `principal` may start the consent of `profile`. A session under a mandate connects a
+ * profile it set up itself, and nothing else (PRD §3.13): the consent is recorded as its own, and
+ * an account the owner, or another mandate, prepared is theirs to connect. The connect start
+ * refuses on it, and the profile list tells the page, so the page offers the link only where the
+ * start goes through.
+ */
+function mayStartConnect(principal: RequestPrincipal, profile: ApiProfile | undefined): boolean {
+  if (principal.kind !== 'mandate') return true;
+  return profile !== undefined && profile.created_by === principalTag(principal) && principal.mandateId !== undefined;
+}
 /** A mandate may, for this reason. */
 const free = (why: string): MandateStance => ({ kind: 'free', why });
 /** A GET that only reads. */
@@ -365,13 +376,15 @@ const STOPPED_BY_DELETE: ReadonlySet<string> = new Set(['run_workflow', 'run_age
  * would be an uncaught exception.
  */
 export function withdrawPromptOnAbort(
-  store: { expirePrompt(id: string): boolean },
+  store: { expirePrompt(id: string, reason: PromptClosedReason): boolean },
   promptId: string,
   signal: AbortSignal | undefined,
+  /** Why the run ended, read when it does: a takeover says so before it aborts. */
+  reason: () => PromptClosedReason = () => 'run_stopped',
 ): () => void {
   if (!signal) return () => undefined;
   const withdraw = (): void => {
-    try { store.expirePrompt(promptId); } catch { /* the row stays pending until its TTL — no worse than before */ }
+    try { store.expirePrompt(promptId, reason()); } catch { /* the row stays pending until its TTL — no worse than before */ }
   };
   if (signal.aborted) { withdraw(); return () => undefined; }
   signal.addEventListener('abort', withdraw, { once: true });
@@ -1229,16 +1242,26 @@ function maskForClient(text: string, opts?: { includeGeneric?: boolean }): strin
  * prose. For a message that is entirely uncontrolled the caller asks for more —
  * see the SSE error path, which also caps the length.
  */
-/** The answer to an answer that came too late: 410. A question the boot or shutdown sweep closed
- *  (`closed_reason`, prompt-store v59) says that the run which asked is gone and has to be
- *  started again; every other closed question keeps the bare "expired". */
+/** The answer to an answer that came too late: 410, with why the question was closed as its
+ *  `code` (`closed_reason`), so the page can say what happened and what to do instead. A row
+ *  closed before the reasons were written keeps the bare "expired". */
 function refuseClosedPrompt(res: ServerResponse, row: Pick<PendingPromptRow, 'closed_reason'>): void {
-  if (row.closed_reason === 'process_restarted') {
-    errorResponse(res, 410, 'Prompt closed: the engine restarted, so the run that asked is no longer waiting. Start it again.', 'process_restarted');
-    return;
-  }
-  errorResponse(res, 410, 'Prompt expired');
+  if (row.closed_reason === null) { errorResponse(res, 410, 'Prompt expired'); return; }
+  errorResponse(res, 410, CLOSED_PROMPT_MESSAGE[row.closed_reason], row.closed_reason);
 }
+
+const CLOSED_PROMPT_MESSAGE: Readonly<Record<PromptClosedReason, string>> = {
+  process_restarted: 'Prompt closed: the engine restarted, so the run that asked is no longer waiting. Start it again.',
+  timed_out: 'Prompt closed: its time ran out.',
+  run_stopped: 'Prompt closed: the run that asked was stopped.',
+  run_taken_over: 'Prompt closed: a newer message in this chat took over the run that asked.',
+  thread_deleted: 'Prompt closed: the chat it was asked in was deleted.',
+  mandate_ended: 'Prompt closed: the access it was asked under has ended.',
+  plan_paused: 'Prompt closed: the plan that asked is paused.',
+  plan_taken_over: 'Prompt closed: the plan that asked was taken over.',
+  plan_ended: 'Prompt closed: the plan that asked is no longer waiting on it.',
+  superseded: 'Prompt closed: a newer question replaced it.',
+};
 
 /** Whether the request reached this server over TLS: its own socket, or a trusted proxy's `x-forwarded-proto`. */
 function requestIsTls(req: IncomingMessage, trustProxy: boolean): boolean {
@@ -1750,7 +1773,7 @@ export class LynoxHTTPApi {
   // Per-session run tracking. `streamAlive=false` after the SSE connection
   // closes; if a pending prompt is then blocking the previous run, a fresh
   // /run can take it over instead of 409-looping forever (Bug 3).
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>();
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number }>();
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
@@ -1896,9 +1919,9 @@ export class LynoxHTTPApi {
    *     `insertAskUser` on this session hits the unique index. Strictly better
    *     than a wedged slot, not free.
    */
-  private reclaimRunSlot(sessionId: string): void {
+  private reclaimRunSlot(sessionId: string, reason: PromptClosedReason): void {
     try {
-      this.runningSessions.get(sessionId)?.takeover();
+      this.runningSessions.get(sessionId)?.takeover(reason);
     } catch { /* best-effort — the caller's teardown continues regardless */ }
   }
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
@@ -2751,7 +2774,8 @@ export class LynoxHTTPApi {
       if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
       if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
       if (!recorded(promptId)) return;
-      if (!settle(promptId)) { errorResponse(res, 410, 'Prompt expired'); return; }
+      // Pending a moment ago, so it is its time that ran out.
+      if (!settle(promptId)) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
       jsonResponse(res, 200, { ok: true });
       return;
     }
@@ -4396,7 +4420,7 @@ export class LynoxHTTPApi {
       // A parked run ignores abort() and would keep both the slot and its
       // run-executor reservation after the Session is dropped below — with no
       // handle left to reach it.
-      this.reclaimRunSlot(params['id']!);
+      this.reclaimRunSlot(params['id']!, 'run_stopped');
       this.sessionStore.reset(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }, OWN));
@@ -4436,7 +4460,7 @@ export class LynoxHTTPApi {
           // Taking over ends the parked run and lets its question lapse: only that run's
           // principal (or the owner) may, even in the mandate's own conversation (§3.13 E7).
           if (this._refuseUnlessOwns(req, res, 'take over a run of this conversation', () => [this._lastRunRow(session)])) return;
-          existingSlot.takeover();
+          existingSlot.takeover('run_taken_over');
           // Wait for the previous handler's `finally` to clear the slot.
           // Realistic drain after takeover() is sub-100 ms (one tick to
           // resolve waitForSettled, then session.run unwinds); the 1 s cap
@@ -4554,24 +4578,43 @@ export class LynoxHTTPApi {
       const preflightStore = engine.getSecretStore();
       const preflightCfg = engine.getUserConfig();
       const preflightProvider = preflightCfg.provider ?? 'anthropic';
-      let preflightKeyOk: boolean;
+      // What the provider still lacks, in the order the settings page asks for it. `key` is the
+      // API key; the others are the settings fields without which no call can be made.
+      const preflightMissing: Array<'key' | 'gcp_project_id' | 'api_base_url' | 'model_id'> = [];
+      const preflightKey = (): string | undefined => preflightStore
+        ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg })
+        : undefined;
       if (preflightProvider === 'vertex') {
-        preflightKeyOk = !!(preflightCfg.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
+        if (!(preflightCfg.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID'])) preflightMissing.push('gcp_project_id');
       } else if (preflightProvider === 'custom') {
-        const base = preflightCfg.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!base && !!key;
+        if (!preflightKey()) preflightMissing.push('key');
+        if (!(preflightCfg.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL'))) preflightMissing.push('api_base_url');
       } else if (preflightProvider === 'openai') {
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!preflightCfg.api_base_url
-          && (!endpointNeedsCredential(preflightProvider, preflightCfg.api_base_url) || !!key)
-          && !!preflightCfg.openai_model_id;
-      } else {
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!key;
+        // Whether the endpoint needs a key is known only once there is an endpoint.
+        if (preflightCfg.api_base_url && endpointNeedsCredential(preflightProvider, preflightCfg.api_base_url) && !preflightKey()) preflightMissing.push('key');
+        if (!preflightCfg.api_base_url) preflightMissing.push('api_base_url');
+        if (!preflightCfg.openai_model_id) preflightMissing.push('model_id');
+      } else if (!preflightKey()) {
+        preflightMissing.push('key');
       }
-      if (!preflightKeyOk) {
-        errorResponse(res, 400, `No ${preflightProvider} API key configured. Open Settings → Providers and add one.`);
+      if (preflightMissing.length > 0) {
+        // `code` is what the web UI translates. Who may set it up decides the
+        // sentence: the provider settings are owner-only, so a mandate is told to ask the owner,
+        // not sent to a page it cannot use. `provider` is the display name the status bar
+        // shows, never the config key, and goes only to the one who can act on it, with what
+        // is missing: without a key nothing else helps, so a missing key is named alone.
+        if (!isOwnerPrincipal(this._principalOf(req))) {
+          errorResponse(res, 400, 'No AI provider is set up on this instance yet. Only the owner can do that, so ask the owner.',
+            'llm_not_configured', { may_configure: false });
+        } else {
+          const providerName = providerIdentity(preflightProvider, preflightCfg.api_base_url).label;
+          const missing = preflightMissing.includes('key') ? ['key'] : preflightMissing;
+          const fieldNames: Record<string, string> = { gcp_project_id: 'the GCP project ID', api_base_url: 'the base URL', model_id: 'the model ID' };
+          errorResponse(res, 400, missing[0] === 'key'
+            ? `No key is stored for ${providerName} yet. Open Settings → Configuration and add one.`
+            : `${providerName} is missing ${missing.map((m) => fieldNames[m]).join(' and ')}. Open Settings → Configuration and fill it in.`,
+            'llm_not_configured', { may_configure: true, provider: providerName, missing });
+        }
         return;
       }
 
@@ -4958,6 +5001,8 @@ export class LynoxHTTPApi {
       const promptStore = this.engine?.getPromptStore();
       // AbortController for the session — used to cancel prompt polling on disconnect
       const sessionAbortController = new AbortController();
+      // Why this run's open question closes if the run ends while it waits: a stop, unless whoever takes the run over says otherwise.
+      let endedBy: PromptClosedReason = 'run_stopped';
       let hasActivePendingPrompt = false;
 
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
@@ -4980,7 +5025,7 @@ export class LynoxHTTPApi {
         const promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: true }, sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
-        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
         // Best-effort SSE notification (client may not be connected). A question
         // withdrawn at birth (its run already stopped) is never announced.
         if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -5019,7 +5064,7 @@ export class LynoxHTTPApi {
           // Same rule as `promptUser` above: an empty answer list would be answers nobody gave.
           if (!promptStore) throw new InputRequiredError(questions.map(q => q.question).join(' / '));
           const promptId = promptStore.insertAskUserTabs(sessionId, questions, promptOriginOf(meta), askStamp);
-          const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+          const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
           hasActivePendingPrompt = true;
           pauseWallClock(); // parked on a human — don't spend the compute budget
           if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -5089,7 +5134,7 @@ export class LynoxHTTPApi {
         }
 
         const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType, promptOriginOf(meta), askStamp);
-        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -5132,7 +5177,7 @@ export class LynoxHTTPApi {
           promptOriginOf(meta),
           askStamp,
         );
-        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal, () => endedBy);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
@@ -5244,7 +5289,7 @@ export class LynoxHTTPApi {
         setTimeout(() => {
           const liveSlot = this.runningSessions.get(sessionId);
           if (liveSlot && !liveSlot.streamAlive && promptStore?.getPending(sessionId)) {
-            liveSlot.takeover();
+            liveSlot.takeover('run_stopped');
           }
         }, ORPHAN_PROMPT_WATCHDOG_MS);
         if (hasActivePendingPrompt) {
@@ -5271,15 +5316,16 @@ export class LynoxHTTPApi {
       // Run
       // Takeover hook: a future /run for this session can call this to free
       // the slot when our SSE stream is dead and we're stuck on a prompt.
-      const takeover = (): void => {
+      const takeover = (reason: PromptClosedReason): void => {
         // Unwind BEFORE the bookkeeping. `waitForSettled` resolves on the signal
         // alone, so aborting first means a throw from the prompt store (closed
         // db, SQLITE_BUSY) can no longer leave the run parked — which is the
         // exact failure this handle exists to prevent.
+        endedBy = reason;
         sessionAbortController.abort();
         session.abort();
         const pending = promptStore?.getPending(sessionId);
-        if (pending) promptStore?.expirePrompt(pending.id);
+        if (pending) promptStore?.expirePrompt(pending.id, reason);
       };
       this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now() });
       try {
@@ -5614,7 +5660,7 @@ export class LynoxHTTPApi {
         // Pending, yet not answered: its time ran out before the sweep marked it. Nothing between
         // the read above and this write yields, so another answer cannot settle it in between
         // today; should that change, this still names only this question.
-        if (!ps.answerUser(promptId, answer, by)) { errorResponse(res, 410, 'Prompt expired'); return; }
+        if (!ps.answerUser(promptId, answer, by)) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
         jsonResponse(res, 200, { ok: true });
         return;
       }
@@ -5767,7 +5813,7 @@ export class LynoxHTTPApi {
       // anything is reclaimed: the live session's last run, else the registry's row for the
       // thread, when there is one.
       if (this._refuseUnlessOwns(_req, res, 'stop this run', () => [this._threadRow(sessionId), ...this._liveRunRows(sessionId)])) return;
-      this.reclaimRunSlot(sessionId);
+      this.reclaimRunSlot(sessionId, 'run_stopped');
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
@@ -6084,7 +6130,7 @@ export class LynoxHTTPApi {
       // hatch, not a path any client walks. sessionId IS the threadId here
       // (POST /api/sessions returns `threadId: sessionId`), so this can only
       // ever reclaim this thread's own run.
-      this.reclaimRunSlot(params['id']!);
+      this.reclaimRunSlot(params['id']!, 'thread_deleted');
       this.sessionStore.reset(params['id']!);
       // What was learned in this chat stays; its source is marked as a deleted chat instead
       // of pointing at a transcript that is gone. Marked before the delete. Each store is
@@ -7218,7 +7264,7 @@ export class LynoxHTTPApi {
 
     // ── Config ──
     this.addStatic('user', 'GET /api/config', async (req, res) => {
-      const { readUserConfig, loadConfig: loadEffectiveConfig } = await import('../core/config.js');
+      const { readUserConfig, loadConfig: loadEffectiveConfig, replacedTierSlots } = await import('../core/config.js');
       const config = readUserConfig();
       // The loader's OWN output. `readUserConfig()` above is the raw file;
       // `loadConfig()` additionally merges the CP-pinned env layers and applies
@@ -7593,6 +7639,11 @@ export class LynoxHTTPApi {
         debug_wire_capture: wireCaptureEnvOn || wireCaptureEnvOff,
         ...(pinIgnored ? { tier_preset_ignored: pinnedPreset } : {}),
       };
+      // A config.json `tier_set` slot whose model this engine does not know runs the strategy's
+      // model on the same provider instead (`config.ts`, the preset guard). Reported, like the
+      // ignored pin above, so the replacement does not read as the user's choice.
+      const replacedSlots = replacedTierSlots();
+      if (replacedSlots.length > 0) redacted['replaced_tier_slots'] = replacedSlots;
       if (wireCaptureEnvOn) {
         redacted['debug_wire_capture'] = true;
       } else if (wireCaptureEnvOff) {
@@ -7633,7 +7684,7 @@ export class LynoxHTTPApi {
     // Self-host: no admin secret → cookie users auto-promoted to admin scope
     // at the auth layer, so the allowlist branch is a no-op for them.
     this.addStatic('user', 'PUT /api/config', async (_req, res, _params, body) => {
-      const { readUserConfig, saveUserConfig, reloadConfig, loadConfig } = await import('../core/config.js');
+      const { readUserConfig, saveUserConfig, reloadConfig, loadConfig, checkCandidateConfig } = await import('../core/config.js');
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid config'); return; }
       // Wave 5d BYOK liability gate (server-side): `confirm_custom_endpoint` is
       // a control-plane signal, not a config field — it acts as a per-call
@@ -7853,6 +7904,30 @@ export class LynoxHTTPApi {
         if (!prior.some((e) => e.host === acceptedHostToRecord)) {
           merged['accepted_custom_endpoints'] = [...prior, { host: acceptedHostToRecord, accepted_at: new Date().toISOString() }];
         }
+      }
+      // Checked BEFORE the write, by the loader itself: a file the loader refuses would answer
+      // every later GET here with a 500 and stop the next boot, and on a managed instance every
+      // PUT too (its lock gate loads the stored file above), so only a hand edit in the container
+      // would bring it back. A slot whose model the loader would replace is refused too when this
+      // request sets that model, so a new choice is never stored only to be overridden. One
+      // already stored does not block saving the rest: the UI re-sends every field, without the
+      // slot keys GET redacts, which is why the model alone decides "sets".
+      const candidate = checkCandidateConfig(merged);
+      if (candidate.error !== undefined) {
+        // To the log, not the client: the first line only, masked like an error sent to a client,
+        // since a loader message may quote an environment value and operators read these logs.
+        if (candidate.unknownModel === undefined) process.stderr.write(`[lynox] PUT /api/config refused a configuration the loader rejects: ${maskForClient(candidate.error.split('\n')[0] ?? '', { includeGeneric: true })}\n`);
+        errorResponse(res, 400, candidate.unknownModel !== undefined
+          ? `A tier names the model '${candidate.unknownModel}', which this version does not know. Choose a listed model for that tier.`
+          : 'This configuration could not be loaded, so it was not saved.');
+        return;
+      }
+      const storedSlots = (existing['tier_set'] ?? {}) as Record<string, { model_id?: unknown } | undefined>;
+      const newlyReplaced = candidate.replacedSlots.filter((r) => storedSlots[r.tier]?.model_id !== r.model_id);
+      if (newlyReplaced.length > 0) {
+        const r = newlyReplaced[0]!;
+        errorResponse(res, 400, `A tier names the model '${r.model_id}', which this version does not know. Choose a listed model for that tier.`);
+        return;
       }
       saveUserConfig(merged);
       reloadConfig();
@@ -11270,14 +11345,11 @@ export class LynoxHTTPApi {
       //   - `authenticated` is passed as a fact rather than assumed inside
       //     `decideConnect`, because the same function answers for the tool,
       //     where there is no dispatch to have done it.
-      // A session under a mandate connects a profile it set up itself, and nothing else (PRD
-      // §3.13): the consent is recorded as its own, and an account the owner, or another
-      // mandate, prepared is theirs to connect. One answer whether the id exists or not, so the
-      // session learns nothing about which ids do.
+      // `mayStartConnect`. One answer whether the id exists or not, so the session learns nothing
+      // about which ids do.
       const principal = this._principalOf(req);
       const profile = engine.getApiStore()?.get(id);
-      if (principal.kind === 'mandate'
-        && (profile === undefined || profile.created_by !== principalTag(principal) || principal.mandateId === undefined)) {
+      if (!mayStartConnect(principal, profile)) {
         sendOAuthHtml(res, 403, 'In this session you can connect only an API profile you set up yourself. Nothing was sent to the provider.');
         return;
       }
@@ -12708,9 +12780,10 @@ export class LynoxHTTPApi {
       // As the reader may see them (`profileForReader`): without the grant's credential
       // fingerprints, which are the engine's bookkeeping, and without the provider account of a
       // connection somebody else made. `importWaiting`: the files the import of the earlier
-      // profiles waits on, for the owner to repair or delete.
+      // profiles waits on, for the owner to repair or delete. `reader_may_connect`: whether this
+      // reader's connect start goes through (`mayStartConnect`), so the page offers the link only there.
       const reader = this._principalOf(req);
-      jsonResponse(res, 200, { profiles: store.getAll().map((p) => profileForReader(p, reader)), importWaiting: store.importWaitsOn() });
+      jsonResponse(res, 200, { profiles: store.getAll().map((p) => ({ ...profileForReader(p, reader), reader_may_connect: mayStartConnect(reader, p) })), importWaiting: store.importWaitsOn() });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (req, res, params) => {
@@ -13439,7 +13512,7 @@ export class LynoxHTTPApi {
         const SqliteDatabase = (await import('better-sqlite3')).default;
         // Loaded lazily like every other inbox route, so a boot without the inbox never loads it.
         const { isBackfillRunning } = await import('../integrations/inbox/api.js');
-        for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id);
+        for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id, 'run_stopped');
         const drainStart = Date.now();
         while (this.runningSessions.size > 0 && Date.now() - drainStart < ERASURE_RUN_DRAIN_MS) {
           await new Promise<void>((r) => setTimeout(r, 25));

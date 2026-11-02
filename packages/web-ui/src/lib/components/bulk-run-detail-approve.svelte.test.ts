@@ -74,7 +74,8 @@ beforeEach(() => {
 			return reply({});
 		}
 		gets.push(u);
-		if (u.endsWith('/config')) return reply({ managed: true });
+		// The owner's session: the page offers its acts only once the server says so.
+		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
 		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);

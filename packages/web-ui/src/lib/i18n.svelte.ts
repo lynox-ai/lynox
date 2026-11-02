@@ -147,6 +147,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.queue.reload_aria': { de: 'Prüf-Liste neu laden', en: 'Reload review list' },
 	'knowledge.queue.edit_aria': { de: 'Eintrag bearbeiten', en: 'Edit entry' },
 	'chat.knowledge.review_edit_aria': { de: 'Zur Prüfung bearbeiten', en: 'Edit for review' },
+	// A mandate's session reads the queue without approving or rejecting (the route is the owner's, ux 1148).
+	'knowledge.queue.subtitle_mandate': { de: 'Fakten aus Durchläufen mit externen Inhalten warten hier auf die Freigabe des Inhabers.', en: 'Facts captured on turns that read external content wait here for the owner\'s approval.' },
+	'knowledge.queue.owner_only_notice': { de: 'Wissen in der Warteschlange freigeben oder ablehnen kann nur der Inhaber dieser Instanz. Brauchst du eine Entscheidung, wende dich an den Inhaber.', en: 'Only the owner of this instance can approve or reject knowledge in the queue. If you need a decision, ask the owner.' },
 	'knowledge.queue.empty': { de: 'Nichts zu prüfen — die Warteschlange ist leer.', en: 'Nothing to review — the queue is empty.' },
 	'knowledge.queue.pending_tag': { de: 'ungeprüft', en: 'pending' },
 	// The subject a queued entry would bind to on approval. `target_new` is the one that
@@ -168,6 +171,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.active.playbook': { de: 'Playbook', en: 'Playbook' },
 	'knowledge.active.empty': { de: 'Noch nichts gemerkt. Sobald lynox etwas über dich lernt, erscheint es hier.', en: 'Nothing remembered yet. As lynox learns about you, it shows up here.' },
 	'knowledge.active.pinned': { de: 'angeheftet', en: 'pinned' },
+	// A mandate's session reads this page without its owner's acts (ux U-115).
+	'knowledge.active.subtitle_mandate': { de: 'Was sich lynox auf dieser Instanz gemerkt hat.', en: 'What lynox has remembered on this instance.' },
+	'knowledge.active.empty_mandate': { de: 'Noch nichts gemerkt. Sobald lynox auf dieser Instanz etwas lernt, erscheint es hier.', en: 'Nothing remembered yet. Once lynox learns something on this instance, it shows up here.' },
+	// The page's changes are the owner's (its routes refuse a mandate), but a mandate's turn keeps
+	// remember, memory_block_edit and memory_retire (`mandate-tool-lock.ts`): the chat stays its way
+	// to change an entry, so the sentence names the page and points there.
+	'memory.owner_only_notice': { de: 'Einträge auf dieser Seite ändern oder entfernen kann nur der Inhaber dieser Instanz. Etwas ändern? Sag es lynox im Chat.', en: 'Only the owner of this instance can change or remove entries on this page. Want to change something? Tell lynox in the chat.' },
 	'knowledge.active.edit_hint': { de: 'Etwas ändern? Sag es lynox im Chat. Einen falschen Eintrag entfernst du direkt hier.', en: 'Want to change something? Tell lynox in chat. To remove a wrong entry, use the button on it.' },
 	'knowledge.active.retire': { de: 'entfernen', en: 'remove' },
 	'knowledge.active.retiring': { de: 'wird entfernt...', en: 'removing...' },
@@ -486,7 +496,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.restart.none': { de: 'Neu starten hilft hier nicht. Bitte lynox im Chat, den Lauf neu zu planen.', en: 'Starting it again would not help. Ask lynox in the chat to plan the run again.' },
 	'bulk.halt.unavailable': { de: 'Der Lauf kam nicht weiter. {provider} hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', en: 'The run could not go on. {provider} did not answer, or an error occurred in lynox.' },
 	'bulk.halt.unavailable_judge': { de: 'Der Lauf kam nicht weiter. {provider} oder das KI-Modell hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', en: 'The run could not go on. {provider} or the AI model did not answer, or an error occurred in lynox.' },
-	'bulk.halt.unrecorded': { de: 'lynox konnte einen Lesezugriff nicht im Protokoll deiner Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergelesen.', en: 'lynox could not record a read in your instance\'s log. So lynox stopped reading at that point.' },
+	'bulk.halt.unrecorded': { de: 'lynox konnte einen Lesezugriff nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergelesen.', en: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.' },
 	'bulk.halt.timeBudget': { de: 'Der Lauf hat seine Zeit für diesen Durchgang aufgebraucht.', en: 'The run used up its time for this pass.' },
 	'bulk.halt.consecutiveFailures': { de: 'Dreimal hintereinander liess sich ein Ziel oder eine Seite der Liste nicht lesen.', en: 'Three times in a row a target or a page of the list could not be read.' },
 	'bulk.halt.consecutiveFailures_before': { de: 'Prüfe unten die Ziele mit Fehler, bevor du weitermachst.', en: 'Check the targets with an error below before you continue.' },
@@ -531,6 +541,22 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.halt.awaitingStart_start': { de: 'Starte den Lauf mit „{button}“.', en: 'Start the run with “{button}”.' },
 	'bulk.halt.listed_start': { de: 'Prüf die Ziele, dann starte mit „{button}“.', en: 'Review the targets, then start with “{button}”.' },
 	'bulk.halt.wait_owner_only': { de: 'Starten kann diesen Lauf nur der Inhaber der Instanz.', en: 'Only the owner of the instance can start this run.' },
+	// A mandate's session sees a run without the owner's acts, and reads the sentences that name
+	// them as the owner's (`BULK_MANDATE_KEYS`, ux U-111).
+	'bulk.intro_mandate': { de: 'Änderungen über viele Ziele. Jeder Lauf zeigt erst eine Vorschau und schreibt erst nach der Freigabe des Inhabers. Was lynox geschrieben hat, kann der Inhaber zurücknehmen, solange es seither niemand geändert hat. Was versendet wurde, lässt sich nicht zurückholen.', en: 'Changes across many targets. Every run shows a preview first and writes only once the owner approves it. The owner can take back what lynox wrote, as long as nobody has changed it since. Anything that was sent cannot be taken back.' },
+	'bulk.deselect.taken_out_mandate': { de: 'Vom Inhaber herausgenommen.', en: 'Taken out by the owner.' },
+	'bulk.skipped.products_mandate': { de: '{n} Produkte lässt lynox aus.', en: 'lynox skips {n} products.' },
+	'bulk.skipped.targets_mandate': { de: '{n} Ziele lässt lynox aus.', en: 'lynox skips {n} targets.' },
+	'bulk.skipped.both_products_mandate': { de: '{n} Produkte lässt lynox aus, {m} hat der Inhaber herausgenommen.', en: 'lynox skips {n} products and the owner took out {m}.' },
+	'bulk.skipped.both_targets_mandate': { de: '{n} Ziele lässt lynox aus, {m} hat der Inhaber herausgenommen.', en: 'lynox skips {n} targets and the owner took out {m}.' },
+	'bulk.skipped.taken_out_mandate': { de: '{m} hat der Inhaber herausgenommen.', en: 'The owner took out {m}.' },
+	'bulk.halt.probeRequired_mandate': { de: 'Weitere Ziele schreibt lynox erst, wenn der Inhaber die Probe bestätigt hat.', en: 'lynox writes further targets only once the owner has confirmed the probe.' },
+	'bulk.halt.shopifyWriteOff_mandate': { de: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kann der Inhaber ihn hier fortsetzen.', en: 'Bulk changes to Shopify stores are not enabled on this instance. The run is stopped. Once they are enabled again, the owner can continue it here.' },
+	'bulk.halt.costCap_mandate': { de: 'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap} USD, verbraucht {spent} USD.', en: 'The run reached the AI cost limit the owner set at its start: {cap} USD, spent {spent} USD.' },
+	'bulk.halt.mandateEnded_mandate': { de: 'Geplant hat diesen Lauf jemand mit Zugang zu dieser Instanz. Der Zugang ist abgelaufen oder widerrufen, bevor der Inhaber den Lauf freigegeben hat. Der Lauf hat nichts geschrieben. Brauchst du ihn, bitte lynox im Chat, ihn neu zu planen.', en: 'Someone with access to this instance planned this run. The access ended or was revoked before the owner approved the run. The run wrote nothing. If you need it, ask lynox in the chat to plan it again.' },
+	'bulk.halt.checksum_mandate': { de: 'Der Lauf hat sich seit der Freigabe des Inhabers geändert.', en: 'The run has changed since the owner approved it.' },
+	'bulk.halt.superseded_mandate': { de: 'Der Inhaber hat an seiner Stelle einen anderen Lauf gestartet, bei dem lynox die Ziele beurteilt. Offen sein kann nur einer davon. Dieser Lauf hat nichts geschrieben.', en: 'The owner started another run in its place in which lynox judges the targets. Only one of them can be open at a time. This run wrote nothing.' },
+	'bulk.owner_only_notice': { de: 'Massenläufe freigeben, starten, weiterschreiben und zurücknehmen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber.', en: 'Only the owner of this instance can approve, start, continue or take back bulk runs. If you need that, ask the owner.' },
 	'bulk.halt.wait_no_start': { de: 'Der Lauf kann gerade nicht starten. Warum, steht im Hinweis bei diesem Lauf.', en: 'The run cannot start right now. The note on this run says why.' },
 	'bulk.halt.support_mail': { de: 'Mail an den Support', en: 'Email support' },
 	'bulk.halt.support_subject': { de: 'lynox: Massenlauf {run} auf {host} angehalten', en: 'lynox: bulk run {run} on {host} halted' },
@@ -538,9 +564,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.target.shop_added_markup': { de: 'Markup im Shop dazugekommen', en: 'Markup added in the shop' },
 	'bulk.halt.shopifyWriteOff_before_managed': { de: 'Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du fortsetzen.', en: 'If lynox should write to Shopify stores, write to support@lynox.ai. Then you can continue.' },
 	'bulk.halt.shopifyWriteOff_before_selfhost': { de: 'Du schaltest sie in der Konfiguration deiner Instanz frei (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).', en: 'You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).' },
-	'bulk.halt.shopifyReadOff': { de: 'Das Lesen eines Shopify-Shops in Massenläufen ist auf deiner Instanz ausgeschaltet.', en: 'Reading a Shopify store in bulk runs is switched off on your instance.' },
-	'bulk.halt.runUnrecorded': { de: 'lynox konnte diesen Lauf nicht im Protokoll deiner Instanz festhalten. Deshalb hat lynox in diesem Durchgang nichts gelesen und nichts geschrieben.', en: 'lynox could not record this run in your instance\'s log. So lynox read and wrote nothing in this pass.' },
-	'bulk.halt.unrecorded_write': { de: 'lynox konnte einen Zugriff auf {provider} nicht im Protokoll deiner Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.', en: 'lynox could not record an access to {provider} in your instance\'s log. So lynox stopped writing at that point.' },
+	'bulk.halt.shopifyReadOff': { de: 'Das Lesen eines Shopify-Shops in Massenläufen ist auf dieser Instanz ausgeschaltet.', en: 'Reading a Shopify store in bulk runs is switched off on this instance.' },
+	'bulk.halt.runUnrecorded': { de: 'lynox konnte diesen Lauf nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox in diesem Durchgang nichts gelesen und nichts geschrieben.', en: 'lynox could not record this run in this instance\'s log. So lynox read and wrote nothing in this pass.' },
+	'bulk.halt.unrecorded_write': { de: 'lynox konnte einen Zugriff auf {provider} nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.', en: 'lynox could not record an access to {provider} in this instance\'s log. So lynox stopped writing at that point.' },
 	'bulk.halt.expired': { de: 'Die Freigabe ist abgelaufen, bevor der Lauf fertig war.', en: 'The approval ran out before the run was finished.' },
 	'bulk.halt.maxTargets': { de: 'Der Lauf hat die freigegebene Höchstzahl erreicht: {max} Ziele.', en: 'The run reached the approved maximum: {max} targets.' },
 	'bulk.halt.maxTargets_one': { de: 'Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.', en: 'The run reached the approved maximum: one target.' },
@@ -914,6 +940,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'erasure.changed': { de: 'Seit der Vorschau hat sich etwas geändert, es wurde nichts gelöscht. Die Liste ist neu geladen; prüfe sie und bestätige erneut.', en: 'Something changed since the preview, so nothing was erased. The list is reloaded; check it and confirm again.' },
 	'erasure.busy': { de: 'Gerade läuft ein Chat, es wurde nichts gelöscht. Stoppe ihn oder warte, bis er fertig ist, und versuche es dann erneut.', en: 'A chat is running, so nothing was erased. Stop it or let it finish, then try again.' },
 	'erasure.unreadable': { de: 'Ein Teil des Gedächtnisses lässt sich mit dem Schlüssel dieser Instanz nicht entschlüsseln. Die Suche wäre unvollständig, darum wird nichts gelöscht.', en: 'Part of the memory cannot be decrypted with this instance\'s key. The search would be incomplete, so nothing is erased.' },
+	'erasure.owner_only_notice': { de: 'Die Daten einer Person löschen kann nur der Inhaber dieser Instanz. Bittet dich jemand darum, gib die Anfrage an den Inhaber weiter.', en: 'Only the owner of this instance can erase a person\'s data. If someone asks you to, pass the request on to the owner.' },
 	'erasure.forbidden': { de: 'Nur der Inhaber dieser Instanz kann eine Person löschen.', en: 'Only the owner of this instance can erase a person.' },
 	'erasure.failed': { de: 'Das hat nicht geklappt. Lade die Vorschau neu, um zu sehen, was noch da ist.', en: 'That did not work. Reload the preview to see what is still there.' },
 	'erasure.step.durable_knowledge': { de: 'Wissensspeicher', en: 'durable knowledge' },
@@ -1162,6 +1189,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_insufficient_quota': { de: 'Dein API-Guthaben ist aufgebraucht. [Guthaben aufladen](https://console.anthropic.com/settings/billing)', en: 'Your API credits are exhausted. [Top up credits](https://console.anthropic.com/settings/billing)' },
 	'chat.error_llm_unavailable': { de: 'Der Sprachdienst ist gerade nicht erreichbar. Bitte in wenigen Minuten erneut versuchen.', en: 'Language service is temporarily unavailable. Please try again in a few minutes.' },
 	'chat.error_invalid_request': { de: 'Ungültige Anfrage. Die Nachricht konnte nicht verarbeitet werden.', en: 'Invalid request. The message could not be processed.' },
+	// No AI provider key yet (`code: 'llm_not_configured'`): one sentence per reader.
+	// {label} is the settings page's own title (`settings.config`), filled in where it is shown.
+	'chat.error_no_llm_key_owner': { de: 'Für {provider} ist noch kein Schlüssel hinterlegt. Öffne Einstellungen → {label} und füg einen hinzu.', en: 'No key is stored for {provider} yet. Open Settings → {label} and add one.' },
+	// The key is there, a settings field is not: {fields} is one or two of the names below.
+	'chat.error_no_llm_field_owner': { de: 'Für {provider} fehlt noch {fields}. Öffne Einstellungen → {label} und trag sie ein.', en: '{provider} is missing {fields}. Open Settings → {label} and fill it in.' },
+	'chat.llm_field.gcp_project_id': { de: 'die GCP-Projekt-ID', en: 'the GCP project ID' },
+	'chat.llm_field.api_base_url': { de: 'die Basis-URL', en: 'the base URL' },
+	'chat.llm_field.model_id': { de: 'die Modell-ID', en: 'the model ID' },
+	'chat.llm_fields_and': { de: '{a} und {b}', en: '{a} and {b}' },
+	'chat.error_no_llm_key_mandate': { de: 'Auf dieser Instanz ist noch kein KI-Anbieter eingerichtet. Das kann nur der Inhaber. Wende dich an den Inhaber.', en: 'No AI provider is set up on this instance yet. Only the owner can do that, so ask the owner.' },
 	'chat.error_content_policy': { de: 'Die Anfrage wurde aufgrund der Inhaltsrichtlinie abgelehnt. Bitte formuliere deine Nachricht um.', en: 'The request was rejected due to content policy. Please rephrase your message.' },
 	'chat.error_model_unavailable': { de: 'Das gewählte KI-Modell ist nicht verfügbar. Prüfe die [Einstellungen](/app/settings).', en: 'The selected AI model is not available. Check your [settings](/app/settings).' },
 	'chat.error_context_length': { de: 'Die Konversation ist zu lang. Starte einen neuen Chat.', en: 'The conversation is too long. Start a new chat.' },
@@ -1185,6 +1222,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.note.tool_loop_break.title': { de: 'Wiederholung gestoppt', en: 'Repetition stopped' },
 	'chat.note.thinking_loop.title': { de: 'Abgebrochen: nur nachgedacht, keine Antwort', en: 'Stopped: only thinking, no answer' },
 	'chat.note.thinking_loop': { de: 'Der Agent hat zweimal hintereinander nur nachgedacht und dabei die ganze Länge einer Antwort aufgebraucht, ohne zu antworten oder einen Schritt zu tun. Ein dritter Versuch hätte wieder von vorn begonnen, deshalb hat lynox angehalten. Stell die Frage enger, oder bitte um die Auswertung in Teilen, zum Beispiel erst für einen Ausschnitt der Daten.', en: 'The agent only thought, twice in a row, and used up the full length of an answer without replying or taking a step. A third try would have started over, so lynox stopped. Ask a narrower question, or ask for the analysis in parts, for example for a slice of the data first.' },
+	// Only for the owner of an instance without `locks.provider` (ChatView, `canChooseModel`, ux U-116).
+	// Names no model on purpose: the models are rafael's to choose. Labels as in SettingsIndex
+	// (`settings.config`) and LLMSettings (`llm.preset.heading`).
+	'chat.note.thinking_loop.model': { de: 'Das hängt auch vom Modell ab: In den Einstellungen unter „Konfiguration“ › „Modell-Strategie“ kannst du eine andere wählen.', en: 'This also depends on the model: under Settings › “Configuration” › “Model strategy” you can choose another one.' },
 	'chat.note.continuation_loop.title': { de: 'Abgebrochen: Antwort ohne Fortschritt', en: 'Stopped: response without progress' },
 	'chat.note.continuation_loop': { de: 'Die Antwort wurde wiederholt abgeschnitten, ohne dass der Agent weiterkam — meist versucht er, eine sehr grosse Datei direkt in die Antwort zu schreiben. Teile die Aufgabe in kleinere Schritte oder lade die Datei erneut hoch (grosse Dateien werden automatisch als Datei gespeichert, nicht in die Nachricht eingebettet).', en: 'The response was truncated repeatedly without the agent making progress — usually it is trying to write a very large file into the reply itself. Split the task into smaller steps or upload the file again (large uploads are stored as a file automatically, not embedded in the message).' },
 	
@@ -1299,6 +1340,21 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_busy': { de: 'Der Agent arbeitet noch. Bitte warten.', en: 'The agent is still working. Please wait.' },
 	'chat.prompt_expired': { de: 'Diese Frage ist nicht mehr offen, deine Antwort wurde nicht verwendet. Schreib sie als neue Nachricht in den Chat.', en: 'This question is no longer open, so your answer was not used. Send it as a new message in the chat.' },
 	'chat.prompt_closed_restart': { de: 'Diese Frage wurde geschlossen, weil lynox neu gestartet ist. Der Lauf, der gefragt hat, wartet nicht mehr, und deine Antwort wurde nicht verwendet. Starte die Aufgabe noch einmal.', en: 'This question was closed because lynox restarted. The run that asked is no longer waiting, and your answer was not used. Start the task again.' },
+	// UX-068 (ux U-113): why a question was closed, by the 410's `code`, and what to do instead. The
+	// draft sentence is added only when the lost answer was put back into an empty message field.
+	'chat.prompt_closed.timed_out': { de: 'Diese Frage ist abgelaufen, deine Antwort wurde nicht verwendet. Schreib sie als neue Nachricht in den Chat.', en: 'This question has expired, so your answer was not used. Write it as a new message in the chat.' },
+	'chat.prompt_closed.run_stopped': { de: 'Der Lauf, der diese Frage gestellt hat, wurde gestoppt. Deine Antwort wurde nicht verwendet. Schreib sie als neue Nachricht in den Chat.', en: 'The run that asked this question was stopped. Your answer was not used. Write it as a new message in the chat.' },
+	'chat.prompt_closed.run_taken_over': { de: 'Eine neuere Nachricht in diesem Chat hat den Lauf abgelöst, der diese Frage gestellt hat. Deine Antwort wurde nicht verwendet. Schreib sie als neue Nachricht.', en: 'A newer message in this chat replaced the run that asked this question. Your answer was not used. Write it as a new message.' },
+	'chat.prompt_closed.thread_deleted': { de: 'Dieser Chat wurde gelöscht, deine Antwort wurde nicht verwendet. Schreib sie in einem anderen Chat als neue Nachricht.', en: 'This chat was deleted, so your answer was not used. Write it as a new message in another chat.' },
+	'chat.prompt_closed.mandate_ended.mandate': { de: 'Der Zugang, unter dem diese Frage gestellt wurde, ist beendet. Deine Antwort wurde nicht verwendet. Wende dich an den Inhaber.', en: 'The access this question was asked under has ended. Your answer was not used. Ask the owner.' },
+	'chat.prompt_closed.mandate_ended.owner': { de: 'Der Zugang, unter dem diese Frage gestellt wurde, ist beendet. Deine Antwort wurde nicht verwendet. Brauchst du sie, schreib sie als neue Nachricht in den Chat.', en: 'The access this question was asked under has ended. Your answer was not used. If you need it, write it as a new message in the chat.' },
+	'chat.prompt_closed.plan_paused.mandate': { de: 'Der Plan, der diese Frage gestellt hat, ist pausiert. Deine Antwort wurde nicht verwendet. Wende dich an den Inhaber.', en: 'The plan that asked this question is paused. Your answer was not used. Ask the owner.' },
+	'chat.prompt_closed.plan_paused.owner': { de: 'Der Plan, der diese Frage gestellt hat, ist pausiert. Deine Antwort wurde nicht verwendet. Pausierte Pläne übernimmst du unter Automation → Trigger.', en: 'The plan that asked this question is paused. Your answer was not used. You take over paused plans under Automation → Triggers.' },
+	'chat.prompt_closed.plan_taken_over.mandate': { de: 'Der Inhaber hat diesen Plan übernommen. Die offene Frage ist damit geschlossen, deine Antwort wurde nicht verwendet. Wende dich an den Inhaber.', en: 'The owner took over this plan, so its open question is closed and your answer was not used. Ask the owner.' },
+	'chat.prompt_closed.plan_taken_over.owner': { de: 'Du hast diesen Plan übernommen. Die offene Frage ist damit geschlossen, deine Antwort wurde nicht verwendet. Brauchst du sie, schreib sie als neue Nachricht in den Chat.', en: 'You took over this plan, so its open question is closed and your answer was not used. If you need it, write it as a new message in the chat.' },
+	'chat.prompt_closed.plan_ended': { de: 'Inzwischen hat ein neuer Lauf dieses Plans begonnen, die offene Frage ist damit geschlossen. Deine Antwort wurde nicht verwendet. Brauchst du sie, schreib sie als neue Nachricht in den Chat.', en: 'A new run of this plan has started since, so the open question is closed. Your answer was not used. If you need it, write it as a new message in the chat.' },
+	'chat.prompt_closed.superseded': { de: 'Diese Frage wurde durch eine neuere in diesem Chat ersetzt. Antworte dort.', en: 'A newer question in this chat replaced this one. Answer that one.' },
+	'chat.prompt_closed.draft': { de: ' Sie steht wieder im Eingabefeld.', en: ' It is back in the message field.' },
 	'chat.error_blocked_by_prompt': { de: 'Beantworte zuerst die offene Anfrage oben — sie blockiert den Agenten.', en: 'Answer the open prompt above first — it is blocking the agent.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
@@ -1824,6 +1880,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.saving': { de: 'Speichern...', en: 'Saving...' },
 	'settings.saved': { de: 'Gespeichert', en: 'Saved' },
 	// A settings page in a mandate's session (ux U-104): the owner sets these, the mandate sees them.
+	'mail.owner_only_notice': { de: 'Postfächer verbindet nur der Inhaber dieser Instanz. Bitte den Inhaber, das Postfach in den Einstellungen unter „{label}“ zu verbinden.', en: 'Only the owner of this instance connects mailboxes. Ask the owner to connect the mailbox in Settings under “{label}”.' },
+	'apis.reconnect_not_yours': { de: 'Neu verbinden kannst du dieses Profil nicht, weil du es nicht angelegt hast. Brauchst du es, wende dich an den Inhaber.', en: 'You cannot reconnect this profile because you did not set it up. If you need it, ask the owner.' },
+	'apis.owner_only_notice': { de: 'Profile löschen und den App-Zugang eintragen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber.', en: 'Only the owner of this instance can delete profiles or enter app credentials. If you need that, ask the owner.' },
+	'settings.viewer_unavailable': { de: 'Diese Seite konnte nicht vollständig geladen werden. Lade sie neu.', en: 'This page could not load completely. Reload it.' },
 	'settings.owner_only_notice': { de: 'Diese Einstellungen legt der Inhaber dieser Instanz fest. Du siehst sie, kannst sie aber nicht ändern. Brauchst du eine Änderung, wende dich an den Inhaber.', en: 'The owner of this instance sets these settings. You can see them but not change them. If you need a change, ask the owner.' },
 	'settings.value_on': { de: 'An', en: 'On' },
 	'settings.value_off': { de: 'Aus', en: 'Off' },
@@ -2185,6 +2245,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'triggers.watch_url': { de: 'Beobachtete Seite', en: 'Watched page' },
 	'triggers.watch_every': { de: 'Prüft alle {minutes} Minuten.', en: 'Checks every {minutes} minutes.' },
 	'triggers.confirm': { de: 'Bestätigen', en: 'Confirm' },
+	'triggers.confirm_owner_only_notice': { de: 'Läuft erst, wenn der Inhaber diesen Plan bestätigt.', en: 'Runs only once the owner confirms this plan.' },
 	'triggers.confirm_label': { de: 'Bestätigen, dass dieser Trigger ohne dich laufen darf', en: 'Confirm that this trigger may run without you' },
 	'triggers.confirmed': { de: 'Bestätigt.', en: 'Confirmed.' },
 	'triggers.confirm_failed': { de: 'Bestätigen fehlgeschlagen. Bitte erneut versuchen.', en: 'Could not confirm. Please try again.' },
@@ -2210,6 +2271,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.edit_in_chat': { de: 'Bearbeiten', en: 'Edit' },
 	'workflow_library.edit_in_chat_prompt': { de: 'Ich möchte diesen gespeicherten Workflow bearbeiten:', en: "I'd like to edit this saved workflow:" },
 	'workflow_library.delete': { de: 'Löschen', en: 'Delete' },
+	'workflow_library.owner_only_notice': { de: 'Workflows hier ausführen, umbenennen oder löschen kann nur der Inhaber dieser Instanz. Brauchst du das, wende dich an den Inhaber. Ausführen kannst du einen Workflow auch im Chat: bitte lynox darum.', en: 'Only the owner of this instance can run, rename or delete workflows here. If you need that, ask the owner. You can also run a workflow in the chat: just ask lynox.' },
 	'workflow_library.save': { de: 'Speichern', en: 'Save' },
 	'workflow_library.cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'workflow_library.run_started': { de: 'Workflow gestartet.', en: 'Workflow started.' },

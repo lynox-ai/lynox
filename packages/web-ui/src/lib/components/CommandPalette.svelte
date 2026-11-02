@@ -61,7 +61,7 @@
 		// IA reorg (D2) — 3rd-party API keys are low-frequency config; their home
 		// is Settings. Palette lands directly on the Settings route (skips the
 		// `?section=keys` redirect bounce).
-		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/llm/keys'), keywords: 'keys api schluessel settings einstellungen' },
+		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/llm/keys'), keywords: 'keys api schluessel settings einstellungen', ownerOnly: true },
 		// PRD-IA-V2 P3-PR-A2 — `settings.integrations` retired in favour of
 		// `settings.channels`. Keywords still include the old "integrations"
 		// term so muscle-memory queries still hit the right command.
