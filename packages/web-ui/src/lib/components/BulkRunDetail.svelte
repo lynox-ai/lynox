@@ -9,7 +9,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
-	import { isMandateSession, isOwnerSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, isOwnerSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import {
 		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
@@ -97,9 +97,10 @@
 			// A preview the owner approves is loaded whole: the approval covers every target, and
 			// each one the owner may take out has to be on the page to be taken out.
 			// So is a run whose rollback left targets: the sentence names the marked ones, and each
-			// has to be on the page to be seen.
+			// has to be on the page to be seen. So is a run with a product its store kept with markup
+			// lynox did not send: the halt's sentence points at it, and the mark outlives that halt.
 			const approving = r.body.phase === 'previewed' && r.body.kind === 'apply';
-			const whole = approving || bulkRollbackIncomplete(r.body);
+			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0;
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
 			if (whole && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
@@ -303,12 +304,13 @@
 
 	$effect(() => { void runId; void load(); });
 	$effect(() => {
+		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
 			.then(async (r) => {
 				const body: unknown = r.ok ? await r.json() : null;
 				managed = bulkManagedOf(r.ok, body);
 				// Whose session reads the run: a mandate's sees it without the owner's acts.
-				noteSettingsViewer(body);
+				noteViewer(body);
 			})
 			.catch(() => { managed = null; });
 	});
@@ -430,6 +432,9 @@
 									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}">
 										<td class="py-1.5 pr-3">
 											<code class="text-xs break-all">{bulkVisibleText(target.key)}</code>
+											{#if target.shopAddedMarkup}
+												<span class="ml-1 inline-block rounded-full bg-danger/15 border border-danger/40 px-1.5 text-[11px] text-danger" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
+											{/if}
 											{#if bulkRollbackLeft(run, target)}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
 											{/if}

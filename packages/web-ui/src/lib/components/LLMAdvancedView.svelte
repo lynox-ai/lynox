@@ -33,7 +33,7 @@
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { optionLabel } from './settings-readonly/values.js';
@@ -103,6 +103,7 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const body = (await res.json()) as UserConfig & {
@@ -111,7 +112,7 @@
 				capabilities?: { mistral_available?: boolean };
 				active_model?: ActiveModel;
 			};
-			noteSettingsViewer(body);
+			noteViewer(body);
 			// UX-fix 2026-05-24: when effort_level / thinking_mode are unset in
 			// stored config, prefer the engine's actual defaults so the dropdowns
 			// don't display a phantom "default" option that the user can't

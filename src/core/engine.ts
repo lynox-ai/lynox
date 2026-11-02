@@ -55,7 +55,7 @@ import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import { legacyMemoryReason, type LegacyMemoryReason } from './memory-tool-set.js';
-import { compose, engineText, renderFence } from '../core/data-boundary.js';
+import { collectOwnBlocks, compose, engineText, renderFence } from '../core/data-boundary.js';
 
 import {
   bashTool,
@@ -313,6 +313,8 @@ export class Engine {
   private securityAudit: import('./security-audit.js').SecurityAudit | null = null;
   private context: LynoxContext | null = null;
   private briefing: string | undefined = undefined;
+  /** The blocks wrapped into {@link briefing} as it was built; see `collectOwnBlocks`. */
+  private readonly briefingOwnBlocks: string[] = [];
   /** The vault's `<secrets>` listing at boot, apart from the briefing: an owner's turn only. */
   private secretsBriefing: string | undefined = undefined;
   private currentManifest: Map<string, number> | null = null;
@@ -1814,7 +1816,8 @@ export class Engine {
       // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
       this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
       if (loaded > 0) {
-        const apiContext = this._apiStore.formatForSystemPrompt();
+        const store = this._apiStore;
+        const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
         this.briefing = this.briefing ? `${this.briefing}\n\n${apiContext}` : apiContext;
       }
       // Inject the curated "bootstrap-suggestion" catalog regardless of how
@@ -2819,6 +2822,7 @@ export class Engine {
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
+  getBriefingOwnBlocks(): readonly string[] { return [...this.briefingOwnBlocks]; }
   getSecretsBriefing(): string | undefined { return this.secretsBriefing; }
   /** Freshly compute the first-turn task overview (overdue / due tasks) — pure SQL,
    *  no LLM. Called per-Session so the overview is current, not frozen at engine boot.

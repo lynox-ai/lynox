@@ -297,14 +297,16 @@ export function insertPipelineRun(db: Database.Database, params: {
   startedVia?: string | undefined;
   /** The chat the run was started from (v64), or none. */
   originThreadId?: string | undefined;
+  /** The chat run whose turn started it (v72), nested runs included, or none. */
+  startedByRunId?: string | undefined;
 }): void {
   // 2a: no `completed_at` stamp at INSERT — the row is born 'running' with a
   // NULL completed_at and is closed out by `updatePipelineRun` at finalize.
   // (Pre-2a this INSERT was the run-END write, so it stamped completed_at; the
   // orchestrator is now the single canonical writer via start-INSERT + finalize.)
   db.prepare(`
-    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, workflow_grant_id, started_via, origin_thread_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, workflow_grant_id, started_via, origin_thread_id, started_by_run_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.manifestName, params.status, params.manifestJson,
     params.totalDurationMs ?? 0, params.totalCostUsd ?? 0,
@@ -313,6 +315,7 @@ export function insertPipelineRun(db: Database.Database, params: {
     params.workflowId ?? null,
     params.grantId ?? null, params.startedVia ?? null,
     params.originThreadId ?? null,
+    params.startedByRunId ?? null,
   );
 }
 
