@@ -179,7 +179,7 @@ async function runOne(provider: string, kase: Case, make: (tools: ToolEntry[]) =
 
 const runs = Array.from({ length: RUNS }, (_, i) => ({ i, label: `run #${String(i)}` }));
 const cases: Case[] = ['page', 'run'];
-const base = { maxIterations: 6, systemPrompt: SYSTEM_PROMPT, promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' as const }) };
+const base = { maxIterations: 6, systemPrompt: SYSTEM_PROMPT, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('graphql page-read refusal — Anthropic (Haiku)', () => {
