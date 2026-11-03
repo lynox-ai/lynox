@@ -102,10 +102,12 @@ describe('Engine boot — unified-inbox flag', () => {
     engine = new Engine({});
     await engine.init();
     const runtime = engine.getInboxRuntime();
-    const mailContext = (engine as unknown as { _mailContext: { hooks: { inboxLabelOf?: unknown } } | null })._mailContext;
+    const mailContext = (engine as unknown as { _mailContext: { hooks: { inboxLabelOf?: unknown; inboxReader?: unknown } } | null })._mailContext;
     expect(runtime).not.toBeNull();
     expect(mailContext, 'the boot made a mail context, so the check below is not vacuous').not.toBeNull();
     expect(mailContext!.hooks.inboxLabelOf).toBe(runtime!.inboxLabelOf);
+    // inbox_read reads the store through the same wiring.
+    expect(mailContext!.hooks.inboxReader).toBe(runtime!.inboxReader);
   });
 
   it('flag on: shutdown drains the inbox runtime cleanly', async () => {

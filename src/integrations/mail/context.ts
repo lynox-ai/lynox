@@ -18,7 +18,7 @@
 // backed by its registry. Engine registers them on its own ToolRegistry.
 
 import type { ToolEntry } from '../../types/index.js';
-import type { InboxBucket, InboxUserAction } from '../../types/inbox.js';
+import type { InboxBucket, InboxItem, InboxUserAction } from '../../types/inbox.js';
 import type { GoogleAuth } from '../google/google-auth.js';
 import { SCOPES } from '../google/scopes.js';
 import type { MailCredentialBackend } from './auth/app-password.js';
@@ -197,6 +197,51 @@ export interface MailHooks {
    * snippet again. Synchronous and must not throw.
    */
   inboxLabelOf?: (accountId: string, threadKey: string) => InboxLabel | null;
+
+  /**
+   * Not an event but a read: the inbox store as `inbox_read` sees it, the same rows the inbox
+   * view shows (`GET /api/inbox/counts`, `/items`, `/items/:id/full`, `/items/:id/thread`).
+   * Absent while the inbox is off. Wired with the runtime and replaced when it is rebuilt.
+   */
+  inboxReader?: InboxReader;
+}
+
+/** What `inbox_read` reads: the inbox store of one runtime, read-only. */
+export interface InboxReader {
+  /**
+   * Open items per bucket, counted as `GET /api/inbox/counts` counts them, leaving out the
+   * items of `exclude` (accounts).
+   */
+  countByBucket(exclude: ReadonlySet<string>): Record<InboxBucket, number>;
+  /** The open items of one bucket, the ones `countByBucket` counts, newest first. */
+  listItems(bucket: InboxBucket, limit: number, offset: number, exclude: ReadonlySet<string>): ReadonlyArray<InboxItem>;
+  getItem(id: string): InboxItem | null;
+  /** The item's own message text, or null when none is stored (a skipped sensitive mail). */
+  bodyOf(item: InboxItem): string | null;
+  /** The thread's stored messages, newest first. */
+  threadOf(item: InboxItem, limit: number): ReadonlyArray<InboxThreadMessage>;
+  /**
+   * The sensitive categories the inbox found in the item's mail when it took it in, from the
+   * item's audit (none when it found none). The check ran on more of the mail than the store
+   * keeps, so a re-check of the stored text can miss what it found.
+   */
+  sensitiveAtIngest(item: InboxItem): ReadonlyArray<string>;
+  /** Accounts the inbox leaves out (`LYNOX_INBOX_DISABLED_ACCOUNTS`). */
+  disabledAccounts: ReadonlySet<string>;
+}
+
+/** One stored message of a thread, the fields `inbox_read` shows. */
+export interface InboxThreadMessage {
+  messageId: string;
+  fromAddress: string;
+  fromName?: string | undefined;
+  subject: string;
+  mailDate?: Date | undefined;
+  direction: 'inbound' | 'outbound' | 'unknown';
+  bodyMd?: string | undefined;
+  snippet?: string | undefined;
+  /** The inbox item this message was stored with, when the inbox stored it with one. */
+  inboxItemId?: string | undefined;
 }
 
 /** The inbox's verdict on one thread, as `mail_triage` shows it. */

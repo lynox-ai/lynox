@@ -1,7 +1,7 @@
 // Co-located tests for the five mail tools. Uses an in-memory MailRegistry
 // + fake provider — no IMAP/SMTP, no real network.
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { subscribe, unsubscribe } from 'node:diagnostics_channel';
 import type {
   MailEnvelope,
@@ -17,12 +17,13 @@ import type {
 } from '../provider.js';
 import type { IAgent } from '../../../types/index.js';
 import { InMemoryMailRegistry } from './registry.js';
+import { leftOutRefusal } from '../../inbox/disabled-accounts.js';
 import { createMailSearchTool } from './mail-search.js';
 import { createMailReadTool } from './mail-read.js';
 import { createMailSendTool } from './mail-send.js';
 import { createMailReplyTool, prepareReply, commitReply } from './mail-reply.js';
 import { prepareSend, commitSend } from '../send-core.js';
-import { createMailTriageTool, inboxGroupOf, inboxLabelText, INBOX_LABEL_LEGEND } from './mail-triage.js';
+import { createMailTriageTool, inboxGroupOf, inboxLabelText, INBOX_LABEL_LEGEND, UNWATCHED_LEFT_OUT } from './mail-triage.js';
 import type { InboxLabel } from '../context.js';
 import { createMailTools } from './index.js';
 import { createMailConnectTool } from './mail-connect.js';
@@ -2104,5 +2105,66 @@ describe('sendMail in three steps', () => {
     expect(provider.send).toHaveBeenCalledWith({ to: [{ address: 'a@x.com' }], cc: [{ address: 'c@x.com' }], subject: 's', text: 'one two' });
     const again = await prepareSend(registry, { to: [{ address: 'a@x.com' }], cc: [{ address: 'c@x.com' }], subject: 's', body: 'three' }, {});
     expect(again.ok ? undefined : again.status).toBe('dedup_window');
+  });
+});
+
+// ── mail_triage in a run nobody watches (PRD inbox-user-rules F6) ─────────────
+
+describe('mail_triage leaves out the inbox\'s left-out accounts when nobody watches', () => {
+  let secret: FakeProvider;
+  beforeEach(() => {
+    secret = new FakeProvider('secret-box');
+    registry.add(secret);
+    provider.list.mockResolvedValue([envelope(1, { messageId: '<m-1@x>', subject: 'Normal' })]);
+    secret.list.mockResolvedValue([envelope(2, { messageId: '<m-2@x>', subject: 'Vertraulich' })]);
+    vi.stubEnv('LYNOX_INBOX_DISABLED_ACCOUNTS', ' secret-box , other ');
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('does not list a left-out account in a run nobody watches, and says one was left out', async () => {
+    const out = await createMailTriageTool(registry).handler({}, noPromptAgent);
+    expect(secret.list).not.toHaveBeenCalled();
+    expect(out).not.toContain('Vertraulich');
+    expect(out).toContain('Normal');
+    expect(out).toContain('1 more account(s) not read');
+  });
+
+  it('refuses when the only account asked for is left out', async () => {
+    const out = await createMailTriageTool(registry).handler({ account: 'secret-box' }, noPromptAgent);
+    expect(secret.list).not.toHaveBeenCalled();
+    expect(out).toBe(UNWATCHED_LEFT_OUT);
+  });
+
+  it('lists it when the user is there', async () => {
+    const out = await createMailTriageTool(registry).handler({ account: 'secret-box' }, yesAgent);
+    expect(secret.list).toHaveBeenCalled();
+    expect(out).toContain('Vertraulich');
+  });
+
+  // A schedule's or trigger's run has a promptUser (the worker loop parks its questions) and
+  // is autonomous. It is a run nobody watches all the same.
+  const workerRun = { promptUser: async () => 'Yes', autonomy: 'autonomous' } as unknown as IAgent;
+
+  it('does not list it in a worker run, which has a promptUser', async () => {
+    const out = await createMailTriageTool(registry).handler({ account: 'secret-box' }, workerRun);
+    expect(secret.list).not.toHaveBeenCalled();
+    expect(out).toBe(UNWATCHED_LEFT_OUT);
+  });
+
+  it('mail_read and mail_search do not read it in a run nobody watches either, and do when the user is there', async () => {
+    const read = await createMailReadTool(registry).handler({ uid: 2, account: 'secret-box' }, workerRun);
+    expect(secret.fetch).not.toHaveBeenCalled();
+    expect(read).toBe(leftOutRefusal('mail_read'));
+    const one = await createMailSearchTool(registry).handler({ account: 'secret-box', subject: 'x' }, noPromptAgent);
+    expect(secret.search).not.toHaveBeenCalled();
+    expect(one).toBe(leftOutRefusal('mail_search'));
+    const all = await createMailSearchTool(registry).handler({ subject: 'x' }, workerRun);
+    expect(secret.search).not.toHaveBeenCalled();
+    expect(provider.search).toHaveBeenCalled();
+    expect(all).toContain('1 more account(s) not searched');
+    await createMailSearchTool(registry).handler({ account: 'secret-box', subject: 'x' }, yesAgent);
+    expect(secret.search).toHaveBeenCalled();
+    await createMailReadTool(registry).handler({ uid: 2, account: 'secret-box' }, yesAgent);
+    expect(secret.fetch).toHaveBeenCalled();
   });
 });

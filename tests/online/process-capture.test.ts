@@ -92,7 +92,7 @@ describe.skipIf(SKIP)('Online: Process Capture', () => {
     const captured: PlannedPipeline = {
       id: 'smoke', name: record.name, goal: record.description, steps: processToSteps(record),
       reasoning: '', estimatedCost: 0, createdAt: record.createdAt, executed: false,
-      executionMode: 'orchestrated', template: true, mode: 'autonomous', parameters: record.parameters,
+      template: true, mode: 'autonomous', parameters: record.parameters,
     };
     // Grade with an empty param expectation so recall/precision aren't strictly
     // asserted (Haiku naming varies); stepCount IS deterministic from the trace.

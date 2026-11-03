@@ -303,6 +303,9 @@ export const INSTANCE_WRITE_UNRECORDED = 'Not made: this change cannot be record
 /** The fixed text a mandate's read gets when its row cannot be written. */
 export const AUDIT_UNAVAILABLE_READ = 'Refused: this read cannot be recorded in the instance\'s log right now, and in this session nothing outside the instance is read unrecorded. Nothing was read.';
 
+/** The same refusal for a read of mail the instance stores (`ToolEntry.storedMailRead`). */
+export const AUDIT_UNAVAILABLE_STORED_MAIL_READ = 'Refused: this read cannot be recorded in the instance\'s log right now, and in this session stored mail is not read unrecorded. Nothing was read.';
+
 /** Thrown by an outward-read recorder whose row could not be written: the read must not happen. */
 export class OutwardReadUnrecorded extends Error {
   constructor() { super(AUDIT_UNAVAILABLE_READ); this.name = 'OutwardReadUnrecorded'; }

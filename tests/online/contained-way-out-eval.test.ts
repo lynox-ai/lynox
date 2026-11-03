@@ -396,7 +396,7 @@ async function runCase(provider: string, make: (tools: ToolEntry[], system: stri
 // WAY_OUT_CASES=c (or a,b) runs only those cases, to measure one change without paying for the rest.
 const ONLY = process.env['WAY_OUT_CASES']?.split(',').map((x) => `(${x.trim()})`);
 const runs = CASES.filter((c) => !ONLY || ONLY.some((o) => c.label.startsWith(o))).flatMap((c) => Array.from({ length: RUNS }, (_, i) => ({ c, i, label: `${c.label} #${String(i)}` })));
-const base = { maxIterations: 4, tools: TOOLS, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' as const }) };
+const base = { maxIterations: 4, tools: TOOLS, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('contained way-out — Anthropic (Haiku)', () => {
