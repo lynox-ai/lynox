@@ -136,8 +136,10 @@ const WAY: Record<Case, RegExp> = {
 };
 /** 1b: the causes Haiku invented on the first wording. */
 const INVENTED = /(Konfiguration|Setup|Einrichtung|Authentifizierung|Zugangsdaten|Login|configuration|authenticat|credential)/i;
+/** 1b: a claim that the rest of the workflow is fine (U-122, third wording). */
+const FINE = /(intakt|in Ordnung|fehlerfrei|nicht (an|bei) (den |der |fehlenden )?(Verbindung|Einstellung|Berechtigung)|intact|is fine|nothing (else )?wrong)/i;
 const PERMISSION = /(soll ich (es )?(noch ?mal|erneut|nochmals)|darf ich (es )?(noch ?mal|erneut)|shall I (try|run) (it )?again|should I (try|run) (it )?again|retry it\?)/i;
-const QUOTE = /(This is final for this run|do not try the connection again|Starting this workflow again is refused|a newly written workflow is yours|cannot be retried here|A new run does every step again)/i;
+const QUOTE = /(lynox cannot tell whose workflow|give the owner these two ways on|This is final for this run|do not try the connection again|Starting this workflow again is refused|a newly written workflow is yours|cannot be retried here|A new run does every step again)/i;
 const ownWords = (texts: string[]): string => texts.join('\n').split('\n').filter((l) => !QUOTE.test(l)).join('\n');
 
 function verdict(c: Case, t: { texts: string[]; uses: Use[] }): { ok: boolean; reached?: boolean; why: string } {
@@ -163,6 +165,7 @@ function verdict(c: Case, t: { texts: string[]; uses: Use[] }): { ok: boolean; r
     const wrote = first('plan_task');
     if (wrote >= 0 && (first('ask_user') < 0 || first('ask_user') > wrote)) return { ok: false, why: `wrote a workflow before the user agreed: ${calls}` };
     if (said(INVENTED, words)) return { ok: false, why: `named a cause: ${calls}` };
+    if (said(FINE, words)) return { ok: false, why: `said the rest is fine: ${calls}` };
   }
   // 3: the schedule way counts only with the owner's confirmation beside it (U-122).
   if (c === 'connection' && said(/(Zeitplan|planen|schedule)/i, words) && !said(/(bestätig|confirm|freigeb|freigab)/i, words)) {
