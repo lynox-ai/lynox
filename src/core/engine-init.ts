@@ -35,6 +35,7 @@ import { ALL_NAMESPACES } from '../types/index.js';
 import { INSTANCE_WRITE_SITES } from './mandate-tool-lock.js';
 import type { KnowledgeStoreResult } from '../types/index.js';
 import { configurePersistentBudget } from './session-budget.js';
+import { describeConnectionTokens } from './profile-secret-view.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
 import { configureMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
@@ -453,6 +454,34 @@ export function ensureVaultKey(): void {
   }
 }
 
+/**
+ * The `<secrets>` listing: every agent-visible name as a `secret:` reference, with its masked
+ * value, except a name that holds a connection's token. Those are used through their API profile
+ * and are counted per profile, not named (`describeConnectionTokens`). Left out entirely, the
+ * briefing reads as if the vault had no access for the profile, and a model asks the owner for it
+ * again under a new name (tests/online/ask-secret-token-slot-eval.test.ts). `tokenHolders` answers the
+ * profiles that hold a name, empty for a free one. The boot renders the listing before the API
+ * profiles are loaded, with no holders; the engine renders it again once they are.
+ */
+export function renderSecretsBriefing(
+  store: Pick<SecretStore, 'listAgentVisibleNames' | 'getMasked'>,
+  tokenHolders: (name: string) => readonly { id?: unknown; name: unknown }[] = () => [],
+): string | undefined {
+  const free: string[] = [];
+  const tokens: (readonly { id?: unknown; name: unknown }[])[] = [];
+  for (const n of store.listAgentVisibleNames()) {
+    const holders = tokenHolders(n);
+    if (holders.length === 0) free.push(`secret:${n} (${store.getMasked(n)})`);
+    else tokens.push(holders);
+  }
+  const tokenLine = describeConnectionTokens(tokens);
+  if (free.length === 0 && tokenLine === undefined) return undefined;
+  const lines: string[] = [];
+  if (free.length > 0) lines.push(free.join(', '));
+  if (tokenLine !== undefined) lines.push(tokenLine);
+  return compose([renderFence('secrets', lines.join('\n'))]);
+}
+
 export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   const parts: Part[] = [];
   let secretsBriefing: string | undefined;
@@ -558,11 +587,7 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
     // Only advertise agent-visible secrets — infrastructure secrets (mail
     // account / OAuth / SMTP/IMAP / engine-internal) are excluded so their
     // names never enter the model context (and cannot be referenced for exfil).
-    const visibleNames = store.listAgentVisibleNames();
-    if (visibleNames.length > 0) {
-      const names = visibleNames.map(n => `secret:${n} (${store!.getMasked(n)})`).join(', ');
-      secretsBriefing = compose([renderFence('secrets', names)]);
-    }
+    secretsBriefing = renderSecretsBriefing(store);
   } catch {
     store = null;
   }

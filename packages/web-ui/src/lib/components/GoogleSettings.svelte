@@ -9,7 +9,7 @@
 	import { onDestroy, untrack } from 'svelte';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, isOwnerSession, isViewerKnown, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
@@ -114,10 +114,26 @@
 		});
 	}
 
+	/**
+	 * Ends the parked claim, and only then takes `google_oauth` out of the URL. Until the claim is
+	 * confirmed or dropped the nonce stays there, so a reload parks it again: the card needs the
+	 * owner's session, and when `GET /api/config` never answers, the reload the page asks for is
+	 * the owner's only way back to it.
+	 */
 	function dropPendingClaim(): void {
 		pendingClaimNonce = null;
 		pendingClaimPreview = null;
+		if (typeof window === 'undefined') return;
+		const url = new URL(window.location.href);
+		if (!url.searchParams.has('google_oauth')) return;
+		url.searchParams.delete('google_oauth');
+		window.history.replaceState({}, '', url.toString());
 	}
+
+	// A session the server named as not the owner's never sees the card: the claim is dropped.
+	$effect(() => {
+		if (pendingClaimNonce !== null && isViewerKnown() && !isOwnerSession()) untrack(dropPendingClaim);
+	});
 
 	function confirmPendingClaim(): void {
 		const nonce = pendingClaimNonce;
@@ -148,10 +164,7 @@
 			const claimNonce = params.get('google_oauth');
 			if (claimNonce && claimNonce !== 'success') {
 				oauthClaimHandled = true;
-				// Clean URL param without reload
-				const url = new URL(window.location.href);
-				url.searchParams.delete('google_oauth');
-				window.history.replaceState({}, '', url.toString());
+				// The param leaves the URL when the claim ends (`dropPendingClaim`), not here.
 				parkClaim(claimNonce);
 			}
 			// A connect that came back WITHOUT a grant says why in `google_oauth_error`.

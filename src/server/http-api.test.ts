@@ -16725,6 +16725,55 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(403);
     });
 
+    it('without isolation too, says a file it may not read as a failure, not as "File not found"', async () => {
+      repayRateWindow();
+      expect(process.getuid?.(), 'this test needs a non-root user').not.toBe(0);
+      writeFileSync(join(base, 'safe', 'sealed.txt'), 's');
+      const seen: unknown[] = [];
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let lines: string[] = [];
+      try {
+        chmodSync(join(base, 'safe', 'sealed.txt'), 0o000);
+        for (const route of ['download', 'read']) {
+          const res = await jsonFetch(`/api/files/${route}?path=safe/sealed.txt`);
+          seen.push([route, res.status, await res.json()]);
+          seen.push([route, (await jsonFetch(`/api/files/${route}?path=safe/gone.txt`)).status]);
+        }
+      } finally {
+        chmodSync(join(base, 'safe', 'sealed.txt'), 0o600);
+        rmSync(join(base, 'safe', 'sealed.txt'), { force: true });
+        lines = logged.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('/api/files/'));
+        logged.mockRestore();
+      }
+      const failed = { error: 'Could not read the file' };
+      expect(seen).toEqual([['download', 500, failed], ['download', 404], ['read', 500, failed], ['read', 404]]);
+      // The reason behind the 500 is in the server's log, as for the folder listing.
+      expect(lines).toEqual(['[lynox] GET /api/files/download failed: EACCES', '[lynox] GET /api/files/read failed: EACCES']);
+    });
+
+    it('without isolation, closes the opened file when the header cannot be sent and for an empty file', async () => {
+      repayRateWindow();
+      const held = (name: string): number =>
+        readdirSync('/proc/self/fd').filter((n) => { try { return readlinkSync(`/proc/self/fd/${n}`).endsWith(name); } catch { return false; } }).length;
+      writeFileSync(join(base, 'safe', 'once.txt'), 'x');
+      writeFileSync(join(base, 'safe', 'empty.txt'), '');
+      const writeHead = vi.spyOn(ServerResponse.prototype, 'writeHead');
+      try {
+        for (let i = 0; i < 10; i++) {
+          // The header write is what fails, as Node does for a header value it refuses.
+          writeHead.mockImplementationOnce(() => { throw new TypeError('Invalid character in header content'); });
+          // The answer of the route itself, so the failed header write was the route's own.
+          const res = await jsonFetch('/api/files/download?path=safe/once.txt');
+          expect([res.status, await res.json()]).toEqual([500, { error: 'Could not read the file' }]);
+        }
+      } finally {
+        writeHead.mockRestore();
+      }
+      for (let i = 0; i < 10; i++) expect((await jsonFetch('/api/files/download?path=safe/empty.txt')).status).toBe(200);
+      // A FileHandle left open stays open until the garbage collector finds it.
+      expect([held('once.txt'), held('empty.txt')]).toEqual([0, 0]);
+    });
+
     it('answers every path behind an escaping symlink with 403, so files and directories out there look alike', async () => {
       mkdirSync(join(externalDir, 'sub'), { recursive: true });
       // Missing leaf, a file used as a directory, a directory, and a missing nested path: all
@@ -16955,6 +17004,36 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('says a read the file system refused as a failure, not as "File not found", for the download and the preview', async () => {
+      repayRateWindow();
+      // root ignores file and directory permissions, so the refusal this test needs cannot happen there
+      expect(process.getuid?.(), 'this test needs a non-root user').not.toBe(0);
+      mkdirSync(join(ws, 'shut'));
+      writeFileSync(join(ws, 'shut', 'in.txt'), 'i');
+      writeFileSync(join(ws, 'sealed.txt'), 's');
+      const seen: unknown[] = [];
+      try {
+        chmodSync(join(ws, 'shut'), 0o000);
+        chmodSync(join(ws, 'sealed.txt'), 0o000);
+        for (const route of ['download', 'read']) {
+          for (const p of ['sealed.txt', 'shut/in.txt']) {
+            const res = await jsonFetch(`/api/files/${route}?path=${q(p)}`);
+            seen.push([route, p, res.status, await res.json()]);
+          }
+          // A file that is really missing stays "not found".
+          seen.push([route, 'gone.txt', await status(`/api/files/${route}?path=gone.txt`)]);
+        }
+      } finally {
+        chmodSync(join(ws, 'shut'), 0o700);
+        chmodSync(join(ws, 'sealed.txt'), 0o600);
+      }
+      const failed = { error: 'Could not read the file' };
+      expect(seen).toEqual([
+        ['download', 'sealed.txt', 500, failed], ['download', 'shut/in.txt', 500, failed], ['download', 'gone.txt', 404],
+        ['read', 'sealed.txt', 500, failed], ['read', 'shut/in.txt', 500, failed], ['read', 'gone.txt', 404],
+      ]);
+    });
+
     const openFds =(): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
 
     it('downloads a file whose name is outside Latin-1, under that name', async () => {
@@ -16974,7 +17053,7 @@ describe('LynoxHTTPApi', () => {
       try {
         for (let i = 0; i < 10; i++) {
           writeHead.mockImplementationOnce(() => { throw new TypeError('Invalid character in header content'); });
-          expect(await status('/api/files/download?path=once.txt')).toBe(404);
+          expect(await status('/api/files/download?path=once.txt')).toBe(500);
         }
       } finally {
         writeHead.mockRestore();

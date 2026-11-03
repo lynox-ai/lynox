@@ -24,6 +24,7 @@ import {
 } from './bulk-list.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
+import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
 import { shopifyBeforeImage, shopifyListPage, shopifyPairedAfter, shopifyTargetIo } from './bulk-shopify.js';
 import { shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
@@ -1014,6 +1015,8 @@ describe('applying a Shopify run', () => {
     const db = engineDb.getDb();
     db.prepare(`INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total, targets_applied) VALUES ('woo', 'x', 'http:shop.example.com', 'restorable', 'done', 0, 0)`).run();
     expect(ledger.comparedAsHtml('woo')).toEqual([]);
+    // The store's saved form likewise: a product run and its undo, no other run.
+    expect([ledger.comparedInSavedForm(id), ledger.comparedInSavedForm(undo.status.id), ledger.comparedInSavedForm('woo')]).toEqual([true, true, false]);
   });
 
   it('takes back what it wrote, both seo fields, beyond one target and with the switch off', async () => {
@@ -1039,6 +1042,129 @@ describe('applying a Shopify run', () => {
     ]);
     expect(s.products.get(10)!['seo']).toEqual({ title: null, description: 'D1' });
     expect(s.products.get(20)!['seo']).toEqual({ title: null, description: 'D2' });
+  });
+
+  // A value the store saves in its own form (m009, m009c): a resumed loop finds it as planned
+  // instead of taking it for someone else's change.
+  describe('a value the store saved in its own form', () => {
+    /** The worker's own writer for the run, as the worker builds it. */
+    const applyLive = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string }> => runBulkEffect(id, effect, {
+      ledger, trailFor: () => null,
+      writerFor: (run) => bulkWriterFor(run, null, (r) => externalRunWriter(r, ledger, (rr, _q, _r, shopifyApply) => {
+        const stored = rr.contractJson === null ? null : parseBulkContract(rr.contractJson);
+        const granted = stored === null ? null : bulkRunContract(stored, rr.targetSystem, { shopifyApply });
+        return granted === null ? null : client(granted);
+      })),
+    });
+    const previewedWith = async (after: Record<string, unknown>): Promise<string> => {
+      vi.stubEnv(FLAG, '1');
+      const id = startedList(after);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(ledger.resumePreview(id).ok).toBe(true);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      return id;
+    };
+    const row = (runId: string): { before: unknown; after_planned: unknown; after_actual: unknown } => {
+      const r = engineDb.getDb().prepare('SELECT before, after_planned, after_actual FROM bulk_targets WHERE run_id = ?').get(runId) as Record<string, string | null>;
+      const dec = (v: string | null): unknown => (v === null ? null : JSON.parse(engineDb.dec(v)));
+      return { before: dec(r['before']!), after_planned: dec(r['after_planned']!), after_actual: dec(r['after_actual']!) };
+    };
+    const approved = (id: string): void => {
+      expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+    };
+
+    it('finds a title trimmed and a SEO title sent as the same text as planned, and sends nothing (m009)', async () => {
+      fill(1);
+      const id = await previewedWith({ title: 'Neu ', seo_title: 'Neu ' });
+      approved(id);
+      // A dead loop's write, as the store keeps it: the title trimmed, the SEO title equal to it read as null.
+      s.products.set(10, { title: 'Neu', descriptionHtml: '<p>1</p>', seo: { title: null, description: 'D1' } });
+      s.requests.length = 0;
+      await applyLive(id);
+      expect(writes()).toEqual([]);
+      expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0, hostRewrote: 0 });
+    });
+
+    it('finds a SEO title the store read as null as planned by the title read with it, and records what it holds', async () => {
+      fill(1);
+      s.products.set(10, { ...s.products.get(10)!, seo: { title: 'Old', description: 'D1' } });
+      const id = await previewed();
+      plant(id, gid(10), { seo_title: 'T1' });
+      approved(id);
+      // A loop marked it sent, wrote it, and died before recording it; the store read the SEO title equal to the title as null.
+      ledger.markSent(id, ledger.getPreview(id)[0]!.seq, null);
+      s.products.set(10, { ...s.products.get(10)!, seo: { title: null, description: 'D1' } });
+      s.requests.length = 0;
+      await applyLive(id);
+      expect(writes()).toEqual([]);
+      expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0 });
+      // The title read beside the image is in no row: the ledger and the undo hold the run's fields only.
+      expect(row(id)).toEqual({
+        before: { absent: false, value: { seo_title: 'Old', seo_description: 'D1' } },
+        after_planned: { seo_title: 'T1', seo_description: 'D1' },
+        after_actual: { value: { seo_title: null, seo_description: 'D1' }, estimated: false },
+      });
+      const undo = ledger.planUndo(id);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(row(undo.status.id).after_planned).toEqual({ seo_title: 'Old', seo_description: 'D1' });
+    });
+
+    it('takes a SEO title for a conflict where the read holds no title, another title, or another SEO title', async () => {
+      for (const kept of [
+        { seo: { title: null, description: 'D1' } },
+        { title: 'Fremd', seo: { title: null, description: 'D1' } },
+        // Someone else's SEO title, one space off the title: the store holds it, and it is not the plan.
+        { title: 'T1', seo: { title: 'T1 ', description: 'D1' } },
+      ]) {
+        s.products.clear();
+        fill(1);
+        s.products.set(10, { ...s.products.get(10)!, seo: { title: 'Old', description: 'D1' } });
+        const id = await previewed();
+        plant(id, gid(10), { seo_title: 'T1' });
+        approved(id);
+        s.products.set(10, { descriptionHtml: '<p>1</p>', ...kept });
+        s.requests.length = 0;
+        await applyLive(id);
+        expect(writes()).toEqual([]);
+        expect(ledger.getStatus(id)).toMatchObject({ applied: 0, conflicts: 1 });
+      }
+    });
+
+    it('does not take a new title with no SEO title for the product\'s old one', async () => {
+      fill(1);
+      const id = await previewedWith({ title: 'Neu', seo_title: null });
+      approved(id);
+      // Someone else's state: the old title, its SEO title read as null.
+      s.products.set(10, { title: 'Alt', descriptionHtml: '<p>1</p>', seo: { title: null, description: 'D1' } });
+      s.requests.length = 0;
+      await applyLive(id);
+      expect(writes()).toEqual([]);
+      expect(ledger.getStatus(id)).toMatchObject({ applied: 0, conflicts: 1 });
+    });
+
+    // The store was measured to read a SEO title equal to the title as null, so a read holding it as
+    // text is not expected. What a read answers is taken as it is: should the store ever hold it, a
+    // plan that clears the SEO title is a change, and the write is sent.
+    it('takes a read as it is: a SEO title held equal to the title is no null', async () => {
+      fill(2);
+      s.products.set(10, { ...s.products.get(10)!, seo: { title: 'T1', description: 'D1' } });
+      const id = await previewedWith({ seo_title: null });
+      expect(ledger.getPreview(id).map((t) => [t.key, t.change])).toEqual([[gid(10), 'update'], [gid(20), 'unchanged']]);
+      approved(id);
+      s.requests.length = 0;
+      await applyLive(id);
+      expect(ledger.getStatus(id)).toMatchObject({ applied: 1, conflicts: 0 });
+      expect(writes()).toEqual([{ id: gid(10), seoTitle: null, seoDescription: 'D1' }]);
+    });
+
+    it('classifies a SEO title equal to the product\'s title as no change, and another one as a change', async () => {
+      fill(3);
+      s.products.set(10, { ...s.products.get(10)!, title: 'New title' });
+      // The owner's own SEO title, one space off the title: the store holds it, so planning that SEO title is a change.
+      s.products.set(30, { ...s.products.get(30)!, title: 'New title', seo: { title: 'New title ', description: 'D3' } });
+      const id = await previewed();
+      expect(ledger.getPreview(id).map((t) => [t.key, t.change])).toEqual([[gid(10), 'unchanged'], [gid(20), 'update'], [gid(30), 'update']]);
+    });
   });
 });
 

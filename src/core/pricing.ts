@@ -194,6 +194,8 @@ export function hasKnownPricing(model: string): boolean {
  * and the flat figure is nearly exact for the cheapest. Over all 40 ids in
  * `MODEL_CAPABILITIES` (counted 2026-10-13) the range is $0.00224576 (`ministral-3b-2512`) to
  * $0.88 (`claude-fable-5`): 17.60x too low at the top, and 22.26x too HIGH at the bottom.
+ * (Since Mistral is priced at its EU endpoint rate, list × 1.1, the bottom is $0.002470336,
+ * 20.24x too high.)
  * (The first count said 39 ids from $0.000898 — `ministral-3b-2410` priced at a retired
  * model's rate, which Mistral no longer serves under that id; see `MISTRAL_SERVED_AS`.)
  *

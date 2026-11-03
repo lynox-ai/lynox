@@ -668,6 +668,10 @@ export function externalWriter(client: ExternalClient, opts: {
    *  value sent: markup the write never sent (`markupAddedByHost`; the target stays written, the
    *  run halts), the value stored otherwise than sent (counted, not halted), or the bytes sent. */
   readBack?: (sent: ExternalImage, back: ExternalImage) => 'added' | 'rewritten' | 'kept';
+  /** The title a read answered, kept beside the image for a form whose store saves a value in its
+   *  own way (`shopifySavedForm`). Taken from the same answer as the image, never from a read of
+   *  its own; null where the answer holds none. */
+  titleOf?: (value: unknown) => string | null;
 } = {}): TargetWriter {
   const method = opts.method ?? 'PATCH';
   const io: TargetIo = opts.io ?? {
@@ -697,12 +701,16 @@ export function externalWriter(client: ExternalClient, opts: {
       default: return got;
     }
   };
-  const readOver = async (key: string, fields: readonly string[]): Promise<ExternalImage | 'foreign'> => {
+  const readAnswer = async (key: string, fields: readonly string[]): Promise<{ image: ExternalImage; value: unknown } | 'foreign'> => {
     const got = await call(() => io.read(key));
     if (got.kind === 'not_found') return 'foreign';
     if (got.kind !== 'ok') throw new Error('read failed');
     const over = beforeOverFields(got.value, fields);
-    return 'before' in over ? over.before : 'foreign';
+    return 'before' in over ? { image: over.before, value: got.value } : 'foreign';
+  };
+  const readOver = async (key: string, fields: readonly string[]): Promise<ExternalImage | 'foreign'> => {
+    const got = await readAnswer(key, fields);
+    return got === 'foreign' ? 'foreign' : got.image;
   };
   return {
     readsBack: true,
@@ -710,8 +718,9 @@ export function externalWriter(client: ExternalClient, opts: {
     track: () => client.track(),
     async read(key, fields) {
       if (fields === null) return 'foreign';
-      const image = await readOver(key, fields);
-      return image === 'foreign' ? 'foreign' : { absent: false, value: image };
+      const got = await readAnswer(key, fields);
+      if (got === 'foreign') return 'foreign';
+      return opts.titleOf === undefined ? { absent: false, value: got.image } : { absent: false, value: got.image, titleNow: opts.titleOf(got.value) };
     },
     async write(key, after, onSend, onRefused) {
       if (after.absent || !isPlainObject(after.value)) throw new Error('an external target is only ever edited, never removed');

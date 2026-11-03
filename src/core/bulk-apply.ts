@@ -26,6 +26,7 @@ import {
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
 import { processUmask } from './workspace-rel.js';
+import { shopifySavedForm } from './shopify-saved-form.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
@@ -56,7 +57,9 @@ export interface TargetWriter {
   /** A writer whose requests carry a stored credential (an external host): start noting the
    *  connections of what it sends from now on (`ExternalClient.track`). A local writer has none. */
   readonly track?: (() => () => AttachedConnection | null) | undefined;
-  read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
+  /** `titleNow`: the product title the same read answered, for a form the store saves in its
+   *  own way ({@link shopifySavedForm}); null where the answer holds none. Never part of the image. */
+  read(key: string, fields: readonly string[] | null): Promise<(BeforeImage & { readonly titleNow?: string | null }) | 'path_changed' | 'foreign'>;
   /** `hostAddedMarkup`: the read-back holds markup the write never sent (PRD shopify-preset
    *  §21.2 item 6). The target is written all the same — the value is in the store — and is
    *  recorded with its mark; the run then halts. `hostRewrote`: the host stored the value otherwise
@@ -132,6 +135,17 @@ const HALT_CONSECUTIVE = 3;
 function sameImage(a: BeforeImage, b: BeforeImage, htmlFields: readonly string[] = []): boolean {
   if (a.absent || b.absent) return a.absent === b.absent;
   return sameValue(a.value, b.value, htmlFields);
+}
+
+/**
+ * A read holding what the store would have saved of a planned image ({@link shopifySavedForm}),
+ * with the title the read answered where the plan sets none. The read is taken as it is. A read
+ * without that title leaves the planned `seo_title` as it is: unknown is not equal.
+ */
+function sameInSavedForm(cur: BeforeImage & { readonly titleNow?: string | null }, planned: BeforeImage, htmlFields: readonly string[] = []): boolean {
+  if (cur.absent || planned.absent) return false;
+  const titleNow = cur.titleNow ?? null;
+  return sameValue(cur.value, shopifySavedForm(planned.value, titleNow), htmlFields);
 }
 
 function summarize(ledger: BulkLedger, runId: string, lead: string, say: BulkNotices = BULK_NOTICES.en): string {
@@ -259,6 +273,8 @@ async function applyRunEffect(
   const writingTotal = ledger.countWriting(runId);
   // Compared under `htmlEqual` where a value is HTML: a store re-serialises a description.
   const htmlFields = ledger.comparedAsHtml(runId);
+  // Compared also in the form the store saves a value in, on a Shopify product run only.
+  const savedForm = ledger.comparedInSavedForm(runId);
   const pending = ledger.listPending(runId);
   const deadline = now() + Math.max(MIN_RUN_BUDGET_MS, pending.length * BULK_TARGET_BUDGET_MS);
   let consecutive = 0;
@@ -407,14 +423,16 @@ async function applyRunEffect(
     try {
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
-      if (cur !== 'foreign' && sameImage(cur, t.after, htmlFields)) {
+      if (cur !== 'foreign' && (sameImage(cur, t.after, htmlFields) || (savedForm && sameInSavedForm(cur, t.after, htmlFields)))) {
         // Found as planned: either a loop of this run wrote it and died before recording it
         // (the target is marked sent), or someone else set the value, and the run sends
         // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
         // also what an undo must expect.
         // Found only under the HTML comparison: the store holds the planned description in its own
-        // form — counted like a read-back stored otherwise than sent.
-        const rewritten = htmlFields.length > 0 && !sameImage(cur, t.after);
+        // form — counted like a read-back stored otherwise than sent. A title or SEO title the store
+        // saved in its measured form is no description and not counted; neither is HTML, so that
+        // comparison runs without the HTML fields.
+        const rewritten = htmlFields.length > 0 && !sameImage(cur, t.after) && !(savedForm && sameInSavedForm(cur, t.after));
         return {
           kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null,
           ...(rewritten ? { hostRewrote: true as const } : {}),

@@ -728,6 +728,22 @@ export const MISTRAL_SERVED_AS: Readonly<Record<string, string>> = Object.freeze
   'magistral-small-latest': 'mistral-small-2603',
 });
 
+/**
+ * Mistral bills its regional endpoints at list price plus 10 % on every token rate (pricing page,
+ * docs.mistral.ai/inference/pricing: "REGIONAL INFERENCE (+10%)", read 2026-09-22), and every
+ * Mistral call lynox makes goes to the EU one (`MISTRAL_API_BASE`). The Mistral entries below keep
+ * the list price as the model cards publish it; {@link mistralEuPricing} puts the factor on top, so
+ * the cost cap counts what the EU endpoint bills.
+ */
+export const MISTRAL_EU_PRICE_FACTOR = 1.1;
+
+/** A Mistral list price as the EU endpoint bills it: every rate × {@link MISTRAL_EU_PRICE_FACTOR}. */
+export function mistralEuPricing(list: ModelPricing): ModelPricing {
+  // Rounded to a millionth of a dollar per million tokens, so 0.10 × 1.1 is 0.11, not 0.11000000000000001.
+  const eu = (rate: number): number => Math.round(rate * MISTRAL_EU_PRICE_FACTOR * 1e6) / 1e6;
+  return { input: eu(list.input), output: eu(list.output), cacheWrite: eu(list.cacheWrite), cacheRead: eu(list.cacheRead) };
+}
+
 export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // Claude Opus 5.5 — candidate for the deep slot (not wired to any preset or tier
   // here; this is the entry the switch needs so it is priced and shaped, not the
@@ -974,6 +990,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'Claude Haiku 4.5',
   },
   // === Mistral tier-set (eu-sovereign managed via openai-compat) ===
+  // Every Mistral price below is the list price, billed through mistralEuPricing (EU endpoint, +10 %).
   // cacheRead = 10% of input per Mistral pricing docs (2026-05-24).
   // Mistral exposes `prompt_cache_key` opt-in; cached input billed at 10%.
   // Cache-write is implicit (no separate billing field per Mistral terms).
@@ -990,7 +1007,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_GEN3,
-    pricing: { input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.010 },
+    pricing: mistralEuPricing({ input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.010 }),
     uiLabel: 'Ministral 3B',
   },
   'ministral-8b-2512': {
@@ -1002,7 +1019,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_GEN3,
-    pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 },
+    pricing: mistralEuPricing({ input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 }),
     uiLabel: 'Ministral 8B',
     provenance: 'EU',
   },
@@ -1018,7 +1035,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_GEN3,
-    pricing: { input: 0.20, output: 0.20, cacheWrite: 0.20, cacheRead: 0.02 },
+    pricing: mistralEuPricing({ input: 0.20, output: 0.20, cacheWrite: 0.20, cacheRead: 0.02 }),
     uiLabel: 'Ministral 14B',
     provenance: 'EU',
   },
@@ -1035,7 +1052,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 10,
     betaHeaders: [],
     features: MISTRAL_FEATURES_GEN3,
-    pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.05 },
+    pricing: mistralEuPricing({ input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.05 }),
     uiLabel: 'Mistral Large 3',
     // Was MISSING until 2026-08-10, and it mattered: eu-sovereign pins this model,
     // and `buildTierPresetSignal` omits the key when undefined — so the one preset
@@ -1075,7 +1092,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.15, output: 0.60, cacheWrite: 0.15, cacheRead: 0.15 },
+    pricing: mistralEuPricing({ input: 0.15, output: 0.60, cacheWrite: 0.15, cacheRead: 0.15 }),
     uiLabel: 'Mistral Small 4',
   },
   'ministral-8b-2410': {
@@ -1087,7 +1104,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 },
+    pricing: mistralEuPricing({ input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 }),
     uiLabel: 'Ministral 8B',
   },
   'ministral-3b-2410': {
@@ -1099,7 +1116,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.010 },
+    pricing: mistralEuPricing({ input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.010 }),
     uiLabel: 'Ministral 3B',
   },
   'open-mistral-nemo': {
@@ -1111,7 +1128,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 },
+    pricing: mistralEuPricing({ input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 }),
     uiLabel: 'Mistral Nemo',
   },
   'mistral-medium-2508': {
@@ -1123,7 +1140,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 10,
     betaHeaders: [],
     features: MISTRAL_FEATURES_LARGE,
-    pricing: { input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 },
+    pricing: mistralEuPricing({ input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 }),
     uiLabel: 'Mistral Medium 3.1',
   },
   // Mistral Medium 3.5 (2604) — model-presets candidate (Mistral standard-deep /
@@ -1146,7 +1163,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 10,
     betaHeaders: [],
     features: MISTRAL_FEATURES_GEN3,
-    pricing: { input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 },
+    pricing: mistralEuPricing({ input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 }),
     uiLabel: 'Mistral Medium 3.5',
     provenance: 'EU',
   },
@@ -1159,7 +1176,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 10,
     betaHeaders: [],
     features: MISTRAL_FEATURES_LARGE,
-    pricing: { input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 },
+    pricing: mistralEuPricing({ input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 }),
     uiLabel: 'Mistral Medium (latest)',
   },
   'codestral-2508': {
@@ -1171,7 +1188,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 10,
     betaHeaders: [],
     features: MISTRAL_FEATURES_LARGE,
-    pricing: { input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 },
+    pricing: mistralEuPricing({ input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 }),
     uiLabel: 'Codestral',
   },
   'codestral-latest': {
@@ -1183,7 +1200,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 10,
     betaHeaders: [],
     features: MISTRAL_FEATURES_LARGE,
-    pricing: { input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 },
+    pricing: mistralEuPricing({ input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 }),
     uiLabel: 'Codestral (latest)',
   },
 
@@ -1196,7 +1213,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.15, output: 0.60, cacheWrite: 0.15, cacheRead: 0.15 },
+    pricing: mistralEuPricing({ input: 0.15, output: 0.60, cacheWrite: 0.15, cacheRead: 0.15 }),
     uiLabel: 'Magistral Small (latest)',
   },
   // === Fireworks-hosted (openai-compat) — preset slots + picker candidates ===

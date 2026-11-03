@@ -34,6 +34,7 @@ import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission
 import { verdictTextRefusal } from './bulk-judge.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { shopifyBulkReadEnabled, shopifyListPage, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
+import { productTitleOf } from './shopify-saved-form.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, externalHostOf,
@@ -245,7 +246,8 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         const after = shopifyPairedAfter(target.after, image.value);
         const markup = planMarkupRefusal(after, image.value, list, host, ledger.startDomainsOf(runId));
         if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
-        else ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after);
+        else ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after,
+          shopifyForm === 'shopify_media_alt' ? undefined : productTitleOf(image.value));
       }
       consecutive = 0;
       continue;

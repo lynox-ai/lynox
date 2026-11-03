@@ -437,4 +437,15 @@ describe('a WooCommerce description keeps today\'s comparison (§21.4, N5)', () 
     expect(w.sent).toEqual([]);
     expect(ledger.getStatus(id)).toMatchObject({ applied: 0, conflicts: 1 });
   });
+
+  it('compares nothing in a store\'s saved form: a title kept trimmed is a conflict, as before', async () => {
+    const id = approvedRun({ title: 'Neu ', seo_title: 'Neu' }, [{ title: 'Alt', seo_title: 'Alt' }]);
+    expect(ledger.comparedInSavedForm(id)).toBe(false);
+    // What a Shopify store would keep of it; measured there only, so not this store's form.
+    const store = new Map<string, Record<string, unknown>>([[`${LIST}/1`, { title: 'Neu', seo_title: null }]]);
+    const w = stubWriter(store);
+    await run(id, w);
+    expect(w.sent).toEqual([]);
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 0, conflicts: 1 });
+  });
 });
