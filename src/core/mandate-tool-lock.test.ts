@@ -14,6 +14,7 @@ import { createMailTriageTool } from '../integrations/mail/tools/mail-triage.js'
 import { createMailSendTool } from '../integrations/mail/tools/mail-send.js';
 import { createMailReplyTool } from '../integrations/mail/tools/mail-reply.js';
 import { createMailConnectTool } from '../integrations/mail/tools/mail-connect.js';
+import { createInboxReadTool } from '../integrations/mail/tools/inbox-read.js';
 import { createSheetsTool } from '../integrations/google/google-sheets.js';
 import { createDocsTool } from '../integrations/google/google-docs.js';
 import { createDriveTool } from '../integrations/google/google-drive.js';
@@ -151,7 +152,7 @@ describe('Engine boot — every tool a mandate may use is placed for what it rea
     const provider = { name: 'test', search: async () => [] } as unknown as SearchProvider;
     const integrations = [
       createMailReadTool(mail), createMailSearchTool(mail), createMailTriageTool(mail), createMailSendTool(mail),
-      createMailReplyTool(mail), createMailConnectTool(),
+      createMailReplyTool(mail), createMailConnectTool(), createInboxReadTool(),
       createSheetsTool(noAuth), createDocsTool(noAuth), createDriveTool(noAuth), createCalendarTool(noAuth),
       createWebSearchTool(provider), calendarReadTool,
     ] as unknown as Array<ToolEntry<never>>;

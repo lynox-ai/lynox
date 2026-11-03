@@ -391,9 +391,10 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     process.env['MISTRAL_API_KEY'] = 'sk-mistral-test';
     const engine = new Engine({ model: 'balanced' });
     const oldLookup = vi.fn(() => null);
-    const usRuntime = { ...makeRuntime('us-runtime'), inboxLabelOf: oldLookup };
-    const euRuntime = { ...makeRuntime('eu-runtime'), inboxLabelOf: vi.fn(() => null) };
-    const fakeMailContext = { hooks: { inboxLabelOf: oldLookup } as { inboxLabelOf?: unknown } };
+    const oldReader = { __reader: 'us' };
+    const usRuntime = { ...makeRuntime('us-runtime'), inboxLabelOf: oldLookup, inboxReader: oldReader };
+    const euRuntime = { ...makeRuntime('eu-runtime'), inboxLabelOf: vi.fn(() => null), inboxReader: { __reader: 'eu' } };
+    const fakeMailContext = { hooks: { inboxLabelOf: oldLookup, inboxReader: oldReader } as { inboxLabelOf?: unknown; inboxReader?: unknown } };
     const handle = engine as unknown as {
       _inboxRuntime: unknown; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
       _inboxRebootstrapInflight: Promise<void> | null; _mailContext: typeof fakeMailContext | null;
@@ -410,6 +411,8 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     if (handle._inboxRebootstrapInflight) await handle._inboxRebootstrapInflight;
     expect(usRuntime.shutdown).toHaveBeenCalledTimes(1);
     expect(fakeMailContext.hooks.inboxLabelOf).toBe(euRuntime.inboxLabelOf);
+    // inbox_read reads the fresh runtime's store, not the disposed one.
+    expect(fakeMailContext.hooks.inboxReader).toBe(euRuntime.inboxReader);
   });
 
   /**

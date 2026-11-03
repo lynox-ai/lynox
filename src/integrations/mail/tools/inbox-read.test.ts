@@ -6,6 +6,8 @@ import { bootstrapInbox, type InboxRuntime } from '../../inbox/bootstrap.js';
 import { handleGetCounts, type InboxApiDeps } from '../../inbox/api.js';
 import type { MailHooks } from '../context.js';
 import { createInboxReadTool, INBOX_OFF, INBOX_READ_LIMITS } from './inbox-read.js';
+import { createMailTools } from './index.js';
+import { InMemoryMailRegistry } from './registry.js';
 
 // A one-time code the sensitive-content check recognises (keyword + digit run).
 const OTP_TEXT = 'Ihr Bestätigungscode lautet 482913';
@@ -175,5 +177,20 @@ describe('inbox_read — a run nobody watches (F6)', () => {
     const secret = item({ accountId: 'acct-secret', subject: 'Geheim' });
     expect(await call({ action: 'counts' }, watched)).toContain('- requires_user: 1');
     expect(await call({ action: 'item', id: secret }, watched)).toContain('Subject: Geheim');
+  });
+});
+
+describe('inbox_read — behind its flag', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('is among the mail tools only with LYNOX_FEATURE_INBOX_READ on, and reads the hooks it is built with', async () => {
+    const names = (): string[] => createMailTools(new InMemoryMailRegistry(), { hooks } as never).map((t) => t.definition.name);
+    vi.stubEnv('LYNOX_FEATURE_INBOX_READ', '');
+    expect(names()).not.toContain('inbox_read');
+    vi.stubEnv('LYNOX_FEATURE_INBOX_READ', '1');
+    expect(names()).toContain('inbox_read');
+    item({ subject: 'Über die Hooks' });
+    const tool = createMailTools(new InMemoryMailRegistry(), { hooks } as never).find((t) => t.definition.name === 'inbox_read')!;
+    expect(await tool.handler({ action: 'list', bucket: 'requires_user' }, watched)).toContain('Subject: Über die Hooks');
   });
 });
