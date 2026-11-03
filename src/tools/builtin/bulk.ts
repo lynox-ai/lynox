@@ -50,6 +50,13 @@ function formatUsd(usd: number, round: 'down' | 'nearest' = 'nearest'): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+/** What the model reads when a target is left out for `shortcode_changed` (1130, U-103): the way
+ *  out, not only the diagnosis. */
+export const SHORTCODE_CHANGED_NOTE = 'shortcode_changed: the new text has a [shortcode] whose attributes or content contain &, < or >; ' +
+  'writing it would change those characters and the shop might read the shortcode differently. Writing them as ' +
+  'references such as &amp; does not help: the shop reads those literally. Plan the value again without these ' +
+  'characters inside the shortcode, or leave this field to the owner to change in the shop.';
+
 export function formatStatus(s: BulkRunStatus): string {
   const invalid = Object.entries(s.invalidReasons).map(([r, n]) => `${r} ${String(n)}`).join(', ');
   const lines = [
@@ -66,11 +73,7 @@ export function formatStatus(s: BulkRunStatus): string {
       'an email to a customer, a payment, or a change of someone\'s access or data. A bulk run never writes ' +
       'such a field: leave it out, or make that change in the provider\'s own interface.');
   }
-  if ((s.invalidReasons.shortcode_changed ?? 0) > 0) {
-    lines.push('shortcode_changed: the new text has a [shortcode] whose attributes or content contain &, < or >; ' +
-      'writing it would change those characters and the shop might read the shortcode differently. Plan the value ' +
-      'again without these characters inside the shortcode, or leave this field to the owner to change in the shop.');
-  }
+  if ((s.invalidReasons.shortcode_changed ?? 0) > 0) lines.push(SHORTCODE_CHANGED_NOTE);
   if (s.judge !== null) {
     lines.push(`A model decides each target's new values with the run's rule: ` +
       `${String(judgedTargets(s))} judged, ${String(s.judge.unjudged)} target(s) without a verdict yet. The verdicts are only in the run's ledger, for the user to review.`);

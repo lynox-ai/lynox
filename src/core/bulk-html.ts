@@ -325,6 +325,26 @@ export function shortcodeChangedBy(value: string, canonical: string): string | n
   return null;
 }
 
+/** A character reference: `&amp;`, `&#38;`, `&#x26;`, `&nbsp;`. */
+const CHAR_REFERENCE = /&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#[xX][0-9A-Fa-f]+);/;
+
+/**
+ * The first shortcode text of a value that spells a character as a reference and that the
+ * before-image does not hold as often, or null. The shop's server reads `&amp;` in a shortcode as
+ * the five characters, not as `&`: writing the reference by hand changes the shortcode as the
+ * canonical form would. A shortcode the field already holds, references and all, is the owner's own.
+ */
+export function shortcodeReferenceNotHeld(value: string, before: string): string | null {
+  const held = counts(shortcodeTextOf(before));
+  for (const text of shortcodeTextOf(value)) {
+    if (!CHAR_REFERENCE.test(text)) continue;
+    const n = held.get(text) ?? 0;
+    if (n === 0) return text;
+    held.set(text, n - 1);
+  }
+  return null;
+}
+
 /** Whether a verdict's or a plan's value for an HTML field adds markup the owner does not read. */
 export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
   try {
@@ -344,6 +364,10 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
       return refused('shortcode_changed', `Writing would change the shortcode text: ${changed}`);
     }
     const before = input.before ?? '';
+    const spelled = shortcodeReferenceNotHeld(input.after, before);
+    if (spelled !== null) {
+      return refused('shortcode_changed', `The shortcode spells a character as a reference the shop reads literally: ${spelled}`);
+    }
     // What the fragment drops, a multiset against the before-image's own, byte for byte. A stretch
     // the before-image does not hold as often is refused: it is the value's own, and the owner
     // never reads it. One it holds is passed, attributed or not, because it never reaches the shop:

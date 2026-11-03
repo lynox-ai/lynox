@@ -131,11 +131,25 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
 
   it('passes a shortcode the canonical form keeps, and HTML tags that read the same inside one', () => {
     expect(check('<p>[product_page id="99"]</p>')).toEqual({ ok: true });
-    expect(check('[button url="/a?x=1&amp;y=2"]Kaufen[/button]')).toEqual({ ok: true });
+    // A shortcode the field already holds, references and all, is the owner's own.
+    const own = '[button url="/a?x=1&amp;y=2"]Kaufen[/button]';
+    expect(check(`<p>neu</p>${own}`, own)).toEqual({ ok: true });
     // `<br/>` becomes `<br>` inside the pair: the enclosed text reads the same.
     expect(check('[note]a<br/>b[/note]')).toEqual({ ok: true });
     // CONTROL: an & outside any shortcode is HTML text, and becomes &amp; harmlessly.
     expect(check('<p>Salz & Pfeffer</p>')).toEqual({ ok: true });
+  });
+
+  it('refuses a character reference written into a shortcode by hand, which the shop reads literally', () => {
+    expect(check('[button url="/a?x=1&amp;y=2"]Kaufen[/button]')).toEqual({ ok: false, reason: 'shortcode_changed',
+      detail: 'The shortcode spells a character as a reference the shop reads literally: [button url="/a?x=1&amp;y=2"]' });
+    expect(check('[x a="1&#38;2"]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+    expect(check('[embed]a&#x26;b[/embed]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+    // Held once, written twice: the second copy is the value's own.
+    const own = '[x a="1&amp;2"]';
+    expect(check(`${own}${own}`, own)).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+    // CONTROL: a reference in HTML text outside any shortcode is ordinary HTML.
+    expect(check('<p>Salz &amp; Pfeffer</p>')).toEqual({ ok: true });
   });
 
   it('refuses no field the run leaves as it is, though its shortcode carries an &', () => {
@@ -156,7 +170,8 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     const status = ledger.getStatus(id)!;
     expect(status.invalidReasons).toEqual({ shortcode_changed: 1 });
     expect(formatStatus(status)).toContain('shortcode_changed: the new text has a [shortcode] whose attributes or content contain &, < or >; '
-      + 'writing it would change those characters and the shop might read the shortcode differently. Plan the value again without '
+      + 'writing it would change those characters and the shop might read the shortcode differently. Writing them as references '
+      + 'such as &amp; does not help: the shop reads those literally. Plan the value again without '
       + 'these characters inside the shortcode, or leave this field to the owner to change in the shop.');
   });
 });
