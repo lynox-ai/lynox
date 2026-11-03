@@ -827,6 +827,21 @@ export function moveMistralEndpointsToEu(update: {
   }
 }
 
+/**
+ * An endpoint as a refusal may quote it: scheme, host and path. What stands between the scheme
+ * and the last `@` (credentials), and from the first `?` or `#` on (a key in the query, a
+ * fragment), is dropped, and so are control and line-separator characters. A tier slot's
+ * `api_base_url` is any string, so this does not assume a parseable URL. A path holding an `@`
+ * loses its host as well: that cuts too much, never too little.
+ */
+export function endpointForMessage(value: string): string {
+  const withoutQuery = value.replace(/[?#][^]*$/, '');
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(withoutQuery)?.[0] ?? '';
+  const rest = withoutQuery.slice(scheme.length);
+  const afterCredentials = rest.slice(rest.lastIndexOf('@') + 1);
+  return `${scheme}${afterCredentials}`.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
+}
+
 function enforceManagedProviderConstraints(
   update: Record<string, unknown>,
   // Model blocklist (`blocked_model_ids`, env LYNOX_BLOCKED_MODEL_IDS) — the
@@ -858,7 +873,7 @@ function enforceManagedProviderConstraints(
     if (provider === 'openai') {
       const baseUrl = update['api_base_url'];
       if (typeof baseUrl !== 'string' || !MANAGED_OPENAI_MISTRAL_HOSTS.has(baseUrl)) {
-        return `Managed instance: provider 'openai' is only allowed with the curated Mistral preset api_base_url; got '${String(baseUrl)}'.`;
+        return `Managed instance: provider 'openai' is only allowed with the curated Mistral preset api_base_url; got '${typeof baseUrl === 'string' ? endpointForMessage(baseUrl) : String(baseUrl)}'.`;
       }
     }
   }
@@ -871,7 +886,7 @@ function enforceManagedProviderConstraints(
   if ('api_base_url' in update) {
     const baseUrl = update['api_base_url'];
     if (typeof baseUrl === 'string' && baseUrl.length > 0 && !MANAGED_CURATED_HOSTS.has(baseUrl)) {
-      return `Managed instance: cannot set api_base_url to '${baseUrl}' — only the curated Anthropic/Mistral endpoints are allowed.`;
+      return `Managed instance: cannot set api_base_url to '${endpointForMessage(baseUrl)}' — only the curated Anthropic/Mistral endpoints are allowed.`;
     }
     // The pair counts, not the host alone: a Mistral URL beside the Anthropic provider would
     // send the pool's Anthropic key to Mistral, and the reverse. Checked against the provider
@@ -879,7 +894,7 @@ function enforceManagedProviderConstraints(
     // on each save, and the loader already drops an unpaired one (`poolEndpointFor`).
     const provider = typeof update['provider'] === 'string' ? update['provider'] : stored.provider;
     if (typeof baseUrl === 'string' && baseUrl.length > 0 && baseUrl !== stored.api_base_url && poolEndpointFor(provider, baseUrl) !== baseUrl) {
-      return `Managed instance: api_base_url '${baseUrl}' does not belong to provider '${provider ?? 'anthropic'}'.`;
+      return `Managed instance: api_base_url '${endpointForMessage(baseUrl)}' does not belong to provider '${provider ?? 'anthropic'}'.`;
     }
   }
   // 3. tier_set (hybrid routing) carries a per-slot api_base_url — the SAME
@@ -895,7 +910,7 @@ function enforceManagedProviderConstraints(
       if (!slot || typeof slot !== 'object') continue;
       const slotUrl = (slot as Record<string, unknown>)['api_base_url'];
       if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
-        return `Managed instance: tier_set slot '${tier}' api_base_url '${slotUrl}' is not a curated Anthropic/Mistral endpoint.`;
+        return `Managed instance: tier_set slot '${tier}' api_base_url '${endpointForMessage(slotUrl)}' is not a curated Anthropic/Mistral endpoint.`;
       }
       // Model blocklist: reject a slot naming a blocked model honestly at write
       // time — the loader would drop it in-memory and silently reroute the tier
@@ -933,7 +948,7 @@ function enforceManagedProviderConstraints(
     for (const [tier, slot] of Object.entries(expanded.tier_set)) {
       const slotUrl = slot?.api_base_url;
       if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
-        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${slotUrl}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
+        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${endpointForMessage(slotUrl)}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
       }
       // Model blocklist: a preset whose expanded slot names a blocked model is
       // rejected honestly (never advertised, then silently rerouted at load).
