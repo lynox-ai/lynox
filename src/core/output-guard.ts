@@ -203,7 +203,10 @@ export function briefingInjection(briefing: string, ownBlocks: readonly string[]
   let cursor = 0;
   for (const f of located) {
     region += briefing.slice(cursor, f.at);
-    const start = region.length;
+    // The range starts after the opening tag: the wrap's scan and its mark cover the body, not
+    // the source label in the tag.
+    const opener = f.block.indexOf('\n');
+    const start = region.length + (opener < 0 ? 0 : opener + 1);
     region += briefing.slice(f.at, f.stop - OWN_CLOSER.length) + '\n';
     ranges.push({ start, end: region.length, block: f.block });
     cursor = f.stop;

@@ -635,11 +635,25 @@ export function detectInjectionAcross(parts: readonly string[]): InjectionResult
 
 const BLOCK_INJECTION_MARK = '⚠ WARNING: This content contains text that resembles prompt injection';
 
-/** Whether a block {@link wrapUntrustedData} produced carries its injection warning: the line
- *  right after the opening tag, which the wrap writes when its own scan flagged the body. */
+/**
+ * Whether a block {@link wrapUntrustedData} produced carries its injection warning: the line
+ * right after the opening tag, which the wrap writes when its own scan flagged the body.
+ *
+ * The line alone does not prove it: an unflagged block starts its body right there, so a body
+ * whose first line copies the warning's wording looks the same. The text after that line must
+ * therefore hold a hit itself. A flagged body passes: the wrap found a hit in it, and the
+ * neutralising of boundary tags does not take one away that this scan needs (an escaped closer
+ * still reads as a boundary escape). A copied line over clean text fails. Errs towards "not
+ * marked", which warns the whole briefing.
+ */
 export function blockCarriesInjectionMark(block: string): boolean {
   const opener = block.indexOf('\n');
-  return opener >= 0 && block.startsWith(BLOCK_INJECTION_MARK, opener + 1);
+  if (opener < 0 || !block.startsWith(BLOCK_INJECTION_MARK, opener + 1)) return false;
+  const afterMark = block.indexOf('\n', opener + 1);
+  if (afterMark < 0) return false;
+  const closer = block.lastIndexOf('\n</untrusted_data>');
+  const body = block.slice(afterMark + 1, closer > afterMark ? closer : block.length);
+  return detectInjectionAttempt(body).detected;
 }
 
 export function wrapUntrustedData(
