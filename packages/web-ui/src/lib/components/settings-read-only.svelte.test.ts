@@ -268,7 +268,8 @@ describe('VoiceSettings', () => {
 		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('voice.save'));
 		expect(rows()).toEqual([
-			line(t('voice.stt_heading'), 'Mistral Voxtral (EU endpoint)'),
+			// The server names Mistral in English; the page shows it in the UI language (de here).
+			line(t('voice.stt_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
 			line(t('voice.tts_heading'), 'Auto'),
 			line(t('voice.tts_voice'), 'paul (de)'),
 		]);

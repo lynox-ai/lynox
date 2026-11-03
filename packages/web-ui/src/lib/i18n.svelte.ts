@@ -221,6 +221,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'voice.tts_voice':     { de: 'Stimme',                                                           en: 'Voice' },
 	'voice.tts_voice_hint': { de: 'Die gewählte Stimme wird für jede Sprache verwendet.',             en: 'The chosen voice is used for every language.' },
 	'voice.default':       { de: 'Standard',                                                         en: 'Default' },
+	'voice.provider_mistral': { de: 'Mistral Voxtral (EU-Endpunkt)', en: 'Mistral Voxtral (EU endpoint)' },
 	'voice.unavailable':   { de: 'nicht verfügbar',                                                  en: 'unavailable' },
 	// ux U-074: an instance connected to a Shopify store sends no text to a speech service.
 	'voice.tts_off_shopify': { de: 'Auf Instanzen mit Shopify-Anbindung schickt lynox keinen Text an einen Sprachdienst. Vorlesen ist hier deshalb aus.', en: 'On instances connected to Shopify, lynox sends no text to a speech service, so reading aloud is off here.' },
