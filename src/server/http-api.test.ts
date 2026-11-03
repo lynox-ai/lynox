@@ -14789,7 +14789,11 @@ describe('LynoxHTTPApi', () => {
           expect(shielded).toContain("api_base_url 'h.example/v1' is not a curated");
           const lookalike = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'u:SECRET\uFF20h.example/v1' } } });
           expect(lookalike).toContain("api_base_url 'h.example/v1' is not a curated");
-          for (const error of [top, paired, slot, shielded, lookalike]) expect(error).not.toContain('SECRET');
+          const encoded = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'u:SECRET%40h.example/v1' } } });
+          expect(encoded).toContain("api_base_url 'h.example/v1' is not a curated");
+          for (const error of [top, paired, slot, shielded, lookalike, encoded]) expect(error).not.toContain('SECRET');
+          // An `@` in the query of a parseable URL is not a credential: the host stays.
+          expect(await refusal({ api_base_url: 'https://h.example/v1?next=a@b.example' })).toContain("cannot set api_base_url to 'https://h.example/v1'");
           // The other way: a curated endpoint is saved as it was entered.
           const MISTRAL = 'https://api.eu.mistral.ai/v1';
           const saved = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ provider: 'openai', api_base_url: MISTRAL, openai_model_id: 'mistral-medium-2604' }) });

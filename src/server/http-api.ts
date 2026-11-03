@@ -828,20 +828,25 @@ export function moveMistralEndpointsToEu(update: {
 }
 
 /**
- * An endpoint as a refusal may quote it: scheme, host and path. First everything between the
- * scheme and the last `@` (or a full-width or small `@`, which a reader takes for one) is dropped,
- * so a `?` or `#` inside a password cannot shield the credentials; then everything from the first
- * `?` or `#` (a key in the query, a fragment); then control and line-separator characters. A tier
- * slot's `api_base_url` is any string, so this does not assume a parseable URL. A path holding an
- * `@` loses its host as well: that cuts too much, never too little.
+ * An endpoint as a refusal may quote it: scheme, host and path, never credentials, a query or a
+ * fragment. A value the URL parser reads with a host is rebuilt from what it parsed, so an `@` in
+ * the query or path stays where it belongs. Anything else (a tier slot's `api_base_url` is any
+ * string) is cut by hand: first everything between the scheme and the last `@` (or `%40`, or a
+ * full-width or small `@`, which a reader takes for one), so a `?` or `#` inside a password cannot shield it;
+ * then everything from the first `?` or `#`. A path holding an `@` loses its host there as well:
+ * that cuts too much, never too little. Control and line-separator characters are dropped.
  */
 export function endpointForMessage(value: string): string {
+  const clean = (s: string): string => s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
+  if (URL.canParse(value)) {
+    const url = new URL(value);
+    if (url.host !== '') return clean(`${url.protocol}//${url.host}${url.pathname}`);
+  }
   const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(value)?.[0] ?? '';
   const rest = value.slice(scheme.length);
-  let cut = -1;
-  for (const m of rest.matchAll(/[@\uFF20\uFE6B]/g)) cut = m.index;
-  const afterCredentials = rest.slice(cut + 1).replace(/[?#][^]*$/, '');
-  return `${scheme}${afterCredentials}`.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
+  let cut = 0;
+  for (const m of rest.matchAll(/[@\uFF20\uFE6B]|%40/gi)) cut = m.index + m[0].length;
+  return clean(`${scheme}${rest.slice(cut).replace(/[?#][^]*$/, '')}`);
 }
 
 function enforceManagedProviderConstraints(
