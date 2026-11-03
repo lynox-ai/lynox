@@ -377,10 +377,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     countByBucket: (exclude) => state.countItemsByBucket(readerTenant, exclude),
     listItems: (bucket, limit, offset, exclude) =>
       state.listOpenItems({ tenantId: readerTenant, bucket, limit, offset, excludeAccounts: exclude }),
-    getItem: (id) => {
-      const item = state.getItem(id);
-      return item !== null && item.tenantId === readerTenant ? item : null;
-    },
+    getItem: (id) => state.getItem(id, readerTenant),
     bodyOf: (item) => {
       const tm = item.messageId !== undefined && item.messageId.length > 0
         ? state.getThreadMessageByMessageId(item.accountId, item.messageId, item.tenantId)
@@ -398,9 +395,6 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
         const cats = (payload as { sensitive_categories?: unknown } | null)?.sensitive_categories;
         if (Array.isArray(cats)) for (const c of cats) if (typeof c === 'string' && c.length > 0) found.add(c);
       }
-      // The skip path files the item under this version; its audit names the categories, but
-      // the version alone already says the mail was sensitive.
-      if (found.size === 0 && item.classifierVersion === 'sensitive-prefilter') found.add('sensitive');
       return [...found];
     },
     disabledAccounts: disabledAccounts ?? new Set<string>(),

@@ -244,6 +244,25 @@ describe('inbox_read — what the inbox found at intake counts (B1)', () => {
   });
 });
 
+describe('inbox_read — the intake finding reaches the stored copy of the same mail', () => {
+  it('withholds the thread copy stored with the item, after a backfill gave the item another message id', async () => {
+    const LINK = 'https://app.example.com/auth?t=Zq81xP0aLm';
+    const id = runtime.state.insertItemWithAudit(
+      { accountId: 'acct-1', channel: 'email', threadKey: 't-bf', bucket: 'requires_user', confidence: 0,
+        reasonDe: 'Sensible Inhalte — manuell prüfen.', classifiedAt: new Date(), classifierVersion: 'sensitive-prefilter',
+        subject: 'Ihr Zugang', messageId: '<new@x>', fromAddress: 'noreply@app.example.com' },
+      { action: 'classified', actor: 'rule_engine', payloadJson: JSON.stringify({ sensitive_categories: ['password_reset'], sensitive_mode: 'skip' }) },
+    );
+    runtime.state.insertThreadMessage({
+      accountId: 'acct-1', threadKey: 't-bf', messageId: '<old@x>', fromAddress: 'noreply@app.example.com',
+      subject: 'Ihr Zugang', snippet: `Hier: ${LINK}`, inboxItemId: id,
+    } as Parameters<InboxRuntime['state']['insertThreadMessage']>[0]);
+    const out = await call({ action: 'item', id });
+    expect(out).toContain('Other stored messages of the thread, newest first (1):');
+    expect(out).not.toContain(LINK);
+  });
+});
+
 describe('inbox_read — a worker run nobody watches has a promptUser (B2)', () => {
   beforeEach(async () => {
     await runtime.shutdown();
@@ -284,9 +303,15 @@ describe('inbox_read — reading edges', () => {
     expect((await call({ action: 'list', bucket: 'requires_user', limit: Number.NaN })).match(/^id:/gm)?.length).toBe(10);
   });
 
-  it('does not open another tenant\'s item', async () => {
+  it('reads the items of its own tenant, and not another tenant\'s', async () => {
     const other = item({ tenantId: 'other-tenant', subject: 'Fremd' });
     expect(await call({ action: 'item', id: other })).toBe('inbox_read: no inbox item with this id.');
+    // A runtime of another tenant reads that tenant's item by id.
+    await runtime.shutdown();
+    const client = { messages: { create: vi.fn() } } as unknown as Anthropic;
+    runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, tenantId: 'other-tenant' });
+    hooks = { inboxReader: runtime.inboxReader };
+    expect(await call({ action: 'item', id: other })).toContain('Subject: Fremd');
   });
 
   it('shows the item\'s own message once, and the body from the older body store when no thread copy has one', async () => {
