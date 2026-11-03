@@ -41,6 +41,10 @@ import type { ToolEntry } from '../../src/types/index.js';
 import { HAIKU } from './setup.js';
 
 const RUNS = Number(process.env['GRAPHQL_RUNS'] ?? 3);
+/** GRAPHQL_PAGE_BASELINE=404: the article read fails as an ordinary unreadable page (HTTP 404)
+ *  instead of the refusal, page case only. A comparison: is what a model invents after the
+ *  refusal (a reason, a summary of the unread page) there after any failed read as well? */
+const BASELINE_404 = process.env['GRAPHQL_PAGE_BASELINE'] === '404';
 
 type Case = 'page' | 'run';
 
@@ -78,7 +82,7 @@ function webFor(calls: Call[]): ToolEntry {
       calls.push({ tool: 'web_research', method: String(i['action'] ?? ''), url });
       if (i['action'] !== 'read') return 'No results found.';
       let refusal: string | null = null;
-      if (url === ARTICLE) refusal = `Blocked: redirect to ${ENDPOINT} ${GRAPHQL_PAGE_READ_REFUSAL}`;
+      if (url === ARTICLE && !BASELINE_404) refusal = `Blocked: redirect to ${ENDPOINT} ${GRAPHQL_PAGE_READ_REFUSAL}`;
       else if (url.startsWith(ENDPOINT)) refusal = `Blocked: ${ENDPOINT} ${GRAPHQL_PAGE_READ_REFUSAL}`;
       const message = refusal === null ? 'Failed to read URL: HTTP 404 Not Found' : `Failed to read URL: ${refusal}`;
       throw new ToolSoftFailure(message, message.slice(0, 200));
@@ -191,7 +195,7 @@ async function runOne(provider: string, kase: Case, make: (tools: ToolEntry[]) =
 }
 
 const runs = Array.from({ length: RUNS }, (_, i) => ({ i, label: `run #${String(i)}` }));
-const cases: Case[] = ['page', 'run'];
+const cases: Case[] = BASELINE_404 ? ['page'] : ['page', 'run'];
 const base = { maxIterations: 6, systemPrompt: SYSTEM_PROMPT, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
