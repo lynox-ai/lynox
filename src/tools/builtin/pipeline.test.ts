@@ -3119,6 +3119,48 @@ describe('a stored workflow run from a chat follows its author: retry, log, ways
     expect(runRows(clean.recs).map((r) => targetPairs(r.target).get('outcome') ?? null)).toEqual([null, 'success']);
   });
 
+  it('a retry the owner started says so in the log, and ends failed when a member connection was refused in it', async () => {
+    const { noteMemberConnection, MEMBER_CONNECTION_PREFIX } = await import('../../core/member-connection-notes.js');
+    const id = seed();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, agentAs(OWNER_PRINCIPAL, () => madeBy(A)).agent);
+    mockRetryManifest.mockImplementationOnce(async () => { noteMemberConnection(`${MEMBER_CONNECTION_PREFIX} a@example.invalid set up this connection`); return makeRunState(); });
+    const refused = agentAs(OWNER_PRINCIPAL, () => madeBy(A));
+    expect(await runWorkflowTool.handler({ workflow_id: id, retry: true }, refused.agent)).not.toMatch(/^Error/);
+    expect(runRows(refused.recs).map((r) => [targetPairs(r.target).get('started') ?? null, targetPairs(r.target).get('by') ?? null, targetPairs(r.target).get('outcome') ?? null]))
+      .toEqual([['hand', 'owner', null], ['hand', 'owner', 'failed']]);
+    // CONTROL: the same retry without the refusal ends success.
+    mockRetryManifest.mockResolvedValueOnce(makeRunState());
+    const clean = agentAs(OWNER_PRINCIPAL, () => madeBy(A));
+    await runWorkflowTool.handler({ workflow_id: id, retry: true }, clean.agent);
+    expect(runRows(clean.recs).map((r) => targetPairs(r.target).get('outcome') ?? null)).toEqual([null, 'success']);
+  });
+
+  it('inside a run that collects (the owner\'s session in the worker): each run counts its own refusals, a repeat too, and passes them on', async () => {
+    const { noteMemberConnection, runCollectingMemberNotes, MEMBER_CONNECTION_PREFIX } = await import('../../core/member-connection-notes.js');
+    const line = `${MEMBER_CONNECTION_PREFIX} a@example.invalid set up this connection`;
+    const id = seed();
+    const first = agentAs(OWNER_PRINCIPAL, () => madeBy(A));
+    const second = agentAs(OWNER_PRINCIPAL, () => madeBy(A));
+    const beside = agentAs(OWNER_PRINCIPAL, () => madeBy(A));
+    const outer = runCollectingMemberNotes(async () => {
+      mockRunManifest.mockImplementationOnce(async () => { noteMemberConnection(line); return makeRunState(); });
+      await runWorkflowTool.handler({ workflow_id: id }, first.agent);
+      // The same refusal again in the same session: already among the session's lines, still this run's.
+      mockRunManifest.mockImplementationOnce(async () => { noteMemberConnection(line); return makeRunState(); });
+      await runWorkflowTool.handler({ workflow_id: id }, second.agent);
+      // A line noted beside a run (another call of the session) is not that run's.
+      noteMemberConnection(`${MEMBER_CONNECTION_PREFIX} b@example.invalid set up another`);
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id }, beside.agent);
+    });
+    await outer.done;
+    const outcome = (recs: Rec[]): unknown => runRows(recs).map((r) => targetPairs(r.target).get('outcome') ?? null)[1];
+    expect([outcome(first.recs), outcome(second.recs), outcome(beside.recs)]).toEqual(['failed', 'failed', 'success']);
+    // The session's collector holds the run's line, so the worker ends the session with it.
+    expect(outer.notes.has(line)).toBe(true);
+  });
+
   it('authorship is read once: a read that throws and then succeeds is unreadable for both decisions', async () => {
     const id = seed();
     let reads = 0;

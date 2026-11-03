@@ -120,6 +120,22 @@ describe('a workflow run the runner ended because an access ended mid-run (1100)
     expect(r.paused_at).not.toBeNull();
   });
 
+  it('a liveness read that throws is no end found: a failure, the plan not paused', async () => {
+    const p = boot();
+    let ran = 0;
+    runner.run = () => {
+      ran++;
+      vi.spyOn(p.ends, 'isLive').mockImplementation(() => { throw new Error('engine.db busy'); });
+      return Promise.resolve({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN, runId: 'r1' });
+    };
+    await tick(p);
+    expect(ran, 'the run reached the runner').toBe(1);
+    const r = row(p);
+    expect(r.last_run_status).toBe('failed');
+    expect(r.last_run_result ?? '').not.toContain('access of someone who set up or changed this plan ended');
+    expect(r.paused_at).toBeNull();
+  });
+
   it('control: the same error while every member is live is a failure, not that stop', async () => {
     const p = boot();
     let ran = 0;

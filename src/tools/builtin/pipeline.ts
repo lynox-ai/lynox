@@ -27,7 +27,7 @@ import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
-import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes, currentMemberNotes, runCollectingMemberNotes } from '../../core/member-connection-notes.js';
+import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes, noteMemberConnection, runCollectingMemberNotes } from '../../core/member-connection-notes.js';
 import { namedTarget, newCorrelationId, type AuditLog, type AuditPhase } from '../../core/audit-log.js';
 import { isOwnerPrincipal, mandateIdOf, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import type { WorkflowAuthorship } from '../../core/workflow-store.js';
@@ -49,7 +49,7 @@ const pipelineStore = new Map<string, PlannedPipeline>();
 // last chat that retried it. A retry hands the state's cached outputs to whoever retries it, so a
 // retry from another chat is a read of the run.
 // `ranAs`: whom the run was for (`principalKey`), so a retry under anyone else is refused (1100).
-type ExecutedState = { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined; originThreadId?: string | undefined; ranAs?: string | undefined };
+type ExecutedState = { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined; originThreadId?: string | undefined; ranAs: string };
 const executedStates = new Map<string, ExecutedState>();
 
 // Non-template reentrancy guard: a non-template (run-once) pipeline currently
@@ -1104,14 +1104,14 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   const asPlanOfAuthor = async <T>(trail: WorkflowRunTrail | null, fn: () => Promise<T>): Promise<T> => {
     if (!runFor.asPlan) return underWorkflowRun(trail, runAs, fn);
     const asPlan = (): Promise<T> => runAsPlanOf(runAs, () => underWorkflowRun(trail, runAs, fn), null, trail?.key, /* the owner started it */ true);
-    // Inside a run that collects already (the worker's), its collector keeps the lines and ends
-    // that run; this one only reads whether any came. Otherwise the run gets a collector of its own.
-    if (collectingMemberNotes()) {
-      const before = currentMemberNotes().length;
-      try { return await asPlan(); } finally { memberRefused = currentMemberNotes().length > before; }
-    }
+    // The run gets a collector of its own, so a line it repeats from an earlier run in the same
+    // collecting run (the worker's) still counts, and a line of a call beside it does not. Its
+    // lines then go on to that outer collector, which ends that run with them.
     const collected = runCollectingMemberNotes(asPlan);
-    try { return await collected.done; } finally { memberRefused = collected.notes.size > 0; }
+    try { return await collected.done; } finally {
+      memberRefused = collected.notes.size > 0;
+      for (const line of collected.notes) noteMemberConnection(line);
+    }
   };
 
   // Interactive pipelines need a live prompt-capable session. Refuse with a
@@ -1176,7 +1176,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     // A retry hands the earlier run's step results to this run and re-runs its snapshot of the
     // steps: under anyone but whom that run was for, it would carry one person's results into
     // another's run, or re-run a mandate's steps without its lock (1100).
-    if (prev.ranAs !== undefined && prev.ranAs !== principalKey(runAs)) {
+    if (prev.ranAs !== principalKey(runAs)) {
       return `Error: ${RETRY_OTHER_PRINCIPAL_REFUSAL}`;
     }
     // A run started from a contained chat carries that chat's data, and a retry re-runs steps
