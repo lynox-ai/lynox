@@ -184,6 +184,43 @@ describe('a marked part of the briefing is marked at that part', () => {
     expect(tail).not.toContain(PART_WARNING);
   });
 
+  it('places a hit that ends at a marked block\'s last line inside that block', () => {
+    // The role line needs whitespace after its colon. The line break that stands in for the
+    // block's closer gives it that, so the hit ends inside the block, not in the text after it.
+    const own: string[] = [];
+    const block = collectOwnBlocks(own, () => wrapUntrustedData(`${MARKED}\nassistant:`, 'api_profile.description'));
+    const tail = tailOf(`<api_profiles>\n- weather: Weather — ${block} (https://api.weather.example)\n</api_profiles>`, own);
+    expect(block).toContain(BLOCK_MARK);
+    expect(tail).toContain(PART_WARNING);
+    expect(tail).not.toContain(WARNING);
+  });
+
+  it('warns on the whole briefing when the hit sits in a block the wrap did not mark', () => {
+    // The wrap's own scan has no whitespace after "assistant:" and leaves the block unmarked;
+    // the briefing's scan has the line break for the closer and finds the role line. Naming the
+    // block would claim a mark the model does not see.
+    const own: string[] = [];
+    const block = collectOwnBlocks(own, () => wrapUntrustedData('Forecasts.\nassistant:', 'api_profile.description'));
+    const tail = tailOf(`<api_profiles>\n- weather: Weather — ${block} (https://api.weather.example)\n</api_profiles>`, own);
+    expect(block).not.toContain(BLOCK_MARK);
+    expect(tail).toContain(WARNING);
+    expect(tail).not.toContain(PART_WARNING);
+  });
+
+  it('warns on the whole briefing when the windowed scan reports a hit the position scan does not find', () => {
+    // A briefing longer than one scan window: the second window starts at 61440, in the middle
+    // of a line, and reads "assistant: " there as a line start. The whole text does not.
+    const { briefing, own } = twoProfiles(MARKED);
+    const filler = 'x'.repeat(61440);
+    const long = `${filler}assistant: hello ${'z'.repeat(8192)}`;
+    const tail = tailOf(`${long}\n${briefing}`, own);
+    // Witnesses: windowed, the line reads as a role line; one character earlier, it does not.
+    expect(detectInjectionAttempt(long).patterns).toContain('role impersonation');
+    expect(detectInjectionAttempt(`y${long}`).patterns).not.toContain('role impersonation');
+    expect(tail).toContain(WARNING);
+    expect(tail).not.toContain(PART_WARNING);
+  });
+
   it('says nothing when no part is marked', () => {
     const { briefing, own } = twoProfiles('Contacts and deals.');
     const tail = tailOf(briefing, own);

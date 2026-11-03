@@ -1,5 +1,5 @@
 import { channels } from './observability.js';
-import { detectInjectionAttempt, injectionHitSpans } from './data-boundary.js';
+import { blockCarriesInjectionMark, detectInjectionAttempt, injectionHitSpans } from './data-boundary.js';
 
 // === Write content scanning ===
 
@@ -182,7 +182,8 @@ export function scanRegionOf(result: string, ownBlocks: readonly string[] | unde
  * Placed by POSITION, not by label: a hit across a block's edge can carry the same label as
  * a hit inside the block, and a label check would read it as covered. The whole briefing is
  * warned whenever a hit cannot be placed wholly inside one of those blocks: a hit in text the
- * engine did not wrap, one that runs across a block's edge, a label the windowed scan reports
+ * engine did not wrap, one that runs across a block's edge, one in a block the wrap did not
+ * mark (the fence would claim a mark that is not there), a label the windowed scan reports
  * and the position scan does not find, or a briefing with format characters, whose offsets
  * the scan cannot give (`injectionHitSpans`). Noisy, never open.
  */
@@ -215,7 +216,9 @@ export function briefingInjection(briefing: string, ownBlocks: readonly string[]
   const sources: string[] = [];
   for (const hit of hits) {
     const home = ranges.find((r) => hit.start >= r.start && hit.end <= r.end);
-    if (!home) return { scope: 'whole' };
+    // The fence says the block is marked, so a block the wrap did not mark cannot take the hit:
+    // a role line at a block's last line, say, matches only once the closer becomes a line break.
+    if (!home || !blockCarriesInjectionMark(home.block)) return { scope: 'whole' };
     const source = OWN_SOURCE.exec(home.block)?.[1] ?? 'untrusted_data';
     if (!sources.includes(source)) sources.push(source);
   }
