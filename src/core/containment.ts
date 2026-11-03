@@ -6,7 +6,7 @@ import type { ThreadStore } from './thread-store.js';
 import type { ContainmentMirror } from './history-markers.js';
 import { isShopifyAdminHost, normalizeHostForMatch } from './shopify-host.js';
 import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
-import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, type BodyReadings } from './outbound-write.js';
+import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, urlQueryStrings, writeMethodsNamed, type BodyReadings } from './outbound-write.js';
 
 /**
  * Containment: the record of which containers a store connection's credential was attached
@@ -96,19 +96,39 @@ export class Containment {
    * {@link isContained}: an empty id, or a read that throws, counts as contained.
    */
   containedThreadIds(threadIds: readonly string[]): Set<string> {
+    const { contained, unknown } = this.threadStates(threadIds);
+    for (const id of unknown) contained.add(id);
+    return contained;
+  }
+
+  /**
+   * {@link containedThreadIds} split by why: `contained` the threads a row records (or an empty
+   * id), `unknown` those counted contained only because the record could not be read — a read
+   * that throws, or no engine.db on a provisioned instance. Enforcement takes both; only what
+   * the owner is told differs.
+   */
+  threadStates(threadIds: readonly string[]): { contained: Set<string>; unknown: Set<string> } {
     const named = threadIds.filter((id) => id !== '');
     const contained = new Set<string>(threadIds.filter((id) => id === ''));
-    if (named.length === 0) return contained;
+    const unknownRest = (): Set<string> => new Set(named.filter((id) => !contained.has(id)));
+    if (named.length === 0) return { contained, unknown: new Set() };
+    // A history copy that cannot be read is a record that cannot be read: what engine.db does
+    // not record is unknown then. Read on, so a thread engine.db records stays known.
+    let mirrorFailed = false;
     try {
       if (this.mirror !== null) for (const id of this.mirror.threadIds(named)) contained.add(id);
-      if (this.db === null) return isProvisionedInstance() ? new Set(threadIds) : contained;
+    } catch {
+      mirrorFailed = true;
+    }
+    try {
+      if (this.db === null) return { contained, unknown: mirrorFailed || isProvisionedInstance() ? unknownRest() : new Set() };
       const rows = this.db
         .prepare(`SELECT DISTINCT container_id AS id FROM contained WHERE container_kind = 'thread' AND container_id IN (${named.map(() => '?').join(',')})`)
         .all(...named) as Array<{ id: string }>;
       for (const row of rows) contained.add(row.id);
-      return contained;
+      return { contained, unknown: mirrorFailed ? unknownRest() : new Set() };
     } catch {
-      return new Set(threadIds);
+      return { contained, unknown: unknownRest() };
     }
   }
 
@@ -238,6 +258,16 @@ export function threadIsContained(store: Containment | null, threadId: string): 
 export function containedThreads(store: Containment | null, threadIds: readonly string[]): Set<string> {
   if (store === null) return isProvisionedInstance() ? new Set(threadIds) : new Set();
   return store.containedThreadIds(threadIds);
+}
+
+/**
+ * {@link containedThreads} split by why ({@link Containment.threadStates}): without a store on a
+ * provisioned instance every thread is `unknown`, not `contained`. The routes that show the
+ * owner a chat's state read this; enforcement reads {@link containedThreads}.
+ */
+export function containedThreadStates(store: Containment | null, threadIds: readonly string[]): { contained: Set<string>; unknown: Set<string> } {
+  if (store === null) return { contained: new Set(), unknown: isProvisionedInstance() ? new Set(threadIds) : new Set() };
+  return store.threadStates(threadIds);
 }
 
 /**
@@ -382,9 +412,8 @@ export function containedStoreWrite(method: string, headers: Record<string, stri
   const named = writeMethodsNamed(method, headers, url, gateBody);
   if (named.length === 0) return false;
   if (method.trim().toUpperCase() !== 'POST' || named.length !== 1) return true;
-  let parsed: URL;
-  try { parsed = new URL(url); } catch { return true; }
-  if (!isGraphqlEndpoint(url) || parsed.search.length > 1) return true;
+  try { new URL(url); } catch { return true; }
+  if (!isGraphqlEndpoint(url) || urlQueryStrings(url).some((search) => search !== '')) return true;
   const reading = graphqlWrite(headers, body);
   return 'refusal' in reading || reading.mutates;
 }

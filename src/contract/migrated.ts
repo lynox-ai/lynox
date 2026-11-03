@@ -66,6 +66,7 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'ENV_REGISTRY_BY_NAME', contractFile: 'env-registry.ts', twinPattern: valueTwin('ENV_REGISTRY_BY_NAME') },
   { name: 'SELF_HOST_ONLY', contractFile: 'env-registry.ts', twinPattern: valueTwin('SELF_HOST_ONLY') },
   { name: 'PREFIX_FAMILIES', contractFile: 'env-registry.ts', twinPattern: valueTwin('PREFIX_FAMILIES') },
+  { name: 'envVarRequired', contractFile: 'env-registry.ts', twinPattern: valueTwin('envVarRequired') },
   // K-W2 — money-HTTP + health wire shapes (born in the contract; a local
   // re-declaration downstream is the same silent-divergence failure mode).
   { name: 'UsageReportRun', contractFile: 'http.ts', twinPattern: typeTwin('UsageReportRun') },

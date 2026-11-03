@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  checkMarkup, htmlFieldsOfListForm, markupChangesOf, markupOf, plainTextMarkupOf,
+  checkMarkup, droppedTagsOf, htmlFieldsOfListForm, markupChangesOf, markupOf, plainTextMarkupOf,
   type MarkupCheckInput, type MarkupRefusal,
 } from './bulk-html.js';
 import { parseFragment, defaultTreeAdapter, html as p5 } from 'parse5';
@@ -24,7 +24,7 @@ describe('markupOf', () => {
   it('counts a bare element as a triple of its own, so a bare <script> is not invisible', () => {
     const { triples, occurrences } = markupOf(tree('<script></script>'));
     expect(triples).toEqual([{ namespace: 'html', element: 'script', attribute: null, value: null, inTemplate: false }]);
-    expect(occurrences).toEqual([{ kind: 'element', namespace: 'html', name: 'script', attributes: [], text: '', inTemplate: false }]);
+    expect(occurrences).toEqual([{ kind: 'element', namespace: 'html', name: 'script', attributes: [], text: '', layout: null, inTemplate: false }]);
   });
 
   it('walks template contents and marks them', () => {
@@ -90,6 +90,13 @@ describe('checkMarkup: the allowlist and the multiset', () => {
     expect(reason('<style>p{}</style>', '<style>p{color:red}</style>')).toBe('content_changed');
     expect(reason('<svg><script>a()</script></svg>', '<svg><script>b()</script></svg>')).toBe('content_changed');
     expect(reason('<noscript>a</noscript>', '<noscript>b</noscript>')).toBe('content_changed');
+  });
+
+  it('refuses a held foreign script whose text moves between it and an element below it', () => {
+    const held = '<svg><script>a=1;/*b()*/<g></g><g></g></script></svg>';
+    expect(reason(held, '<svg><script>a=1;<g>/*</g>b()<g>*/</g></script></svg>')).toBe('content_changed');
+    // Control: held as it is, it passes.
+    expect(reason(held, held)).toBe('ok');
   });
 
   it('refuses a second bare script beside a held one', () => {
@@ -342,6 +349,96 @@ describe('checkMarkup: what the page makes of the value (refuter round 1)', () =
     expect(() => check('', deep)).not.toThrow();
     expect(() => markupChangesOf('d', '', deep)).not.toThrow();
     expect(() => markupChangesOf('d', '', `<svg>${'<g>'.repeat(200000)}`)).not.toThrow();
+  });
+});
+
+describe('checkMarkup: tags the fragment drops', () => {
+  // Measured with parse5 8.0.1 (div context): each tag below is gone from the fragment's tree,
+  // its canonical form and its end, while the page reads it — attributes on its own element of
+  // that name, or the theme's element closed around the value.
+  const dropped = [
+    ['<body class="x" data-a="1"><p>a</p>', '<body class="x" data-a="1">'],
+    ['<html lang="x" title="t"><p>a</p>', '<html lang="x" title="t">'],
+    ['</div><p>a</p>', '</div>'],
+    ['<p>a</p></section><p>b</p>', '</section>'],
+    ['<head><p>a</p>', '<head>'],
+    // Text on both sides: the parser joins it into one node whose range covers the tag.
+    ['<p>a<body class="x">b</p>', '<body class="x">'],
+    ['<p>a</div>b</p>', '</div>'],
+    ['<p>a</p> </div> <p>b</p>', '</div>'],
+    ['<p>a&amp;<html lang="x">b</p>', '<html lang="x">'],
+  ] as const;
+
+  it.each(dropped)('refuses %s, names the stretch %s, and passes the value without the tag', (after, stretch) => {
+    const out = check('<p>a</p>', after);
+    expect(out).toEqual({ ok: false, reason: 'markup_dropped', detail: expect.stringContaining(stretch) });
+    expect(reason('<p>a</p>', after.replace(/<\/?(body|html|div|section|head)\b[^>]*>/, ''))).toBe('ok');
+  });
+
+  it('lets a text that swallowed a tag hold only the same tags, not a prefix of another tag', () => {
+    // A `>` inside a quoted value: a match cut there would be the same for both tags. With
+    // attributes, neither is held at all.
+    const before = '<p>x<body title="a>b">y</p>';
+    expect(reason(before, '<p>x<body title="a>" class="z">y</p>')).toBe('markup_dropped');
+    expect(reason(before, before)).toBe('markup_dropped_before');
+    // Without attributes, the same tags with what lies between them are held, a `>` in the text included.
+    expect(reason('<p>x</div>y > z</p>', '<p>w</div>y > z.</p>')).toBe('ok');
+    expect(reason('<p>x</div>y > z</p>', '<p>w</div>y</div> > z</p>')).toBe('markup_dropped');
+  });
+
+  it('passes an edit of the text around a held tag, and whitespace around it normalised', () => {
+    expect(reason('<p>Neu</div> Lieferzeit 3 Tage</p>', '<p>Neu</div> Lieferzeit 2 Tage</p>')).toBe('ok');
+    expect(reason('<p>a</p>\n</div>\n<p>b</p>', '<p>a</p></div><p>b</p>')).toBe('ok');
+  });
+
+  it('lets inert CDATA text of the before-image hold nothing live', () => {
+    const before = '<p>Info</p><svg><![CDATA[x> <body class="z">]]></svg>';
+    expect(reason(before, '<p>Info<body class="z">!</p><svg><![CDATA[x> <body class="z">]]></svg>')).toBe('markup_dropped');
+  });
+
+  it('passes a dropped tag without attributes the before-image holds the same way, and refuses a second copy', () => {
+    const before = '<p>a</p></div>';
+    expect(reason(before, '<p>b</p></div>')).toBe('ok');
+    expect(reason(before, '<p>b</p></div> </div>')).toBe('markup_dropped');
+    expect(reason(before, '<p>b</p></section>')).toBe('markup_dropped');
+  });
+
+  it('holds no dropped start tag with attributes, wherever the before-image has it', () => {
+    // Inert in a template or a select there, read by the page where the after-state puts it.
+    for (const before of ['<template><body class="z"></template>', '<select><option>a</option><body class="z"></select>', '<body class="z"><p>a</p>']) {
+      // The before-image carries it: planning again cannot help, the refusal says so.
+      expect(reason(before, '<p>a<body class="z">b</p>'), before).toBe('markup_dropped_before');
+      expect(reason(before, `${before}`), before).toBe('markup_dropped_before');
+    }
+    // Not carried: planning again can leave it out.
+    expect(reason('<p>a</p>', '<p>a<body class="z">b</p>')).toBe('markup_dropped');
+    // An attribute after a slash is an attribute too: held by the bytes, still refused.
+    expect(reason('<body/class=z><p>a</p>', '<body/class=z><p>b</p>')).toBe('markup_dropped_before');
+  });
+
+  it('finds nothing in markup the fragment keeps, however it is written', () => {
+    for (const v of [
+      '<p>a</p>', '<ul><li>a<li>b</ul>', '<b><p>x</b>y</p>', '<pre>\nx</pre>', '<p>a &amp; b&nbsp;c</p>',
+      '<p>a<br/>b</p>', '<svg><circle/></svg>', '<table><tr><td>a</td></tr></table>',
+      '<template><p>x</p></template>', '<p>a\r\nb</p>', '<!-- note --><p>a</p>', ' \n ',
+    ]) {
+      expect(droppedTagsOf(v), v).toEqual([]);
+    }
+  });
+
+  it('reads every dropped stretch, inside a template too', () => {
+    expect(droppedTagsOf('<p>a</span></p><template><p>b</p></div></template>')).toEqual(['</span>', '</div>']);
+    expect(droppedTagsOf('<svg><desc>a</div>b</desc></svg>')).toEqual(['</div>']);
+    // An SVG `title` or `style` is not raw text: the tokenizer reads tags in it.
+    expect(droppedTagsOf('<svg><title>a<body class="x">b</title></svg>')).toEqual(['<body class="x">']);
+    // Two tags in one text: one stretch from the first to the last, what lies between included.
+    expect(droppedTagsOf('<p>a<body class="x">b</div>c</p>')).toEqual(['<body class="x">b</div>']);
+  });
+
+  it('reads a < in raw text as a character, and one in ordinary text that opens nothing as text', () => {
+    for (const v of ['<style>a</div>b</style>', '<textarea>a<body>b</textarea>', '<p>a < b and 1<2</p>']) {
+      expect(droppedTagsOf(v), v).toEqual([]);
+    }
   });
 });
 

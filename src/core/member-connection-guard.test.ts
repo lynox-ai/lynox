@@ -73,6 +73,7 @@ const PINNED: Readonly<Record<string, string>> = {
   "server/http-api.ts|? { principal: OWNER_PRINCIPAL, actorKind: 'cp-migration' as const }": 'audit actor of a migration, no attach',
   "core/engine.ts|principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history',": 'audit actor of the connection erasure sweep, no attach',
   "core/plan-takeover.ts|principal: OWNER_PRINCIPAL, action: 'plan.takeover', phase: 'done', correlationId: newCorrelationId(),": 'audit actor of the owner\'s takeover of a paused plan, no attach',
+  "core/session-store.ts|const summarySession = engine.createSession({ model: 'fast', principal: OWNER_PRINCIPAL });": 'the thread summary\'s session, built for the owner without tools, no attach',
   'core/migration-export.ts|const allSecrets = vault.getAll();': 'admin migration export, refused to a mandate before dispatch',
   'core/secret-vault.ts|const entries = oldVault.getAll();': 'vault re-key',
   'core/secret-store.ts|const entries = this.vault.getAll();': 'the store\'s own load',
@@ -87,7 +88,7 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/api-setup.ts|const ids = apiStore.getAll().filter((p) => connectionWaits(p, ends)).map((p) => p.id);': 'profile ids, no values',
   'core/transcribe/session-context.ts|return store.getAll().map((p) => p.name).filter((n) => n.length > 0);': 'profile names, no values',
   'integrations/push/web-push-channel.ts|for (const row of this.store.getAll()) {': 'push subscriptions, not the vault',
-  'server/http-api.ts|jsonResponse(res, 200, { profiles: store.getAll().map((p) => profileForReader(p, reader)), importWaiting: store.importWaitsOn() });': 'profiles as the reader may see them: no fingerprints, no account of another person\'s connection',
+  'server/http-api.ts|jsonResponse(res, 200, { profiles: store.getAll().map((p) => ({ ...profileForReader(p, reader), reader_may_connect: mayStartConnect(reader, p) })), importWaiting: store.importWaitsOn() });': 'profiles as the reader may see them: no fingerprints, no account of another person\'s connection; plus whether this reader may start the connection, a yes or no from the same check as the connect start',
   'server/http-api.ts|secret: (name) => this.engine?.getSecretStore()?.resolve(name) ?? null,': 'webhook signature secret named by its connection row; compared, not sent',
 };
 

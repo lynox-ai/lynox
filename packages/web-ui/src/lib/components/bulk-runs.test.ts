@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkInvalidText, bulkSkippedHead,
 } from './bulk-runs.js';
@@ -393,7 +393,7 @@ describe('going on from a run that halted', () => {
 	it('places every halt the engine names', () => {
 		const STARTS = ['awaitingStart', 'listed'];
 		const ENDS_THE_RUN = ['superseded', 'mandateEnded'];
-		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff'];
+		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff', 'markupAddedByShop'];
 		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkRestartKind({ ...base, haltKey });
@@ -424,7 +424,7 @@ describe('going on from a run that halted', () => {
 		// A judged run may also have stopped on its model.
 		expect(bulkHaltText(at('unavailable', { judge: judged.judge }), true, DE)?.cause)
 			.toBe('Der Lauf kam nicht weiter. shop.example.invalid oder das KI-Modell hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.');
-		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in your instance\'s log. So lynox stopped reading at that point.', before: null });
+		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
 		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
 			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, verbraucht 0.0034 USD.');
 		expect(bulkHaltText(at('blocked'), true, DE)).toEqual({
@@ -552,7 +552,7 @@ describe('going on from a run that halted', () => {
 		// Under twenty targets the halt comes at the first failure.
 		expect(bulkResumeText(w('failureRate', { failureLimit: 0 }), true, EN)?.cause).toBe('In this pass, a target could not be written.');
 		expect(bulkResumeText(w('consecutiveFailures'), true, DE)?.cause).toBe('Dreimal hintereinander liess sich ein Ziel nicht schreiben.');
-		expect(bulkResumeText(w('unrecorded'), true, DE)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll deiner Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
+		expect(bulkResumeText(w('unrecorded'), true, DE)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN)?.cause).toBe('The run reached the approved maximum: 40 targets.');
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 1 }), true, DE)?.cause).toBe('Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.');
 		expect(bulkResumeText(w('unauthorized'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. If there is no profile, ask lynox in the chat to set up the access.');
@@ -619,6 +619,99 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeMax(41.5, 40, 100)).toBeNull();
 		expect(bulkResumeMax(0, null, 100)).toBeNull();
 		expect(bulkResumeMax('', 40, 100)).toBeNull();
+	});
+
+	// The halts neither a restart nor writing on moves past: a run waiting for its start, one at
+	// a probe it may not write past yet, one ended before it was approved.
+	const any = (haltKey: string, o: Partial<BulkRunDetailData> = {}) => ({
+		...w(haltKey), id: 'run-7', costUsd: 0, costCapUsd: null, judge: null, listFirstPage: null, judgeServedBy: null, judgeOwnKey: false, ...o,
+	}) as unknown as BulkRunDetailData;
+	const PROBE = { key: 'p-1', fields: ['title'] };
+
+	it('says for every halt the engine has a sentence of its own, never the engine\'s reason', () => {
+		// Over the engine's own set: a halt shows in the phase it halts in, so each key needs a
+		// sentence in at least one of them; the keys of this page's own sets are held to theirs below.
+		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
+			const engine = BULK_HALT_REASONS[haltKey as keyof typeof BULK_HALT_REASONS];
+			const said = (['planned', 'writing', 'aborted'] as const).map((phase) =>
+				bulkHaltCause(any(haltKey, { phase, haltReason: engine, probe: haltKey === 'probeRequired' ? PROBE : null }), true, 'Ziele lesen', DE));
+			expect(said.some((x) => x !== engine && !/bulk\.|\{/.test(x)), haltKey).toBe(true);
+		}
+	});
+
+	it('words the five halts that had only the engine\'s reason, in both languages', () => {
+		for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
+			for (const haltKey of ['superseded', 'mandateEnded']) {
+				const said = bulkStateText(any(haltKey, { phase: 'aborted' }), null, i);
+				expect(said?.cause, `${lang} ${haltKey}`).toBe((lang === 'de' ? de : en)[`bulk.halt.${haltKey}`]);
+				expect(said?.step, `${lang} ${haltKey}`).toBeNull();
+			}
+		}
+		// Ended before approval: nothing was written, and the page says so.
+		expect(bulkHaltCause(any('superseded', { phase: 'aborted' }), true, null, DE)).toContain('Dieser Lauf hat nichts geschrieben.');
+		expect(bulkHaltCause(any('mandateEnded', { phase: 'aborted' }), true, null, EN)).toContain('It wrote nothing.');
+	});
+
+	it('at a probe it may not write past, names the panel\'s button only where the panel stands', () => {
+		const offered = bulkStateText(any('probeRequired', { probe: PROBE }), null, DE);
+		expect(offered).toEqual({ cause: de['bulk.halt.probeRequired'], step: de['bulk.halt.probeRequired_confirm'] });
+		// The step names the button exactly as the panel labels it.
+		expect(offered!.step).toContain(`„${de['bulk.probe.continue']}“`);
+		expect(bulkStateText(any('probeRequired', { probe: PROBE }), null, EN)!.step).toContain(`“${en['bulk.probe.continue']}”`);
+		// No probe offered (another run's, or one confirming cannot file): no button to point to.
+		const none = bulkStateText(any('probeRequired', { probe: null }), null, DE);
+		expect(none).toEqual({ cause: de['bulk.halt.probeRequired'], step: de['bulk.halt.probeRequired_replan'] });
+		expect(bulkHaltCause(any('probeRequired', { probe: null }), true, null, EN)).toBe(`${en['bulk.halt.probeRequired']} ${en['bulk.halt.probeRequired_replan']}`);
+	});
+
+	it('names the start button a waiting run shows, and says so when it shows none', () => {
+		const planned = { phase: 'planned' as const };
+		const read = bulkStartButtonKey({ listFirstPage: null, judgeServedBy: null, judgeRule: null }, 'read', false);
+		expect(read).toBe('bulk.start.read');
+		expect(bulkStateText(any('awaitingStart', planned), DE.t(read!), DE)).toEqual({ cause: 'Starte den Lauf mit „Ziele lesen“.', step: null });
+		expect(bulkStateText(any('listed', planned), EN.t('bulk.start.list'), EN)).toEqual({ cause: 'Review the targets, then start with “Read the list”.', step: null });
+		for (const haltKey of ['awaitingStart', 'listed']) {
+			// No button because the judge cannot be used: the page shows a note saying why.
+			expect(bulkStateText(any(haltKey, { ...planned, judge: {} as BulkRunDetailData['judge'], judgeServedBy: null }), null, DE), haltKey).toEqual({ cause: de['bulk.halt.wait_no_start'], step: null });
+			expect(bulkStateText(any(haltKey, { ...planned, judge: {} as BulkRunDetailData['judge'], judgeOwnKey: true }), null, DE), haltKey).toEqual({ cause: de['bulk.halt.wait_no_start'], step: null });
+			// A usable judge and still no button: its rule went to the owner only, and no note stands.
+			expect(bulkStateText(any(haltKey, { ...planned, judge: {} as BulkRunDetailData['judge'], judgeServedBy: { provider: 'anthropic', label: 'm' } as unknown as BulkRunDetailData['judgeServedBy'] }), null, EN), haltKey)
+				.toEqual({ cause: en['bulk.halt.wait_owner_only'], step: null });
+		}
+		// The label is the button's: none where the page shows none.
+		const served = { provider: 'anthropic', label: 'm' } as unknown as BulkRunDetailData['judgeServedBy'];
+		const rule = {} as BulkRunDetailData['judgeRule'];
+		expect(bulkStartButtonKey({ listFirstPage: 'https://x.invalid/l', judgeServedBy: null, judgeRule: null }, 'list', false)).toBe('bulk.start.list');
+		expect(bulkStartButtonKey({ listFirstPage: null, judgeServedBy: null, judgeRule: null }, 'list', false)).toBeNull();
+		expect(bulkStartButtonKey({ listFirstPage: null, judgeServedBy: served, judgeRule: rule }, 'judge', false)).toBe('bulk.start.judge');
+		expect(bulkStartButtonKey({ listFirstPage: null, judgeServedBy: served, judgeRule: rule }, 'judge', true)).toBe('bulk.start.supersede_yes');
+		expect(bulkStartButtonKey({ listFirstPage: null, judgeServedBy: served, judgeRule: null }, 'judge', false)).toBeNull();
+		for (const kind of ['judge_own_key', 'no_judge', null] as const) expect(bulkStartButtonKey({ listFirstPage: null, judgeServedBy: served, judgeRule: rule }, kind, false), String(kind)).toBeNull();
+		// The probe sentence belongs to a run halted while writing; one that ended there is not asked to confirm.
+		expect(bulkStateText(any('probeRequired', { phase: 'aborted', probe: PROBE }), null, DE)).toBeNull();
+		// A run that waits for nothing has none of these sentences.
+		expect(bulkStateText(any('awaitingStart', { phase: 'writing' }), 'x', DE)).toBeNull();
+	});
+
+	it('links to support with the run and host in the subject, only where the sentence names support', () => {
+		const planned = any('blocked', { phase: 'planned' });
+		const link = bulkSupportMailto(planned, true, DE);
+		expect(link).toBe(`mailto:support@lynox.ai?subject=${encodeURIComponent('lynox: Massenlauf run-7 auf shop.example.invalid angehalten')}`);
+		expect(bulkSupportMailto(any('shopifyWriteOff'), null, EN)).toBe(`mailto:support@lynox.ai?subject=${encodeURIComponent('lynox: bulk run run-7 on shop.example.invalid halted')}`);
+		// The sentence it stands next to names support, and keeps the address readable.
+		expect(bulkHaltText(planned, true, DE)?.before).toContain('support@lynox.ai');
+		expect(bulkResumeText(any('shopifyWriteOff'), true, DE)?.before).toContain('support@lynox.ai');
+		// Self-hosted: the sentence sends the owner to their configuration, not to support.
+		expect(bulkSupportMailto(planned, false, DE)).toBeNull();
+		expect(bulkHaltText(planned, false, DE)?.before).not.toContain('support@');
+		// A halt whose sentence does not name support has no link.
+		for (const haltKey of ['unavailable', 'spendLimit', 'credential', 'probeRequired']) {
+			expect(bulkSupportMailto(any(haltKey, { phase: 'planned' }), true, DE), haltKey).toBeNull();
+			expect(bulkSupportMailto(any(haltKey), true, DE), haltKey).toBeNull();
+		}
+		// Where the page shows no way on, it shows neither the sentence nor the link.
+		expect(bulkSupportMailto(any('blocked', { probeConfirmed: false, maxTargets: 2 }), true, DE)).toBeNull();
+		expect(bulkSupportMailto(any('blocked', { phase: 'aborted' }), true, DE)).toBeNull();
 	});
 });
 
@@ -791,6 +884,19 @@ describe('what the preview says about a target lynox leaves out', () => {
 		const odd = 'read\u202efailed';
 		expect(bulkVisibleText(odd)).not.toBe(odd);
 		expect(bulkInvalidText(odd, true, true, own)).toBe(`skip (${bulkVisibleText(odd)})`);
+	});
+	it('words the HTML check\'s refusals of dropped tags on every run, with where to remove them (U-103)', () => {
+		const table: Record<string, string> = {
+			'bulk.invalid.markup_dropped': 'plan again', 'bulk.invalid.markup_dropped_before': 'remove them {where}',
+			'bulk.invalid.where_shopify': 'in Shopify', 'bulk.invalid.where_other': 'where you manage them', 'bulk.invalid.other': 'skip ({code})',
+		};
+		const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => (table[k] ?? k).replace(/\{(\w+)\}/g, (_, n: string) => v[n] ?? '') };
+		for (const shopify of [true, false]) {
+			expect(bulkInvalidText('markup_dropped', shopify, true, own)).toBe('plan again');
+		}
+		expect(bulkInvalidText('markup_dropped_before', true, true, own)).toBe('remove them in Shopify');
+		expect(bulkInvalidText('markup_dropped_before', false, true, own)).toBe('remove them where you manage them');
+		expect(i18nSource).toMatch(/'bulk\.invalid\.markup_dropped_before': \{ de: '[^']*\{where\}[^']*', en: "[^"]*\{where\}[^"]*" \}/);
 	});
 	it('adds the way to support on a managed instance only, and an unknown one reads as managed', () => {
 		expect(bulkInvalidText('read_failed', true, true, i18n)).toBe('bulk.invalid.read_failed bulk.invalid.persists_support');

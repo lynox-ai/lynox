@@ -96,7 +96,7 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
       // And `consentFrameProblems`: it reads a preset's customer text and lists what is missing.
       // `normalizedPresetParams` returns a copy of a profile's values as its preset reads them;
       // `askedScopes`, `scopesOfAnswer` and `scopesBeyondAsked` read scopes and add no preset.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'askedScopes', 'consentFrameProblems', 'derivePresetEndpoints', 'isPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'askedScopes', 'consentFrameProblems', 'derivePresetEndpoints', 'isPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
     );
   });
 

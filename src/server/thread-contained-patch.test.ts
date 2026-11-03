@@ -20,7 +20,7 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
   // Built at runtime, never a literal: a key-shaped fixture string is what the commit-time
   // secret scan looks for, and this repo is public.
   const SECRET = `t-${randomBytes(12).toString('hex')}`;
-  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY'];
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_MANAGED_INSTANCE_ID'];
   const saved: Record<string, string | undefined> = {};
   let api: LynoxHTTPApi | undefined;
   let baseUrl: string;
@@ -48,6 +48,8 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
     process.env['LYNOX_HTTP_SECRET'] = SECRET;
     process.env['LYNOX_ALLOW_PLAIN_HTTP'] = 'true';
     process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
+    // A self-hosted instance unless a test says otherwise (`contained_unknown` follows it).
+    for (const k of ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_MANAGED_INSTANCE_ID']) delete process.env[k];
     reloadConfig();
     api = new LynoxHTTPApi();
     await api.init();
@@ -86,6 +88,8 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
     expect(await patch('t-contained', { skip_extraction: false, title: 'renamed' })).toBe(409);
     // The page tells this refusal apart from any other by its code.
     expect((JSON.parse(lastBody) as { code?: unknown }).code).toBe('contained');
+    // A record that says so is no failed check.
+    expect(JSON.parse(lastBody) as Record<string, unknown>).not.toHaveProperty('contained_unknown');
     expect(ts.getThread('t-contained')?.skip_extraction).toBe(1);
     // Refused whole: nothing else in the request was applied either.
     expect(ts.getThread('t-contained')?.title).toBe('contained');
@@ -95,6 +99,26 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
 
     expect(await patch('t-free', { skip_extraction: false })).toBe(200);
     expect(ts.getThread('t-free')?.skip_extraction).toBe(0);
+  });
+
+  it('one read decides and names the failed check: a read that fails once is not asked twice', async () => {
+    const ctx = engine().getToolContext();
+    const ts = engine().getThreadStore()!;
+    ts.createThread('t-flaky', { title: 'x' });
+    ts.updateThread('t-flaky', { skip_extraction: true });
+    const real = ctx.containment!;
+    const db = (real as unknown as { db: { prepare: (sql: string) => unknown } }).db;
+    let reads = 0;
+    const flaky = { prepare: (sql: string) => { if (reads++ === 0) throw new Error('disk I/O error'); return db.prepare(sql); } };
+    ctx.containment = new Containment(flaky as never, null);
+    try {
+      // Refused because the first read failed — and the answer says so, rather than a second
+      // read that worked turning it into a refusal without a reason.
+      expect(await patch('t-flaky', { skip_extraction: false })).toBe(409);
+      expect((JSON.parse(lastBody) as { contained_unknown?: unknown }).contained_unknown).toBe('self-hosted');
+    } finally {
+      ctx.containment = real;
+    }
   });
 
   it('a record that cannot be read refuses', async () => {
@@ -108,6 +132,16 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
       expect(await patch('t-unread', { skip_extraction: false })).toBe(409);
       // An unreadable record is not proof the chat read the store, and the answer says so.
       expect(lastBody).toContain('This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.');
+      // …and says which, for the owner's text: a self-hosted instance, so its logs.
+      expect((JSON.parse(lastBody) as { contained_unknown?: unknown }).contained_unknown).toBe('self-hosted');
+      // Support on a provisioned instance.
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      try {
+        expect(await patch('t-unread', { skip_extraction: false })).toBe(409);
+        expect((JSON.parse(lastBody) as { contained_unknown?: unknown }).contained_unknown).toBe('provisioned');
+      } finally {
+        delete process.env['LYNOX_BILLING_TIER'];
+      }
       expect(ts.getThread('t-unread')?.skip_extraction).toBe(1);
     } finally {
       ctx.containment = real;

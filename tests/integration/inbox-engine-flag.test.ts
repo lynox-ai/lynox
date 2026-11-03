@@ -96,6 +96,18 @@ describe('Engine boot — unified-inbox flag', () => {
     expect(runtime.budget.snapshot().exceeded).toBe(false);
   });
 
+  // 1070: the cold boot wires the classifier's verdict lookup for mail_triage.
+  it('flag on: the cold boot wires the inbox verdict lookup into the mail context', async () => {
+    process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
+    engine = new Engine({});
+    await engine.init();
+    const runtime = engine.getInboxRuntime();
+    const mailContext = (engine as unknown as { _mailContext: { hooks: { inboxLabelOf?: unknown } } | null })._mailContext;
+    expect(runtime).not.toBeNull();
+    expect(mailContext, 'the boot made a mail context, so the check below is not vacuous').not.toBeNull();
+    expect(mailContext!.hooks.inboxLabelOf).toBe(runtime!.inboxLabelOf);
+  });
+
   it('flag on: shutdown drains the inbox runtime cleanly', async () => {
     process.env['LYNOX_FEATURE_UNIFIED_INBOX'] = '1';
     engine = new Engine({});

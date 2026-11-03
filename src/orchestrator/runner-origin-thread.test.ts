@@ -19,7 +19,7 @@ import { runManifest } from './runner.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest } from '../types/orchestration.js';
 import type { LynoxUserConfig, ToolEntry } from '../types/index.js';
-import type { ChatOrigin } from './runtime-adapter.js';
+import { chatOriginOf, type ChatOrigin } from './runtime-adapter.js';
 
 const CONFIG: LynoxUserConfig = { api_key: 'test-key' };
 const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
@@ -63,6 +63,55 @@ describe('origin_thread_id', () => {
     try {
       await runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h });
       expect(rows(h)).toEqual([{ parent_run_id: null, origin_thread_id: null }]);
+    } finally { h.close(); }
+  }, 60_000);
+});
+
+/**
+ * v72: the chat run whose turn started the workflow (`ChatOrigin.runId`) is on the pipeline run,
+ * nested runs included, so the chat's footer counts the paid API calls a step sent.
+ */
+describe('started_by_run_id', () => {
+  // The recorder the runner hands a step (`spawnInline`'s 12th argument) records the step's calls.
+  const stepSendsPaidCall = (): void => {
+    mockSpawnInline.mockImplementation(async (...args: unknown[]) => {
+      const record = args[11] as ((call: object) => void) | undefined;
+      record?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false, apiCost: { usd: 0.05, source: 'response' } });
+      return { result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 };
+    });
+  };
+  it('is read off the calling agent\'s run (`chatOriginOf`)', () => {
+    expect(chatOriginOf({ currentThreadId: 't-1', originThreadId: undefined, skipMemoryExtraction: false, currentRunId: 'run-7' }).runId).toBe('run-7');
+    expect(chatOriginOf({ currentThreadId: 't-1', originThreadId: undefined, skipMemoryExtraction: false }).runId).toBeUndefined();
+  });
+  afterEach(() => { mockSpawnInline.mockReset(); mockSpawnInline.mockResolvedValue({ result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 }); });
+
+  it('is written from the chat origin, on the nested run as well, and the chat run counts the step\'s paid call', async () => {
+    const h = tmpHistory();
+    try {
+      stepSendsPaidCall();
+      const chatRun = h.insertRun({ taskText: 'chat', modelTier: 'balanced', modelId: 'm' });
+      const state = await runManifest(NESTED, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h, chatOrigin: { ...chat('chat-1'), runId: chatRun } });
+      expect(state.status).toBe('completed');
+      const started = h.getDb().prepare('SELECT started_by_run_id FROM pipeline_runs ORDER BY started_at, rowid').all() as { started_by_run_id: string | null }[];
+      expect(started).toEqual([{ started_by_run_id: chatRun }, { started_by_run_id: chatRun }]);
+      expect(mockSpawnInline).toHaveBeenCalledTimes(1);
+      const sum = h.getApiCallsOfRun(chatRun);
+      expect(sum.calls).toBe(1);
+      expect(sum.usd).toBeCloseTo(0.05, 9);
+    } finally { h.close(); }
+  }, 60_000);
+
+  it('is NULL, and the step\'s call counts for no chat run, when no chat turn started it (control)', async () => {
+    const h = tmpHistory();
+    try {
+      stepSendsPaidCall();
+      const chatRun = h.insertRun({ taskText: 'chat', modelTier: 'balanced', modelId: 'm' });
+      await runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h, chatOrigin: chat('chat-1') });
+      expect(h.getDb().prepare('SELECT started_by_run_id FROM pipeline_runs').all()).toEqual([{ started_by_run_id: null }]);
+      expect(h.getApiCallsOfRun(chatRun).calls).toBe(0);
+      // The call was recorded, on the step's own run.
+      expect(h.getDb().prepare("SELECT COUNT(*) AS n FROM run_tool_calls WHERE api_cost_source = 'response'").get()).toEqual({ n: 1 });
     } finally { h.close(); }
   }, 60_000);
 });

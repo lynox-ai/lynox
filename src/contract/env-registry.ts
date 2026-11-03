@@ -66,7 +66,7 @@ export type EnvValueKind =
 
 export type EmitPolicy =
   | 'always' // emitted unconditionally for every provisioned tier
-  | 'tier' // emitted unconditionally for the tiers in `requiredForTier`
+  | 'tier' // emitted for the tiers in `requiredForTier`, unless the row's `notRequiredWhenOn` switch is on
   | 'when-true' // emitted only when the per-tenant flag is true (false never clobbers a hand-flipped .env)
   | 'when-non-default' // emitted only when configured / non-default / present
   | 'operator-only' // engine read exists; the CP must NOT emit
@@ -109,8 +109,15 @@ export interface EnvRegistryRow {
   emitPolicy: EmitPolicy;
   engineConsumed: EngineConsumption;
   secret?: { redact: 'whole-value' | 'exact-name'; preserveAcrossSyncEnv?: boolean };
-  /** Tiers for which the var is unconditionally present after the standard managed emit path. */
+  /** Tiers for which the var is present after the standard managed emit path, except where
+   *  `notRequiredWhenOn` names a switch that is on ({@link envVarRequired}). */
   requiredForTier?: BillingTier[];
+  /**
+   * A `bool` row whose switch, when on (`1` or `true`), lets this var be absent on a tier
+   * `requiredForTier` names. For an instance where the switch's feature rules out what this var
+   * feeds, so the control plane leaves it out.
+   */
+  notRequiredWhenOn?: string;
   /** Legacy env names still accepted at read boundaries (src/core/env.ts ENV_ALIASES) — read-aliases are permanent. */
   legacyReadAliases?: string[];
   /** Behavior of an OLDER engine receiving this var, when it differs from "ignored". */
@@ -157,7 +164,7 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
 
   // ── Provider key slots (SDK/ecosystem-canonical names) ────────────────────
   { name: 'ANTHROPIC_API_KEY', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' }, note: 'SDK-canonical key slot — managed Anthropic-main. Also consumed inside the Anthropic SDK constructor and via the provider-keys slot map.' },
-  { name: 'MISTRAL_API_KEY', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' }, note: 'SDK-canonical key slot — worker profile + in-UI switch target; also read via the provider-keys slot map.' },
+  { name: 'MISTRAL_API_KEY', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, notRequiredWhenOn: 'LYNOX_SHOPIFY_EXCHANGE', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/engine-init.ts' }, note: 'SDK-canonical key slot — worker profile + in-UI switch target; also read via the provider-keys slot map. Not required where LYNOX_SHOPIFY_EXCHANGE is on: the control plane may then leave out any of the Mistral block (this key, LYNOX_WORKER_PROFILE, LYNOX_MODEL_PROFILES_JSON). The control plane decides that; this row does not make the engine avoid Mistral. An engine without the key drops the Mistral slot and clears a worker profile that names a missing profile.' },
   { name: 'FIREWORKS_API_KEY', valueKind: 'opaque', emitPolicy: 'when-non-default', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/config.ts' }, note: 'Emitted only when the CP pool holds a Fireworks key (opt-in Efficient preset).' },
   { name: 'LYNOX_MANAGED_FIREWORKS_ENABLED', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'direct', readSite: 'src/core/tier-presets.ts' }, note: 'Unlocks the Fireworks slot for managed; emitted only alongside FIREWORKS_API_KEY (DPA-gated sub-processor).' },
   { name: 'LYNOX_FEATURE_PROACTIVE_DEEP', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep', consumerSite: 'src/core/session.ts' } }, note: 'Fleet opt-in for proactive deep escalation; engine still cost-gates on the deep-slot provider.' },
@@ -173,8 +180,8 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   { name: 'GOOGLE_CLIENT_SECRET', valueKind: 'opaque', emitPolicy: 'operator-only', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'pair-resolver', pair: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' }, readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, note: 'The secret half of the GOOGLE_CLIENT_ID pair. Also read in src/core/secret-store.ts, but through process.env[envVar] with a VARIABLE, which no literal form can assert — not listed as a read site.' },
 
   // ── Worker / model-profiles bridge ────────────────────────────────────────
-  { name: 'LYNOX_WORKER_PROFILE', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Names a profile key inside LYNOX_MODEL_PROFILES_JSON; engine clears a dangling one.' },
-  { name: 'LYNOX_MODEL_PROFILES_JSON', valueKind: 'json', valueSchema: 'ModelProfile', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, secret: { redact: 'whole-value' }, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'JSON embeds provider keys in model_profiles[*].api_key → whole-value redaction (exact-name would miss it). Entries must satisfy shapes.ts isModelProfile.' },
+  { name: 'LYNOX_WORKER_PROFILE', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, notRequiredWhenOn: 'LYNOX_SHOPIFY_EXCHANGE', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Names a profile key inside LYNOX_MODEL_PROFILES_JSON; engine clears a dangling one.' },
+  { name: 'LYNOX_MODEL_PROFILES_JSON', valueKind: 'json', valueSchema: 'ModelProfile', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, notRequiredWhenOn: 'LYNOX_SHOPIFY_EXCHANGE', secret: { redact: 'whole-value' }, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'JSON embeds provider keys in model_profiles[*].api_key → whole-value redaction (exact-name would miss it). Entries must satisfy shapes.ts isModelProfile.' },
 
   // ── Conditional / feature flags ───────────────────────────────────────────
   { name: 'LYNOX_BUGSINK_DSN', valueKind: 'opaque', emitPolicy: 'when-non-default', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/core/error-reporting.ts' } },
@@ -221,6 +228,18 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
 export const ENV_REGISTRY_BY_NAME: ReadonlyMap<string, EnvRegistryRow> = new Map(
   ENV_REGISTRY.map((r) => [r.name, r]),
 );
+
+/**
+ * Whether `row`'s var must be present on an instance of `tier` whose emitted env is `env`: the
+ * tier is one `requiredForTier` names, and the switch `notRequiredWhenOn` names, if any, is not
+ * on. The switch counts as on as the engine reads a `bool` var: `1` or `true`, nothing else.
+ */
+export function envVarRequired(row: EnvRegistryRow, tier: BillingTier, env: Readonly<Record<string, string | undefined>>): boolean {
+  if (!(row.requiredForTier ?? []).includes(tier)) return false;
+  if (row.notRequiredWhenOn === undefined) return true;
+  const sw = env[row.notRequiredWhenOn];
+  return !(sw === '1' || sw === 'true');
+}
 
 /**
  * Engine-read `LYNOX_*` vars that are SELF-HOST / operator surface only — the

@@ -64,6 +64,24 @@ function envelope(overrides: Partial<MailEnvelope> = {}): MailEnvelope {
 }
 
 describe('bootstrapInbox — wiring', () => {
+  // 966: the reminder poller gets the instance's language, so its title follows it.
+  it('titles a reminder in the language it is handed', async () => {
+    const titles: string[] = [];
+    const router = { notify: vi.fn(async (m: { title: string }) => { titles.push(m.title); return []; }) };
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({
+      mailStateDb: mail, anthropicClient: client, reminderPollIntervalMs: 10, language: () => 'de',
+      notificationRouter: router as unknown as Parameters<typeof bootstrapInbox>[0]['notificationRouter'],
+    });
+    const id = runtime.state.insertItem({
+      accountId: 'acct-1', channel: 'email', threadKey: 't-r', bucket: 'requires_user', confidence: 0.5,
+      reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', subject: 'Vertrag prüfen',
+    });
+    runtime.state.setSnooze(id, new Date(Date.now() - 5000), null, true, true);
+    await vi.waitFor(() => expect(titles).toEqual(['Erinnerung']));
+    await runtime.shutdown();
+  });
+
   it('returns a runtime bundle with all parts populated', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
@@ -75,6 +93,31 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.onAccountAdded).toBeInstanceOf(Function);
     expect(runtime.onOutboundReconcile).toBeInstanceOf(Function); // wired to MailHooks.onOutboundSent
     expect(runtime.contactResolver).toBeNull(); // no CRM provided
+  });
+
+  // 1070: mail_triage reads the classifier's verdict through this.
+  it('answers what the classifier made of a thread, scoped to its account', () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    const id = runtime.state.insertItem({
+      accountId: 'acct-1', channel: 'email', threadKey: 't-l', bucket: 'draft_ready', confidence: 0.9,
+      reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', messageId: '<label@x>',
+    });
+    const before = runtime.inboxLabelOf('acct-1', 't-l');
+    expect(before?.bucket).toBe('draft_ready');
+    expect(before?.userAction).toBeUndefined();
+    runtime.state.updateUserAction(id, 'replied');
+    expect(before?.reason).toBe('r');
+    expect(runtime.inboxLabelOf('acct-1', 't-l')).toEqual({ bucket: 'draft_ready', userAction: 'replied', reason: 'r' });
+    expect(runtime.inboxLabelOf('acct-2', 't-l')).toBeNull();
+    expect(runtime.inboxLabelOf('acct-1', 't-unknown')).toBeNull();
+  });
+
+  it('shows no verdict, rather than throwing, when the lookup fails', () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    vi.spyOn(runtime.state, 'findItemByThread').mockImplementation(() => { throw new Error('db closed'); });
+    expect(runtime.inboxLabelOf('acct-1', 't-l')).toBeNull();
   });
 
   it('emits a console.warn when llmRegion=us without an ack (default routing)', () => {
@@ -238,7 +281,7 @@ describe('bootstrapInbox — wiring', () => {
     expect(create).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const url = fetchSpy.mock.calls[0]![0] as string;
-    expect(url).toContain('api.mistral.ai');
+    expect(url).toContain('api.eu.mistral.ai');
     expect(runtime.state.listItems()[0]?.bucket).toBe('requires_user');
     expect(runtime.budget.snapshot().spentUSD).toBeGreaterThan(0);
     fetchSpy.mockRestore();
@@ -287,6 +330,31 @@ describe('bootstrapInbox — wiring', () => {
     // No tokens were ever returned, so the budget stays at zero — the SDK
     // failure path never invokes the onUsage hook.
     expect(runtime.budget.snapshot().spentUSD).toBe(0);
+  });
+
+  it('on an instance connected to a Shopify store the EU region sends nothing — not to Mistral, not to the US path', async () => {
+    vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const create = vi.fn();
+    const client = { messages: { create } } as unknown as Anthropic;
+    try {
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, llmRegion: 'eu', mistralApiKey: 'eu-key' });
+      await runtime.hook(ACCOUNT.id, envelope());
+      for (let i = 0; i < 50 && runtime.state.listItems().length === 0; i++) {
+        await new Promise((r) => setImmediate(r));
+      }
+      await runtime.shutdown();
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+      const items = runtime.state.listItems();
+      expect(items).toHaveLength(1);
+      expect(items[0]?.bucket).toBe('requires_user');
+      expect(items[0]?.classifierVersion).toMatch(/^dead-letter:/);
+    } finally {
+      fetchSpy.mockRestore();
+      vi.unstubAllEnvs();
+    }
   });
 });
 

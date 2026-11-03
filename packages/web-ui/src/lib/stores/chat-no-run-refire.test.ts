@@ -110,7 +110,8 @@ describe('chat store — no client-side run re-fire', () => {
 		// standing over a confirmed answer invites the second billed send this
 		// whole change exists to prevent. (Delta round on this fix, 2026-08-23.)
 		expect(answeredBranch).toContain('chatError = null;');
-		const reset = answeredBranch.indexOf('isStreaming = false;');
+		// `endStreaming` clears `isStreaming` (and reads whether the run contained the chat).
+		const reset = answeredBranch.indexOf('endStreaming(turn.assistantMsg);');
 		const reconcile = answeredBranch.indexOf('await reconcileThread();');
 		expect(reset).toBeGreaterThan(-1);
 		expect(reset).toBeLessThan(reconcile);

@@ -69,6 +69,12 @@ export function toTriageView(env: MailEnvelope): TriageEnvelopeView {
 export function renderTriageList(
   envelopes: ReadonlyArray<MailEnvelope>,
   accountId?: string,
+  labelOf?: (env: MailEnvelope) => string | null,
+  // The ordinal of the first message, so a list rendered in several groups numbers on.
+  firstOrdinal = 1,
+  // The inbox's reason for its verdict. Model text derived from the mail, so it goes inside the
+  // message's untrusted block, never next to the label in the header.
+  reasonOf?: (env: MailEnvelope) => string | null,
 ): string {
   if (envelopes.length === 0) return '(no messages)';
   const acctLabel = accountId ?? 'unknown';
@@ -82,7 +88,10 @@ export function renderTriageList(
     const flagSuffix = flags.length > 0 ? ` [${flags.join(' ')}]` : '';
 
     // Operational header — agent framing, NOT user-controlled.
-    lines.push(`${String(i + 1)}. uid:${String(v.uid)} · date:${v.date}${flagSuffix}`);
+    // `labelOf` returns the inbox's own enum values (inboxLabelText), never mail text, so it
+    // may stand in the operational header.
+    const label = labelOf?.(envelopes[i]!) ?? null;
+    lines.push(`${String(firstOrdinal + i)}. uid:${String(v.uid)} · date:${v.date}${flagSuffix}${label ? ` · inbox:${label}` : ''}`);
 
     // Headers + snippet collected as one untrusted block per envelope.
     // Single-block wrapping (vs separate wrappers per field) keeps the
@@ -92,9 +101,11 @@ export function renderTriageList(
     // two lines, and the second can imitate the `N. uid:… · date:…` label above — inside
     // this envelope's block, but naming another message's uid. Collapsing it here, at the
     // renderer, covers every provider that fills the envelope.
+    const reason = reasonOf?.(envelopes[i]!) ?? null;
     const headerBlock = [
       `From: ${oneBlockLine(v.from)}`,
       `Subject: ${oneBlockLine(v.subject)}`,
+      ...(reason ? [`Inbox reason: ${truncate(oneBlockLine(reason).replace(/\s+/g, ' '), 200)}`] : []),
       ...(body ? ['', body] : []),
     ].join('\n');
     lines.push(wrapUntrustedData(headerBlock, `mail:${acctLabel}:envelope:${String(v.uid)}`));

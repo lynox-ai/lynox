@@ -11,6 +11,22 @@ export interface BulkI18n {
 	tf: (key: string, vars: Record<string, string>) => string;
 }
 
+/** The sentences that name the owner's own act ("you approved", "you took out", "the limit you
+ *  set"). Every such act is the owner's alone (the routes refuse a mandate), so a mandate's
+ *  session reads each in its `_mandate` form, which names the owner instead (ux U-111). */
+export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
+	'bulk.intro', 'bulk.deselect.taken_out',
+	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
+	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
+	'bulk.halt.mandateEnded', 'bulk.halt.checksum',
+]);
+
+/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form. */
+export function bulkMandateI18n(i18n: BulkI18n): BulkI18n {
+	const key = (k: string): string => (BULK_MANDATE_KEYS.has(k) ? `${k}_mandate` : k);
+	return { t: (k) => i18n.t(key(k)), tf: (k, vars) => i18n.tf(key(k), vars) };
+}
+
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
 export type BulkChange = 'update' | 'create' | 'delete' | 'unchanged' | 'invalid';
 
@@ -27,6 +43,8 @@ export interface BulkRun {
 	/** Targets not written because an earlier send reached them without a clear answer; the
 	 *  engine does not send to them again. */
 	sentUnknown: number;
+	/** Written targets the store kept with markup lynox did not send. Optional: an older engine sends none. */
+	shopAddedMarkup?: number | undefined;
 	undone: number;
 	kind: 'apply' | 'undo';
 	atomic: boolean;
@@ -165,7 +183,7 @@ export function bulkHaltText(
 /** A write run's halts that writing on moves on from, each with its own sentence on the page. */
 const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
-	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff',
+	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff', 'markupAddedByShop',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
@@ -214,6 +232,7 @@ export function bulkResumeText(
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
+		: key === 'markupAddedByShop' ? 'bulk.halt.markupAddedByShop_before'
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, kept: null, soFar: null, allows: null };
@@ -402,6 +421,9 @@ export interface BulkTarget {
 	written?: boolean | undefined;
 	/** A rollback or an undo took this run's write back. */
 	undone?: boolean | undefined;
+	/** Written, and the store kept it with markup lynox did not send: the target the halt
+	 *  `markupAddedByShop` is about. Set only where it holds. */
+	shopAddedMarkup?: true | undefined;
 }
 
 /** The external host of a run's target system, or null for a local run. */
@@ -493,6 +515,93 @@ export function bulkRollbackText(run: Pick<BulkRun, 'phase' | 'haltKey'>, i18n: 
 	return { cause: i18n.t(`bulk.halt.${key}`), incomplete };
 }
 
+/** The halts that end an unapproved run before it wrote anything: another judged run took its
+ *  place, or the access that planned it ended. Both leave the run aborted. */
+const BULK_ENDED_UNAPPROVED = new Set(['superseded', 'mandateEnded']);
+
+/** The label key of the button that starts a run waiting for its start, exactly as the page
+ *  shows it; null where the page shows no button (a judge it cannot use, or a list or judge
+ *  the run lacks the data to show). */
+export function bulkStartButtonKey(
+	run: Pick<BulkRunDetailData, 'listFirstPage' | 'judgeServedBy' | 'judgeRule'>,
+	kind: BulkStartKind | null,
+	supersedable: boolean,
+): string | null {
+	if (kind === 'read') return 'bulk.start.read';
+	if (kind === 'list') return run.listFirstPage ? 'bulk.start.list' : null;
+	if (kind === 'judge') return run.judgeServedBy && run.judgeRule ? (supersedable ? 'bulk.start.supersede_yes' : 'bulk.start.judge') : null;
+	return null;
+}
+
+/** The page's own sentences for the halts that neither a restart nor writing on moves past: a
+ *  run waiting for its start, one at a probe it may not write past yet, and one ended before it
+ *  was approved. `cause` replaces the engine's reason; `step` says what the owner does next.
+ *  `startButton`: the label of the start button the page shows ({@link bulkStartButtonKey}),
+ *  null when it shows none. Null on any other halt. */
+export function bulkStateText(
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>,
+	startButton: string | null,
+	i18n: BulkI18n,
+): { cause: string; step: string | null } | null {
+	const key = run.haltKey;
+	if (key === null) return null;
+	if (bulkWaitsForStart(run)) {
+		if (startButton !== null) return { cause: i18n.tf(`bulk.halt.${key}_start`, { button: startButton }), step: null };
+		// No button: a judge the run cannot use has its note on the page; a judge it can use but
+		// no button means the rule went only to the owner, and someone else is looking.
+		return { cause: i18n.t(bulkStartKind(run) === 'judge' ? 'bulk.halt.wait_owner_only' : 'bulk.halt.wait_no_start'), step: null };
+	}
+	// Set only while writing (bulk-apply), where the probe panel can stand.
+	if (key === 'probeRequired' && run.phase === 'writing') {
+		// The probe panel stands only where the server offers a probe confirming can file.
+		return { cause: i18n.t('bulk.halt.probeRequired'), step: i18n.t(bulkAtProbe(run) ? 'bulk.halt.probeRequired_confirm' : 'bulk.halt.probeRequired_replan') };
+	}
+	if (run.phase === 'aborted' && BULK_ENDED_UNAPPROVED.has(key)) return { cause: i18n.t(`bulk.halt.${key}`), step: null };
+	return null;
+}
+
+/** What the page says under "halted because": its own sentence where it has one, else the
+ *  engine's reason. `startButton` as for {@link bulkStateText}. `mandate`: a session the page
+ *  offers no act (a mandate's, or one whose owner is not known yet) is shown no step that names a
+ *  button it does not see: a run waiting for its start says who starts it. */
+export function bulkHaltCause(
+	run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0] & Parameters<typeof bulkStateText>[0],
+	managed: boolean | null,
+	startButton: string | null,
+	i18n: BulkI18n,
+	mandate = false,
+): string {
+	if (bulkAtProbe(run) && run.haltKey === 'maxTargets') return i18n.t('bulk.halted_after_probe');
+	const own = bulkHaltText(run, managed, i18n)?.cause ?? bulkResumeText(run, managed, i18n)?.cause ?? bulkRollbackText(run, i18n)?.cause;
+	if (own !== undefined) return own;
+	if (mandate && bulkWaitsForStart(run)) return i18n.t('bulk.halt.wait_owner_only');
+	const state = bulkStateText(run, startButton, i18n);
+	if (state !== null) return state.step === null || mandate ? state.cause : `${state.cause} ${state.step}`;
+	return run.haltReason ?? '';
+}
+
+/** The address the support halts point to. */
+export const BULK_SUPPORT_EMAIL = 'support@lynox.ai';
+
+/** The halts whose sentence on a managed instance sends the owner to support. */
+const BULK_SUPPORT_HALTS = new Set(['blocked', 'shopifyWriteOff']);
+
+/** A `mailto:` link to support for a halt whose sentence names support, with a subject naming
+ *  the run and its host and nothing else from the run; null on any other halt, on a
+ *  self-hosted instance, and where the page shows no such sentence. */
+export function bulkSupportMailto(
+	run: Pick<BulkRunDetailData, 'id' | 'phase' | 'haltKey' | 'targetSystem' | 'probe' | 'haltReason' | 'probeConfirmed' | 'maxTargets' | 'changes' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>,
+	managed: boolean | null,
+	i18n: BulkI18n,
+): string | null {
+	if (managed === false || run.haltKey === null || !BULK_SUPPORT_HALTS.has(run.haltKey)) return null;
+	// The sentence stands with the way on: a restart for a planned run, writing on for one that wrote.
+	const shown = run.phase === 'planned' ? bulkRestartKind(run) !== null : bulkResumeKind(run) !== null;
+	if (!shown) return null;
+	const subject = i18n.tf('bulk.halt.support_subject', { run: run.id, host: bulkSystemName(run.targetSystem, i18n) });
+	return `mailto:${BULK_SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}`;
+}
+
 /** Whether an atomic run's rollback did not complete, so the page has targets to mark. The page
  *  then loads every target: a mark on a page the owner never opens would not be seen. */
 export function bulkRollbackIncomplete(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
@@ -527,7 +636,12 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	list_item_mismatch: 'list_item_mismatch',
 	list_item_truncated: 'list_item_truncated',
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
-	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char',
+	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused', shop_added_markup: 'shop_added_markup',
+};
+/** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
+ *  of tags the page reads, whose way out differs from planning again (U-103). */
+const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
+	markup_dropped: 'markup_dropped', markup_dropped_before: 'markup_dropped_before',
 };
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
@@ -541,6 +655,10 @@ const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
  *  lynox does not change it, and the next step; elsewhere the reason by its code and the step
  *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
 export function bulkInvalidText(reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n): string {
+	const anyForm = BULK_INVALID_ANY_FORM[reason];
+	if (anyForm !== undefined) {
+		return i18n.tf(`bulk.invalid.${anyForm}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
+	}
 	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
 	if (key === undefined) return i18n.tf('bulk.invalid.other', { code: bulkVisibleText(reason) });
 	const support = BULK_INVALID_SUPPORT[key];

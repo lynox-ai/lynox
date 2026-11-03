@@ -199,6 +199,19 @@ describe('writing a plan or a workflow with a character that renders as nothing'
     expect(briefing).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
   });
 
+  it('a due date stored with them before update checked its form reaches task_list and the overview without them', async () => {
+    // `update` once took ten UTF-16 units unchecked: a date followed by tag characters.
+    const t = tm.create({ title: 'Weekly offer', dueDate: '2020-01-06' });
+    history.getDb().prepare('UPDATE tasks SET due_date = ? WHERE id = ?').run(`2020-01${tagged('m x')}`, t.id);
+    expect(tm.getTask(t.id)?.due_date).toMatch(/[\u{E0000}-\u{E007F}]/u);
+    const listing = await taskListTool.handler({}, agent());
+    expect(listing).toContain('Weekly offer — due 2020-01');
+    expect(listing).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+    const briefing = tm.getBriefingSummary();
+    expect(briefing).toContain('Overdue: "Weekly offer", due 2020-01,');
+    expect(briefing).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+  });
+
   it('import_workflow refuses a shared workflow whose steps carry it, and saves nothing', async () => {
     const planned = {
       id: 'wf_helper', name: 'Monthly report', goal: 'Fetch and send',
@@ -226,6 +239,17 @@ describe('writing a plan or a workflow with a character that renders as nothing'
     expect(() => history.insertPlannedPipeline({ ...base, id: 'wf_2', steps: [{ id: 's1', task: 'Fetch', input_template: { q: `seen on a page${ZWSP}` } }] } as typeof base, OWNER_PRINCIPAL)).not.toThrow();
     // The capture's own record never reaches a run's model and may hold web text: not read.
     expect(() => history.insertPlannedPipeline({ ...base, reasoning: `seen on a page${ZWSP}` }, OWNER_PRINCIPAL)).not.toThrow();
+  });
+
+  it('the save chokepoint refuses it in a step id, where a name takes none of the places running text may', () => {
+    const base = { id: 'wf_1', name: 'Report', goal: 'Send it', steps: [{ id: 's1', task: 'Fetch' }], reasoning: '', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z' };
+    const ZWNJ = String.fromCodePoint(0x200C);
+    expect(() => history.insertPlannedPipeline({ ...base, steps: [{ id: 'fetch', task: 'Fetch' }, { id: `send${tagged('x')}`, task: 'Send' }] }, OWNER_PRINCIPAL))
+      .toThrow(/refused to save this workflow — steps\[1\]\.id contains a character that renders as nothing \(U\+E0078\)/);
+    // ZWNJ between letters is a place running text may carry one: in a task it is saved, in an id it is not.
+    expect(() => history.insertPlannedPipeline({ ...base, steps: [{ id: `me${ZWNJ}ku`, task: 'Fetch' }] }, OWNER_PRINCIPAL)).toThrow(/steps\[0\]\.id contains/);
+    expect(() => history.insertPlannedPipeline({ ...base, id: 'wf_2', steps: [{ id: 's1', task: `me${ZWNJ}ku` }] }, OWNER_PRINCIPAL)).not.toThrow();
+    expect(() => history.insertPlannedPipeline({ ...base, id: 'wf_3', steps: [{ id: 'fetch-2', task: 'Fetch' }] }, OWNER_PRINCIPAL)).not.toThrow();
   });
 
   it('plan_task refuses it before the owner is asked', async () => {

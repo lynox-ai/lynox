@@ -39,6 +39,71 @@ function canonicalHtml(value: string): string {
   return serialize(parseHtmlFragment(value));
 }
 
+/**
+ * The tags of a value that its fragment does not keep: every stretch of the source no node of the
+ * tree was built from, whitespace left out. The fragment parse drops a start tag that only has a
+ * place at document level, with its attributes, while the page applies those attributes to its own
+ * element of that name; it drops an end tag that closes nothing in the fragment, while in the page
+ * it closes the theme's element around the value. Neither the tree, the canonical form nor
+ * `endsClosed` sees them, so they are read off the source.
+ *
+ * A text node does not vouch for its whole range: the parser appends the characters after a dropped
+ * tag to the text before it and moves the node's end over the tag. Outside an element whose content
+ * the tokenizer reads as raw text, a `<` that opens a tag, an end tag or a declaration cannot be a
+ * character of the text, so such a text node's source from the first one to its last `>` is reported
+ * as one stretch. Not a match cut at the first `>`: a before-image then holds only the same tags with
+ * what lies between them, never a prefix cut at a `>` inside a quoted value, nor a CDATA section of
+ * foreign content, which is inert text. The text around them stays out, so editing it is no change.
+ */
+/** A start tag in a dropped stretch whose name is followed by an attribute. */
+const DROPPED_WITH_ATTRIBUTES = /<[A-Za-z][^\s/>]*[\s/]+[^\s/>]/;
+
+/** Elements whose content the tokenizer reads as text, scripting on: a `<` there is a character. */
+const RAW_TEXT_PARENTS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext']);
+
+export function droppedTagsOf(value: string): string[] {
+  const div = defaultTreeAdapter.createElement('div', p5.NS.HTML, []);
+  const tree = parseFragment(div, value, { scriptingEnabled: true, sourceCodeLocationInfo: true });
+  const kept = new Uint8Array(value.length);
+  const keep = (at: { startOffset: number; endOffset: number } | null | undefined): void => {
+    if (at) kept.fill(1, at.startOffset, at.endOffset);
+  };
+  const swallowed: string[] = [];
+  const visit = (parent: { childNodes?: Node[] }, rawText: boolean): void => {
+    for (const node of parent.childNodes ?? []) {
+      if (isElement(node)) {
+        keep(node.sourceCodeLocation?.startTag);
+        keep(node.sourceCodeLocation?.endTag);
+        const raw = node.namespaceURI === p5.NS.HTML && RAW_TEXT_PARENTS.has(node.tagName);
+        if (node.tagName === 'template') visit(defaultTreeAdapter.getTemplateContent(node as DefaultTreeAdapterTypes.Template), false);
+        visit(node, raw);
+      } else {
+        const at = node.sourceCodeLocation;
+        keep(at);
+        if (at && node.nodeName === '#text' && !rawText) {
+          const source = value.slice(at.startOffset, at.endOffset);
+          const first = source.search(/<[A-Za-z/!?]/);
+          const last = source.lastIndexOf('>');
+          if (first >= 0) swallowed.push(source.slice(first, last > first ? last + 1 : source.length));
+        }
+      }
+    }
+  };
+  visit(tree, false);
+  const dropped: string[] = [...swallowed];
+  let from = -1;
+  for (let i = 0; i <= value.length; i++) {
+    if (i < value.length && kept[i] === 0) {
+      if (from < 0) from = i;
+    } else if (from >= 0) {
+      const stretch = value.slice(from, i);
+      if (stretch.trim() !== '') dropped.push(stretch);
+      from = -1;
+    }
+  }
+  return dropped;
+}
+
 // --- Which fields hold HTML. Only the form knows a field's content type; a key name is no
 // evidence. A closed map from the list read, until forms declare it themselves.
 
@@ -69,6 +134,9 @@ export interface Occurrence {
   attributes: (readonly [name: string, value: string])[];
   /** The text below a script, style, raw-text or RCDATA element; a comment's text; else null. */
   text: string | null;
+  /** Where that text sits, when elements stand below the element too (a foreign `script` may hold
+   *  them): every node below in document order with its depth. Null when no element is below. */
+  layout: string | null;
   /** Inside a `template`'s content: inert there, live once lifted out. */
   inTemplate: boolean;
 }
@@ -132,6 +200,31 @@ function textBelow(n: Node): string {
   return out;
 }
 
+/** Text below a foreign text carrier runs or styles by where it sits, not only by what it says:
+ *  the same characters split differently between the carrier and elements below it are another
+ *  body. Null when only text and comments are below, where the text alone tells. */
+function layoutBelow(n: Node): string | null {
+  const out: (readonly [number, string, string] | readonly [number, string])[] = [];
+  let elementBelow = false;
+  const stack: [Node, number][] = [];
+  const push = (p: Node, depth: number): void => {
+    const kids = childrenOf(p);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push([kids[i]!, depth]);
+  };
+  push(n, 1);
+  while (stack.length > 0) {
+    const [c, depth] = stack.pop()!;
+    if (c.nodeName === '#text') out.push([depth, '#text', (c as DefaultTreeAdapterTypes.TextNode).value]);
+    else if (c.nodeName === '#comment') out.push([depth, '#comment', (c as DefaultTreeAdapterTypes.CommentNode).data]);
+    else if (isElement(c)) {
+      elementBelow = true;
+      out.push([depth, c.tagName]);
+      push(c, depth + 1);
+    }
+  }
+  return elementBelow ? JSON.stringify(out) : null;
+}
+
 function attributesOf(el: Element): (readonly [string, string])[] {
   return el.attrs
     .map((a) => [a.prefix ? `${a.prefix}:${a.name}` : a.name, a.value] as const)
@@ -148,14 +241,16 @@ export function markupOf(fragment: HtmlFragment): { occurrences: Occurrence[]; t
   // may still be elements, and they count as their own.
   for (const [c, inTemplate] of descendants(fragment, false)) {
     if (c.nodeName === '#comment') {
-      occurrences.push({ kind: 'comment', namespace: '', name: '', attributes: [], text: (c as DefaultTreeAdapterTypes.CommentNode).data, inTemplate });
+      occurrences.push({ kind: 'comment', namespace: '', name: '', attributes: [], text: (c as DefaultTreeAdapterTypes.CommentNode).data, layout: null, inTemplate });
       continue;
     }
     if (!isElement(c)) continue;
     const namespace = NAMESPACES[c.namespaceURI] ?? 'other';
     const attributes = attributesOf(c);
-    const text = TEXT_CARRIERS.has(c.tagName) ? textBelow(c) : null;
-    occurrences.push({ kind: 'element', namespace, name: c.tagName, attributes, text, inTemplate });
+    const carrier = TEXT_CARRIERS.has(c.tagName);
+    const text = carrier ? textBelow(c) : null;
+    const layout = carrier ? layoutBelow(c) : null;
+    occurrences.push({ kind: 'element', namespace, name: c.tagName, attributes, text, layout, inTemplate });
     triples.push({ namespace, element: c.tagName, attribute: null, value: null, inTemplate });
     for (const [attribute, value] of attributes) triples.push({ namespace, element: c.tagName, attribute, value, inTemplate });
   }
@@ -185,7 +280,9 @@ export type MarkupRefusal =
   | 'url_scheme'
   | 'url_control_char'
   | 'hidden_char'
-  | 'not_canonical';
+  | 'not_canonical'
+  | 'markup_dropped'
+  | 'markup_dropped_before';
 
 export interface MarkupCheckInput {
   /** The field's before-image; null where the target has none. */
@@ -217,12 +314,54 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
       return refused('not_canonical', 'The value leaves a tag, a comment, raw text or an element open at its end.');
     }
     const before = input.before ?? '';
+    // What the fragment drops, a multiset against the before-image's own, byte for byte. A stretch
+    // with a start tag that carries attributes is never held: the same bytes are inert where the
+    // before-image has them (a `template`, a `select`) and land on the page's own element where the
+    // after-state puts them, and the place is not compared. Held is only what can move layout.
+    // Where the before-image carries the same attributed stretch, planning again never helps: the
+    // owner has to remove it in the shop, and the refusal says so (`markup_dropped_before`).
+    const held = counts(droppedTagsOf(before));
+    for (const tag of droppedTagsOf(input.after)) {
+      const n = held.get(tag) ?? 0;
+      const detail = `The value carries a tag the page reads but this check cannot place: ${tag}`;
+      if (DROPPED_WITH_ATTRIBUTES.test(tag)) return refused(n > 0 ? 'markup_dropped_before' : 'markup_dropped', detail);
+      if (n === 0) return refused('markup_dropped', detail);
+      held.set(tag, n - 1);
+    }
     // Each tree of the after-state against the before-image's tree of the same kind.
     const raw = checkTrees(parseHtmlFragment(before), parseHtmlFragment(input.after), input);
     if (!raw.ok) return raw;
     return checkTrees(parseHtmlFragment(canonicalHtml(before)), parseHtmlFragment(canonical), input);
   } catch {
     // parse5 does not throw on any string; this is the fixed reason should it ever.
+    return refused('not_canonical', 'The value could not be read as HTML.');
+  }
+}
+
+/**
+ * Whether a field the host read back holds markup the run never sent (PRD shopify-preset §21.2
+ * item 6): an occurrence or a triple outside the allowlist and outside the value sent, or a link
+ * to a domain the rule does not take. Checked against the value SENT, not the before-image: an
+ * undo's before-image may already hold the shop's markup, and against it that would pass unmarked.
+ * Only the tree the host serialised is read, the one a shopper's browser parses, and its end must
+ * be as closed as the value sent was (`endsClosed`). Formatting,
+ * allowlisted additions and removals are not refused here; hidden characters are not either.
+ * Like {@link checkMarkup}, it never throws: a value that cannot be read counts as added markup.
+ */
+export function markupAddedByHost(input: { sent: string; back: string; storeHost: string; startDomains: readonly string[] }): MarkupCheckResult {
+  try {
+    // A tag, comment or attribute value left open at the end falls away from the fragment's tree,
+    // so no tree check sees it, nor what the host writes into it; the theme's next `>` closes it,
+    // live. A value read back open counts as added unless it is the bytes sent: a before-image an
+    // undo restores, or an unchanged field a verdict carries, may itself end open.
+    if (!endsClosed(input.back) && input.back !== input.sent) {
+      return refused('not_canonical', 'The value read back leaves a tag, a comment, raw text or an element open at its end.');
+    }
+    const got = checkTrees(parseHtmlFragment(input.sent), parseHtmlFragment(input.back), {
+      before: input.sent, after: input.back, storeHost: input.storeHost, startDomains: input.startDomains,
+    });
+    return !got.ok && got.reason === 'hidden_char' ? { ok: true } : got;
+  } catch {
     return refused('not_canonical', 'The value could not be read as HTML.');
   }
 }
@@ -266,7 +405,7 @@ function endsClosed(value: string): boolean {
 }
 
 function occurrenceKey(o: Occurrence): string {
-  return JSON.stringify([o.kind, o.namespace, o.name, o.attributes, o.text, o.inTemplate]);
+  return JSON.stringify([o.kind, o.namespace, o.name, o.attributes, o.text, o.layout, o.inTemplate]);
 }
 
 function shellKey(o: Occurrence): string {

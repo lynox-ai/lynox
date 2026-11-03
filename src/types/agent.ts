@@ -7,7 +7,7 @@ import type { SecretStoreLike, IsolationConfig } from './security.js';
 import type { AutonomyLevel } from './modes.js';
 import type { AgentWarning } from './models.js';
 import type { ConversationGrants } from '../core/conversation-grants.js';
-import type { CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { CallApiCost, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 
 export interface TabQuestion {
   question: string;
@@ -160,6 +160,8 @@ export type ToolCallRecorder = (call: {
   contract?: CallContract | undefined;
   /** How the call's filing for the owner's approval ended (`CallFiled`); absent when it filed nothing. */
   filed?: CallFiled | undefined;
+  /** The API request this call sent and its cost (`CallApiCost`); absent when it sent none. */
+  apiCost?: CallApiCost | undefined;
   /** The id of the `tool_use` block this call answers, as the model's turn carried it.
    *  A required key, so a producer cannot leave it out by accident; `undefined`
    *  only where no block id exists. */
