@@ -39,7 +39,7 @@ import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
-import { connectionTokenAllowed } from './profile-secret-view.js';
+import { connectionTokenAllowed, connectionTokenHolders } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
@@ -122,6 +122,7 @@ import {
   applyEgressSettings,
   generateInitBriefing,
   initSecrets,
+  renderSecretsBriefing,
   ensureVaultKey,
   initScopes,
   initMemoryInstance,
@@ -1804,6 +1805,12 @@ export class Engine {
       // memory, and GET /api/api-profiles keeps returning [] until the next
       // engine restart re-projects it.
       this._toolContext.apiStore = this._apiStore;
+      // The `<secrets>` briefing was rendered before any profile was known; now that they are,
+      // the names that hold a connection's token come out of it (the `secret:` gate refuses them).
+      if (this.secretStore && this.secretsBriefing !== undefined) {
+        const apiStore = this._apiStore;
+        this.secretsBriefing = renderSecretsBriefing(this.secretStore, (n) => connectionTokenHolders(apiStore, n).length > 0);
+      }
       // Once per database, after every stored profile is known: each vault secret whose profiles
       // agree on where it goes is bound there. A failure leaves the names unbound, which refuses
       // their sends rather than letting them go anywhere, and the next boot tries again.

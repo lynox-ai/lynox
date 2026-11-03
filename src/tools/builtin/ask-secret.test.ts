@@ -3,6 +3,7 @@ import { askSecretTool } from './ask-secret.js';
 import { SecretStore } from '../../core/secret-store.js';
 import type { IAgent } from '../../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
+import { accessTokenKey, type ApiProfile } from '../../core/api-store.js';
 
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   return {
@@ -441,5 +442,109 @@ describe('askSecretTool — discovery + reconciliation', () => {
     const agent = makeAgent({ secretStore: new SecretStore() });
     const result = await askSecretTool.handler({ action: 'collect' }, agent);
     expect(result).toContain('needs both');
+  });
+});
+
+// The `secret:` gate refuses a reference to a connection's token (`slotMayReach(…, 'other')`), so
+// no text of this tool offers one. Three kinds of name are told apart: (i) a token of the grant,
+// (ii) the refresh slot an oauth2 profile configures, which only `tokenSlotNames` covers, and
+// (iii) a name refused only because an unreadable stored entry may hold it — that one is no token.
+describe('a connection token is offered as no secret: reference', () => {
+  const shop = {
+    id: 'shop-api', name: 'shop-api', base_url: 'https://shop.example/v1', description: 'shop',
+    auth: { type: 'oauth2', oauth: { token_url: 'https://shop.example/oauth/token', grant_type: 'refresh_token', refresh_token_key: 'SHOP_RT' } },
+  } as unknown as ApiProfile;
+  const ACCESS = accessTokenKey('shop-api');
+  const HELD = 'HELD_KEY';
+  const FREE = 'FREE_KEY';
+
+  function agentWith(names: string[], matches: string[], profiles: ApiProfile[] = [shop], promptSecret?: IAgent['promptSecret']): IAgent {
+    const apiStore = {
+      knownProfiles: () => profiles,
+      get: (id: string) => profiles.find(p => p.id === id),
+      unreadableHolds: (n: string) => n === HELD,
+    };
+    const secretStore = {
+      listAgentVisibleNames: () => names,
+      getMasked: () => '****abcd',
+      findNameMatches: () => matches,
+    };
+    return makeAgent({ secretStore, toolContext: { apiStore }, ...(promptSecret ? { promptSecret } : {}) } as unknown as Partial<IAgent>);
+  }
+
+  /** The two sections of the list: what may be referenced, and the connection tokens. */
+  function sections(out: string): { refs: string; tokens: string } {
+    const at = out.indexOf('Connection tokens in the vault');
+    return at < 0 ? { refs: out, tokens: '' } : { refs: out.slice(0, at), tokens: out.slice(at) };
+  }
+
+  it('list: a grant token and a configured refresh slot stand apart; an unreadable-held name and a free one stay references', async () => {
+    const out = await askSecretTool.handler({ action: 'list' }, agentWith([ACCESS, 'SHOP_RT', HELD, FREE], []));
+    const { refs, tokens } = sections(out);
+    expect(refs).toContain('reference with secret:NAME');
+    expect(refs).toContain(`${FREE} (`);
+    expect(refs, 'no profile is known to hold it: not a token').toContain(`${HELD} (`);
+    expect(refs).not.toContain(ACCESS);
+    expect(refs, 'the configured refresh slot is a token too').not.toContain('SHOP_RT');
+    expect(tokens).toContain(`${ACCESS} of profile "shop-api"`);
+    expect(tokens).toContain('SHOP_RT of profile "shop-api"');
+    expect(tokens).not.toContain(HELD);
+    expect(tokens, 'no token is written as a reference').not.toMatch(/secret:[A-Z]/);
+  });
+
+  it('list: a configured name two profiles read is no one\'s token and stays a reference', async () => {
+    // `slotGrant`: a configured name named by a second profile stays free, so `secret:` may reach it.
+    const twin = { ...shop, id: 'shop-two', name: 'shop-two' } as ApiProfile;
+    const out = await askSecretTool.handler({ action: 'list' }, agentWith(['SHOP_RT'], [], [shop, twin]));
+    expect(sections(out).refs).toContain('SHOP_RT (');
+    expect(sections(out).tokens).toBe('');
+  });
+
+  it('list: with tokens only, nothing is offered as a reference', async () => {
+    const out = await askSecretTool.handler({ action: 'list' }, agentWith(['SHOP_RT'], []));
+    expect(out).not.toContain('reference with secret:NAME');
+    expect(out).toContain('SHOP_RT of profile "shop-api"');
+  });
+
+  it('collect: an exact match that is a token is not offered as secret:, and nothing is collected', async () => {
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const out = await askSecretTool.handler({ name: 'SHOPRT', prompt: 'p' }, agentWith(['SHOP_RT'], ['SHOP_RT'], [shop], promptSecret));
+    expect(out).toContain("holds a connection's token");
+    expect(out).toContain('"SHOP_RT" (profile "shop-api")');
+    expect(out).not.toContain('secret:SHOP_RT');
+    expect(promptSecret).not.toHaveBeenCalled();
+  });
+
+  it('collect: a mixed exact match keeps the reference to the free name only', async () => {
+    const out = await askSecretTool.handler({ name: 'SHOP_R_T', prompt: 'p' }, agentWith(['SHOP_RT', 'SHOPRT'], ['SHOP_RT', 'SHOPRT']));
+    expect(out).toContain('Reference secret:SHOPRT instead');
+    expect(out).not.toContain('secret:SHOP_RT');
+  });
+
+  it('collect: an exact match held only by an unreadable entry keeps its reference and is not called a token', async () => {
+    const out = await askSecretTool.handler({ name: 'HELDKEY', prompt: 'p' }, agentWith([HELD], [HELD]));
+    expect(out).toContain(`Reference secret:${HELD} instead`);
+    expect(out).not.toContain("connection's token");
+  });
+
+  it('collect: the vendor hint names no token', async () => {
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    await askSecretTool.handler({ name: 'SHOP_API_KEY', prompt: 'Enter it' }, agentWith([ACCESS, 'SHOP_WEBHOOK'], [ACCESS, 'SHOP_WEBHOOK'], [shop], promptSecret));
+    const [, text] = promptSecret.mock.calls[0] as [string, string, string | undefined];
+    expect(text).toContain('"SHOP_WEBHOOK"');
+    expect(text).not.toContain(ACCESS);
+  });
+
+  it('names the holder only when exactly one profile holds it, and takes a name that is a number', async () => {
+    // Two grants that both wrote the same name contest it: the gate refuses it, and it is a token
+    // of neither one in particular.
+    const wrote = (p: ApiProfile, id: string): ApiProfile => ({ ...p, id, name: id, oauth_grant: { written: [{ name: 'SHARED_TOK', fp: 'f' }] } } as unknown as ApiProfile);
+    const two = await askSecretTool.handler({ action: 'list' }, agentWith(['SHARED_TOK'], [], [wrote(shop, 'shop-a'), wrote(shop, 'shop-b')]));
+    expect(sections(two).tokens).toContain('SHARED_TOK');
+    expect(two).not.toContain('of profile');
+    expect(sections(two).refs).not.toContain('SHARED_TOK');
+    const numeric = { ...shop, name: 42 } as unknown as ApiProfile;
+    const one = await askSecretTool.handler({ action: 'list' }, agentWith(['SHOP_RT'], [], [numeric]));
+    expect(one).toContain('SHOP_RT of profile "42"');
   });
 });

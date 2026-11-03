@@ -556,6 +556,30 @@ export function slotMayReach(
 }
 
 /**
+ * The stored profiles that hold `name` as one of their token slots ({@link tokenSlotNames}: the
+ * derived pair, the names an exchange wrote, and the refresh slot an oauth2 profile reads, which
+ * it may configure), when a `secret:` reference to it is refused ({@link slotMayReach} with
+ * `other`). Such a name is a connection's token: it is used through that profile, never offered
+ * as `secret:NAME`. A name refused only because a stored entry the boot could not read may hold
+ * it is NOT one — no profile is known to hold it — and answers an empty list, as does anything
+ * that throws, which leaves the name where it was.
+ *
+ * `tokenSlotNames`, not `grantTokenNames`: a configured refresh slot is in the first set only,
+ * and the refusal covers it.
+ */
+export function connectionTokenHolders(
+  apiStore: Pick<ApiStore, 'knownProfiles' | 'get' | 'unreadableHolds'>,
+  name: string,
+): ApiProfile[] {
+  try {
+    if (slotMayReach(apiStore, name, 'other', undefined)) return [];
+    return apiStore.knownProfiles().filter((p) => tokenSlotNames(p).has(name));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * How each field of a profile bears on a released value, so that a field added later cannot be
  * left out without a decision (the `satisfies` below fails to compile until it is placed):
  * - `host` — it decides where the value goes; it enters through {@link credentialEndpoints}.
