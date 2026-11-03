@@ -60,7 +60,7 @@ beforeEach(() => {
   mkdirSync(outside);
   setTenantWorkspace(ws);
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
 });
 
 afterEach(() => {

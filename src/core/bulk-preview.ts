@@ -31,12 +31,30 @@ import {
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
+import { verdictTextRefusal } from './bulk-judge.js';
+import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { shopifyBulkReadEnabled, shopifyListPage, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, externalHostOf,
   type BulkHaltReason, type BulkInvalidReason, type BulkLedger, type BulkListRun, type BulkRunForPreview,
 } from './bulk-ledger.js';
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * Whether a planner's after-state adds markup the owner does not read (PRD shopify-preset §20.2
+ * item 5, M4): the same rule a verdict's value goes through (`verdictTextRefusal`), for the
+ * after-state that did not come from a verdict — an HTML field of the list form checked as HTML,
+ * every other text field as plain text, with or without a list form. A judged target's
+ * after-state is its template here, every field null, so nothing of it is checked before its verdict.
+ */
+function planMarkupRefusal(
+  after: unknown, before: unknown, list: BulkListRun | null, host: string, startDomains: readonly string[],
+): BulkInvalidReason | null {
+  if (!isRecord(after)) return null;
+  return verdictTextRefusal(after, isRecord(before) ? before : {}, { listForm: list?.source.form ?? null, storeHost: host, startDomains });
+}
 
 export interface BulkPreviewOutcome {
   /** `pending`: the preview waits (budget, rate limit, a 429, a stopped tick) and is
@@ -64,6 +82,8 @@ export interface BulkPreviewDeps {
   /** The host profile's price per call, when it has a per-call cost model. There is no
    *  chat to show an `api_cost` event in, so the tick's result states what it spent. */
   costPerCallUsd?: number | undefined;
+  /** The sentences of the outcome's summary, in the instance's notice language; English without. */
+  notices?: BulkNotices | undefined;
 }
 
 /** A wait this short is slept through; a longer one ends the tick as `pending`. */
@@ -80,11 +100,10 @@ const defaultSleep = async (ms: number, signal: AbortSignal | undefined): Promis
   await delay(ms, undefined, signal ? { signal } : undefined).catch(() => {});
 };
 
-function summarize(ledger: BulkLedger, runId: string, lead: string): string {
+function summarize(ledger: BulkLedger, runId: string, lead: string, say: BulkNotices = BULK_NOTICES.en): string {
   const s = ledger.getStatus(runId);
   if (!s) return lead;
-  return `${lead} Read ${String(s.total - s.changes.invalid - s.unread)}, invalid ${String(s.changes.invalid)}, ` +
-    `unread ${String(s.unread)} of ${String(s.total)} targets.`;
+  return `${lead} ${say.previewCounts(s.total - s.changes.invalid - s.unread, s.changes.invalid, s.unread, s.total)}`;
 }
 
 /** The fixed reason a read makes a target unplannable, or null when it does not. */
@@ -123,19 +142,17 @@ function haltFor(read: ExternalRead): BulkHaltReason | null {
 }
 
 /**
- * What a filtered Shopify list that matched no product tells the model, by the filters it has;
- * null for a list without filters. The value is not repeated: no summary of this code echoes
- * the planner's input, and the model has it in its own plan.
+ * What a filtered Shopify list that matched no product tells the model and the owner, by the
+ * filters it has ({@link BulkNotices.listNoMatch}); null for a list without filters. The value is
+ * not repeated: no summary of this code echoes the planner's input, and the model has it in its
+ * own plan.
  */
-function noMatchSentence(filters: Readonly<Record<string, string>>): string | null {
+function noMatchSentence(filters: Readonly<Record<string, string>>, say: BulkNotices): string | null {
   const type = filters['product_type'] !== undefined;
   const vendor = filters['vendor'] !== undefined;
   if (!type && !vendor) return null;
   // With both, each value may match products while the pair matches none: no value is to blame.
-  if (type && vendor) {
-    return 'Bulk list read done — no product matched the list\'s filter; check its values against the store\'s product types and vendors. Tell the user in one sentence that no product holds both values.';
-  }
-  return `Bulk list read done — no product matched the list's filter; check its value against the store's ${type ? 'product types' : 'vendors'}. Tell the user in one sentence which value matched no product.`;
+  return say.listNoMatch(type && vendor ? 'both' : type ? 'product_type' : 'vendor');
 }
 
 /**
@@ -145,6 +162,7 @@ function noMatchSentence(filters: Readonly<Record<string, string>>): string | nu
  */
 export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Promise<BulkPreviewOutcome> {
   const { ledger } = deps;
+  const say = deps.notices ?? BULK_NOTICES.en;
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? defaultSleep;
   const budget = deps.budget ?? BULK_HOST_BUDGET;
@@ -169,7 +187,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     // A filtered Shopify list fails on its filters (a key or value the rule no longer takes), not on a path.
     const withdrawn = list.source.form === SHOPIFY_FILTERED_LIST_FORM ? BULK_HALT_REASONS.listFilterWithdrawn : BULK_HALT_REASONS.listFormWithdrawn;
     ledger.halt(runId, withdrawn);
-    return { status: 'halted', summary: summarize(ledger, runId, `Bulk preview halted: ${withdrawn}.`) };
+    return { status: 'halted', summary: summarize(ledger, runId, say.halted('preview', withdrawn), say) };
   }
   const shopify = list !== null && isShopifyListSource(list.source);
   // The form the run's targets are read and written with: a product's, or an image's.
@@ -195,7 +213,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk preview paused.');
     const current = ledger.getRunForPreview(runId);
     if (!current || current.phase !== 'planned' || current.haltReason !== null) {
-      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk preview stopped: the run was dropped, halted or moved on.') };
+      return { status: 'halted', summary: summarize(ledger, runId, say.previewStopped, say) };
     }
     if (now() > deadline) return halt(BULK_HALT_REASONS.timeBudget);
     const target = ledger.loadExternalTarget(runId, seq);
@@ -241,7 +259,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       } else {
         // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
         const after = shopifyPairedAfter(target.after, image.value);
-        ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after);
+        const markup = planMarkupRefusal(after, image.value, list, host, ledger.startDomainsOf(runId));
+        if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
+        else ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after);
       }
       consecutive = 0;
       continue;
@@ -255,7 +275,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         consecutive = 0;
         continue;
       }
-      ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried());
+      const markup = planMarkupRefusal(target.after, read.value, list, host, ledger.startDomainsOf(runId));
+      if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
+      else ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried());
       consecutive = 0;
       continue;
     }
@@ -277,12 +299,12 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // A judged run is read for its judge, which goes on in the same effect (`bulk-judge.ts`): its
   // targets have no after-state yet, so reading them does not make it previewed.
   if (ledger.getJudgeRun(runId) !== null) {
-    return { status: 'done', summary: costed(summarize(ledger, runId, 'Bulk read done — the targets are to be judged next.')) };
+    return { status: 'done', summary: costed(summarize(ledger, runId, say.readDone, say)) };
   }
   if (!ledger.finishPreview(runId)) {
-    return { status: 'halted', summary: summarize(ledger, runId, 'Bulk preview stopped: the run was dropped, halted or moved on.') };
+    return { status: 'halted', summary: summarize(ledger, runId, say.previewStopped, say) };
   }
-  return { status: 'done', summary: costed(summarize(ledger, runId, 'Bulk preview done — the run is ready for review.')) };
+  return { status: 'done', summary: costed(summarize(ledger, runId, say.previewDone, say)) };
 
   /**
    * Read the run's list, page by page from the one after the last recorded, until a short
@@ -302,7 +324,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
       const current = ledger.getListRun(runId);
       if (!current || current.state !== 'pending' || current.phase !== 'planned' || current.haltReason !== null) {
-        return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+        return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
       }
       // The progress is kept page by page, so a tick that runs out of time goes on from here.
       if (now() > listDeadline) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read has pages left to read.');
@@ -324,7 +346,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
           const still = ledger.getListRun(runId);
           return still?.state === 'pending' && still.phase === 'planned' && still.haltReason === null
             ? halt(BULK_HALT_REASONS.listTooLarge)
-            : { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+            : { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
         }
         const answer = await listClient.get(listPageUrl(host!, source, next), deps.signal, cap);
         if (answer.kind === 'rate_limited') {
@@ -359,7 +381,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       });
       if (!recorded.ok) {
         if (recorded.reason === 'too_large') return halt(BULK_HALT_REASONS.listTooLarge);
-        return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+        return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
       }
       // A short page is the last one. A full page that adds nothing is a list that pages in
       // circles, or ignores the page asked for: it is not read to the page cap.
@@ -368,13 +390,11 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     }
     const closed = ledger.finishList(runId, (keys) => mintBulkContract(host!, keys, source.method ?? undefined));
     if (closed === 'moved') {
-      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+      return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
     }
     return {
       status: 'done',
-      summary: costed(summarize(ledger, runId, closed === 'empty'
-        ? 'Bulk list read done — the list holds no target that could be planned.'
-        : 'Bulk list read done — waiting for the owner to review the targets and start reading them.')),
+      summary: costed(summarize(ledger, runId, closed === 'empty' ? say.listEmpty : say.listWaiting, say)),
     };
   }
 
@@ -399,7 +419,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
       const current = ledger.getListRun(runId);
       if (!current || current.state !== 'pending' || current.phase !== 'planned' || current.haltReason !== null) {
-        return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+        return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
       }
       if (now() > listDeadline) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read has pages left to read.');
       const next = current.page + 1;
@@ -430,7 +450,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
           const still = ledger.getListRun(runId);
           return still?.state === 'pending' && still.phase === 'planned' && still.haltReason === null
             ? halt(BULK_HALT_REASONS.listTooLarge)
-            : { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+            : { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
         }
         const answer = await thisPage.graphqlRead(endpoint!, media
           ? { form: 'shopify_media_list', afterId: current.lastId }
@@ -465,7 +485,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       const recorded = ledger.recordListPage(runId, { page: next, items: page.items, bytes: got.bytes ?? 0, lastId: page.lastId });
       if (!recorded.ok) {
         if (recorded.reason === 'too_large') return halt(BULK_HALT_REASONS.listTooLarge);
-        return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+        return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
       }
       if (page.count < (media ? SHOPIFY_MEDIA_LIST_PAGE_SIZE : SHOPIFY_LIST_PAGE_SIZE)) break;
       // A full page whose ids were all unusable leaves the cursor where it was: the next page
@@ -474,26 +494,25 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     }
     const closed = ledger.finishList(runId, () => listReadContract(host!, source));
     if (closed === 'moved') {
-      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+      return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
     }
     return {
       status: 'done',
-      summary: costed(summarize(ledger, runId, closed === 'empty'
-        ? (noMatchSentence(source.filters) ?? 'Bulk list read done — the list holds no target that could be planned.')
-        : 'Bulk list read done — waiting for the owner to review the targets and start reading them.')),
+      summary: costed(summarize(ledger, runId, closed === 'empty' ? (noMatchSentence(source.filters, say) ?? say.listEmpty) : say.listWaiting, say)),
     };
   }
 
   function halt(reason: BulkHaltReason): BulkPreviewOutcome {
     ledger.halt(runId, reason);
-    return { status: 'halted', summary: costed(summarize(ledger, runId, `Bulk preview halted: ${reason}.`)) };
+    return { status: 'halted', summary: costed(summarize(ledger, runId, say.halted('preview', reason), say)) };
   }
+  // A pending outcome is recorded, never pushed, and its lead is English: so is its cost.
   function pending(retryAt: number, lead: string): BulkPreviewOutcome {
-    return { status: 'pending', summary: costed(summarize(ledger, runId, lead)), retryAt };
+    return { status: 'pending', summary: costed(summarize(ledger, runId, lead), BULK_NOTICES.en), retryAt };
   }
-  function costed(text: string): string {
+  function costed(text: string, sentence: BulkNotices = say): string {
     const n = sentBefore + (pageClient?.sent ?? 0) + (client?.sent ?? 0);
     if (deps.costPerCallUsd === undefined || n === 0) return text;
-    return `${text} ${String(n)} API calls this tick at $${String(deps.costPerCallUsd)} each ($${(n * deps.costPerCallUsd).toFixed(4)}).`;
+    return `${text} ${sentence.costs(n, deps.costPerCallUsd)}`;
   }
 }

@@ -717,7 +717,7 @@ describe('capture_suppressed — the turns where NOTHING ran', () => {
       entry({ event: 'capture_suppressed', reason: 'internal_run' }),
     ]);
     const r = await buildCaptureReport();
-    expect(r.suppressed).toEqual({ no_memory: 3, extraction_off: 2, internal_run: 1, fallback_off: 0, unknown: 0 });
+    expect(r.suppressed).toEqual({ no_memory: 3, extraction_off: 2, internal_run: 1, fallback_off: 0, trail_unavailable: 0, unknown: 0 });
     // The parts must agree with the one integer, or one of the two is lying.
     const s = r.suppressed;
     expect(s.no_memory + s.extraction_off + s.internal_run + s.fallback_off + s.unknown).toBe(r.events['capture_suppressed']);
@@ -771,7 +771,7 @@ describe('capture_suppressed — the turns where NOTHING ran', () => {
     // that is supposed to explain a gap becomes another source of one.
     await seed([entry({ event: 'capture_eligible', reason: 'no_memory' })]);
     const r = await buildCaptureReport();
-    expect(r.suppressed).toEqual({ no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, unknown: 0 });
+    expect(r.suppressed).toEqual({ no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, trail_unavailable: 0, unknown: 0 });
   });
 });
 

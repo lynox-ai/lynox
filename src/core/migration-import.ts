@@ -32,6 +32,9 @@ import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import { isCorruptionError } from './sqlite-constants.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
+import { controlPlaneFromEnv } from './exact-clearance.js';
+import { isProvisionedInstance } from './wire-capture.js';
+import { exactHeldInFiles, writeExactMarkerInFile } from './history-markers.js';
 import { shellIsolation } from './shell-isolation.js';
 import { importRefusal } from './sidecar-refusals.js';
 import { removeStaleStages, stageIn, statEntry, type StageEntry } from './workspace-fd.js';
@@ -621,6 +624,21 @@ export class MigrationImporter {
     const staged = this.stageDatabases(chunksByType.sqlite_db, (meta) => {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: meta.name });
     });
+    // An instance that holds the exact marker keeps it (cut S3-E): the bundle's engine.db and
+    // history.db replace the files that carry it and its copy. Read before the swap, written into
+    // the staged copies, so the marker lands with them or the import stops here with nothing
+    // replaced. A copy the bundle brings for another instance is left as it is (`history-markers.ts`).
+    const instanceId = controlPlaneFromEnv()?.instanceId ?? null;
+    try {
+      if (exactHeldInFiles(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'history.db'), instanceId, isProvisionedInstance())) {
+        for (const { baseName, tmpPath } of staged) {
+          if (baseName === 'engine.db' || baseName === 'history.db') writeExactMarkerInFile(tmpPath, baseName, instanceId);
+        }
+      }
+    } catch (err) {
+      for (const { tmpPath } of staged) dropStagedCopy(tmpPath);
+      throw err;
+    }
     for (const { baseName, tmpPath, destPath, unreadable } of staged) {
       // The unreadable database goes first, its `-wal` with it: the copy must not land next to it.
       if (unreadable) moveAsideUnreadable(destPath);

@@ -134,6 +134,8 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
       // refuses the call, or the value is filled in. Either way the pin below fails.
       getSecretStore: () => secretStore,
       escalateToUser: () => null,
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as never, 60_000);
     await (loop as unknown as { executePipeline: (t: TriggerRecord, starter: undefined, ownerStop: AbortSignal) => Promise<void> }).executePipeline(task, undefined, new AbortController().signal);

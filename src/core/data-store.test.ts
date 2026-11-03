@@ -972,6 +972,38 @@ describe('DataStore', () => {
 
   // === Collection Info & Listing ===
 
+  describe('deleteRecordsReturningIds (660a-2)', () => {
+    const seed = (): Array<{ _id: number; status: string }> => {
+      ds.createCollection({ name: 'leads', scope, columns: [{ name: 'status', type: 'string' }] });
+      ds.insertRecords({ collection: 'leads', records: [{ status: 'open' }, { status: 'lost' }, { status: 'lost' }, { status: 'open' }], stamp: TEST_STAMP });
+      return ds.queryRecords({ collection: 'leads' }).rows as Array<{ _id: number; status: string }>;
+    };
+
+    it('names exactly the records it removed, and the count matches', () => {
+      const before = seed();
+      const lost = before.filter(r => r.status === 'lost').map(r => r._id).sort((a, b) => a - b);
+      const res = ds.deleteRecordsReturningIds({ collection: 'leads', filter: { status: 'lost' } });
+      expect([...res.ids].sort((a, b) => a - b)).toEqual(lost);
+      expect(res.deleted).toBe(2);
+      const left = (ds.queryRecords({ collection: 'leads' }).rows as Array<{ _id: number }>).map(r => r._id);
+      expect(left.some(id => lost.includes(id))).toBe(false);
+      expect(left).toHaveLength(2);
+      expect(ds.getCollectionInfo('leads')?.recordCount).toBe(2);
+    });
+
+    it('names nothing and keeps the count when nothing matches', () => {
+      seed();
+      expect(ds.deleteRecordsReturningIds({ collection: 'leads', filter: { status: 'won' } })).toEqual({ deleted: 0, ids: [] });
+      expect(ds.getCollectionInfo('leads')?.recordCount).toBe(4);
+    });
+
+    it('deleteRecords still answers with the count alone', () => {
+      seed();
+      expect(ds.deleteRecords({ collection: 'leads', filter: { status: 'open' } })).toBe(2);
+      expect(ds.getCollectionInfo('leads')?.recordCount).toBe(2);
+    });
+  });
+
   describe('listCollections / getCollectionInfo', () => {
     it('lists all collections', () => {
       ds.createCollection({ name: 'a', scope, columns: [{ name: 'x', type: 'string' }] });

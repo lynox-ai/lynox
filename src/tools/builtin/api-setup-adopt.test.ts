@@ -10,6 +10,7 @@ import { flattenPrompt } from '../../core/prompt-value.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { connectionTokenAllowed, connectionWaits } from '../../core/profile-secret-view.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => mockLynoxDir }));
@@ -85,6 +86,8 @@ function agentWith(store: ApiStore, opts: AgentOpts = {}): never {
     runSignal: opts.runSignal,
     ...(opts.autonomy ? { autonomy: opts.autonomy } : {}),
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       vaultNameBindings: bindingsAsMigrated(store),
       apiStore: store,
       mandateEnds: live === null ? null : { isLive: (id: string) => live.includes(id) },

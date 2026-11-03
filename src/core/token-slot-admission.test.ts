@@ -71,6 +71,7 @@ import { setPinnedTransportForTests } from './network-guard.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
+import { testAuditLog } from '../../tests/helpers/audit-log.js';
 
 // Values assembled at runtime: no literal here has the shape of a credential.
 const value = (...parts: string[]): string => parts.join('-');
@@ -850,7 +851,7 @@ describe('an update of a profile the boot held back', () => {
     secretStore: { resolve: () => null, resolveSecretRefs: (i: unknown) => i, listNames: () => [] },
     promptUser: async () => 'Allow',
     getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
-    toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+    toolContext: { auditLog: testAuditLog().log, vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   }) as never;
 
   it('is refused for a mandate that did not write it, as a registered one is', async () => {

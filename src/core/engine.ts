@@ -3,7 +3,8 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider, getActiveProvider } from './llm-client.js';
 import type { RunFailure } from './provider-failure.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
-import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds } from './llm/provider-keys.js';
+import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds, poolSuppliesLLMKeys } from './llm/provider-keys.js';
+import { resolveInboxMistralKey } from '../integrations/inbox/mistral-key.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
   LynoxConfig,
@@ -14,7 +15,7 @@ import type {
   ModelTier,
   ContextSource,
 } from '../types/index.js';
-import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier } from '../types/index.js';
+import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier, mistralCommitsEuInference } from '../types/index.js';
 import { setTierSetResolver, resolveDefaultChatTier, resolveAgentModel } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
@@ -29,6 +30,7 @@ import { ApprovalExecutor, type TickResult } from './approval-executor.js';
 import { createApprovalNotifier } from './approval-notice.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
 import { Containment } from './containment.js';
+import { ContainmentMirror, ExactMirror, exactHeldAtBoot, exactMarkerOf, syncContainmentMirror, syncExactMarker } from './history-markers.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
@@ -42,7 +44,6 @@ import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
 import { resolveContext } from './context.js';
-import { ShellIsolationError } from './shell-isolation.js';
 import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
 import { closeWorkspaceBase } from './workspace-rel.js';
@@ -53,7 +54,8 @@ import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
-import { compose, engineText, renderFence } from '../core/data-boundary.js';
+import { legacyMemoryReason, type LegacyMemoryReason } from './memory-tool-set.js';
+import { collectOwnBlocks, compose, engineText, renderFence } from '../core/data-boundary.js';
 
 import {
   bashTool,
@@ -242,14 +244,16 @@ async function settleWithin(work: Promise<void>, ms: number, what: string): Prom
  * Default the inbox classifier's LLM region from the user's main provider
  * choice. Env override `LYNOX_INBOX_LLM_REGION` always wins (explicit
  * override path for managed-EU tenants who want hard-pinning regardless
- * of UI). When the user picked Mistral in Settings (api.mistral.ai), the
+ * of UI). When the user picked Mistral in Settings (api.eu.mistral.ai), the
  * classifier inherits 'eu' automatically — pre-this-fix the classifier
  * always defaulted to 'us' (Anthropic) regardless of the UI choice,
  * leaking mail snippets + reply-draft bodies to Anthropic-US.
  *
- * Hostname-strict match (URL().hostname === 'api.mistral.ai') — a naive
- * substring would let an attacker-controlled `api.mistral.ai.evil.com`
- * misclassify as EU residency.
+ * 'eu' only for the endpoint Mistral commits to EU/EFTA inference for
+ * (`mistralCommitsEuInference`, exact hostname `api.eu.mistral.ai`). The global
+ * `api.mistral.ai` commits to no location, so it counts as 'us': the warning and
+ * the production gate stay on. A substring match would also let
+ * `api.eu.mistral.ai.evil.com` pass as EU.
  */
 export function resolveInboxLlmRegion(opts: {
   envOverride: string | undefined;
@@ -259,13 +263,7 @@ export function resolveInboxLlmRegion(opts: {
   if (opts.envOverride === 'eu') return 'eu';
   if (opts.envOverride === 'us') return 'us';
   if (opts.provider !== 'openai' || !opts.apiBaseURL) return 'us';
-  let hostname: string;
-  try {
-    hostname = new URL(opts.apiBaseURL).hostname.toLowerCase();
-  } catch {
-    return 'us';
-  }
-  return hostname === 'api.mistral.ai' ? 'eu' : 'us';
+  return mistralCommitsEuInference(opts.apiBaseURL) ? 'eu' : 'us';
 }
 
 /**
@@ -315,6 +313,8 @@ export class Engine {
   private securityAudit: import('./security-audit.js').SecurityAudit | null = null;
   private context: LynoxContext | null = null;
   private briefing: string | undefined = undefined;
+  /** The blocks wrapped into {@link briefing} as it was built; see `collectOwnBlocks`. */
+  private readonly briefingOwnBlocks: string[] = [];
   /** The vault's `<secrets>` listing at boot, apart from the briefing: an owner's turn only. */
   private secretsBriefing: string | undefined = undefined;
   private currentManifest: Map<string, number> | null = null;
@@ -438,6 +438,8 @@ export class Engine {
   /** Durable Knowledge Substrate (DK.1) — the user-owned Know store. Null unless
    *  `durable_memory_enabled` is on (+ engine.db present). */
   private _knowledgeStore: import('./knowledge-store.js').KnowledgeStore | null = null;
+  /** Read by the mandate lock; until the tools are registered it refuses, as `dk_off` would. */
+  private _legacyMemory: LegacyMemoryReason | null = 'dk_off';
   /** Onboarding Wave 1 — the server-side onboarding-flag store. Present whenever
    *  engine.db is (unconditional, NOT DK-gated); null only when engine.db failed to
    *  open (→ HTTP/flow layer fails open: onboarding counts as done, AC-1.7). */
@@ -450,6 +452,8 @@ export class Engine {
   /** The bulk ledger, built at boot whenever engine.db is on, whether bulk runs are on or not:
    *  `_applyBulkSwitch` hands it to the tool context when they go on. */
   private _bulkLedgerIfOn: BulkLedger | null = null;
+  /** history.db's copy of the thread containment (`history-markers.ts`); `null` without history.db. */
+  private _containmentMirror: ContainmentMirror | null = null;
   /** The bulk sweep (ended mandates, judged-run retention), run again when bulk runs go on. */
   private _bulkSweep: (() => void) | null = null;
   private _erasureSweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -842,6 +846,23 @@ export class Engine {
   }
 
   /**
+   * The inbox classifier's Mistral key, and whether its spend is debited to the instance, for
+   * the cold boot and the rebootstrap alike. The managed credit gate and debit apply to the
+   * pool's spend only: on a pool tier, the US classifier (the pool's Anthropic client) and the
+   * EU one on the pool's Mistral key. A classifier on the user's own key is not debited, as the
+   * user already pays the provider for it and would pay twice.
+   *
+   * And the instance's language, for the reminder poller's title (`notice-language.ts`): set here
+   * so the cold boot and the rebootstrap cannot hand the inbox different ones.
+   */
+  private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
+    const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
+    if (key !== undefined) bootOpts.mistralApiKey = key;
+    if (poolSuppliesLLMKeys() && (bootOpts.llmRegion !== 'eu' || poolPays)) bootOpts.meteredHost = this;
+    bootOpts.language = () => this.config.language;
+  }
+
+  /**
    * Rebuild the inbox classifier runtime when a UI provider-switch crosses
    * the us/eu region boundary. Idempotent + region-gated: a same-region
    * rotation (BYOK refresh, Anthropic→Anthropic) short-circuits to avoid
@@ -889,11 +910,6 @@ export class Engine {
       const { bootstrapInbox } = await import('../integrations/inbox/bootstrap.js');
       const rawMode = process.env['LYNOX_INBOX_SENSITIVE_MODE'];
       const sensitiveMode = rawMode === 'mask' || rawMode === 'allow' ? rawMode : 'skip';
-      const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
-        ?? this.secretStore?.resolve('MISTRAL_API_KEY')
-        ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
-        ?? process.env['MISTRAL_API_KEY']
-        ?? undefined;
       const folderBlacklistRaw = process.env['LYNOX_INBOX_FOLDER_BLACKLIST'] ?? '';
       const folderBlacklist = new Set(
         folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
@@ -911,14 +927,12 @@ export class Engine {
         requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
         privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
       };
-      if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
       if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
       if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
       bootOpts.notificationRouter = this._notificationRouter;
       const runHistoryForInbox = this.getRunHistory();
       if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
-      // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
-      bootOpts.meteredHost = this;
+      this._applyInboxKeyAndMeter(bootOpts);
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
         // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
@@ -934,6 +948,8 @@ export class Engine {
         this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
         // Mark an inbox item `replied` when the user answers it in chat.
         this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+        // What the classifier made of each mail, for mail_triage.
+        this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -1245,18 +1261,31 @@ export class Engine {
     // The exact (Shopify) clearance: asked of the control plane once per boot, recorded in
     // engine.db's marker (v38). Not provisioned (no managed env) means it never clears.
     // Its debug paths close for good at the first set and, on every later boot, here (S3, E4).
+    // Both markers are kept in history.db as well (cut S3-E, `history-markers.ts`), with the
+    // threads, so an engine.db set aside on corruption or older than history.db does not open
+    // what it held. The exact copy only on a provisioned instance: on a self-hosted one the
+    // marker is never set, and a copy found there came from elsewhere. With the control-plane env
+    // incomplete this boot it is read (any row holds) and not written.
+    const historyDb = this.runHistory?.getDb() ?? null;
+    const containmentMirror = historyDb ? new ContainmentMirror(historyDb) : null;
+    this._containmentMirror = containmentMirror;
+    const controlPlane = controlPlaneFromEnv();
+    const exactMirror = historyDb && isProvisionedInstance() ? new ExactMirror(historyDb, controlPlane?.instanceId ?? null) : null;
     if (this.engineDb) {
       const db = this.engineDb;
-      const marker = { isSet: () => db.exactMarkerSet(), set: () => { db.setExactMarker(); } };
-      this._toolContext.exactClearance = new ExactClearance(controlPlaneFromEnv(), marker, { onMarkerSet: () => { refuseDebug(); } });
+      syncExactMarker(db, exactMirror);
+      const marker = exactMarkerOf(db, exactMirror);
+      this._toolContext.exactClearance = new ExactClearance(controlPlane, marker, { onMarkerSet: () => { refuseDebug(); } });
       this._toolContext.storeBindingDigest = (id, origin, value) => db.storeBindingDigest(id, origin, value);
       // And which threads and bulk runs a store connection was attached for (v40).
-      this._toolContext.containment = new Containment(db.getDb());
-      if (isExactHeld(marker)) refuseDebug();
+      syncContainmentMirror(containmentMirror, db.getDb());
+      this._toolContext.containment = new Containment(db.getDb(), containmentMirror);
+      if (exactHeldAtBoot(isExactHeld(marker), exactMirror)) refuseDebug();
     } else {
       this._toolContext.exactClearance = null;
       this._toolContext.storeBindingDigest = null;
-      this._toolContext.containment = null;
+      // Reads only: without engine.db nothing can be contained, but history.db's copy still answers.
+      this._toolContext.containment = containmentMirror ? new Containment(null, containmentMirror) : null;
       // No engine.db, no readable marker: fail-closed.
       if (isExactHeld(null)) refuseDebug();
     }
@@ -1517,6 +1546,12 @@ export class Engine {
       const db = this.engineDb?.getDb();
       if (db === undefined) return;
       pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+      // A run of a plan paused here would go on until the next sweep, up to 5 minutes, with its
+      // member live again and its connections open to it. So the parts that end runs follow at
+      // once, outside the login's transaction, as on a revoke. They read what was committed: when
+      // the login's transaction fails, the pause is gone with it and so is the reason to stop.
+      // Outside any run group, as the sweeps are: ending runs belongs to no run.
+      runOutsideGroup(() => queueMicrotask(() => this.endEndedMandateRuns()));
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
@@ -1547,12 +1582,6 @@ export class Engine {
     // Resolve context (CLI: project detection, others: explicit)
     // In sidecar mode the context's workspace is the label (D0); the mode was built with the tool context.
     this.context = resolveContext(this.config, this._toolContext.shellIsolation);
-    // In sidecar mode the workspace sites below still reach the tree by name; they move to the
-    // fd-3 anchor in their own change. Until then the start stops here, so nothing is created by
-    // name under the label (PRD shell-sidecar-activation D3).
-    if (this._toolContext.shellIsolation.kind === 'sidecar') {
-      throw new ShellIsolationError('D3', 'the workspace is still reached by name in this version; sidecar mode cannot be switched on yet.');
-    }
 
     // Non-CLI sources always get isolated workspace. A root or context directory the engine
     // cannot use stops the boot here, naming the path, instead of every upload quietly falling
@@ -1647,6 +1676,9 @@ export class Engine {
       this.context?.id ?? '',
       // Read per write, not captured: the store and the flag can change after boot.
       (threadId) => this._threadStore?.getThread(threadId)?.skip_extraction === 1,
+      // The log a mandate's derived entry is recorded in (660a-3); read per write, like the
+      // flag above.
+      () => this._toolContext.auditLog,
     );
 
     // Durable Knowledge Substrate (DK.1): construct the KnowledgeStore + expose it to the
@@ -1714,6 +1746,14 @@ export class Engine {
         // estimate that said "the store is already on the engine" was measuring
         // a reachability that did not exist.
         this._connectionStore = connStore;
+        // Every API profile row without its opaque id gets one, on every boot (660a-1c S-2): the
+        // migration ran once, and a row an older binary wrote after a pin back has none. In its own
+        // catch: a failure costs a row's id, never the profiles or engine.db.
+        try {
+          connStore.fillApiTrailIds();
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox] API profile id fill failed: ${processErrorText(err)}\n`);
+        }
         this._apiStore.importFromDirectoryIfNeeded(apisDir, connStore);
         loaded = this._apiStore.loadFromConnections(connStore);
         this._apiStore.setConnectionStore(connStore);
@@ -1778,7 +1818,8 @@ export class Engine {
       // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
       this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
       if (loaded > 0) {
-        const apiContext = this._apiStore.formatForSystemPrompt();
+        const store = this._apiStore;
+        const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
         this.briefing = this.briefing ? `${this.briefing}\n\n${apiContext}` : apiContext;
       }
       // Inject the curated "bootstrap-suggestion" catalog regardless of how
@@ -1836,7 +1877,7 @@ export class Engine {
     // The switch can move at runtime (`reloadUserConfig` → `_applyBulkSwitch`), so nothing
     // below keeps a copy of it: the sweep asks the tool context on every pass.
     if (this.engineDb) {
-      const ledger = new BulkLedger(this.engineDb);
+      const ledger = new BulkLedger(this.engineDb, this._containmentMirror);
       this._bulkLedgerIfOn = ledger;
       this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
       // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,
@@ -1887,7 +1928,8 @@ export class Engine {
     // was carried as dormant. The CP default flipped ON (pro migration 0048), so it is now the
     // path every newly provisioned tenant takes. Falling back to the legacy tools here is not a
     // silent downgrade over the alternative — the alternative was silence with nothing working.
-    if (this.userConfig.durable_memory_enabled === true && this._knowledgeStore) {
+    this._legacyMemory = legacyMemoryReason(this.userConfig.durable_memory_enabled, this._knowledgeStore);
+    if (this._legacyMemory === null) {
       this.registry
         .register(rememberTool)
         .register(recallTool)
@@ -2173,8 +2215,8 @@ export class Engine {
         // EU residency: default the inbox classifier provider from the
         // user's chosen main provider. When the user picked Mistral in
         // Settings (`userConfig.provider === 'openai'` against
-        // api.mistral.ai), the classifier inherits that choice and uses
-        // Mistral (EU-resident) automatically — no env var required.
+        // api.eu.mistral.ai), the classifier inherits that choice and uses
+        // Mistral's EU endpoint automatically — no env var required.
         //
         // `LYNOX_INBOX_LLM_REGION` remains an explicit override (e.g.
         // managed-EU tenants who want hard-pinning regardless of the UI
@@ -2196,11 +2238,6 @@ export class Engine {
         // the runtime — without this, switching the main provider to Mistral
         // would leave the classifier on Anthropic-US (the H-012 leak).
         this._inboxLlmRegion = llmRegion;
-        const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')
-          ?? this.secretStore?.resolve('MISTRAL_API_KEY')
-          ?? process.env['LYNOX_INBOX_MISTRAL_API_KEY']
-          ?? process.env['MISTRAL_API_KEY']
-          ?? undefined;
         // Folder blacklist: comma-separated env, case-insensitive match.
         // Use case: "Banking, Privat, Healthcare" — those folders' mails
         // never reach the inbox classifier path at all.
@@ -2222,7 +2259,6 @@ export class Engine {
           requireUsAck: process.env['LYNOX_INBOX_REQUIRE_PRIVACY_ACK'] === '1',
           privacyAck: process.env['LYNOX_INBOX_PRIVACY_ACK'] === '1',
         };
-        if (mistralApiKey !== undefined) bootOpts.mistralApiKey = mistralApiKey;
         if (folderBlacklist.size > 0) bootOpts.folderBlacklist = folderBlacklist;
         if (disabledAccounts.size > 0) bootOpts.disabledAccounts = disabledAccounts;
         // Wire the notification router so the reminder poller can fire
@@ -2233,8 +2269,7 @@ export class Engine {
         // in the dashboard.
         const runHistoryForInbox = this.getRunHistory();
         if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
-        // Managed credit gate + debit for classifier pool-key spend (no-op self-host).
-        bootOpts.meteredHost = this;
+        this._applyInboxKeyAndMeter(bootOpts);
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured
@@ -2257,6 +2292,8 @@ export class Engine {
           this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
           // Mark an inbox item `replied` when the user answers it in chat.
           this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+          // What the classifier made of each mail, for mail_triage.
+          this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —
@@ -2757,7 +2794,7 @@ export class Engine {
     try {
       pauseEndedPlans({
         db, endOf: (id) => ends.endRow(id), closedPromptOf: (id) => this.closedPromptOf(id),
-        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id); } } : {}),
+        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id, 'plan_paused'); } } : {}),
       });
     } catch (err: unknown) {
       process.stderr.write(`[lynox] pausing plans of ended mandates failed: ${processErrorText(err)}\n`);
@@ -2789,6 +2826,7 @@ export class Engine {
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
+  getBriefingOwnBlocks(): readonly string[] { return [...this.briefingOwnBlocks]; }
   getSecretsBriefing(): string | undefined { return this.secretsBriefing; }
   /** Freshly compute the first-turn task overview (overdue / due tasks) — pure SQL,
    *  no LLM. Called per-Session so the overview is current, not frozen at engine boot.
@@ -2808,6 +2846,8 @@ export class Engine {
   getKnowledgeLayer(): KnowledgeLayer | null { return this.knowledgeLayer; }
   /** Durable Knowledge Substrate (DK.1) store, or null when `durable_memory_enabled` is off. */
   getKnowledgeStore(): import('./knowledge-store.js').KnowledgeStore | null { return this._knowledgeStore; }
+  /** Why the legacy memory tools are registered, or `null` for the durable ones; set where they are registered. */
+  getLegacyMemoryReason(): LegacyMemoryReason | null { return this._legacyMemory; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }

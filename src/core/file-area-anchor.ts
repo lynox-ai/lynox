@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 import { DIR_MODE_PRIVATE, FILE_MODE_PRIVATE } from './constants.js';
 import { chatUploadRel, persistChatUpload } from './workspace.js';
 import { toWorkspaceRel, workspaceBase, WorkspacePathRefused } from './workspace-rel.js';
+import { sidecarWriteModes } from './workspace-write-modes.js';
 import {
   listDir, openRead, statEntry, unlinkAt, writeFileAt, WorkspaceAccessError,
   type EntryInfo, type WorkspaceAnchor,
@@ -142,8 +143,9 @@ export function deleteAreaFile(t: AreaTarget): void {
 
 /**
  * {@link persistChatUpload} with isolation: stored through the area's open directory, private as
- * before (0600 in 0700 directories) and atomically (temp file, fsync, rename). Null when it cannot
- * be written, so the caller falls back to inlining the upload, as before.
+ * before (0600 in 0700 directories) and atomically (temp file, fsync, rename). In sidecar mode the
+ * shell must read it, so it takes the sidecar's modes and group instead (`workspace-write-modes.ts`).
+ * Null when it cannot be written, so the caller falls back to inlining the upload, as before.
  */
 export function persistChatUploadInArea(fileName: string, text: string): { rel: string; abs: string } | null {
   let t: AreaTarget | null;
@@ -154,7 +156,9 @@ export function persistChatUploadInArea(fileName: string, text: string): { rel: 
   }
   if (t === null) return persistChatUpload(fileName, text);
   try {
-    writeFileAt(t.anchor, t.rel, text, { fileMode: FILE_MODE_PRIVATE, dirMode: DIR_MODE_PRIVATE });
+    // In sidecar mode `bash` must read an upload: the layout's modes and group, not private ones.
+    const sidecar = sidecarWriteModes();
+    writeFileAt(t.anchor, t.rel, text, sidecar ?? { fileMode: FILE_MODE_PRIVATE, dirMode: DIR_MODE_PRIVATE });
   } catch {
     return null;
   }

@@ -38,7 +38,7 @@ const base = (): Record<string, unknown> => ({
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-domains-plan-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
 });
 afterEach(() => {
   engineDb.close();

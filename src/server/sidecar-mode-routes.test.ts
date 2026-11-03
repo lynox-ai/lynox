@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -10,7 +10,10 @@ import { MigrationExporter } from '../core/migration-export.js';
 import type { MigrationImporter } from '../core/migration-import.js';
 import { generateEphemeralKeypair, serializePublicKey, deserializePublicKey, deriveTransferKey } from '../core/migration-crypto.js';
 import { _resetWorkspaceAccess } from '../core/workspace-access.js';
-import { resetShellIsolationForTest, setShellIsolationForTest, type ShellIsolation } from '../core/shell-isolation.js';
+import { resetShellIsolationForTest, setShellIsolationForTest, WORKSPACE_LABEL, type ShellIsolation } from '../core/shell-isolation.js';
+import { anchorFromFd, closeAnchor } from '../core/workspace-fd.js';
+import { getWorkspaceDir, setTenantWorkspace } from '../core/workspace.js';
+import { closeWorkspaceBase } from '../core/workspace-rel.js';
 
 /**
  * The routes that would walk or empty the shared workspace tree, in shell sidecar mode (PRD D6,
@@ -132,6 +135,124 @@ describe('routes in sidecar mode (real engine)', () => {
       expect(body.code).toBe('workspace_sidecar_mode');
       expect(body.error).toBe('This backup contains files from the workspace. On this instance lynox does not restore them from a backup; nothing was changed. You can restore the rest from a backup without the workspace. On this instance you manage the workspace files outside lynox.');
       expect(readFileSync(join(dir, 'workspace', 'kept.md'), 'utf8')).toBe('ZZ-live');
+    });
+  });
+
+  // The tree is a directory of the test machine handed over as fd 3; `/workspace` does not exist
+  // here, so a route that still reached it by name would fail or answer from somewhere else (D3).
+  describe('D3: the file area and the workspace status, reached through fd 3', () => {
+    const withTree = async (fn: (tree: string) => Promise<void>): Promise<void> => {
+      const tree = join(dir, 'fd3-tree');
+      mkdirSync(join(tree, 'ctx1'), { recursive: true });
+      const anchor = anchorFromFd(openSync(tree, constants.O_RDONLY | constants.O_DIRECTORY), WORKSPACE_LABEL);
+      const before = getWorkspaceDir();
+      setShellIsolationForTest({ kind: 'sidecar', socket: '/run/lynox/shell.sock', root: { mode: 'sidecar', anchor, label: WORKSPACE_LABEL } });
+      _resetWorkspaceAccess();
+      setTenantWorkspace(`${WORKSPACE_LABEL}/ctx1`);
+      try {
+        await fn(tree);
+      } finally {
+        closeWorkspaceBase();
+        setTenantWorkspace(before);
+        resetShellIsolationForTest();
+        _resetWorkspaceAccess();
+        closeAnchor(anchor);
+        rmSync(tree, { recursive: true, force: true });
+      }
+    };
+
+    it('GET /api/files lists the context folder from fd 3 and makes nothing by name', async () => {
+      await withTree(async (tree) => {
+        writeFileSync(join(tree, 'ctx1', 'report.md'), 'x');
+        const res = await call('GET', '/api/files');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { entries: Array<{ name: string }> };
+        expect(body.entries.map(e => e.name)).toEqual(['report.md']);
+      });
+    });
+
+    // In sidecar mode a pool uid can put a link into the area. Download and read must refuse a link
+    // to a file outside, at the file or on the way, and never send what it points to; the listing
+    // must not list a linked directory. The label path does not exist on this machine, so any read
+    // by name fails here: these checks show the routes go through fd 3, not what a read by name
+    // would do where the label exists.
+    it('download, read and listing refuse a link out of the area, at the file and on the way', async () => {
+      expect(existsSync(WORKSPACE_LABEL)).toBe(false);
+      const outside = join(dir, 'engine-only');
+      try {
+        await withTree(async (tree) => {
+          const engineOnly = `engine-only-${randomBytes(6).toString('hex')}`;
+          mkdirSync(outside, { recursive: true });
+          writeFileSync(join(outside, 'f.txt'), engineOnly);
+          writeFileSync(join(tree, 'ctx1', 'plain.txt'), 'inside');
+          mkdirSync(join(tree, 'ctx1', 'sub'));
+          writeFileSync(join(tree, 'ctx1', 'sub', 'in.txt'), 'nested');
+          symlinkSync(join(outside, 'f.txt'), join(tree, 'ctx1', 'x.txt'));
+          symlinkSync(outside, join(tree, 'ctx1', 'dl'));
+          for (const route of ['/api/files/download', '/api/files/read']) {
+            // Controls: a plain file and one in a real directory are served, so a refusal below is
+            // the link's, not the route's and not the walk's.
+            for (const [path, content] of [['plain.txt', 'inside'], ['sub/in.txt', 'nested']] as const) {
+              const ok = await call('GET', `${route}?path=${encodeURIComponent(path)}`);
+              expect({ route, path, status: ok.status }).toEqual({ route, path, status: 200 });
+              expect(await ok.text()).toContain(content);
+            }
+            for (const path of ['x.txt', 'dl/f.txt']) {
+              const res = await call('GET', `${route}?path=${encodeURIComponent(path)}`);
+              const text = await res.text();
+              expect({ route, path, status: res.status }).toEqual({ route, path, status: 403 });
+              expect(text).toContain('Outside workspace');
+              expect(text).not.toContain(engineOnly);
+            }
+          }
+          const sub = await call('GET', '/api/files?path=sub');
+          expect(sub.status).toBe(200);
+          expect(await sub.text()).toContain('in.txt');
+          const listed = await call('GET', '/api/files?path=dl');
+          const listedText = await listed.text();
+          expect(listed.status).toBe(403);
+          expect(listedText).not.toContain('f.txt');
+        });
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('the workspace status names the sidecar mode, compares fd 3\'s mount, and reads no old location', async () => {
+      await withTree(async () => {
+        mkdirSync(join(dir, 'workspace'), { recursive: true });
+        writeFileSync(join(dir, 'workspace', 'left.md'), 'x');
+        const res = await call('GET', '/api/admin/workspace/status');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect(body['workspace_root_mode']).toBe('sidecar');
+        expect(body['workspace_legacy_pending']).toBe(false);
+        // fd 3 and the data directory are on the same mount here: not a mount of its own.
+        if (process.platform === 'linux') expect(body['workspace_root_is_mount']).toBe(false);
+        rmSync(join(dir, 'workspace', 'left.md'));
+      });
+    });
+  });
+
+  describe('the backup list (row 987)', () => {
+    type Listed = { backup_id: string; provenance?: string; coverage?: { workspace: string } };
+    const listed = async (id: string): Promise<Listed | undefined> =>
+      ((await (await call('GET', '/api/backups')).json()) as { backups: Listed[] }).backups.find(b => b.backup_id === id);
+
+    it('delivers each backup\'s provenance, so a record stripped from a signed manifest shows as mismatch', async () => {
+      setShellIsolationForTest(sidecar);
+      const created = await (await call('POST', '/api/backups')).json() as { success: boolean; path: string };
+      expect(created.success).toBe(true);
+      const id = basename(created.path);
+      expect(await listed(id)).toMatchObject({ provenance: 'verified', coverage: { workspace: 'omitted-sidecar' } });
+
+      const file = join(created.path, 'manifest.json');
+      const manifest = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+      delete manifest['coverage'];
+      writeFileSync(file, JSON.stringify(manifest, null, 2));
+      const stripped = await listed(id);
+      expect(stripped?.coverage).toBeUndefined();
+      expect(stripped?.provenance).toBe('mismatch');
     });
   });
 

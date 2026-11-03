@@ -81,7 +81,7 @@ describe('checkMistralAccountHealth', () => {
     await checkMistralAccountHealth();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const call = fetchMock.mock.calls[0];
-    expect(call?.[0]).toBe('https://api.mistral.ai/v1/models');
+    expect(call?.[0]).toBe('https://api.eu.mistral.ai/v1/models');
     const init = call?.[1] as RequestInit;
     expect(init.method).toBe('GET');
     const headers = init.headers as Record<string, string>;

@@ -43,10 +43,15 @@ self.addEventListener('notificationclick', (event) => {
   const itemId = data.itemId;
   const threadId = data.threadId;
   const approvals = data.approvals;
+  // The owner's notice that plans are paused carries { data: { pausedPlans } } → the plans view,
+  // where each ended access is said in full.
+  const pausedPlans = data.pausedPlans;
   const target = itemId
     ? `/app/inbox?item=${encodeURIComponent(itemId)}`
-    : (threadId ? `/app?thread=${encodeURIComponent(threadId)}` : (approvals ? '/app/approvals' : '/'));
-  const deepLink = Boolean(itemId || threadId || approvals);
+    : (threadId
+      ? `/app?thread=${encodeURIComponent(threadId)}`
+      : (approvals ? '/app/approvals' : (pausedPlans ? '/app/hub?section=triggers' : '/')));
+  const deepLink = Boolean(itemId || threadId || approvals || pausedPlans);
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {

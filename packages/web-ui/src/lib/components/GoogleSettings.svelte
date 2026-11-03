@@ -9,6 +9,9 @@
 	import { onDestroy, untrack } from 'svelte';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import { googleOAuthErrorNotice } from '../stores/integrations/google-oauth-error.js';
 	import {
@@ -106,6 +109,7 @@
 	$effect(() => {
 		void loadManagedStatus();
 		void loadGoogleStatus();
+		void loadSettingsViewer();
 
 		// A pending Google claim is PARKED here, not executed. The user confirms it.
 		//
@@ -154,8 +158,9 @@
 <div class="p-6 max-w-4xl mx-auto space-y-4">
 	<a href="/app/settings/channels" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.channels.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.google')}</h1>
+	<ViewerUnavailableNotice />
 
-	{#if pendingClaimNonce}
+	{#if pendingClaimNonce && isOwnerSession()}
 		<!-- Deliberately a decision, not a notice. The wording says what cannot be shown —
 		     which account — because that absence is the reason the confirmation exists. -->
 		<div class="rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 p-5 space-y-3 text-warning">
@@ -191,6 +196,23 @@
 
 		{#if isGoogleLoading()}
 			<!-- loading -->
+		{:else if isMandateSession()}
+			<!-- A mandate's session: connecting, the access level and disconnecting are the
+			     owner's. The status stays in the header; what the connection covers shows as text. -->
+			<div class="space-y-3" data-testid="google-read-only">
+				<OwnerOnlyNotice />
+				{#if getGoogleStatus()?.authenticated && getGoogleStatus()?.scopes && getGoogleStatus()!.scopes!.length > 0}
+					<div class="flex flex-wrap gap-x-4 gap-y-1">
+						{#each grantedServices(getGoogleStatus()!.scopes!) as svc}
+							<span class="text-xs text-text-muted">
+								<span class="text-text">{svc.name}</span> — {t(svc.labelKey)}
+							</span>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{:else if !isOwnerSession()}
+			<!-- No control until the server said this is the owner's session. -->
 		{:else if isManagedGoogleClaiming() || isSwitchingToManaged()}
 			<div class="flex items-center gap-2 text-sm text-text-muted">
 				<span class="inline-block h-4 w-4 border-2 border-accent border-t-transparent rounded-full animate-spin"></span>
@@ -209,6 +231,17 @@
 					>
 						{t('integrations.google_broker_connect')}
 					</button>
+					<!-- Before the connect, not after: an admin's block shows on Google's own error page,
+					     which may never come back here. -->
+					<p class="text-sm text-text-muted" data-workspace-admin-hint>
+						{t('integrations.google_workspace_admin_hint')}
+						<a
+							href="https://docs.lynox.ai/integrations/google-workspace/#workspace-admin-approval"
+							target="_blank"
+							rel="noopener noreferrer"
+							class="text-accent-text hover:underline"
+						>{t('integrations.google_workspace_admin_link')}</a>
+					</p>
 				{:else}
 					<p class="text-sm text-text-muted">{t('integrations.google_broker_unavailable')}</p>
 				{/if}
@@ -404,8 +437,21 @@
 					     rather than asking "are you sure". -->
 					<div class="rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 p-5 space-y-3 text-warning">
 						<p class="text-sm font-medium">{t('integrations.google_switch_confirm_title')}</p>
-						<p class="text-xs">{t('integrations.google_switch_confirm_body')}</p>
-						<p class="text-xs text-text-subtle">{t('integrations.google_grant_stays')}</p>
+						<!-- The body in the text colour, not the warning's: orange on this tint is under 4.5:1. -->
+						<p class="text-xs text-text">{t('integrations.google_switch_confirm_body')}</p>
+						<p class="text-xs text-text">{t('integrations.google_grant_stays')}</p>
+						<!-- The switch goes straight to lynox's consent, past the brokered card's sentence: an
+						     admin who allowed this tenant's own client may not have allowed lynox's. The way
+						     back is in the body: enter the pair again (the brokered card's "Advanced"). -->
+						<p class="text-xs text-text" data-workspace-admin-hint>
+							{t('integrations.google_switch_admin_hint')}
+							<a
+								href="https://docs.lynox.ai/integrations/google-workspace/#workspace-admin-approval"
+								target="_blank"
+								rel="noopener noreferrer"
+								class="text-accent-text hover:underline"
+							>{t('integrations.google_workspace_admin_link')}</a>
+						</p>
 						<div class="flex gap-2">
 							<button class="btn-primary text-sm" onclick={confirmSwitchToManaged}>
 								{t('integrations.google_switch_confirm_yes')}

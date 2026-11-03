@@ -406,7 +406,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
         "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nosv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json\nOSV_DOCS_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\" --report /tmp/osv-docs.json --rc \"${OSV_DOCS_RC}\"\n"
       }
     ],
-    "timeout-minutes": 20
+    "timeout-minutes": 30
   },
   "release.yml:test": {
     "permissions": {

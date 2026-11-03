@@ -14,7 +14,7 @@ import { EngineDb } from './engine-db.js';
 import { BulkLedger, type PlannedTarget } from './bulk-ledger.js';
 import { runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
-import { Containment, chatIsContained, containedRefusal, threadIsContained } from './containment.js';
+import { Containment, chatIsContained, containedRefusal, containedThreadStates, threadIsContained } from './containment.js';
 import { createToolContext } from './tool-context.js';
 import { bulkPlanTool } from '../tools/builtin/bulk.js';
 
@@ -31,7 +31,7 @@ let containment: Containment;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'lynox-contained-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
-  containment = new Containment(engineDb.getDb());
+  containment = new Containment(engineDb.getDb(), null);
 });
 afterEach(() => {
   engineDb.close();
@@ -53,15 +53,15 @@ describe('the contained table (v40)', () => {
     const path = join(dir, 'old.db');
     new EngineDb(path, '').close();
     const raw = new Database(path);
-    raw.exec(`DELETE FROM schema_version WHERE version >= 40; ALTER TABLE bulk_runs DROP COLUMN start_domains; ALTER TABLE triggers DROP COLUMN paused_at; ALTER TABLE triggers DROP COLUMN paused_due_at; ALTER TABLE triggers DROP COLUMN paused_for; ALTER TABLE triggers DROP COLUMN pause_noticed_at; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events; ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent; ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id; DROP TRIGGER contained_written_once; DROP TABLE contained;
+    raw.exec(`DELETE FROM schema_version WHERE version >= 40; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; ALTER TABLE bulk_targets DROP COLUMN deselected_at; ALTER TABLE triggers DROP COLUMN paused_db_at; ALTER TABLE triggers DROP COLUMN covered_created_by; ALTER TABLE triggers DROP COLUMN covered_created_id; ALTER TABLE triggers DROP COLUMN covered_created_at; ALTER TABLE triggers DROP COLUMN covered_edited_by; ALTER TABLE triggers DROP COLUMN covered_edited_id; ALTER TABLE triggers DROP COLUMN covered_edited_at; ALTER TABLE triggers DROP COLUMN covered_at; ALTER TABLE workflows DROP COLUMN covered_created_by; ALTER TABLE workflows DROP COLUMN covered_created_id; ALTER TABLE workflows DROP COLUMN covered_created_at; ALTER TABLE workflows DROP COLUMN covered_edited_by; ALTER TABLE workflows DROP COLUMN covered_edited_id; ALTER TABLE workflows DROP COLUMN covered_edited_at; ALTER TABLE workflows DROP COLUMN covered_at; ALTER TABLE bulk_runs DROP COLUMN start_domains; ALTER TABLE triggers DROP COLUMN paused_at; ALTER TABLE triggers DROP COLUMN paused_due_at; ALTER TABLE triggers DROP COLUMN paused_for; ALTER TABLE triggers DROP COLUMN pause_noticed_at; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; DROP INDEX IF EXISTS idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events; ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent; ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id; DROP TRIGGER contained_written_once; DROP TABLE contained;
       INSERT INTO exact_marker (id, first_ok_at) VALUES (1, '2026-10-01 00:00:00');`);
     expect(raw.prepare("SELECT name FROM sqlite_master WHERE name = 'contained'").get()).toBeUndefined();
     raw.close();
     const e = new EngineDb(path, '');
     try {
-      expect((e.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(58);
+      expect((e.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(65);
       expect(e.exactMarkerSet()).toBe(true);
-      const c = new Containment(e.getDb());
+      const c = new Containment(e.getDb(), null);
       c.contain({ kind: 'bulk_run', id: 'r1' }, { kind: 'api', connectionId: 'shop-acme' });
       expect(c.isContained({ bulkRunId: 'r1' })).toBe(true);
       expect(() => e.getDb().prepare("UPDATE contained SET connection_id = 'x'").run()).toThrow(/written once/);
@@ -86,7 +86,7 @@ describe('the contained table (v40)', () => {
   });
 
   it('the store has no way to remove or change a row, and no source file deletes or updates one', () => {
-    expect(Object.getOwnPropertyNames(Containment.prototype).sort()).toEqual(['constructor', 'contain', 'containFromThread', 'containedThreadIds', 'isContained']);
+    expect(Object.getOwnPropertyNames(Containment.prototype).sort()).toEqual(['canContain', 'constructor', 'contain', 'containFromThread', 'containedThreadIds', 'engine', 'holds', 'isContained', 'threadStates']);
     const SRC = fileURLToPath(new URL('..', import.meta.url));
     const sources = (d: string): string[] => readdirSync(d).flatMap((n) => {
       const p = join(d, n);
@@ -99,6 +99,12 @@ describe('the contained table (v40)', () => {
     expect(writers).toEqual(['core/containment.ts']);
     const own = readFileSync(join(SRC, 'core/containment.ts'), 'utf-8');
     expect(own).not.toMatch(/\b(DELETE\s+FROM|UPDATE)\s+contained\b/i);
+    // history.db's copy (`history-markers.ts`): written by INSERT in that module alone.
+    const mirrorWriters = sources(SRC)
+      .filter((p) => /\b(DELETE\s+FROM|UPDATE|INSERT\s+(OR\s+\w+\s+)?INTO)\s+(contained_threads|exact_marker_mirror)\b/i.test(readFileSync(p, 'utf-8')))
+      .map((p) => relative(SRC, p).replace(/\\/g, '/'));
+    expect(mirrorWriters).toEqual(['core/history-markers.ts']);
+    expect(readFileSync(join(SRC, 'core/history-markers.ts'), 'utf-8')).not.toMatch(/\b(DELETE\s+FROM|UPDATE)\s+(contained_threads|exact_marker_mirror)\b/i);
   });
 });
 
@@ -121,11 +127,11 @@ describe('isContained reads fail-closed', () => {
   });
 
   it('a store that throws is contained', () => {
-    const throwing = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
+    const throwing = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never, null);
     expect(throwing.isContained({ threadId: 't2' })).toBe(true);
     // A closed database too.
     const e = new EngineDb(join(dir, 'closed.db'), '');
-    const c = new Containment(e.getDb());
+    const c = new Containment(e.getDb(), null);
     e.close();
     expect(c.isContained({ threadId: 't2' })).toBe(true);
   });
@@ -140,6 +146,73 @@ describe('isContained reads fail-closed', () => {
     // A billing tier marks the instance provisioned; no control-plane URL or secret this boot.
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
     expect(threadIsContained(null, 't1')).toBe(true);
+  });
+});
+
+describe('threadStates tells a record from a failed read', () => {
+  const sorted = (s: Set<string>): string[] => [...s].sort();
+  const throwingDb = { prepare: () => { throw new Error('disk I/O error'); } } as never;
+
+  it('a read that works: recorded threads contained, nothing unknown', () => {
+    containment.contain({ kind: 'thread', id: 't1' }, { kind: 'api', connectionId: 'shop-acme' });
+    const s = containment.threadStates(['t1', 't2']);
+    expect(sorted(s.contained)).toEqual(['t1']);
+    expect(sorted(s.unknown)).toEqual([]);
+  });
+
+  it('a read that throws: every thread unknown, but one the history copy names stays contained', () => {
+    const mirror = { has: (id: string) => id === 't1', threadIds: (ids: readonly string[]) => ids.filter((id) => id === 't1') };
+    const s = new Containment(throwingDb, mirror as never).threadStates(['t1', 't2', 't3']);
+    expect(sorted(s.contained)).toEqual(['t1']);
+    expect(sorted(s.unknown)).toEqual(['t2', 't3']);
+    expect(sorted(new Containment(throwingDb, null).threadStates(['t2']).unknown)).toEqual(['t2']);
+  });
+
+  it('a history copy whose read throws: a thread engine.db records stays known, any other is unknown', () => {
+    containment.contain({ kind: 'thread', id: 't1' }, { kind: 'api', connectionId: 'shop-acme' });
+    const throwingMirror = { has: () => { throw new Error('x'); }, threadIds: () => { throw new Error('x'); } };
+    const s = new Containment(engineDb.getDb(), throwingMirror as never).threadStates(['t1', 't2']);
+    expect(sorted(s.contained)).toEqual(['t1']);
+    expect(sorted(s.unknown)).toEqual(['t2']);
+    // Enforced as contained, as isContained has it.
+    const c = new Containment(engineDb.getDb(), throwingMirror as never);
+    expect(c.containedThreadIds(['t2']).has('t2')).toBe(true);
+    expect(c.isContained({ threadId: 't2' })).toBe(true);
+    // No engine.db and an unreadable copy: unknown on a self-hosted instance too.
+    expect(sorted(new Containment(null, throwingMirror as never).threadStates(['t2']).unknown)).toEqual(['t2']);
+  });
+
+  it('no engine.db: unknown on a provisioned instance, clear elsewhere', () => {
+    expect(sorted(new Containment(null, null).threadStates(['t2']).unknown)).toEqual([]);
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    expect(sorted(new Containment(null, null).threadStates(['t2']).unknown)).toEqual(['t2']);
+  });
+
+  it('an empty id is contained, not unknown, as the refusals have it', () => {
+    const s = new Containment(throwingDb, null).threadStates(['', 't2']);
+    expect(sorted(s.contained)).toEqual(['']);
+    expect(sorted(s.unknown)).toEqual(['t2']);
+  });
+
+  it('no store: unknown on a provisioned instance, clear elsewhere', () => {
+    expect(sorted(containedThreadStates(null, ['t1']).unknown)).toEqual([]);
+    expect(sorted(containedThreadStates(null, ['t1']).contained)).toEqual([]);
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    expect(sorted(containedThreadStates(null, ['t1']).unknown)).toEqual(['t1']);
+  });
+
+  it('enforcement is the union: containedThreadIds holds both, in every branch', () => {
+    containment.contain({ kind: 'thread', id: 't1' }, { kind: 'api', connectionId: 'shop-acme' });
+    const stores = [containment, new Containment(throwingDb, null), new Containment(null, null)];
+    for (const tier of [undefined, 'managed']) {
+      if (tier !== undefined) vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      for (const c of stores) {
+        const ids = ['t1', 't2', ''];
+        const { contained, unknown } = c.threadStates(ids);
+        expect(sorted(c.containedThreadIds(ids))).toEqual(sorted(new Set([...contained, ...unknown])));
+        for (const id of ['t1', 't2']) expect(c.isContained({ threadId: id })).toBe(contained.has(id) || unknown.has(id));
+      }
+    }
   });
 });
 
@@ -161,7 +234,7 @@ describe('the memory guards read the record', () => {
   });
 
   it('a store that throws refuses', () => {
-    const throwing = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
+    const throwing = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never, null);
     // The same answer stands for a record that cannot be read, so it does not claim the chat read the store.
     expect(containedRefusal(agentIn({ current: 't2' }, throwing))).toMatch(/^Not stored: this chat has read data through a store connection, or this engine cannot read whether it has, /);
   });
@@ -205,7 +278,7 @@ describe('the memory guards read the record', () => {
 
 describe('a bulk run is contained at its insert', () => {
   let ledger: BulkLedger;
-  beforeEach(() => { ledger = new BulkLedger(engineDb); });
+  beforeEach(() => { ledger = new BulkLedger(engineDb, null); });
 
   const targets = (): PlannedTarget[] => [0, 1].map((i) => ({ key: `k${String(i)}`, before: { absent: false, value: `v${String(i)}` }, after: `w${String(i)}` }));
 

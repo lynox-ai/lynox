@@ -103,6 +103,7 @@ export interface ChangesetDiff {
   absolutePath: string;
   status: 'added' | 'modified';
   diff: string;                  // unified diff text
+  compared: boolean;             // false: `diff` holds a note, not a diff (file over the cap, diff unavailable)
   originalContent: string | null;
 }
 

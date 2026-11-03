@@ -29,6 +29,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { runInCallSlot } from '../../core/call-connection.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
@@ -92,6 +93,8 @@ function createMockAgent(
     // (a non-allowlisted egress host cannot be saved without a real human).
     promptUser,
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       apiStore: apiStore ?? null,
       vaultNameBindings: bindingsAsMigrated(apiStore),
       dataStore: null,
@@ -803,6 +806,49 @@ describe('api_setup tool', () => {
         createMockAgent(new ApiStore()),
       );
       expect(result).not.toContain('Invalid auth.header_name');
+    });
+  });
+
+  // A profile with a pasted token on a store: while the store exchange is off it is saved (and
+  // every request through it gets the closed text); once it is on, it is pointed at the preset.
+  describe('a profile of its own on a Shopify store', () => {
+    const pasted: ApiProfile = {
+      ...SAMPLE_PROFILE,
+      id: 'shop-pasted', name: 'Shop', base_url: 'https://acme.myshopify.com/admin/api/2026-04', description: 'The admin API of one store',
+      auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+    };
+    const save = (store: ApiStore): Promise<string> =>
+      apiSetupTool.handler({ action: 'create', profile: pasted }, createMockAgent(store, undefined, async () => 'Allow')) as Promise<string>;
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it('is refused and pointed at the preset while the store exchange is on', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+      const store = new ApiStore();
+      expect(await save(store)).toBe('Validation error: Invalid profile: the API of Shopify is connected only through this engine\'s built-in "shopify" provider, which shows the user what lynox may do there before a write access and asks every write with what it sends. '
+        + 'A profile with another sign-in, a pasted token included, would reach the same account past both. Use auth.type "oauth2" with auth.oauth.preset_id "shopify" and auth.oauth.preset_params '
+        + '{"shop": "<shop>"} (shop: the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case), then api_setup action "connect".');
+      expect(store.get('shop-pasted')).toBeUndefined();
+    });
+
+    it('is saved as before while the store exchange is off', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '0');
+      const store = new ApiStore();
+      const result = await save(store);
+      expect(result).not.toContain('built-in "shopify" provider');
+      expect(store.get('shop-pasted')?.auth?.type).toBe('bearer');
+    });
+
+    // Saved while the exchange was off, refined once it is on: it is pointed at the preset, and
+    // told that nothing goes through it, since every request to a store needs the connection.
+    it('is not refined once the store exchange is on, and is told that no request goes through it', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '0');
+      const store = new ApiStore();
+      await save(store);
+      expect(store.get('shop-pasted')).toBeDefined();
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+      const out = await apiSetupTool.handler({ action: 'refine', id: 'shop-pasted', refine: { addNotes: ['x'] } }, createMockAgent(store, undefined, async () => 'Allow')) as string;
+      expect(out).toContain('Error: the stored profile "shop-pasted" cannot be refined: the API of Shopify is connected only through this engine\'s built-in "shopify" provider');
+      expect(out).toContain('Change this profile with api_setup action="update"; every request through it is refused until then.');
     });
   });
 
@@ -1706,6 +1752,18 @@ describe('api_setup tool', () => {
         agent,
       );
       expect(result).toContain('cost.output_ratio');
+    });
+
+    it('takes a cost.response_field that is a dot path, and rejects any other', async () => {
+      for (const field of ['cost', 'tasks.0.cost', 'data.billing.total_usd']) {
+        const store = new ApiStore();
+        const result = await apiSetupTool.handler({ action: 'create', profile: withV2({ cost: { model: 'per_call', rate_usd: 0.001, response_field: field } }) }, createMockAgent(store));
+        expect(result).not.toContain('cost.response_field');
+      }
+      for (const field of ['', 'cost.', '.cost', 'a..b', 'tasks[0].cost', '$.cost', 'a b', 7, 'a.b.c.d.e.f.g.h.i']) {
+        const result = await apiSetupTool.handler({ action: 'create', profile: withV2({ cost: { model: 'per_call', rate_usd: 0.001, response_field: field as never } }) }, createMockAgent(new ApiStore()));
+        expect(result).toContain('Invalid cost.response_field');
+      }
     });
 
     it('rejects unknown provenance.source', async () => {
@@ -3448,8 +3506,13 @@ describe('api_setup tool', () => {
       // Simulate a session that has already spent its HTTP budget.
       (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const rateSpy = vi.spyOn(store, 'checkRateLimit');
 
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+      // Refused before the token host's rate bucket is consumed (row 1005); the call below the
+      // limit in 'reserves fetch_token's POST before it goes out' shows the bucket is consumed there.
+      expect(rateSpy).not.toHaveBeenCalled();
+      rateSpy.mockRestore();
 
       // ux U-010 for fetch_token, written out: the profile is stored, so the way on is to continue it.
       expect(result).toBe('Blocked: this conversation or run has reached its limit of 100 HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.');
@@ -3850,6 +3913,29 @@ describe('api_setup tool', () => {
       expect(result).toMatch(/Token exchange OK/i);
       expect(fetchSpy).toHaveBeenCalled();
       fetchSpy.mockRestore();
+    });
+
+    // Row 1005: reserved before the POST, as http_request does, so an exchange that fails after it
+    // went out still counts against the budget.
+    it('reserves fetch_token\'s POST before it goes out, so a failed exchange stays charged', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({ OAUTH_ID: 'id', OAUTH_SECRET: 'sec' }));
+      store.register({
+        id: 'allowlisted_oauth', name: 'Allowlisted OAuth', base_url: 'https://api.openai.com/v1', description: 'Allowlisted OAuth profile.',
+        auth: { type: 'oauth2', vault_keys: ['OAUTH_ID', 'OAUTH_SECRET'], oauth: { token_url: 'https://api.anthropic.com/oauth/token', grant_type: 'client_credentials', client_id_key: 'OAUTH_ID', client_secret_key: 'OAUTH_SECRET', body_format: 'json' } },
+        endpoints: [{ method: 'POST', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('socket hang up'));
+      const rateSpy = vi.spyOn(store, 'checkRateLimit');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'allowlisted_oauth' }, agent);
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(result).toContain('failed');
+      expect((agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests).toBe(1);
+      expect(rateSpy).toHaveBeenCalledTimes(1);
+      fetchSpy.mockRestore();
+      rateSpy.mockRestore();
     });
 
     it('does the token exchange and stores the access_token in the vault', async () => {

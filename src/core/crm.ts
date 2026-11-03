@@ -218,15 +218,16 @@ export class CRM {
    * trimmed lower-case form so dedup and the inbox contact-resolver lookup
    * (which lower-cases on read) agree. A contact without an email is always
    * inserted (NULL emails do not collide) — phone-only dedup is out of scope.
-   * `stamp` says where the contact came from (see `RowStamp`).
+   * `stamp` says where the contact came from (see `RowStamp`). Returns the contact table's
+   * counts; the subject-graph mirror below is not in them.
    */
-  upsertContact(data: ContactData, stamp: RowStamp): void {
+  upsertContact(data: ContactData, stamp: RowStamp): { inserted: number; updated: number; errors: string[] } {
     this.ensureSchema();
     const normalized: ContactData =
       typeof data.email === 'string' && data.email.trim().length > 0
         ? { ...data, email: data.email.trim().toLowerCase() }
         : data;
-    this.ds.insertRecords({ collection: 'contacts', records: [normalized as unknown as Record<string, unknown>], stamp });
+    const written = this.ds.insertRecords({ collection: 'contacts', records: [normalized as unknown as Record<string, unknown>], stamp });
 
     // Foundation Rework v2 (S1c): additively mirror the contact into the
     // engine.db subject-graph behind the flag. Fully isolated — the ds_contacts
@@ -242,6 +243,7 @@ export class CRM {
         );
       }
     }
+    return written;
   }
 
   /**

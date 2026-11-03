@@ -14,12 +14,16 @@
  */
 
 import { normalizeTier, type ModelTier } from '../contract/vocab.js';
+import { containedReason, type ContainedRefusalReason } from './contained-way-out.js';
 
 export interface ToolCallInfo {
 	name: string;
 	input: unknown;
 	result?: string;
 	status: 'running' | 'done' | 'error';
+	/** Why the engine refused this call in a chat that only reads. Live only: a chat loaded from
+	 *  the server does not carry it, and the bar above the input stands in for it there. */
+	contained?: ContainedRefusalReason | undefined;
 }
 
 /** One delegated child, as the UI tracks it. Mirrors the engine's `SpawnedSubAgent`. */
@@ -111,6 +115,7 @@ export interface ToolEventData {
 	isError?: unknown;
 	subAgent?: unknown;
 	subAgentId?: unknown;
+	contained?: unknown;
 }
 
 /** Where an event was filed. `dropped` means attributed to a child we do not know. */
@@ -302,6 +307,8 @@ export function recordToolResult(
 		if (!call) return null;
 		call.result = String(ev.result ?? '');
 		call.status = ev.isError === true ? 'error' : 'done';
+		const reason = containedReason(ev.contained);
+		if (reason !== undefined) call.contained = reason;
 		return call;
 	};
 	if (isChildEvent(ev.subAgentId, ev.subAgent)) {

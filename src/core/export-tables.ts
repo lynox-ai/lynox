@@ -104,6 +104,9 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       secret_release_requests: ACCESS,
       vault_name_bindings: ACCESS,
       mandate_ends: ACCESS,
+      // Each row names an end in `mandate_ends`, which stays here too: on another instance no
+      // warning was sent, and a pause there says so.
+      plan_advance_warnings: OPERATING,
       bulk_host_probes: ACCESS,
       contained: MARKER,
       exact_marker: MARKER,
@@ -144,6 +147,9 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       workflow_run_claims: OPERATING,
       tenants: OPERATING,
       model_provenance_backfill_marker: MARKER,
+      // history.db's copies of engine.db's `contained` and `exact_marker`, labelled like them.
+      contained_threads: MARKER,
+      exact_marker_mirror: MARKER,
       schema_version: MARKER,
     },
   },

@@ -24,7 +24,7 @@ describe('a mandate\'s changes in the actor trail (real engine)', () => {
   let mandateCookie: string;
   let ownerCookie: string;
   const saved: Record<string, string | undefined> = {};
-  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'];
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_DURABLE_MEMORY_ENABLED'];
 
   type Row = { actor_kind: string; actor_email: string | null; actor_display: string | null; mandate_id: string | null; action: string; target: string | null; phase: string; correlation_id: string };
   type Inner = {
@@ -60,6 +60,8 @@ describe('a mandate\'s changes in the actor trail (real engine)', () => {
     process.env['LYNOX_HTTP_SECRET'] = SECRET;
     process.env['LYNOX_ALLOW_PLAIN_HTTP'] = 'true';
     process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
+    // A mandate is let in only on the durable memory tools (660a-2), as on the fleet.
+    process.env['LYNOX_DURABLE_MEMORY_ENABLED'] = 'true';
     delete process.env['LYNOX_BILLING_TIER'];
     delete process.env['LYNOX_MANAGED_MODE'];
     reloadConfig();

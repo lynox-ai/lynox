@@ -52,7 +52,7 @@ describe('a paused plan in the task tools', () => {
   });
 
   it('the model text, exactly', () => {
-    expect(PAUSED_MODEL_TEXT).toBe("paused until the owner takes it over (the helper's access ended or was not renewed in time; takeover is not available yet, the owner can delete the plan)");
+    expect(PAUSED_MODEL_TEXT).toBe("paused until the owner takes it over (the helper's access ended or was not renewed in time)");
     expect(PAUSED_MODEL_TEXT).not.toMatch(/recreate/i);
   });
 

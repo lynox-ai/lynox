@@ -9,15 +9,17 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { foldInterfacePolls } from '../access-trail-fold.js';
 
 	type Status = 'running' | 'done' | 'halted' | 'ended' | 'refused' | 'failed' | 'interrupted';
 	type Note = 'awaits-answer' | 'awaits-approval' | 'question-open' | 'approval-expired' | 'approval-rejected' | 'send-unknown' | 'no-result';
 	interface Person { email: string | null; display: string | null; mandateId: string | null }
 	interface Targets { written: number; failed: number; atLeast: boolean }
 	interface Step { kind: 'step'; id: string; action: string; target: string | null; at: string; person: Person; status: Status | null; note?: Note; decidedBy?: string | null }
-	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person }
-	interface PlanRun { kind: 'plan'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; writeSteps: number | null; entries: Array<Step | Event> }
-	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
+	/** `auto`: a read on a route the person's web UI polls by itself, marked by the engine (row 1034). */
+	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true }
+	interface PlanRun { kind: 'plan'; run?: 'plan' | 'workflow'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; writeSteps: number | null; entries: Array<Step | Event> }
+	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; store?: 'files' | 'data_store' | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
 	type Entry = PlanRun | BulkRun | Step | Event;
 
 	const PERIODS = { all: null, '1d': 86_400_000, '7d': 7 * 86_400_000, '30d': 30 * 86_400_000 } as const;
@@ -106,6 +108,19 @@
 			&& (since === null || Date.parse(e.at) >= since));
 	});
 
+	// After the filters: a group holds only what they show (ux U-047).
+	const items = $derived(foldInterfacePolls(shown, (e) => personKey(e.person)));
+
+	/** "{from}–{to}" of a group; the date once when both ends fall on the same day. */
+	function span(from: string, to: string): string {
+		const a = new Date(from);
+		const b = new Date(to);
+		if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return `${from}–${to}`;
+		const locale = getLocale() === 'de' ? 'de-CH' : 'en-GB';
+		const sameDay = a.toDateString() === b.toDateString();
+		return `${a.toLocaleString(locale)}–${sameDay ? b.toLocaleTimeString(locale) : b.toLocaleString(locale)}`;
+	}
+
 	function when(at: string): string {
 		const d = new Date(at);
 		return Number.isNaN(d.getTime()) ? at : d.toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-GB');
@@ -115,6 +130,8 @@
 	}
 	function kindText(e: Entry): string {
 		if (e.kind === 'event') return t(e.phase === 'read' ? 'access_trail.kind_read' : 'access_trail.kind_event');
+		// A workflow run started in a chat (660b) is a run like a plan's, without a trigger.
+		if (e.kind === 'plan' && e.run === 'workflow') return t('access_trail.kind_workflow');
 		return t(`access_trail.kind_${e.kind}`);
 	}
 	function targetsText(x: Targets): string {
@@ -129,9 +146,10 @@
 	}
 	function noteText(s: Step): string | null {
 		if (s.note === undefined) return null;
-		const by = s.note === 'approval-rejected' ? decidedByText(s.decidedBy) : null;
-		const note = t(`access_trail.note.${s.note}`);
-		return by === null ? note : `${note} (${by})`;
+		if (s.note !== 'approval-rejected') return t(`access_trail.note.${s.note}`);
+		// Who did not approve stands next to "not approved", not after "not sent": the person sent nothing.
+		const by = decidedByText(s.decidedBy);
+		return by === null ? t('access_trail.note.approval-rejected_unnamed') : tf('access_trail.note.approval-rejected', { by });
 	}
 </script>
 
@@ -181,12 +199,35 @@
 				</select>
 			</label>
 		</div>
+		{#if before !== null}
+			<!-- Both filters choose among the loaded pages only: while an older one exists, a period
+			     or a person may have entries the selection does not show. -->
+			<p class="text-xs text-text-muted" data-state="filter-partial">{t('access_trail.filter_partial')}</p>
+		{/if}
 
 		{#if shown.length === 0}
 			<p class="text-sm text-text-muted" data-state="empty-filtered">{t('access_trail.empty_filtered')}</p>
 		{:else}
+			<p class="text-xs text-text-muted" data-legend="interface-polls">{t('access_trail.polls_legend')}</p>
 			<ul class="divide-y divide-border border-y border-border" aria-label={t('settings.account.access_trail')}>
-				{#each shown as e (e.id)}
+				{#each items as item (item.kind === 'polls' ? item.id : item.entry.id)}
+					{#if item.kind === 'polls'}
+					<li class="py-3 space-y-1" data-entry-kind="polls">
+						<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+							<span class="text-sm font-medium">{personName(item.entries[0]!.person)}</span>
+							{#if item.entries[0]!.person.email && item.entries[0]!.person.display}<span class="text-xs text-text-subtle">{item.entries[0]!.person.email}</span>{/if}
+						</div>
+						<details>
+							<summary class="text-sm text-text-muted cursor-pointer" data-polls-summary>{item.entries.length === 1
+								? tf('access_trail.polls_one', { time: when(item.to) })
+								: tf('access_trail.polls_many', { n: String(item.entries.length), span: span(item.from, item.to) })}</summary>
+							<div class="space-y-1 pt-1 pl-4">
+								{#each item.entries as p (p.id)}{@render line(p)}{/each}
+							</div>
+						</details>
+					</li>
+					{:else}
+					{@const e = item.entry}
 					<li class="py-3 space-y-1" data-entry-kind={e.kind}>
 						<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
 							<span class="text-sm font-medium">{personName(e.person)}</span>
@@ -213,7 +254,7 @@
 							<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
 								<span class="text-xs text-text-subtle tabular-nums">{when(e.at)}</span>
 								<span class="text-text-muted">{kindText(e)}</span>
-								<span class="font-mono text-xs break-all">{e.action}{#if e.host} · {e.host}{/if}</span>
+								<span class="font-mono text-xs break-all">{e.action}{#if e.host} · {e.host}{:else if e.store} · {t(e.store === 'files' ? 'bulk.system.workspace' : 'bulk.system.data_store')}{/if}</span>
 								<span class="text-xs" data-status>{statusText(e.status)}</span>
 								<span class="text-xs text-text-muted">{tf('access_trail.windows', { n: String(e.windows) })}</span>
 								<span class="text-xs text-text-muted" data-targets>{targetsText(e.targets)}</span>
@@ -223,6 +264,7 @@
 							{@render line(e)}
 						{/if}
 					</li>
+					{/if}
 				{/each}
 			</ul>
 		{/if}

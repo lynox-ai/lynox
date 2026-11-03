@@ -1,4 +1,5 @@
 import type { ToolEntry } from '../../types/index.js';
+import { DEFAULT_MAX_TOOL_RESULT_CHARS } from '../../types/index.js';
 import { urlScanForms } from '../../core/url-scan-forms.js';
 import { shellIsolation } from '../../core/shell-isolation.js';
 import { applyShape } from '../../core/api-shape.js';
@@ -10,7 +11,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -39,15 +40,15 @@ import {
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
-import { currentCallSignal, currentCallTwins, joinCallSignal, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
-import { containerOf, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
+import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -67,6 +68,13 @@ import { timingSafeEqual } from 'node:crypto';
 // the validated IP (closes the DNS-rebinding window between validate + connect).
 
 /** Translate technical block reasons into business-friendly messages */
+/** After `Blocked: redirect to <url>`: a hop to a GraphQL URL that carries a mutation, with the way out. */
+export const GRAPHQL_REDIRECT_REFUSAL = 'carries a GraphQL mutation in its URL; the redirect was not followed. To run the mutation, send it as a POST with a JSON body directly to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation.';
+
+/** After `Blocked: <write> to <service>`: a JSON object that cannot be a GraphQL request at a
+ *  GraphQL-looking address, as a write to a file named `graphql.*` sends (`jsonObjectNotGraphql`). */
+export const GRAPHQL_NOT_A_REQUEST_REFUSAL = 'looks like a GraphQL address to this check, and the body is not a GraphQL request, so it was not sent. If this writes or changes a file whose name contains graphql, lynox cannot send it this way: tell the user which file it is and that they need to change it themselves. Otherwise send one JSON object with a query string and Content-Type: application/json.';
+
 function friendlyBlockMessage(technical: string): string {
   if (technical.includes('private IP')) return 'That address points to an internal network and cannot be reached.';
   if (technical.includes('enforce_https')) return 'Only secure HTTPS connections are allowed. HTTP is disabled.';
@@ -187,9 +195,21 @@ export interface SentWrite {
   url: string;
   via?: { method: string; url: string } | undefined;
   // The call's own write sent once more on a redirect and answered there (the cap allows one).
-  // `carried`: it went as a method override on a GET, after a change of origin had turned the
-  // write into a GET without the body.
-  again?: { method: string | undefined; url: string; carried?: true } | undefined;
+  // `carried`: it went as a method override on a GET, after a 301/302/303 or a change of origin
+  // had turned the write into a GET. `afterOriginChange`: the hop where the origin changed, when
+  // that was an earlier hop than this one.
+  again?: SentAgain | undefined;
+}
+
+/** The call's own write, sent once more on a redirect (`SentWrite.again`). */
+export interface SentAgain { method: string | undefined; url: string; carried?: true; afterOriginChange?: string; answered?: true }
+
+/** Where the second sending went: `on its redirect`, or a later hop past a change of origin. */
+function againWhere(again: SentAgain): string {
+  const where = again.afterOriginChange === undefined
+    ? 'on its redirect'
+    : `on a later redirect, after the origin changed at ${urlForNote(again.afterOriginChange)}`;
+  return `${sentWriteSubject(again)} ${where}${again.carried === true ? ' (a GET carrying it as a method override)' : ''}`;
 }
 
 /** How the note opens on the write that was sent: `<subject> was sent ...`. */
@@ -201,8 +221,7 @@ function sentWriteSubject(sent: { method: string | undefined; url: string }): st
  *  follows is the second address's answer, not the first's. */
 export function sentWritePhrase(sent: SentWrite): string {
   if (sent.again === undefined) return `${sentWriteSubject(sent)} was sent`;
-  const how = sent.again.carried === true ? ' (a GET carrying it as a method override)' : '';
-  return `${sentWriteSubject(sent)} was sent, then ${sentWriteSubject(sent.again)} on its redirect${how},`;
+  return `${sentWriteSubject(sent)} was sent, then ${againWhere(sent.again)},`;
 }
 
 /** A refused hop, as the note says it when a redirect of a read carried the write. */
@@ -332,10 +351,20 @@ export function connectedAccountProfiles(url: string, apiStore: NonNullable<Tool
 }
 
 /** The built-in provider whose API host `url` is on (`apiHosts`), whatever profiles exist: the
- *  same predicate a profile is held to when it is saved (`presetNotFollowed`), asked for a
+ *  same predicate a profile is held to when it is saved (`providerNotFollowed`), asked for a
  *  request that follows no provider. */
 function hostClaimant(url: string): OAuthPreset | undefined {
-  return presetNotFollowed({ base_url: url });
+  return providerNotFollowed({ base_url: url });
+}
+
+/**
+ * {@link presetNotFollowed} as the engine asks it: a store host counts as the store provider's
+ * while the store exchange is switched on ({@link shopifyExchangeSwitchOn}), read at each call.
+ * The one reading for the save (`api_setup`) and the request, so the two cannot disagree.
+ */
+export function providerNotFollowed(profile: Parameters<typeof presetNotFollowed>[0]): OAuthPreset | undefined {
+  // `undefined`, not `OAUTH_PRESETS`: the register stays the predicate's own default, as every caller had it before.
+  return presetNotFollowed(profile, undefined, { storesClaimed: shopifyExchangeSwitchOn() });
 }
 
 /** Every profile on `url`'s host, as {@link presetProfilesOnHost} finds them, with or without a preset. */
@@ -382,8 +411,11 @@ const DEFAULT_LARGE_RESPONSE_SHAPE: ResponseShape = {
 // a few KB, so byte-truncating a large JSON to invalid mid-cut text BEFORE it
 // can be parsed + shaped would defeat the cap on exactly the heavy API pulls
 // (e.g. DataForSEO bulk keyword data, routinely >100KB) that motivate it. Only
-// applied when the user hasn't pinned an explicit `http_response_limit`.
-const JSON_SHAPE_READ_CEILING = 2_000_000;
+// applied when the user hasn't pinned an explicit `http_response_limit`. A
+// keywords_for_keywords answer on broad seed terms came to 2.2MB, past the
+// earlier 2MB, and then nothing was shaped at all; a JSON past this ceiling
+// still comes back raw, with a note in front.
+const JSON_SHAPE_READ_CEILING = 8_000_000;
 
 function shouldRewriteToGet(status: number, method: string): boolean {
   if (status === 303) return method !== 'GET' && method !== 'HEAD';
@@ -464,6 +496,9 @@ export async function fetchWithValidatedRedirects(
   // override: the call's own method then says nothing about what reached a server, and a caller
   // that words a stop or a timeout by that method would call the request safe to repeat.
   onOverrideWrite?: ((write: SentWrite) => void) | undefined,
+  // Called before it is requested with the hop the call's own write is sent again on, and again
+  // once that hop answered (`answered`): a stop or a timeout after it names the second sending too.
+  onSendAgain?: ((again: SentAgain) => void) | undefined,
   // `writeFollowedAsRead`: the first hop at which a write with a body was turned into a GET
   // because the origin changed. The write was not sent there, and the response is that GET's —
   // unless a GET from there on carried an override (`sent.again.carried`), which a server may run.
@@ -476,7 +511,7 @@ export async function fetchWithValidatedRedirects(
   let writeFollowedAsRead: string | undefined;
   let writeSentAgain = false;
   // The hop the call's own write is sent again on, until that hop answers (`SentWrite.again`).
-  let pendingAgain: SentWrite['again'];
+  let pendingAgain: SentAgain | undefined;
   // Carried explicitly so credential headers (incl. the engine-attached OAuth2
   // Bearer) can be dropped on a cross-origin hop (mirror fetch()); see
   // redirectHopHeaders.
@@ -517,6 +552,7 @@ export async function fetchWithValidatedRedirects(
       const response = await fetchPinned(currentUrl, requestInit, pass);
       sent ??= ownWrite ?? overrideHop;
       if (pendingAgain !== undefined && sent !== undefined) sent = { ...sent, again: pendingAgain };
+      if (pendingAgain !== undefined) onSendAgain?.({ ...pendingAgain, answered: true });
       pendingAgain = undefined;
       unansweredDowngrade = undefined;
 
@@ -559,6 +595,14 @@ export async function fetchWithValidatedRedirects(
         method = 'GET';
         body = undefined;
       }
+      // A GraphQL endpoint runs a mutation it finds in the URL's `query`, for a GET as for a write,
+      // and a request that carries one is refused before it goes out (`graphqlUrlWrites`). A hop
+      // is held to the same, whatever guard the call has: a read has none, and a redirect would
+      // otherwise run the mutation without a question.
+      if (isGraphqlEndpoint(nextUrl) && graphqlUrlWrites(nextUrl)) {
+        if (sent !== undefined) throw new RedirectRefusedAfterWrite(sent, nextUrl, 'consent');
+        throw new Error(`Blocked: redirect to ${urlForNote(nextUrl)} ${GRAPHQL_REDIRECT_REFUSAL}`);
+      }
       const verdict = redirectGuard ? redirectGuard(nextUrl, method) : true;
       if (verdict !== true) {
         // Decided on the write that was SENT, not on `method`: after a 303 (or a cross-origin
@@ -585,8 +629,15 @@ export async function fetchWithValidatedRedirects(
           overrideHop = { method: hopWrite ?? undefined, url: nextUrl, via: { method: originalMethod, url } };
           onOverrideWrite?.(overrideHop);
         } else {
-          // After a change of origin the write goes on only as an override a GET carries.
-          pendingAgain = { method: hopWrite ?? undefined, url: nextUrl, ...(writeFollowedAsRead === undefined ? {} : { carried: true as const }) };
+          // A hop that requests a GET (a 301/302/303, or a change of origin) sends the write only
+          // as an override that GET carries. A HEAD keeps its method on a redirect and is not one.
+          pendingAgain = {
+            method: hopWrite ?? undefined,
+            url: nextUrl,
+            ...(method === 'GET' ? { carried: true as const } : {}),
+            ...(writeFollowedAsRead === undefined || writeFollowedAsRead === nextUrl ? {} : { afterOriginChange: writeFollowedAsRead }),
+          };
+          onSendAgain?.(pendingAgain);
         }
         unansweredDowngrade = undefined;
       }
@@ -707,7 +758,7 @@ export function undoClassFor(method: string): 'restorable' | 'none' | null {
   // conservative answer for it is the gated one. So this list is "what this tool reads",
   // NOT "what cannot have an effect" — it does not claim to be complete, and adding a
   // method to the enum is a decision the schema test asks for by name.
-  if (m === 'GET' || m === 'HEAD') return null;
+  if (isReadMethod(m)) return null;
   if (m === 'PUT' || m === 'PATCH') return 'restorable';
   return 'none';
 }
@@ -748,16 +799,16 @@ function carriedWriteWarning(carried: SentWrite): string {
  * (`answeredStatus`, from the final hop after any redirect) and only the body stalled, the
  * request certainly reached a server — a redirect is itself an answer to it.
  */
-export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock: boolean, answeredStatus?: string, carried?: SentWrite): string {
+export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock: boolean, answeredStatus?: string, carried?: SentWrite, again?: SentAgain): string {
   const base = `HTTP request timed out after ${timeoutMs}ms${wallClock ? ' (wall clock)' : ''}`;
   const verb = method.toUpperCase();
   const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
-  if ((verb === 'GET' || verb === 'HEAD') && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
-  if (verb === 'GET' || verb === 'HEAD') return `${base}${read}`;
+  if (isReadMethod(verb) && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
+  if (isReadMethod(verb)) return `${base}${read}`;
   const landed = answeredStatus === undefined
     ? `The ${verb} may still have reached the server and taken effect`
     : `The ${verb} reached the server`;
-  return `${base}${read}. ${landed} — check the result there before sending it again.`;
+  return `${base}${read}. ${landed}${againNote(again)} — check the result there before sending it again.`;
 }
 
 /**
@@ -766,16 +817,25 @@ export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock:
  * one this file does not know included — may have reached the server, since the stop says
  * nothing about how far the request had got.
  */
-export function httpStoppedMessage(method: string, answeredStatus?: string, carried?: SentWrite): string {
+export function httpStoppedMessage(method: string, answeredStatus?: string, carried?: SentWrite, again?: SentAgain): string {
   const verb = method.toUpperCase();
   const base = `HTTP request stopped because the run was stopped`;
   const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
-  if ((verb === 'GET' || verb === 'HEAD') && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
-  if (verb === 'GET' || verb === 'HEAD') return `${base}${read}. It only reads, so it can simply be repeated.`;
+  if (isReadMethod(verb) && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
+  if (isReadMethod(verb)) return `${base}${read}. It only reads, so it can simply be repeated.`;
   const landed = answeredStatus === undefined
     ? `The ${verb} may already have reached the server and taken effect`
     : `The ${verb} reached the server`;
-  return `${base}${read}. ${landed} — check the result there before sending it again.`;
+  return `${base}${read}. ${landed}${againNote(again)} — check the result there before sending it again.`;
+}
+
+/** A write the call sent a second time (`onSendAgain`): it is named, so the count of sendings
+ *  is not one too low, and said as answered once its hop answered. */
+function againNote(again: SentAgain | undefined): string {
+  if (again === undefined) return '';
+  return again.answered === true
+    ? `, and it was sent a second time, as ${againWhere(again)}, which the server answered`
+    : `, and it was being sent a second time, as ${againWhere(again)}, which may have reached the server too`;
 }
 
 /**
@@ -1972,13 +2032,17 @@ async function mintStorePassFor(
     return { refusal: 'a request to a Shopify store is sent only for a chat or a bulk run, and this one runs for neither, so nothing was sent. Make the request from a chat.' };
   }
   const containment = toolContext.containment;
-  if (!containment) return { refusal: CONTAINMENT_UNWRITABLE };
+  // Without engine.db there is a containment reader (history.db's copy) but no clearance, and
+  // `contain` would throw: refused here, before anything is asked.
+  if (!containment || !toolContext.exactClearance) return { refusal: CONTAINMENT_UNWRITABLE };
   const threads = target.kind === 'thread' ? toolContext.threadStore : null;
   if (target.kind === 'thread' && !threads) return { refusal: CONTAINMENT_UNWRITABLE };
-  const clearance = await toolContext.exactClearance!.ensure();
+  const clearance = await toolContext.exactClearance.ensure();
   if (!clearance.ok) return { refusal: SHOPIFY_UNAVAILABLE };
   try {
     containment.contain(target, connection);
+    // Read back in both records: `INSERT OR IGNORE` swallows a refused row as well.
+    if (!containment.holds(target, connection)) throw new Error('the containment row did not hold');
     if (threads) {
       // Read back, not trusted: an UPDATE of a thread row that does not exist (the session's
       // insert is best-effort) changes nothing and throws nothing.
@@ -2081,7 +2145,7 @@ async function attachEngineManagedAuth(
   try { new URL(url); } catch { parsed = false; } // invalid URL — assertHostPolicy reports it downstream
   if (write && parsed && apiStore) {
     for (const p of profilesOnHost(url, apiStore)) {
-      const provider = presetNotFollowed(p);
+      const provider = providerNotFollowed(p);
       if (provider) { astray = { profile: p, provider }; break; }
     }
   }
@@ -2195,7 +2259,12 @@ async function attachEngineManagedAuth(
     if (memberRefusal !== null) return { refusal: memberRefusal };
     // Before the revoked-grant check and the renewal: a request this refuses reads nothing.
     const offGrant = slotOffGrant([accessTokenKey(profile.id)]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
+    if (offGrant !== undefined) {
+      // A store's own connection asked for a path its token does not go to: said as that, since the
+      // general text below ("to its base_url") is true of the host and wrong about the path.
+      const store = storePathRefusal(profile, url);
+      return { refusal: store ?? slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
+    }
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
     // token and send the model to fetch_token, which cannot help. Only while the
@@ -2350,8 +2419,10 @@ async function attachEngineManagedAuth(
       if (origin === null || typeof bound !== 'string' || digest === null || !digestsEqual(digest, bound)) {
         return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".` };
       }
-      // Step 6b, the containment and the pass: after every refusal above, so a refused request
-      // records nothing and contains nothing (`mintStorePassFor`).
+      // Step 6b, the containment and the pass: after every refusal above, so a request refused
+      // there records nothing and contains nothing (`mintStorePassFor`). The pass's own checks
+      // (path, encoding, access tokens, `store-pass.ts`) run at the send, after this: a request
+      // they refuse has contained the chat without anything sent, the safe direction.
       const minted = await mintStorePassFor(toolContext!, container, { kind: 'api', connectionId: profile.id }, origin, oauthSlot, oauthValue);
       if ('refusal' in minted) return { refusal: `Error: ${minted.refusal}` };
       return { ...put(oauthSlot, oauthValue), pass: minted.pass };
@@ -2762,9 +2833,111 @@ function slotReachRefusal(profileId: string, name: string, hostname: string, cli
   return `Error: api_profile "${profileId}" would send ${shapedForLog(name, DERIVED_NAME_SHAPE, 80)} to ${hostname}, but that vault name holds an OAuth token that goes only to where its own connection points (an access token to its base_url, a refresh token only to its token endpoint), or more than one profile claims it. Nothing was sent. Give this profile a credential of its own with api_setup action="update", or send the request through the profile that holds the connection.`;
 }
 
+/**
+ * A store connection's request to a path outside its provider's API (`apiPathPrefix`), written
+ * plainly or with an encoded slash or backslash: `null` for any other profile or path. Asked after
+ * the attach refused a store profile whose base is off its store, so the host is the store's. The
+ * path is not repeated; the model wrote it and knows it.
+ */
+function storePathRefusal(profile: ApiProfile, url: string): string | null {
+  const preset = OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '');
+  const prefix = preset?.apiPathPrefix;
+  if (preset === undefined || prefix === undefined) return null;
+  let path: string;
+  try { path = new URL(url).pathname; } catch { return null; }
+  if (path.startsWith(prefix) && !/%(2f|5c)/i.test(path)) return null;
+  return `Error: api_profile "${profile.id}" is the connection of a ${preset.label} store, and its token goes only to the store's API: paths under ${prefix}, with no encoded slash or backslash (%2F, %5C) in the path. This request goes to another path on the store, so nothing was sent. Other paths there are served by others than the store's API (an app's pages under /apps/, for example), and lynox does not send the store's token to them. Do not retry it, and do not set a credential yourself; make the request to the API path for what you need.`;
+}
+
 /** Shared wording — the same refusal for basic and bearer/header. */
 function protectedKeyRefusal(profileId: string, keys: string): string {
   return `Error: api_profile "${profileId}" names protected secret(s) ${keys} as its credentials. Those belong to the platform or hold the tenant's own provider key, and are never attached to an outbound request. Use a credential the user supplied for this API.`;
+}
+
+/**
+ * The note in front of a response read only up to its limit. A JSON cut there is not parsed, so
+ * neither the profile's `response_shape` nor the size cap applies, and a shape written now would
+ * not either: the way on is a request that returns less, not the same request again.
+ */
+function readLimitNote(limitKB: number, isJson: boolean, pinnedLimit: boolean): string {
+  if (!isJson) {
+    return `[truncated — response exceeded ${limitKB}KB limit; below is only its start. ` +
+      `For large responses prefer \`spawn_agent\` with role='collector' ` +
+      `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
+      `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
+  }
+  const limit = pinnedLimit
+    ? `the ${limitKB}KB read limit that "http_response_limit" sets (without that setting a JSON response is read up to ${Math.round(JSON_SHAPE_READ_CEILING / 1024)}KB and shaped)`
+    : `the ${limitKB}KB read limit`;
+  return `[truncated — this JSON response exceeded ${limit}, so it was not parsed: no response_shape and no size cap applied, and below is its raw start, cut mid-JSON. ` +
+    `A response_shape does not help while the response is cut. Do not send the same request again: make it return less (fewer seed terms, a limit or page parameter), ` +
+    `or use \`spawn_agent\` with role='collector' to work it in an isolated context.]`;
+}
+
+/**
+ * The note in front of a result the agent cuts to its start (`max_tool_result_chars`). A
+ * `response_shape` is offered only for a body that was parsed: it applies to nothing else.
+ */
+function resultCutNote(cut: number, parsedJson: boolean): string {
+  return `[note: this result is over ${cut} characters, the most that reaches you; anything past that, notes after the data included, is cut. ` +
+    'To get less, make the request return less (fewer items, a limit or page parameter), ' +
+    (parsedJson
+      ? 'or give this API\'s profile a response_shape that keeps fewer items or fields.]'
+      : 'or use `spawn_agent` with role=\'collector\' to work it in an isolated context.]');
+}
+
+/**
+ * The result with its engine notes in front: the write note first, where the run report reads
+ * it, then the size notes. Whether the agent cuts it is measured on the whole of it, the notes
+ * after the data included, and only a result already over the cut gets the note: a note added
+ * to one just under it would itself push the end off. The result scan may still put a warning
+ * in front before the agent measures; a result within that warning's length of the cut is then
+ * cut without this note, under the agent's own.
+ */
+function withFrontNotes(result: string, writeNote: string | undefined, sizeNotes: readonly string[], cut: number, parsedJson: boolean): string {
+  const compose = (notes: readonly string[]): string =>
+    `${writeNote === undefined ? '' : `${writeNote}\n\n`}${notes.length > 0 ? `${notes.join('\n')}\n\n` : ''}${result}`;
+  const whole = compose(sizeNotes);
+  return whole.length > cut ? compose([...sizeNotes, resultCutNote(cut, parsedJson)]) : whole;
+}
+
+/** The profile of `url`'s host when it has a cost; `undefined` for any other URL. */
+function apiProfileOfUrl(url: string, toolContext: ToolContext | undefined): ApiProfile | undefined {
+  try {
+    const profile = toolContext?.apiStore?.getByHostname(new URL(url).hostname);
+    return profile?.cost === undefined ? undefined : profile;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The most a provider's own figure may say one request cost, as the profile rate's own bound
+ *  (`api-setup.ts`). A larger or a negative figure is not taken; the profile rate stands. */
+const MAX_RESPONSE_COST_USD = 100;
+
+/**
+ * What one answered request to `profile`'s API cost (`CallApiCost`). The answer's own figure at
+ * `cost.response_field` when it gives a finite number from 0 to {@link MAX_RESPONSE_COST_USD};
+ * otherwise the profile's `per_call` rate as an estimate; otherwise no amount. `json` is the
+ * answer as parsed, before any `response_shape`; `undefined` when it was not parsed.
+ * The figure is the provider's: it is shown, and nothing that limits spending reads it.
+ */
+export function apiCostOfAnswer(profile: ApiProfile, json: unknown): CallApiCost {
+  const cost = profile.cost;
+  const field = cost?.response_field;
+  if (field !== undefined && json !== undefined) {
+    let at: unknown = json;
+    for (const key of field.split('.')) {
+      // An array is entered by index only, so `tasks.length` reads no count as a cost.
+      at = Array.isArray(at) ? (/^\d+$/.test(key) ? (at as unknown[])[Number(key)] : undefined)
+        : at !== null && typeof at === 'object' ? (at as Record<string, unknown>)[key] : undefined;
+    }
+    if (typeof at === 'number' && Number.isFinite(at) && at >= 0 && at <= MAX_RESPONSE_COST_USD) {
+      return { usd: at, source: 'response' };
+    }
+  }
+  if (cost?.model === 'per_call') return { usd: cost.rate_usd, source: 'profile' };
+  return { usd: null, source: 'none' };
 }
 
 /**
@@ -2856,14 +3029,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const headers = input.headers ?? {};
     const body = gateBodyReadings(input.body, headers);
     const method = effectiveWriteMethod(input.method ?? 'GET', headers, input.url, body) ?? 'OVERRIDE';
-    if (method === 'GET' || method === 'HEAD') return null;
+    if (isReadMethod(method)) return null;
     const named = method === 'OVERRIDE' ? [] : writeMethodsNamed(input.method ?? 'GET', headers, input.url, body);
     return named.length > 1 ? named.join('+') : method;
   },
   // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
   outwardRead: (input) => {
     const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
-    return method === 'GET' || method === 'HEAD' ? httpTarget(method, input.url) : null;
+    return isReadMethod(method) ? httpTarget(method, input.url) : null;
   },
   definition: {
     name: 'http_request',
@@ -2881,6 +3054,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       type: 'object' as const,
       properties: {
         url: { type: 'string', description: 'The URL to request' },
+        // The methods the model may ask for; which of them only read is answered by `isReadMethod` (core/outbound-write.ts), never by this list.
         method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'], description: 'HTTP method (default: GET)' },
         headers: { type: 'object', description: 'Request headers as key-value pairs' },
         // This string is in the STATIC PREFIX: it ships on every turn of every session
@@ -2978,7 +3152,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // The service these refusals name, as the question and the gate's refusals do (`approvalOrigin`):
     // `http://h:8080` is another service than `https://h`. Read only when a refusal is built: a
     // malformed URL is refused by the host policy further down, with its own message.
-    const service = (): string => approvalOrigin(new URL(input.url));
+    // Under a mandate a host that holds a stored secret is not named: the text reaches the
+    // mandate's run report too. Read as parsed (lower-cased, percent-decoded) and as the request
+    // wrote it, where a secret keeps its case; and the parsed host as DNS and TLS read it.
+    const hostHoldsSecret = (): boolean => {
+      if (isOwnerPrincipal(agent.principal)) return false;
+      const parsed = new URL(input.url);
+      const maskOf = (text: string): string => agent.secretStore?.maskSecrets(text) ?? text;
+      const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
+      const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
+      return [parsed.hostname, rawHost, decodedHost].some((h) => maskOf(h) !== h)
+        || (agent.secretStore?.containsSecretAsHost(parsed.hostname) ?? false);
+    };
+    const service = (): string => (hostHoldsSecret() ? 'this service' : approvalOrigin(new URL(input.url)));
     const writeShown = writeForNote(method.trim().toUpperCase(), gatedMethod, writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)));
     // The approval and the outbound-effect table are keyed by the URL's host. A header a
     // server or proxy routes on instead (`Host`, `X-Forwarded-Host`, `X-Original-URL`, …)
@@ -2998,10 +3184,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (graphqlEndpoint && isWriteMethod(gatedMethod)) {
       // Some servers read `query` from the URL before the body (express-graphql, graphene-django),
       // so a write there carries nothing in its URL: no list of parameter names a server might read.
-      if (new URL(input.url).search.length > 1) {
+      // The query string a proxy may make of a `?` decoded in the path counts as well.
+      if (urlQueryStrings(input.url).some((search) => search !== '')) {
         blockedVerbatim(`Blocked: ${writeShown} to ${service()} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
       }
       const reading = graphqlWrite(headers, input.body);
+      if ('refusal' in reading && jsonObjectNotGraphql(input.body)) {
+        blockedVerbatim(`Blocked: ${writeShown} to ${service()} ${GRAPHQL_NOT_A_REQUEST_REFUSAL}`);
+      }
       if ('refusal' in reading) {
         blockedVerbatim(`Blocked: ${writeShown} to ${service()} is a GraphQL request this check cannot read: ${reading.refusal}. Send one JSON object with a query string and Content-Type: application/json.`);
       }
@@ -3009,6 +3199,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     } else if (graphqlEndpoint && graphqlUrlWrites(input.url)) {
       // Not a write (the branch above takes those), so no override names one: the method as gated.
       blockedVerbatim(`Blocked: ${gatedMethod} to ${service()} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
+    }
+
+    // A contained chat reads its store and writes nowhere, not even to the store: many writes
+    // there send data on to an address the request names or make it public, and a list of them
+    // would let through every one it misses. The dispatch reads the call as the model gave it
+    // (`containedCallRefusal`); this reads the request as it goes out, with what the engine
+    // resolved into it and the body as the sender will repair it.
+    if (chatIsContained(agent) && containedStoreWrite(method, headers, input.url, input.body, gateBodyReadings(input.body, headers))) {
+      blockedVerbatim(CONTAINED_WRITE_REFUSAL_AT_SEND);
     }
 
     // A write to an account connected through a provider preset, by anyone: the owner and a
@@ -3032,7 +3231,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // nowhere to keep a profile.
       const wayOut = !toolContext?.apiStore
         ? 'This run has no api_profile store, so it cannot write there.'
-        : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
+        : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}"${presetParamsForModel(claimant) === '' ? '' : ` and auth.oauth.preset_params ${presetParamsForModel(claimant)}`}, then connect it with api_setup action "connect".`;
       blockedVerbatim(`Blocked: ${writeShown} to ${service()} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
     }
     // A write to a connected account is shown with everything the request puts on the wire, as
@@ -3179,8 +3378,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
     }
 
-    // GET-based exfiltration detection
-    if (method === 'GET' || method === 'HEAD') {
+    // GET-based exfiltration detection. On the method as the input names it, not the effective
+    // one: a GET carrying a write override is still sent as a GET with its URL.
+    if (isReadMethod(method)) {
       const exfilWarning = detectGetExfiltration(input.url);
       if (exfilWarning) {
         if (!agent.promptUser) {
@@ -3432,7 +3632,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (asksForWrite) {
       const counters = agent.sessionCounters;
       const mandate = !isOwnerPrincipal(agent.principal);
-      if ('unshowable' in askedHeaders) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, hostname, mandate));
+      if ('unshowable' in askedHeaders) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, service(), mandate));
       const batch = agent.approvalBatch?.();
       // How many calls of this batch are this same call; an Allow sends that many (`approvedInBatch`).
       // Outside a batch an answer covers this call alone, so the question names one.
@@ -3449,8 +3649,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       while (!takeTicket()) {
         if (!agent.promptUser) {
           blockedVerbatim(
-            `Blocked: outbound ${refusedAs} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).` +
-            `\n${ungrantedWriteNote(writeForShortNote(sentMethod, gatedMethod, named), input.url, governing?.withheld === 'untrusted', refusedReviewedHeaders(input, contract))}`,
+            `Blocked: outbound ${refusedAs} to ${service()} requires user consent but no interactive prompt is available (autonomous/background mode).` +
+            `\n${ungrantedWriteNote(writeForShortNote(sentMethod, gatedMethod, named), input.url, governing?.withheld === 'untrusted', refusedReviewedHeaders(input, contract), hostHoldsSecret(), mask)}`,
           );
         }
         const promptUser = agent.promptUser;
@@ -3509,24 +3709,18 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const pathOnly = new URL(input.url);
           pathOnly.search = '';
           const pathSecret = mandate && pathHoldsSecret(pathOnly.href, mask);
-          // The host goes out in DNS and TLS and is named in the question unmasked. Read as parsed
-          // (lower-cased, percent-decoded) and as the request wrote it, where a secret keeps its case.
-          // And the parsed host compared without case, as DNS and TLS read it: only the parser says
-          // what goes out, so that comparison reads no text the request wrote.
-          const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
-          const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
-          const hostSecret = mandate && ([pathOnly.hostname, rawHost, decodedHost].some((h) => mask(h) !== h)
-            || (agent.secretStore?.containsSecretAsHost(pathOnly.hostname) ?? false));
+          // The host goes out in DNS and TLS and is named in the question unmasked (`hostHoldsSecret`).
+          const hostSecret = mandate && hostHoldsSecret();
           const refusal = bodyGoesOut && shown === undefined
             ? (carriesInlineBinary(sentBody)
-              ? `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
-              : `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`)
+              ? `Blocked: the body of this ${refusedAs} to ${service()} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
+              : `Blocked: the body of this ${refusedAs} to ${service()} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`)
             : mandate && (bodyEscaped || bodyMasked)
               ? viaProfile('body')
               : bodyEscaped
-                ? `Blocked: the body of this ${refusedAs} to ${hostname} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
+                ? `Blocked: the body of this ${refusedAs} to ${service()} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
                 : sentQuery !== '' && query === undefined
-                  ? `Blocked: the query of this ${refusedAs} to ${hostname} (${querySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Put the values in the body.`
+                  ? `Blocked: the query of this ${refusedAs} to ${service()} (${querySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Put the values in the body.`
                   : mandate && query?.secret === true
                     ? viaProfile('query')
                     : secretHeader !== undefined
@@ -3577,17 +3771,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // gated as: a denied PUT stands against a PATCH that also names PUT.
             const deniedNamed = deniedHere === undefined ? [] : named.filter((m) => deniedHere.has(approvalKey(approvalMethod(m), hostname)));
             if (remembers && deniedNamed.length > 0) {
-              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: a ${deniedNamed.join(' or ')} to this host was denied earlier in this batch.`);
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} was not asked: a ${deniedNamed.join(' or ')} to this service was denied earlier in this batch.`);
             }
             // A call that waited in the queue raises no prompt once the run is aborted: the
             // prompt would outlive the run as a pending row and block the Session's next one.
             if (agent.runSignal?.aborted) {
-              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: the run was stopped.`);
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} was not asked: the run was stopped.`);
             }
             // The same for this call alone: the engine stopped waiting for it (its tool timeout),
             // so its question would be withdrawn at birth and read as a denial for the batch.
             if (currentCallSignal()?.aborted) {
-              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: the call timed out.`);
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} was not asked: the call timed out.`);
             }
             // How far an Allow reaches, or why this write is asked every time. Engine text, so
             // spliced in as frame (a nested `pv`), never as a value.
@@ -3629,7 +3823,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
         const allowed = await pending;
         if (!allowed) {
-          blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} denied by user.`);
+          blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} denied by user.`);
         }
         // Outside a batch, and for a write asked every time, the answer covers this call alone.
         if (!remembers || batch === undefined) break;
@@ -3659,9 +3853,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // (the transport destroys the socket), which a name check took for an unrelated failure.
     let timedOut: 'abort' | 'wall' | 'stopped' | null = null;
     let answeredStatus: string | undefined;
+    // The request this call sent to an API whose profile has a cost, once an answer came back
+    // (`apiCostOfAnswer`). Recorded on the call at the success return and on the error path, so a
+    // body that stalled after the headers still counts: the request went out.
+    let apiCost: CallApiCost | undefined;
     // A write a redirect of this call carried as a method override (`onOverrideWrite`), for the
     // stop and timeout messages: they would otherwise go by `gatedMethod`, a read.
     let carriedWrite: SentWrite | undefined;
+    // The hop the call's own write was sent again on (`onSendAgain`), for the same messages.
+    let againWrite: SentAgain | undefined;
     const timeoutId = setTimeout(() => { timedOut ??= 'abort'; controller.abort(); }, timeoutMs);
     opts.signal = controller.signal;
 
@@ -3673,7 +3873,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       wallTimeoutId = setTimeout(() => {
         timedOut = 'wall';
         controller.abort();
-        reject(new Error(httpTimeoutMessage(timeoutMs, gatedMethod, true, answeredStatus, carriedWrite)));
+        reject(new Error(httpTimeoutMessage(timeoutMs, gatedMethod, true, answeredStatus, carriedWrite, againWrite)));
       }, timeoutMs + HTTP_WALL_GRACE_MS);
     });
     // The run's stop (`currentCallSignal`, linked in the agent) ends the request now, not at the
@@ -3685,7 +3885,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const onStop = (): void => {
         timedOut ??= 'stopped';
         controller.abort();
-        reject(new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite)));
+        reject(new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite, againWrite)));
       };
       // Stopped while the call was still on its way here (DNS, a question): nothing is sent.
       if (callSignal.aborted) onStop();
@@ -3758,13 +3958,20 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, writeFollowedAsRead, sent } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass, (write) => { carriedWrite = write; }),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass, (write) => { carriedWrite = write; }, (again) => { againWrite = again; }),
         wallTimeout,
         stopped,
       ]);
       const status = `${response.status} ${response.statusText}`;
       // After a write turned into a GET on another origin, the answer is that GET's, not the write's.
       answeredStatus = writeFollowedAsRead === undefined ? status : `${status} to the GET it was redirected to on ${urlForNote(finalRequestUrl)}`;
+      // Attributed to the final URL after redirects; when that host has no cost but the first one
+      // has, the request still went to the priced API (a redirect to a CDN or a signed link). The
+      // answer is then another party's, so its cost field is not read: only the profile rate counts.
+      const answeringProfile = apiProfileOfUrl(finalRequestUrl, toolContext);
+      const costProfile = answeringProfile ?? apiProfileOfUrl(input.url, toolContext);
+      const costInAnswer = answeringProfile !== undefined;
+      apiCost = costProfile === undefined ? undefined : apiCostOfAnswer(costProfile, undefined);
       // Strip sensitive response headers to prevent credential leakage to agent
       const REDACTED_HEADERS = new Set([
         'set-cookie', 'authorization', 'www-authenticate', 'proxy-authenticate',
@@ -3823,9 +4030,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const htmlExtractEnabled = agent.toolContext?.userConfig?.http_html_extract ?? true;
       let htmlExtracted: HtmlExtractResult | undefined;
 
+      let parsedJson = false;
       if (isJson && !truncated) {
         try {
           const json = JSON.parse(text) as unknown;
+          parsedJson = true;
+          // The amount the answer gives, read before the shaping can drop its field.
+          if (costProfile !== undefined && costInAnswer) apiCost = apiCostOfAnswer(costProfile, json);
           // Apply per-API response shaping if the profile defines one.
           const shapedBody = await maybeShapeJson(json, input.url, toolContext);
           body = shapedBody;
@@ -3856,20 +4067,18 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           `Set "http_html_extract": false in config if you need the raw markup.]`;
       }
 
+      // Notes about size go in FRONT of the data, outside the wrap: a result longer than
+      // `max_tool_result_chars` is cut to its start by the agent, and a note at its end goes with it.
+      const sizeNotes: string[] = [];
       if (truncated) {
         const limitKB = Math.round(readLimit / 1024);
-        // Active delegation hint: a half-cut response in the main context is
-        // expensive (eats the cap, may still miss the field the agent needs).
-        // A collector sub-agent can fetch + summarize in an isolated context
-        // and return only the relevant slice — that's the cheaper path. After a
-        // successful extraction that bloat is already gone, so the hint would be
-        // wrong advice — say only that the page was longer than what we read.
-        body += htmlExtracted
-          ? `\n[note: the page exceeded the ${limitKB}KB read limit — the extraction above covers its first ${limitKB}KB.]`
-          : `\n... [truncated — response exceeded ${limitKB}KB limit. ` +
-            `For large responses prefer \`spawn_agent\` with role='collector' ` +
-            `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
-            `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
+        // After a successful extraction the bloat is already gone and the text is capped far
+        // below the cut, so the note stays after it and says only that the page was longer.
+        if (htmlExtracted) {
+          body += `\n[note: the page exceeded the ${limitKB}KB read limit — the extraction above covers its first ${limitKB}KB.]`;
+        } else {
+          sizeNotes.push(readLimitNote(limitKB, isJson, explicitLimit !== undefined));
+        }
       }
 
       const rawResult = `HTTP ${status}\n${respHeaders.join('\n')}\n\n${body}`;
@@ -3877,12 +4086,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
       let wrapped = wrapUntrustedData(rawResult, 'http_response');
       // In front, where the run report collects it (`collectWriteNotes`): engine text, not data.
+      // It is put in front of the size notes at the return, so the report still finds it first.
+      let writeNote: string | undefined;
       if (writeFollowedAsRead !== undefined) {
         const own = sent ?? { method: method.trim().toUpperCase(), url: input.url };
         // A write carried on from the other origin is told after the change of origin, where it went.
         const carried = own.again?.carried === true ? own.again : undefined;
         const sentPhrase = sentWritePhrase(carried === undefined ? own : { ...own, again: undefined });
-        wrapped = `${writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, carried)}\n\n${wrapped}`;
+        writeNote = writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, carried);
       }
 
       // ⚠ A repair that nobody can see is a defect that stops being reported. This call's result
@@ -3985,44 +4196,46 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
       }
 
-      // Phase E (api-cost-display): if this hit a profiled API with a per_call
-      // cost model, surface the cost on the streamHandler so the web-ui can
-      // show "$0.0006" alongside the tool_result. per_token / per_unit are
-      // deferred — we have no reliable token counter for arbitrary HTTP bodies.
-      try {
-        // Attribute to the final URL after redirects, so a chain landing on a
-        // different host is profiled against its actual endpoint. This used to
-        // read `response.url || input.url`, and `response.url` is always ''
-        // because fetchPinned constructs the Response — so it silently did the
-        // opposite of what this comment promised.
-        const parsedFinal = new URL(finalRequestUrl);
-        const profile = toolContext?.apiStore?.getByHostname(parsedFinal.hostname);
-        if (profile?.cost?.model === 'per_call' && isFeatureEnabled('api-cost-display')) {
+      // Phase E (api-cost-display): the request's cost goes on the call's row, where the run's
+      // footer counts it, and on the streamHandler so the web-ui can show it beside the tool_result.
+      if (apiCost !== undefined) {
+        noteApiCost(apiCost);
+        try {
           const streamHandler = toolContext?.streamHandler;
-          if (streamHandler) {
+          if (streamHandler && apiCost.source !== 'none' && apiCost.usd !== null && costProfile !== undefined && isFeatureEnabled('api-cost-display')) {
             // Mirror emitBootstrapProgress: catch sync throws via the outer
             // try/catch, and chain .catch on the Promise so an async rejection
             // from the handler cannot escape as an unhandledRejection.
             const emitResult = streamHandler({
               type: 'api_cost',
               tool: 'http_request',
-              profileId: profile.id,
-              profileName: profile.name,
-              endpoint: parsedFinal.pathname,
-              costUsd: profile.cost.rate_usd,
+              profileId: costProfile.id,
+              profileName: costProfile.name,
+              endpoint: new URL(costInAnswer ? finalRequestUrl : input.url).pathname,
+              costUsd: apiCost.usd,
+              source: apiCost.source === 'response' ? 'response' : 'profile',
               agent: agent.name,
             });
             if (emitResult instanceof Promise) {
               emitResult.catch(() => { /* best-effort */ });
             }
           }
-        }
-      } catch { /* cost emission is best-effort */ }
+        } catch { /* cost emission is best-effort */ }
+      }
 
       // Append profile warning if this was an unregistered API
       const profileWarning = (input as unknown as Record<string, unknown>)['_profileWarning'];
-      return profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
+      const result = profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
+      const resultCut = agent.toolContext?.userConfig?.max_tool_result_chars ?? DEFAULT_MAX_TOOL_RESULT_CHARS;
+      return withFrontNotes(result, writeNote, sizeNotes, resultCut, parsedJson);
     } catch (err: unknown) {
+      // The request went out and was answered, so it counts even though reading the answer failed.
+      if (answeredStatus !== undefined && apiCost !== undefined) noteApiCost(apiCost);
+      // So does a write whose redirect hop was refused: it was sent and answered before the hop.
+      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused) {
+        const sentTo = apiProfileOfUrl(input.url, toolContext);
+        if (sentTo !== undefined) noteApiCost(apiCostOfAnswer(sentTo, undefined));
+      }
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
       // the REASON as its message, and `blockedFriendly`'s reason starts with
       // "Blocked:" — so the branch two lines down would match it, re-wrap it as
@@ -4043,12 +4256,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
       if (err instanceof DelegatedHopRefused) blockedVerbatim(err.message);
       if (timedOut === 'stopped') {
-        throw new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite) + repairNote);
+        throw new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite, againWrite) + repairNote);
       }
       if (timedOut !== null) {
         // The note rides the timeout too — see `repairNote` above for why the silent path is
         // the one that matters here.
-        throw new Error(httpTimeoutMessage(timeoutMs, gatedMethod, timedOut === 'wall', answeredStatus, carriedWrite) + repairNote);
+        throw new Error(httpTimeoutMessage(timeoutMs, gatedMethod, timedOut === 'wall', answeredStatus, carriedWrite, againWrite) + repairNote);
       }
       // Translate SSRF/network errors into business-friendly messages
       if (err instanceof Error && err.message.startsWith('Blocked:')) {

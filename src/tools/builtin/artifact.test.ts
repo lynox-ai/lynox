@@ -7,10 +7,11 @@ import { artifactHistoryTool, artifactRestoreTool, artifactSaveTool } from './ar
 import type { IAgent } from '../../types/index.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { evictSavedArtifactBodies, EVICTION_MIN_CHARS } from '../../core/artifact-eviction.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 // Minimal agent — the artifact tools only read agent.toolContext.artifactStore.
 function makeAgent(store: ArtifactStore | null): IAgent {
-  return { toolContext: { artifactStore: store } } as unknown as IAgent;
+  return { principal: OWNER_PRINCIPAL, toolContext: { artifactStore: store } } as unknown as IAgent;
 }
 
 describe('artifact history/restore tool handlers', () => {

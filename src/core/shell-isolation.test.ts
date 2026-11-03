@@ -68,6 +68,8 @@ function inputs(socket: string | undefined, dir: boolean, over: Partial<ShellIso
     env: () => undefined,
     openFds: () => [0, 1, 2, 3, 19, 21],
     probeChild: (d) => { probed.push(d); return d === WORKSPACE_LABEL ? 'EROFS' : 'ENOENT'; },
+    // Without the newline the file has: the newline is the one test's below, so a lost trim fails there.
+    protectedHardlinks: () => '1',
     dataDir: DATA,
     log: (line) => { logged.push(line); },
     ...over,
@@ -263,6 +265,45 @@ describe('the D2 start checks, each one firing with its name (PRD shell-sidecar-
     });
   });
 
+  describe('(hardlinks) the host refuses foreign hard links', () => {
+    // Asserted in the test bodies, not through `check`/`build`: a mutation run proves a kill by the
+    // failing frame, and a helper's frame is not a test's.
+    const caught = (f: () => unknown): unknown => { try { f(); return undefined; } catch (err) { return err; } };
+    it.each([['0\n'], [''], ['2\n'], ['1 1\n']])('fires on fs.protected_hardlinks %j', (value) => {
+      const err = caught(() => buildShellIsolation(inputs(SOCKET, true, { protectedHardlinks: () => value })));
+      expect(err).toBeInstanceOf(ShellIsolationError);
+      expect((err as ShellIsolationError).check).toBe('hardlinks');
+      expect((err as ShellIsolationError).message).toBe(
+        `Shell sidecar start check (hardlinks) failed: fs.protected_hardlinks is ${JSON.stringify(value.trim())} on this host; it must be 1, ` +
+        'or the sidecar could hard-link a file of the engine\'s on the workspace volume to where the engine reads or writes it for the shell. ' +
+        'Set it on the host (sysctl -w fs.protected_hardlinks=1, kept in /etc/sysctl.d); it cannot be set from inside the container.',
+      );
+    });
+    it('fires when the setting cannot be read, never passes', () => {
+      const err = caught(() => buildShellIsolation(inputs(SOCKET, true, { protectedHardlinks: () => { throw new Error('ENOENT'); } })));
+      expect(err).toBeInstanceOf(ShellIsolationError);
+      expect((err as ShellIsolationError).check).toBe('hardlinks');
+    });
+    it('runs before (i): a host without it probes nothing by name', () => {
+      const i = inputs(SOCKET, true, { protectedHardlinks: () => '0\n' });
+      const err = caught(() => buildShellIsolation(i));
+      expect(err).toBeInstanceOf(ShellIsolationError);
+      expect((err as ShellIsolationError).check).toBe('hardlinks');
+      expect(i.probed).toEqual([]);
+      expect(i.logged).toEqual([]);
+    });
+    it('passes 1, with or without the trailing newline', () => {
+      expect(caught(() => buildShellIsolation(inputs(SOCKET, true, { protectedHardlinks: () => '1\n' })))).toBeUndefined();
+      expect(caught(() => buildShellIsolation(inputs(SOCKET, true, { protectedHardlinks: () => '1' })))).toBeUndefined();
+    });
+    it('is not read in local mode: self-host does not need it', () => {
+      let read = 0;
+      const i = inputs(undefined, false, { protectedHardlinks: () => { read += 1; return '0\n'; } });
+      expect(buildShellIsolation(i).kind).toBe('local');
+      expect(read).toBe(0);
+    });
+  });
+
   describe('(i) nothing to write by name', () => {
     it.each([['/workspace'], [`${DATA}/workspace`]])('fires when a file can be created under %s', (path) => {
       const err = check({ probeChild: (d) => d === path ? 'created' : 'ENOENT' });
@@ -373,6 +414,7 @@ describe('the process\'s own inputs are the process\'s (every check reads the re
     const i = processInputs();
     expect(i.procStatus()).toMatch(new RegExp(`^Uid:\\s+${process.getuid?.() ?? -1}\\s`, 'm'));
     expect(i.mountinfo()).toMatch(/^\d+ \d+ \d+:\d+ \//m);
+    expect(i.protectedHardlinks()).toBe(readFileSync('/proc/sys/fs/protected_hardlinks', 'utf8'));
     const dir = mkdtempSync(join(tmpdir(), 'inputs-'));
     made.push(dir);
     const fd = openSync(dir, 'r');

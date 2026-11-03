@@ -28,7 +28,7 @@ import { PromptStore } from './prompt-store.js';
 import { TaskManager } from './task-manager.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
-import type { NotificationRouter } from './notification-router.js';
+import type { DeliverySummary, NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/index.js';
 import { stopHandleOf, keepsQuestionForNextProcess } from './worker-loop.js';
 import type { ActiveTask } from './worker-loop.js';
@@ -140,6 +140,8 @@ function makeHarness(opts?: {
   lastRunStop?: { cause: string; pendingToolCount: number } | undefined;
   /** A run that loops in the past and is now short: the execution deadline, in ms. */
   taskTimeoutMs?: number | undefined;
+  /** Whether the run's container reads as contained (a store pass was minted in it). */
+  contained?: boolean | undefined;
 }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
@@ -248,9 +250,13 @@ function makeHarness(opts?: {
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
-    // A failed run's push asks whether its thread is contained; no store here, as on an
-    // instance that never connected one.
-    getToolContext: () => ({ containment: null }),
+    // A task's question hands its delivery here; no hooks on this engine.
+    escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
+    // A run's push asks whether its thread is contained; no store here, as on an instance
+    // that never connected one, unless the test says the run is contained.
+    getToolContext: () => ({ containment: opts?.contained === true ? { isContained: () => true } : null }),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
 
   // ⚠ `hasChannels` decides whether the loop even composes a notification, so a
@@ -733,6 +739,7 @@ function makeClassHarness(opts: {
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => { escalations++; return null; },
+    escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
     getPromptStore: () => null,
     getSecretStore: () => null,
     getDataStore: () => null,
@@ -749,6 +756,8 @@ function makeClassHarness(opts: {
       sessions.push(1);
       return { run: () => hold('unexpected'), abort: () => { /* noop */ }, _recreateAgent: () => { /* noop */ } } as unknown as Session;
     },
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
 
   const router = {
@@ -1066,6 +1075,19 @@ describe('the recorded word for a run that returns rather than throws', () => {
     expect(note.body, 'the ceiling is still reported').toContain('cost ceiling');
   });
 
+  it('stopped while parked in a CONTAINED run: the stop is told, and the run\'s text is not', async () => {
+    const { CONTAINED_RESULT_PUSH } = await import('./worker-loop.js');
+    const h = makeHarness({ park: true, withChannels: true, contained: true });
+    await h.parked;
+    h.loop.stopTask('trg-stop');
+    await waitUntil('the stop to be recorded', () => lastStatus(h) !== null);
+    const parkNotices = 1;
+    await waitUntil('the owner to be told', () => h.notifications().length > parkNotices);
+    const note = h.notifications().at(-1)!;
+    expect(note.title.startsWith('\u23f9')).toBe(true);
+    expect(note.body).toBe(`Stopped on your instruction.\n\n${CONTAINED_RESULT_PUSH}`);
+  });
+
   it('on its ceiling with no stop: failed, and the notice is a cross at high priority', async () => {
     const h = makeHarness({ withChannels: true, lastRunStop: { cause: 'budget_cap', pendingToolCount: 2 } });
     await h.running;
@@ -1099,6 +1121,7 @@ describe('the recorded word for a run that returns rather than throws', () => {
     await waitUntil('the run to be recorded', () => lastStatus(h) !== null);
     expect(lastStatus(h)).toBe('stopped');
     expect(h.prompts.getPending('thread-stop'), 'nothing left to re-arm it').toBeUndefined();
+    expect(h.history.getDb().prepare("SELECT closed_reason FROM pending_prompts WHERE session_id = 'thread-stop'").all(), 'and a late answer hears the run was stopped').toEqual([{ closed_reason: 'run_stopped' }]);
     expect(h.history.getTrigger('trg-stop')?.status).not.toBe('waiting');
   });
 

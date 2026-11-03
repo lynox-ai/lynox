@@ -1,14 +1,30 @@
 import {
-  mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, realpathSync,
-  openSync, closeSync, writeSync, constants, fstatSync, ftruncateSync,
+  mkdtempSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, realpathSync,
+  openSync, closeSync, writeSync, constants, fstatSync, ftruncateSync, lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, dirname, resolve, basename } from 'node:path';
 import { isPathWithin, getWorkspaceCwd, writeRootsBesidesWorkspace } from './workspace.js';
 import { processUmask, toWorkspaceRel, workspaceBase } from './workspace-rel.js';
-import { openRead, openWrite, rmdirAt, statEntry, unlinkAt, WorkspaceAccessError, type WorkspaceAnchor } from './workspace-fd.js';
+import { namesSidecarLabel } from './workspace-root.js';
+import { sidecarWriteModes } from './workspace-write-modes.js';
+import {
+  FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, openWrite, readFdCapped, rmdirAt, statEntry, unlinkAt,
+  WorkspaceAccessError, type WorkspaceAnchor,
+} from './workspace-fd.js';
 
-const realOr = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
+// In shell sidecar mode a path below the label is its own key: it is not looked up by name (D3).
+const realOr = (p: string): string => { if (namesSidecarLabel(p)) return resolve(p); try { return realpathSync(p); } catch { return resolve(p); } };
+
+/** Whether nothing is at `p`, not even a link. Anything else, an error included, counts as there. */
+function isMissing(p: string): boolean {
+  try {
+    lstatSync(p);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
 
 /** The context workspace's open directory, or null without isolation or when it cannot be reached. */
 function heldBase(): ReturnType<typeof workspaceBase> {
@@ -18,6 +34,36 @@ function heldBase(): ReturnType<typeof workspaceBase> {
     return null;
   }
 }
+
+/** A tracked file over {@link FILE_TOOL_READ_CAP_BYTES}, with its size: its bytes are not read.
+ *  The size is null when it could not be read once the file was found over the cap. */
+type OverCap = { overCap: number | null };
+
+/** A size as the review shows it: bytes below 1 MB, MB to one decimal above. `up` rounds up,
+ *  so a file one byte over the cap does not read as the cap itself. */
+const shownSize = (bytes: number, up = false): string => {
+  if (bytes < 1024 * 1024) return `${bytes} bytes`;
+  const tenths = (bytes / (1024 * 1024)) * 10;
+  return `${(up ? Math.ceil(tenths) : Math.round(tenths)) / 10} MB`;
+};
+
+/** The review's line for a file over the cap, in place of a diff: what is known, and what the
+ *  person deciding without the content can do. `before` is null for a file the run added,
+ *  undefined when the original could not be read (then nothing was saved to restore). */
+function notComparedNote(before: number | null | undefined, now: number | null): string {
+  const was = before === null
+    ? 'It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it unless it was changed or replaced after the run wrote it.'
+    : before === undefined
+      ? 'Its size before the run is not known. Look at the file yourself before you keep the change; Rollback cannot restore it, because the original could not be read.'
+      : `Before the run it was ${shownSize(before)}. Look at the file yourself before you keep the change; Rollback restores the original, or says it could not.`;
+  const size = now === null ? 'now larger than' : `${shownSize(now, true)} now, larger than`;
+  return `(Content not compared: the file is ${size} the ${shownSize(FILE_TOOL_READ_CAP_BYTES)} the review reads. ${was})`;
+}
+/** The most of a diff the review shows (Node's default `maxBuffer`, now named), and how long
+ *  `diff` may take. A diff stopped by either is shown cut, with {@link DIFF_CUT_NOTE}. */
+const DIFF_MAX_BYTES = 1024 * 1024;
+const DIFF_TIMEOUT_MS = 5000;
+const DIFF_CUT_NOTE = `(Diff cut: only its start is shown, as it is longer than ${shownSize(DIFF_MAX_BYTES)} or took longer than ${DIFF_TIMEOUT_MS / 1000} seconds. Look at the file yourself before you keep the change; Rollback restores the original, or says it could not.)`;
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { ChangesetEntry, ChangesetDiff } from '../types/index.js';
@@ -40,14 +86,16 @@ export class ChangesetManager {
    *  no directory behind. `cleanup()` sets it back to null, so a backup after it makes a new
    *  private (0700) directory instead of re-creating the removed path with default modes. */
   private backupDir: string | null = null;
+  /** Whether the last {@link backupBeforeWrite} refused because the file is too large to save,
+   *  so the caller's refusal can say so and name the way out. */
+  refusedTooLarge = false;
 
   /** `runId` names the session run this manager belongs to (one per user run, not the HTTP
    *  run registry's id). The review shows it and its answer carries it back, so an answer to
    *  one run's review never reaches the next run's files. */
   constructor(private readonly cwd: string, readonly runId: string, otherRoots: readonly string[] = []) {
-    const real = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
-    this.realCwd = real(cwd);
-    this.roots = [this.realCwd, ...otherRoots.map(real)];
+    this.realCwd = realOr(cwd);
+    this.roots = [this.realCwd, ...otherRoots.map(realOr)];
   }
 
   /** `cwd` with symlinks resolved: the workspace, which names in the review are relative to. */
@@ -66,6 +114,9 @@ export class ChangesetManager {
    */
   private _confine(filePath: string): string | null {
     const abs = resolve(filePath);
+    // In shell sidecar mode a path below the label outside the context workspace is not tracked,
+    // and not looked up by name to find out (D3).
+    if (namesSidecarLabel(abs)) return null;
     let ancestor = abs;
     let tail = '';
     while (!existsSync(ancestor)) {
@@ -155,16 +206,43 @@ export class ChangesetManager {
   }
 
   /** The bytes of a tracked file, read only while it is still inside a root and
-   *  not through a symlink at the file itself. Null when it is neither, or unreadable. */
-  private _readTracked(abs: string): Buffer | null {
-    return this._withTracked(abs, (fd) => readFileSync(fd));
+   *  not through a symlink at the file itself. Null when it is neither, or unreadable.
+   *  A file over {@link FILE_TOOL_READ_CAP_BYTES} is not read whole: only its size is
+   *  returned. Another writer can put a file of any size under a tracked path. */
+  private _readTracked(abs: string): Buffer | OverCap | null {
+    return this._withTracked(abs, (fd) => {
+      // The size first, so a file known to be over the cap is not read at all.
+      const size = fstatSync(fd).size;
+      if (size > FILE_TOOL_READ_CAP_BYTES) return { overCap: size };
+      try {
+        return readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
+      } catch (err) {
+        if (!isReadLimit(err)) throw err;
+        // Grown past the cap since the fstat. A size that cannot be read now leaves it unknown:
+        // the file is still shown as changed, never left out of the review as if it were gone.
+        try {
+          return { overCap: fstatSync(fd).size };
+        } catch {
+          return { overCap: null };
+        }
+      }
+    });
   }
 
-  /** Which file a tracked path names now, read as {@link _readTracked} reads it. */
+  /** Which file a tracked path names now: its inode and a hash of its bytes, read as
+   *  {@link _readTracked} reads them. A file over the cap is not read: it is known by its size
+   *  and its ctime instead, which every write changes and no caller can set back. So the run's
+   *  own large file is still rolled back, and one changed or put there since is not. A kernel
+   *  with coarse timestamps can leave ctime as it was for a write in the same tick; multigrain
+   *  timestamps (Linux 6.13 on, for the filesystems that use them) do not, after the fstat here.
+   *  Null when a file grows past the cap while it is read: never taken for the run's own. */
   private _identityOf(abs: string): { dev: number; ino: number; hash: string } | null {
     return this._withTracked(abs, (fd) => {
-      const st = fstatSync(fd);
-      return { dev: st.dev, ino: st.ino, hash: createHash('sha256').update(readFileSync(fd)).digest('hex') };
+      const st = fstatSync(fd, { bigint: true });
+      const id = { dev: Number(st.dev), ino: Number(st.ino) };
+      if (st.size > BigInt(FILE_TOOL_READ_CAP_BYTES)) return { ...id, hash: `over-cap:${st.size}:${st.ctimeNs}` };
+      const bytes = readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
+      return { ...id, hash: createHash('sha256').update(bytes).digest('hex') };
     });
   }
 
@@ -221,10 +299,12 @@ export class ChangesetManager {
    *
    * False when isolation is on and its directory cannot be reached: nothing could be saved,
    * and the caller does not write. A write that went ahead would be in neither the review
-   * nor the rollback, and nothing would say it is missing. True otherwise, also for a path
-   * this review does not track.
+   * nor the rollback, and nothing would say it is missing. False also for a file over
+   * {@link FILE_TOOL_READ_CAP_BYTES}, which is not read whole and so cannot be saved; then
+   * {@link refusedTooLarge} is true. True otherwise, also for a path this review does not track.
    */
   backupBeforeWrite(filePath: string): boolean {
+    this.refusedTooLarge = false;
     // Outside the workspace: not tracked. The write tool refuses such a path; if it is
     // allowed elsewhere (`/tmp`), it is not this review's to show or roll back.
     const loc = this._locate(filePath);
@@ -248,8 +328,18 @@ export class ChangesetManager {
       // The file exists, so it is `modified` whatever fails below. Treating it as `added`
       // would make "Rollback all" delete a file the user had before the run.
       status = 'modified';
+      const read = { tooLarge: false };
       try {
-        const bytes = this._readTracked(abs);
+        // Read only up to the file tools' cap: a file of any size must not be read whole
+        // because a write names it.
+        const bytes = this._withTracked(abs, (fd) => {
+          try {
+            return readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
+          } catch (err) {
+            read.tooLarge = isReadLimit(err);
+            throw err;
+          }
+        });
         if (bytes === null) throw new Error('unreadable');
         originalContent = bytes.toString('utf-8');
         // Held before the copy: a failed copy still leaves the bytes rollback restores.
@@ -260,6 +350,13 @@ export class ChangesetManager {
       } catch {
         // Unreadable: rollback cannot restore it and leaves it alone (no original content).
         // Copy failed: rollback restores the held bytes; the diff is unavailable.
+      }
+      if (read.tooLarge) {
+        // Too large to save: the write is refused, as for an unreachable workspace. Going ahead
+        // would change a file the rollback cannot restore. Nothing of it is kept.
+        this.anchored.delete(abs);
+        this.refusedTooLarge = true;
+        return false;
       }
     }
 
@@ -298,19 +395,33 @@ export class ChangesetManager {
    *
    * "Same" is decided on the bytes read before the run, never on decoded text: a file with
    * bytes that are not valid UTF-8 decodes to the same string after a write that changed
-   * them, and that write must still be reviewed.
+   * them, and that write must still be reviewed. A file over the cap is never "same": its
+   * bytes were not read, so it is reported, with its size instead of its content.
    */
-  private _changed(): Array<[string, ChangesetEntry, string, Buffer]> {
-    const changed: Array<[string, ChangesetEntry, string, Buffer]> = [];
+  private _changed(): Array<[string, ChangesetEntry, Buffer | OverCap]> {
+    const changed: Array<[string, ChangesetEntry, Buffer | OverCap]> = [];
     for (const [abs, entry] of this.entries) {
       // Deleted during the run, unreadable, or no longer inside the workspace — not reported
-      const currentBytes = this._readTracked(abs);
-      if (currentBytes === null) continue;
-      if (entry.status === 'modified' && this.originalBytes.get(abs)?.equals(currentBytes)) continue;
-      const currentContent = currentBytes.toString('utf-8');
-      changed.push([abs, entry, currentContent, currentBytes]);
+      const current = this._readTracked(abs);
+      if (current === null) continue;
+      if (entry.status === 'modified' && Buffer.isBuffer(current) && this.originalBytes.get(abs)?.equals(current)) continue;
+      changed.push([abs, entry, current]);
     }
     return changed;
+  }
+
+  /** Whether a rollback has something to put back for a tracked file: the bytes read before the
+   *  run, or a file the run added. False for a file the backup could not read. */
+  hasOriginal(abs: string): boolean {
+    const entry = this.entries.get(abs);
+    return entry !== undefined && (entry.status === 'added' || entry.originalContent !== null);
+  }
+
+  /** Every tracked file by the name the review shows it under, changed now or not. A file replaced
+   *  by a link since the review is no longer among {@link getChanges}, but an answer to that review
+   *  still names it, and a rollback that leaves it has to name it back. */
+  reviewNames(): Map<string, string> {
+    return new Map([...this.entries.keys()].map((abs) => [relative(this.realCwd, abs), abs]));
   }
 
   /**
@@ -319,11 +430,18 @@ export class ChangesetManager {
   getChanges(): ChangesetDiff[] {
     const diffs: ChangesetDiff[] = [];
 
-    for (const [abs, entry, currentContent, currentBytes] of this._changed()) {
+    for (const [abs, entry, current] of this._changed()) {
       const rel = relative(this.realCwd, abs);
 
       let diffText: string;
-      if (entry.status === 'added') {
+      // False when the review shows a note instead of a diff: no line count says anything then.
+      let compared = Buffer.isBuffer(current);
+      if (!Buffer.isBuffer(current)) {
+        // Over the cap: shown as changed, with both sizes, and its content not compared.
+        const before = entry.status === 'added' ? null : this.originalBytes.get(abs)?.length;
+        diffText = `--- ${entry.status === 'added' ? '/dev/null' : `a/${rel}`}\n+++ b/${rel}\n${notComparedNote(before, current.overCap)}`;
+      } else if (entry.status === 'added') {
+        const currentContent = current.toString('utf-8');
         // New file: show all lines as additions
         const lines = currentContent.split('\n');
         const header = `--- /dev/null\n+++ b/${rel}\n@@ -0,0 +1,${lines.length} @@\n`;
@@ -333,26 +451,41 @@ export class ChangesetManager {
         // to a file of our own. `diff` given the tracked path would open it by name again.
         const backupPath = this._backupPathOf(abs);
         const currentPath = backupPath === null ? null : `${backupPath}.current`;
+        let cut = false;
         try {
           if (backupPath === null || currentPath === null || !existsSync(backupPath)) throw new Error('no backup copy');
           // The bytes, as the backup holds bytes: decoded text would turn every line that is
           // not UTF-8 into a change.
-          writeFileSync(currentPath, currentBytes, { mode: 0o600 });
+          writeFileSync(currentPath, current, { mode: 0o600 });
           diffText = execFileSync('diff', ['-u', '--label', `a/${rel}`, '--label', `b/${rel}`, backupPath, currentPath], {
             encoding: 'utf-8',
-            timeout: 5000,
+            timeout: DIFF_TIMEOUT_MS,
+            maxBuffer: DIFF_MAX_BYTES,
           });
         } catch (err: unknown) {
-          // diff returns exit code 1 when files differ — that's normal
-          if (err && typeof err === 'object' && 'stdout' in err) {
-            diffText = String((err as { stdout: unknown }).stdout);
+          const e = (err && typeof err === 'object' ? err : {}) as { stdout?: unknown; status?: unknown; code?: unknown };
+          const out = typeof e.stdout === 'string' ? e.stdout : '';
+          if (e.status === 1 && e.code === undefined) {
+            // diff exits 1 when the files differ: its output is the whole diff.
+            diffText = out !== '' ? out : `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
+          } else if ((e.code === 'ENOBUFS' || e.code === 'ETIMEDOUT') && out.includes('\n')) {
+            // Stopped part-way, by DIFF_MAX_BYTES or the timeout: what it printed is only the start
+            // of the diff, and must not read as the whole. Its last line may be cut mid-line, and
+            // would show as a change of its own, so it is dropped.
+            diffText = `${out.slice(0, out.lastIndexOf('\n') + 1)}${DIFF_CUT_NOTE}`;
+            cut = true;
           } else {
-            // Fallback: basic header
+            // Fallback: basic header, for a diff that printed nothing, failed to start, or stopped
+            // for any other reason (a signal, exit 2): its output is not known to be the start.
             diffText = `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
           }
         } finally {
           if (currentPath !== null) rmSync(currentPath, { force: true });
         }
+        // A diff without a hunk shows no changed line: binary files ("Binary files … differ"), or a
+        // diff that failed or printed nothing. Its +0 -0 would read as unchanged. A cut diff's
+        // counts are those of its start only.
+        compared = /^@@ /m.test(diffText) && !cut;
       }
 
       diffs.push({
@@ -360,6 +493,7 @@ export class ChangesetManager {
         absolutePath: abs,
         status: entry.status,
         diff: diffText,
+        compared,
         originalContent: entry.originalContent,
       });
     }
@@ -368,25 +502,31 @@ export class ChangesetManager {
   }
 
   /**
-   * Restore ALL files to their pre-run state.
+   * Restore ALL files to their pre-run state. Returns the files it left as they are: the
+   * caller names them, so a rollback that skipped one does not read as done.
    */
-  rollbackAll(): void {
+  rollbackAll(): string[] {
+    const notRestored: string[] = [];
     for (const [abs, entry] of this.entries) {
-      this._rollbackOne(abs, entry);
+      if (!this._rollbackOne(abs, entry)) notRestored.push(abs);
     }
+    return notRestored;
   }
 
   /**
-   * Restore specific files (by absolute path) to pre-run state.
+   * Restore specific files (by absolute path) to pre-run state. Returns those it left as they
+   * are, as {@link rollbackAll} does.
    */
-  rollbackFiles(files: string[]): void {
+  rollbackFiles(files: string[]): string[] {
+    const notRestored: string[] = [];
     for (const file of files) {
       const abs = resolve(file);
       const entry = this.entries.get(abs);
       if (entry) {
-        this._rollbackOne(abs, entry);
+        if (!this._rollbackOne(abs, entry)) notRestored.push(abs);
       }
     }
+    return notRestored;
   }
 
   /**
@@ -447,7 +587,8 @@ export class ChangesetManager {
   private _isUnchanged(abs: string): boolean {
     const before = this.originalBytes.get(abs);
     if (before === undefined) return false;
-    return this._readTracked(abs)?.equals(before) ?? false;
+    const now = this._readTracked(abs);
+    return Buffer.isBuffer(now) && now.equals(before);
   }
 
   /**
@@ -480,17 +621,18 @@ export class ChangesetManager {
     return this._changed().length;
   }
 
-  private _rollbackOne(abs: string, entry: ChangesetEntry): void {
-    if (this.anchored.has(abs)) {
-      this._rollbackAnchored(abs, entry);
-      return;
-    }
+  /** Puts one file back as it was before the run. True when it now is: the original written
+   *  back, or a file the run added gone. False when the file was left as it is: replaced, linked
+   *  or moved out of reach since, not a regular file, or the write failed. */
+  private _rollbackOne(abs: string, entry: ChangesetEntry): boolean {
+    if (this.anchored.has(abs)) return this._rollbackAnchored(abs, entry);
     // Checked again here: a directory on the way may have become a symlink out of the
     // workspace since the backup. Such a file is left alone.
-    if (this._confine(abs) !== abs) return;
+    if (this._confine(abs) !== abs) return false;
     if (entry.status === 'added') {
-      // Another file under the name since the run's last write is left alone.
-      if (!this._isRunsOwn(abs)) return;
+      // Another file under the name since the run's last write is left alone. One that is gone
+      // is as it was before the run.
+      if (!this._isRunsOwn(abs)) return isMissing(abs);
       // New file — delete it (unlink removes a symlink itself, never its target)
       try {
         unlinkSync(abs);
@@ -504,38 +646,42 @@ export class ChangesetManager {
             break; // Dir not empty
           }
         }
-      } catch {
-        // File already gone
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ENOENT';
       }
-    } else {
-      // Modified file — restore the pre-run bytes; the decoded text loses any that are not UTF-8
-      if (entry.originalContent !== null) {
-        let fd: number | undefined;
-        try {
-          // O_NOFOLLOW: a symlink planted at the file since the backup is not written through.
-          // O_NONBLOCK: a FIFO at the file does not hold the process. ftruncate refuses anything
-          // but a regular file (EINVAL), so a FIFO or device is never written.
-          fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o666);
-          ftruncateSync(fd, 0);
-          const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
-          let off = 0;
-          while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);
-        } catch {
-          // Best-effort
-        } finally {
-          if (fd !== undefined) closeSync(fd);
-        }
-      }
+      return true;
     }
+    // Modified file — restore the pre-run bytes; the decoded text loses any that are not UTF-8.
+    // Without them (the original could not be read) there is nothing to put back.
+    if (entry.originalContent === null) return false;
+    let fd: number | undefined;
+    try {
+      // O_NOFOLLOW: a symlink planted at the file since the backup is not written through.
+      // O_NONBLOCK: a FIFO at the file does not hold the process. ftruncate refuses anything
+      // but a regular file (EINVAL), so a FIFO or device is never written.
+      fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o666);
+      ftruncateSync(fd, 0);
+      const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
+      let off = 0;
+      while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);
+    } catch {
+      // Not restored: a symlink or something other than a regular file at the name, or the write
+      // failed (a failed write after the truncate leaves the file shorter). The caller names it.
+      return false;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    return true;
   }
 
   /** {@link _rollbackOne} through the workspace's open directory: nothing on the way is followed. */
-  private _rollbackAnchored(abs: string, entry: ChangesetEntry): void {
+  private _rollbackAnchored(abs: string, entry: ChangesetEntry): boolean {
     const at = this._at(abs);
-    if (at === null) return;
+    if (at === null) return false;
     if (entry.status === 'added') {
-      // Another file under the name since the run's last write is left alone.
-      if (!this._isRunsOwn(abs)) return;
+      // Another file under the name since the run's last write is left alone. One that is gone
+      // is as it was before the run.
+      if (!this._isRunsOwn(abs)) return this._presentAnchored(abs) === false;
       try {
         // New file — delete it (unlinkat removes a link itself, never its target)
         unlinkAt(at.anchor, at.rel);
@@ -548,28 +694,33 @@ export class ChangesetManager {
             break; // Dir not empty
           }
         }
-      } catch {
-        // File already gone
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ENOENT';
       }
-      return;
+      return true;
     }
-    if (entry.originalContent === null) return;
+    if (entry.originalContent === null) return false;
     let fd: number | undefined;
     try {
       // In place, as before: the file keeps its inode, owner and mode; one that is gone is made
       // again with the mode a write by name gives it. Its directories are not made again.
-      ({ fd } = openWrite(at.anchor, at.rel, { createMode: 0o666 & ~processUmask() }));
+      const sidecar = sidecarWriteModes();
+      ({ fd } = openWrite(at.anchor, at.rel, sidecar !== null
+        ? { createMode: sidecar.fileMode, group: sidecar.group }
+        : { createMode: 0o666 & ~processUmask() }));
       // A file with a second name may be a file outside the workspace: not written.
-      if (fstatSync(fd).nlink > 1) return;
+      if (fstatSync(fd).nlink > 1) return false;
       const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
       ftruncateSync(fd, 0);
       let off = 0;
       while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off, off);
     } catch {
-      // Best-effort
+      // Not restored, as in {@link _rollbackOne}.
+      return false;
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
+    return true;
   }
 }
 

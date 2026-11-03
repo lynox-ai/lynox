@@ -29,7 +29,7 @@ let ledger: BulkLedger;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'lynox-bulk-list-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
 });
 afterEach(() => {
   engineDb.close();

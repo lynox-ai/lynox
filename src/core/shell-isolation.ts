@@ -21,6 +21,9 @@ import { anchorFromFd, mountIdOf, mountIdOfDir, openFds, type WorkspaceAnchor } 
 import { otherNamesFor, parseMountinfo } from './sidecar-mounts.js';
 
 
+/** Where the host's `fs.protected_hardlinks` is read (check (hardlinks)). */
+export const PROTECTED_HARDLINKS_PATH = '/proc/sys/fs/protected_hardlinks';
+
 /** The fd the entrypoint's root stage hands over: the workspace tree, opened under a `0700` parent. */
 export const SIDECAR_ROOT_FD = 3;
 
@@ -100,6 +103,8 @@ export interface ShellIsolationInputs {
   readonly openFds: () => number[];
   /** (i) Try to create a fresh child under `dir`. */
   readonly probeChild: (dir: string) => ProbeOutcome;
+  /** (hardlinks) `/proc/sys/fs/protected_hardlinks`, the host's setting (not namespaced). */
+  readonly protectedHardlinks: () => string;
   /** (c), (i) The data directory (`getLynoxDir()`). */
   readonly dataDir: string;
   /** Where the witness line goes. */
@@ -165,6 +170,7 @@ export function processInputs(): ShellIsolationInputs {
     env: (name) => process.env[name],
     openFds,
     probeChild,
+    protectedHardlinks: () => readFileSync(PROTECTED_HARDLINKS_PATH, 'utf8'),
     dataDir: getLynoxDir(),
     log: (line) => { process.stderr.write(`${line}\n`); },
   };
@@ -239,8 +245,8 @@ function checkIdentity(inputs: ShellIsolationInputs): void {
  * - Socket unset and no directory on fd 3: `local` (self-host, unchanged), no check runs.
  * - Socket set but empty or blank: a broken config, never "run here" — exits.
  * - fd 3 a directory but the socket unset: exits. That is a misconfigured template, not self-host.
- * - Socket set: the D2 checks in the PRD's order, (h) (a) (b) (c) (d) (e) (g) (i). Check (i) for the
- *   context label runs in `resolveContext`, which knows the context.
+ * - Socket set: the D2 checks in the PRD's order, (h) (a) (b) (c) (d) (e) (g), then (hardlinks),
+ *   then (i). Check (i) for the context label runs in `resolveContext`, which knows the context.
  *
  * On success it logs the anchor's identity once (the witness line), for the probe that compares
  * it with the sidecar's view of the tree.
@@ -313,6 +319,17 @@ export function buildShellIsolation(inputs: ShellIsolationInputs = processInputs
     if (mount === rootMount) {
       throw new ShellIsolationError('g', `fd ${fd} is open on the workspace tree besides fd ${SIDECAR_ROOT_FD}.`);
     }
+  }
+
+  // (hardlinks) The host refuses a hard link to a file the linking uid could not read and write
+  // itself. The file tools' "more than one name" check is check-then-use: a link unlinked between
+  // the open and the fstat passes it. This setting is the guarantee, the nlink check a heuristic.
+  // A link cannot leave its mount, so what it protects is a file of the engine's on the workspace
+  // volume (another context's, mode 0600) that a pool uid could otherwise link where it can reach.
+  // One setting per kernel, so the engine's read is the one the sidecar's link() is subject to.
+  const hardlinks = read('hardlinks', PROTECTED_HARDLINKS_PATH, inputs.protectedHardlinks).trim();
+  if (hardlinks !== '1') {
+    throw new ShellIsolationError('hardlinks', `fs.protected_hardlinks is ${JSON.stringify(hardlinks)} on this host; it must be 1, or the sidecar could hard-link a file of the engine's on the workspace volume to where the engine reads or writes it for the shell. Set it on the host (sysctl -w fs.protected_hardlinks=1, kept in /etc/sysctl.d); it cannot be set from inside the container.`);
   }
 
   // (i) Nothing to write by name: the root label and <data>/workspace. The context label follows

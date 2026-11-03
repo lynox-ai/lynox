@@ -1,6 +1,6 @@
 // === Capability Contract (Slice B — the unattended-write grant) ===
 
-/** HTTP methods a contract can pin for `http_request`. */
+/** HTTP methods a contract can pin for `http_request`; which of them only read is answered by `isReadMethod` (core/outbound-write.ts), never by this list. */
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
 
 /**

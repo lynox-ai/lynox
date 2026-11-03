@@ -6,8 +6,13 @@
 <script lang="ts">
 	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { onOff } from './settings-readonly/values.js';
 
 	interface Config {
 		update_check?: boolean;
@@ -20,6 +25,8 @@
 	let saving = $state(false);
 
 	let vaultConfigured = $state(false);
+	// The owner-only keyless field (see StatusBar); absent for a mandate and when nothing was found.
+	let vaultKeyState = $state<'missing_over_encrypted_data' | 'unknown' | null>(null);
 	let vaultRevealed = $state(false);
 	let vaultKey = $state<string | null>(null);
 
@@ -28,19 +35,22 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const [configRes, vaultRes] = await Promise.all([
 				fetch(`${getApiBase()}/config`),
 				fetch(`${getApiBase()}/vault/key?reveal=false`),
 			]);
 			if (!configRes.ok) throw new Error(`HTTP ${configRes.status}`);
 			const body = (await configRes.json()) as Config;
+			noteViewer(body);
 			config = {
 				update_check: body.update_check,
 			};
 			managed = cpSuppliesLLMKey(body.managed);
 			if (vaultRes.ok) {
-				const vaultBody = (await vaultRes.json()) as { configured: boolean };
+				const vaultBody = (await vaultRes.json()) as { configured: boolean; vault_key?: unknown };
 				vaultConfigured = vaultBody.configured;
+				vaultKeyState = vaultBody.vault_key === 'missing_over_encrypted_data' || vaultBody.vault_key === 'unknown' ? vaultBody.vault_key : null;
 			}
 			loaded = true;
 		} catch (e) {
@@ -80,10 +90,10 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ update_check: config.update_check }),
 			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			await throwIfRefused(res);
 			addToast(t('system.saved'), 'success', 3000);
 		} catch (e) {
-			addToast(e instanceof Error ? e.message : t('system.save_failed'), 'error', 5000);
+			addToast(saveFailedText(e, t('system.save_failed')), 'error', 5000);
 		} finally {
 			saving = false;
 		}
@@ -98,7 +108,18 @@
 		<p class="text-sm text-text-muted">{t('system.subtitle')}</p>
 	</header>
 
-	{#if managed}
+	{#if isMandateSession()}
+		<!-- A mandate's session: the values as text (ux U-104); PUT /api/config is the owner's. The vault
+		     key and the access token are secrets and are left out, with their reveal buttons. -->
+		<OwnerOnlyNotice />
+		{#if managed}
+			<section class="border border-border rounded p-4 text-sm text-text-muted">
+				<p>{t('system.managed_minimal')}</p>
+			</section>
+		{:else}
+			<ReadOnlyRows rows={[{ label: t('system.update_label'), value: onOff(config.update_check) }]} />
+		{/if}
+	{:else if managed}
 		<section class="border border-border rounded p-4 text-sm text-text-muted">
 			<p>{t('system.managed_minimal')}</p>
 		</section>
@@ -109,7 +130,11 @@
 		<section class="border-t border-border pt-6 space-y-2">
 			<h2 class="text-lg font-medium">{t('system.vault_heading')}</h2>
 			<p class="text-xs text-text-muted">{t('system.vault_subtitle')}</p>
-			{#if !vaultConfigured}
+			{#if vaultKeyState !== null}
+				<!-- "generates one on first save" is not true here: a key existed, and the data it wrote is still there. -->
+				<p role="alert" class="text-sm text-warning">{t(vaultKeyState === 'unknown' ? 'status.vault_key_unknown' : 'status.vault_key_missing')}</p>
+				<p class="text-sm text-text-muted">{t('system.vault_key_missing_hint')}</p>
+			{:else if !vaultConfigured}
 				<p class="text-sm italic text-text-muted">{t('system.vault_not_configured')}</p>
 			{:else if vaultRevealed && vaultKey}
 				<pre class="font-mono text-xs px-2 py-1 bg-bg-muted rounded select-all overflow-x-auto">{vaultKey}</pre>

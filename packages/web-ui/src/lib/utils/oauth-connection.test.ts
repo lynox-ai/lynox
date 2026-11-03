@@ -20,9 +20,20 @@ describe('connectionLine', () => {
 		expect(connectionLine({ connected_by: 'owner', account: { label: '' } })?.account).toBeNull();
 	});
 
-	it('reads the owner, and a grant from before it was recorded, as you', () => {
-		expect(connectionLine({ connected_by: 'owner' })?.by).toEqual({ kind: 'you' });
-		expect(connectionLine({ account: { label: 'a@example.invalid' } })?.by).toEqual({ kind: 'you' });
+	it('reads a connection as yours only when the engine says this reader made it', () => {
+		expect(connectionLine({ connected_by: 'owner', connected_by_reader: true })?.by).toEqual({ kind: 'you' });
+		expect(connectionLine({ account: { label: 'a@example.invalid' }, connected_by_reader: true })?.by).toEqual({ kind: 'you' });
+		// A helper's own connection is theirs too, not their address.
+		expect(connectionLine({ connected_by: 'mandate:helper@example.invalid', connected_by_reader: true })?.by).toEqual({ kind: 'you' });
+	});
+
+	it('reads the owner\'s connection without an account as the owner\'s for anyone else', () => {
+		// Nothing was withheld, because there was no account: the tag alone used to read as "you".
+		expect(connectionLine({ connected_by: 'owner', connected_by_reader: false })?.by).toEqual({ kind: 'owner' });
+		expect(connectionLine({ connected_by: 'owner' })?.by).toEqual({ kind: 'owner' });
+		// Only the engine's `true` is the answer; anything else on the wire is not.
+		expect(connectionLine({ connected_by: 'owner', connected_by_reader: 'true' })?.by).toEqual({ kind: 'owner' });
+		expect(connectionLine({ connected_by: 'mandate:helper@example.invalid', connected_by_reader: 1 })?.by).toEqual({ kind: 'helper', address: 'helper@example.invalid' });
 	});
 
 	it('says an account the engine left out was withheld, not unknown', () => {
@@ -30,7 +41,7 @@ describe('connectionLine', () => {
 			.toEqual({ by: { kind: 'helper', address: 'helper@example.invalid' }, account: null, withheld: true });
 		expect(connectionLine({ connected_by: 'mandate:helper@example.invalid' })?.withheld).toBe(false);
 		// Only the engine's `true` is the marker; anything else on the wire is not.
-		expect(connectionLine({ connected_by: 'owner', account_withheld: false, account: { label: 'a@example.invalid' } }))
+		expect(connectionLine({ connected_by: 'owner', account_withheld: false, account: { label: 'a@example.invalid' }, connected_by_reader: true }))
 			.toEqual({ by: { kind: 'you' }, account: 'a@example.invalid', withheld: false });
 	});
 

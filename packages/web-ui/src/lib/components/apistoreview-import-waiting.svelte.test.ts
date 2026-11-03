@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -22,11 +23,14 @@ vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 
+/** `body` for the profile list; `/config` says the session is the owner's, whose page lists the files. */
 function serve(body: unknown): void {
-	vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+	vi.stubGlobal('fetch', vi.fn(async (url: string) =>
+		new Response(JSON.stringify(String(url).split('?')[0]!.endsWith('/config') ? { viewer: 'owner' } : body), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 }
 
 beforeEach(() => {
+	resetSettingsViewer();
 	target = document.createElement('div');
 	document.body.appendChild(target);
 });

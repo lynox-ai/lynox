@@ -58,7 +58,9 @@ export function vaultSlotForProvider(provider: LLMProvider | undefined | null): 
  * credential. A key the user stored in the vault is never read for an LLM call and
  * never copied into the environment, and a missing pool key leaves the call without
  * one: fail-closed. Otherwise the user's own key would run in the pool's place,
- * silently, and be counted as pool usage.
+ * silently, and be counted as pool usage. The one exception is a key the user set
+ * for the inbox classifier on purpose (`LYNOX_INBOX_MISTRAL_API_KEY`): it runs as
+ * the user's and is not debited (`resolveInboxMistralKey`).
  *
  * Managed BYOK (`hosted`) and self-host are untouched: there the user supplies the
  * key, so the vault is where it lives.

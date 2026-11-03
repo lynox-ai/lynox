@@ -11,6 +11,7 @@ import type { IAgent, ProcessRecord, LynoxUserConfig, PlannedPipeline } from '..
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
 import { WorkflowStore } from '../../core/workflow-store.js';
 import { runInCallSlot } from '../../core/call-connection.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 // === Mock process-capture (the Haiku extraction step) ===
 
@@ -70,6 +71,8 @@ function makeAgent(
 ): IAgent {
   const toolContext = createToolContext(userConfig);
   toolContext.runHistory = runHistory as never;
+  // A mandate's writes leave rows in the actor trail and are refused without one.
+  toolContext.auditLog = testAuditLog().log;
   return {
     name: 'test',
     model: 'test-model',

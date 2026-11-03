@@ -6,8 +6,9 @@
  * owner's route only, never by a tool, so the trail still never reaches a model's context.
  *
  * Three kinds of entry:
- * - a run: a plan's run (its `plan:run` rows and every row keyed to it by `plan_run`), or a bulk
- *   run (its windows, the `bulk:apply` / `bulk:undo` row pairs of one `run_id`);
+ * - a run: a plan's run (its `plan:run` rows and every row keyed to it by `plan_run`), a stored
+ *   workflow someone the owner let in ran from a chat (its `workflow:run` rows, keyed the same
+ *   way), or a bulk run (its windows, the `bulk:apply` / `bulk:undo` row pairs of one `run_id`);
  * - a step: an `attempt` row and its outcome row, joined by `correlation_id`;
  * - an event: a row that stands alone (a read, an act that has no outcome row by design).
  *
@@ -90,6 +91,43 @@ export interface TrailEvent {
   readonly phase: string;
   readonly at: string;
   readonly person: TrailPerson;
+  /** A read on a route the web UI polls by itself (`INTERFACE_POLLS`); the view groups these. */
+  readonly auto?: true | undefined;
+}
+
+/**
+ * The routes the web UI polls by itself, without the person doing anything, by the action
+ * `_recordedMandateRead` writes for them (`GET <route template>`). A helper's open tab leaves about
+ * 23 reads a minute on them (row 1034), and the owner's view groups them so the person's own steps stay
+ * findable. The trail itself keeps every row (D15).
+ *
+ * Decided here, from the route the engine dispatched, never from a mark the client sends. Listed
+ * are only routes without a path parameter, whose answer holds no session's messages (the task list
+ * does carry its tasks' titles and descriptions): a route that takes an id (`pending-prompt`) is
+ * not listed. Grouping is by route, not by query (the row does not record these queries, and D15
+ * stays as it is), so where the person opens the same route on purpose, that read is grouped too
+ * (the Tasks view, the cost history, chat's own check for a running run); opening the group shows
+ * it. A poll missing here is shown ungrouped, as before. `audit-trail-interface-polls.test.ts`
+ * holds this list against the pollers in the web UI.
+ */
+export const INTERFACE_POLLS: ReadonlySet<string> = new Set([
+  // threads.svelte.ts every 4 s (the nav's live-run marks), StatusBar.svelte every 30 s.
+  'GET /api/runs/active',
+  // StatusBar.svelte every 30 s.
+  'GET /api/providers/status',
+  // StatusBar.svelte every 30 s (`days=1`). Also the history views (`days=30`, `days=14`):
+  // „faltet auch das selbst geöffnete Fenster; aufklappbar sichtbar; kein Session-Inhalt“
+  // (sec-infra, 2026-10-28).
+  'GET /api/history/cost/daily',
+  // StatusBar.svelte every 30 s (`status=in_progress`). Also the Tasks view:
+  // „faltet auch das selbst geöffnete Fenster; aufklappbar sichtbar; kein Session-Inhalt“
+  // (sec-infra, 2026-10-28).
+  'GET /api/tasks',
+]);
+
+/** Whether a row is a read on a route the web UI polls by itself. Writes and steps never are. */
+export function isInterfacePoll(row: Pick<TrailRow, 'phase' | 'action'>): boolean {
+  return row.phase === 'read' && INTERFACE_POLLS.has(row.action);
 }
 
 /** Targets a run wrote and failed: summed over its windows, a lower bound when one did not say. */
@@ -102,6 +140,8 @@ export interface TrailTargets {
 
 export interface TrailPlanRun {
   readonly kind: 'plan';
+  /** A plan's run, or a workflow run started in a chat (660b): that one has no trigger. */
+  readonly run: 'plan' | 'workflow';
   readonly id: string;
   /** The run's key; null for a run whose rows carry none, which then has no steps under it. */
   readonly key: string | null;
@@ -124,6 +164,8 @@ export interface TrailBulkRun {
   readonly runId: string;
   readonly action: string;
   readonly host: string | null;
+  /** The store a run inside the instance writes (660b), null for a run outside it or a store the view does not know. */
+  readonly store: 'files' | 'data_store' | null;
   readonly at: string;
   readonly person: TrailPerson;
   readonly status: TrailStatus | null;
@@ -170,6 +212,8 @@ function approvalOfFiling(r: TrailRow): string | undefined {
 }
 
 const BULK_ACTIONS: ReadonlySet<string> = new Set(['bulk:apply', 'bulk:undo']);
+/** The rows of a run's own start and end: a plan's, or a workflow run's from a chat (660b). */
+const RUN_ACTIONS: ReadonlySet<string> = new Set(['plan:run', 'workflow:run']);
 
 /**
  * The pairs of a target written by `namedTarget`: `name=value` separated by spaces, each value
@@ -198,6 +242,11 @@ function planEndStatus(outcome: string | undefined): TrailStatus {
     // `interrupted`, `unrecorded` (the end is known to have come, not how) and anything else.
     default: return 'interrupted';
   }
+}
+
+/** The store a bulk run inside the instance names (`store=`), or null for any other value. */
+function storeOf(value: string | undefined): 'files' | 'data_store' | null {
+  return value === 'files' || value === 'data_store' ? value : null;
 }
 
 /** A bulk window's end, from its `outcome=`. `pending` is decided by the caller. */
@@ -312,7 +361,10 @@ function stepsOf(rows: readonly TrailRow[], src: TrailSources, sends: ReadonlyMa
         ...(judged.decidedBy !== undefined ? { decidedBy: judged.decidedBy } : {}),
       });
     } else {
-      out.push({ kind: 'event', id: `event:${String(r.id)}`, action: r.action, target: r.target, phase: r.phase, at: r.ts, person: personOf(r) });
+      out.push({
+        kind: 'event', id: `event:${String(r.id)}`, action: r.action, target: r.target, phase: r.phase, at: r.ts, person: personOf(r),
+        ...(isInterfacePoll(r) ? { auto: true as const } : {}),
+      });
     }
   }
   return out;
@@ -352,30 +404,31 @@ export function buildTrail(rows: readonly TrailRow[], src: TrailSources, opts: {
   const planEntry = (key: string | null, own: readonly TrailRow[], inner: readonly TrailRow[]): void => {
     const start = own.find((r) => r.phase === 'attempt') ?? own[0]!;
     const end = own.find((r) => r.phase !== 'attempt');
+    const run = start.action === 'workflow:run' ? 'workflow' : 'plan';
     const head = targetPairs(start.target);
     const trigger = head.get('trigger') ?? null;
     const started = head.get('started');
     let status: TrailStatus | null;
     if (end !== undefined) status = planEndStatus(targetPairs(end.target).get('outcome'));
     // No end row: running if this very run is its trigger's run in flight. A run without a key
-    // cannot be asked for, so no source says.
-    else if (key === null) status = null;
+    // cannot be asked for, so no source says; nor for a workflow run, which has no trigger.
+    else if (key === null || run === 'workflow') status = null;
     else status = trigger !== null && src.planRunRunning(trigger, key) ? 'running' : 'interrupted';
     // A run without a key is given no rows of its own (`inner` is empty), so it has no steps.
     const steps = stepsOf(inner, src, sends, claimed);
     entries.push({
       order: start.id,
       entry: {
-        kind: 'plan', id: key === null ? `plan:c:${start.correlation_id}` : `plan:${key}`, key, trigger, startedBy: started === 'hand' || started === 'schedule' ? started : null,
+        kind: 'plan', run, id: key === null ? `plan:c:${start.correlation_id}` : `plan:${key}`, key, trigger, startedBy: started === 'hand' || started === 'schedule' ? started : null,
         at: start.ts, person: personOf(start), status, writeSteps: key === null || opts.complete === false ? null : steps.filter((e) => e.kind === 'step').length, entries: steps,
       },
     });
   };
   for (const [key, group] of byKey) {
-    const own = group.filter((r) => r.action === 'plan:run');
+    const own = group.filter((r) => RUN_ACTIONS.has(r.action));
     // Rows keyed to a run whose own rows are not in this page: shown as they are, not as a run.
     if (own.length === 0) { loose.push(...group); continue; }
-    planEntry(key, own, group.filter((r) => r.action !== 'plan:run'));
+    planEntry(key, own, group.filter((r) => !RUN_ACTIONS.has(r.action)));
   }
   for (const own of keylessPlan.values()) planEntry(null, own, []);
 
@@ -398,6 +451,7 @@ export function buildTrail(rows: readonly TrailRow[], src: TrailSources, opts: {
       order: (windows[0]?.start ?? first).id,
       entry: {
         kind: 'bulk', id: `bulk:${runId}`, runId, action: first.action, host: targetPairs(first.target).get('host') ?? null,
+        store: storeOf(targetPairs(first.target).get('store')),
         at: (windows[0]?.start ?? first).ts, person: personOf(first), status, planned,
         windows: windows.length,
         targets: sumTargets(windows.map((w) => (w.end === undefined ? UNKNOWN_COUNTS : targetPairs(w.end.target)))),
@@ -458,7 +512,7 @@ export function readTrailPage(db: Database.Database, opts: { limit: number; befo
             AND EXISTS (SELECT 1 FROM json_each(?) j WHERE substr(target, -length(' approval=' || j.value)) = ' approval=' || j.value)))
       -- Past the bound, a run's start and end and a bulk run's windows are kept before inner steps,
       -- so what is cut is a step, not the row a status is read from.
-      ORDER BY CASE WHEN action IN ('plan:run', 'bulk:apply', 'bulk:undo') THEN 0 ELSE 1 END, id
+      ORDER BY CASE WHEN action IN ('plan:run', 'workflow:run', 'bulk:apply', 'bulk:undo') THEN 0 ELSE 1 END, id
       LIMIT ?`,
   );
   // Only the mail tools file for approval (mail-send.ts, mail-reply.ts), under these actions, so

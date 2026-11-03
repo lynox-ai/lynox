@@ -31,6 +31,8 @@
  * so a value the model supplies cannot become the stamp.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { AuditLog } from './audit-log.js';
+import type { RequestPrincipal } from './request-principal.js';
 
 export interface CallConnection {
   /** `connections.id` of the resolved profile. */
@@ -109,6 +111,41 @@ export interface CallSlot {
   filing?: boolean | undefined;
   /** Set by {@link noteCallFiled} when this call's filing settled, either way. */
   filed?: CallFiled | undefined;
+  /** Who makes this call, for the rows a write inside the instance leaves (`instance-trail.ts`):
+   *  fixed when the agent builds the slot, from the same sources as the outward trail, so a call
+   *  that settles after the next run began still writes under the principal that started it.
+   *  `'exempt'` for the owner, who leaves no row; `'unnamed'` when the caller names no principal,
+   *  whose writes are refused. Absent outside the agent's dispatch. */
+  instanceTrail?: InstanceTrail | 'exempt' | 'unnamed' | undefined;
+  /** Set once a row for a write inside the instance could not be written. Every later write of
+   *  this call is refused, and the dispatch answers with the refusal text, whatever the handler
+   *  made of the throw. */
+  instanceRefused?: boolean | undefined;
+  /** Set by {@link noteApiCost} when this call sent a request to an API whose profile has a cost. */
+  apiCost?: CallApiCost | undefined;
+}
+
+/**
+ * A request this call sent to an API whose profile has a cost, and what it cost. Counted once the
+ * request went out and an answer came back, whatever its status: whether the provider bills an
+ * error answer is not known here. A request refused before sending is not one.
+ *  - `response`: `usd` is the number the answer gave at the profile's `cost.response_field`;
+ *  - `profile`: `usd` is the profile's own `per_call` rate, an estimate;
+ *  - `none`: the profile's cost model has no per-call amount, so `usd` is null.
+ * Shown to the user only. No budget or cap reads it: the `response` amount is the provider's.
+ */
+export interface CallApiCost {
+  usd: number | null;
+  source: 'response' | 'profile' | 'none';
+}
+
+/** The actor of a call's writes inside the instance, captured with the slot. */
+export interface InstanceTrail {
+  readonly log: AuditLog | null;
+  readonly principal: RequestPrincipal;
+  readonly runId: string | undefined;
+  /** The tool the call dispatches, for the record only. */
+  readonly tool: string;
 }
 
 /**
@@ -159,6 +196,18 @@ const slotStorage = new AsyncLocalStorage<CallSlot>();
  *  it adds no microtask between the caller and `fn`. */
 export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
   return slotStorage.run(slot, fn);
+}
+
+/**
+ * Run `fn` outside any call's slot: `fn`, and everything it awaits, sees no slot at all. For work
+ * that a call starts but does not own — a `memory:store` subscriber, which `diagnostics_channel`
+ * runs synchronously inside the publisher's slot, or a write the call leaves running after its
+ * outcome row. Inheriting the slot would hand that work the call's trail, and let its refusal
+ * poison a call that has already answered. Only this storage is left; every other async context
+ * (run group, plan, worker) stays.
+ */
+export function runOutsideCallSlot<T>(fn: () => T): T {
+  return slotStorage.exit(fn);
 }
 
 /**
@@ -237,6 +286,18 @@ export function callFiledOf(slot: CallSlot): CallFiled | undefined {
   return slot.filed === undefined ? undefined : { ...slot.filed };
 }
 
+/** Record the API request the current call sent and its cost; outside a slot a no-op. First write
+ *  wins: one `http_request` sends one request to its API. */
+export function noteApiCost(cost: CallApiCost): void {
+  const slot = slotStorage.getStore();
+  if (slot && slot.apiCost === undefined) slot.apiCost = { ...cost };
+}
+
+/** What {@link noteApiCost} left on `slot`, as a copy; `undefined` when the call sent none. */
+export function apiCostOf(slot: CallSlot): CallApiCost | undefined {
+  return slot.apiCost === undefined ? undefined : { ...slot.apiCost };
+}
+
 /** The mark {@link noteGrantLift} left on `slot`, as a copy; `undefined` when none did. */
 export function grantLiftOf(slot: CallSlot): GrantLift | undefined {
   return slot.grantLift === undefined ? undefined : { ...slot.grantLift };
@@ -258,4 +319,27 @@ export function noteNetworkContact(): void {
 export function noteCallConnection(connection: CallConnection): void {
   const slot = slotStorage.getStore();
   if (slot && slot.connection === undefined) slot.connection = { ...connection };
+}
+
+/** The current call's instance trail as the agent fixed it; `undefined` outside a slot or for a
+ *  slot built without one. */
+export function currentInstanceTrail(): InstanceTrail | 'exempt' | 'unnamed' | undefined {
+  return slotStorage.getStore()?.instanceTrail;
+}
+
+/** Whether there is a slot at all: a write outside one takes its actor from the writer. */
+export function inCallSlot(): boolean {
+  return slotStorage.getStore() !== undefined;
+}
+
+/** Poison the current call: a row for a write inside the instance could not be written. Outside
+ *  a slot a no-op (the refusal is still thrown to the writer). */
+export function noteInstanceRefused(): void {
+  const slot = slotStorage.getStore();
+  if (slot) slot.instanceRefused = true;
+}
+
+/** Whether the current call is poisoned; false outside a slot. */
+export function isInstanceRefused(): boolean {
+  return slotStorage.getStore()?.instanceRefused === true;
 }

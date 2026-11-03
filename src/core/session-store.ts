@@ -4,6 +4,8 @@ import type { Engine } from './engine.js';
 import { normalizeTier } from '../types/index.js';
 import type { ThreadRecord } from './thread-store.js';
 import { hydrateApiMessages } from './run-stop.js';
+import { threadIsContained } from './containment.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 const VERBATIM_THRESHOLD = 80;
 const RECENT_COUNT = 40;
@@ -78,7 +80,10 @@ async function generateThreadSummary(
   engine: Engine, threadId: string, messages: BetaMessageParam[],
 ): Promise<void> {
   try {
-    const summarySession = engine.createSession({ model: 'fast' });
+    // A summary without tools, in a session of its own: built for the owner, as it always was,
+    // and named rather than left to the library's default (register 735). Its thread row now
+    // records `created_by = 'owner'` where it recorded nothing; every reader treats the two alike.
+    const summarySession = engine.createSession({ model: 'fast', principal: OWNER_PRINCIPAL });
     const formatted = formatMessagesForSummary(messages.slice(0, -RECENT_COUNT));
     const prompt = `Summarize this conversation concisely in 3-5 paragraphs. Focus on: what was discussed, decisions made, current state of work, and any pending items.\n\n${formatted.slice(0, 30_000)}`;
     // Run as an INTERNAL summary (mirror compact()): a budget/credit guard block is
@@ -158,8 +163,12 @@ export class SessionStore {
           session.setSkipMemoryExtraction(true);
         }
 
-        // Fire-and-forget summary generation if needed
-        if (messages.length > VERBATIM_THRESHOLD && !thread.summary) {
+        // Fire-and-forget summary generation if needed. Not for a private or contained thread: the
+        // summary runs in a session of its own, under a thread id no containment filter knows, on
+        // the fast slot, which may be another provider's. Such a thread resumes from its recent
+        // messages (`buildResumeContext` without a summary).
+        if (messages.length > VERBATIM_THRESHOLD && !thread.summary && !thread.skip_extraction
+          && !threadIsContained(engine.getToolContext().containment, sessionId)) {
           void generateThreadSummary(engine, sessionId, messages);
         }
       } else {

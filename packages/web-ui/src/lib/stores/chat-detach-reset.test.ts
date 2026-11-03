@@ -37,11 +37,14 @@ const THREAD_SCOPED = [
 	'messages', 'sessionId', 'isStreaming', 'streamingActivity',
 	'streamingToolName', 'streamingToolPhase', 'pendingPermission', 'pendingTabsPrompt',
 	'pendingSecretPrompt', 'pendingMailConnect', 'pendingChangeset', 'changesetLoading',
-	'skipExtraction', 'threadContained', 'chatError', 'runInterrupted', 'messageQueue', 'runStartedAt',
+	'skipExtraction', 'threadContained', 'threadContainedUnknown', 'threadReadRefusal', 'chatError', 'runInterrupted', 'messageQueue', 'runStartedAt',
 	'runPromptCount', 'contextBudget', 'compactionOffer', 'retryStatus',
 	// A count of what is waiting in the PREVIOUS conversation is exactly the wrong thing to
 	// leave on screen; `resumeThread` re-fetches it for the new one.
 	'threadPending',
+	// Where a chat opened with "Plan in a new chat" came from, and its input text: set by
+	// `planInNewChat` AFTER its own `newChat()`, so no other chat may inherit them.
+	'containedOrigin', 'containedPrefillText',
 ] as const;
 
 /**

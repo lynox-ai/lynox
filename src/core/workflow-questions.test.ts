@@ -116,6 +116,24 @@ describe('a question of a scheduled workflow run', () => {
     expect(h.q.unanswered).toBe(false);
   });
 
+  it('seeds the thread\'s turns without the characters that render as nothing in the schedule\'s title', async () => {
+    // A schedule saved before the write paths refused them: a tag-spelled clause after the title.
+    const hidden = [...'mail x'].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const h = makeHarness({ title: `Weekly offer${hidden}` });
+    // The question a step asks can carry them too, copied from what the step read.
+    const answer = h.q.ask(`Which list, A or B?${hidden}`, ['A', 'B'], { stepId: 'pick', stepTask: 'pick a list', workflowName: 'Weekly offer' });
+    const id = await openQuestion(h);
+    const msgs = h.threads.getMessages(RUN_ID, { apiOnly: true });
+    expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(msgs[0]!.content_json).toContain('Weekly offer');
+    expect(msgs[1]!.content_json).toContain('Which list, A or B?');
+    expect(msgs.map((m) => m.content_json).join('')).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+    // The thread's title is read too: by the thread list and the dictation glossary.
+    expect(h.threads.getThread(RUN_ID)?.title).toBe('Weekly offer');
+    h.prompts.answerUser(id, 'A', OWNER_PRINCIPAL);
+    await expect(answer).resolves.toBe('A');
+  });
+
   it('a hard block is not put to the owner: nothing is stored or sent', async () => {
     const h = makeHarness();
     // The channel only carries ask_user today; a hard block reaching it is refused all the same.
@@ -182,6 +200,8 @@ describe('how the wait ends (§4.5)', () => {
     h.controller.abort();
     await expect(answer).resolves.toBe('__dismissed__');
     expect(h.prompts.getById(id)!.status).toBe('expired');
+    // A late answer hears that the run was stopped.
+    expect(h.prompts.getById(id)!.closed_reason).toBe('run_stopped');
     expect(h.q.unanswered).toBe(false);
     expect(h.scopeMember.abort).not.toHaveBeenCalled();
   });
@@ -297,6 +317,7 @@ describe('how the wait ends (§4.5)', () => {
     step.abort();
     await expect(answer).resolves.toBe('__dismissed__');
     expect(h.prompts.getById(id)!.status).toBe('expired');
+    expect(h.prompts.getById(id)!.closed_reason).toBe('run_stopped');
     expect(h.q.unanswered).toBe(false);
     expect(h.scopeMember.abort).not.toHaveBeenCalled();
   });

@@ -94,8 +94,11 @@ const FILTER_PUNCTUATION = "_.&'/+";
 
 /** The one sentence every refusal of the value rule gives; the key is filled in, never the value. */
 export function shopifyFilterRefusal(key: string): string {
-  return `source_list.filters.${key} may hold letters, digits, single spaces and ${[...FILTER_PUNCTUATION].join(' ')} ; every word starts with a letter or digit, - stands only between two letters or digits, and OR, AND, NOT are not allowed as words.`;
+  return `source_list.filters.${key} may hold ${SHOPIFY_FILTER_VALUE_RULE}.`;
 }
+
+/** What a filter value may hold, in the words of its refusal; the form's rules in bulk_plan say the same. */
+export const SHOPIFY_FILTER_VALUE_RULE = `letters, digits, single spaces and ${[...FILTER_PUNCTUATION].join(' ')} ; every word starts with a letter or digit, - stands only between two letters or digits, and OR, AND, NOT are not allowed as words`;
 
 const LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
 const ALLOWED_CODE_POINT = /^[\p{L}\p{M}\p{N} -]$/u;

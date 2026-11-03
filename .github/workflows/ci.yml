@@ -92,8 +92,10 @@ jobs:
     # shell against a stubbed curl). Their own timeout signals the shell it
     # started, not that shell's own children — an orphaned grandchild outlives
     # it. Without a job ceiling such a process would burn the runner's 6h
-    # default instead of failing. Matches `smoke` below.
-    timeout-minutes: 20
+    # default instead of failing. The ceiling sits above the suite's own time,
+    # not at it: the suite alone ran 18-20 min on main by late October 2026
+    # (one run was cancelled at 20:03), so 20 cut off green runs.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

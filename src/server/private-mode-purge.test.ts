@@ -12,6 +12,7 @@ import type { KnowledgeLayer } from '../core/knowledge-layer.js';
 import type { SubjectStore } from '../core/subject-store.js';
 import type { IAgent } from '../types/index.js';
 import { rememberTool } from '../tools/builtin/knowledge.js';
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 
 /**
  * Switching private mode on removes the thread's legacy memories and its durable entries —
@@ -218,7 +219,7 @@ describe('PATCH /api/threads/:id { skip_extraction: true } removes what is store
     expect((await setPrivate('t-tool-private')).status).toBe(200);
     const toolContext = (engineOf() as unknown as { getToolContext: () => IAgent['toolContext'] }).getToolContext();
     const agentIn = (threadId: string) => ({
-      toolContext, currentThreadId: threadId, currentRunId: 'r1', autonomy: 'supervised',
+      principal: OWNER_PRINCIPAL, toolContext, currentThreadId: threadId, currentRunId: 'r1', autonomy: 'supervised',
       sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: false,
       skipMemoryExtraction: false, promptUser: async (_q: unknown, options: string[] = []) => options[0] ?? 'Apply',
     } as unknown as IAgent);
@@ -240,7 +241,7 @@ describe('PATCH /api/threads/:id { skip_extraction: true } removes what is store
     ts.createThread('t-step-chat', { title: 'chat t-step-chat' });
     const toolContext = (engineOf() as unknown as { getToolContext: () => IAgent['toolContext'] }).getToolContext();
     const stepAgent = (originThreadId: string | undefined, runId: string) => ({
-      toolContext, currentThreadId: undefined, originThreadId, currentRunId: runId, autonomy: 'supervised',
+      principal: OWNER_PRINCIPAL, toolContext, currentThreadId: undefined, originThreadId, currentRunId: runId, autonomy: 'supervised',
       sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: false,
       skipMemoryExtraction: false, promptUser: async (_q: unknown, options: string[] = []) => options[0] ?? 'Apply',
     } as unknown as IAgent);

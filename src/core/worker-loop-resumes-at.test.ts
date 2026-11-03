@@ -28,7 +28,7 @@ function harness(): { loop: WorkerLoop; manager: TaskManager; triggerId: string 
   const triggerId = new TriggerStore(engineDb).armBulkEffect({
     runId: 'run-1', effect: 'bulk_apply', title: 'Bulk run', nextRunAt: new Date().toISOString(),
   });
-  const engine = { getTaskManager: () => manager } as unknown as Engine;
+  const engine = { getTaskManager: () => manager, getEngineDb: () => null, getMandateEnds: () => null } as unknown as Engine;
   const loop = new WorkerLoop(engine, {} as NotificationRouter, 60_000, undefined, { heartbeatMs: HEARTBEAT, ttlMs: TTL });
   return { loop, manager, triggerId };
 }

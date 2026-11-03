@@ -4,8 +4,11 @@ import { detectInjectionAcross, wrapChannelMessage, wrapUntrustedData } from './
 import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained, type Containment } from './containment.js';
 import type { ThreadStore } from './thread-store.js';
 import { stripUntrustedSeparators } from './sanitize.js';
-import { approvalQueueEnabled, type ApprovalEntry, type StoredAddress } from './approval-store.js';
-import { plainAddresses, type ApprovalScope } from './approval-view.js';
+import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
+import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
+import { stripHidden, stripHiddenInName } from './hidden-text.js';
+
+const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
 /**
  * The chat a context is loaded into, and the stores that contain it: a run started from a
@@ -16,7 +19,12 @@ export interface ChatContextReader {
   readonly threadId: string | undefined;
   readonly containment: Containment | null;
   readonly threadStore: Pick<ThreadStore, 'getThread' | 'updateThread'> | null;
+  /** What a chat opened from a contained one may promise (`kind: 'contained-origin'`). */
+  readonly wayOut?: ContainedWayOutState | undefined;
 }
+
+/** The state assumed when the caller gives none: nothing on, and support as the way. */
+const CLOSED_WAY_OUT: ContainedWayOutState = { bulkRuns: false, bulkRunsBy: 'control-plane', shopifyBulk: false, managed: true };
 
 /**
  * A typed reference to an object a chat is opened ON — the payload of the
@@ -35,7 +43,7 @@ export interface ChatContextReader {
  * changed version through the interactive confirm.
  */
 export type ChatContextRef =
-  | { kind: 'workflow' | 'run' | 'mail' | 'approval'; id: string }
+  | { kind: 'workflow' | 'run' | 'mail' | 'approval' | 'contained-origin'; id: string }
   | { kind: 'mail-batch'; ids: string[] };
 
 /**
@@ -68,6 +76,7 @@ export const CHAT_CONTEXT_KIND_SET = {
   mail: true,
   'mail-batch': true,
   approval: true,
+  'contained-origin': true,
 } as const satisfies Record<ChatContextRef['kind'], true>;
 
 export const CHAT_CONTEXT_KINDS = Object.keys(
@@ -141,6 +150,77 @@ export interface ChatInboxReader {
   getUidByMessageId(accountId: string, messageId: string): { uid: number; folder: string } | null;
 }
 
+/**
+ * What a chat opened from a contained one may promise for a change to the store: whether this
+ * instance runs a bulk run that reads a Shopify store, and if not, who can turn on what is missing.
+ * Read by the run route when it resolves a `contained-origin` reference.
+ */
+export interface ContainedWayOutState {
+  /** Bulk runs run on this instance (`core/bulk-switch.ts › bulkRunsOn`). */
+  readonly bulkRuns: boolean;
+  /** Who can turn bulk runs on here: the owner through the config, also on a pool tier the
+   *  control plane has opened them on, or the control plane (`bulkRunsTurnedOnBy`). */
+  readonly bulkRunsBy: 'config' | 'control-plane';
+  /** A bulk run may read a Shopify store (`core/bulk-shopify.ts › shopifyBulkReadEnabled`). */
+  readonly shopifyBulk: boolean;
+  /** A managed instance: a billing tier is set, and what the owner cannot turn on goes to support. */
+  readonly managed: boolean;
+}
+
+/** Whether a store change can go to a bulk run here: both switches on. */
+export function storeChangeByBulkRun(state: ContainedWayOutState): boolean {
+  return state.bulkRuns && state.shopifyBulk;
+}
+
+const ORIGIN_HEAD = '[Loaded context: opened from a read-only chat]\n'
+  + 'Unlike the chat it was opened from, this chat is not limited to reading a store; keep it that way: '
+  + 'do not read the store with http_request here. ';
+const ORIGIN_STORE_BY_BULK_RUN =
+  'If the user wants to change the store, plan it as a bulk run (bulk_plan), which reads the store itself and shows a preview. ';
+const ORIGIN_OTHER_SERVICE = 'If the user wants a request to another service, run it here; if it needs details from the store, such as product names or a product type, '
+  + 'ask the user for them instead of reading the store.';
+
+/**
+ * What the model reads in a chat opened from a contained one where a store change can go to a bulk
+ * run: a fixed text, no content of that chat. It says this chat is not read-only, so the model does
+ * not tell the user it is. A change to the store goes to a bulk run, which reads the store itself;
+ * a request to another service runs here, with store details asked of the user. Either way this
+ * chat does not read the store first and become read-only in turn.
+ */
+export const CONTAINED_ORIGIN_CONTEXT = ORIGIN_HEAD + ORIGIN_STORE_BY_BULK_RUN + ORIGIN_OTHER_SERVICE;
+
+/** What is missing and who can turn it on, as clauses after „Tell the user … that“: the Shopify
+ *  read first, then bulk runs, each with the one who can turn it on where there is a way, and
+ *  support once. Bulk runs the owner can turn on get a clause that names no place: the line above
+ *  the input names the settings switch (`contained-way-out.ts › originLineKeys`). */
+function enableClauses(state: ContainedWayOutState): string[] {
+  const clauses: string[] = [];
+  const support = 'they can write to support@lynox.ai to have them enabled';
+  if (!state.shopifyBulk) {
+    clauses.push(state.managed ? support
+      : 'they enable bulk changes to Shopify stores with LYNOX_FEATURE_SHOPIFY_BULK_READ in their instance\'s configuration');
+  }
+  if (!state.bulkRuns) {
+    if (state.bulkRunsBy === 'config') clauses.push('bulk runs are turned off on this instance');
+    else if (!clauses.includes(support)) clauses.push(support);
+  }
+  return clauses;
+}
+
+/**
+ * The text for a chat opened from a contained one, as this instance stands: where a store change
+ * cannot go to a bulk run, the store part says so and who can turn on what is missing, and offers
+ * drafts the user copies into the store; the rest is {@link CONTAINED_ORIGIN_CONTEXT}'s.
+ */
+export function containedOriginContext(state: ContainedWayOutState): string {
+  if (storeChangeByBulkRun(state)) return CONTAINED_ORIGIN_CONTEXT;
+  const store = 'If the user wants to change the store: bulk changes to Shopify stores are not enabled on this instance, '
+    + 'so the store cannot be changed from here. Begin your answer with one sentence that says so and that '
+    + enableClauses(state).join(', and that ')
+    + '; only then offer to draft the new texts here from what the user gives you, for them to copy into Shopify themselves. ';
+  return ORIGIN_HEAD + store + ORIGIN_OTHER_SERVICE;
+}
+
 const MAX_STEP_TASK_CHARS = 280;
 const MAX_NAME_CHARS = 200;
 const MAX_STEP_ID_CHARS = 80;
@@ -166,6 +246,9 @@ export interface ChatApprovalReader {
    * its original by uid only where this holds.
    */
   accountUidsStable(accountId: string): boolean;
+  /** Whether the entry's content is still the one its checksum was taken over when it was filed —
+   *  the store's own check, which the decision and the executor use. */
+  checksumMatches(id: string): boolean;
 }
 
 /**
@@ -186,6 +269,20 @@ export interface ChatApprovalReader {
 function oneLine(s: string, max: number): string {
   const flat = s.replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** {@link oneLine} for a stored workflow's or run's text (name, step id, task, error), without the
+ *  characters that render as nothing (`hidden-text.ts`): text saved before the save refused them
+ *  would otherwise carry an instruction no one sees into the chat. Not for mail fields, whose
+ *  values the model echoes back to the mail tools. */
+function storedLine(s: string, max: number): string {
+  return oneLine(stripHidden(s), max);
+}
+
+/** {@link storedLine} for a stored name or step id, which takes none of the places running text may
+ *  carry such a character: a ZWNJ an old step id holds between letters goes too. */
+function storedName(s: string, max: number): string {
+  return oneLine(stripHiddenInName(s), max);
 }
 
 /**
@@ -349,6 +446,15 @@ export function resolveChatContext(
     );
   }
 
+  if (ref.kind === 'contained-origin') {
+    // A chat opened by "Plan in a new chat" from a chat that read a store and now only reads
+    // (`containment.ts`). The id names that chat for the view; it is not read here, and nothing of
+    // that chat reaches this one: the user's own words come as the message, and a reader of the
+    // old chat's content goes through `containThreadFrom` like every other. Without the instance's
+    // state the text promises no bulk run: one it cannot keep is the failure this guards.
+    return containedOriginContext(reader?.wayOut ?? CLOSED_WAY_OUT);
+  }
+
   if (ref.kind === 'mail-batch') {
     // N inbox items the user bulk-selected to work through in one chat (the
     // "💬 N im Chat" bulk affordance). Same untrusted-content rules as the
@@ -439,11 +545,11 @@ export function resolveChatContext(
     }
     if (wf.template !== true) return null; // only saved workflows are editable
     const steps = (wf.steps ?? [])
-      .map((s, i) => `  ${i + 1}. [${oneLine(s.id, MAX_STEP_ID_CHARS)}] ${oneLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
+      .map((s, i) => `  ${i + 1}. [${storedName(s.id, MAX_STEP_ID_CHARS)}] ${storedLine(s.task ?? '', MAX_STEP_TASK_CHARS)}`)
       .join('\n');
     return (
       `[Loaded saved workflow for editing — id: ${wf.id}]\n` +
-      `Name: "${oneLine(wf.name, MAX_NAME_CHARS)}"\n` +
+      `Name: "${storedName(wf.name, MAX_NAME_CHARS)}"\n` +
       `Mode: ${wf.mode ?? 'autonomous'}${contractNote(wf.capabilityContract)}\n` +
       `Steps:\n${steps}\n\n` +
       `To change it, call update_workflow_steps with workflow_id "${wf.id}". ` +
@@ -468,7 +574,7 @@ export function resolveChatContext(
   }
   const stepResults = runHistory.getPipelineStepResults(run.id);
   const trace = stepResults
-    .map(s => `  [${s.status}] ${oneLine(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${oneLine(s.error, MAX_ERR_CHARS)}` : ''}`)
+    .map(s => `  [${s.status}] ${storedName(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${storedLine(s.error, MAX_ERR_CHARS)}` : ''}`)
     .join('\n');
   const hasFailure = run.status === 'failed' || stepResults.some(s => s.status === 'failed' || s.error);
   // Only point at the editable workflow if it still exists — a run can outlive a
@@ -479,8 +585,8 @@ export function resolveChatContext(
   const readerContained = reader?.threadId !== undefined && reader.threadId !== '' && threadIsContained(reader.containment, reader.threadId);
   return (
     `[Loaded workflow run — id: ${run.id}]\n` +
-    `Workflow: "${oneLine(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
-    `Status: ${run.status}${run.error ? `\nError: ${oneLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
+    `Workflow: "${storedName(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
+    `Status: ${run.status}${run.error ? `\nError: ${storedLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
     (trace ? `Steps:\n${trace}\n` : '') +
     (hasFailure
       ? readerContained
@@ -497,6 +603,38 @@ function approvalInScope(entry: ApprovalEntry, scope: ApprovalScope): boolean {
   if (scope.viewer === 'owner') return true;
   return entry.mandateId !== null && entry.mandateId === scope.mandateId;
 }
+
+/**
+ * Why an entry's draft may load into a chat, or null: the owner, or its own grant, moved it there;
+ * or it was approved and not sent for a reason that proves nothing went out
+ * ({@link APPROVAL_REWRITABLE_OUTCOMES}), and it still holds what was filed. The second is the
+ * owner's only — a mandate's grant may end, and the owner decides what it sends again.
+ */
+function approvalLoadable(
+  entry: ApprovalEntry,
+  scope: ApprovalScope,
+  checksumMatches: (id: string) => boolean,
+): { as: 'moved' } | { as: 'not_sent'; reason: ApprovalOutcome } | null {
+  if (!approvalInScope(entry, scope)) return null;
+  if (entry.status === 'rejected' && entry.decidedReason === 'moved_to_chat') return { as: 'moved' };
+  if (entry.status !== 'failed' || scope.viewer !== 'owner') return null;
+  const reason = approvalOutcome(entry);
+  if (reason === null || !REWRITABLE.has(reason)) return null;
+  // The reason is the last attempt's; a matching mail that went out before an earlier one still counts.
+  if (approvalResultSawDedup(entry.resultJson)) return null;
+  return checksumMatches(entry.id) ? { as: 'not_sent', reason } : null;
+}
+
+/**
+ * What a chat opened on an approval entry reads when its draft does not load: the entry was sent,
+ * closed, purged or changed since, the queue is off, or this session may not load it — the same
+ * words for each, so it tells a session nothing about an entry it may not see. Without it the
+ * chat's first line ("write this email again") would reach the model with no draft to go by.
+ */
+export const APPROVAL_DRAFT_UNAVAILABLE =
+  '[Loaded draft — not available]\n' +
+  'The draft from the approval queue that this chat was opened on cannot be loaded here. ' +
+  'Tell the user it is not available. Do not write the email from memory or look for it elsewhere; ask the user what they want to send.';
 
 /** Recipients as one line, at most {@link MAX_RECIPIENTS} of them, and how many were left out:
  *  that count is the engine's statement, so it goes into the framing, not beside the addresses. */
@@ -617,8 +755,9 @@ function replyRoute(
 function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null): string | null {
   if (!approvalQueueEnabled() || approvals === null || approvals.scope === null) return null;
   const entry = approvals.get(id);
-  if (entry === null || !approvalInScope(entry, approvals.scope)) return null;
-  if (entry.status !== 'rejected' || entry.decidedReason !== 'moved_to_chat') return null;
+  if (entry === null) return null;
+  const loadable = approvalLoadable(entry, approvals.scope, (e) => approvals.checksumMatches(e));
+  if (loadable === null) return null;
   const filing = entry.filing;
   if (filing === null) return null;
   const p = filing.payload;
@@ -657,7 +796,11 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
     oneLine(p.fromAddress, MAX_NAME_CHARS), subject, followup === null ? '' : oneLine(followup.reason, MAX_NAME_CHARS),
     origSender, origSubject,
   ]);
-  const head = `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
+  // The reason is a code from a fixed list, never the stored result's text: a provider's error
+  // message is someone else's words.
+  const head = loadable.as === 'moved'
+    ? `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`
+    : `[Loaded draft of an approved email that was not sent — entry: ${entry.id} · ${filing.kind} · reason: ${loadable.reason} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
   const fields = wrapChannelMessage({
     source: `approval:${entry.id}`,
     injection,
@@ -695,7 +838,11 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   return (
     `${head}${fields}\n${message}\n\n` +
     `The draft's recipients are exactly those in the first block; the second block is only the message text. ` +
-    `This draft was not sent from the approval queue. It may have been sent from a chat since it was moved — before sending, ask the user whether it already went out. ` +
+    (loadable.as === 'moved'
+      ? `This draft was not sent from the approval queue. It may have been sent from a chat since it was moved — before sending, ask the user whether it already went out. `
+      : `This draft was approved, and the approval queue did not send it (reason in the first line); it will not send it later either. ` +
+        `It may have been sent another way since — before sending, ask the user whether it already went out. ` +
+        `Depending on the reason, sending it unchanged may fail again: tell the user the reason and ask what to change. `) +
     (leftCounts.length > 0 ? `Not every recipient is shown: ask the user how to handle the recipients not shown. ` : '') +
     (body.cut ? `Its message is cut here: ask the user before sending a shortened version. ` : '') +
     send +

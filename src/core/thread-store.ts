@@ -258,7 +258,8 @@ export class ThreadStore {
     /** Slice A: set (string) or clear (null) the thread's anchor subject.
      *  `undefined` leaves it unchanged (whitelist semantics — null is a real clear). */
     primary_subject_id?: string | null | undefined;
-  }): void {
+  }): boolean {
+    // `true` when a row matched: `updated_at` is set on every update, so a match is a write.
     const sets: string[] = [];
     const params: unknown[] = [];
 
@@ -277,11 +278,11 @@ export class ThreadStore {
     // null is a real value here (clear the anchor); only `undefined` means "skip".
     if (updates.primary_subject_id !== undefined) { sets.push('primary_subject_id = ?'); params.push(updates.primary_subject_id); }
 
-    if (sets.length === 0) return;
+    if (sets.length === 0) return false;
 
     sets.push("updated_at = datetime('now')");
     params.push(id);
-    this.db.prepare(`UPDATE threads SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+    return this.db.prepare(`UPDATE threads SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes > 0;
   }
 
   /** Slice B3: clear the unread flag (the user opened the escalated thread).

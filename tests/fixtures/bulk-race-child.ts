@@ -17,7 +17,7 @@ import { BulkLedger } from '../../src/core/bulk-ledger.js';
 
 const [dbPath, action, runId, gateDir, mode] = process.argv.slice(2) as [string, string, string, string, string];
 const engineDb = new EngineDb(dbPath, 'test-vault-key');
-const ledger = new BulkLedger(engineDb);
+const ledger = new BulkLedger(engineDb, null);
 
 if (mode === 'pause') {
   const proto = BulkLedger.prototype as unknown as { writeBlocked: (run: unknown) => unknown };

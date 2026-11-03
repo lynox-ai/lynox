@@ -130,6 +130,12 @@ describe('stripLoadedContext', () => {
 		expect(stripLoadedContext(raw)).toBe('Please note: [/loaded-context] should stay in my message.');
 	});
 
+	it('strips the line the engine sends when an approval draft does not load', () => {
+		const missing = '[Loaded draft — not available]\nThe draft from the approval queue that this chat was opened on cannot be loaded here. ' +
+			'Tell the user it is not available. Do not write the email from memory or look for it elsewhere; ask the user what they want to send.';
+		expect(stripLoadedContext(`${missing}${END}Ich möchte diese Mail neu erstellen.`)).toBe('Ich möchte diese Mail neu erstellen.');
+	});
+
 	it('a multi-line draft whose sentinel line the engine escaped is stripped whole, not at that line', () => {
 		// The engine keeps a moved draft's lines and escapes a line that reads as the sentinel.
 		const draft = '[Loaded draft moved from the approval queue — entry: x]\n<untrusted_data source="approval:x">\n' +

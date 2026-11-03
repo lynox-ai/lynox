@@ -1,5 +1,7 @@
 import { channel } from 'node:diagnostics_channel';
 import { performance } from 'node:perf_hooks';
+import type { InstanceActor } from './instance-trail.js';
+import type { InstanceWriteSite } from './mandate-tool-lock.js';
 
 export const channels = {
   toolStart:    channel('lynox:tool:start'),
@@ -82,6 +84,42 @@ export const channels = {
    */
   webSearch:            channel('lynox:websearch:call'),
 };
+
+/**
+ * One `lynox:memory:store` message. Its subscriber (`setupMemoryStoreSubscription`) writes the
+ * knowledge layer's derived entry under `actor`, a row of its own (`derived#memory`, 660a-3).
+ */
+export interface MemoryStoreMessage {
+  readonly namespace: string;
+  readonly content: string;
+  readonly scopeType?: string | undefined;
+  readonly scopeId?: string | undefined;
+  readonly sourceThreadId?: string | undefined;
+  /** Captured by value at the publish call site: the engine-level subscriber cannot read a run. */
+  readonly sourceRunId?: string | undefined;
+  readonly sourceChannel?: string | undefined;
+  readonly sourceUntrusted?: boolean | undefined;
+  readonly sourceToolName?: string | undefined;
+  /** A move (`memory_promote`): the ids of the original, named as the copy's predecessors. */
+  readonly replaces?: { readonly ids: string[] } | undefined;
+  /**
+   * Who acts, read at the publish from the agent (or the value the end of the turn holds), never
+   * from the async context the subscriber happens to run in. Required, so a publisher cannot leave
+   * it out by omission; `null` is "no agent", which no publisher has today. The subscriber writes
+   * a message without one as before, with a line on stderr.
+   */
+  readonly actor: InstanceActor | null;
+  /** The row of the act this follows from: its site and correlation id. Absent for the owner. */
+  readonly trail?: { readonly site: InstanceWriteSite; readonly correlationId: string } | undefined;
+}
+
+/**
+ * The one way to publish on `channels.memoryStore`: the type makes `actor` part of every message.
+ * A source scan (`instance-trail-derived.test.ts`) holds that no raw publish is left elsewhere.
+ */
+export function publishMemoryStore(msg: MemoryStoreMessage): void {
+  channels.memoryStore.publish(msg);
+}
 
 export function measureTool(name: string): { end(): number } {
   const markName = `lynox:tool:${name}:${performance.now()}`;

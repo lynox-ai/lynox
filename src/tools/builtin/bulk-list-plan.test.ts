@@ -40,7 +40,7 @@ const plan = (extra: Record<string, unknown> = {}): Promise<string> => bulkPlanT
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-list-plan-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
 });
 afterEach(() => {
   engineDb.close();

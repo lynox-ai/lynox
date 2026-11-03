@@ -31,7 +31,7 @@ let ledger: BulkLedger;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'lynox-bulk-domains-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
 });
 afterEach(() => {
   engineDb.close();
@@ -116,6 +116,12 @@ describe('the start list at the judge start', () => {
     expect(out.ok).toBe(true);
     expect(ledger.startDomainsOf(id)).toEqual(['example.ch']);
     expect(ledger.getStatus(id)!.startDomains).toEqual(['example.ch']);
+  });
+
+  it('reaches the judge with the run, which checks the links of a verdict against it', () => {
+    const id = listed();
+    expect(startJudge(id, 2, ['example.ch']).ok).toBe(true);
+    expect(ledger.getJudgeRun(id)).toMatchObject({ startDomains: ['example.ch'], listForm: 'woocommerce' });
   });
 
   it('is refused at the list read (D-8), and the list read does not start', () => {

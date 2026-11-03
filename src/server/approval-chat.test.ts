@@ -143,6 +143,30 @@ describe('moving an approval entry to the chat (real engine)', () => {
     expect(await loads(ANNA_LATER, annas)).toBe(false);
   }, 60_000);
 
+  /** Approved, claimed and ended `failed` with `reason`, as the executor ends it. */
+  const failed = (id: string, reason: string): string => {
+    expect(store().decide(id, { action: 'approve', checksum: store().get(id)!.checksum }, 'owner')).toEqual({ ok: true });
+    expect(store().claim(id).ok).toBe(true);
+    expect(store().finish(id, 'failed', { reason })).toBe('failed');
+    return id;
+  };
+
+  it('loads an approved entry that was not sent for the owner, not for a mandate, and not once its content changed', async () => {
+    const id = failed(file(), 'receive_only');
+    expect(await loads(OWNER_PRINCIPAL, id)).toBe(true);
+    const annas = failed(file({ createdBy: 'mandate:anna@example.com', mandateId: 'grant-a' }), 'receive_only');
+    expect(await loads(ANNA, annas)).toBe(false);
+    // The route reads the store's own checksum: a payload changed after filing does not load.
+    const changed = failed(file(), 'receive_only');
+    const inner = store() as unknown as { db: { exec(sql: string): void; prepare(sql: string): { get(...a: unknown[]): unknown; run(...a: unknown[]): unknown } }; engine: { enc(s: string): string; tryDec(s: string): string | null } };
+    const row = inner.db.prepare('SELECT payload_json FROM approval_entries WHERE id = ?').get(changed) as { payload_json: string };
+    const payload = JSON.parse(inner.engine.tryDec(row.payload_json)!) as { to: Array<{ address: string }> };
+    payload.to = [{ address: 'mallory@example.com' }];
+    inner.db.exec('DROP TRIGGER IF EXISTS approval_entries_written_once');
+    inner.db.prepare('UPDATE approval_entries SET payload_json = ? WHERE id = ?').run(inner.engine.enc(JSON.stringify(payload)), changed);
+    expect(await loads(OWNER_PRINCIPAL, changed)).toBe(false);
+  }, 60_000);
+
   it('loads nothing while the queue is off', async () => {
     const id = moved(file());
     delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];

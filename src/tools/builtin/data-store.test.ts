@@ -11,8 +11,10 @@ import {
 } from './data-store.js';
 import { createToolContext } from '../../core/tool-context.js';
 import type { IAgent } from '../../types/index.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 const mockAgent = {
+  principal: OWNER_PRINCIPAL,
   toolContext: createToolContext({}),
 } as unknown as IAgent;
 

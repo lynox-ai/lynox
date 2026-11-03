@@ -34,13 +34,20 @@ const NUMBER_BYTES = 32;
 const RESERVED_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 
 export interface JudgeRule {
-  /** What the model is told to decide, per target. The owner's words, never a target's. */
+  /** What the model is told to decide, per target. Never a target's words, but not always the
+   *  owner's either: the agent may draft it from third-party data (keyword data for a shop's
+   *  meta texts), and the owner approves it without having written it. Nothing in the schema can
+   *  bar a string's content, so a field's value check carries that load (`seo-text.ts`). */
   rule: string;
   /** The verdict's shape over F, normalised by {@link normalizeJudgeRule}. */
   schema: ExtractSchema;
   /** The tier that places the judge's call: which provider serves it, and the gate and booking.
    *  The model is set per provider (`JUDGE_MODELS`), not by the tier. Default `fast`. */
   tier: ModelTier;
+  /** The verdict's shape. `envelope`: `{ keep, after }`, where `keep: true` leaves the target as it
+   *  is without the model repeating it. Absent: the flat verdict over F, as every rule planned
+   *  before the envelope was stored; such a rule keeps its hash, and its run its checksum. */
+  verdict?: 'envelope' | undefined;
 }
 
 /** Targets with a verdict a write can use: not invalid (before the judge or by its answer), and
@@ -136,8 +143,14 @@ function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
 export function normalizeJudgeRule(input: unknown, opts: { idField?: string | undefined } = {}): JudgeRule {
   if (!isPlainObject(input)) throw new BulkSourceError('judge must be an object with rule and schema.');
   const rule = input['rule'];
-  if (typeof rule !== 'string' || rule.trim() === '' || rule.length > JUDGE_MAX_RULE_CHARS) {
+  if (typeof rule !== 'string' || rule.trim() === '') {
     throw new BulkSourceError(`judge.rule must be a text of 1–${String(JUDGE_MAX_RULE_CHARS)} characters.`);
+  }
+  if (rule.length > JUDGE_MAX_RULE_CHARS) {
+    // The counted length, so the model shortens by a number instead of an estimate.
+    throw new BulkSourceError(
+      `judge.rule has ${String(rule.length)} characters; it may have at most ${String(JUDGE_MAX_RULE_CHARS)}. Shorten it by at least ${String(rule.length - JUDGE_MAX_RULE_CHARS)}.`,
+    );
   }
   refuseHidden(rule, 'judge.rule');
   const rawSchema = input['schema'];
@@ -165,7 +178,24 @@ export function normalizeJudgeRule(input: unknown, opts: { idField?: string | un
   const tierRaw = input['tier'];
   const tier = tierRaw === undefined ? 'fast' : normalizeTier(typeof tierRaw === 'string' ? tierRaw : '');
   if (tier === undefined) throw new BulkSourceError('judge.tier must be fast, balanced or deep.');
-  return { rule, schema, tier };
+  return { rule, schema, tier, verdict: 'envelope' };
+}
+
+/** The schema the judge's call is bound by: the rule's own over F, or around it the envelope
+ *  `{ keep, after }`. `after` keeps F's `required` and `additionalProperties: false`, so a verdict
+ *  that changes a target names every field of F and no other; only `keep` is required, because
+ *  a kept target needs no `after` (a missing one on `keep: false` is refused after the call). */
+export function judgeCallSchema(rule: Pick<JudgeRule, 'schema' | 'verdict'>): ExtractSchema {
+  if (rule.verdict !== 'envelope') return rule.schema;
+  return {
+    type: 'object',
+    properties: {
+      keep: { type: 'boolean' },
+      after: { type: 'object', properties: rule.schema.properties, required: rule.schema.required ?? [], additionalProperties: false },
+    },
+    required: ['keep'],
+    additionalProperties: false,
+  };
 }
 
 /**
@@ -186,6 +216,9 @@ export function judgeAfterBound(schema: ExtractSchema): number {
         break;
       case 'boolean':
         bytes += 5;
+        break;
+      case 'object':
+        bytes += judgeAfterBound(prop as unknown as ExtractSchema);
         break;
       default:
         bytes += NUMBER_BYTES;

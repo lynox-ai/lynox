@@ -256,6 +256,9 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-preview.ts | const shopifyForm = list !== null && isShopifyListForm(list.',
     'core/bulk-preview.ts | const withdrawn = list.source.form === SHOPIFY_FILTERED_LIST',
     'core/bulk-preview.ts | if (isShopifyListForm(source.form)) throw new Error(\'a Shopi',
+    // The product writer and the HTML fields of a product run: a filtered list writes products too.
+    'core/bulk-external-writer.ts | return (sent, back) => htmlFieldsOfListForm(\'shopify\').some(',
+    'core/bulk-ledger.ts | if (this.shopifyFormOfRun(run) === \'shopify_product\') for (c',
     'server/http-api.ts | import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl, s',
     'server/http-api.ts | listFirstPage: listRun ? (isShopifyListSource(listRun.source',
     // The image list: every other stored form, filtered or not, is read and written as products.
@@ -274,7 +277,10 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-list.ts | if (form === SHOPIFY_LIST_FORM) return parseShopifyListSourc',
     'tools/builtin/bulk.ts | form: { type: \'string\', enum: [\'woocommerce\', \'shopify\', \'sh',
     // The forms a planner may name, checked before parsing; the stored form is not one of them.
-    'tools/builtin/bulk.ts | if (listForm === SHOPIFY_LIST_FORM || listForm === SHOPIFY_M',
+    'tools/builtin/bulk.ts | function isPlannerShopifyForm(form: unknown): form is typeof',
+    'tools/builtin/bulk.ts | return form === SHOPIFY_LIST_FORM || form === SHOPIFY_MEDIA_',
+    // A judge on the planner's form: only the product form takes one.
+    'tools/builtin/bulk.ts | if (judgeInput !== undefined && form !== \'shopify\') throw ne',
     'tools/builtin/bulk.ts | import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listRea',
     // parseShopifyMediaListSource: the planner's image form and the form it is stored under.
     'core/bulk-list.ts | if (form === SHOPIFY_MEDIA_LIST_FORM) return parseShopifyMed',
@@ -285,7 +291,10 @@ describe('where the stored Shopify list form is read', () => {
     'core/oauth-presets.ts | id: \'shopify\',',
     'core/shopify-graphql.ts | const version = OAUTH_PRESETS.get(\'shopify\')?.adminApiVersio',
     'server/webhook-receiver.ts | const secret = this.deps.secret(presetClientKeys(\'shopify\').',
-    'server/webhook-receiver.ts | shopHost = profile.auth?.type === \'oauth2\' && profile.auth.o',
+    'core/webhook-verifiers.ts | return profile.auth?.type === \'oauth2\' && profile.auth.oauth',
+    // The instance setting that lets bulk runs read a store: a switch, not a list form.
+    'web-ui/lib/components/bulk-runs-setting.ts | && typeof r[\'shopify\'] === \'boolean\';',
+    'web-ui/lib/stores/contained-way-out.ts | const shopify = bulk[\'shopify\'] === true;',
   ];
   const PATTERN = /SHOPIFY_(FILTERED_|MEDIA_)?LIST_FORM|isShopifyList(Source|Form)|'shopify(_filtered|_media)?'|isListForm\(/;
 
@@ -306,7 +315,7 @@ describe('where the stored Shopify list form is read', () => {
       }
     };
     walk(join(__dirname, '..'), join(__dirname, '..'), '');
-    // The web UI never compares a list form today; a place there would be sorted here too.
+    // The web UI compares no list form today (its two lines above name a setting); a place there would be sorted here too.
     const ui = join(__dirname, '..', '..', 'packages', 'web-ui', 'src');
     walk(ui, ui, 'web-ui/');
     return out.filter((p) => !NOT_A_LIST_FORM.includes(p)).sort();
@@ -325,7 +334,7 @@ describe('where the stored Shopify list form is read', () => {
     // The provider lines it leaves out are there, so leaving them out is not what keeps the list short.
     const all = NOT_A_LIST_FORM.map((p) => p.split(' | ')[0]!);
     for (const [i, f] of all.entries()) {
-      const text = readFileSync(join(__dirname, '..', f), 'utf8');
+      const text = readFileSync(f.startsWith('web-ui/') ? join(__dirname, '..', '..', 'packages', 'web-ui', 'src', f.slice('web-ui/'.length)) : join(__dirname, '..', f), 'utf8');
       expect(text.split('\n').some((l) => `${f} | ${l.trim().slice(0, 60)}` === NOT_A_LIST_FORM[i]), NOT_A_LIST_FORM[i]).toBe(true);
     }
   });

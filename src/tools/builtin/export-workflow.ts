@@ -2,6 +2,7 @@ import type { ToolEntry } from '../../types/index.js';
 import { getPipeline } from './pipeline.js';
 import { toPortableWorkflow, buildFence, LYNOX_WORKFLOW_INFO_STRING } from '../../core/workflow-portable.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { escapeHiddenInJson, stripHidden } from '../../core/hidden-text.js';
 
 // The share-format constants (info-string + dynamic fence builder) live in core
 // alongside the envelope + import validator so producer and parser can never drift.
@@ -63,14 +64,16 @@ export const exportWorkflowTool: ToolEntry<ExportWorkflowInput> = {
     let block: string;
     try {
       const portable = toPortableWorkflow(planned);
-      block = JSON.stringify(portable, null, 2);
+      // A character that renders as nothing is written as its escape: the same JSON to the instance
+      // that imports it, and visible to the model that reads it here (`hidden-text.ts`).
+      block = escapeHiddenInJson(JSON.stringify(portable, null, 2));
     } catch (err: unknown) {
       return `Error: Could not serialize the workflow for export: ${getErrorMessage(err)}`;
     }
 
     const fence = buildFence(block);
     return (
-      `✓ Exported "${planned.name}" as a portable workflow. Copy the block below and paste it ` +
+      `✓ Exported "${stripHidden(planned.name)}" as a portable workflow. Copy the block below and paste it ` +
       `into another lynox instance to import it — its API connections and secrets are re-bound ` +
       `there, so nothing sensitive travels with it.\n\n` +
       `${fence}${LYNOX_WORKFLOW_INFO_STRING}\n${block}\n${fence}`

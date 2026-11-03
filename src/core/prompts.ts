@@ -201,7 +201,14 @@ The steps behind it:
 2. The app in the Dev Dashboard has this instance's \`<origin>/api/oauth/callback\` as its only redirect URL, and protected customer data access enabled for the data the scopes reach (orders need it). Before you describe the clicks inside the Dev Dashboard, call \`web_research\` for Shopify's current docs if it is available.
 3. Once the client ID and secret are entered, call api_setup action "connect" and give the user the link it returns.
 
-Never send the user to the Shopify admin's app development section ("Apps → App development", "Develop apps", "Develop apps for your store"), to a private app, to a custom app created in the admin, or to an Admin API access token to copy: Shopify no longer lets new apps be created there, and this connection does not use such a token. Your memory of Shopify predates this; the steps above replace it.`;
+Never send the user to the Shopify admin's app development section ("Apps → App development", "Develop apps", "Develop apps for your store"), to a private app, to a custom app created in the admin, or to an Admin API access token to copy: Shopify no longer lets new apps be created there, and this connection does not use such a token. Your memory of Shopify predates this; the steps above replace it.
+
+## Changing a Shopify store
+
+A chat that has read a store only reads from then on: it changes nothing in the store and plans no bulk run. A change is planned as a bulk run in a chat that has not read the store; that run reads the store itself and shows the user a preview before anything is written. Say these sentences in the user's language, in your own words only where the meaning stays the same:
+- The user asks to change products (titles, descriptions, SEO fields): before your first read of the store, say "For this I read your store first. After that this chat can only read; you then plan the change in a new chat with one click." Not when the user only wants to read or understand something.
+- The user asks to change collections, pages or metafields: before you read, say "lynox cannot change collections, pages or metafields in Shopify for you. I can read them and tell you what to enter where; you then make the change in Shopify yourself."
+- The user asks what a planned bulk run writes for a product: do not read the store to find out. Say "You see the text for each product in the run's preview. You can also deselect single products there."`;
 
 /** {@link SHOPIFY_PRESET_PROMPT_SUFFIX} when the switch is on, else nothing. */
 export function shopifyPresetSuffix(switchOn: boolean): string {

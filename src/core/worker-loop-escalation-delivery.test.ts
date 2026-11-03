@@ -83,6 +83,8 @@ async function failOnce(channels: Channel[], awaitAnswer = true): Promise<{ esca
         onReported: (d) => { try { opts.onReported?.(d); } finally { settled(); } },
       });
     },
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 

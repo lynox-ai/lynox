@@ -3,7 +3,9 @@
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
 	import { slide } from 'svelte/transition';
-	import { newChat, resumeThread, getSessionId, getSkipExtraction, getThreadContained, toggleSkipExtraction, compactNow, getIsCompacting } from '../stores/chat.svelte.js';
+	import { newChat, resumeThread, getSessionId, getSkipExtraction, getThreadContained, getThreadContainedUnknown, toggleSkipExtraction, compactNow, getIsCompacting } from '../stores/chat.svelte.js';
+	import { containedTextKeys, readContainedUnknown } from '../stores/contained-text.js';
+	import { containedReadKey } from '../utils/contained-read.js';
 	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh, startActiveRunsPoll, getRunStatus, markThreadRead } from '../stores/threads.svelte.js';
 	import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -18,10 +20,11 @@
 	import PublicDemoBanner from './PublicDemoBanner.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
-	import { isSessionExpired, clearSessionExpired } from '../stores/session.svelte.js';
+	import { isSessionExpired, clearSessionExpired, mandateMemoryBlocked } from '../stores/session.svelte.js';
 	import { installApiFetchInterceptor } from '../utils/api-fetch-interceptor.js';
 	import { installMandateRenewTimer } from '../utils/mandate-renew-timer.js';
 	import { startApprovalsNav, approvalsNavItem } from '../stores/approvals.svelte.js';
+	import { startPausedPlansNav, getPausedPlansBadge } from '../stores/paused-plans.svelte.js';
 	import type { Snippet } from 'svelte';
 
 	let { children, userSlot }: {
@@ -85,6 +88,12 @@
 	// keyboard). From the open chat (re-read after each run) or from the list.
 	const headerContained = $derived(
 		getThreadContained() || getThreads().find((thr) => thr.id === getSessionId())?.contained === true,
+	);
+	// Why it is locked: a record the engine could not read says so instead of "read store data".
+	const headerContainedText = $derived(
+		containedTextKeys('locked', getThreadContained()
+			? getThreadContainedUnknown()
+			: readContainedUnknown(getThreads().find((thr) => thr.id === getSessionId())?.contained_unknown)).map((k) => t(k)).join(' '),
 	);
 	let headerRenameValue = $state('');
 	function startHeaderRename() {
@@ -201,7 +210,8 @@
 		try {
 			const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(threadId)}/messages?limit=10000`);
 			if (!res.ok) {
-				alert(t('threads.error_export'));
+				// A chat this reader may not read says why, in the page's language (register 1112).
+				alert(t((await containedReadKey(res)) ?? 'threads.error_export'));
 				return;
 			}
 			const data = (await res.json()) as { messages: Array<{ role: string; content?: unknown }> };
@@ -240,6 +250,12 @@
 			if (res.ok) {
 				const bundle: unknown = await res.json();
 				downloadBlob(JSON.stringify(bundle, null, 2), 'application/json', exportFilename(title, 'json'));
+				return;
+			}
+			// Refused, not missing: no fallback to the thin bundle, which the engine refuses too.
+			const refused = await containedReadKey(res);
+			if (refused !== null) {
+				alert(t(refused));
 				return;
 			}
 			// Fallback for an older engine without /debug-export (e.g. mid-rollout):
@@ -313,6 +329,8 @@
 		type?: 'threads';
 		/** A count shown beside the label (and as a dot on the collapsed rail). */
 		badge?: number | null;
+		/** What the count means, read out to a screen reader ({count}). */
+		badgeLabelKey?: string;
 	}
 
 	// Feature-flag gated nav entries. Fetched once on mount from the Engine.
@@ -320,6 +338,7 @@
 	// no dead link.
 	let inboxEnabled = $state(false);
 	let stopApprovalsNav: (() => void) | undefined;
+	let stopPausedPlansNav: (() => void) | undefined;
 
 	onMount(async () => {
 		// Catch any /api/* 401 globally so a Safari-PWA cookie eviction
@@ -332,6 +351,8 @@
 		// The approval queue's item shows when its count answers; the count is polled only while
 		// the latest answer names the owner's session.
 		stopApprovalsNav = startApprovalsNav();
+		// Plans waiting for the owner's takeover: a dot at "Automation" (ux UX-032).
+		stopPausedPlansNav = startPausedPlansNav();
 
 		// /inbox/counts returns 503 when the flag is off; treating ok=true as
 		// "enabled" mirrors the store's own probe (see inbox.svelte.ts).
@@ -359,12 +380,16 @@
 			// PRD-IA-V2 P2-PR-A: Activity is its own root (daily-frequency surface).
 			// Position 3 per PRD nav table — between Inbox and Hub.
 			{ href: '/app/activity', labelKey: 'nav.activity', exact: false, icon: 'clock' },
-			{ href: '/app/hub', labelKey: 'nav.automation', exact: false, icon: 'workflow' },
+			{ href: '/app/hub', labelKey: 'nav.automation', exact: false, icon: 'workflow', badge: getPausedPlansBadge(), badgeLabelKey: 'nav.paused_badge' },
 			{ href: '/app/intelligence', labelKey: 'nav.intelligence', exact: false, icon: 'brain' },
 			{ href: '/app/artifacts', labelKey: 'nav.artifacts', exact: false, icon: 'artifacts' },
 		);
 		return items;
 	});
+
+	// The counts behind the menu button on a phone, where the navigation is folded away: the dot at
+	// "Automation" must be seen without the push (ux UX-032), so the button carries it too.
+	const foldedBadges = $derived(nav.filter((item) => typeof item.badge === 'number' && item.badge > 0));
 
 	// The Chat entry — its expanded thread list grows to fill the sidebar.
 	// nav[0] is always Chat (see the `nav` builder above); kept as a derived
@@ -509,6 +534,7 @@
 		stopVisibilityRefresh?.();
 		stopActiveRunsPoll?.();
 		stopApprovalsNav?.();
+		stopPausedPlansNav?.();
 		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
 		railMq?.removeEventListener('change', onRailMq);
 	});
@@ -606,7 +632,7 @@
 					{#if item.badge}
 						<span class="shrink-0 text-[10px] tabular-nums rounded px-1.5 py-0.5 bg-accent/15 text-accent-text {railExpanded ? '' : 'md:sr-only'}" data-nav-badge>
 							<span aria-hidden="true">{item.badge}</span>
-							<span class="sr-only">{tf('nav.approvals_badge', { count: String(item.badge) })}</span>
+							<span class="sr-only">{tf(item.badgeLabelKey ?? 'nav.approvals_badge', { count: String(item.badge) })}</span>
 						</span>
 					{/if}
 					{#if isExpandable(item) && navExpanded}
@@ -729,7 +755,7 @@
 												{/if}
 													{#if thread.is_favorite || thread.skip_extraction || thread.contained}
 														<span class="shrink-0 pr-1 group-hover:hidden flex items-center gap-0.5">
-															{#if thread.skip_extraction || thread.contained}<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-warning" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-label={thread.contained ? t('threads.contained_badge') : t('threads.private')}><title>{thread.contained ? t('threads.contained_badge') : t('threads.private')}</title><path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" /></svg>{/if}
+															{#if thread.skip_extraction || thread.contained}<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-warning" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-label={thread.contained ? t(containedTextKeys('badge', readContainedUnknown(thread.contained_unknown))[0]!) : t('threads.private')}><title>{thread.contained ? t(containedTextKeys('badge', readContainedUnknown(thread.contained_unknown))[0]!) : t('threads.private')}</title><path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" /></svg>{/if}
 															{#if thread.is_favorite}<span class="text-accent text-xs">&#9733;</span>{/if}
 														</span>
 													{:else}
@@ -843,8 +869,13 @@
 			<header class="flex items-center justify-between h-12 px-4 border-b border-border bg-bg shrink-0">
 				<!-- Left: hamburger (mobile) + logo -->
 				<div class="flex items-center gap-3">
-					<button onclick={() => { sidebarOpen = true; langDropdownOpen = false; }} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label="Open menu">
-						<Icon name="hamburger" size="md" />
+					<button onclick={() => { sidebarOpen = true; langDropdownOpen = false; }} class="md:hidden h-10 w-10 flex items-center justify-center rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors -ml-2" aria-label={[t('nav.open_menu'), ...foldedBadges.map((item) => tf(item.badgeLabelKey ?? 'nav.approvals_badge', { count: String(item.badge) }))].join('. ')}>
+						<span class="relative inline-flex">
+							<Icon name="hamburger" size="md" />
+							{#if foldedBadges.length > 0}
+								<span class="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-accent" aria-hidden="true" data-menu-badge></span>
+							{/if}
+						</span>
 					</button>
 					<!-- PRD-LIGHT-MODE PR 4 — two static <img>, CSS visibility-switch
 					     by [data-theme]. Avoids SSR/hydrate flicker that any reactive
@@ -913,8 +944,8 @@
 							onclick={() => { if (!headerContained) void toggleSkipExtraction(); }}
 							aria-disabled={headerContained}
 							class="flex items-center gap-1.5 text-xs transition-colors min-h-[2.5rem] px-2 py-2 rounded {headerContained ? 'text-warning cursor-not-allowed' : getSkipExtraction() ? 'text-warning hover:bg-bg-muted' : 'text-text-subtle hover:text-text hover:bg-bg-muted'}"
-							aria-label={headerContained ? t('threads.contained_locked') : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
-							title={headerContained ? t('threads.contained_locked') : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
+							aria-label={headerContained ? headerContainedText : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
+							title={headerContained ? headerContainedText : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
 						>
 							{#if headerContained || getSkipExtraction()}
 								<Icon name="ghost" size="xs" />
@@ -993,10 +1024,15 @@
 			<!-- Setup warnings -->
 			<SetupBanner />
 
-			<!-- Session-expired banner — fires when any /api/* 401s. Common
-				cause is Safari PWA cookie eviction; engine itself is fine. -->
-			{#if isSessionExpired()}
-				<div class="border-b border-warning bg-warning-subtle px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+			<!-- Session banner. Session-expired fires when any /api/* 401s (common cause: Safari
+				PWA cookie eviction; the engine itself is fine). A delegated access this instance
+				refuses while it runs without durable knowledge (engine 403 `mandate_memory_off` /
+				`_missing`) takes its place: signing in again changes nothing there. -->
+			{#if mandateMemoryBlocked() !== null || isSessionExpired()}
+				<div role={mandateMemoryBlocked() !== null ? 'alert' : undefined} class="border-b border-warning bg-warning-subtle px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+					{#if mandateMemoryBlocked() !== null}
+					<div class="text-[12px] text-warning">{mandateMemoryBlocked() === 'off' ? t('session.mandate_memory_off') : t('session.mandate_memory_missing')}</div>
+					{:else}
 					<div class="text-[12px] text-warning">
 						<strong>{t('session.expired_title')}</strong>
 						<span class="ml-2 text-text-muted">{t('session.expired_hint')}</span>
@@ -1012,6 +1048,7 @@
 							class="rounded-[var(--radius-sm)] bg-accent text-accent-fg px-3 py-1.5 text-[11px] hover:opacity-90"
 						>{t('session.relogin')}</a>
 					</div>
+					{/if}
 				</div>
 			{/if}
 

@@ -9,7 +9,7 @@ import { docsToMarkdown, markdownToHtml } from './google-docs-format.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapChannelMessage } from '../../core/data-boundary.js';
 import { googleFetch } from '../../core/connector-egress.js';
-import { namedTarget } from '../../core/audit-log.js';
+import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
 
 // === Types ===
 
@@ -86,7 +86,7 @@ export function createDocsTool(getAuth: () => GoogleAuth | null): ToolEntry<Docs
   return {
     outwardWrite: (input) => (DOCS_WRITE_ACTIONS.has(input.action) ? input.action : null),
     // `append` reads the document before it writes, to find its end.
-    outwardRead: (input) => (input.action === 'read' || input.action === 'append' ? `${input.action} ${namedTarget([['document', input.document_id]])}`.trimEnd() : null),
+    outwardRead: (input) => (input.action === 'read' || input.action === 'append' ? `${input.action} ${namedTarget([['document', input.document_id === undefined ? undefined : withoutAddresses(input.document_id)]])}`.trimEnd() : null),
     destructive: {
       mode: 'external',
       check: (input) => {

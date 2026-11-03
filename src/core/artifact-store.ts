@@ -13,6 +13,11 @@ import { containsEvictionMarker } from './artifact-eviction.js';
 
 const SAFE_ID = /^[a-f0-9-]{8}$/;
 
+/** Whether `id` has the shape of an artifact id: a row may name it then, and `save` keeps it. */
+export function isArtifactId(id: unknown): id is string {
+  return typeof id === 'string' && SAFE_ID.test(id);
+}
+
 /** How many prior versions to retain per artifact. A small ring — enough to
  *  recover from an accidental clobber (the "v2 → v7 wrong-name" case) without
  *  growing the store unbounded. Oldest beyond this are pruned on each save. */

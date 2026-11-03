@@ -91,7 +91,8 @@ if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -e "$DATA_DIR/vault.db" ]; then
     echo "" >&2
     echo "  WARNING: this start found no vault key, and $DATA_DIR/vault.db already exists." >&2
     echo "  No new key was generated: it could not open what is encrypted there." >&2
-    echo "  If lynox then logs \"Encrypted vault found but LYNOX_VAULT_KEY is not set\", or your saved" >&2
+    echo "  If lynox then logs \"Encrypted vault found but LYNOX_VAULT_KEY is not set\" or" >&2
+    echo "  \"History: encrypted data found but no encryption key set\", or your chats, saved" >&2
     echo "  connections and API keys are missing, set LYNOX_VAULT_KEY to the key this install was" >&2
     echo "  created with (docker run -e, or the compose .env), or put it in $ENV_FILE with mode 600." >&2
     echo "" >&2

@@ -35,16 +35,18 @@ vi.mock('./llm-client.js', async () => {
   };
 });
 
-vi.mock('./observability.js', () => ({
-  channels: {
+vi.mock('./observability.js', () => {
+  const channels = {
     memoryStore: { publish: vi.fn(), hasSubscribers: false },
     memoryExtraction: { publish: vi.fn(), hasSubscribers: false },
     contentTruncation: { publish: vi.fn(), hasSubscribers: false },
     securityInjection: { publish: vi.fn(), hasSubscribers: true },
     // memory.ts → resolveTierModel('fast', …) now publishes lynox:llm:call.
     llmCall: { publish: vi.fn(), hasSubscribers: false },
-  },
-}));
+  };
+  // The extraction publishes through the typed helper (660a-3); it is the channel's publish.
+  return { channels, publishMemoryStore: (msg: unknown) => channels.memoryStore.publish(msg) };
+});
 
 vi.mock('./scope-classifier.js', () => ({
   classifyScope: vi.fn(),
@@ -361,6 +363,17 @@ describe('Memory', () => {
   });
 
   describe('scoped methods', () => {
+    it('appendScoped says whether it wrote: true for new text in the file, false for text it holds, false without the file', async () => {
+      const mem = new Memory(dir, undefined, undefined, 'proj1');
+      const g = { type: 'global' as const, id: 'global' };
+      expect(await mem.appendScoped('knowledge', 'a fact', g)).toBe(true);
+      expect(await mem.appendScoped('knowledge', 'a fact', g)).toBe(false);
+      expect(await mem.append('knowledge', 'another fact')).toBe(true);
+      const cacheOnly = new Memory(dir, undefined, undefined, 'proj1', undefined, false);
+      expect(await cacheOnly.appendScoped('knowledge', 'only cached', g)).toBe(false);
+      expect(await cacheOnly.loadScoped('knowledge', g)).toBe('only cached');
+    });
+
     it('appendScoped stores in global scope', async () => {
       const mem = new Memory(dir, undefined, undefined, 'proj1');
       await mem.appendScoped('knowledge', 'global fact', { type: 'global', id: 'global' });
@@ -723,6 +736,8 @@ describe('Memory', () => {
         scopeType: 'context',
         scopeId: 'proj1',
         sourceChannel: 'agent',
+        // No actor handed in: published without one, written as before (660a-3).
+        actor: null,
       });
     });
 
@@ -740,6 +755,8 @@ describe('Memory', () => {
         namespace: 'knowledge',
         content: 'Node.js 22 is latest LTS.',
         sourceChannel: 'agent',
+        // No actor handed in: published without one, written as before (660a-3).
+        actor: null,
       });
       // Ensure no scope metadata was included
       expect(mockPublish).not.toHaveBeenCalledWith(

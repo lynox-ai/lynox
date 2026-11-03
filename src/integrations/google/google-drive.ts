@@ -9,7 +9,7 @@ import { wrapChannelMessage } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
-import { namedTarget } from '../../core/audit-log.js';
+import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
 
 // === Types ===
 
@@ -130,8 +130,8 @@ export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<Dri
     outwardRead: (input) => {
       switch (input.action) {
         case 'search': return 'search';
-        case 'read': case 'move': return `${input.action} ${namedTarget([['file', input.file_id]])}`.trimEnd();
-        case 'list': return `list ${namedTarget([['folder', input.folder_id]])}`.trimEnd();
+        case 'read': case 'move': return `${input.action} ${namedTarget([['file', input.file_id === undefined ? undefined : withoutAddresses(input.file_id)]])}`.trimEnd();
+        case 'list': return `list ${namedTarget([['folder', input.folder_id === undefined ? undefined : withoutAddresses(input.folder_id)]])}`.trimEnd();
         default: return null;
       }
     },

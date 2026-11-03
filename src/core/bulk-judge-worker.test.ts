@@ -51,7 +51,7 @@ beforeEach(() => {
   captured.length = 0;
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-judge-worker-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
   store = new DataStore(join(dir, 'datastore.db'));
   store.createCollection({ name: 'products', scope, uniqueKey: ['sku'], columns: [{ name: 'sku', type: 'string' }, { name: 'title', type: 'string' }] });
   store.insertRecords({ collection: 'products', records: [{ sku: 'A', title: `${MARK}-title` }], stamp: TEST_STAMP });
@@ -75,7 +75,7 @@ function startedRun(): string {
   return id;
 }
 
-async function tick(runId: string, hooks: unknown[] = []): Promise<{ records: string[]; notes: string[] }> {
+async function tick(runId: string, hooks: unknown[] = [], language?: string): Promise<{ records: string[]; notes: string[] }> {
   const records: string[] = [];
   const notes: string[] = [];
   const task = {
@@ -113,6 +113,9 @@ async function tick(runId: string, hooks: unknown[] = []): Promise<{ records: st
     getHooks: () => hooks,
     getContext: () => null,
     client: {},
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
+    config: { language },
   } as unknown as Engine;
   const router = {
     hasChannels: () => true,
@@ -129,6 +132,21 @@ async function tick(runId: string, hooks: unknown[] = []): Promise<{ records: st
   }
   return { records, notes };
 }
+
+describe('bulk_judge through the worker: the language of its outcome (966)', () => {
+  it('records and pushes a judged run in German on an instance set to German', async () => {
+    model.create = async () => ({
+      id: 'm', type: 'message', role: 'assistant', model: 'claude-haiku-4-5', stop_reason: 'tool_use', stop_sequence: null,
+      content: [{ type: 'tool_use', id: 't', name: 'extract', input: { title: 'Kurzer Titel' } }],
+      usage: { input_tokens: 100, output_tokens: 20 },
+    });
+    const { records, notes } = await tick(startedRun(), [], 'de');
+    // The stub's verdict does not meet the run's schema, so the target counts as invalid; the
+    // sentence around the counts is what this test is about.
+    expect(records).toEqual(['Beurteilung fertig. Der Massenlauf wartet auf deine Prüfung. Beurteilt 0, ungültig 1, ohne Urteil 0 von 1 Zielen.']);
+    expect(notes).toEqual([`\u2713 Judge\n${records[0]!}`]);
+  });
+});
 
 describe('bulk_judge through the worker: what leaves as an error', () => {
   it('a schema refusal carrying the target\'s text: the target is invalid, and the text is nowhere', async () => {

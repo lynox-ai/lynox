@@ -118,7 +118,7 @@ const previewDeps = (c: ExternalClient, extra: Partial<BulkPreviewDeps> = {}): B
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-preview-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
 });
 
 afterEach(() => {
@@ -340,6 +340,34 @@ describe('the preview effect', () => {
     }
   });
 
+  it('leaves out a target whose planned text adds markup, on a run without a list form', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planRun([
+        { target: url(0), after: { title: 'New <script>x()</script>' } },
+        { target: url(1), after: { title: 'New <a href="https://evil.example/">deal</a>' } },
+        { target: url(2), after: { title: 'New title' } }, // the twin: plain text passes
+      ]);
+      await runBulkPreview(runId, previewDeps(client()));
+      expect(ledger.getPreview(runId).map((t) => [t.change, t.error])).toEqual([['invalid', 'markup_in_text'], ['invalid', 'markup_in_text'], ['update', null]]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('leaves out a target whose planned text adds a hidden character, on a run without a list form', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planRun([{ target: url(0), after: { title: 'New\u200btitle' } }]);
+      await runBulkPreview(runId, previewDeps(client()));
+      expect(ledger.getPreview(runId).map((t) => [t.change, t.error])).toEqual([['invalid', 'hidden_char']]);
+    } finally {
+      restore();
+    }
+  });
+
   it('refuses a run that is not planned or is halted, and reads nothing', async () => {
     const s = shop();
     const restore = serve(s);
@@ -391,7 +419,7 @@ describe('the preview effect', () => {
     for (const i of [0, 1, 3, 4, 5]) s2.special.set(`/products/${String(i)}`, { status: 503 });
     const restore2 = serve(s2);
     try {
-      ledger = new BulkLedger(engineDb);
+      ledger = new BulkLedger(engineDb, null);
       engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
       const runId = planRun([0, 1, 2, 3, 4, 5].map((i) => ({ target: url(i), after: { price: '1' } })));
       expect((await runBulkPreview(runId, previewDeps(client()))).status).toBe('halted');
@@ -647,7 +675,7 @@ describe('the preview effect', () => {
       expect(none.summary).not.toMatch(/API calls/);
       ledger.resumePreview(refused);
       const out = await runBulkPreview(refused, previewDeps(client(), { costPerCallUsd: 0.002 }));
-      expect(out.summary).toContain('2 API calls this tick at $0.002 each ($0.0040).');
+      expect(out.summary).toContain('2 API calls this pass, estimated $0.0040 ($0.002 each from the profile rate).');
       expect(s.requests).toHaveLength(2);
     } finally {
       restore();
@@ -744,11 +772,11 @@ describe('the approval checksum of an external run', () => {
 
 /** A worker loop over this file's ledger, with a real ApiStore profile for the host and
  *  a vault that holds (or does not hold) its token. */
-function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: number; rateLimit?: () => string | null; auditLog?: { record: (e: never) => void } | null; beforeRearm?: () => void } = {}) {
+function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: number; rateLimit?: () => string | null; auditLog?: { record: (e: never) => void } | null; beforeRearm?: () => void; auth?: Parameters<ApiStore['register']>[0]['auth']; secrets?: Record<string, string>; language?: string } = {}) {
   const apiStore = new ApiStore();
   apiStore.register({
     id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
-    auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+    auth: opts.auth ?? { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
     ...(opts.ack === false ? {} : { custom_endpoint_ack: { accepted: true, hosts: [HOST], accepted_at: '2026-09-30T00:00:00.000Z' } }),
     ...(opts.costUsd !== undefined ? { cost: { model: 'per_call' as const, rate_usd: opts.costUsd } } : {}),
   });
@@ -770,11 +798,14 @@ function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: numbe
     }),
     getBulkLedger: () => ledger,
     getApiStore: () => apiStore,
-    getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? token : null) }),
+    getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? token : opts.secrets?.[k] ?? null) }),
     getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
     getAuditLog: () => opts.auditLog ?? null,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => { opts.beforeRearm?.(); return triggers.updateFields(id, p); } }),
     getUserConfig: () => ({}),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
+    config: { language: opts.language },
   } as unknown as Engine;
   const notify = vi.fn(async () => {});
   const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
@@ -852,6 +883,8 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
+        getEngineDb: () => null,
+        getMandateEnds: () => null,
       } as unknown as Engine;
       const notify = vi.fn(async () => {});
       const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
@@ -920,6 +953,24 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
     }
   });
 
+  // A pending outcome is recorded only, and its lead is English: its cost sentence is too, on a
+  // German instance as well, so the record does not switch language mid-line.
+  it('records a pending read wholly in English, its cost included, on a German instance', async () => {
+    const s = shop();
+    s.special.set('/products/0', { status: 429, headers: { 'retry-after': '30' } });
+    const restore = serve(s);
+    try {
+      planRun([{ target: url(0), after: { price: '1' } }]);
+      const w = workerFor({ costUsd: 0.01, language: 'de' });
+      await w.tick();
+      const result = w.recordTaskRun.mock.calls[0]![1];
+      expect(result).toContain('API calls this pass');
+      expect(result).not.toContain('API-Abrufe');
+    } finally {
+      restore();
+    }
+  });
+
   it('states the cost of a per-call profile in the run result', async () => {
     const s = shop();
     const restore = serve(s);
@@ -927,9 +978,32 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
       const w = workerFor({ costUsd: 0.01 });
       await w.tick();
-      expect(w.recordTaskRun.mock.calls[0]![1]).toContain('2 API calls this tick at $0.01 each ($0.0200).');
+      expect(w.recordTaskRun.mock.calls[0]![1]).toContain('2 API calls this pass, estimated $0.0200 ($0.01 each from the profile rate).');
     } finally {
       restore();
+    }
+  });
+
+  // 966: the worker hands the instance's notice language to the preview, so the run result it
+  // records and pushes is the owner's language — the counts and the estimate included.
+  it('records and pushes the outcome in German on an instance set to German, in English without', async () => {
+    for (const [language, done, counts, costs] of [
+      ['de', 'Vorschau fertig. Der Massenlauf wartet auf deine Prüfung.', 'Gelesen 2, ungültig 0, nicht gelesen 0 von 2 Zielen.', '2 API-Abrufe in diesem Durchgang, geschätzt $0.0200 (je $0.01 laut Profil).'],
+      [undefined, 'Bulk preview done. The run is ready for review.', 'Read 2, invalid 0, unread 0 of 2 targets.', '2 API calls this pass, estimated $0.0200 ($0.01 each from the profile rate).'],
+    ] as const) {
+      const s = shop();
+      const restore = serve(s);
+      try {
+        const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+        const w = workerFor({ costUsd: 0.01, ...(language !== undefined ? { language } : {}) });
+        await w.tick();
+        expect(w.recordTaskRun.mock.calls[0]![1]).toBe(`${done} ${counts} ${costs}`);
+        await vi.waitFor(() => expect(w.notify).toHaveBeenCalled());
+        expect((w.notify.mock.calls[0] as unknown as [{ body: string }])[0].body).toBe(`${done} ${counts} ${costs}`);
+        expect(ledger.getStatus(runId)!.phase).toBe('previewed');
+      } finally {
+        restore();
+      }
     }
   });
 
@@ -1069,6 +1143,41 @@ describe('the reads of a run a delegated session planned', () => {
         // One external dry run at a time: clear this one before the next round.
         engineDb.getDb().prepare('DELETE FROM bulk_runs').run();
       }
+    }
+  });
+});
+
+// 660b-2 E: a preview's reads attach the stored credential and never renew an OAuth token, even
+// one about to expire with a refresh token in its slot. The attach has no agent that may renew
+// unattended (`mayRenewOAuthUnattended`), so no exchange runs and no token host is read; were one
+// run, its reads would be outside the run's rows. Observed at the first seam: the exchange
+// itself, `api_setup fetch_token`, is never called.
+describe('a preview never renews an OAuth token', () => {
+  it('reads with the stored token and calls no token exchange, though the token is due and a refresh token is stored', async () => {
+    const { apiSetupTool } = await import('../tools/builtin/api-setup.js');
+    const exchange = vi.spyOn(apiSetupTool, 'handler');
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const targets = planExternal([{ target: url(0), after: { price: '15.00' } }], HOST, detectSecretInContent);
+      const keys = targets.filter((t) => !('invalid' in t)).map((t) => t.key);
+      const out = ledger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, targets, contract: contractFor(keys) });
+      if (!out.ok) throw new Error(out.reason);
+      if (!ledger.resumePreview(out.status.id).ok) throw new Error('not started');
+      const { tick } = workerFor({
+        auth: {
+          type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+          oauth: { token_url: `https://${HOST}/oauth/token`, grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', token_expires_at: Date.now() - 1_000 },
+        },
+        secrets: { SHOP_ACCESS_TOKEN: TOKEN, SHOP_REFRESH_TOKEN: 'refresh-fixture', SHOP_CLIENT_ID: 'id-fixture', SHOP_CLIENT_SECRET: 'secret-fixture' },
+      });
+      await tick();
+      expect(exchange, 'a token exchange ran for a preview').not.toHaveBeenCalled();
+      expect(s.requests.map((r) => new URL(r.url).pathname), 'the read went out, and nothing to the token endpoint').toEqual(['/products/0']);
+      expect(ledger.getStatus(out.status.id)!.phase).toBe('previewed');
+    } finally {
+      exchange.mockRestore();
+      restore();
     }
   });
 });

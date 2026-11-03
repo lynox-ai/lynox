@@ -52,6 +52,10 @@ export function resolveTaskTemplate(
   task: string,
   context: Record<string, unknown>,
   isAccepted?: (path: string, value: unknown) => boolean,
+  /** Fence every step output, not only one the injection detector flags: a run whose input is a
+   *  third party's (a webhook event) can steer an earlier step's output in words no detector
+   *  knows. */
+  fenceStepOutputs = false,
 ): string {
   return task.replace(/\{\{([^}]+)\}\}/g, (_match: string, rawPath: string) => {
     const path = rawPath.trim();
@@ -67,7 +71,7 @@ export function resolveTaskTemplate(
       if (isAccepted?.(path, value) === true) return str;
       return wrapUntrustedData(str, `workflow_param:${path}`);
     }
-    return detectInjectionAttempt(str).detected
+    return fenceStepOutputs || detectInjectionAttempt(str).detected
       ? wrapUntrustedData(str, `pipeline_step:${path}`)
       : str;
   });
@@ -127,4 +131,21 @@ function substituteString(s: string, context: Record<string, unknown>): unknown 
     if (resolved === undefined) return `{{${path}}}`;
     return typeof resolved === 'string' ? resolved : JSON.stringify(resolved);
   });
+}
+
+/**
+ * What a step agent of a run started by a third party's event reads as its context: without the
+ * run's params, which reach it only where its task names them, fenced; and with every earlier
+ * step's output fenced, since an event's text can steer it. The templates still resolve
+ * from the full context.
+ */
+export function contextForEventRun(context: Record<string, unknown>, step: ManifestStep): Record<string, unknown> {
+  const { params: _params, ...rest } = context;
+  for (const fromId of step.input_from ?? []) {
+    const out = rest[fromId];
+    if (out !== null && typeof out === 'object' && typeof (out as { result?: unknown }).result === 'string') {
+      rest[fromId] = { ...(out as object), result: wrapUntrustedData((out as { result: string }).result, `pipeline_step:${fromId}`) };
+    }
+  }
+  return rest;
 }

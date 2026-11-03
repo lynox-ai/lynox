@@ -57,6 +57,14 @@
 		retireKnowledge,
 		getThreadPendingCount,
 		reviewKnowledge,
+		getThreadContained,
+		getThreadContainedUnknown,
+		getThreadReadRefusal,
+		getContainedOrigin,
+		getContainedPrefill,
+		registerComposerDraft,
+		planInNewChat,
+		newChat,
 		type FileAttachment,
 		type UsageInfo,
 		type ToolCallInfo,
@@ -70,6 +78,10 @@
 	import { formatCompactionDelta } from '../stores/compaction-result.js';
 	import { taskPreview } from '../stores/follow-ups.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
+	import { approvalNoteLines } from './approvals.js';
+	import { getApprovalsViewer } from '../stores/approvals.svelte.js';
+	import { originLineKeys, refusalOffersNewChat } from '../stores/contained-way-out.js';
+	import { containedTextKeys } from '../stores/contained-text.js';
 	import { formatCost } from '../format.js';
 	import { knowledgeCauseKey } from '../stores/knowledge-chip.js';
 
@@ -99,17 +111,19 @@
 	import ComposerModelPicker from './ComposerModelPicker.svelte';
 	import ThreadModelControl from './ThreadModelControl.svelte';
 	import OnboardingBasics from './OnboardingBasics.svelte';
+	import { canChooseModel, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { copyWithToast } from '../utils/clipboard.js';
 	import { playSpeech, playSpeechQueued, stopSpeech, primeIosTts, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
-	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
+	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider, isSttAvailable, isSpeechServiceOff } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { onMount, tick } from 'svelte';
+	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 
 	// Welcome screen state
 	let displayName = $state('');
@@ -193,8 +207,13 @@
 		// (dismiss), NOT shown with the default memory tool — otherwise a transient failure on a
 		// DK-on instance would run the chips instructing the unregistered `memory_store`,
 		// silently losing every capture (RF-COH1).
+		// Asked alongside the status: only the owner's session runs the introduction (setting the
+		// instance up is the owner's), so a mandate's answers cannot get lost on a refusal.
+		const viewerRead = loadSettingsViewer();
 		try {
 			const res = await fetch(`${getApiBase()}/onboarding/status`);
+			await viewerRead;
+			if (!isOwnerSession()) { onboardingDismissed = true; return; }
 			if (!res.ok) { onboardingDismissed = true; return; }
 			const data = (await res.json()) as {
 				knowledgeDone?: boolean; skipped?: boolean; durableMemory?: boolean; firstSessionAt?: string | null;
@@ -309,6 +328,14 @@
 		void sendMessage(prompt); /* never rejects; a turn that cannot start is marked failed and reported */
 	}
 
+	/** A new chat on the draft of an approved mail that was not sent, as the approvals page opens
+	 *  one moved there. The engine loads it only for the owner and for a reason that proves nothing
+	 *  went out. The chat writes a new mail; the old entry stays as it ended. */
+	function rewriteApprovalInChat(id: string) {
+		newChat();
+		void sendMessage(t('chat.note.approval_rewrite_framing'), undefined, undefined, { context: { kind: 'approval', id } }); /* never rejects */
+	}
+
 	function sendOnboardingStep(idx: number, url?: string) {
 		const chip = ONBOARDING_CHIPS[idx];
 		if (!chip) return;
@@ -330,8 +357,10 @@
 		sendOnboardingStep(0, url);
 	}
 
+	// Only once the server said this is the owner's session: a mandate does not see it even while
+	// `/api/config` has not answered.
 	const showOnboarding = $derived(
-		!onboardingDismissed && onboardingStep < ONBOARDING_CHIPS.length
+		isOwnerSession() && !onboardingDismissed && onboardingStep < ONBOARDING_CHIPS.length
 	);
 
 	// showInlineChip is computed in the template (depends on messages/isStreaming declared later)
@@ -389,9 +418,11 @@
 		addToast(t('onboard.vault_confirmed'), 'success');
 	}
 
-	// Defer vault checkpoint until onboarding is complete or skipped
+	// Defer vault checkpoint until onboarding is complete or skipped. Not on `showOnboarding`: that
+	// stays false until the server said whose session it is, and the checkpoint must not open over an
+	// introduction that is still to come.
 	$effect(() => {
-		if (messages.length > 0 && !securityLoadTriggered && (onboardingDismissed || !showOnboarding)) {
+		if (messages.length > 0 && !securityLoadTriggered && (onboardingDismissed || onboardingStep >= ONBOARDING_CHIPS.length)) {
 			securityLoadTriggered = true;
 			void loadSecurityState();
 		}
@@ -801,6 +832,10 @@
 	void ensureVoiceInfoProbed();
 	const transcribeProvider = $derived(getSttProvider());
 	const ttsAvailable = $derived(isTtsAvailable());
+	// ux U-074: on an instance connected to a Shopify store dictation runs only with whisper.cpp
+	// on the instance; without it the mic would only fail, so it is not shown. Elsewhere the mic
+	// stays as it was.
+	const micHidden = $derived(isSpeechServiceOff() && !isSttAvailable());
 
 	const voicePrivacyKey = $derived(
 		transcribeProvider === 'mistral-voxtral' ? 'chat.voice_privacy_hint'
@@ -969,6 +1004,9 @@
 		// button is already removed from the DOM while the composer shows the
 		// transcribing spinner.
 		if (recording || isStartingRecording || transcribing) return;
+		// The keyboard shortcut reaches here too: where the mic is hidden (ux U-074) a recording
+		// would run with no visible indicator and could only fail.
+		if (micHidden) return;
 		isStartingRecording = true;
 		try {
 			if (!navigator.mediaDevices?.getUserMedia) {
@@ -1090,7 +1128,7 @@
 								// through `await sendMessage` would freeze the composer on
 								// "Transcribing…" for the entire answer.
 								transcribing = false;
-								void sendMessage(`🎤 ${trimmed}`);
+								void sendMessage(`🎤 ${trimmed}`, undefined, undefined, { typed: true });
 							} else {
 								// Append rather than replace so a typed prefix isn't
 								// clobbered when the user dictates after typing.
@@ -1181,7 +1219,7 @@
 	/** Resolve the user-facing provider variant for the inline setup form. */
 	function inlineProviderVariant(): 'anthropic' | 'mistral' | 'openai-custom' {
 		if (activeProvider === 'anthropic') return 'anthropic';
-		if (activeProvider === 'openai' && activeApiBaseUrl === 'https://api.mistral.ai/v1') return 'mistral';
+		if (activeProvider === 'openai' && isMistralPresetBase(activeApiBaseUrl)) return 'mistral';
 		return 'openai-custom';
 	}
 
@@ -1626,6 +1664,40 @@
 	const ready = $derived(hasApiKey !== false);
 	const ctxBudget = $derived(getContextBudget());
 	const compactionOffer = $derived(getCompactionOffer());
+	const threadContained = $derived(getThreadContained());
+	// Set when the engine could not read whether this chat read store data (`contained-text.ts`):
+	// every chat is locked then, so a new one does not help and is not offered.
+	const threadContainedUnknown = $derived(getThreadContainedUnknown());
+	/** The engine refused this reader the chat or its live run (register 1112, ux U-091). */
+	const threadReadRefusal = $derived(getThreadReadRefusal());
+	const containedOrigin = $derived(getContainedOrigin());
+	/** What the line above the input of such a chat may promise, read from the config each time
+	 *  such a chat opens: a bulk run only where this instance runs one that reads a Shopify store.
+	 *  Null until read. A read that answers after a newer one began is dropped, so a chat
+	 *  left and opened again shows what the newer read found. */
+	let originKeys = $state<string[] | null>(null);
+	let originRead = 0;
+	$effect(() => {
+		if (!containedOrigin) { originRead++; if (originKeys !== null) originKeys = null; return; }
+		if (originKeys !== null) return;
+		const read = ++originRead;
+		const keep = (keys: string[]): void => { if (read === originRead) originKeys = keys; };
+		fetch(`${getApiBase()}/config`)
+			.then(async (r) => { keep(originLineKeys(r.ok, r.ok ? await r.json() : null)); })
+			.catch(() => { keep(originLineKeys(false, null)); });
+	});
+
+	/** "Plan in a new chat": the store opens the chat; the composer takes the user's words,
+	 *  unsent, for the user to read and change first. */
+	function openPlanInNewChat() {
+		planInNewChat();
+		inputText = getContainedPrefill() ?? '';
+		void tick().then(() => {
+			if (!textareaEl) return;
+			autoResize({ target: textareaEl } as unknown as Event);
+			textareaEl.focus();
+		});
+	}
 	/**
 	 * The percentage the compaction offer is actually judged on: the engine's
 	 * cost-aware budget figure, not raw window fill. `usagePercent` is the
@@ -1698,6 +1770,9 @@
 		: tabsPromptActive ? t('chat.placeholder_tabs')
 		: permissionPromptActive ? t('chat.placeholder_answer')
 		: isStreaming ? t('chat.placeholder_streaming')
+		// A chat opened with "Plan in a new chat" whose old chat held nothing typed here (it was
+		// loaded from the server): an example of a selection, in place of the user's own words.
+		: containedOrigin && !getContainedPrefill() ? t('contained.placeholder')
 		: t('chat.placeholder'),
 	);
 
@@ -1729,12 +1804,21 @@
 		}
 	}
 	$effect(() => { focusInput(); });
+	// An answer that reached a closed question comes back here, into an empty field only (UX-064):
+	// a text the user is writing is theirs, and the sentence above says the answer was not used.
+	$effect(() => registerComposerDraft((text) => {
+		if (inputText.trim() !== '') return false;
+		inputText = text;
+		focusInput();
+		return true;
+	}));
 	// Re-focus after SvelteKit navigation (goto('/app') resets focus). Also
 	// the only path that clears leftover input — placeholder cycling must not.
 	// Releases the persistent mic stream too, since changing route / chat
 	// session is the user's "I'm done with voice for now" signal.
 	afterNavigate(() => {
-		inputText = '';
+		// A chat opened with "Plan in a new chat" keeps its prefill until its first run.
+		inputText = getContainedPrefill() ?? '';
 		focusInput();
 		stopSpeech();
 		releaseMicNow();
@@ -1814,7 +1898,8 @@
 		// stream growth; sendMessage awaits the full run, so pinning here (not
 		// after) is what makes it robust.
 		pinToBottomFor(1500);
-		await sendMessage(task || t('chat.analyze_files'), files);
+		// Only text the user typed is marked: the stand-in for a files-only send is the app's.
+		await sendMessage(task || t('chat.analyze_files'), undefined, files, task ? { typed: true } : undefined);
 	}
 
 	function isAtBottom(): boolean {
@@ -2208,6 +2293,15 @@
 	{/if}
 {/snippet}
 
+{#snippet planNewChatButton()}
+	<button
+		type="button"
+		class="inline-flex items-center rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2.5 py-1 text-[13px] md:text-xs text-accent-text hover:bg-accent/20"
+		onclick={openPlanInNewChat}
+		data-plan-new-chat
+	>{t('contained.plan_new_chat')}</button>
+{/snippet}
+
 {#snippet micButton()}
 	<!-- Tap-to-toggle on every device. Hold-to-record was racy on touch
 	     (async getUserMedia vs pointerup, plus the synthesised click that
@@ -2304,10 +2398,10 @@
 						title={t('chat.footer_tokens_tooltip')}
 					>{formatTurnTokens(usage)}</span><span class="sr-only">{t('chat.footer_tokens_tooltip')}</span>
 					{#each formatUsageMetaParts(usage, !getDemoMode()) as part}
-						<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{#if part.title}<span
+						<span class={part.ownLineWhenNarrow ? 'hidden sm:contents' : 'contents'}><span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{#if part.title}<span
 								class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
 								title={part.title}
-							>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}
+							>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}</span>
 					{/each}
 				{/if}
 			</div>
@@ -2326,6 +2420,16 @@
 			{/if}
 		</div>
 	</div>
+	<!-- A part too important to be swiped out of view (the run's API calls, ux U-096) gets its own
+	     line under the stats on a narrow screen; from `sm` it sits in the row above. -->
+	{#if usage && !isStreamingMsg}
+		{#each formatUsageMetaParts(usage, !getDemoMode()).filter((p) => p.ownLineWhenNarrow) as part}
+			<div class="sm:hidden mt-0.5 text-[11px] font-mono text-text-subtle">{#if part.title}<span
+					class="cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
+					title={part.title}
+				>{part.text}</span><span class="sr-only">{part.title}</span>{:else}{part.text}{/if}</div>
+		{/each}
+	{/if}
 	<!-- Diagnostics panel: opt-in (Advanced metrics setting), never on demo
 	     tenants. Token breakdown + finish reason + iterations are live-only;
 	     duration / tok-s / run-id persist via usage_json and survive a reload. -->
@@ -2421,7 +2525,12 @@
 	     if an ancestor becomes scrollable again someday. -->
 	<div class="relative flex min-h-0 flex-1 flex-col">
 	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
-		{#if messages.length === 0 && !isStreaming}
+		{#if threadReadRefusal !== null && messages.length === 0}
+			<!-- Not this reader's chat to read: the reason, not an empty start page. -->
+			<div class="flex h-full items-center justify-center">
+				<p class="max-w-md text-center text-sm text-text-muted" role="status" data-thread-read-refused>{t(threadReadRefusal)}</p>
+			</div>
+		{:else if messages.length === 0 && !isStreaming}
 			<div class="flex h-full items-center justify-center">
 				{#if hasApiKey === false}
 					{@const variant = inlineProviderVariant()}
@@ -2661,11 +2770,12 @@
 					     a small monospace line so the user can debug without it
 					     dominating the transcript. This row never enters the model's
 					     API context (filtered at resume hydration). -->
-					{@const noteKey = `chat.note.${msg.note.code}`}
+					{@const approvalLines = approvalNoteLines(msg.note.code, msg.note.approval, getApprovalsViewer())}
+					{@const noteKey = approvalLines?.bodyKey ?? `chat.note.${msg.note.code}`}
 					{@const noteBody = t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey)}
 					{@const titleKey = `chat.note.${msg.note.code}.title`}
 					{@const noteTitle = t(titleKey) === titleKey ? t('chat.note.title') : t(titleKey)}
-					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop' || msg.note.code === 'turn_limit' || msg.note.code === 'cost_budget' || msg.note.code === 'input_required' || msg.note.code === 'approval_sent'}
+					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop' || msg.note.code === 'thinking_loop' || msg.note.code === 'turn_limit' || msg.note.code === 'cost_budget' || msg.note.code === 'input_required' || msg.note.code === 'approval_sent'}
 					<div class="flex items-start gap-2 text-[13px] md:text-[12px] border-l-2 {isInfoNote ? 'border-border' : 'border-danger/40'} pl-3 py-1 my-1" role="status">
 						{#if isInfoNote}
 							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 md:h-3.5 md:w-3.5 shrink-0 text-text-subtle mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
@@ -2675,6 +2785,21 @@
 						<div class="min-w-0">
 							<div class="text-text-muted">{noteTitle}</div>
 							<div class="text-text-subtle">{noteBody}</div>
+							{#if msg.note.code === 'thinking_loop' && canChooseModel()}
+								<div class="text-text-subtle" data-model-choice>{t('chat.note.thinking_loop.model')}</div>
+							{/if}
+							{#if approvalLines?.nextKey}
+								<div class="text-text-subtle" data-approval-next>{t(approvalLines.nextKey)}</div>
+							{/if}
+							{#if approvalLines?.href}
+								<a href={approvalLines.href} class="inline-flex min-h-6 items-center py-1 text-accent hover:underline" data-approval-entry>{t('chat.note.approval_view_entry')}</a>
+							{/if}
+							{#if approvalLines?.rewriteId}
+								{@const rewriteId = approvalLines.rewriteId}
+								<div>
+									<button type="button" class="mt-1 inline-flex min-h-6 items-center rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs text-text-muted hover:text-text" onclick={() => rewriteApprovalInChat(rewriteId)} data-approval-rewrite>{t('chat.note.approval_rewrite')}</button>
+								</div>
+							{/if}
 							{#if msg.note.detail}
 								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>
 							{/if}
@@ -2962,6 +3087,20 @@
 									{/if}
 								{/each}
 							</div>
+						{/if}
+						{#if msg.containedNotice}
+							<!-- This run made the chat read-only. Stays in the history, readable
+							     without hover, unlike the sidebar icon's tooltip. It carries the
+							     button, so a refusal in the same answer adds none of its own. -->
+							<div class="flex flex-col gap-2 text-[13px] md:text-[12px] border-l-2 border-warning/50 pl-3 py-1" role="status" data-contained-notice>
+								<p class="text-text-muted"><strong class="font-medium text-text">{t('contained.notice_title')}</strong> {t('contained.notice_body')}</p>
+								{#if threadContained && threadContainedUnknown === null}<div>{@render planNewChatButton()}</div>{/if}
+							</div>
+						{:else if msg.toolCalls?.some(refusalOffersNewChat) && threadContained && threadContainedUnknown === null}
+							<!-- The engine refused a store write or a bulk plan because this chat only
+							     reads. Keyed on the refusal's reason, never on its text; the agent's
+							     sentence names this button. -->
+							<div class="pt-1">{@render planNewChatButton()}</div>
 						{/if}
 					</div>
 				{/if}
@@ -3660,6 +3799,24 @@
 		 the status bar. `shrink-0`: the composer never pays for a tall stack —
 		 the stack above shrinks and scrolls instead. -->
 	<div class="shrink-0 border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
+		{#if threadReadRefusal !== null && messages.length > 0}
+			<!-- The history is shown, its live part is not: say why, where it shows at 390px too. -->
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 text-[13px] md:text-xs text-text-muted" role="status" data-thread-read-refused-bar>{t(threadReadRefusal)}</div>
+		{/if}
+		{#if threadContained}
+			<!-- As long as the chat only reads: in the composer, so it shows on touch and at
+			     390px too, where the sidebar icon's tooltip never does. -->
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-bar>
+				<span>{containedTextKeys('bar', threadContainedUnknown).map((k) => t(k)).join(' ')}</span>
+				{#if threadContainedUnknown === null}{@render planNewChatButton()}{/if}
+			</div>
+		{:else if containedOrigin}
+			<!-- A chat opened with "Plan in a new chat", before its first run. -->
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 space-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-origin>
+				{#if originKeys && originKeys.length > 0}<p data-contained-origin-line>{originKeys.map((k) => t(k)).join(' ')}</p>{/if}
+				{#if containedOrigin.removedHidden}<p data-contained-removed-hidden>{t('contained.removed_hidden')}</p>{/if}
+			</div>
+		{/if}
 		<!-- Pending files -->
 		{#if pendingFiles.length > 0}
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex flex-wrap gap-2 mb-2">
@@ -3757,7 +3914,7 @@
 					     appends/replaces the input text. Either way the user
 					     should never lose access to voice input just because
 					     they typed something. -->
-					{@render micButton()}
+					{#if !micHidden}{@render micButton()}{/if}
 					<!-- Hide the regular send button while recording: on mobile
 					     it sits a thumb-width away from the mic, and a stop-tap
 					     misaim would post whatever's still in the input box

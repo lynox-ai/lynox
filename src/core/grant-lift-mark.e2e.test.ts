@@ -161,6 +161,7 @@ describe('a grant marks the call whose write it let through, and no other', () =
       getSecretStore: () => null,
       getPromptStore: () => null,
       escalateToUser: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
   }
 

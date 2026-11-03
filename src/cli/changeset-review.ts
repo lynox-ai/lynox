@@ -69,7 +69,8 @@ export async function reviewChangeset(
   for (const change of changes) {
     const { added: a, removed: r } = countLines(change.diff);
     const statusLabel = change.status === 'added' ? `${GREEN}new${RESET}` : `${BLUE}mod${RESET}`;
-    const counts = `${GREEN}+${a}${RESET} ${RED}-${r}${RESET}`;
+    // A file shown with a note instead of a diff has no line counts: "+0 -0" would read as unchanged.
+    const counts = change.compared ? `${GREEN}+${a}${RESET} ${RED}-${r}${RESET}` : 'not compared';
     stdout.write(`  ${statusLabel} ${change.file} ${DIM}(${stripAnsi(counts) ? counts : 'no changes'})${RESET}\n`);
   }
   stdout.write('\n');

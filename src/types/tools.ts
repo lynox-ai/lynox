@@ -6,7 +6,8 @@ import type { IAgent, ProviderConfigSnapshot } from './agent.js';
 import type { AutonomyLevel, CostSnapshot } from './modes.js';
 import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
-import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { ContainedRefusalReason } from '../core/containment.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -233,7 +234,7 @@ export type StreamEvent =
   | { type: 'tool_call';   name: string; input: unknown;           agent: string; toolUseId?: string | undefined; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'tool_progress'; tool: string; phase: string;          agent: string; subAgent?: string | undefined }
   | { type: 'api_cost'; tool: string; profileId: string; profileName: string;
-      endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
+      endpoint: string; costUsd: number; source: 'response' | 'profile'; agent: string; subAgent?: string | undefined }
   /** `grant`: the write grant that let this call's write through (`GrantLift` says what the mark means and does not).
    *  `connection`: the connection and grant the call resolved its URL to (`CallConnection` says what the stamp means
    *  and does not); absent when nothing was resolved. Every agent's result carries it. The step recorder writes it
@@ -241,8 +242,10 @@ export type StreamEvent =
    *  `contract`: where the call stood toward the run's contract (`CallContract`). `filed`: how its filing for
    *  the owner's approval ended (`CallFiled`). Both reach the step's row the same way.
    *  `softFailure`: the call failed in a way the model reads as a plain result (`ToolSoftFailure`), so `isError`
-   *  stays unset, as in the model's own view and in a reloaded thread. The step recorder writes it as an error. */
-  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; softFailure?: true | undefined }
+   *  stays unset, as in the model's own view and in a reloaded thread. The step recorder writes it as an error.
+   *  `contained`: the call was refused because the chat read data through a store connection
+   *  (`ContainedRefusal.reason`); the chat's view keys its "plan in a new chat" button on it. */
+  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; apiCost?: CallApiCost | undefined; softFailure?: true | undefined; contained?: ContainedRefusalReason | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`

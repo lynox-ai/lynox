@@ -78,8 +78,8 @@ export function _resetTenantInvariantForTests(): void {
 export async function runGuardedSavedWorkflow(
   engine: Engine,
   workflowId: string,
-  params?: Record<string, unknown> | undefined,
-  opts?: {
+  params: Record<string, unknown> | undefined,
+  opts: {
     seed?: UntrustedCause | undefined;
     /** How the run was started. Absent = the run passes no contract on, whatever is stored. */
     origin?: GrantRunOrigin | undefined;
@@ -91,9 +91,11 @@ export async function runGuardedSavedWorkflow(
      *  through before. Without that seam the stamp never happens and every claim reads as
      *  "nothing spent", which releases a claim after a paid crash. */
     hooks?: RunHooks | undefined;
-    /** Who started the run, when a request did. A mandate's steps get only the tools its
-     *  lock allows (PRD customer-granted-operator-access D1, §3.13 E4). Absent = the owner. */
-    principal?: RequestPrincipal | undefined;
+    /** Whom the run is for. A mandate's steps get only the tools its lock allows (PRD
+     *  customer-granted-operator-access D1, §3.13 E4). Required: the owner is passed as
+     *  `OWNER_PRINCIPAL`, so a caller that forgets it fails to compile instead of running a
+     *  mandate's work as the owner (1055). */
+    principal: RequestPrincipal;
     /** The owner's stop, and the scope whose agents it ends (the worker's scheduled run).
      *  See `RunManifestOptions.stopSignal`. */
     stopSignal?: AbortSignal | undefined;
@@ -104,7 +106,9 @@ export async function runGuardedSavedWorkflow(
     questionWait?: WorkflowQuestionWait | undefined;
     /** What the run's steps file a mail with for its owner. See `runSavedWorkflow`. */
     approvalFiling?: ApprovalFilingContext | undefined;
-  } | undefined,
+    /** A check of the workflow as the runner reads it; a reason refuses the run. See `runSavedWorkflow`. */
+    checkWorkflow?: ((planned: PlannedPipeline) => string | null) | undefined;
+  },
 ): Promise<RunSavedWorkflowResult> {
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
   const budgetCheck = checkPersistentBudget();
@@ -172,7 +176,7 @@ export async function runGuardedSavedWorkflow(
   //    run must not exceed. Its steps get the engine's set narrowed to that lock, and the
   //    step agents are built from this list, so they cannot reach what it leaves out.
   const toolContext = engine.getToolContext();
-  const lock = opts?.principal ? toolLockFor(opts.principal) : null;
+  const lock = toolLockFor(opts.principal);
   const tools = lock === null ? toolContext.tools : toolContext.tools.filter(t => lock.has(t.definition.name));
   const result = await runSavedWorkflow(workflowId, engine.getRunHistory(), config, params, {
     tools,
@@ -189,12 +193,16 @@ export async function runGuardedSavedWorkflow(
     hooks: opts?.hooks,
     // And the step agents are built for that principal, so its lock also refuses them the
     // protected secrets and its writes carry its name.
-    principal: opts?.principal,
+    principal: opts.principal,
     stopSignal: opts?.stopSignal,
     abortScope: opts?.abortScope,
     parentPrompt: opts?.parentPrompt,
     questionWait: opts?.questionWait,
     approvalFiling: opts?.approvalFiling,
+    checkWorkflow: opts?.checkWorkflow,
+    // A webhook run's params are a third party's values: its step agents meet them only where a
+    // task names them, fenced.
+    paramsKeptFromSteps: opts?.origin?.kind === 'webhook',
   });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.

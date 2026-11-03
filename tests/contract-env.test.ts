@@ -697,3 +697,30 @@ describe('env-ABI: credential-named rows are marked secret', () => {
     expect(unredactedCredentials(rows)).toEqual(['X_SECRET', 'X_TOKEN', 'X_KEY', 'X_PASSWORD', 'X_DSN']);
   });
 });
+
+describe('env-ABI: a note that names the emit stance agrees with the policy', () => {
+  // A control plane reads the policy, a person reads the note. Only notes using one of the two
+  // phrases below are checked; a note that words its stance differently is not.
+  const saysNoEmit = (row: EnvRegistryRow): boolean => /no control plane emits it/i.test(row.note ?? '');
+  const saysPerInstance = (row: EnvRegistryRow): boolean => /per instance, never fleet-wide/i.test(row.note ?? '');
+
+  it('the sweep sees rows of both kinds (guard against a silently-empty match)', () => {
+    expect(ENV_REGISTRY.filter(saysNoEmit).length).toBeGreaterThan(0);
+    expect(ENV_REGISTRY.filter(saysPerInstance).length).toBeGreaterThan(0);
+  });
+
+  it('a row whose note says no control plane emits it is operator-only', () => {
+    expect(ENV_REGISTRY.filter((r) => saysNoEmit(r) && r.emitPolicy !== 'operator-only').map((r) => r.name)).toEqual([]);
+  });
+
+  it('a row whose note says a control plane emits it per instance is when-true', () => {
+    expect(ENV_REGISTRY.filter((r) => saysPerInstance(r) && r.emitPolicy !== 'when-true').map((r) => r.name)).toEqual([]);
+  });
+
+  it('exactly these rows say a control plane emits them per instance, never fleet-wide', () => {
+    expect(ENV_REGISTRY.filter(saysPerInstance).map((r) => r.name).sort()).toEqual([
+      'LYNOX_FEATURE_BULK_RUNS',
+      'LYNOX_FEATURE_SHOPIFY_BULK_READ',
+    ]);
+  });
+});
