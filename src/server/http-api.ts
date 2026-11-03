@@ -10477,12 +10477,12 @@ export class LynoxHTTPApi {
       // `auto` is a choice only where it resolves to something: with the switch on, only to whisper.cpp.
       const sttProviders = [
         { id: 'auto',    name: 'Auto',                            available: !speechServiceOff || transcribeMod.hasTranscribeProvider() },
-        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: !speechServiceOff && transcribeMod.mistralVoxtralProvider.isAvailable },
+        { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: !speechServiceOff && transcribeMod.mistralVoxtralProvider.isAvailable },
         { id: 'whisper', name: 'whisper.cpp (local)',             available: transcribeMod.whisperCppProvider.isAvailable },
       ];
       const ttsProviders = [
         { id: 'auto',    name: 'Auto',                            available: !speechServiceOff },
-        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: !speechServiceOff && speakMod.mistralVoxtralTtsProvider.isAvailable },
+        { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: !speechServiceOff && speakMod.mistralVoxtralTtsProvider.isAvailable },
       ];
 
       // Env-var overrides — when set, the Settings selector should display
