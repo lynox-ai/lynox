@@ -4,6 +4,7 @@ import { SecretStore } from '../../core/secret-store.js';
 import type { IAgent } from '../../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
 import { accessTokenKey, type ApiProfile } from '../../core/api-store.js';
+import { scopeSecretStore } from '../../core/secret-scope.js';
 
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   return {
@@ -572,21 +573,27 @@ describe('a connection token is offered as no secret: reference', () => {
   });
 
   it('collect: a scoped child does not collect a token slot outside its scope, stored or not', async () => {
-    // A scoped view lists only the child's names, so the stored-name check cannot see the token.
-    const scoped = (promptSecret: IAgent['promptSecret']): IAgent => {
-      const agent = agentWith([], [], [shop], promptSecret);
-      const store = agent.secretStore as unknown as Record<string, unknown>;
-      store['explainUnresolved'] = (n: string) => (n === FREE ? undefined : 'out-of-scope');
-      return agent;
+    // Through the real scope view: it lists only the child's names, so the stored-name check below
+    // it cannot see the token, while writes are not narrowed.
+    const child = (inner: string[], scope: string[], promptSecret: IAgent['promptSecret']): IAgent => {
+      const agent = agentWith(inner, [], [shop], promptSecret);
+      return { ...agent, secretStore: scopeSecretStore(agent.secretStore as never, scope) } as IAgent;
     };
     const promptSecret = vi.fn().mockResolvedValue('saved');
-    const out = await askSecretTool.handler({ name: 'SHOP_RT', prompt: 'p' }, scoped(promptSecret));
-    expect(out).toContain("connection's token slot outside this session's secret scope");
+    for (const inner of [['SHOP_RT'], []]) {
+      const out = await askSecretTool.handler({ name: 'SHOP_RT', prompt: 'p' }, child(inner, [FREE], promptSecret));
+      expect(out, `vault ${JSON.stringify(inner)}`).toContain("token slot outside this session's secret scope");
+      expect(out, 'it names the way forward').toContain('in its secret_scope');
+    }
     expect(promptSecret).not.toHaveBeenCalled();
-    // Control: a free name outside the scope is collected as before (not a token slot).
-    const other = await askSecretTool.handler({ name: 'OTHER_KEY', prompt: 'p' }, scoped(promptSecret));
-    expect(other).not.toContain('outside');
+    // In scope, an empty slot is collected as for any session.
+    await askSecretTool.handler({ name: 'SHOP_RT', prompt: 'p' }, child([], ['SHOP_RT'], promptSecret));
     expect(promptSecret).toHaveBeenCalledTimes(1);
+    // Control: a name outside the scope that no profile holds is collected; that writes are not
+    // narrowed for such a name is the scope view's stated limit, not this check's.
+    const other = await askSecretTool.handler({ name: 'OTHER_KEY', prompt: 'p' }, child([], [FREE], promptSecret));
+    expect(other).not.toContain('outside');
+    expect(promptSecret).toHaveBeenCalledTimes(2);
   });
 
   it('a long profile name is cut before it is escaped, so no entity is cut in half', async () => {
