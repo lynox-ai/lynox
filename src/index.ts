@@ -204,7 +204,7 @@ Installer without prompts (no terminal needed; exits non-zero on failure):
 
 Environment:
   ANTHROPIC_API_KEY             Anthropic API key (required for anthropic provider)
-  LYNOX_API_BASE_URL            Base URL for non-Anthropic backends (e.g. https://api.mistral.ai/v1)
+  LYNOX_API_BASE_URL            Base URL for non-Anthropic backends (e.g. https://api.eu.mistral.ai/v1)
                                 (legacy ANTHROPIC_BASE_URL still accepted)
   MISTRAL_API_KEY               Mistral API key (provider: openai with Mistral endpoint)
   OPENAI_API_KEY                Bearer for generic OpenAI-compatible endpoints (experimental)

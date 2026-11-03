@@ -697,9 +697,11 @@ describe('a planned text of a Shopify run (PRD shopify-preset §20.2 item 5)', (
   }
 
   it('leaves a product out where the plan puts markup into its title or seo title', async () => {
-    expect(await planned({ title: 'New <script>x()</script>' })).toEqual(['invalid', 'markup_in_text']);
-    expect(await planned({ title: 'New <a href="https://evil.example/">deal</a>' })).toEqual(['invalid', 'markup_in_text']);
-    expect(await planned({ seo_title: 'New <script>x()</script>' })).toEqual(['invalid', 'markup_in_text']);
+    // The SEO check runs first (PRD shopify-preset §23.1 item 5).
+    expect(await planned({ title: 'New <script>x()</script>' })).toEqual(['invalid', 'seo_text_refused']);
+    expect(await planned({ title: 'New <a href="https://evil.example/">deal</a>' })).toEqual(['invalid', 'seo_text_refused']);
+    expect(await planned({ seo_title: 'New <script>x()</script>' })).toEqual(['invalid', 'seo_text_refused']);
+    expect(await planned({ seo_title: 'New > title' })).toEqual(['invalid', 'markup_in_text']);
     expect(await planned({ title: 'New title' })).toEqual(['update', null]);
   });
 
@@ -712,6 +714,48 @@ describe('a planned text of a Shopify run (PRD shopify-preset §20.2 item 5)', (
   it('does not hold the seo partner the store already holds against the plan', async () => {
     const held = (): void => { s.products.set(10, { ...s.products.get(10)!, seo: { title: 'Old', description: 'Size < 40, A -> B' } }); };
     expect(await planned({ seo_title: 'New title' }, held)).toEqual(['update', null]);
+  });
+});
+
+describe('the SEO check of a planned Shopify text (PRD shopify-preset §23)', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  async function planned(after: Record<string, unknown>, prepare?: () => void): Promise<[string, string | null]> {
+    vi.stubEnv(FLAG, '1');
+    fill(1);
+    prepare?.();
+    const id = startedList(after);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    const t = ledger.getPreview(id)[0]!;
+    return [t.change, t.error];
+  }
+
+  it('leaves a product out where the plan puts a link or an address into a title or SEO field', async () => {
+    expect(await planned({ seo_description: 'Mehr auf https://evil.example/deal' })).toEqual(['invalid', 'seo_text_refused']);
+    expect(await planned({ seo_title: 'Jetzt auf evil.com' })).toEqual(['invalid', 'seo_text_refused']);
+    expect(await planned({ seo_description: 'Fragen an info@evil.example' })).toEqual(['invalid', 'seo_text_refused']);
+    expect(await planned({ title: 'Filter https://evil.example' })).toEqual(['invalid', 'seo_text_refused']);
+    expect(await planned({ seo_description: 'Wasserfilter für 5.5 l, inkl. MwSt & Versand – 20 € günstiger' })).toEqual(['update', null]);
+  });
+
+  it('counts only the store host as own on a run without a judge', async () => {
+    // A2 stores start domains for judged runs only: the shop's public domain is refused here, fail-closed.
+    expect(await planned({ seo_title: 'Acmewater.ch – Wasserfilter' })).toEqual(['invalid', 'seo_text_refused']);
+    expect(await planned({ seo_title: `Mehr auf ${HOST}` })).toEqual(['update', null]);
+  });
+
+  it('does not check the seo partner the store already holds, only what the plan writes', async () => {
+    const linked = (): void => { s.products.set(10, { ...s.products.get(10)!, seo: { title: 'Old', description: 'Mehr auf https://evil.example' } }); };
+    expect(await planned({ seo_title: 'New title' }, linked)).toEqual(['update', null]);
+    expect(await planned({ seo_description: 'Neu auf https://evil.example' }, linked)).toEqual(['invalid', 'seo_text_refused']);
+  });
+
+  it('lets a title keep a dotted word it held, and refuses a new domain beside it', async () => {
+    const held = (): void => { s.products.set(10, { ...s.products.get(10)!, title: 'Kurs für Node.js' }); };
+    expect(await planned({ title: 'Neuer Kurs für Node.js' }, held)).toEqual(['update', null]);
+    expect(await planned({ title: 'Neuer Kurs für Node.js' })).toEqual(['invalid', 'seo_text_refused']);
+    expect(await planned({ title: 'Neuer Kurs für Node.js auf evil.com' }, held)).toEqual(['invalid', 'seo_text_refused']);
   });
 });
 
@@ -990,19 +1034,44 @@ describe('a judged Shopify run', () => {
   }
 
   // One run per case: a second judged run over the same list waits for the first to be superseded.
+  // A `<` in a title or SEO field is the SEO check's (PRD shopify-preset §23.1 item 5): its reason
+  // wins over S20-2's, and it holds where the before-image held one too.
   it.each([
-    ['a tag', 'New <b>title</b>', null],
-    ['a closing bracket', 'New > title', null],
-    ['a tag where the counts pass against a title that holds both', '<img src=x>', 'USB-C <> HDMI'],
-  ])('leaves out a verdict that adds %s to a text field that is not HTML (S20-2)', async (_what, title, before) => {
-    expect(await judgedOnce(title, before)).toEqual(['invalid', 'markup_in_text']);
+    ['a tag', 'New <b>title</b>', null, 'seo_text_refused'],
+    ['a closing bracket', 'New > title', null, 'markup_in_text'],
+    ['a tag where the counts pass against a title that holds both', '<img src=x>', 'USB-C <> HDMI', 'seo_text_refused'],
+    ['brackets its field already held', 'USB-C <> HDMI, 2 m', 'USB-C <> HDMI', 'seo_text_refused'],
+  ])('leaves out a verdict that adds %s to a text field that is not HTML', async (_what, title, before, reason) => {
+    expect(await judgedOnce(title, before)).toEqual(['invalid', reason]);
   });
 
   it.each([
-    ['brackets its field already held', 'USB-C <> HDMI, 2 m', 'USB-C <> HDMI'],
+    ['a closing bracket its field already held', 'USB-C > HDMI, 2 m', 'USB-C > HDMI'],
     ['an inch mark', 'Pipe 2" wide', null],
   ])('writes a verdict that adds %s (twin)', async (_what, title, before) => {
     expect(await judgedOnce(title, before)).toEqual(['update', null]);
+  });
+
+  it('leaves out a verdict with a link in its SEO title, does not store it and goes on (PRD shopify-preset §23)', async () => {
+    fill(2);
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await judgedRun();
+      const box = judgeDeps(id);
+      const answers = ['Mehr auf https://evil.example/deal', 'Wasserfilter kaufen – 20 € günstiger'];
+      box.deps.call = (async () => ({
+        data: { keep: false, after: { seo_title: answers.shift() } }, inputTokens: 100, outputTokens: 10, costUsd: 0.01, modelId: 'claude-haiku-4-5',
+      })) as unknown as typeof callForStructuredJson;
+      expect((await runBulkJudge(id, box.deps)).status).toBe('done');
+      expect(ledger.getPreview(id).map((t) => [t.change, t.error, t.after])).toEqual([
+        // The planned template stays the after-state of the target left out: the verdict is not stored.
+        ['invalid', 'seo_text_refused', { seo_title: null, seo_description: 'D1' }],
+        ['update', null, { seo_title: 'Wasserfilter kaufen – 20 € günstiger', seo_description: 'D2' }],
+      ]);
+      expect(JSON.stringify(ledger.getPreview(id))).not.toContain('evil.example');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it.each([

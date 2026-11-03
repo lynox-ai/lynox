@@ -243,7 +243,7 @@ describe('isVettedEgressHost — the credential-attach gate', () => {
     ]);
     expect(exactHosts).toEqual([
       '0.0.0.0', '127.0.0.1', 'aiplatform.googleapis.com', 'api.anthropic.com',
-      'api.fireworks.ai', 'api.groq.com', 'api.mistral.ai', 'api.openai.com',
+      'api.eu.mistral.ai', 'api.fireworks.ai', 'api.groq.com', 'api.mistral.ai', 'api.openai.com',
       'api.together.xyz', 'localhost',
     ]);
   });

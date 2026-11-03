@@ -73,6 +73,7 @@ const PINNED: Readonly<Record<string, string>> = {
   "server/http-api.ts|? { principal: OWNER_PRINCIPAL, actorKind: 'cp-migration' as const }": 'audit actor of a migration, no attach',
   "core/engine.ts|principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history',": 'audit actor of the connection erasure sweep, no attach',
   "core/plan-takeover.ts|principal: OWNER_PRINCIPAL, action: 'plan.takeover', phase: 'done', correlationId: newCorrelationId(),": 'audit actor of the owner\'s takeover of a paused plan, no attach',
+  "core/session-store.ts|const summarySession = engine.createSession({ model: 'fast', principal: OWNER_PRINCIPAL });": 'the thread summary\'s session, built for the owner without tools, no attach',
   'core/migration-export.ts|const allSecrets = vault.getAll();': 'admin migration export, refused to a mandate before dispatch',
   'core/secret-vault.ts|const entries = oldVault.getAll();': 'vault re-key',
   'core/secret-store.ts|const entries = this.vault.getAll();': 'the store\'s own load',

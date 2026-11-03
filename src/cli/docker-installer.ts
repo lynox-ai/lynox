@@ -377,7 +377,7 @@ export async function validateOpenAICompatKey(
 // of POST /v1/chat/completions so we don't burn a token quota on every
 // installer run.
 export async function validateMistralKey(key: string): Promise<KeyValidation> {
-  return validateOpenAICompatKey(key, 'https://api.mistral.ai/v1', 'Mistral API');
+  return validateOpenAICompatKey(key, 'https://api.eu.mistral.ai/v1', 'Mistral API');
 }
 
 // TCP-probe a port to see if anything is already listening. Fast (~50ms on
@@ -947,7 +947,7 @@ export async function runDockerInstaller(args: readonly string[] = []): Promise<
       // wire shape as openai/custom); the user-facing label stays "Mistral"
       // so the model + endpoint defaults are pre-filled.
       envVars['LYNOX_LLM_PROVIDER'] = 'openai';
-      envVars['ANTHROPIC_BASE_URL'] = 'https://api.mistral.ai/v1';
+      envVars['ANTHROPIC_BASE_URL'] = 'https://api.eu.mistral.ai/v1';
 
       stdout.write(`\n  ${BOLD}Mistral${RESET}  ${DIM}console.mistral.ai → API Keys${RESET}\n`);
 

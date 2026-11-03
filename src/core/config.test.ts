@@ -1532,10 +1532,37 @@ describe('Config', () => {
   });
 
   it('LYNOX_API_BASE_URL (canonical) sets api_base_url', async () => {
-    process.env['LYNOX_API_BASE_URL'] = 'https://api.mistral.ai/v1';
+    process.env['LYNOX_API_BASE_URL'] = 'https://api.eu.mistral.ai/v1';
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
-    expect(config.api_base_url).toBe('https://api.mistral.ai/v1');
+    expect(config.api_base_url).toBe('https://api.eu.mistral.ai/v1');
+  });
+
+  // Mistral commits to EU/EFTA inference only for its regional endpoint. A config or env written
+  // before the move names the global one, and is read as the EU one.
+  it.each([
+    ['config.json, with /v1', 'file', 'https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'],
+    ['config.json, bare origin', 'file', 'https://api.mistral.ai', 'https://api.eu.mistral.ai'],
+    ['LYNOX_API_BASE_URL', 'env', 'https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'],
+  ] as const)('reads Mistral\'s global endpoint from %s as the EU one', async (_where, source, stored, expected) => {
+    if (source === 'env') process.env['LYNOX_API_BASE_URL'] = stored;
+    else {
+      const dir = join(fakeHome, '.lynox');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'config.json'), JSON.stringify({ provider: 'openai', api_base_url: stored }));
+    }
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_base_url).toBe(expected);
+  });
+
+  it('leaves every other endpoint as written, a spoof of the Mistral host included', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    for (const url of ['https://api.mistral.ai.evil.com/v1', 'https://api.us.mistral.ai/v1', 'https://api.groq.com/openai/v1']) {
+      writeFileSync(join(dir, 'config.json'), JSON.stringify({ provider: 'openai', api_base_url: url }));
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      expect((reloadConfig(), loadConfig()).api_base_url, url).toBe(url);
+    }
   });
 
   it('LYNOX_API_BASE_URL wins over the legacy ANTHROPIC_BASE_URL when both are set', async () => {
@@ -1799,7 +1826,7 @@ describe('Config', () => {
   // On a pool tier the key in the environment is the pool's; the endpoint a config file
   // names must be the one that key belongs to, or the key goes to another vendor.
   describe('an api_base_url from config.json on a pool tier', () => {
-    const MISTRAL = 'https://api.mistral.ai/v1';
+    const MISTRAL = 'https://api.eu.mistral.ai/v1';
     const ANTHROPIC = 'https://api.anthropic.com';
     const writeCfg = (cfg: Record<string, unknown>): void => {
       const dir = join(fakeHome, '.lynox');
@@ -1835,7 +1862,7 @@ describe('Config', () => {
       const cfg = (reloadConfig(), loadConfig());
       expect(cfg.api_base_url).toBe(MISTRAL);
       expect(cfg.api_key).toBe('sk-pool-mistral');
-      expect(await clientBase(cfg)).toContain('api.mistral.ai');
+      expect(await clientBase(cfg)).toContain('api.eu.mistral.ai');
     });
 
     it('on a pool tier, a leftover ANTHROPIC_BASE_URL does not decide the host either', async () => {
@@ -1867,7 +1894,9 @@ describe('Config', () => {
       const { loadConfig, reloadConfig } = await import('./config.js');
       for (const [cfgIn, expected] of [
         [{ provider: 'openai', api_base_url: MISTRAL }, MISTRAL],
-        [{ provider: 'openai', api_base_url: 'https://api.mistral.ai' }, 'https://api.mistral.ai'],
+        [{ provider: 'openai', api_base_url: 'https://api.eu.mistral.ai' }, 'https://api.eu.mistral.ai'],
+        // Written before the move: read as the EU endpoint, which the pool pairs.
+        [{ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' }, MISTRAL],
         [{ provider: 'anthropic', api_base_url: ANTHROPIC }, ANTHROPIC],
         [{ provider: 'anthropic' }, undefined],
       ] as const) {
