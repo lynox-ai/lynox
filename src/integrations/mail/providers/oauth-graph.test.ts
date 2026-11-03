@@ -562,22 +562,28 @@ describe('OAuthGraphProvider — links Graph hands back', () => {
     }
   });
 
-  it('…and so is a link on a host that only looks like Graph, while Graph itself is followed', async () => {
-    // Each look-alike survives a different loosening of the exact host match: the first
-    // passes `includes`/`startsWith`, the second passes `endsWith`.
+  it('…and so is a deltaLink on a host that only looks like Graph, while Graph itself is followed', async () => {
+    // Each loosening of the exact host match lets at least one of these through: the first
+    // passes `includes` and `startsWith`, the second `includes` and `endsWith`, the third a
+    // dot-anchored `endsWith` (a subdomain of Graph).
     for (const bad of [
       'https://graph.microsoft.com.attacker.example/v1.0/x',
       'https://evilgraph.microsoft.com/v1.0/x',
+      'https://x.graph.microsoft.com/v1.0/x',
     ]) {
       routes = [(url) => url.includes('/messages/delta?') ? json({ value: [], '@odata.deltaLink': bad }) : undefined];
       fetchMock.mockClear();
       const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
       const events: MailWatchEvent[] = [];
       const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
-      await vi.waitFor(() => { expect(events.length).toBeGreaterThan(0); });
-      await handle.stop();
-      await provider.close();
+      try {
+        await vi.waitFor(() => { expect(events.length).toBeGreaterThan(0); });
+      } finally {
+        await handle.stop();
+        await provider.close();
+      }
       expect(events[0], bad).toMatchObject({ type: 'error' });
+      expect(String((events[0] as { error: Error }).error.message), bad).toMatch(/off graph\.microsoft\.com/);
       expect(calls().every((c) => new URL(c.url).hostname === 'graph.microsoft.com'), bad).toBe(true);
     }
 
@@ -591,9 +597,12 @@ describe('OAuthGraphProvider — links Graph hands back', () => {
     const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const events: MailWatchEvent[] = [];
     const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
-    await vi.waitFor(() => { expect(calls().some((c) => c.url === good)).toBe(true); });
-    await handle.stop();
-    await provider.close();
+    try {
+      await vi.waitFor(() => { expect(calls().some((c) => c.url === good)).toBe(true); });
+    } finally {
+      await handle.stop();
+      await provider.close();
+    }
     expect(events.filter((e) => e.type === 'error')).toEqual([]);
   });
 });
