@@ -715,8 +715,8 @@ export const CACHE_READ_MULTIPLIER = 0.1;
 
 /**
  * Legacy Mistral ids the API answers with ANOTHER model, mapped to the registry entry of
- * the model that answers (measured 2026-10-13: the response's `model` field, and the
- * alias lists of `GET /v1/models`). The legacy entry carries that model's pricing and
+ * the model that answers (measured 2026-10-13 and again 2026-11-03 on the EU endpoint: the
+ * response's `model` field, and the alias lists of `GET /v1/models`). The legacy entry carries that model's pricing and
  * context window, so the cost cap counts what Mistral bills.
  */
 export const MISTRAL_SERVED_AS: Readonly<Record<string, string>> = Object.freeze({
@@ -1039,15 +1039,18 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'Ministral 14B',
     provenance: 'EU',
   },
-  // Mistral Large 3 (Dec 2025): 256k context, $0.50/$1.50 (75% price cut vs Large 2),
+  // Mistral Large 3 (Dec 2025): 262 144 context, 256k in binary k (`GET /v1/models` on the EU
+  // endpoint, 2026-11-03; this entry had the decimal 256 000), $0.50/$1.50 list (75% price cut vs Large 2),
   // multimodal input (text+image), structured-outputs, function-calling, prefix-cache.
   // The `deep` tier as of 2026-05-29 (replaced the deprecated magistral-medium-2509);
-  // the Mistral quality leader on Set-Bench v4.
+  // the Mistral quality leader on Set-Bench v4. Mistral retires it on 2027-04-30 (deprecation
+  // table, read 2026-11-03) and names Large 4 as the alternative; Large 4 is a public preview
+  // there and is not registered here.
   'mistral-large-2512': {
     id: 'mistral-large-2512',
     provider: 'openai',
     tier: 'deep',
-    contextWindow: 256_000,
+    contextWindow: 262_144,
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
@@ -1068,7 +1071,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // wired into MISTRAL_MODEL_MAP — they're only referenced by set-bench and
   // cost-guard so the user can opt-in via openai_model_id.
   //
-  // ⚠ SERVED-AS (measured live 2026-10-13):
+  // ⚠ SERVED-AS (measured live 2026-10-13, unchanged on the EU endpoint 2026-11-03):
   // Mistral does not refuse a retired id, it answers it with a successor and names that
   // successor in the response's `model` field. A legacy config that pins one of these ids
   // therefore runs on — and is billed for — another model. Each such entry carries the

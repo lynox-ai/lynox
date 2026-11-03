@@ -276,7 +276,7 @@ describe('Mistral tier-set', () => {
     // mistral-small-2603 is Small 4 and active: /v1/models gives 262 144 (2026-10-13)
     expect(getContextWindow('mistral-small-2603')).toBe(262_144);
     // Mistral Large 3 (Dec 2025) has 256k ctx (was 131k as Large 2)
-    expect(getContextWindow('mistral-large-2512')).toBe(256_000);
+    expect(getContextWindow('mistral-large-2512')).toBe(262_144);
     // Gen-3 ministrals replace -2410. /v1/models (2026-10-13): 8B 262 144, 3B only 131 072.
     expect(getContextWindow('ministral-3b-2512')).toBe(131_072);
     expect(getContextWindow('ministral-8b-2512')).toBe(262_144);
@@ -459,7 +459,7 @@ describe('resolveNativeContextWindow', () => {
   it('returns the registry window for a known id (managed Mistral, direct Anthropic)', () => {
     // managed: getModelId(balanced, openai) → ministral-14b-2512 (provider openai), 262k.
     expect(resolveNativeContextWindow('ministral-14b-2512', 'openai', undefined)).toBe(262_144);
-    expect(resolveNativeContextWindow('mistral-large-2512', 'openai', undefined)).toBe(256_000);
+    expect(resolveNativeContextWindow('mistral-large-2512', 'openai', undefined)).toBe(262_144);
     expect(resolveNativeContextWindow('claude-opus-4-6', 'anthropic', undefined)).toBe(1_000_000);
   });
 
