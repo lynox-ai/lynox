@@ -561,6 +561,41 @@ describe('OAuthGraphProvider — links Graph hands back', () => {
       expect(events[0], bad).toMatchObject({ type: 'error' });
     }
   });
+
+  it('…and so is a link on a host that only looks like Graph, while Graph itself is followed', async () => {
+    // Each look-alike survives a different loosening of the exact host match: the first
+    // passes `includes`/`startsWith`, the second passes `endsWith`.
+    for (const bad of [
+      'https://graph.microsoft.com.attacker.example/v1.0/x',
+      'https://evilgraph.microsoft.com/v1.0/x',
+    ]) {
+      routes = [(url) => url.includes('/messages/delta?') ? json({ value: [], '@odata.deltaLink': bad }) : undefined];
+      fetchMock.mockClear();
+      const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
+      const events: MailWatchEvent[] = [];
+      const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
+      await vi.waitFor(() => { expect(events.length).toBeGreaterThan(0); });
+      await handle.stop();
+      await provider.close();
+      expect(events[0], bad).toMatchObject({ type: 'error' });
+      expect(calls().every((c) => new URL(c.url).hostname === 'graph.microsoft.com'), bad).toBe(true);
+    }
+
+    // The control on the same machinery: a deltaLink on graph.microsoft.com is kept and
+    // followed in the next round, and no error is raised.
+    const good = `${ME}/mailFolders/inbox/messages/delta?$deltatoken=ok`;
+    routes = [(url) => url === good || url.includes('/messages/delta?changeType=')
+      ? json({ value: [], '@odata.deltaLink': good })
+      : undefined];
+    fetchMock.mockClear();
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
+    const events: MailWatchEvent[] = [];
+    const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
+    await vi.waitFor(() => { expect(calls().some((c) => c.url === good)).toBe(true); });
+    await handle.stop();
+    await provider.close();
+    expect(events.filter((e) => e.type === 'error')).toEqual([]);
+  });
 });
 
 describe('OAuthGraphProvider — watch over delta', () => {
