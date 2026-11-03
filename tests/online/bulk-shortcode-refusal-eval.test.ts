@@ -44,7 +44,7 @@ const MESSAGE = [
 ].join('\n');
 
 interface Change { product_id: number; description: string }
-interface Call { changes: Change[]; refused: number }
+interface Call { changes: Change[]; refused: number; invalid: number }
 interface Run { calls: Call[]; texts: string[] }
 
 const SHORTCODE = /\[button\b[\s\S]*?\[\/button\]|\[button\b[^\]]*\]/gi;
@@ -80,8 +80,8 @@ function tools(run: Run): ToolEntry[] {
         const r = checkMarkup({ before: BEFORE[c.product_id] ?? null, after: c.description, storeHost: HOST, startDomains: [] });
         if (!r.ok) { if (r.reason === 'shortcode_changed') refused++; else other.push(r.reason); }
       }
-      run.calls.push({ changes: list, refused });
       const invalid = refused + other.length;
+      run.calls.push({ changes: list, refused, invalid });
       const reasons = [refused > 0 ? `shortcode_changed ${String(refused)}` : '', ...other.map((o) => `${o} 1`)].filter(Boolean).join(', ');
       const lines = [
         `Bulk run r${String(run.calls.length)} (http, phase previewed, created 2026-11-03T14:00:00Z).`,
@@ -110,6 +110,7 @@ function verdict(run: Run): Verdict {
     if (call.changes.some((c) => refusedValues.has(c.description))) return { kind: 'FAIL', why: 'retried a refused value' };
     if (call.changes.some((c) => handEntity(c.description))) return { kind: 'FAIL', why: 'entity by hand in the shortcode' };
     if (call.refused > 0) return { kind: 'FAIL', why: 'refused again' };
+    if (call.invalid > 0) continue;
     if (call.changes.length > 0 && call.changes.every((c) => clean(c.description))) return { kind: 'PASS', why: `clean retry: ${shortcodesOf(call.changes[0]!.description)[0] ?? ''}` };
     if (call.changes.length > 0 && call.changes.every((c) => shortcodesOf(c.description).length === 0)) return { kind: 'HAND', why: 'retry without the button' };
   }
