@@ -1565,6 +1565,43 @@ describe('Config', () => {
     }
   });
 
+  // The control plane's worker and fallback profiles arrive with the URL it wrote, which can be
+  // the global one. The loaded profile names the EU endpoint; another host in the same blob stays
+  // as written.
+  it('reads a model profile on Mistral\'s global endpoint as the EU one, and leaves other hosts', async () => {
+    process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+      worker: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-w', model_id: 'ministral-14b-2512' },
+      fallback: { provider: 'openai', api_base_url: 'https://api.mistral.ai', api_key: 'sk-f', model_id: 'mistral-medium-2604' },
+      other: { provider: 'openai', api_base_url: 'https://api.groq.com/openai/v1', api_key: 'sk-g', model_id: 'm' },
+    });
+    const { loadConfig } = await import('./config.js');
+    const profiles = loadConfig().model_profiles;
+    expect(profiles?.['worker']?.api_base_url).toBe('https://api.eu.mistral.ai/v1');
+    expect(profiles?.['fallback']?.api_base_url).toBe('https://api.eu.mistral.ai');
+    expect(profiles?.['other']?.api_base_url).toBe('https://api.groq.com/openai/v1');
+    // The rest of the profile is carried over unchanged.
+    expect(profiles?.['worker']).toMatchObject({ provider: 'openai', api_key: 'sk-w', model_id: 'ministral-14b-2512' });
+  });
+
+  it('reads a tier slot and the background model on Mistral\'s global endpoint as the EU one', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      routing_mode: 'hybrid',
+      tier_set: {
+        fast: { provider: 'openai', model_id: 'ministral-14b-2512', api_base_url: 'https://api.mistral.ai/v1' },
+        deep: { provider: 'openai', model_id: 'gpt-oss', api_base_url: 'https://api.groq.com/openai/v1' },
+      },
+      background_model: { provider: 'mistral', model_id: 'ministral-14b-2512', api_base_url: 'https://api.mistral.ai/v1' },
+    }));
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig();
+    expect(cfg.tier_set?.fast?.api_base_url).toBe('https://api.eu.mistral.ai/v1');
+    expect(cfg.tier_set?.fast?.model_id).toBe('ministral-14b-2512');
+    expect(cfg.tier_set?.deep?.api_base_url).toBe('https://api.groq.com/openai/v1');
+    expect(cfg.background_model?.api_base_url).toBe('https://api.eu.mistral.ai/v1');
+  });
+
   it('LYNOX_API_BASE_URL wins over the legacy ANTHROPIC_BASE_URL when both are set', async () => {
     process.env['LYNOX_API_BASE_URL'] = 'https://canonical.example/v1';
     process.env['ANTHROPIC_BASE_URL'] = 'https://legacy.example/v1';
@@ -1788,8 +1825,8 @@ describe('Config', () => {
   // On a pool tier the CP's key is the only LLM credential. A profile in config.json carries
   // the user's own `api_key`, and spawn(profile) would send it in the pool's place.
   describe('a model profile from config.json on a pool tier', () => {
-    const fileProfile = { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-own', model_id: 'mistral-large-2512' };
-    const envProfile = { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-pool', model_id: 'mistral-large-2512' };
+    const fileProfile = { provider: 'openai', api_base_url: 'https://api.eu.mistral.ai/v1', api_key: 'sk-own', model_id: 'mistral-large-2512' };
+    const envProfile = { provider: 'openai', api_base_url: 'https://api.eu.mistral.ai/v1', api_key: 'sk-pool', model_id: 'mistral-large-2512' };
     const writeProfiles = (cfg: Record<string, unknown>): void => {
       const dir = join(fakeHome, '.lynox');
       mkdirSync(dir, { recursive: true });
@@ -1811,6 +1848,14 @@ describe('Config', () => {
       process.env['LYNOX_BILLING_TIER'] = 'managed';
       process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({ fallback: envProfile });
       writeProfiles({ model_profiles: { mine: fileProfile, fallback: { ...fileProfile } } });
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().model_profiles).toEqual({ fallback: envProfile });
+    });
+
+    it('keeps an environment profile on the global Mistral URL on a pool tier, read as the EU one', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({ fallback: { ...envProfile, api_base_url: 'https://api.mistral.ai/v1' } });
+      writeProfiles({ model_profiles: { mine: { ...fileProfile, api_base_url: 'https://api.mistral.ai/v1' } } });
       const { loadConfig } = await import('./config.js');
       expect(loadConfig().model_profiles).toEqual({ fallback: envProfile });
     });

@@ -1,8 +1,8 @@
 // === Inbox classifier — Mistral EU LLM caller ===
 //
 // Direct REST adapter for Mistral's chat-completions endpoint, used as
-// the EU-resident classifier provider. Hits api.eu.mistral.ai/v1 in
-// Frankfurt; no third-party SDK, no AnthropicLike shim — the OpenAI
+// the EU classifier provider. Hits api.eu.mistral.ai/v1, Mistral's EU
+// regional endpoint; no third-party SDK, no AnthropicLike shim — the OpenAI
 // adapter in core/openai-adapter.ts only implements `beta.messages.stream`,
 // while the inbox classifier issues a single non-streaming
 // `messages.create`. A small fetch wrapper is the minimal contract

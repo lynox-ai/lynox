@@ -15,7 +15,7 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 
 ## At a Glance
 
-| | **Claude (Anthropic)** ✅ tested | **Mistral (EU)** ✅ tested | **Other OpenAI-compatible** ⚠ experimental | **Custom Anthropic-compat proxy** ⚠ experimental |
+| | **Claude (Anthropic)** ✅ tested | **Mistral (EU and EFTA)** ✅ tested | **Other OpenAI-compatible** ⚠ experimental | **Custom Anthropic-compat proxy** ⚠ experimental |
 |---|---|---|---|---|
 | **Setup** | API key | API key | API key + base URL | Proxy URL |
 | **AI quality** | Claude | Mistral Large / Ministral | Model-dependent | Model-dependent |
@@ -31,7 +31,7 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 | Web Search (SearXNG / DDG fallback) | ✅ | ✅ | ✅ | ✅ |
 | | | | | |
 | **Privacy** | | | | |
-| Data residency | US | EU by default | Provider-dependent | 🏠 Your server |
+| Data residency | US | EU and EFTA (EU endpoint) | Provider-dependent | 🏠 Your server |
 | Training on data | ❌ Never | ❌ Never (per Mistral terms) | Provider-dependent | ❌ Never |
 | | | | | |
 | **Cost** | | | | |
@@ -84,7 +84,7 @@ The config shape is always the same:
 
 The wizard (npx installer or in-product **Settings → Config**) prefills the right values when you pick Mistral or Custom; the manual snippets below are for `~/.lynox/config.json` editors or environment-driven deploys.
 
-### Mistral (France, EU) — natively supported
+### Mistral (France; EU endpoint) — natively supported
 
 First-class Sonnet replacement, tested on every release. Every Anthropic tier has a 100%-pass Mistral replacement on the lynox agent-loop bench (see [/bench](https://lynox.ai/bench)); ~6× cheaper than Claude on cached workloads; French company with no US parent.
 
@@ -306,7 +306,7 @@ For maximum data control, run lynox on a server close to your LLM provider — a
 
 | Setup | LLM | lynox | Data Residency |
 |-------|-----|-------|---------------|
-| **Hetzner + Mistral** | Mistral API (EU by default) | Hetzner VPS (Falkenstein) | Server and AI provider are not US companies; Mistral may transfer data to its own sub-processors outside the EU |
+| **Hetzner + Mistral** | Mistral API (EU endpoint, inference in EU and EFTA countries) | Hetzner VPS (Falkenstein) | Server and AI provider are not US companies; Mistral may transfer data to its own sub-processors outside the EU |
 | **Fully local** | Ollama on your server | Docker on your server | The model call stays on your server |
 
 lynox runs as a single Docker container — any platform that runs containers can host it. See [Docker Deployment](/setup/docker/) for container configuration.
