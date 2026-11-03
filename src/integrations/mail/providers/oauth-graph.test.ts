@@ -561,6 +561,50 @@ describe('OAuthGraphProvider — links Graph hands back', () => {
       expect(events[0], bad).toMatchObject({ type: 'error' });
     }
   });
+
+  it('…and so is a deltaLink on a host that only looks like Graph, while Graph itself is followed', async () => {
+    // Each loosening of the exact host match lets at least one of these through: the first
+    // passes `includes` and `startsWith`, the second `includes` and `endsWith`, the third a
+    // dot-anchored `endsWith` (a subdomain of Graph).
+    for (const bad of [
+      'https://graph.microsoft.com.attacker.example/v1.0/x',
+      'https://evilgraph.microsoft.com/v1.0/x',
+      'https://x.graph.microsoft.com/v1.0/x',
+    ]) {
+      routes = [(url) => url.includes('/messages/delta?') ? json({ value: [], '@odata.deltaLink': bad }) : undefined];
+      fetchMock.mockClear();
+      const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
+      const events: MailWatchEvent[] = [];
+      const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
+      try {
+        await vi.waitFor(() => { expect(events.length).toBeGreaterThan(0); });
+      } finally {
+        await handle.stop();
+        await provider.close();
+      }
+      expect(events[0], bad).toMatchObject({ type: 'error' });
+      expect(String((events[0] as { error: Error }).error.message), bad).toMatch(/off graph\.microsoft\.com/);
+      expect(calls().every((c) => new URL(c.url).hostname === 'graph.microsoft.com'), bad).toBe(true);
+    }
+
+    // The control on the same machinery: a deltaLink on graph.microsoft.com is kept and
+    // followed in the next round, and no error is raised.
+    const good = `${ME}/mailFolders/inbox/messages/delta?$deltatoken=ok`;
+    routes = [(url) => url === good || url.includes('/messages/delta?changeType=')
+      ? json({ value: [], '@odata.deltaLink': good })
+      : undefined];
+    fetchMock.mockClear();
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
+    const events: MailWatchEvent[] = [];
+    const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
+    try {
+      await vi.waitFor(() => { expect(calls().some((c) => c.url === good)).toBe(true); });
+    } finally {
+      await handle.stop();
+      await provider.close();
+    }
+    expect(events.filter((e) => e.type === 'error')).toEqual([]);
+  });
 });
 
 describe('OAuthGraphProvider — watch over delta', () => {
