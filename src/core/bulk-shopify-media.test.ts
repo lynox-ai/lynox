@@ -39,7 +39,7 @@ const HOST = 'acme.myshopify.com';
 // The store connection of HOST, granted the scope image alt texts need (`shopifyMediaWritable`), so a
 // plan in the image form gets past the scope check to what this file tests.
 const IMAGE_WRITING_STORE = {
-  getByHostname: (h: string) => h === HOST ? { auth: { type: 'oauth2', oauth: { preset_id: 'shopify' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
+  getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
 };
 const ENDPOINT = `https://${HOST}/admin/api/2026-10/graphql.json`;
 const product = (n: number): string => `gid://shopify/Product/${String(n)}`;

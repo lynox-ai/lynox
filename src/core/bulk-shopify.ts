@@ -18,7 +18,7 @@ import { isPlainObject, type ExternalClient, type ExternalRead, type TargetIo } 
 import type { BulkInvalidReason, ListPageItem } from './bulk-ledger.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, mediaImageGidNumber, productGidNumber, type ShopifyWriteForm } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
-import { askedScopes } from './oauth-presets.js';
+import { presetStoreHost } from './oauth-presets.js';
 import type { ApiProfile } from './api-store.js';
 
 /** The Shopify scopes either of which `fileUpdate` needs to write an image's alt text (PRD
@@ -26,16 +26,15 @@ import type { ApiProfile } from './api-store.js';
 export const SHOPIFY_MEDIA_WRITE_SCOPES: readonly string[] = Object.freeze(['write_files', 'write_themes']);
 
 /**
- * Whether a store connection may write image alt texts: its grant holds `write_files` or
- * `write_themes`. The scopes are those the provider says it granted, else those the connection
- * asked for; no profile, a profile that is no OAuth connection, or one with neither scope may not.
- * A store connection is always the engine's own OAuth grant (`http.ts`, the store binding), so a
- * profile of another kind writes no store anyway.
+ * Whether the store connection for `host` may write image alt texts: the engine's own Shopify
+ * connection to that store (`presetStoreHost`, the same profile the write attaches) whose grant,
+ * as Shopify answered it, holds `write_files` or `write_themes`. Without a recorded grant nothing
+ * is known beyond the ask, and the preset never asks for either, so that counts as no.
  */
-export function shopifyMediaWritable(profile: Pick<ApiProfile, 'auth' | 'oauth_grant'> | undefined): boolean {
-  if (profile?.auth?.type !== 'oauth2') return false;
-  const scopes = profile.oauth_grant?.granted_scope ?? askedScopes(profile.auth.oauth ?? {}) ?? [];
-  return scopes.some((s) => SHOPIFY_MEDIA_WRITE_SCOPES.includes(s));
+export function shopifyMediaWritable(profile: Pick<ApiProfile, 'base_url' | 'auth' | 'oauth_grant'> | undefined, host: string): boolean {
+  // Only the Shopify preset derives its API host from the store (`apiOnDerivedHost`), so a match is that preset.
+  if (profile === undefined || presetStoreHost(profile) !== host) return false;
+  return (profile.oauth_grant?.granted_scope ?? []).some((s) => SHOPIFY_MEDIA_WRITE_SCOPES.includes(s));
 }
 
 /** Whether this instance reads Shopify stores in bulk runs. Asked when a run is planned and on

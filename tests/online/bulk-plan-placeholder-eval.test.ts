@@ -36,7 +36,7 @@ const STORE = 'acme-demo.myshopify.com';
 // The store connection of STORE, granted the scope image alt texts need (`shopifyMediaWritable`), so a
 // plan in the image form gets past the scope check to what this file tests.
 const IMAGE_WRITING_STORE = {
-  getByHostname: (h: string) => h === STORE ? { auth: { type: 'oauth2', oauth: { preset_id: 'shopify' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
+  getByHostname: (h: string) => h === STORE ? { base_url: `https://${STORE}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: STORE.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
 };
 
 const PRODUCTS = JSON.stringify({

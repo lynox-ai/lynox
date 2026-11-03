@@ -18,7 +18,7 @@ const HOST = 'acme.myshopify.com';
 // The store connection of HOST, granted the scope image alt texts need (`shopifyMediaWritable`), so a
 // plan in the image form gets past the scope check to what this file tests.
 const IMAGE_WRITING_STORE = {
-  getByHostname: (h: string) => h === HOST ? { auth: { type: 'oauth2', oauth: { preset_id: 'shopify' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
+  getByHostname: (h: string) => h === HOST ? { base_url: `https://${HOST}`, auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: HOST.split('.')[0] } } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
 };
 const FLAG = 'LYNOX_FEATURE_SHOPIFY_BULK_READ';
 const PRODUCT_RULES = 'Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after sets only title, seo_title, seo_description, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.';
@@ -161,25 +161,38 @@ describe('the bulk_plan schema', () => {
 // fileUpdate needs write_files or write_themes, which the Shopify preset never asks for: an image
 // plan over such a connection would be approved and then fail at Shopify for every target.
 describe('an image plan on a store connection that may not write image alt texts', () => {
-  const NO_SCOPE = 'source_list.form shopify_media writes image alt texts, which needs the Shopify scope write_files or write_themes on the store connection, and the connection for target_host holds neither. Product fields can be changed with form shopify; tell the user in one sentence that image alt texts cannot be changed on this store connection.';
+  const NO_SCOPE = 'source_list.form shopify_media writes image alt texts, which needs a Shopify store connection for target_host granted the scope write_files or write_themes, and target_host has no such connection. Tell the user in one sentence that image alt texts cannot be changed on this store.';
   const connection = (profile: unknown) => ({ getByHostname: (h: string) => h === HOST ? profile : undefined });
   const planOn = (store: unknown, input: Record<string, unknown>): Promise<string> =>
     bulkPlanTool.handler({ target_system: 'http', target_host: HOST, ...input } as Parameters<typeof bulkPlanTool.handler>[0],
       ({ toolContext: { bulkLedger: ledger, apiStore: store }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent);
   const runs = (): unknown => engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get();
-  const preset = (grant: Record<string, unknown> | undefined, scope = 'read_products,write_products') =>
-    ({ auth: { type: 'oauth2', oauth: { preset_id: 'shopify', scope } }, ...(grant ? { oauth_grant: grant } : {}) });
+  // The engine's own Shopify connection to HOST, as `api_setup` saves it.
+  const preset = (grant: Record<string, unknown> | undefined, over: { presetId?: string; shop?: string; scope?: string } = {}) => ({
+    base_url: `https://${HOST}`,
+    auth: { type: 'oauth2', oauth: { preset_id: over.presetId ?? 'shopify', preset_params: { shop: over.shop ?? 'acme' }, scope: over.scope ?? 'read_products write_products' } },
+    ...(grant ? { oauth_grant: grant } : {}),
+  });
 
   it.each([
     ['no connection for the store', null],
     ['a preset connection granted the product scopes only', connection(preset({ granted_scope: ['read_products', 'write_products'] }))],
-    ['a preset connection with no recorded grant, asking for the product scopes', connection(preset(undefined))],
-    ['a grant narrower than a write_files ask', connection(preset({ granted_scope: ['read_products'] }, 'read_products,write_files'))],
-    ['a profile that is no OAuth connection', connection({ auth: { type: 'bearer' }, oauth_grant: { granted_scope: ['write_files'] } })],
+    ['a preset connection with no recorded grant', connection(preset(undefined))],
+    ['a connection of another provider granted write_files', connection(preset({ granted_scope: ['write_files'] }, { presetId: 'example-shop' }))],
+    ['a preset connection whose store is another one', connection(preset({ granted_scope: ['write_files'] }, { shop: 'other' }))],
+    ['a profile that is no OAuth connection', connection({ base_url: `https://${HOST}`, auth: { type: 'bearer' }, oauth_grant: { granted_scope: ['write_files'] } })],
   ])('refuses it with its own reason, without the form\'s rules, over %s', async (_what, store) => {
     const answer = await planOn(store, { source_list: { form: 'shopify_media', after: { alt: 'x' } } });
     expect(answer).toBe(`Error: ${NO_SCOPE}`);
     expect(runs()).toEqual({ n: 0 });
+  });
+
+  // A host that is no store is refused for that: the scope reason would send the user the wrong way.
+  it('refuses an image plan on a host that is no store for the host, not for the scope', async () => {
+    const answer = await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.acme.ch', source_list: { form: 'shopify_media', after: { alt: 'x' } } } as Parameters<typeof bulkPlanTool.handler>[0],
+      ({ toolContext: { bulkLedger: ledger, apiStore: connection(null) }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent);
+    expect(answer.startsWith('Error: source_list.form shopify_media reads a store: target_host must be <store>.myshopify.com.'), answer).toBe(true);
+    expect(answer).not.toContain('write_files');
   });
 
   it.each([

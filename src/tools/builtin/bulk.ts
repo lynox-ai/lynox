@@ -169,13 +169,13 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
  *  (`shopifyMediaWritable`): the one profile mapped to that host, read from the API store. */
 function mediaWritableFor(input: BulkPlanInput, agent: IAgent): boolean {
   const host = typeof input.target_host === 'string' ? canonicalHost(input.target_host) : null;
-  return host !== null && shopifyMediaWritable(agent.toolContext?.apiStore?.getByHostname(host));
+  return host !== null && shopifyMediaWritable(agent.toolContext?.apiStore?.getByHostname(host), host);
 }
 
 /** The refusal of an image plan on a store connection that may not write image alt texts: the
  *  write would fail at Shopify for every target, after the owner approved it. Without the form's
  *  rules, which would name the alt text it cannot write. */
-const SHOPIFY_MEDIA_NO_SCOPE = `source_list.form shopify_media writes image alt texts, which needs the Shopify scope ${SHOPIFY_MEDIA_WRITE_SCOPES.join(' or ')} on the store connection, and the connection for target_host holds neither. Product fields can be changed with form shopify; tell the user in one sentence that image alt texts cannot be changed on this store connection.`;
+const SHOPIFY_MEDIA_NO_SCOPE = `source_list.form shopify_media writes image alt texts, which needs a Shopify store connection for target_host granted the scope ${SHOPIFY_MEDIA_WRITE_SCOPES.join(' or ')}, and target_host has no such connection. Tell the user in one sentence that image alt texts cannot be changed on this store.`;
 
 /** A plan on a Shopify store's host that does not use a Shopify form: the refusal it got (a path
  *  that is not a woocommerce list, a source file that does not exist) says nothing about the store,
@@ -212,8 +212,9 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     // A judge plans its fields F like an after-state: the Shopify parse below bounds them to the
     // writable fields. Only the product form takes one: an image run writes its alt text from
     // source_list.after until a judge is decided for it. A verb would name a write nothing grants.
-    // Before every other check of the form: no plan in it can be written over this connection.
-    if (form === 'shopify_media' && !mediaWritableFor(input, agent)) throw new BulkSourceError(SHOPIFY_MEDIA_NO_SCOPE);
+    // Before the form's other checks: no plan in it can be written over this connection. Only on a
+    // store host: any other host is refused by the parse below, with the reason that fits it.
+    if (form === 'shopify_media' && isShopifyStoreHostName(host) && !mediaWritableFor(input, agent)) throw new BulkSourceError(SHOPIFY_MEDIA_NO_SCOPE);
     if (judgeInput !== undefined && form !== 'shopify') throw new BulkSourceError(`source_list.form ${form} does not take judge yet: give the fields to set in source_list.after.`);
     if (input.write_method !== undefined) throw new BulkSourceError(`source_list.form ${form} does not take write_method: the engine writes a store with its own form.`);
   }
