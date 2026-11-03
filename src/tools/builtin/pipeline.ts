@@ -1069,7 +1069,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   if (runFor.kind === 'refused') return `Error: ${runFor.error}`;
   const runAs = runFor.principal;
   const asPlanOfAuthor = <T>(trail: WorkflowRunTrail | null, fn: () => T): T =>
-    runFor.asPlan ? runAsPlanOf(runAs, () => underWorkflowRun(trail, runAs, fn), null, trail?.key) : underWorkflowRun(trail, runAs, fn);
+    runFor.asPlan ? runAsPlanOf(runAs, () => underWorkflowRun(trail, runAs, fn), null, trail?.key, /* the owner started it */ true) : underWorkflowRun(trail, runAs, fn);
 
   // Interactive pipelines need a live prompt-capable session. Refuse with a
   // clear error rather than running steps that will throw "ask_user is not
