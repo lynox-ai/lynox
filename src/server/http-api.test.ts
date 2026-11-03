@@ -16718,6 +16718,27 @@ describe('LynoxHTTPApi', () => {
       expect(seen).toEqual([['download', 500, failed], ['download', 404], ['read', 500, failed], ['read', 404]]);
     });
 
+    it('without isolation, closes the opened file when the header cannot be sent and for an empty file', async () => {
+      repayRateWindow();
+      const held = (name: string): number =>
+        readdirSync('/proc/self/fd').filter((n) => { try { return readlinkSync(`/proc/self/fd/${n}`).endsWith(name); } catch { return false; } }).length;
+      writeFileSync(join(base, 'safe', 'once.txt'), 'x');
+      writeFileSync(join(base, 'safe', 'empty.txt'), '');
+      const writeHead = vi.spyOn(ServerResponse.prototype, 'writeHead');
+      try {
+        for (let i = 0; i < 10; i++) {
+          // The header write is what fails, as Node does for a header value it refuses.
+          writeHead.mockImplementationOnce(() => { throw new TypeError('Invalid character in header content'); });
+          expect((await jsonFetch('/api/files/download?path=safe/once.txt')).status).toBe(500);
+        }
+      } finally {
+        writeHead.mockRestore();
+      }
+      for (let i = 0; i < 10; i++) expect((await jsonFetch('/api/files/download?path=safe/empty.txt')).status).toBe(200);
+      // A FileHandle left open is only closed by the garbage collector, so a missing close shows here.
+      expect([held('once.txt'), held('empty.txt')]).toEqual([0, 0]);
+    });
+
     it('answers every path behind an escaping symlink with 403, so files and directories out there look alike', async () => {
       mkdirSync(join(externalDir, 'sub'), { recursive: true });
       // Missing leaf, a file used as a directory, a directory, and a missing nested path: all
