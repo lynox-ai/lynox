@@ -439,6 +439,31 @@ describe('applying a media run', () => {
     engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(first);
     const second = await previewed();
     expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_media_alt', cause: 'other_run' }], step: null } });
+    // The second run's own probe gets a row of its own; the first run keeps its probe.
+    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+    await apply(second);
+    expect(ledger.confirmProbe(second)).toEqual({ ok: true });
+    expect([ledger.getStatus(first)!.probeConfirmed, ledger.getStatus(second)!.probeConfirmed]).toEqual([true, true]);
+    expect(engineDb.getDb().prepare('SELECT kind, run_id FROM bulk_host_probes ORDER BY confirmed_at, kind').all()).toEqual([
+      { kind: `unmeasured:${first}:shopify_media_alt`, run_id: first },
+      { kind: `unmeasured:${second}:shopify_media_alt`, run_id: second },
+    ]);
+  });
+
+  // A probe confirmed before the kind carried its run: `unmeasured:<form>`, read with its `run_id`.
+  it('reads an image probe filed before rows carried their run as that run\'s own only', async () => {
+    fill(2);
+    const first = await previewed();
+    ledger.approve(first, { checksum: ledger.computeChecksum(first)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    await apply(first);
+    engineDb.getDb().prepare('INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, NULL, ?)')
+      .run(HOST, 'POST', 'unmeasured:shopify_media_alt', first, new Date().toISOString());
+    expect(ledger.getStatus(first)!.probeConfirmed).toBe(true);
+    expect(ledger.probeKey(first)).toBeNull();
+    mediaOf(image(11))!.alt = 'A1';
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(first);
+    const second = await previewed();
+    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_media_alt', cause: 'other_run' }], step: null } });
   });
 
   it('records an image the store refuses as not ready as refused, and the alt as it was', async () => {

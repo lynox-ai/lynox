@@ -738,8 +738,9 @@ export function resourceKindOf(path: string): string {
   return trimmed.slice(0, trimmed.lastIndexOf('/') + 1);
 }
 
-/** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A kind is a path
- *  and starts with `/`, so a marked one never equals a plain one. */
+/** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A plain kind is a
+ *  path and starts with `/`, so a marked one never equals a plain one; a Shopify form is always
+ *  marked. */
 const UNMEASURED_PROBE = 'unmeasured:';
 /** The method a Shopify run's probe is filed under: its form writes with a `POST` to the store's endpoint. */
 const SHOPIFY_PROBE_METHOD = 'POST';
