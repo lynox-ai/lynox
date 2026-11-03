@@ -750,7 +750,8 @@ describe('restoreBackup writes only where createBackup writes', () => {
       const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/names two paths this machine's filesystem takes for one name/);
-      expect(folds.mock.calls).toEqual([[memory]]);
+      expect(folds).toHaveBeenCalledTimes(1);
+      expect(folds).toHaveBeenCalledWith(memory);
       expect(liveTier()).toBe('deep');
     } finally {
       folds.mockRestore();
