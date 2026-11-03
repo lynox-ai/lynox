@@ -143,7 +143,7 @@ describe('files', () => {
 		const deletes = (): string[] =>
 			(fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock.calls
 				.filter(([, init]) => init?.method === 'DELETE').map(([url]) => String(url));
-		const answerDelete = (res: () => Response): void => {
+		const answerDelete = (res: () => Response | Promise<Response>): void => {
 			const base = fetch as unknown as (url: string, init?: RequestInit) => Promise<Response>;
 			vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => (init?.method === 'DELETE' ? res() : base(url, init))));
 		};
@@ -184,6 +184,36 @@ describe('files', () => {
 			buttonByTitle(t('files.delete'))!.click();
 			await settle();
 			expect(getToasts().map((x) => x.message)).toEqual([tf('files.delete_failed', { name: 'offer.pdf' })]);
+		});
+
+		const listings = (): number =>
+			(fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock.calls
+				.filter(([url, init]) => init?.method === undefined && /\/files\?path=/.test(String(url))).length;
+
+		it('reloads the folder after a delete, whether it worked or not, as the toast says', async () => {
+			for (const status of [200, 404]) {
+				answerDelete(() => new Response(JSON.stringify(status === 200 ? { ok: true } : { error: 'File not found' }), { status, headers: { 'Content-Type': 'application/json' } }));
+				await render('files');
+				const before = listings();
+				buttonByTitle(t('files.delete'))!.click();
+				await settle();
+				expect(`${status}: ${String(listings() - before)}`).toBe(`${status}: 1`);
+			}
+		});
+
+		it('sends one DELETE when the button is clicked again while the first is still running', async () => {
+			let answer: (r: Response) => void = () => undefined;
+			answerDelete(() => new Promise<Response>((resolve) => { answer = resolve; }));
+			await render('files');
+			const button = buttonByTitle(t('files.delete'))!;
+			button.click();
+			await settle();
+			button.click();
+			await settle();
+			expect(deletes()).toHaveLength(1);
+			answer(new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+			await settle();
+			expect(getToasts()).toEqual([]);
 		});
 	});
 });

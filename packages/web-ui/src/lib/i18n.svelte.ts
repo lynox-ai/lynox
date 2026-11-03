@@ -1093,7 +1093,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'files.delete': { de: 'Löschen', en: 'Delete' },
 	'files.delete_named': { de: '{name} löschen', en: 'Delete {name}' },
 	'files.delete_confirm': { de: '{name} löschen? Das lässt sich nicht rückgängig machen.', en: 'Delete {name}? This cannot be undone.' },
-	'files.delete_failed': { de: '{name} wurde nicht gelöscht. Die Liste ist neu geladen; versuch es noch einmal.', en: '{name} was not deleted. The list has been reloaded; try again.' },
+	'files.delete_failed': { de: '{name} wurde nicht gelöscht. Die Liste ist neu geladen; steht die Datei noch darin, versuch es noch einmal.', en: '{name} was not deleted. The list has been reloaded; if the file is still in it, try again.' },
 	'files.download': { de: 'Herunterladen', en: 'Download' },
 	'files.download_named': { de: '{name} herunterladen', en: 'Download {name}' },
 	'files.show_hidden': { de: 'Versteckte', en: 'Hidden' },
