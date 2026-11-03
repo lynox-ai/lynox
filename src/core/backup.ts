@@ -274,6 +274,9 @@ function nearestExistingDir(root: string, relDir: string): string {
  * Whether the filesystem holding `dir` folds names: one file written under a lower-case name with an
  * accent in NFC form, then looked up in upper case and in NFD form. Either lookup that finds it folds.
  */
+/** The fold probe's file, of exactly this shape; a crash between writing and removing it leaves it behind. */
+const FOLD_PROBE = /^\.lynox-fold-probe-[0-9a-f]{12}-\u00e9a$/;
+
 export function filesystemFoldsNames(dir: string, exists: (path: string) => boolean = existsSync): boolean {
   const base = `.lynox-fold-probe-${randomBytes(6).toString('hex')}-\u00e9a`;
   const probe = join(dir, base);
@@ -290,10 +293,10 @@ export function filesystemFoldsNames(dir: string, exists: (path: string) => bool
  * way inside the data directory (writing through it would land outside), or a directory where the
  * backup has a file (the swap's rename would fail after earlier files were already replaced).
  */
-/** Remove the temps a crashed restore left in `dir`: files and links of exactly `STAGING_TEMP`'s shape. */
+/** Remove what a crashed restore left in `dir`: files and links of exactly `STAGING_TEMP`'s or `FOLD_PROBE`'s shape. */
 function removeStagingTemps(dir: string): void {
   for (const name of readdirSync(dir)) {
-    if (!STAGING_TEMP.test(name)) continue;
+    if (!STAGING_TEMP.test(name) && !FOLD_PROBE.test(name)) continue;
     const path = join(dir, name);
     if (lstatSync(path).isDirectory()) continue;
     rmSync(path, { force: true });
@@ -775,7 +778,7 @@ export class BackupManager {
         folds.set(dir, foldsHere);
       }
       if (foldsHere) {
-        return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names one file twice on this machine, whose filesystem does not tell ${JSON.stringify(a)} from ${JSON.stringify(b)} — refusing to restore; nothing was replaced.` };
+        return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names two paths this machine's filesystem takes for one name, as it does not tell ${JSON.stringify(a)} from ${JSON.stringify(b)} — refusing to restore; nothing was replaced.` };
       }
     }
     for (const entry of dataDirEntries) {

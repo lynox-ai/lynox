@@ -728,7 +728,7 @@ describe('restoreBackup writes only where createBackup writes', () => {
       try {
         const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
         expect(result.success, b).toBe(false);
-        expect(result.error).toMatch(/names one file twice on this machine/);
+        expect(result.error).toMatch(/names two paths this machine's filesystem takes for one name/);
         expect(result.pre_restore_backup_path).toBe('');
         expect(liveTier()).toBe('deep');
         expect(existsSync(join(lynoxDir, a))).toBe(false);
@@ -749,7 +749,7 @@ describe('restoreBackup writes only where createBackup writes', () => {
     try {
       const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/names one file twice on this machine/);
+      expect(result.error).toMatch(/names two paths this machine's filesystem takes for one name/);
       expect(folds.mock.calls).toEqual([[memory]]);
       expect(liveTier()).toBe('deep');
     } finally {
@@ -863,15 +863,23 @@ describe('restoreBackup writes only where createBackup writes', () => {
     expect(readFileSync(users, 'utf-8')).toBe('mine');
   });
 
-  it('removes a temp a crashed restore left beside a file it restores', async () => {
+  it('removes a temp and a fold probe a crashed restore left beside a file it restores', async () => {
     const { manager, backupPath } = await backupWith([{ path: 'memory/b.txt', bytes: 'plain' }]);
     const stale = join(lynoxDir, 'memory', 'b.txt.fedcba9876543210.restore-staging');
     writeFileSync(stale, 'stale');
+    // And a fold probe a crash left there.
+    const probe = join(lynoxDir, 'memory', '.lynox-fold-probe-0123456789ab-\u00e9a');
+    writeFileSync(probe, '');
+    // Control: a user's own dotfile, and one that only starts like a probe, stay.
+    const dotfiles = ['.notes', '.lynox-fold-probe-mine'].map(n => join(lynoxDir, 'memory', n));
+    for (const f of dotfiles) writeFileSync(f, 'mine');
 
     const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
 
     expect(result.success, String(result.error)).toBe(true);
     expect(existsSync(stale)).toBe(false);
+    expect(existsSync(probe)).toBe(false);
+    for (const f of dotfiles) expect(readFileSync(f, 'utf-8'), f).toBe('mine');
     // Control: a file of the live folder the restore does not name stays.
     expect(readFileSync(join(lynoxDir, 'memory', 'a.txt'), 'utf-8')).toBe('kept');
   });
