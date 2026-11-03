@@ -1895,11 +1895,27 @@ describe('LynoxHTTPApi', () => {
         author = 'mandate:jan@example.invalid';
         const foreign = await post();
         expect(foreign.status).toBe(403);
-        expect(((await foreign.json()) as { error: string }).error).toMatch(/^Not scheduled: this workflow holds steps another person with delegated access/);
+        const foreignBody = (await foreign.json()) as { error: string; code?: string };
+        expect(foreignBody.error).toMatch(/^Not scheduled: this workflow holds steps another person with delegated access/);
+        // The code lets the page word the refusal in its reader's language (UX-058, ux U-119).
+        expect(foreignBody.code).toBe('foreign_workflow');
         author = undefined;
-        expect((await post()).status).toBe(403);
+        const unread = await post();
+        expect(unread.status).toBe(403);
+        const unreadBody = (await unread.json()) as { error: string; code?: string };
+        expect(unreadBody.code).toBe('unreadable_workflow');
+        expect(unreadBody.error).toMatch(/^Not scheduled: lynox could not read who set up this workflow/);
         author = 'throws';
-        expect((await post()).status).toBe(403);
+        const thrown = await post();
+        expect(thrown.status).toBe(403);
+        const thrownBody = (await thrown.json()) as { error: string; code?: string };
+        expect(thrownBody.code).toBe('unreadable_workflow');
+        expect(thrownBody.error).toMatch(/^Not scheduled: lynox could not read who set up this workflow/);
+        // A workflow that is gone (the lookup finds none) is a 404 with its own code, before any refusal.
+        mockGetPipeline.mockReturnValueOnce(undefined);
+        const missing = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-gone', scheduleCron: '0 9 1 * *' }) });
+        expect(missing.status).toBe(404);
+        expect(((await missing.json()) as { code?: string }).code).toBe('missing_workflow');
         expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
         author = 'mandate:eva@example.invalid';
         expect((await post()).status).toBe(201);
@@ -5343,6 +5359,29 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       const body = await res.json() as { state: string };
       expect(body.state).toBe('invalid');
+    });
+
+    it('POST /api/secrets/validate-key checks Mistral\'s global endpoint at the EU one', async () => {
+      // This file shares ONE per-IP rate window: the request below is paid back after.
+      const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
+      const { setPinnedTransportForTests } = await import('../core/network-guard.js');
+      const hosts: string[] = [];
+      const restoreTransport = setPinnedTransportForTests(async (input) => {
+        hosts.push(input.hostname);
+        return new Response('{}', { status: 401 });
+      });
+      try {
+        const res = await jsonFetch('/api/secrets/validate-key', {
+          method: 'POST',
+          body: JSON.stringify({ provider: 'openai', key: 'sk-test', api_base_url: 'https://api.mistral.ai/v1' }),
+        });
+        expect(res.status).toBe(200);
+        expect(hosts).toEqual(['api.eu.mistral.ai']);
+      } finally {
+        restoreTransport();
+        for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+      }
     });
 
     it('PUT stores a secret', async () => {
@@ -12585,10 +12624,43 @@ describe('LynoxHTTPApi', () => {
         live = false;
         const res = await jsonFetch('/api/workflows/library');
         const body = await res.json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
-        expect(body.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true });
+        // No engine.db here, so no paused plan whose takeover covers it: none counted.
+        expect(body.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 });
         expect(body.workflows.find((w) => w.id === 'wf-o')).not.toHaveProperty('runs_as');
         mockHistoryGetWorkflowAuthorship.mockReset();
         mockHistoryGetPlannedPipelines.mockReturnValue([]);
+      });
+
+      it('reads the paused plans once per list and only when a listed workflow has ended, and a failed read counts none instead of failing the list', async () => {
+        repayRateWindow();
+        mockHistoryGetPlannedPipelines.mockReturnValue([
+          { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },
+          { id: 'wf-m2', manifest_name: 'M2', manifest_json: JSON.stringify({ template: true, name: 'M2', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-20T00:00:00Z' },
+        ]);
+        mockHistoryGetWorkflowAuthorship.mockImplementation((id: string) => (id === 'wf-m' || id === 'wf-m2' ? mandateMade : undefined));
+        const origDb = engineRef()['getEngineDb'];
+        const getDb = vi.fn((): never => { throw new Error('engine.db closed'); });
+        engineRef()['getEngineDb'] = () => ({ getDb });
+        type Lib = { workflows: Array<{ id: string; runs_as?: unknown }> };
+        try {
+          live = true;
+          const whileLive = await jsonFetch('/api/workflows/library');
+          expect(((await whileLive.json()) as Lib).workflows.map((w) => w.runs_as)).toEqual([0, 1].map(() => ({ person: 'eva@kanzlei.example', ended: false })));
+          // Nothing listed has ended: the paused plans are not read at all.
+          expect(getDb).not.toHaveBeenCalled();
+          live = false;
+          const ended = await jsonFetch('/api/workflows/library');
+          expect(ended.status).toBe(200);
+          const endedRows = ((await ended.json()) as Lib).workflows;
+          expect(endedRows.map((w) => w.runs_as)).toEqual([0, 1].map(() => ({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 })));
+          // Twin: the read was tried, so the 0 above is the fallback, not a skipped read — and
+          // tried once for both ended workflows, not once per row.
+          expect(getDb).toHaveBeenCalledTimes(1);
+        } finally {
+          engineRef()['getEngineDb'] = origDb;
+          mockHistoryGetWorkflowAuthorship.mockReset();
+          mockHistoryGetPlannedPipelines.mockReturnValue([]);
+        }
       });
 
       it('lists no one\'s email to a mandate reading the library', async () => {
@@ -12600,8 +12672,22 @@ describe('LynoxHTTPApi', () => {
         const cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
         try {
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'ida@kanzlei.example', mandateId: MID }));
-          const asMandate = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+          const asMandate = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown; schedule_refusal?: unknown }> };
           expect(asMandate.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('runs_as');
+          // What it does learn: this one is not its to schedule (UX-058), and not whose it is.
+          expect(asMandate.workflows.find((w) => w.id === 'wf-m')?.schedule_refusal).toBe('foreign');
+          expect(JSON.stringify(asMandate)).not.toContain('eva@kanzlei.example');
+          // Its own workflow and the owner's carry no refusal; one whose author cannot be read does.
+          mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: 'mandate:ida@kanzlei.example', createdMandateId: MID, mandateEditor: null, mandateEditorId: null });
+          const own = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; schedule_refusal?: unknown }> };
+          expect(own.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('schedule_refusal');
+          mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null });
+          const owners = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; schedule_refusal?: unknown }> };
+          expect(owners.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('schedule_refusal');
+          mockHistoryGetWorkflowAuthorship.mockReturnValue(undefined);
+          const unread = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; schedule_refusal?: unknown }> };
+          expect(unread.workflows.find((w) => w.id === 'wf-m')?.schedule_refusal).toBe('unreadable');
+          mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
           // Twin on the same machinery: the owner gets it.
           api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
           const asOwner = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
@@ -14518,7 +14604,7 @@ describe('LynoxHTTPApi', () => {
       // A curated host is not enough: it must belong to the provider the save leaves in place,
       // or the pool's key goes to the other vendor (the Anthropic key to Mistral, or back).
       describe('PUT /api/config pairs api_base_url with the provider', () => {
-        const MISTRAL = 'https://api.mistral.ai/v1';
+        const MISTRAL = 'https://api.eu.mistral.ai/v1';
         // This file shares ONE per-IP rate window; the requests below are paid back so a test
         // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
         const rateCounts = (): Map<string, { count: number }> =>
@@ -14570,12 +14656,23 @@ describe('LynoxHTTPApi', () => {
             expect((await put({ api_base_url: 'https://api.anthropic.com' })).status).toBe(200);
           });
           await withStored({ provider: 'openai', api_base_url: MISTRAL }, async () => {
+            expect((await put({ api_base_url: 'https://api.eu.mistral.ai' })).status).toBe(200);
+          });
+          // A page loaded before the move, or a file written before it, names Mistral's global
+          // endpoint. It is taken, as the EU one.
+          await withStored({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' }, async () => {
+            expect((await put({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' })).status).toBe(200);
             expect((await put({ api_base_url: 'https://api.mistral.ai' })).status).toBe(200);
           });
           // The Web UI sends every field back on each save; an unpaired value already in the
           // file is not refused, the loader drops it.
           await withStored({ provider: 'anthropic', api_base_url: MISTRAL }, async () => {
             expect((await put({ provider: 'anthropic', api_base_url: MISTRAL })).status).toBe(200);
+          });
+          // The same unpaired value, written before the move, names the global endpoint: sent
+          // back unchanged it is still the stored value, not a new choice.
+          await withStored({ provider: 'anthropic', api_base_url: 'https://api.mistral.ai/v1' }, async () => {
+            expect((await put({ provider: 'anthropic', api_base_url: 'https://api.mistral.ai/v1' })).status).toBe(200);
           });
         });
       });
@@ -16032,6 +16129,31 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // A page loaded before the move to Mistral's EU endpoint still sends the global one. The probe
+    // goes where a model request would go, the EU endpoint, and on a pool tier it is paired with
+    // the pool's endpoint, so the stored key is used. Typed with the EU URL it is the same probe.
+    it.each(['https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'])('a probe of %s on a pool tier goes to the EU endpoint with the stored Mistral key', async (baseUrl) => {
+      const keep = { tier: process.env['LYNOX_BILLING_TIER'], mistral: process.env['MISTRAL_API_KEY'] };
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['MISTRAL_API_KEY'] = 'sk-pool-mistral-eu-probe';
+      const { setPinnedTransportForTests } = await import('../core/network-guard.js');
+      const outbound: string[] = [];
+      const restoreTransport = setPinnedTransportForTests(async (input) => {
+        outbound.push(`${input.hostname} ${new Headers(input.headers).get('authorization') ?? ''}`);
+        return new Response('{}', { status: 401 });
+      });
+      try {
+        const res = await llmTestFetch({ provider: 'openai', base_url: baseUrl });
+        expect(res.status).toBe(200);
+        expect(outbound).toEqual(['api.eu.mistral.ai Bearer sk-pool-mistral-eu-probe']);
+      } finally {
+        restoreTransport();
+        for (const [name, v] of [['LYNOX_BILLING_TIER', keep.tier], ['MISTRAL_API_KEY', keep.mistral]] as const) {
+          if (v === undefined) delete process.env[name]; else process.env[name] = v;
+        }
+      }
+    });
+
     it('vertex returns 200 with skipped=true (auth too heavy for sync probe)', async () => {
       const res = await llmTestFetch({ provider: 'vertex' });
       expect(res.status).toBe(200);
@@ -16786,7 +16908,27 @@ describe('LynoxHTTPApi', () => {
       expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('outside');
     });
 
-    const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
+    it('says a delete the file system refused as a failure, not as "File not found", and keeps the file', async () => {
+      repayRateWindow();
+      // root ignores directory permissions, so the refusal this test needs cannot happen there
+      expect(process.getuid?.(), 'this test needs a non-root user').not.toBe(0);
+      mkdirSync(join(ws, 'locked'));
+      writeFileSync(join(ws, 'locked', 'keep.txt'), 'k');
+      try {
+        // 0o500: the file can be looked at but not removed; 0o000: not even looked at.
+        for (const mode of [0o500, 0o000]) {
+          chmodSync(join(ws, 'locked'), mode);
+          const res = await jsonFetch('/api/files?path=locked/keep.txt', { method: 'DELETE' });
+          expect([mode.toString(8), res.status, await res.json()]).toEqual([mode.toString(8), 500, { error: 'Could not delete the file' }]);
+        }
+        chmodSync(join(ws, 'locked'), 0o700);
+        expect(readFileSync(join(ws, 'locked', 'keep.txt'), 'utf8')).toBe('k');
+      } finally {
+        chmodSync(join(ws, 'locked'), 0o700);
+      }
+    });
+
+    const openFds =(): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
 
     it('downloads a file whose name is outside Latin-1, under that name', async () => {
       repayRateWindow();
@@ -23522,5 +23664,31 @@ describe('the connection form of a built-in provider (/api/api-profiles/:id/clie
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can enter the app credentials of a built-in provider.');
     expect(h.set).not.toHaveBeenCalled();
+  });
+});
+
+describe('moveMistralEndpointsToEu', () => {
+  it('moves the global endpoint to the EU one, at the top level and in every tier slot', async () => {
+    const { moveMistralEndpointsToEu } = await import('./http-api.js');
+    const update = {
+      api_base_url: 'https://api.mistral.ai/v1',
+      tier_set: {
+        fast: { api_base_url: 'https://api.mistral.ai' },
+        deep: { api_base_url: 'https://api.fireworks.ai/inference/v1' },
+        balanced: {},
+      },
+    };
+    moveMistralEndpointsToEu(update);
+    expect(update.api_base_url).toBe('https://api.eu.mistral.ai/v1');
+    expect(update.tier_set.fast.api_base_url).toBe('https://api.eu.mistral.ai');
+    expect(update.tier_set.deep.api_base_url).toBe('https://api.fireworks.ai/inference/v1');
+    expect(update.tier_set.balanced).toEqual({});
+  });
+
+  it('leaves a spoof of the Mistral host as written', async () => {
+    const { moveMistralEndpointsToEu } = await import('./http-api.js');
+    const update = { api_base_url: 'https://api.mistral.ai.evil.com/v1' };
+    moveMistralEndpointsToEu(update);
+    expect(update.api_base_url).toBe('https://api.mistral.ai.evil.com/v1');
   });
 });

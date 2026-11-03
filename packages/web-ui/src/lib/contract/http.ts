@@ -623,6 +623,37 @@ export interface OAuthClaimResponse {
   email?: string;
 }
 
+// === OAuth claim preview — POST /internal/oauth/google/claim-preview (engine → CP) ===
+
+/**
+ * Which Google account a pending claim belongs to, asked BEFORE it is claimed.
+ *
+ * The claim consumes the grant, so the engine cannot learn the account from the
+ * claim and still ask the user whether to take it. What the control plane's
+ * preview route must do: read the same pending grant without consuming it; take
+ * the same request as the claim and the same instance authentication; bind the
+ * nonce to the same instance; leave the grant's expiry unchanged; and answer a
+ * nonce of another instance, an unknown one, an expired grant and a claimed one
+ * all alike (same status, same body), so the preview tells nobody whether a
+ * nonce was ever valid. The address goes to no log.
+ */
+export interface OAuthClaimPreviewRequest {
+  instance_id: string;
+  claim_nonce: string;
+}
+
+/**
+ * Only the address, never a token. For a grant that names no account (Google sent
+ * no `id_token`, or its address was not verified, or the token did not check
+ * out), the control plane must answer 200 WITHOUT `email`, not an error status:
+ * whoever runs the consent can arrange the second case, and the engine's dialog
+ * does not offer the claim on that 200 (nor on a 200 the engine cannot read). An error
+ * status instead makes the dialog fall back to letting the user decide.
+ */
+export interface OAuthClaimPreviewResponse {
+  email?: string;
+}
+
 // === OAuth refresh — POST /internal/oauth/{google,microsoft}/refresh (engine → CP) ===
 
 /**

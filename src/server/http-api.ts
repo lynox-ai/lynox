@@ -34,7 +34,7 @@ import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
+import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
@@ -92,7 +92,7 @@ import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
 import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded , toMistralEuBase } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
@@ -112,6 +112,8 @@ import type { WorkerLoop } from '../core/worker-loop.js';
 import type {
   HealthBody,
   UsageSummaryResponse,
+  OAuthClaimPreviewRequest,
+  OAuthClaimPreviewResponse,
   OAuthClaimRequest,
   OAuthClaimResponse,
   OAuthDeclineCode,
@@ -134,7 +136,7 @@ import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
-import { takeOver, takeoverPreview, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
+import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -790,7 +792,7 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
  * On Managed, `provider` is constrained to a curated set so a customer
  * cannot point the engine at a free-text endpoint we'd then proxy traffic to.
  * Anthropic: always allowed (CP-pinned default). `openai` provider is allowed
- * ONLY when paired with the Mistral preset (`api_base_url ==='https://api.mistral.ai/v1'`).
+ * ONLY when paired with the Mistral preset (`api_base_url ==='https://api.eu.mistral.ai/v1'`).
  * `custom` / `vertex` are blocked on Managed (free-text or GCP-OAuth surfaces
  * the CP doesn't manage). Returns null when accepted, a 403-reason string
  * otherwise.
@@ -812,6 +814,17 @@ const MANAGED_CURATED_HOSTS = new Set<string>([
   ...MANAGED_OPENAI_MISTRAL_HOSTS,
   POOL_ANTHROPIC_ENDPOINT,
 ]);
+
+/** Rewrites a config update's Mistral global-endpoint URLs (top level and tier slots) to the EU one. */
+export function moveMistralEndpointsToEu(update: {
+  api_base_url?: string | undefined;
+  tier_set?: Partial<Record<string, { api_base_url?: string | undefined } | undefined>> | undefined;
+}): void {
+  if (update.api_base_url) update.api_base_url = toMistralEuBase(update.api_base_url);
+  for (const slot of Object.values(update.tier_set ?? {})) {
+    if (slot?.api_base_url) slot.api_base_url = toMistralEuBase(slot.api_base_url);
+  }
+}
 
 function enforceManagedProviderConstraints(
   update: Record<string, unknown>,
@@ -2389,9 +2402,16 @@ export class LynoxHTTPApi {
    * prompt store may be missing; the takeover then refuses, since it could not close the questions.
    */
   #takeoverDeps(res: ServerResponse): TakeoverDeps | null {
+    const deps = this.#takeoverDepsIfReady();
+    if (deps === null) errorResponse(res, 503, 'Taking over a plan is not available on this instance right now.');
+    return deps;
+  }
+
+  /** The takeover's reads and writes, or null when engine.db is not there; answers nothing. */
+  #takeoverDepsIfReady(): TakeoverDeps | null {
     const engine = this.engine;
     const engineDb = engine?.getEngineDb() ?? null;
-    if (engine === null || engine === undefined || engineDb === null) { errorResponse(res, 503, 'Taking over a plan is not available on this instance right now.'); return null; }
+    if (engine === null || engine === undefined || engineDb === null) return null;
     const ends = engine.getMandateEnds();
     return {
       db: engineDb.getDb(),
@@ -7193,7 +7213,8 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const provider = b && typeof b['provider'] === 'string' ? b['provider'] : '';
       const key = b && typeof b['key'] === 'string' ? b['key'] : '';
-      const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? b['api_base_url'] : '';
+      // Mistral's global endpoint is checked where a model request would go: the EU one.
+      const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? toMistralEuBase(b['api_base_url']) : '';
       if (!provider || !key) { errorResponse(res, 400, 'Missing provider or key'); return; }
       const { validateAnthropicKey, validateMistralKey, validateOpenAICompatKey } = await import('../cli/docker-installer.js');
       try {
@@ -7710,6 +7731,10 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
+      // A page loaded before the Mistral move, or a stored value sent back unchanged, still names
+      // Mistral's global endpoint. It is saved as the EU regional one, which the gates below and
+      // every reader expect.
+      moveMistralEndpointsToEu(parsed.data);
       // Sonnet-variant selection: the schema admits any 1–64-char string
       // (`balanced_model` is intentionally NOT a z.enum — an unrecognised value
       // must degrade at the resolver, not null the whole `.strict()` config).
@@ -7787,7 +7812,7 @@ export class LynoxHTTPApi {
         // effective model blocklist (env-merged by loadConfig) rides along so
         // the gate can 403 a blocked tier_set/tier_preset model honestly.
         const storedConfig = readUserConfig();
-        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? [], { provider: storedConfig.provider, api_base_url: storedConfig.api_base_url });
+        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? [], { provider: storedConfig.provider, api_base_url: toMistralEuBase(storedConfig.api_base_url) });
         if (providerReason) {
           errorResponse(res, 403, providerReason);
           return;
@@ -8128,10 +8153,28 @@ export class LynoxHTTPApi {
       // library agrees with the schedule handler on cron-eligibility (otherwise a
       // legacy autonomous workflow with no stored mode hides its Schedule button).
       const { inferPipelineMode, stepsThatAsk } = await import('../orchestrator/human-in-the-loop.js');
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean } }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind }> = [];
       // Whom the Run button runs each one as, for the owner only: a mandate's email is not another
       // mandate's to read (1055, ux U-063). Absent for the owner's own workflows.
-      const ownerViews = isOwnerPrincipal(this._principalOf(req));
+      const viewer = this._principalOf(req);
+      const ownerViews = isOwnerPrincipal(viewer);
+      // For a workflow whose mandate has ended: how many of its paused plans would move it to the
+      // owner when taken over (ux U-079 (b), U-119). Read once, by the takeover's own decision, and
+      // only when a listed workflow's mandate has ended; a failed read counts none, which leaves the
+      // card with the sentence that holds either way.
+      let coveredByTakeover: Map<string, number> | undefined;
+      const coveredCount = (workflowId: string): number => {
+        if (coveredByTakeover === undefined) {
+          try {
+            const deps = this.#takeoverDepsIfReady();
+            coveredByTakeover = deps === null ? new Map<string, number>() : workflowsCoveredByTakeover(deps);
+          } catch {
+            coveredByTakeover = new Map<string, number>();
+          }
+        }
+        return coveredByTakeover.get(workflowId) ?? 0;
+      };
+      const { foreignWorkflowScheduleRefusalKind } = await import('../core/plan-stamp.js');
       for (const row of rows) {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
         try {
@@ -8187,11 +8230,15 @@ export class LynoxHTTPApi {
           ...(typeof parsed.confirmedAt === 'string' ? { confirmedAt: parsed.confirmedAt } : {}),
           ...(parsed.capabilityContract !== undefined ? { capabilityContract: parsed.capabilityContract } : {}),
           ...(() => {
-            if (!ownerViews) return {};
+            if (!ownerViews) {
+              // A mandate learns that a workflow is not its to schedule (UX-058, ux U-085), never whose it is.
+              const refusal = foreignWorkflowScheduleRefusalKind(viewer, row.id, history);
+              return refusal === null ? {} : { schedule_refusal: refusal };
+            }
             const runAs = workflowRunsAs(authorshipOrNone(() => history.getWorkflowAuthorship(row.id)));
-            return runAs.kind === 'mandate'
-              ? { runs_as: { person: runAs.email, ended: principalHasEnded(runAs, (id) => this._mandateLive(id)) } }
-              : {};
+            if (runAs.kind !== 'mandate') return {};
+            const ended = principalHasEnded(runAs, (id) => this._mandateLive(id));
+            return { runs_as: { person: runAs.email, ended, ...(ended ? { covered_by_takeover: coveredCount(row.id) } : {}) } };
           })(),
         });
       }
@@ -8767,12 +8814,18 @@ export class LynoxHTTPApi {
         }
         const { getPipeline, forgetPipeline } = await import('../tools/builtin/pipeline.js');
         const planned = getPipeline(pipelineId, history);
-        if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`); return; }
+        if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`, 'missing_workflow'); return; }
         // A schedule on another mandate's workflow ties both mandates into one plan, so a mandate
         // schedules only its own workflows and the owner's (`foreignWorkflowScheduleRefusal`).
-        const { foreignWorkflowScheduleRefusal } = await import('../core/plan-stamp.js');
-        const refusal = foreignWorkflowScheduleRefusal(principal, planned.id, history);
-        if (refusal !== null) { errorResponse(res, 403, refusal); return; }
+        const { foreignWorkflowScheduleRefusalKind, FOREIGN_WORKFLOW_SCHEDULE_REFUSAL, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL } = await import('../core/plan-stamp.js');
+        const refusalKind = foreignWorkflowScheduleRefusalKind(principal, planned.id, history);
+        if (refusalKind !== null) {
+          // The code lets the page word it in the reader's language (ux U-085); the text stays for every other client.
+          // One read decides both the text and the code.
+          if (refusalKind === 'foreign') errorResponse(res, 403, FOREIGN_WORKFLOW_SCHEDULE_REFUSAL, 'foreign_workflow');
+          else errorResponse(res, 403, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL, 'unreadable_workflow');
+          return;
+        }
         if (!isSchedulableWorkflow(planned)) {
           errorResponse(res, 400, `Workflow "${planned.id}" asks for more than an answer from its owner and cannot be scheduled — remove its ask_secret / ask_human steps first.`); return;
         }
@@ -10268,7 +10321,9 @@ export class LynoxHTTPApi {
         return;
       }
       const bodyKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
-      const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
+      // A page loaded before the move to Mistral's EU endpoint sends the global one: the probe goes
+      // where a model request would go, the EU endpoint, and pairs with the pool's endpoint.
+      const baseUrl = typeof b['base_url'] === 'string' ? toMistralEuBase(b['base_url']) : '';
       // On an instance connected to a Shopify store a probe goes only where a model request may
       // go (`contained-providers.ts`): a typed key is the user's, and another endpoint is refused
       // before anything is sent. An empty key is the stored one, which on a pool tier is the pool's.
@@ -10419,12 +10474,12 @@ export class LynoxHTTPApi {
       // `auto` is a choice only where it resolves to something: with the switch on, only to whisper.cpp.
       const sttProviders = [
         { id: 'auto',    name: 'Auto',                            available: !speechServiceOff || transcribeMod.hasTranscribeProvider() },
-        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: !speechServiceOff && transcribeMod.mistralVoxtralProvider.isAvailable },
+        { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: !speechServiceOff && transcribeMod.mistralVoxtralProvider.isAvailable },
         { id: 'whisper', name: 'whisper.cpp (local)',             available: transcribeMod.whisperCppProvider.isAvailable },
       ];
       const ttsProviders = [
         { id: 'auto',    name: 'Auto',                            available: !speechServiceOff },
-        { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)',     available: !speechServiceOff && speakMod.mistralVoxtralTtsProvider.isAvailable },
+        { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: !speechServiceOff && speakMod.mistralVoxtralTtsProvider.isAvailable },
       ];
 
       // Env-var overrides — when set, the Settings selector should display
@@ -11354,6 +11409,73 @@ export class LynoxHTTPApi {
         }
       });
     }, ownerOnly('claim the managed Google connection'));
+
+    // Which Google account a parked claim belongs to, so the confirmation can
+    // name it before anything is claimed and the owner confirms a known account.
+    //
+    // It reads and never claims; the control plane answers from the same pending
+    // grant without consuming it. Only the address comes back, never a token.
+    //
+    // Three answers, and the difference between the last two is the point:
+    // - `{ email }`: the control plane named the account;
+    // - `{ unnamed: true }`: it answered, and the grant has no usable address.
+    //   Whoever runs the consent can arrange that (an account without a verified
+    //   address), so the dialog does not let this be confirmed at all;
+    // - `{}`: no answer to go by (an older control plane without the route, an
+    //   expired or unknown nonce, a network error). The dialog falls back to
+    //   saying it cannot name the account. That a live grant cannot be steered
+    //   here rests on the control plane: it mints the nonce only after storing the
+    //   grant, and its preview route must answer from the same row as the claim.
+    //
+    // An address counts only if it is not blank and has an `@` (after trimming): a
+    // blank one would show an empty name next to "Only confirm if this is your
+    // account". This is a sanity check, not validation. A 200 that does not parse
+    // is treated like a 200 without an address. What each answer lets the user do
+    // is decided in the dialog (`claimConfirmCopy`).
+    this.addStatic('user', 'POST /api/google/claim-managed/preview', async (_req, res, _params, body) => {
+      // Same gate and order as the claim: a preview on an instance that cannot
+      // claim would only name an account it could never connect.
+      const google = await engine.ensureGoogleAuth();
+      if (!requireService(res, google, 'Google auth')) return;
+
+      const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+      const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'];
+      const httpSecret = process.env['LYNOX_HTTP_SECRET'];
+      if (!controlPlaneUrl || !instanceId || !httpSecret) {
+        errorResponse(res, 400, 'Not a managed instance or missing control plane config');
+        return;
+      }
+
+      const parsed = body as Record<string, unknown> | undefined;
+      const claimNonce = typeof parsed?.['claim_nonce'] === 'string' ? parsed['claim_nonce'] : '';
+      if (!claimNonce) {
+        errorResponse(res, 400, 'Missing claim_nonce');
+        return;
+      }
+
+      let answer: { email: string } | { unnamed: true } | Record<string, never> = {};
+      try {
+        const previewRes = await cpFetch(controlPlaneUrl, '/internal/oauth/google/claim-preview', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-instance-secret': httpSecret,
+          },
+          body: JSON.stringify({
+            instance_id: instanceId,
+            claim_nonce: claimNonce,
+          } satisfies OAuthClaimPreviewRequest),
+        }, google.hostPolicy);
+        if (previewRes.ok) {
+          const data = (await previewRes.json().catch(() => null)) as OAuthClaimPreviewResponse | null;
+          const email = typeof data?.email === 'string' ? data.email.trim() : '';
+          answer = email.includes('@') ? { email } : { unnamed: true };
+        }
+      } catch {
+        // Unknown, not an error: the dialog still works without the address.
+      }
+      jsonResponse(res, 200, answer);
+    }, ownerOnly('see which Google account a pending connection belongs to'));
 
     // ── API-profile OAuth: the authorization-code round-trip (W1b) ────────
     //
@@ -14397,8 +14519,12 @@ export class LynoxHTTPApi {
         if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
         await unlink(resolved);
         jsonResponse(res, 200, { ok: true });
-      } catch {
-        errorResponse(res, 404, 'File not found');
+      } catch (err: unknown) {
+        // Only a missing file is "not found". Anything else (a permission error, a busy file)
+        // means the file is still there, and the client shows this reason next to its name.
+        const code = err instanceof Error && 'code' in err ? err.code : undefined;
+        if (code === 'ENOENT' || code === 'ENOTDIR') errorResponse(res, 404, 'File not found');
+        else errorResponse(res, 500, 'Could not delete the file');
       }
     }, ownerOnly('delete files'));
 

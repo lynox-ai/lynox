@@ -164,6 +164,15 @@ export const MISSING_WORKFLOW_SCHEDULE_REFUSAL =
  * authorship cannot be read is refused to anyone but the owner.
  */
 export function foreignWorkflowScheduleRefusal(principal: RequestPrincipal, workflowId: string, runHistory: RunHistory | null | undefined): string | null {
+  const kind = foreignWorkflowScheduleRefusalKind(principal, workflowId, runHistory);
+  return kind === null ? null : kind === 'foreign' ? FOREIGN_WORKFLOW_SCHEDULE_REFUSAL : UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL;
+}
+
+/** Which of the two refusals above applies, for a caller that words it itself (the library card, a status code). */
+export type WorkflowScheduleRefusalKind = 'foreign' | 'unreadable';
+
+/** The decision behind `foreignWorkflowScheduleRefusal`, without its text. */
+export function foreignWorkflowScheduleRefusalKind(principal: RequestPrincipal, workflowId: string, runHistory: RunHistory | null | undefined): WorkflowScheduleRefusalKind | null {
   if (isOwnerPrincipal(principal)) return null;
   let a: ReturnType<RunHistory['getWorkflowAuthorship']>;
   try {
@@ -171,8 +180,8 @@ export function foreignWorkflowScheduleRefusal(principal: RequestPrincipal, work
   } catch {
     a = undefined;
   }
-  if (a === undefined) return UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL;
+  if (a === undefined) return 'unreadable';
   const mark = planMandate(planAuthorshipOfWorkflow(a));
   if (mark === undefined || principalTag(mark.principal) === principalTag(principal)) return null;
-  return FOREIGN_WORKFLOW_SCHEDULE_REFUSAL;
+  return 'foreign';
 }

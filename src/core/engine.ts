@@ -15,7 +15,7 @@ import type {
   ModelTier,
   ContextSource,
 } from '../types/index.js';
-import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier } from '../types/index.js';
+import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier, mistralCommitsEuInference } from '../types/index.js';
 import { setTierSetResolver, resolveDefaultChatTier, resolveAgentModel } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
@@ -146,6 +146,7 @@ import type { SessionOptions } from './session.js';
 import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
 import { DEFAULT_PER_JOB_TIMEOUT_MS } from '../integrations/inbox/classifier/queue.js';
+import { inboxDisabledAccounts } from '../integrations/inbox/disabled-accounts.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -244,14 +245,16 @@ async function settleWithin(work: Promise<void>, ms: number, what: string): Prom
  * Default the inbox classifier's LLM region from the user's main provider
  * choice. Env override `LYNOX_INBOX_LLM_REGION` always wins (explicit
  * override path for managed-EU tenants who want hard-pinning regardless
- * of UI). When the user picked Mistral in Settings (api.mistral.ai), the
+ * of UI). When the user picked Mistral in Settings (api.eu.mistral.ai), the
  * classifier inherits 'eu' automatically — pre-this-fix the classifier
  * always defaulted to 'us' (Anthropic) regardless of the UI choice,
  * leaking mail snippets + reply-draft bodies to Anthropic-US.
  *
- * Hostname-strict match (URL().hostname === 'api.mistral.ai') — a naive
- * substring would let an attacker-controlled `api.mistral.ai.evil.com`
- * misclassify as EU residency.
+ * 'eu' only for the endpoint Mistral commits to EU/EFTA inference for
+ * (`mistralCommitsEuInference`, exact hostname `api.eu.mistral.ai`). The global
+ * `api.mistral.ai` commits to no location, so it counts as 'us': the warning and
+ * the production gate stay on. A substring match would also let
+ * `api.eu.mistral.ai.evil.com` pass as EU.
  */
 export function resolveInboxLlmRegion(opts: {
   envOverride: string | undefined;
@@ -261,13 +264,7 @@ export function resolveInboxLlmRegion(opts: {
   if (opts.envOverride === 'eu') return 'eu';
   if (opts.envOverride === 'us') return 'us';
   if (opts.provider !== 'openai' || !opts.apiBaseURL) return 'us';
-  let hostname: string;
-  try {
-    hostname = new URL(opts.apiBaseURL).hostname.toLowerCase();
-  } catch {
-    return 'us';
-  }
-  return hostname === 'api.mistral.ai' ? 'eu' : 'us';
+  return mistralCommitsEuInference(opts.apiBaseURL) ? 'eu' : 'us';
 }
 
 /**
@@ -918,10 +915,7 @@ export class Engine {
       const folderBlacklist = new Set(
         folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
       );
-      const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-      const disabledAccounts = new Set(
-        disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-      );
+      const disabledAccounts = inboxDisabledAccounts();
       const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
         mailStateDb: this._mailStateDb,
         anthropicClient: this.client,
@@ -952,6 +946,10 @@ export class Engine {
         this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
         // Mark an inbox item `replied` when the user answers it in chat.
         this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+        // What the classifier made of each mail, for mail_triage.
+        this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
+        // The store as the inbox view reads it, for inbox_read.
+        this._mailContext.hooks.inboxReader = runtime.inboxReader;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -2217,8 +2215,8 @@ export class Engine {
         // EU residency: default the inbox classifier provider from the
         // user's chosen main provider. When the user picked Mistral in
         // Settings (`userConfig.provider === 'openai'` against
-        // api.mistral.ai), the classifier inherits that choice and uses
-        // Mistral (EU-resident) automatically — no env var required.
+        // api.eu.mistral.ai), the classifier inherits that choice and uses
+        // Mistral's EU endpoint automatically — no env var required.
         //
         // `LYNOX_INBOX_LLM_REGION` remains an explicit override (e.g.
         // managed-EU tenants who want hard-pinning regardless of the UI
@@ -2248,10 +2246,7 @@ export class Engine {
           folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
         );
         // Per-account opt-out: comma-separated mail_account ids.
-        const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-        const disabledAccounts = new Set(
-          disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-        );
+        const disabledAccounts = inboxDisabledAccounts();
         const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
           mailStateDb,
           anthropicClient: this.client,
@@ -2294,6 +2289,10 @@ export class Engine {
           this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
           // Mark an inbox item `replied` when the user answers it in chat.
           this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+          // What the classifier made of each mail, for mail_triage.
+          this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
+          // The store as the inbox view reads it, for inbox_read.
+          this._mailContext.hooks.inboxReader = runtime.inboxReader;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —

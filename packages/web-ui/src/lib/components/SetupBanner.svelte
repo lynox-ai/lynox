@@ -6,6 +6,7 @@
 	import { clearError } from '../stores/chat.svelte.js';
 	import { untrack } from 'svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { MISTRAL_API_BASE, isMistralPresetBase } from '../utils/mistral-endpoint.js';
 
 	type Provider = 'anthropic' | 'mistral' | 'openai';
 
@@ -51,7 +52,7 @@
 				// Mistral + Custom both persist as `provider: 'openai'`. Sniff the
 				// Mistral base URL so re-opening the wizard restores the Mistral
 				// credential form instead of showing the generic Custom URL field.
-				const restored: Provider = narrowed === 'openai' && data.api_base_url === 'https://api.mistral.ai/v1'
+				const restored: Provider = narrowed === 'openai' && isMistralPresetBase(data.api_base_url)
 					? 'mistral'
 					: narrowed;
 				selectedProvider = restored;
@@ -142,7 +143,7 @@
 			const persistedProvider = selectedProvider === 'anthropic' ? 'anthropic' : 'openai';
 			const providerConfig: Record<string, unknown> = { provider: persistedProvider };
 			if (selectedProvider === 'mistral') {
-				providerConfig['api_base_url'] = 'https://api.mistral.ai/v1';
+				providerConfig['api_base_url'] = MISTRAL_API_BASE;
 				providerConfig['openai_model_id'] = mistralModel.trim() || 'mistral-large-2512';
 			}
 			if (selectedProvider === 'openai') {
@@ -168,7 +169,7 @@
 					key: keyForValidation,
 				};
 				if (selectedProvider === 'mistral') {
-					validateBody['api_base_url'] = 'https://api.mistral.ai/v1';
+					validateBody['api_base_url'] = MISTRAL_API_BASE;
 				}
 				if (selectedProvider === 'openai') {
 					validateBody['api_base_url'] = openaiUrl.trim();

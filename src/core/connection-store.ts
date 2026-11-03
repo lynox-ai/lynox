@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
-import { cancelHeldProviderRecords, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
+import { cancelHeldProviderRecords, coveredGrantSet, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
 import { EPOCH_START_SQL, currentGrantSql } from './grant-ledger.js';
 
 /**
@@ -240,11 +240,12 @@ export class ConnectionStore {
   removeApiWithRecord(id: string, kind: ConnectionRecordKind, now: Date, onSuperseded?: (recordIds: readonly number[]) => void): boolean {
     return this.db.transaction(() => {
       if (this.db.prepare("SELECT 1 FROM connections WHERE id = ? AND kind = 'api'").get(id) === undefined) return false;
-      // A provider's erasure still held is superseded only by an owner's erasure, which covers the
-      // epoch. A closing record erases nothing, so the provider's stays held and runs.
-      // `onSuperseded` writes their audit rows in this transaction.
+      // A provider's erasure still held is superseded only by an owner's erasure that covers every
+      // grant the provider's covers. A closing record erases nothing, and an erasure whose set is
+      // `null` (an epoch that cannot be told) covers nothing: then the provider's stays held and
+      // runs. `onSuperseded` writes their audit rows in this transaction.
       if (kind === 'erasure') {
-        const superseded = cancelHeldProviderRecords(this.db, id, now);
+        const superseded = cancelHeldProviderRecords(this.db, id, now, undefined, coveredGrantSet(this.db, id) ?? []);
         if (superseded.length > 0) onSuperseded?.(superseded);
       }
       writeConnectionRecord(this.db, id, kind, now);

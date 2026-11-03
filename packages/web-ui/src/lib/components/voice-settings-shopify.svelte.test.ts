@@ -23,7 +23,7 @@ const before = getLocale();
 /** What GET /api/voice/info answers: with the switch on, Mistral is unavailable and `auto` only
  *  where it resolves to something (whisper.cpp for dictation, nothing for speech output). */
 function voiceInfo(speechServiceOff: boolean, sttAvailable: boolean): unknown {
-	const mistral = { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)', available: !speechServiceOff };
+	const mistral = { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: !speechServiceOff };
 	return {
 		speech_service_off: speechServiceOff,
 		stt: {

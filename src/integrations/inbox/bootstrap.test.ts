@@ -95,6 +95,31 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.contactResolver).toBeNull(); // no CRM provided
   });
 
+  // 1070: mail_triage reads the classifier's verdict through this.
+  it('answers what the classifier made of a thread, scoped to its account', () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    const id = runtime.state.insertItem({
+      accountId: 'acct-1', channel: 'email', threadKey: 't-l', bucket: 'draft_ready', confidence: 0.9,
+      reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', messageId: '<label@x>',
+    });
+    const before = runtime.inboxLabelOf('acct-1', 't-l');
+    expect(before?.bucket).toBe('draft_ready');
+    expect(before?.userAction).toBeUndefined();
+    runtime.state.updateUserAction(id, 'replied');
+    expect(before?.reason).toBe('r');
+    expect(runtime.inboxLabelOf('acct-1', 't-l')).toEqual({ bucket: 'draft_ready', userAction: 'replied', reason: 'r' });
+    expect(runtime.inboxLabelOf('acct-2', 't-l')).toBeNull();
+    expect(runtime.inboxLabelOf('acct-1', 't-unknown')).toBeNull();
+  });
+
+  it('shows no verdict, rather than throwing, when the lookup fails', () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    vi.spyOn(runtime.state, 'findItemByThread').mockImplementation(() => { throw new Error('db closed'); });
+    expect(runtime.inboxLabelOf('acct-1', 't-l')).toBeNull();
+  });
+
   it('emits a console.warn when llmRegion=us without an ack (default routing)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
@@ -256,7 +281,7 @@ describe('bootstrapInbox — wiring', () => {
     expect(create).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const url = fetchSpy.mock.calls[0]![0] as string;
-    expect(url).toContain('api.mistral.ai');
+    expect(url).toContain('api.eu.mistral.ai');
     expect(runtime.state.listItems()[0]?.bucket).toBe('requires_user');
     expect(runtime.budget.snapshot().spentUSD).toBeGreaterThan(0);
     fetchSpy.mockRestore();

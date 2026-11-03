@@ -1,5 +1,5 @@
 import { channels } from './observability.js';
-import { detectInjectionAttempt } from './data-boundary.js';
+import { blockCarriesInjectionMark, detectInjectionAttempt, injectionHitSpans } from './data-boundary.js';
 
 // === Write content scanning ===
 
@@ -132,10 +132,10 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
  */
 const OWN_CLOSER = '\n</untrusted_data>';
 
-export function scanRegionOf(result: string, ownBlocks: readonly string[] | undefined): string {
-  if (!ownBlocks || ownBlocks.length === 0) return result;
-  const taken: Array<[number, number]> = [];
-  const closers: number[] = [];
+/** Where each own block sits in `result`: each found at most once, never overlapping, by start. */
+function locateOwnBlocks(result: string, ownBlocks: readonly string[] | undefined): Array<{ at: number; stop: number; block: string }> {
+  if (!ownBlocks || ownBlocks.length === 0) return [];
+  const found: Array<{ at: number; stop: number; block: string }> = [];
   for (const block of ownBlocks) {
     if (!block.endsWith(OWN_CLOSER)) continue;
     let from = 0;
@@ -143,14 +143,17 @@ export function scanRegionOf(result: string, ownBlocks: readonly string[] | unde
       const at = result.indexOf(block, from);
       if (at < 0) break;
       const stop = at + block.length;
-      if (taken.some(([a, b]) => at < b && stop > a)) { from = at + 1; continue; }
-      taken.push([at, stop]);
-      closers.push(stop - OWN_CLOSER.length);
+      if (found.some((f) => at < f.stop && stop > f.at)) { from = at + 1; continue; }
+      found.push({ at, stop, block });
       break;
     }
   }
+  return found.sort((a, b) => a.at - b.at);
+}
+
+export function scanRegionOf(result: string, ownBlocks: readonly string[] | undefined): string {
+  const closers = locateOwnBlocks(result, ownBlocks).map((f) => f.stop - OWN_CLOSER.length);
   if (closers.length === 0) return result;
-  closers.sort((a, b) => a - b);
   // Each closer is replaced by the newline it consumed, NOT by nothing. That
   // newline is the last character of the body, and three patterns need it: `role
   // impersonation` (/^(assistant|human):\s/im) and both `provenance marker
@@ -164,6 +167,65 @@ export function scanRegionOf(result: string, ownBlocks: readonly string[] | unde
     cursor = at + OWN_CLOSER.length;
   }
   return out + result.slice(cursor);
+}
+
+/**
+ * Where a briefing's injection warning belongs: on the whole briefing, on some of the
+ * engine's own blocks in it, or nowhere.
+ *
+ * A block the engine wrapped already carries its own warning when its body was flagged
+ * (`wrapUntrustedData`). If every hit in the briefing comes from such blocks, the briefing
+ * as a whole needs no warning, only a pointer to them: a warning on the whole briefing makes
+ * the model choose between all of lynox's context and none (1027's staging run, where
+ * Sonnet dropped the agent performance block and the API profiles with it).
+ *
+ * Placed by POSITION, not by label: a hit across a block's edge can carry the same label as
+ * a hit inside the block, and a label check would read it as covered. The whole briefing is
+ * warned whenever a hit cannot be placed wholly inside one of those blocks: a hit in text the
+ * engine did not wrap, one that runs across a block's edge, one in a block the wrap did not
+ * mark (the fence would claim a mark that is not there), a label the windowed scan reports
+ * and the position scan does not find, or a briefing with format characters, whose offsets
+ * the scan cannot give (`injectionHitSpans`). Noisy, never open.
+ */
+export type BriefingInjection =
+  | { readonly scope: 'none' }
+  | { readonly scope: 'whole' }
+  | { readonly scope: 'parts'; readonly sources: readonly string[] };
+
+const OWN_SOURCE = /^<untrusted_data source="([^"]*)">/;
+
+export function briefingInjection(briefing: string, ownBlocks: readonly string[] | undefined): BriefingInjection {
+  // The region scanRegionOf builds, and where each of the engine's blocks sits in it: its
+  // body up to and including the line break that stands in for its closer.
+  const located = locateOwnBlocks(briefing, ownBlocks);
+  const ranges: Array<{ start: number; end: number; block: string }> = [];
+  let region = '';
+  let cursor = 0;
+  for (const f of located) {
+    region += briefing.slice(cursor, f.at);
+    // The range starts after the opening tag: the wrap's scan and its mark cover the body, not
+    // the source label in the tag.
+    const opener = f.block.indexOf('\n');
+    const start = region.length + (opener < 0 ? 0 : opener + 1);
+    region += briefing.slice(f.at, f.stop - OWN_CLOSER.length) + '\n';
+    ranges.push({ start, end: region.length, block: f.block });
+    cursor = f.stop;
+  }
+  region += briefing.slice(cursor);
+  const all = detectInjectionAttempt(region);
+  if (!all.detected) return { scope: 'none' };
+  const hits = injectionHitSpans(region);
+  if (hits === null || !all.patterns.every((p) => hits.some((h) => h.label === p))) return { scope: 'whole' };
+  const sources: string[] = [];
+  for (const hit of hits) {
+    const home = ranges.find((r) => hit.start >= r.start && hit.end <= r.end);
+    // The fence says the block is marked, so a block the wrap did not mark cannot take the hit:
+    // a role line at a block's last line, say, matches only once the closer becomes a line break.
+    if (!home || !blockCarriesInjectionMark(home.block)) return { scope: 'whole' };
+    const source = OWN_SOURCE.exec(home.block)?.[1] ?? 'untrusted_data';
+    if (!sources.includes(source)) sources.push(source);
+  }
+  return sources.length === 0 ? { scope: 'whole' } : { scope: 'parts', sources };
 }
 
 /**

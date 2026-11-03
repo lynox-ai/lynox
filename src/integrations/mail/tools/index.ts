@@ -8,6 +8,7 @@ export { createMailSendTool } from './mail-send.js';
 export { createMailReplyTool } from './mail-reply.js';
 export { createMailTriageTool } from './mail-triage.js';
 export { createMailConnectTool } from './mail-connect.js';
+export { createInboxReadTool } from './inbox-read.js';
 
 import type { ToolEntry } from '../../../types/index.js';
 import { createMailSearchTool } from './mail-search.js';
@@ -16,6 +17,8 @@ import { createMailSendTool } from './mail-send.js';
 import { createMailReplyTool } from './mail-reply.js';
 import { createMailTriageTool } from './mail-triage.js';
 import { createMailConnectTool } from './mail-connect.js';
+import { createInboxReadTool } from './inbox-read.js';
+import { isFeatureEnabled } from '../../../core/features.js';
 import type { MailRegistry } from './registry.js';
 import type { MailContext } from '../context.js';
 
@@ -34,8 +37,10 @@ export function createMailTools(registry: MailRegistry, ctx?: MailContext): Tool
     createMailReadTool(registry) as ToolEntry,
     createMailSendTool(registry, ctx) as ToolEntry,
     createMailReplyTool(registry, ctx) as ToolEntry,
-    createMailTriageTool(registry) as ToolEntry,
+    createMailTriageTool(registry, ctx?.hooks) as ToolEntry,
     createMailConnectTool() as ToolEntry,
+    // Reads the inbox store; behind its flag until the cut is through (PRD inbox-user-rules Teil 1).
+    ...(isFeatureEnabled('inbox-read') ? [createInboxReadTool(ctx?.hooks) as ToolEntry] : []),
   ];
 }
 

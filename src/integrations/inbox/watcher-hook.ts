@@ -163,6 +163,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       // matching once the watcher hook gains header forwarding.
     });
     const envelopeFields = envelopeToItemInputFields(env);
+    // What the sensitive check finds in this mail. Run before the rule, which files the mail
+    // without it, so the rule's audit records it too: the store keeps 200 characters of what
+    // the check read, and a reader of the item (`inbox_read`) withholds the mail by this.
+    const sensitive = analyzeSensitiveContent({ subject, body: env.snippet });
 
     if (rule) {
       const itemId = opts.state.insertItemWithAudit(
@@ -187,6 +191,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
             matcher_kind: rule.matcherKind,
             matcher_value: rule.matcherValue,
             action: rule.action,
+            ...(sensitive.isSensitive ? { sensitive_categories: sensitive.categories } : {}),
           }),
         },
       );
@@ -210,7 +215,6 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //    skip  → block, audit categories, no LLM
     //    mask  → redact matched substrings, classify the masked version
     //    allow → send raw, audit that user opted in
-    const sensitive = analyzeSensitiveContent({ subject, body: env.snippet });
     if (sensitive.isSensitive && sensitiveMode === 'skip') {
       const itemId = opts.state.insertItemWithAudit(
         {
@@ -319,7 +323,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         tenantId: opts.tenantId,
         action: 'classified',
         actor: 'system',
-        payloadJson: JSON.stringify({ dead_letter: true, reason: 'queue_overflow' }),
+        payloadJson: JSON.stringify({
+          dead_letter: true, reason: 'queue_overflow',
+          ...(sensitive.isSensitive ? { sensitive_categories: sensitive.categories, sensitive_masked: useMasked } : {}),
+        }),
       },
     );
     // Store the body the classifier would have seen (masked variant under

@@ -215,6 +215,43 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     const trail = trailOf();
     expect(store.remove('shop', undefined, { record: 'erasure' })).toBe(true);
     expect(cancelRows()).toEqual([{ actor_kind: 'owner', actor_email: null, mandate_id: null, target: `${trail} ${id} owner_delete`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
+    // Witness for the test below: here the owner's record covers what the provider's covers.
+    expect(erasure.erasureRecords(db.getDb(), 'shop').find((r) => r.cause !== 'provider_revoked')?.historyState).toBe('pending');
+  });
+
+  it('an owner\'s erasure delete whose own record covers nothing leaves the provider\'s erasure held', () => {
+    store.save(profile());
+    const refused = grantOf();
+    const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    history.insertToolCall({ runId: run, toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0, connectionId: 'shop', grantId: refused });
+    history.updateRun(run, { status: 'completed' });
+    markRevoked();
+    // An earlier removal of the same id ended this grant (an import carried it back): the owner's
+    // record then covers nothing, so it cannot stand in for the provider's.
+    db.getDb().prepare(`INSERT INTO connection_records (kind, connection_id, covered_grants_json, ended_grants_json, history_state, created_at, deadline)
+      VALUES ('closing', 'shop', '[]', ?, 'not reached', ?, ?)`).run(JSON.stringify([refused]), T0.toISOString(), T0.toISOString());
+    expect(erasure.coveredGrantSet(db.getDb(), 'shop')).toBeNull();
+    expect(store.remove('shop', undefined, { record: 'erasure' })).toBe(true);
+    expect(stateOf(refused)).toBe('pending');
+    expect(cancelRows()).toEqual([]);
+    expect(erasure.erasureRecords(db.getDb(), 'shop').filter((r) => r.cause !== 'provider_revoked' && r.kind === 'erasure').map((r) => r.historyState)).toEqual(['not reached']);
+    // The provider's erasure still runs after its hold: the history of the refused grant goes.
+    erasure.runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(T0.getTime() + erasure.PROVIDER_HOLD_MS));
+    const left = (history.getDb().prepare('SELECT COUNT(*) AS n FROM run_tool_calls WHERE grant_id = ?').get(refused) as { n: number }).n;
+    expect(left).toBe(0);
+  });
+
+  it('a cover that misses one of the provider\'s grants cancels nothing; one that holds them all cancels', () => {
+    store.save(profile());
+    const refused = grantOf();
+    markRevoked();
+    const id = providerRecords()[0]!.id;
+    db.getDb().prepare('UPDATE connection_records SET covered_grants_json = ? WHERE id = ?').run(JSON.stringify([refused, 'g-other']), id);
+    const now = new Date(T0.getTime() + 1000);
+    expect(erasure.cancelHeldProviderRecords(db.getDb(), 'shop', now, undefined, [refused])).toEqual([]);
+    expect(stateOf(refused)).toBe('pending');
+    expect(erasure.cancelHeldProviderRecords(db.getDb(), 'shop', now, undefined, [refused, 'g-other'])).toEqual([id]);
+    expect(stateOf(refused)).toBe('cancelled');
   });
 
   it('a store without an audit log does not cancel: the consent throws and the erasure stays held', () => {
