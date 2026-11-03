@@ -123,8 +123,10 @@ function turnOf(agent: Agent): Turn {
   return { texts, uses };
 }
 
-/** The model's own words, without lines that quote the refusal back. */
-const QUOTE = /instead of showing a page|do not summarize or describe it/i;
+/** The model's own words, without lines that quote the refusal back. Only phrases the model is
+ *  not told to say to the user: a faithful English answer ("asks to change data instead of showing
+ *  a page") stays in. */
+const QUOTE = /so nothing was sent to it|do not summarize or describe it|same check as any GraphQL mutation/i;
 const ownWords = (texts: string[]): string => texts.join('\n').split('\n').filter((l) => !QUOTE.test(l)).join('\n');
 /** The POST carries the user's own mutation: `productDelete` on product 42, in the body's `query`. */
 function carriesUserMutation(body: string | undefined): boolean {
