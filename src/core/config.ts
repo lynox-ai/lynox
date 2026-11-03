@@ -988,6 +988,17 @@ function buildConfig(userConfig: LynoxUserConfig | null, projectConfig: LynoxUse
       // ignore malformed LYNOX_TIER_SET_JSON — boot in standard mode rather than crash
     }
   }
+  // Tier slots and the background model on Mistral's global endpoint are read as the EU one too,
+  // like the top-level URL and the model profiles: their calls go to the EU host either way.
+  if (merged.tier_set) {
+    for (const band of ['fast', 'balanced', 'deep'] as const) {
+      const slot = merged.tier_set[band];
+      if (slot?.api_base_url) merged.tier_set[band] = { ...slot, api_base_url: toMistralEuBase(slot.api_base_url) };
+    }
+  }
+  if (merged.background_model?.api_base_url) {
+    merged.background_model = { ...merged.background_model, api_base_url: toMistralEuBase(merged.background_model.api_base_url) };
+  }
   // The user's background-task model, held to the user bounds (admitBackgroundModel).
   // A choice that fails one is dropped in memory only: config.json keeps it, and the
   // run falls back to `worker_profile`, the operator default; without one, to the

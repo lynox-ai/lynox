@@ -1583,6 +1583,25 @@ describe('Config', () => {
     expect(profiles?.['worker']).toMatchObject({ provider: 'openai', api_key: 'sk-w', model_id: 'ministral-14b-2512' });
   });
 
+  it('reads a tier slot and the background model on Mistral\'s global endpoint as the EU one', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      routing_mode: 'hybrid',
+      tier_set: {
+        fast: { provider: 'openai', model_id: 'ministral-14b-2512', api_base_url: 'https://api.mistral.ai/v1' },
+        deep: { provider: 'openai', model_id: 'gpt-oss', api_base_url: 'https://api.groq.com/openai/v1' },
+      },
+      background_model: { provider: 'mistral', model_id: 'ministral-14b-2512', api_base_url: 'https://api.mistral.ai/v1' },
+    }));
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig();
+    expect(cfg.tier_set?.fast?.api_base_url).toBe('https://api.eu.mistral.ai/v1');
+    expect(cfg.tier_set?.fast?.model_id).toBe('ministral-14b-2512');
+    expect(cfg.tier_set?.deep?.api_base_url).toBe('https://api.groq.com/openai/v1');
+    expect(cfg.background_model?.api_base_url).toBe('https://api.eu.mistral.ai/v1');
+  });
+
   it('LYNOX_API_BASE_URL wins over the legacy ANTHROPIC_BASE_URL when both are set', async () => {
     process.env['LYNOX_API_BASE_URL'] = 'https://canonical.example/v1';
     process.env['ANTHROPIC_BASE_URL'] = 'https://legacy.example/v1';
