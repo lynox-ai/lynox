@@ -14784,7 +14784,12 @@ describe('LynoxHTTPApi', () => {
           expect(paired).toContain("api_base_url; got 'https://h.example/v1'");
           const slot = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: "u:SE'CRET@SECRET@h.example/v1?key=SECRET" } } });
           expect(slot).toContain("api_base_url 'h.example/v1' is not a curated");
-          for (const error of [top, paired, slot]) expect(error).not.toContain('SECRET');
+          // A `?` inside the password must not shield it, and a full-width `@` counts as one.
+          const shielded = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'u:SECRET?x@h.example/v1' } } });
+          expect(shielded).toContain("api_base_url 'h.example/v1' is not a curated");
+          const lookalike = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'u:SECRET\uFF20h.example/v1' } } });
+          expect(lookalike).toContain("api_base_url 'h.example/v1' is not a curated");
+          for (const error of [top, paired, slot, shielded, lookalike]) expect(error).not.toContain('SECRET');
           // The other way: a curated endpoint is saved as it was entered.
           const MISTRAL = 'https://api.eu.mistral.ai/v1';
           const saved = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ provider: 'openai', api_base_url: MISTRAL, openai_model_id: 'mistral-medium-2604' }) });

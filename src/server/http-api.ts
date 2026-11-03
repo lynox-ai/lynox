@@ -828,17 +828,19 @@ export function moveMistralEndpointsToEu(update: {
 }
 
 /**
- * An endpoint as a refusal may quote it: scheme, host and path. What stands between the scheme
- * and the last `@` (credentials), and from the first `?` or `#` on (a key in the query, a
- * fragment), is dropped, and so are control and line-separator characters. A tier slot's
- * `api_base_url` is any string, so this does not assume a parseable URL. A path holding an `@`
- * loses its host as well: that cuts too much, never too little.
+ * An endpoint as a refusal may quote it: scheme, host and path. First everything between the
+ * scheme and the last `@` (or a full-width or small `@`, which a reader takes for one) is dropped,
+ * so a `?` or `#` inside a password cannot shield the credentials; then everything from the first
+ * `?` or `#` (a key in the query, a fragment); then control and line-separator characters. A tier
+ * slot's `api_base_url` is any string, so this does not assume a parseable URL. A path holding an
+ * `@` loses its host as well: that cuts too much, never too little.
  */
 export function endpointForMessage(value: string): string {
-  const withoutQuery = value.replace(/[?#][^]*$/, '');
-  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(withoutQuery)?.[0] ?? '';
-  const rest = withoutQuery.slice(scheme.length);
-  const afterCredentials = rest.slice(rest.lastIndexOf('@') + 1);
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(value)?.[0] ?? '';
+  const rest = value.slice(scheme.length);
+  let cut = -1;
+  for (const m of rest.matchAll(/[@\uFF20\uFE6B]/g)) cut = m.index;
+  const afterCredentials = rest.slice(cut + 1).replace(/[?#][^]*$/, '');
   return `${scheme}${afterCredentials}`.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
 }
 
