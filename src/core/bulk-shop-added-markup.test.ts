@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { BulkLedger, BULK_HALT_REASONS } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, classifyChange, sameValue } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { externalWriter, mintBulkContract, type ExternalClient, type ExternalImage, type ExternalRead } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
@@ -146,26 +146,30 @@ describe('the external writer\'s read-back check', () => {
     read: async (): Promise<ExternalRead> => (back === 'fail' ? { kind: 'error' } as unknown as ExternalRead : { kind: 'ok', value: back } as ExternalRead),
     write: async (): Promise<ExternalRead> => ({ kind: 'ok', value: {} } as ExternalRead),
   });
-  const check = (sent: ExternalImage, back: ExternalImage): boolean =>
-    typeof sent['description'] === 'string' && typeof back['description'] === 'string' && added(sent['description'], back['description']);
+  const check = (sent: ExternalImage, back: ExternalImage): 'added' | 'rewritten' | 'kept' => {
+    const s = sent['description'];
+    const b = back['description'];
+    if (typeof s !== 'string' || typeof b !== 'string') return 'kept';
+    return added(s, b) ? 'added' : s === b ? 'kept' : 'rewritten';
+  };
 
   it('reports the target written with what the host kept, and the mark', async () => {
-    const w = externalWriter(client, { io: io({ description: `<p>Neu</p>${SCRIPT}` }), addedByHost: check });
+    const w = externalWriter(client, { io: io({ description: `<p>Neu</p>${SCRIPT}` }), readBack: check });
     expect(await w.write('k', { absent: false, value: { description: '<p>Neu</p>' } })).toEqual({
       result: 'written', actual: { value: { description: `<p>Neu</p>${SCRIPT}` }, estimated: false }, hostAddedMarkup: true,
     });
   });
 
-  it('reports no mark for a read-back that only reformats, and none without a check', async () => {
-    const reformatted = externalWriter(client, { io: io({ description: '<p>Neu</p>\n' }), addedByHost: check });
+  it('reports a read-back that only reformats as rewritten, never marked, and nothing without a check', async () => {
+    const reformatted = externalWriter(client, { io: io({ description: '<p>Neu</p>\n' }), readBack: check });
     expect(await reformatted.write('k', { absent: false, value: { description: '<p>Neu</p>' } }))
-      .toEqual({ result: 'written', actual: { value: { description: '<p>Neu</p>\n' }, estimated: false } });
+      .toEqual({ result: 'written', actual: { value: { description: '<p>Neu</p>\n' }, estimated: false }, hostRewrote: true });
     const unchecked = externalWriter(client, { io: io({ description: `<p>Neu</p>${SCRIPT}` }) });
     expect(await unchecked.write('k', { absent: false, value: { description: '<p>Neu</p>' } })).not.toHaveProperty('hostAddedMarkup');
   });
 
   it('keeps what was sent, estimated and unmarked, when the read-back fails', async () => {
-    const w = externalWriter(client, { io: io('fail'), addedByHost: () => true });
+    const w = externalWriter(client, { io: io('fail'), readBack: () => 'added' });
     expect(await w.write('k', { absent: false, value: { description: '<p>Neu</p>' } }))
       .toEqual({ result: 'written', actual: { value: { description: '<p>Neu</p>' }, estimated: true } });
   });
@@ -341,5 +345,96 @@ describe('htmlFieldsOf: fail-closed on the product form (sec-core F6)', () => {
     insert.run('plain-run', `http:${HOST}`, JSON.stringify({ ...readContract, httpMethods: ['PUT'] }));
     expect(ledger.htmlFieldsOf('store-run')).toEqual(['descriptionHtml']);
     expect(ledger.htmlFieldsOf('plain-run')).toEqual([]);
+  });
+});
+
+describe('sameValue: a run\'s HTML fields under the normalised comparison (§21.2 item 5)', () => {
+  it('takes a reformatted HTML field as the same, and one changed character, element or attribute as not', () => {
+    const html = ['description'];
+    expect(sameValue({ description: '<P>Neu<br/></P>', name: 'a' }, { description: '<p>Neu<br></p>', name: 'a' }, html)).toBe(true);
+    expect(sameValue({ description: '<p>Neu</p>' }, { description: '<p>Neu!</p>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>Neu</p>' }, { description: '<p>Neu</p><p></p>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>Neu</p>' }, { description: '<p class="x">Neu</p>' }, html)).toBe(false);
+  });
+
+  it('compares a field open at its end byte for byte: the page closes what the parser drops', () => {
+    const html = ['description'];
+    expect(sameValue({ description: '<p>a</p>' }, { description: '<p>a</p><img src=x onerror=y' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>a</p><img src=x onerror=y' }, { description: '<p>a</p>' }, html)).toBe(false);
+    // An element left open at the end that takes in what follows (a `strong`, reopened around the
+    // theme's markup) drops nothing, and the parser closes it: the same tree as the closed value.
+    // Byte for byte, in both directions.
+    expect(sameValue({ description: '<p><strong>a</p>' }, { description: '<p><strong>a</strong></p>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p><strong>a</strong></p>' }, { description: '<p><strong>a</p>' }, html)).toBe(false);
+    // The same value open at its end is equal to itself, byte for byte.
+    expect(sameValue({ description: '<p>a' }, { description: '<p>a' }, html)).toBe(true);
+  });
+
+  it('compares a field byte for byte when the sides differ in what the parser drops', () => {
+    const html = ['description'];
+    expect(sameValue({ description: '<p>a</p>' }, { description: '<body onload=alert(1)><p>a</p>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>a</p>' }, { description: '<p>a</p></div>' }, html)).toBe(false);
+    // Text on both sides of the dropped tag: the parser joins it into one text node over the tag.
+    expect(sameValue({ description: '<p>ab</p>' }, { description: '<p>a</div>b</p>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>ab</p>' }, { description: '<p>a<body onload=alert(1)>b</p>' }, html)).toBe(false);
+    // A dropped stretch on either side, the rest only reformatted: byte for byte, so not equal —
+    // the tree does not say where it sits, and the page closes the container there.
+    expect(sameValue({ description: '<P>a</P></div>' }, { description: '<p>a</p></div>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>a</p></div>' }, { description: '<P>a</P></div>' }, html)).toBe(false);
+    expect(sameValue({ description: '<p>a</p></div><p>b</p>' }, { description: '<p>a</p><p>b</p></div>' }, html)).toBe(false);
+    // The same bytes stay equal.
+    expect(sameValue({ description: '<p>a</p></div>' }, { description: '<p>a</p></div>' }, html)).toBe(true);
+  });
+
+  it('keeps every other field byte for byte, and a field one side lacks as a difference', () => {
+    expect(sameValue({ description: '<p>a</p>', name: '<b>x</b>' }, { description: '<p>a</p>', name: '<B>x</B>' }, ['description'])).toBe(false);
+    expect(sameValue({ description: '<p>a</p>' }, { description: '<p>a</p>', name: null }, ['description'])).toBe(false);
+    expect(sameValue({ description: null }, { description: '' }, ['description'])).toBe(false);
+    // Without HTML fields, the comparison is today's.
+    expect(sameValue({ description: '<P>a</P>' }, { description: '<p>a</p>' })).toBe(false);
+    expect(classifyChange({ absent: false, value: { description: '<P>a</P>' } }, { description: '<p>a</p>' }, ['description'])).toBe('unchanged');
+    expect(classifyChange({ absent: false, value: { description: '<P>a</P>' } }, { description: '<p>a</p>' })).toBe('update');
+  });
+});
+
+describe('a written description the store kept otherwise than sent (§21.2 item 6: counted, not halted)', () => {
+  it('counts the target on the run and names it on its row, and writes on to the next', async () => {
+    const id = approvedRun({ description: 'Neu' }, [{ description: '<p>Alt</p>' }, { description: '<p>Alt 2</p>' }]);
+    const store = new Map<string, Record<string, unknown>>([[`${LIST}/1`, { description: '<p>Alt</p>' }], [`${LIST}/2`, { description: '<p>Alt 2</p>' }]]);
+    const base = stubWriter(store, (v) => ({ ...v, description: `<p>${String(v['description'])}</p>` }));
+    // The first write comes back rewritten, the second as sent.
+    let n = 0;
+    const w: TargetWriter = {
+      ...base,
+      async write(key, after, sent, refused) {
+        const out = await base.write(key, after, sent, refused);
+        n += 1;
+        return n === 1 && typeof out !== 'string' ? { ...out, hostRewrote: true as const } : out;
+      },
+    };
+    const out = await run(id, w);
+    expect(out.status).toBe('done');
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 2, hostRewrote: 1, shopAddedMarkup: 0 });
+    const rows = ledger.getPreview(id);
+    expect(rows[0]).toMatchObject({ hostRewrote: true });
+    expect(rows[1]).not.toHaveProperty('hostRewrote');
+  });
+});
+
+describe('a WooCommerce description keeps today\'s comparison (§21.4, N5)', () => {
+  it('compares nothing as HTML on a WooCommerce list run, although its list form names the field HTML', () => {
+    const id = approvedRun({ description: 'Neu' }, [{ description: '<P>Alt</P>' }]);
+    expect(ledger.htmlFieldsOf(id)).toContain('description');
+    expect(ledger.comparedAsHtml(id)).toEqual([]);
+  });
+
+  it('resumes a WooCommerce target the store reformatted as a conflict, as before', async () => {
+    const id = approvedRun({ description: '<p>Neu</p>' }, [{ description: '<p>Alt</p>' }]);
+    // A dead loop's write, kept reformatted: not the planned bytes, so not found as planned.
+    const store = new Map<string, Record<string, unknown>>([[`${LIST}/1`, { description: '<P>Neu</P>' }]]);
+    const w = stubWriter(store);
+    await run(id, w);
+    expect(w.sent).toEqual([]);
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 0, conflicts: 1 });
   });
 });
