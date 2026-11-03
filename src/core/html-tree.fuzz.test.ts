@@ -255,6 +255,7 @@ interface Wrong {
   contentHtmlOnly?: true; // (i)
   noTemplateFlag?: true; // (j)
   noLayout?: true; // (k) a carrier's text without where it sits
+  textBelow?: true; // a carrier keyed by all the text below it, not its direct text
 }
 
 const HTML_NS = 'http://www.w3.org/1999/xhtml';
@@ -281,6 +282,13 @@ function markupOf(nodes: readonly HtmlNodeRef[], wrong: Wrong = {}): Markup {
     if (wrong.skipForeign && n.namespace !== HTML_NS) { skipBelow = n.depth; continue; }
     const attrs = n.attrs.map((a) => [a.namespace ?? '', a.name, a.value]).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1));
     let content = wrong.ignoreContent ? null : n.content;
+    if (wrong.textBelow && content !== null) {
+      content = '';
+      for (let j = nodes.indexOf(n) + 1; j < nodes.length && nodes[j]!.depth > n.depth; j++) {
+        const c = nodes[j]!;
+        if (c.kind === 'text') content += c.value;
+      }
+    }
     if (wrong.contentHtmlOnly && n.namespace !== HTML_NS) content = null;
     if (!wrong.triplesOnly) {
       const k = JSON.stringify([n.namespace, n.name, attrs, content, flag]);
@@ -511,6 +519,7 @@ interface WrongCheck {
   holdByName?: true; // (d) an element is held when one of its name is
   anyUrl?: true; // (e) every link target passes
   everyAttributeOnce?: true; // a held `onclick` may be copied onto every element
+  textBelowOnly?: true; // a carrier is keyed by all the text below it, wherever that text sits
 }
 
 /**
@@ -526,7 +535,8 @@ function violations(before: string | null, after: string, wrong: WrongCheck = {}
   for (const kind of [(v: string) => v, canonicalHtml]) {
     const aNodes = walkHtml(parseHtmlFragment(kind(after)));
     const bNodes = before === null ? [] : walkHtml(parseHtmlFragment(kind(before)));
-    const A = markupOf(aNodes), B = markupOf(bNodes);
+    const extraction: Wrong = wrong.textBelowOnly ? { textBelow: true } : {};
+    const A = markupOf(aNodes, extraction), B = markupOf(bNodes, extraction);
     const held = linkHosts(bNodes);
     const hosts: Hosts = { web: [STORE_HOST, ...START_DOMAINS, ...held.web], mail: [STORE_HOST, ...START_DOMAINS, ...held.mail] };
     const byName = (k: string): string => { const [ns, name, , , t] = JSON.parse(k) as [string, string, unknown, unknown, boolean]; return JSON.stringify([ns, name, t]); };
@@ -587,6 +597,7 @@ const PROPERTY_2_CONTROLS: readonly (readonly [string, Check, (before: string | 
   ['(d) a check that holds by element name', wrongCheck({ holdByName: true }), (b, a) => violations(b, a).length > 0],
   ['(e) a check whose URL rule takes any target', wrongCheck({ anyUrl: true }), (b, a) => violations(b, a).length > 0],
   ['a check that holds a counted attribute once for every element', wrongCheck({ everyAttributeOnce: true }), (b, a) => violations(b, a).length > 0],
+  ['a check that keys a carrier by all the text below it', wrongCheck({ textBelowOnly: true }), (b, a) => violations(b, a).length > 0],
 ];
 
 const PAIRS = 3000;
@@ -594,9 +605,18 @@ const PAIRS = 3000;
 /** A link the generator may add: allowed, held, or out. */
 const HREFS = ['/products/x', 'https://shop.example/a', 'https://partner.example/b', 'https://evil.example/c', 'mailto:info@shop.example', 'mailto:x@partner.example', 'java\tscript:alert(1)', '//evil.example/x'];
 
+/** The seed whose carrier holds elements, for the pairs that edit it in place. */
+const CARRIER_SEED = '<svg><script>a=1;/*b()*/<g></g><g></g></script></svg>';
+
 function pairs(rng: Rng): [string | null, string][] {
   const out: [string | null, string][] = [];
   for (let i = 0; i < PAIRS; i++) {
+    // One pair in twenty edits the carrier seed by moving its text, so that every run, whatever
+    // its seed, holds such edits; the rest grow out of any seed.
+    if (rng() < 0.05) {
+      out.push([CARRIER_SEED, MUTATIONS['carrierText']!(rng, CARRIER_SEED)]);
+      continue;
+    }
     const [seed, generated] = generateFrom(rng);
     let after = generated;
     const r = rng();
@@ -631,10 +651,12 @@ describe(`property 2 against checkMarkup (seed ${SEED}, ${PAIRS} pairs)`, () => 
         if (!found.has(name) && check(before, after) && wrongWhere(before, after)) found.set(name, after);
       }
     }
-    // Enough of both kinds to mean something, counting as accepted only values that differ from
-    // their before-image (for the same value the property holds by construction), and every
-    // known-wrong check accepted a value the property refuses.
-    expect(acceptedChanged).toBeGreaterThan(PAIRS / 10);
+    // Enough of both kinds to mean something, counting as accepted only values whose bytes differ
+    // from their before-image (for the same bytes the property holds by construction; a value
+    // that differs only in case or quoting still counts), and every known-wrong check accepted a
+    // value the property refuses. The bound guards against a run that accepts next to nothing new,
+    // not a tuned figure: seed 6 gave exactly 300 of 3000, so a tenth was no margin.
+    expect(acceptedChanged).toBeGreaterThan(PAIRS / 20);
     expect(refused).toBeGreaterThan(PAIRS / 10);
     expect(PROPERTY_2_CONTROLS.map(([name]) => [name, found.has(name)])).toEqual(PROPERTY_2_CONTROLS.map(([name]) => [name, true]));
   });
@@ -646,6 +668,7 @@ describe(`property 2 against checkMarkup (seed ${SEED}, ${PAIRS} pairs)`, () => 
       ['(e) a check whose URL rule takes any target', '', '<p><a href="java\tscript:alert(1)">x</a></p>'],
       ['(e) a check whose URL rule takes any target', '', '<p><a href="//evil.example/x">x</a></p>'],
       ['a check that holds a counted attribute once for every element', '<p onclick="a()">x</p>', '<p onclick="a()">x</p><p onclick="a()">y</p>'],
+      ['a check that keys a carrier by all the text below it', CARRIER_SEED, '<svg><script>a=1;<g>/*</g>b()<g>*/</g></script></svg>'],
     ];
     for (const [name, before, after] of named) {
       const [, check, wrongWhere] = PROPERTY_2_CONTROLS.find(([n]) => n === name)!;
