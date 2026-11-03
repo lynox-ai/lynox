@@ -90,6 +90,25 @@ describe('the ledger stores an HTML field in its canonical bytes (1130)', () => 
     expect(ledger.getPreview(id)[0]?.change).toBe('unchanged');
   });
 
+  it('keeps a verdict equal to its before-image byte for byte', () => {
+    const { id, seq } = listed({}, true);
+    const raw = '<p>a<br/>b</p>';
+    expect(ledger.recordRead(id, seq, { before: { description: raw } })).toBe(true);
+    expect(ledger.claimJudge(id, seq, 'tok', Date.now(), 60_000)).toBe(true);
+    expect(ledger.recordJudgement(id, seq, 'tok', { after: { description: raw } })).toBe(true);
+    expect(storedAfter(id)['description']).toBe(raw);
+  });
+
+  it('stores a value whose canonical form is not stable raw, so the send refuses it', () => {
+    // `<pre>` with a leading blank line loses one line per round trip: a canonical form that
+    // changes again would show the shop something the check never read.
+    const raw = '<pre>\n\nCode</pre>';
+    const { id, seq } = listed({ description: raw });
+    expect(ledger.recordRead(id, seq, { before: { description: '<p>x</p>' } })).toBe(true);
+    expect(storedAfter(id)['description']).toBe(raw);
+    expect(rawHtmlField({ after: { absent: false, value: storedAfter(id) }, expected: { absent: false, value: { description: '<p>x</p>' } } }, ['description'])).toBe('description');
+  });
+
   it('CONTROL: leaves a field the list form does not name HTML as it is', () => {
     const { id, seq } = listed({ name: 'a<br/>b' });
     expect(ledger.recordRead(id, seq, { before: { name: 'x' } })).toBe(true);
