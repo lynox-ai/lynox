@@ -56,6 +56,12 @@
 		// A mandate built or changed it and the owner has not stamped what it now is (register 242).
 		// Absent from an engine before the stamp: then nothing waits.
 		awaitsStamp?: boolean;
+		// Whom Run runs it as, when that is a person the owner let in (1055): the email, and whether
+		// their access ended, which refuses the run. Sent to the owner only; absent for the owner's own.
+		runs_as?: { person: string; ended: boolean; covered_by_takeover?: number };
+		// Sent to a mandate for a workflow it may not schedule as it is (UX-058, ux U-085): another
+		// person's, or one whose author lynox cannot read. Never whose it is.
+		schedule_refusal?: 'foreign' | 'unreadable';
 	}
 
 	let workflows = $state<SavedWorkflow[]>([]);
@@ -186,6 +192,33 @@
 
 	// A workflow that asks its owner while it runs: it runs only on its schedule, so the library
 	// offers no Run for it (the engine refuses one), and its schedule names the asking steps.
+	// A workflow whose mandate's access ended runs for no one (the run is refused, 1055), so it is not
+	// run, scheduled or changed from here; renaming and deleting stay (UX-053, ux U-079).
+	function accessEnded(wf: SavedWorkflow): boolean {
+		return wf.runs_as?.ended === true;
+	}
+
+	// The sentence under an ended workflow's buttons: with paused plans whose takeover moves the
+	// workflow to the owner, the way through them (U-079 (b), U-119); otherwise a new workflow (a).
+	function endedNote(wf: SavedWorkflow): string {
+		const person = wf.runs_as?.person ?? '';
+		const unnamed = person === '' ? '_unnamed' : '';
+		const paused = wf.runs_as?.covered_by_takeover ?? 0;
+		if (paused > 0) {
+			return tf(`workflow_library.ended_note_paused_${paused === 1 ? 'one' : 'other'}${unnamed}`, {
+				person, n: String(paused), tab: t('hub.automation.triggers'), button: t('takeover.button'),
+			});
+		}
+		return tf(`workflow_library.ended_note${unnamed}`, { person });
+	}
+
+	// The schedule refusals the engine names by code, in the reader's language (ux U-085, U-119).
+	const SCHEDULE_REFUSALS: Record<string, string> = {
+		foreign_workflow: 'workflow_library.schedule_refused.foreign',
+		unreadable_workflow: 'workflow_library.schedule_refused.unreadable',
+		missing_workflow: 'workflow_library.schedule_refused.missing',
+	};
+
 	function asksOwner(wf: SavedWorkflow): boolean {
 		return wf.mode === 'interactive' && wf.schedulable === true;
 	}
@@ -297,7 +330,7 @@
 				}),
 			});
 			if (!res.ok) {
-				const msg = (await res.json().catch(() => null)) as { error?: string } | null;
+				const msg = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
 				// Only the owner stamps; a helper refused the same way is shown the refusal, not a view
 				// whose line asks them to confirm what they cannot.
 				if (awaitsStampRefusal(res.status, msg, wf.id) && viewer !== 'owner') {
@@ -313,7 +346,8 @@
 					stampResumesSchedule = wf;
 					return;
 				}
-				error = msg?.error ?? t('workflow_library.schedule_failed');
+				const refused = typeof msg?.code === 'string' ? SCHEDULE_REFUSALS[msg.code] : undefined;
+				error = refused !== undefined ? t(refused) : (msg?.error ?? t('workflow_library.schedule_failed'));
 				return;
 			}
 			scheduleModalWf = null;
@@ -439,6 +473,9 @@
 			// Without a fresh list (reload failed) or without the workflow in it, there is nothing
 			// current to reopen the dialog on — the old object is exactly what must not come back.
 			const fresh = listed ? workflows.find((w) => w.id === resume.id) : undefined;
+			// A workflow that may no longer be scheduled (its mandate ended, or it is not this
+			// reader's to schedule) does not get the dialog back; its card now says why.
+			if (fresh && (accessEnded(fresh) || fresh.schedule_refusal !== undefined)) return;
 			if (!fresh) {
 				notice = t('workflow_library.stamp.reopen_schedule');
 				return;
@@ -525,8 +562,16 @@
 				// and spending. Discarding the key there is what lets the next click pay for
 				// the whole workflow a second time.
 				keepKey = !attemptIsOver({ httpStatus: res.status });
-				const msg = (await res.json().catch(() => null)) as { error?: string } | null;
-				error = msg?.error ?? t('workflow_library.run_failed');
+				const msg = (await res.json().catch(() => null)) as { error?: string; code?: string; runs_as?: string | null } | null;
+				// The person who shaped it has left (1055, ux U-063): name them and the way out, a new
+				// workflow from the chat, rather than the engine's sentence.
+				// Named, because the message stands above the list, apart from the workflow's card.
+				const name = workflows.find((w) => w.id === id)?.name ?? id;
+				error = msg?.code === 'author_ended'
+					? (typeof msg.runs_as === 'string' && msg.runs_as !== ''
+						? tf('workflow_library.author_ended', { person: msg.runs_as, name })
+						: tf('workflow_library.author_ended_unnamed', { name }))
+					: msg?.error ?? t('workflow_library.run_failed');
 				notice = '';
 				return;
 			}
@@ -685,6 +730,16 @@
 											{t('workflow_library.stamp.awaits')}
 										</span>
 									{/if}
+									{#if wf.runs_as && accessEnded(wf)}
+										<span data-testid="access-ended-badge" class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-1.5 text-warning break-all">
+											<Icon name="warning" size="xs" />
+											{wf.runs_as.person === '' ? t('workflow_library.access_ended_unnamed') : tf('workflow_library.access_ended', { person: wf.runs_as.person })}
+										</span>
+									{:else if wf.runs_as}
+										<span data-testid="runs-as-badge" class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 break-all">
+											{tf('workflow_library.runs_as', { person: wf.runs_as.person })}
+										</span>
+									{/if}
 								</div>
 								{#if expandedCards.has(wf.id)}
 									<div class="space-y-1 mt-2">
@@ -718,7 +773,7 @@
 								{#if !asksOwner(wf) && ownerActs}
 								<button
 									onclick={() => onRunClick(wf)}
-									disabled={runningId !== null}
+									disabled={runningId !== null || accessEnded(wf)}
 									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50 md:[@media(hover:hover)]:disabled:opacity-0 group-hover:disabled:opacity-50 group-focus-within:disabled:opacity-50"
 								>
 									<Icon name="bolt" size="xs" />
@@ -728,7 +783,8 @@
 								{#if wf.schedulable ?? wf.mode === 'autonomous'}
 									<button
 										onclick={() => onScheduleClick(wf)}
-										class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity"
+										disabled={accessEnded(wf) || wf.schedule_refusal !== undefined}
+										class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50 md:[@media(hover:hover)]:disabled:opacity-0 group-hover:disabled:opacity-50 group-focus-within:disabled:opacity-50"
 									>
 										<Icon name="clock" size="xs" />
 										{t('workflow_library.schedule')}
@@ -736,7 +792,8 @@
 								{/if}
 								<button
 									onclick={() => onEditInChat(wf)}
-									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity"
+									disabled={accessEnded(wf)}
+									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50 md:[@media(hover:hover)]:disabled:opacity-0 group-hover:disabled:opacity-50 group-focus-within:disabled:opacity-50"
 								>
 									<Icon name="chat" size="xs" />
 									{t('workflow_library.edit_in_chat')}
@@ -754,6 +811,12 @@
 							{/if}
 						</div>
 					</div>
+					<!-- Why a button above is off, in the open, not in a tooltip (ux U-079, U-119). -->
+					{#if accessEnded(wf)}
+						<p data-library-note="ended" class="mt-2 text-xs text-warning break-words">{endedNote(wf)}</p>
+					{:else if wf.schedule_refusal !== undefined && (wf.schedulable ?? wf.mode === 'autonomous')}
+						<p data-library-note={wf.schedule_refusal} class="mt-2 text-xs text-text-muted break-words">{t(`workflow_library.${wf.schedule_refusal}_note`)}</p>
+					{/if}
 				</div>
 			{/each}
 		</div>

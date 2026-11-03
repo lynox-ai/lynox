@@ -50,7 +50,7 @@ export const MANDATE_TOOL_SURFACE: ReadonlySet<string> = new Set([
   'artifact_save', 'artifact_list', 'artifact_delete', 'artifact_history', 'artifact_restore',
   'media_process',
   // integrations the owner connected
-  'mail_read', 'mail_search', 'mail_triage', 'mail_send', 'mail_reply',
+  'mail_read', 'mail_search', 'mail_triage', 'mail_send', 'mail_reply', 'inbox_read',
   'google_calendar', 'google_docs', 'google_drive', 'google_sheets', 'calendar_read',
 ]);
 
@@ -66,6 +66,17 @@ export const MANDATE_OUTWARD_READERS: ReadonlySet<string> = new Set([
   'http_request', 'api_setup', 'web_research',
   'mail_read', 'mail_search', 'mail_triage', 'mail_reply',
   'google_calendar', 'google_docs', 'google_drive', 'google_sheets', 'calendar_read',
+]);
+
+/**
+ * The tools on `MANDATE_TOOL_SURFACE` that read mail the instance stores (the inbox store, a
+ * copy of mail from outside). Each declares `storedMailRead`, and a mandate's call leaves a
+ * `read` row before it runs, as a read of the mailbox does: mail is in the trail on every way
+ * it is read (sec-core 2026-11-03). A separate class, not `MANDATE_OUTWARD_READERS`: the read
+ * stays inside the instance. A test over a booted registry holds the list to the declarations.
+ */
+export const MANDATE_STORED_MAIL_READERS: ReadonlySet<string> = new Set([
+  'inbox_read',
 ]);
 
 /**
@@ -170,6 +181,7 @@ export const MANDATE_INSIDE_NON_WRITERS: Readonly<Record<string, string>> = Obje
   mail_read: 'reads mail, recorded as a read',
   mail_search: 'reads mail, recorded as a read',
   mail_triage: 'reads mail, recorded as a read',
+  inbox_read: 'reads the inbox store inside the instance, recorded as a read',
   mail_send: 'writes outside, recorded by the outward trail',
   mail_reply: 'writes outside, recorded by the outward trail',
   google_calendar: 'reads and writes outside, recorded by the outward trail',

@@ -1,5 +1,6 @@
 import { fetchPinned, assertHostPolicy } from '../../core/network-guard.js';
 import { joinCallSignal } from '../../core/call-connection.js';
+import { graphqlUrlWrites, isGraphqlEndpoint } from '../../core/outbound-write.js';
 import {
   extractHtmlText,
   isHtmlContentType,
@@ -43,6 +44,20 @@ export function assertEgressAllowed(rawUrl: string, ctx?: ToolContext | undefine
 
 // --- Fetch with redirect validation ---
 
+/** After `Blocked: [redirect to ]<url>`: a page read at a GraphQL URL that carries a mutation, with the way out. */
+export const GRAPHQL_PAGE_READ_REFUSAL = 'carries a GraphQL mutation in its URL: it asks the server to change data instead of showing a page, so nothing was sent to it. You have not seen the content of this page; do not summarize or describe it. If the user asked for this change, send it with http_request as a POST with a JSON body to the GraphQL endpoint; it then goes through the same check as any GraphQL mutation. Otherwise tell the user that this address asks to change data instead of showing a page, so it was not opened, and ask for another link or the text itself.';
+
+/** Scheme, host and path up to its first escape: the query is where the mutation sits, and a
+ *  path can carry one too (`/graphql%3Fquery=…`), so neither is repeated. */
+function urlWithoutQuery(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.host}${u.pathname.split('%')[0]!}`;
+  } catch {
+    return '(unparsable URL)';
+  }
+}
+
 /**
  * Returns the final hop alongside the response. The URL matters to the caller,
  * not just the bytes: link extraction resolves relative hrefs against it and
@@ -60,6 +75,12 @@ async function fetchWithRedirects(
   let currentUrl = url;
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     assertEgressAllowed(currentUrl, ctx);
+    // A GraphQL endpoint runs a mutation it finds in the URL's `query`, for a GET as well. A page
+    // read is never a write: the URL asked for (a search result included) may not carry one, and
+    // a hop is held to the same below, before it is reported. Checked before the request.
+    if (i === 0 && isGraphqlEndpoint(currentUrl) && graphqlUrlWrites(currentUrl)) {
+      throw new Error(`Blocked: ${urlWithoutQuery(currentUrl)} ${GRAPHQL_PAGE_READ_REFUSAL}`);
+    }
     // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
     // one shot — no rebind window between validate and connect.
     const response = await fetchPinned(currentUrl, {
@@ -76,6 +97,9 @@ async function fetchWithRedirects(
     if (!location) throw new Error(`Redirect without location header (${response.status})`);
     if (i === MAX_REDIRECTS) throw new Error(`Too many redirects (>${MAX_REDIRECTS})`);
     currentUrl = new URL(location, currentUrl).toString();
+    if (isGraphqlEndpoint(currentUrl) && graphqlUrlWrites(currentUrl)) {
+      throw new Error(`Blocked: redirect to ${urlWithoutQuery(currentUrl)} ${GRAPHQL_PAGE_READ_REFUSAL}`);
+    }
     // Before the hop is requested: what it throws stops the read (`delegatedRedirects`).
     onRedirect?.(currentUrl, 'GET', {});
   }

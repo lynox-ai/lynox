@@ -53,6 +53,7 @@ import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBud
 import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
+import { WORKFLOW_ENDED_MID_RUN } from '../orchestrator/run-source.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
@@ -839,11 +840,11 @@ export class WorkerLoop {
 
   /**
    * Whom the run of `id` is built for: the mandate its plan acts for (`planOf`), else whoever
-   * started it by hand; undefined is the owner. Every session, workflow run and question of the
-   * run takes it from here.
+   * started it by hand, else the owner, named as such. Every session, workflow run and question
+   * of the run takes it from here, and none of them reads an absent principal as the owner (1055).
    */
-  #runAs(id: string, starter: RequestPrincipal | undefined): RequestPrincipal | undefined {
-    return this.#runSlotOf(id)?.planOf ?? starter;
+  #runAs(id: string, starter: RequestPrincipal | undefined): RequestPrincipal {
+    return this.#runSlotOf(id)?.planOf ?? starter ?? OWNER_PRINCIPAL;
   }
 
   /**
@@ -2762,7 +2763,7 @@ export class WorkerLoop {
       // difference and the daily cap would be the thing that breaks. Null means nobody
       // reserved (a manual run), and then the constant is the only bound there is.
       costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD },
-      ...(runAs ? { principal: runAs } : {}),
+      principal: runAs,
       // The tier the user chose for this trigger, held to the ceiling by the session.
       ...(triggerTier ? { model: triggerTier } : {}),
     });
@@ -2884,7 +2885,7 @@ export class WorkerLoop {
       let promptId: string;
       try {
         promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: false }, session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
-          principal: runAs ?? OWNER_PRINCIPAL,
+          principal: runAs,
           handRun: active?.handRun === true,
         });
       } catch (err: unknown) {
@@ -3207,7 +3208,7 @@ export class WorkerLoop {
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
     this.#stopIfStarterEnded(active, starter, task.id);
-    const result = await session.run(prompt, { triggerOrigin: task.source, ...(runAs ? { principal: runAs } : {}) });
+    const result = await session.run(prompt, { triggerOrigin: task.source, principal: runAs });
 
     // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
     // knowing it ever happened: `costGuard` makes the agent stop and RETURN its text — it
@@ -3493,7 +3494,7 @@ export class WorkerLoop {
       // Whom the run is for — the mandate its plan acts for, or who started it by hand: the
       // workflow's steps get only the tools that principal's lock allows (PRD §3.13 E4 — the
       // build site is here, not a session).
-      ...(runAs ? { principal: runAs } : {}),
+      principal: runAs,
       // A mapped value reaches only a step's task text, where it is fenced as untrusted; asked
       // by the runner of the workflow exactly as it read it, so no edit falls in between.
       ...(event !== undefined ? { checkWorkflow: (p: PlannedPipeline) => {
@@ -3524,6 +3525,27 @@ export class WorkerLoop {
       else if (!planPauseOn()) endEvent(stopped, { state: 'failed', reason: ACCESS_ENDED_RESULT, runId: result.runId });
       this.#recordRun(this.engine.getTaskManager(), task.id,
         `Workflow stopped on your instruction (run ${result.runId ?? 'unknown'}).`, 'stopped');
+      return;
+    }
+
+    // The runner ended the run before a step because a mandate its workflow depends on ended
+    // since it started (1100, `WORKFLOW_ENDED_MID_RUN`): the same end the sweep gives the run
+    // (`stopEndedStarters`) when it comes first, so it is recorded as that stop, and with the pause
+    // on the plan pauses. Keyed on the run's own error and on the plan having ended, so a step
+    // whose error happens to read the same is still a failure.
+    const endedEntry = this.activeTasks.get(task.id);
+    // A liveness read that throws is no end found: the run is recorded as a failure and retried,
+    // and the plan is not paused for it. The runner stopped the run on its own read (a throw there
+    // counts as ended, `stopForEndedAuthor`), so no further step ran; its error, which the end
+    // event carries and, for a run without a webhook event, the escalation, still says that an
+    // access ended.
+    const planEnded = (entry: ActiveTask): boolean => { try { return this.#planHasEnded(entry); } catch { return false; } };
+    if (result.ok && result.error === WORKFLOW_ENDED_MID_RUN && endedEntry !== undefined && planEnded(endedEntry)) {
+      endedEntry.accessEnded = true;
+      const stopped = this.#runSlotOf(task.id);
+      if (!planPauseOn()) endEvent(stopped, { state: 'failed', reason: ACCESS_ENDED_RESULT, runId: result.runId });
+      this.#recordRun(this.engine.getTaskManager(), task.id,
+        `${ACCESS_ENDED_RESULT} (run ${result.runId ?? 'unknown'}).`, 'stopped');
       return;
     }
 
@@ -3608,7 +3630,7 @@ export class WorkerLoop {
    * nested `run_workflow` pass on `promptUser` only, which a scheduled step does not have.
    */
   #workflowQuestions(
-    task: TriggerRecord, runAs: RequestPrincipal | undefined, active: ActiveTask | undefined,
+    task: TriggerRecord, runAs: RequestPrincipal, active: ActiveTask | undefined,
     ownerStop: AbortSignal, scope: AbortScope,
   ): { runId: string; channel: WorkflowQuestions } {
     const runId = randomUUID();
@@ -3617,7 +3639,7 @@ export class WorkerLoop {
       runId,
       scheduleId: task.id,
       title: task.title,
-      principal: runAs ?? OWNER_PRINCIPAL,
+      principal: runAs,
       handRun: active?.handRun === true,
       promptStore: () => this.engine.getPromptStore(),
       threadStore: () => this.engine.getThreadStore(),
@@ -3829,7 +3851,7 @@ export class WorkerLoop {
       autonomy: 'autonomous',
       // A run without tools, but built for whom it runs all the same: the lock must not
       // depend on which turns happen to carry tools today.
-      ...(runAs ? { principal: runAs } : {}),
+      principal: runAs,
       // A watch is a single summarize-what-changed turn — a fast-tier job.
       // Without this it inherited the engine's default tier (often
       // 'balanced'/Sonnet), paying a premium model for change-detection. A
@@ -3888,7 +3910,7 @@ export class WorkerLoop {
     // _detectDanger). Removing the capability beats gating it. Same mechanism the
     // compaction summarizer uses for the same "pure summarize" shape.
     this.#stopIfStarterEnded(stopEntry, starter, task.id);
-    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', ...(runAs ? { principal: runAs } : {}) });
+    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', principal: runAs });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : analysis;

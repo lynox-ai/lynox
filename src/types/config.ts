@@ -128,6 +128,9 @@ export interface AgentConfig {
   /** The `<secrets>` listing of the vault, given with the briefing but only to an owner's turn:
    *  the principal is per run, and a mandate reaches no owner secret by name (`agent.ts`). */
   secretsBriefing?:    string | undefined;
+  /** The blocks the engine wrapped while it built {@link briefing} (`collectOwnBlocks`), so the
+   *  briefing's scan does not read their closers as a boundary escape. */
+  briefingOwnBlocks?:  readonly string[] | undefined;
   autonomy?:           AutonomyLevel | undefined;
   /**
    * Capability contract authorising headless outbound writes. RESERVED SEAM
@@ -799,8 +802,8 @@ export interface LynoxUserConfig {
   background_model?: TierSlot | null | undefined;
   /**
    * LLM mode for managed instances. 'standard' (default) uses Claude Sonnet 4.6 via Anthropic Direct.
-   * 'eu-sovereign' switches the main LLM to Mistral Large 3 via the OpenAI adapter (Paris) — full
-   * EU data sovereignty, no CLOUD Act exposure. Toggleable in the Web UI under Settings → LLM Mode.
+   * 'eu-sovereign' switches the main LLM to Mistral Large 3 via the OpenAI adapter on
+   * Mistral's EU regional endpoint. Toggleable in the Web UI under Settings → LLM Mode.
    * Engine.init() reads this and overrides provider/api_key/api_base_url at runtime.
    */
   llm_mode?: 'standard' | 'eu-sovereign' | undefined;

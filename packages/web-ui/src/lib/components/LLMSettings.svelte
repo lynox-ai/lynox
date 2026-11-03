@@ -24,16 +24,17 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { throwIfRefused } from '../api/save-refusal.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
 	import { clearTierConfigCache } from '../utils/tier-config.js';
 	import { buildMainModelOptions, selectMainModelKey, mainModelOptionKey, findMainModelOptionByKey, isExpensiveModel, formatContextWindow, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
+	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 	import { cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { endpointText, optionLabel, orNotSet } from './settings-readonly/values.js';
@@ -166,6 +167,9 @@
 		// while verifying a provider switch — turned the fix into a silent no-op
 		// under the env-recommending docs path).
 		env_overrides?: { provider?: boolean };
+		// A tier whose stored model this version does not know runs the strategy's model on the
+		// same provider instead (`config.ts`, the preset guard); GET reports it so the page can say so.
+		replaced_tier_slots?: { tier: ModelTier; model_id: string; runs: string }[];
 		// F1b: effective active provider + base, surfaced ONLY when env-pinned
 		// (the provider then never lands in config.json, so `provider` /
 		// `api_base_url` above are empty). Used as a fallback to highlight the
@@ -356,6 +360,9 @@
 				const u = new URL(baseUrl);
 				host = u.hostname.toLowerCase();
 				hostPort = u.host.toLowerCase();
+				// A config saved on Mistral's global endpoint is the Mistral preset too; the
+				// engine reads it as the EU endpoint the preset now names (core catalog.ts).
+				if (host === 'api.mistral.ai') { host = 'api.eu.mistral.ai'; hostPort = host; }
 			} catch { /* invalid — falls through to the generic tile */ }
 			if (host) {
 				const matched = candidates.find((c) => {
@@ -383,6 +390,7 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const [catRes, configRes, statusRes] = await Promise.all([
 				fetch(`${getApiBase()}/llm/catalog`),
 				fetch(`${getApiBase()}/config`),
@@ -392,7 +400,7 @@
 			const catBody = (await catRes.json()) as { providers: CatalogProvider[] };
 			providers = catBody.providers;
 			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks; available_tier_presets?: Record<string, PresetInfo>; capabilities?: { durable_memory_capture_degraded?: boolean } };
-			noteSettingsViewer(configBody);
+			noteViewer(configBody);
 			config = configBody;
 			locks = configBody.locks ?? {};
 			availablePresets = configBody.available_tier_presets ?? {};
@@ -586,6 +594,39 @@
 	// The active preset's resolved per-tier rows (for the inline detail panel).
 	const activePresetTiers = $derived(presetInfoFor(strategy)?.tiers ?? []);
 
+	// ux U-118: a tier that runs another model than the one chosen says so where it is listed,
+	// in the names the page shows. The owner is told how to change it; a mandate only reads it.
+	// The engine replaces a slot only under the STORED preset, so the lines describe the saved state:
+	// they stand while that strategy is shown and leave while another card is only being tried.
+	const replacedSlots = $derived(strategy === config.tier_preset ? (config.replaced_tier_slots ?? []) : []);
+	// Replaced tiers the preset detail has no row for still need a line (under the rows).
+	const replacedWithoutRow = $derived(replacedSlots.filter((r) => !activePresetTiers.some((x) => x.tier === r.tier)));
+	/** After a save the engine has reloaded its config; ask it again whether a slot is still replaced.
+	 *  Not awaited by the save, so two saves can each have an answer on its way: only the answer to
+	 *  the latest question is taken, an older one arriving late would describe a config since replaced.
+	 *  Nor is an answer taken that was asked for before a sign-in reset: it was the earlier session's. */
+	let replacedAsk = 0;
+	async function refreshReplacedSlots(): Promise<void> {
+		const ask = ++replacedAsk;
+		const noteViewer = viewerNote();
+		try {
+			const res = await fetch(`${getApiBase()}/config`);
+			if (!res.ok) return; // keep the last known lines: a stale warning beats a hidden one
+			const body = (await res.json()) as Pick<UserConfig, 'replaced_tier_slots'>;
+			if (!noteViewer(body) || ask !== replacedAsk) return;
+			config.replaced_tier_slots = body.replaced_tier_slots;
+		} catch {
+			// same as above
+		}
+	}
+	function replacedSlotLine(r: { tier: ModelTier; model_id: string; runs: string }, viewer: 'owner' | 'mandate'): string {
+		const runs = presetInfoFor(strategy)?.tiers.find((x) => x.tier === r.tier && x.model_id === r.runs)?.label ?? r.runs;
+		// Under a locked provider every strategy card is disabled, so the owner has no way to "Custom"
+		// either and reads the sentences without it.
+		const sentences = viewer === 'owner' && !providerLocked ? 'owner' : 'mandate';
+		return tf(`llm.replaced_slot.${sentences}`, { model_id: r.model_id, tier: t(`llm.tier.${r.tier}`), runs });
+	}
+
 	function selectStrategy(next: Strategy): void {
 		if (next === strategy) return;
 		const preset = next !== 'standard' && next !== 'custom' ? availablePresets[next] : undefined;
@@ -658,7 +699,7 @@
 		// 404s against Ollama, which has never heard of that model.
 		const freeTextModel = entry.models.length === 0;
 		if (entry.base_url_default && !entry.requires_base_url) {
-			// Pinned preset (e.g. Mistral → api.mistral.ai). Stamp it so
+			// Pinned preset (e.g. Mistral → api.eu.mistral.ai). Stamp it so
 			// save→reload round-trips back to this preset and the user
 			// doesn't have to type a URL they didn't choose.
 			config = {
@@ -670,11 +711,12 @@
 			};
 		} else if (entry.requires_base_url
 			&& config.api_base_url
-			&& providers.some((p) => p.base_url_default === config.api_base_url)) {
+			&& (providers.some((p) => p.base_url_default === config.api_base_url) || isMistralPresetBase(config.api_base_url))) {
 			// Switching FROM a pinned preset (Mistral) TO a free-text one
 			// (openai-compat). Detect "the URL we have was stamped by a
 			// pinned preset" via membership in `base_url_default` across
-			// the catalog. Also clear openai_model_id (mistral-large-2512
+			// the catalog — or Mistral's global endpoint, which the preset
+			// stamped before it moved to the EU one. Also clear openai_model_id (mistral-large-2512
 			// pinned against a free-text endpoint would 404 every probe).
 			config = { ...config, api_base_url: '', openai_model_id: '' };
 		} else if (!entry.requires_base_url && !entry.base_url_default) {
@@ -916,7 +958,12 @@
 			// and mirror the chosen strategy into local config so a later re-derive
 			// (without a full reload) stays consistent with what was written.
 			dirty = false;
+			const presetBefore = config.tier_preset;
 			config.tier_preset = isPreset ? strategy : undefined;
+			// A line names the model the OLD preset ran; under another preset it would be false, so it
+			// goes until the engine says what runs now.
+			if (config.tier_preset !== presetBefore) config.replaced_tier_slots = undefined;
+			void refreshReplacedSlots();
 			addToast(t('llm.saved'), 'success', 3000);
 			// Tell the StatusBar (and any other live provider indicator) to refresh
 			// NOW instead of waiting up to 30s for its next poll — otherwise the
@@ -1113,6 +1160,9 @@
 		<OwnerOnlyNotice />
 		{#if loaded}
 			<ReadOnlyRows rows={mandateRows} />
+			{#each replacedSlots as r (r.tier)}
+				<p class="text-xs text-warning" data-replaced-slot={r.tier}>{replacedSlotLine(r, 'mandate')}</p>
+			{/each}
 		{/if}
 	{:else}
 	{#if config.env_overrides?.provider}
@@ -1257,6 +1307,10 @@
 								</span>
 							{/if}
 						</div>
+						{@const replaced = replacedSlots.find((r) => r.tier === tier.tier)}
+						{#if replaced}
+							<p class="ml-24 text-xs text-warning" data-replaced-slot={replaced.tier}>{replacedSlotLine(replaced, 'owner')}</p>
+						{/if}
 						{#if expandedDetails[strategy]}
 							<dl class="ml-24 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px] text-text-muted">
 								{#if tier.residency}
@@ -1274,6 +1328,9 @@
 							</dl>
 						{/if}
 					{/each}
+					{#each replacedWithoutRow as r (r.tier)}
+						<p class="text-xs text-warning" data-replaced-slot={r.tier}>{replacedSlotLine(r, 'owner')}</p>
+					{/each}
 					<div class="flex items-center justify-between pt-1">
 						<button type="button" onclick={() => toggleDetails(strategy)}
 							class="text-xs text-accent hover:underline flex items-center gap-1">
@@ -1283,6 +1340,11 @@
 						<span class="text-[11px] text-text-subtle">{t('llm.preset.applies_hint')}</span>
 					</div>
 				</div>
+			{:else}
+				<!-- No preset detail to sit beside: the lines stand under the strategy cards. -->
+				{#each replacedSlots as r (r.tier)}
+					<p class="text-xs text-warning" data-replaced-slot={r.tier}>{replacedSlotLine(r, 'owner')}</p>
+				{/each}
 			{/if}
 		</section>
 	{/if}
@@ -1376,7 +1438,7 @@
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.base_url')}</span>
 					<input type="url" disabled={!loaded || providerLocked}
-						placeholder="https://api.mistral.ai/v1"
+						placeholder="https://api.eu.mistral.ai/v1"
 						bind:value={config.api_base_url} oninput={markDirty}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 				</label>

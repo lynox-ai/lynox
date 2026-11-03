@@ -19,7 +19,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
 	import { secretWriteRefusal, type SecretWriteRefusal } from '../utils/secret-write-refusal.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	function refusalText(why: SecretWriteRefusal): string {
 		if (why === 'preset_client') return t('secrets.preset_client_use_form');
@@ -88,6 +88,7 @@
 		loading = true;
 		error = '';
 		try {
+			const noteViewer = viewerNote();
 			const [secretsRes, configRes] = await Promise.all([
 				fetch(`${getApiBase()}/secrets`),
 				fetch(`${getApiBase()}/config`),
@@ -106,7 +107,7 @@
 			if (configRes.ok) {
 				const cfg = (await configRes.json()) as { managed?: string };
 				managed = cpSuppliesLLMKey(cfg.managed);
-				noteSettingsViewer(cfg);
+				noteViewer(cfg);
 			}
 		} catch {
 			error = t('common.load_failed');

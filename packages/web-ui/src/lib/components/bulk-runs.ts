@@ -45,6 +45,8 @@ export interface BulkRun {
 	sentUnknown: number;
 	/** Written targets the store kept with markup lynox did not send. Optional: an older engine sends none. */
 	shopAddedMarkup?: number | undefined;
+	/** Written targets whose store kept a description otherwise than sent, without outside markup: counted, not halted. */
+	hostRewrote?: number | undefined;
 	undone: number;
 	kind: 'apply' | 'undo';
 	atomic: boolean;
@@ -424,6 +426,8 @@ export interface BulkTarget {
 	/** Written, and the store kept it with markup lynox did not send: the target the halt
 	 *  `markupAddedByShop` is about. Set only where it holds. */
 	shopAddedMarkup?: true | undefined;
+	/** Written, and the store kept the description otherwise than sent, without outside markup. */
+	hostRewrote?: true | undefined;
 }
 
 /** The external host of a run's target system, or null for a local run. */
@@ -636,7 +640,7 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	list_item_mismatch: 'list_item_mismatch',
 	list_item_truncated: 'list_item_truncated',
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
-	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', shop_added_markup: 'shop_added_markup',
+	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused', shop_added_markup: 'shop_added_markup',
 };
 /** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
  *  of tags the page reads, whose way out differs from planning again (U-103). */

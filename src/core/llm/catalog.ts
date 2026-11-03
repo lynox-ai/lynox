@@ -6,6 +6,7 @@
  */
 
 import type { LLMProvider, ModelTier } from '../../types/models.js';
+import { toMistralEuBase } from '../../types/models.js';
 import type { TierSet } from '../../types/config.js';
 import type { ProviderKey } from '../../types/provider-registry.js';
 import {
@@ -73,7 +74,7 @@ export interface MainChatModel {
 export interface CatalogProviderEntry {
   /**
    * Wire-level provider — what the engine sends to `createLLMClient`. Multiple
-   * UI entries can share a `provider` (e.g. both 'Mistral (EU-Paris)' and
+   * UI entries can share a `provider` (e.g. both 'Mistral (EU)' and
    * generic 'OpenAI-compatible endpoint' serialise to provider='openai'); the
    * UI keys buttons off `preset_id ?? provider` to disambiguate them.
    */
@@ -121,7 +122,7 @@ export interface CatalogProviderEntry {
   /**
    * Pre-filled api_base_url for this preset. Used when `requires_base_url` is
    * false but the entry still needs a non-default URL (e.g. Mistral preset
-   * implies api.mistral.ai without making the user type it).
+   * implies api.eu.mistral.ai without making the user type it).
    */
   base_url_default?: string;
   /**
@@ -303,7 +304,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     context_window: 262_144,
     pricing: { input: 1.50, output: 7.50 },
     capabilities: ['tool_use'],
-    residency: 'EU-Paris (Mistral SAS)',
+    residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'The Mistral deep tier — a newer, stronger generation than Large 3 for deep reasoning and analysis (Large is being deprecated to legacy). 262k context, native prompt-cache. Text-only (no vision). Note Mistral has no 1M-context deep.',
   },
   {
@@ -313,7 +314,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     context_window: 256_000,
     pricing: { input: 0.50, output: 1.50 },
     capabilities: ['vision', 'tool_use'],
-    residency: 'EU-Paris (Mistral SAS)',
+    residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'Being deprecated to legacy — Medium 3.5 is the stronger deep now. Cheaper ($0.50/$1.50) and multimodal (vision), but weaker on deep analysis. 256k context, native prompt-cache.',
   },
   {
@@ -323,7 +324,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     context_window: 262_144,
     pricing: { input: 0.20, output: 0.20 },
     capabilities: ['vision', 'tool_use'],
-    residency: 'EU-Paris (Mistral SAS)',
+    residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'Gen-3 mid model, text+vision. Strong tool-ROUTER (100% Set-Bench) but below the R1/R3 orchestration floor as a main — the balanced tier now resolves to Medium 3.5 (WS2); 14B stays a catalog extra.',
   },
   {
@@ -333,7 +334,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     context_window: 131_072,
     pricing: { input: 0.10, output: 0.10 },
     capabilities: ['vision', 'tool_use'],
-    residency: 'EU-Paris (Mistral SAS)',
+    residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'Cheapest Mistral model. Orchestration, classification, routing. Gen-3 multimodal (text+vision).',
   },
   {
@@ -343,7 +344,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     context_window: 262_144,
     pricing: { input: 0.15, output: 0.15 },
     capabilities: ['vision', 'tool_use'],
-    residency: 'EU-Paris (Mistral SAS)',
+    residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'Recommended fast-tier default. Gen-3 multimodal (text+vision). 100% pass on all 8 bench axes at $0.00006–$0.00038 warm per loop.',
   },
 ];
@@ -613,10 +614,10 @@ export const LLM_CATALOG: LLMCatalog = [
     models: MISTRAL_MODELS,
     requires_base_url: false,
     requires_region: false,
-    base_url_default: 'https://api.mistral.ai/v1',
-    default_residency: 'EU-Paris (Mistral SAS; DPA + GDPR)',
+    base_url_default: 'https://api.eu.mistral.ai/v1',
+    default_residency: 'EU/EFTA inference (Mistral SAS, regional endpoint; DPA + GDPR)',
     verification: 'native',
-    notes: 'EU-sovereign option. Pinned to api.mistral.ai — no base URL needed. Tier-aware: ministral / mistral-large picked from the model dropdown.',
+    notes: 'EU-sovereign option. Pinned to the EU regional endpoint api.eu.mistral.ai — no base URL needed. Tier-aware: ministral / mistral-large picked from the model dropdown.',
   },
   ...OPENAI_COMPAT_PRESETS,
   {
@@ -755,7 +756,7 @@ export interface ProviderIdentity {
 /**
  * The first-class registry key `'mistral'` (provider-registry.ts) IS the pinned
  * Mistral endpoint — it carries the host in its identity and arrives without a
- * base URL. It must therefore share a key with `openai` + `api.mistral.ai`, or
+ * base URL. It must therefore share a key with `openai` + `api.eu.mistral.ai`, or
  * one provider would be listed twice under two spellings.
  */
 // A Map, not an object literal: the lookup key comes from LYNOX_TIER_SET_JSON,
@@ -926,7 +927,9 @@ export function resolveCatalogKey(
     let host = '';       // hostname only        — 'localhost', 'api.mistral.ai'
     let hostPort = '';   // hostname:port if any — 'localhost:11434'
     try {
-      const u = new URL(baseUrl);
+      // A URL saved on Mistral's global endpoint is the Mistral preset too: it is moved to
+      // the EU endpoint everywhere it is used, so it matches as that.
+      const u = new URL(toMistralEuBase(baseUrl));
       host = u.hostname.toLowerCase();
       hostPort = u.host.toLowerCase();
     } catch { /* leave empty — falls through to the generic tile */ }
@@ -961,9 +964,11 @@ export function resolveCatalogKey(
         }
 
         // Remote presets: apex + `api.*` + subdomain variants all match —
-        //   defHost='api.mistral.ai' matches 'api.mistral.ai',
-        //   'mistral.ai' (apex) and 'eu.mistral.ai' (subdomain).
-        // Crucially does NOT match 'api.mistral.ai.attacker.com', because the
+        //   defHost='api.eu.mistral.ai' matches 'api.eu.mistral.ai',
+        //   'eu.mistral.ai' (apex) and any '*.eu.mistral.ai' subdomain. Mistral's
+        //   global 'api.mistral.ai' is moved to the EU endpoint before this match
+        //   (`toMistralEuBase`); other '*.mistral.ai' hosts are not the preset.
+        // Crucially does NOT match 'api.eu.mistral.ai.attacker.com', because the
         // suffix check requires a leading `.`.
         if (host === defHost) return true;
         const apex = defHost.replace(/^api\./, '');

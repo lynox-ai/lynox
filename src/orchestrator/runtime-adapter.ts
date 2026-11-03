@@ -1,4 +1,4 @@
-import type { RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
@@ -227,6 +227,9 @@ export interface ChatOrigin {
   readonly threadId: string | undefined;
   /** Whether the chat has private mode on right now. */
   readonly skipsCapture: () => boolean;
+  /** The chat run whose turn started the workflow, recorded on the pipeline run so the chat's
+   *  footer counts the paid API calls of its steps (`RunHistory.getApiCallsOfRun`). */
+  readonly runId?: string | undefined;
 }
 
 /**
@@ -237,11 +240,12 @@ export interface ChatOrigin {
  * `memory_extraction: false`, which stands a step's capture down as it does the chat's.
  */
 export function chatOriginOf(
-  agent: Pick<IAgent, 'currentThreadId' | 'originThreadId' | 'skipMemoryExtraction'> & Partial<Pick<IAgent, 'toolContext'>>,
+  agent: Pick<IAgent, 'currentThreadId' | 'originThreadId' | 'skipMemoryExtraction'> & Partial<Pick<IAgent, 'toolContext' | 'currentRunId'>>,
 ): ChatOrigin {
   const threadId = agent.currentThreadId ?? agent.originThreadId;
   return {
     threadId,
+    runId: agent.currentRunId,
     skipsCapture: () => agent.skipMemoryExtraction === true
       || (threadId !== undefined && agent.toolContext?.threadStore?.getThread(threadId)?.skip_extraction === 1),
   };
@@ -1248,7 +1252,10 @@ export async function spawnInline(
   // back (`MANDATE_PATTERN_WRITE_TOOLS`) are dropped, not refused: they are registered only beside
   // the legacy memory, so on the engines a mandate signs in to the step names a tool that is not
   // there, and the planners still offer `memory_update` for steps.
-  const lock = principal !== undefined ? toolLockFor(principal) : null;
+  // Absent is the owner only because `spawnInline` is public API; the engine's own runs always
+  // pass one (`buildRunCtx`). The lock is asked either way, so the owner's null comes from
+  // `toolLockFor`, not from a branch that skips it.
+  const lock = toolLockFor(principal ?? OWNER_PRINCIPAL);
   if (lock !== null) {
     const named = [...(step.tools ?? []), ...(step.tool !== undefined ? [step.tool] : [])];
     const withheld = [...new Set(named.filter(n => !lock.has(n) && Object.hasOwn(MANDATE_WITHHELD_TOOLS, n)))];

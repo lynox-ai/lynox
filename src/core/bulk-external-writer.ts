@@ -5,7 +5,7 @@
  */
 import type { TargetWriter } from './bulk-apply.js';
 import { externalWriter, parseBulkContract, writeMethodOf, type ExternalClient, type ExternalImage } from './bulk-external.js';
-import { htmlFieldsOfListForm, markupAddedByHost } from './bulk-html.js';
+import { droppedTagsOf, htmlFieldsOfListForm, markupAddedByHost } from './bulk-html.js';
 import { externalHostOf, type BulkLedger, type BulkRunForApply } from './bulk-ledger.js';
 import { shopifyTargetIo } from './bulk-shopify.js';
 import { shopifyGraphqlEndpoint } from './shopify-graphql.js';
@@ -35,7 +35,7 @@ export function externalRunWriter(
     // A product's description is read back for markup the write never sent (PRD shopify-preset
     // §21.2 item 6), on this form only (N5): an image's `alt` is plain text.
     return shopifyApply.form === 'shopify_product'
-      ? externalWriter(client, { io, addedByHost: shopAddedMarkup(host, ledger.startDomainsOf(run.id)) })
+      ? externalWriter(client, { io, readBack: productReadBack(host, ledger.startDomainsOf(run.id)) })
       : externalWriter(client, { io });
   }
   const client = clientFor(run);
@@ -68,12 +68,33 @@ export function bulkRunContract(stored: CapabilityContract, targetSystem: string
   }
 }
 
-/** Whether a product's read-back holds markup in an HTML field that the write did not send. A
- *  field the write did not send, or that is not text on either side, is not checked here. */
-function shopAddedMarkup(storeHost: string, startDomains: readonly string[]): (sent: ExternalImage, back: ExternalImage) => boolean {
-  return (sent, back) => htmlFieldsOfListForm('shopify').some((f) => {
-    const s = sent[f];
-    const b = back[f];
-    return typeof s === 'string' && typeof b === 'string' && !markupAddedByHost({ sent: s, back: b, storeHost, startDomains }).ok;
-  });
+/** Whether `back` holds a string more often than `sent` does. */
+function moreDropped(sent: readonly string[], back: readonly string[]): boolean {
+  const held = new Map<string, number>();
+  for (const v of sent) held.set(v, (held.get(v) ?? 0) + 1);
+  for (const v of back) {
+    const n = held.get(v) ?? 0;
+    if (n === 0) return true;
+    held.set(v, n - 1);
+  }
+  return false;
+}
+
+/** What a product's read-back holds in its HTML fields against the value sent: markup the write did
+ *  not send in any field, else a field stored otherwise than sent — a sent text held as no text
+ *  included — else the bytes sent. A field the write did not send as text is not read here. */
+function productReadBack(storeHost: string, startDomains: readonly string[]): (sent: ExternalImage, back: ExternalImage) => 'added' | 'rewritten' | 'kept' {
+  return (sent, back) => {
+    const fields = htmlFieldsOfListForm('shopify').filter((f) => typeof sent[f] === 'string');
+    const pairs = fields.flatMap((f) => {
+      const b = back[f];
+      return typeof b === 'string' ? [[sent[f] as string, b] as const] : [];
+    });
+    // A stretch the parser drops (`<body onload>`, a stray end tag) is in no tree the check reads:
+    // one the store's read-back holds beyond the value sent is markup it added, live on the page.
+    if (pairs.some(([s, b]) => !markupAddedByHost({ sent: s, back: b, storeHost, startDomains }).ok
+      || (s !== b && moreDropped(droppedTagsOf(s), droppedTagsOf(b))))) return 'added';
+    // A sent text the store holds as no text (cleared) is a removal: counted like any other.
+    return pairs.length < fields.length || pairs.some(([s, b]) => s !== b) ? 'rewritten' : 'kept';
+  };
 }

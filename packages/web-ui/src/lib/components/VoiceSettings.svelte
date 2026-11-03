@@ -9,7 +9,7 @@
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { optionLabel } from './settings-readonly/values.js';
@@ -61,6 +61,7 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const [infoRes, configRes] = await Promise.all([
 				fetch(`${getApiBase()}/voice/info`),
 				fetch(`${getApiBase()}/config`),
@@ -76,7 +77,7 @@
 				throw e;
 			}
 			// Whose session asks, before `info` shows a section: a mandate never sees the pickers flash.
-			noteSettingsViewer(body);
+			noteViewer(body);
 			info = infoBody;
 			config = {
 				transcription_provider: body.transcription_provider,
@@ -110,8 +111,12 @@
 
 	// A mandate's session (ux U-104): what each picker shows, as text, with the option's visible
 	// name. A section without a choice shows no picker to the owner, and no row here.
+	// The server sends one English name per provider; Mistral's is shown in the UI language.
+	function providerName(p: { id: string; name: string }): string {
+		return p.id === 'mistral' ? t('voice.provider_mistral') : p.name;
+	}
 	function providerRow(label: string, side: VoiceInfo['stt'], chosen: string | undefined): { label: string; value: string } {
-		const options = side.providers.map((p) => ({ value: p.id, label: p.name }));
+		const options = side.providers.map((p) => ({ value: p.id, label: providerName(p) }));
 		// Pinned by the environment or locked on a managed instance: the picker shows the provider in use.
 		const value = side.env_override || side.locked ? side.provider : (chosen ?? 'auto');
 		return { label, value: optionLabel(value, options) };
@@ -170,7 +175,7 @@
 					onchange={(e) => { config.transcription_provider = e.currentTarget.value as Config['transcription_provider']; }}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 					{#each info.stt.providers as p (p.id)}
-						<option value={p.id} disabled={!p.available}>{p.name}{p.available ? '' : ' — ' + t('voice.unavailable')}</option>
+						<option value={p.id} disabled={!p.available}>{providerName(p)}{p.available ? '' : ' — ' + t('voice.unavailable')}</option>
 					{/each}
 				</select>
 			{/if}
@@ -201,7 +206,7 @@
 					onchange={(e) => { config.tts_provider = e.currentTarget.value as Config['tts_provider']; }}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 					{#each info.tts.providers as p (p.id)}
-						<option value={p.id} disabled={!p.available}>{p.name}{p.available ? '' : ' — ' + t('voice.unavailable')}</option>
+						<option value={p.id} disabled={!p.available}>{providerName(p)}{p.available ? '' : ' — ' + t('voice.unavailable')}</option>
 					{/each}
 				</select>
 			{/if}

@@ -123,7 +123,7 @@ export function isSpeakActive(key: string): boolean {
 }
 
 /**
- * Surface the "Audio is synthesized by Mistral (Paris, EU)" privacy hint
+ * Surface the "Audio is synthesized by Mistral (EU endpoint)" privacy hint
  * once per browser on the first TTS playback. Caller passes the translated
  * string so this store doesn't need to pull in the i18n module.
  */

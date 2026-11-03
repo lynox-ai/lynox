@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
-import { TOOL_WRITE_SITES, MANDATE_INSIDE_NON_WRITERS, MANDATE_INSIDE_WRITERS, MANDATE_OUTWARD_READERS, MANDATE_PATTERN_WRITE_TOOLS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
+import { TOOL_WRITE_SITES, MANDATE_INSIDE_NON_WRITERS, MANDATE_INSIDE_WRITERS, MANDATE_OUTWARD_READERS, MANDATE_STORED_MAIL_READERS, MANDATE_PATTERN_WRITE_TOOLS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
 import type { MailRegistry } from '../integrations/mail/tools/registry.js';
 import type { SearchProvider } from '../integrations/search/search-provider.js';
 import type { ToolEntry } from '../types/index.js';
@@ -14,6 +14,7 @@ import { createMailTriageTool } from '../integrations/mail/tools/mail-triage.js'
 import { createMailSendTool } from '../integrations/mail/tools/mail-send.js';
 import { createMailReplyTool } from '../integrations/mail/tools/mail-reply.js';
 import { createMailConnectTool } from '../integrations/mail/tools/mail-connect.js';
+import { createInboxReadTool } from '../integrations/mail/tools/inbox-read.js';
 import { createSheetsTool } from '../integrations/google/google-sheets.js';
 import { createDocsTool } from '../integrations/google/google-docs.js';
 import { createDriveTool } from '../integrations/google/google-drive.js';
@@ -151,7 +152,7 @@ describe('Engine boot — every tool a mandate may use is placed for what it rea
     const provider = { name: 'test', search: async () => [] } as unknown as SearchProvider;
     const integrations = [
       createMailReadTool(mail), createMailSearchTool(mail), createMailTriageTool(mail), createMailSendTool(mail),
-      createMailReplyTool(mail), createMailConnectTool(),
+      createMailReplyTool(mail), createMailConnectTool(), createInboxReadTool(),
       createSheetsTool(noAuth), createDocsTool(noAuth), createDriveTool(noAuth), createCalendarTool(noAuth),
       createWebSearchTool(provider), calendarReadTool,
     ] as unknown as Array<ToolEntry<never>>;
@@ -197,6 +198,17 @@ describe('Engine boot — every tool a mandate may use is placed for what it rea
     const siteTools = new Set(TOOL_WRITE_SITES.map(s => s.slice(0, s.indexOf('#'))));
     expect([...MANDATE_INSIDE_WRITERS].filter(n => !siteTools.has(n)), 'a writer without a write site').toEqual([]);
     expect([...siteTools].filter(n => !MANDATE_INSIDE_WRITERS.has(n)), 'a write site of a tool that is no writer').toEqual([]);
+  });
+
+  // sec-core 2026-11-03: a read of stored mail is in the trail like a read of the mailbox.
+  it('declares storedMailRead on exactly the tools placed as reading stored mail, apart from the outward readers', async () => {
+    const all = await surfaceTools();
+    const declared = [...all.values()].filter(t => typeof t.storedMailRead === 'function').map(t => t.definition.name).sort();
+    expect(declared).toEqual([...MANDATE_STORED_MAIL_READERS].sort());
+    for (const n of MANDATE_STORED_MAIL_READERS) {
+      expect(MANDATE_TOOL_SURFACE.has(n), n).toBe(true);
+      expect(MANDATE_OUTWARD_READERS.has(n), `${n} is not an outward reader`).toBe(false);
+    }
   });
 
   it('declares outwardRead on exactly the tools placed as reading outside', async () => {

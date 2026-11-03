@@ -72,6 +72,22 @@ export interface InboxQueuePayload {
   } | undefined;
 }
 
+/**
+ * What the watcher's sensitive check found, for the item's audit. Every audit a queued mail
+ * ends in carries it — classified, dead-lettered or drained — so a reader of the item
+ * (`inbox_read`) knows the mail was sensitive even where the stored 200 characters no longer
+ * show it: the check ran on more of the mail than is kept.
+ */
+export function sensitiveAudit(payload: Pick<InboxQueuePayload, 'sensitive'>): Record<string, unknown> {
+  return payload.sensitive
+    ? {
+        sensitive_categories: payload.sensitive.categories,
+        sensitive_masked: payload.sensitive.masked,
+        sensitive_redactions: payload.sensitive.redactionCount,
+      }
+    : {};
+}
+
 /** Subset of ClassifierQueueOptions the wiring exposes — callbacks are owned. */
 export interface InboxRunnerPolicy {
   maxConcurrency?: number | undefined;
@@ -174,13 +190,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
             confidence: result.confidence,
             fail_reason: result.failReason,
             body_truncated: result.bodyTruncated,
-            ...(payload.sensitive
-              ? {
-                  sensitive_categories: payload.sensitive.categories,
-                  sensitive_masked: payload.sensitive.masked,
-                  sensitive_redactions: payload.sensitive.redactionCount,
-                }
-              : {}),
+            ...sensitiveAudit(payload),
             ...(metadataWarning ? { warning: 'classified_with_empty_metadata', missing: metadataWarning } : {}),
           }),
         },
@@ -229,7 +239,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
             tenantId: payload.tenantId,
             action: 'classified',
             actor: 'system',
-            payloadJson: JSON.stringify({ dead_letter: true, reason: forRestore ? 'restore_drain' : 'shutdown_drain' }),
+            payloadJson: JSON.stringify({ dead_letter: true, reason: forRestore ? 'restore_drain' : 'shutdown_drain', ...sensitiveAudit(payload) }),
           },
         );
         _writeThreadMessage(state, payload, drainedId, payload.classifierInput.body);
@@ -259,6 +269,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
             // reporting so a chatty future SDK cannot leak prompt content
             // into audit logs or downstream Bugsink reports.
             error_message: _scrubErrorMessage(error.message),
+            ...sensitiveAudit(payload),
           }),
         },
       );

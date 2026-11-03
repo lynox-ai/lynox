@@ -7,7 +7,7 @@
 	import { keepSettingsItem } from '../utils/billing-tier.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { getApprovalsEnabled } from '../stores/approvals.svelte.js';
-	import { isMandateSession, noteSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	interface PaletteItem {
 		id: string;
@@ -39,9 +39,10 @@
 	let managed = $state<boolean | null>(null);
 
 	$effect(() => {
+		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
 			.then(r => r.json())
-			.then((data: Record<string, unknown>) => { managed = !!data['managed']; noteSettingsViewer(data); })
+			.then((data: Record<string, unknown>) => { managed = !!data['managed']; noteViewer(data); })
 			.catch(() => { managed = false; });
 	});
 

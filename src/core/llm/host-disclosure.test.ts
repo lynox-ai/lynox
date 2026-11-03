@@ -21,14 +21,19 @@ import {
  */
 describe('host-disclosure (model-presets P1b)', () => {
   it('carries the three provider hosts', () => {
-    for (const host of ['api.anthropic.com', 'api.mistral.ai', 'api.fireworks.ai']) {
+    for (const host of ['api.anthropic.com', 'api.eu.mistral.ai', 'api.fireworks.ai']) {
       expect(hostDisclosure(host), host).toBeDefined();
     }
   });
 
+  // Mistral commits to no inference location for its global endpoint: no entry may claim EU for it.
+  it('has no entry for Mistral\'s global endpoint', () => {
+    expect(hostDisclosure('api.mistral.ai')).toBeUndefined();
+  });
+
   it('an EU host has no Chapter-V transfer basis; a US host does', () => {
-    expect(HOST_DISCLOSURES['api.mistral.ai']!.residency).toBe('EU');
-    expect(HOST_DISCLOSURES['api.mistral.ai']!.transferBasis).toBeNull();
+    expect(HOST_DISCLOSURES['api.eu.mistral.ai']!.residency).toBe('EU');
+    expect(HOST_DISCLOSURES['api.eu.mistral.ai']!.transferBasis).toBeNull();
     expect(HOST_DISCLOSURES['api.fireworks.ai']!.residency).toBe('US');
     expect(HOST_DISCLOSURES['api.fireworks.ai']!.transferBasis).toBe('SCC');
   });
@@ -77,7 +82,7 @@ describe('host-disclosure (model-presets P1b)', () => {
   });
 
   it('a confirmed host shows its posture verbatim — including a sensitive one', () => {
-    expect(displayPosture('api.mistral.ai')).toBe('EU-resident (France)');
+    expect(displayPosture('api.eu.mistral.ai')).toBe('EU/EFTA inference (regional endpoint)');
     // Fireworks carries the sensitive token now, and it is the one that is actually
     // earned: §4.5 of its DPA. Passing it through verbatim proves the gate LETS a
     // confirmed claim show, not merely that it blocks.
