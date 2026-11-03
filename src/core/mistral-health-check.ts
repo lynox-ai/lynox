@@ -2,7 +2,7 @@
  * One-shot Mistral account health check fired at engine startup.
  *
  * Background: Voxtral STT/TTS and Mistral Large 3 (eu-sovereign mode) all
- * call api.mistral.ai. Without this check, the only signal of a depleted
+ * call api.eu.mistral.ai. Without this check, the only signal of a depleted
  * account / expired key was the user clicking the speaker button, getting
  * a generic toast, and the operator hunting stderr for the actual reason.
  * The owner hit exactly that on 2026-04-24 — Mistral budget had bottomed out
@@ -21,7 +21,7 @@ import { captureError } from './error-reporting.js';
 import { getErrorMessage } from './utils.js';
 import { providerListApplies } from './contained-providers.js';
 
-const MODELS_URL = 'https://api.mistral.ai/v1/models';
+const MODELS_URL = 'https://api.eu.mistral.ai/v1/models';
 const TIMEOUT_MS = 5_000;
 
 export type MistralHealthStatus =

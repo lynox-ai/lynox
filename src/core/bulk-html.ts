@@ -134,6 +134,9 @@ export interface Occurrence {
   attributes: (readonly [name: string, value: string])[];
   /** The text below a script, style, raw-text or RCDATA element; a comment's text; else null. */
   text: string | null;
+  /** Where that text sits, when elements stand below the element too (a foreign `script` may hold
+   *  them): every node below in document order with its depth. Null when no element is below. */
+  layout: string | null;
   /** Inside a `template`'s content: inert there, live once lifted out. */
   inTemplate: boolean;
 }
@@ -197,6 +200,31 @@ function textBelow(n: Node): string {
   return out;
 }
 
+/** Text below a foreign text carrier runs or styles by where it sits, not only by what it says:
+ *  the same characters split differently between the carrier and elements below it are another
+ *  body. Null when only text and comments are below, where the text alone tells. */
+function layoutBelow(n: Node): string | null {
+  const out: (readonly [number, string, string] | readonly [number, string])[] = [];
+  let elementBelow = false;
+  const stack: [Node, number][] = [];
+  const push = (p: Node, depth: number): void => {
+    const kids = childrenOf(p);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push([kids[i]!, depth]);
+  };
+  push(n, 1);
+  while (stack.length > 0) {
+    const [c, depth] = stack.pop()!;
+    if (c.nodeName === '#text') out.push([depth, '#text', (c as DefaultTreeAdapterTypes.TextNode).value]);
+    else if (c.nodeName === '#comment') out.push([depth, '#comment', (c as DefaultTreeAdapterTypes.CommentNode).data]);
+    else if (isElement(c)) {
+      elementBelow = true;
+      out.push([depth, c.tagName]);
+      push(c, depth + 1);
+    }
+  }
+  return elementBelow ? JSON.stringify(out) : null;
+}
+
 function attributesOf(el: Element): (readonly [string, string])[] {
   return el.attrs
     .map((a) => [a.prefix ? `${a.prefix}:${a.name}` : a.name, a.value] as const)
@@ -213,14 +241,16 @@ export function markupOf(fragment: HtmlFragment): { occurrences: Occurrence[]; t
   // may still be elements, and they count as their own.
   for (const [c, inTemplate] of descendants(fragment, false)) {
     if (c.nodeName === '#comment') {
-      occurrences.push({ kind: 'comment', namespace: '', name: '', attributes: [], text: (c as DefaultTreeAdapterTypes.CommentNode).data, inTemplate });
+      occurrences.push({ kind: 'comment', namespace: '', name: '', attributes: [], text: (c as DefaultTreeAdapterTypes.CommentNode).data, layout: null, inTemplate });
       continue;
     }
     if (!isElement(c)) continue;
     const namespace = NAMESPACES[c.namespaceURI] ?? 'other';
     const attributes = attributesOf(c);
-    const text = TEXT_CARRIERS.has(c.tagName) ? textBelow(c) : null;
-    occurrences.push({ kind: 'element', namespace, name: c.tagName, attributes, text, inTemplate });
+    const carrier = TEXT_CARRIERS.has(c.tagName);
+    const text = carrier ? textBelow(c) : null;
+    const layout = carrier ? layoutBelow(c) : null;
+    occurrences.push({ kind: 'element', namespace, name: c.tagName, attributes, text, layout, inTemplate });
     triples.push({ namespace, element: c.tagName, attribute: null, value: null, inTemplate });
     for (const [attribute, value] of attributes) triples.push({ namespace, element: c.tagName, attribute, value, inTemplate });
   }
@@ -375,7 +405,7 @@ export function endsClosed(value: string): boolean {
 }
 
 function occurrenceKey(o: Occurrence): string {
-  return JSON.stringify([o.kind, o.namespace, o.name, o.attributes, o.text, o.inTemplate]);
+  return JSON.stringify([o.kind, o.namespace, o.name, o.attributes, o.text, o.layout, o.inTemplate]);
 }
 
 function shellKey(o: Occurrence): string {

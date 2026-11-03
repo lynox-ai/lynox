@@ -774,8 +774,44 @@ describe('graphqlUrlWrites', () => {
     ['https://h.example/graphql?query=%7Ba%7D&query=subscription%7Bb%7D', true],
     ['https://h.example/graphql?query=%7Ba%7D', false],
     ['https://h.example/graphql?q=mutation', false],
+    // `;` as a separator (Rack before 3, older `parse_qs`): the second pair is `query`.
+    ['https://h.example/graphql?x=1;query=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?x=1;query=%7Ba%7D', false],
+    // `%uXXXX` (IIS/System.Web) in the value and in the key.
+    ['https://h.example/graphql?query=%u006Dutation%7Ba%7D', true],
+    ['https://h.example/graphql?%u0071uery=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?query=%u007Ba%7D', false],
+    // A lone surrogate decodes to nothing that names an operation, and does not throw.
+    ['https://h.example/graphql?query=%uD800%7Ba%7D', false],
+    // The key as servers name it: leading spaces and `[]` (PHP), any case (ASP.NET).
+    ['https://wp.example/?graphql&+query=mutation%7Ba%7D', true],
+    ['https://wp.example/?graphql&%20query=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?QUERY=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?query%5B%5D=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?query%5Bq%5D=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?query%00x=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?query%5B%0A%5D=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?queryx=mutation%7Ba%7D', false],
+    ['https://h.example/graphql?x+query=mutation%7Ba%7D', false],
   ] as const)('%s → %s', (url, want) => {
     expect(graphqlUrlWrites(url)).toBe(want);
+  });
+});
+
+describe('isGraphqlEndpoint — the query key read every way a server may', () => {
+  it.each([
+    ['https://wp.example/?x=1;graphql', true],
+    ['https://wp.example/?%u0067raphql', true],
+    ['https://wp.example/?x=1;graphqlx', false],
+    ['https://wp.example/?%u0067raphqlx', false],
+    // The key as PHP and ASP.NET name it: leading space, any case, `[...]` suffix.
+    ['https://wp.example/?+graphql', true],
+    ['https://wp.example/?GRAPHQL', true],
+    ['https://wp.example/?graphql%5B%5D', true],
+    ['https://wp.example/?graphql%00x', true],
+    ['https://wp.example/?x+graphql', false],
+  ] as const)('%s → %s', (url, want) => {
+    expect(isGraphqlEndpoint(url)).toBe(want);
   });
 });
 

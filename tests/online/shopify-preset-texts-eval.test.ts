@@ -249,7 +249,7 @@ async function runCase(provider: string, make: MakeAgent, c: Case, i: number): P
 // PRESET_CASES=t1 (or t1,t3) runs only those cases.
 const ONLY = process.env['PRESET_CASES']?.split(',').map((x) => `(${x.trim()})`);
 const runs = CASES.filter((c) => !ONLY || ONLY.some((o) => c.label.startsWith(o))).flatMap((c) => Array.from({ length: RUNS }, (_, i) => ({ c, i, label: `${c.label} #${String(i)}` })));
-const base = { maxIterations: 8, promptUser: async () => 'Allow', promptSecret: async () => ({ status: 'canceled' as const }) };
+const base = { maxIterations: 8, promptUser: async () => 'Allow', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('Shopify preset texts — Anthropic (Haiku)', () => {

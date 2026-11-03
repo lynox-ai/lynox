@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig, ModelProfile, ModelTier, TierSet, TierSlot } from '../types/index.js';
 import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId, modelIdExceedsMaxTier, profileNamed } from '../types/index.js';
-import { isMistralHost } from '../types/index.js';
+import { isMistralHost, toMistralEuBase } from '../types/index.js';
 import { cpSuppliesLLMKey } from '../server/billing-tier.js';
 import { readEnvAlias, envTier } from './env.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
@@ -17,7 +17,7 @@ const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
 
 /** The Mistral endpoints a pool tier's OpenAI-compatible provider may name. */
-export const POOL_MISTRAL_ENDPOINTS: ReadonlySet<string> = new Set([MISTRAL_API_BASE, 'https://api.mistral.ai']);
+export const POOL_MISTRAL_ENDPOINTS: ReadonlySet<string> = new Set([MISTRAL_API_BASE, 'https://api.eu.mistral.ai']);
 /** The one explicit endpoint a pool tier's Anthropic provider may name; unset means the same. */
 export const POOL_ANTHROPIC_ENDPOINT = 'https://api.anthropic.com';
 
@@ -467,6 +467,10 @@ function buildConfig(userConfig: LynoxUserConfig | null, projectConfig: LynoxUse
   if (apiBaseUrl) {
     merged.api_base_url = apiBaseUrl;
   }
+  // Mistral's global endpoint commits to no inference location; the EU regional one commits to
+  // EU/EFTA. A config file or env written before the move still names the global one: read it
+  // as the EU endpoint, so the region, the key promotion and the pool pairing below see it.
+  if (merged.api_base_url) merged.api_base_url = toMistralEuBase(merged.api_base_url);
   if (process.env['LYNOX_EMBEDDING_PROVIDER']) {
     const ep = process.env['LYNOX_EMBEDDING_PROVIDER'];
     if (ep === 'onnx' || ep === 'local') {
@@ -703,6 +707,16 @@ function buildConfig(userConfig: LynoxUserConfig | null, projectConfig: LynoxUse
       }
     } catch {
       // ignore malformed LYNOX_MODEL_PROFILES_JSON — boot without rather than crash
+    }
+  }
+  // A profile on Mistral's global endpoint is read as the EU regional one, like the top-level
+  // URL above. The adapter would call the EU host anyway; reading it here keeps everything that
+  // looks at the profile's URL (the host a provider failure reports, the provider list) on the
+  // host that is actually called.
+  if (merged.model_profiles) {
+    for (const [name, profile] of Object.entries(merged.model_profiles)) {
+      const euBase = toMistralEuBase(profile.api_base_url);
+      if (euBase !== profile.api_base_url) merged.model_profiles[name] = { ...profile, api_base_url: euBase };
     }
   }
   // On an instance connected to a Shopify store, a profile whose provider is not on the list
@@ -973,6 +987,17 @@ function buildConfig(userConfig: LynoxUserConfig | null, projectConfig: LynoxUse
     } catch {
       // ignore malformed LYNOX_TIER_SET_JSON — boot in standard mode rather than crash
     }
+  }
+  // Tier slots and the background model on Mistral's global endpoint are read as the EU one too,
+  // like the top-level URL and the model profiles: their calls go to the EU host either way.
+  if (merged.tier_set) {
+    for (const band of ['fast', 'balanced', 'deep'] as const) {
+      const slot = merged.tier_set[band];
+      if (slot?.api_base_url) merged.tier_set[band] = { ...slot, api_base_url: toMistralEuBase(slot.api_base_url) };
+    }
+  }
+  if (merged.background_model?.api_base_url) {
+    merged.background_model = { ...merged.background_model, api_base_url: toMistralEuBase(merged.background_model.api_base_url) };
   }
   // The user's background-task model, held to the user bounds (admitBackgroundModel).
   // A choice that fails one is dropped in memory only: config.json keeps it, and the

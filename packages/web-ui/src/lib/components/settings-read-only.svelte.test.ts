@@ -251,7 +251,7 @@ describe('ToolToggles', () => {
 
 describe('VoiceSettings', () => {
 	const load = () => import('./VoiceSettings.svelte');
-	const mistral = { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)', available: true };
+	const mistral = { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: true };
 	const routes = (viewer: Viewer) => ({
 		'/voice/info': {
 			speech_service_off: false,
@@ -268,7 +268,8 @@ describe('VoiceSettings', () => {
 		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('voice.save'));
 		expect(rows()).toEqual([
-			line(t('voice.stt_heading'), 'Mistral Voxtral (Paris, EU)'),
+			// The server names Mistral in English; the page shows it in the UI language (de here).
+			line(t('voice.stt_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
 			line(t('voice.tts_heading'), 'Auto'),
 			line(t('voice.tts_voice'), 'paul (de)'),
 		]);
@@ -504,6 +505,54 @@ describe('LLMSettings', () => {
 		expectOwnerView();
 		expect(target.querySelector('input[type="password"]')).not.toBeNull();
 		expect(buttonTexts()).toContain(t('llm.test_connection'));
+	});
+
+	// The Mistral preset now names the EU regional endpoint. A config saved before the move names
+	// the global one, and still reads as the Mistral preset, not as an unknown endpoint.
+	describe('a config saved on Mistral\'s global endpoint', () => {
+		const mistral = {
+			provider: 'openai', preset_id: 'mistral', display_name: 'Mistral', requires_base_url: false, requires_region: false,
+			base_url_default: 'https://api.eu.mistral.ai/v1', default_residency: 'EU/EFTA inference', vault_slot: 'MISTRAL_API_KEY',
+			models: [{ id: 'mistral-medium-2604', tier: 'sonnet', label: 'Mistral Medium 3.5', context_window: 128_000, pricing: { input: 1.5, output: 7.5 }, residency: 'EU' }],
+		};
+		const compat = {
+			provider: 'openai', preset_id: 'openai-compat', display_name: 'OpenAI-compatible', requires_base_url: true, requires_region: false,
+			default_residency: 'depends on endpoint', vault_slot: 'OPENAI_API_KEY', models: [],
+		};
+		const routesAt = (apiBaseUrl: string) => ({
+			'/llm/catalog': { providers: [anthropic, mistral, compat] },
+			'/config': {
+				provider: 'openai', api_base_url: apiBaseUrl, openai_model_id: 'mistral-medium-2604', default_tier: 'deep',
+				routing_mode: 'standard', tier_preset: null, available_tier_presets: {}, managed: SELF_HOST, viewer: 'mandate',
+			},
+			'/secrets/status': () => Response.json({ error: 'owner only' }, { status: 403 }),
+		});
+		const providerRow = (): string | undefined =>
+			rows().find((r) => r.startsWith(t('llm.provider_heading')));
+
+		it.each(['https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'])('reads %s as the Mistral preset', async (url) => {
+			await render(load, routesAt(url));
+			expect(providerRow()).toBe(line(t('llm.provider_heading'), 'Mistral'));
+		});
+
+		it('twin: another endpoint reads as the generic one', async () => {
+			await render(load, routesAt('https://api.groq.com/openai/v1'));
+			expect(providerRow()).toBe(line(t('llm.provider_heading'), 'OpenAI-compatible'));
+		});
+
+		// The owner switches from the Mistral preset to the OpenAI-compatible tile: the endpoint the
+		// preset stamped is cleared, the global one written before the move as well as the EU one.
+		it.each(['https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'])('clears %s when the owner picks the OpenAI-compatible tile', async (url) => {
+			const owner = { ...routesAt(url), '/config': { ...routesAt(url)['/config'], viewer: 'owner' }, '/secrets/status': { configured: { api_key: true } } };
+			await render(load, owner);
+			const tile = [...target.querySelectorAll('button')].find((b) => b.textContent?.includes('OpenAI-compatible'));
+			expect(tile).toBeDefined();
+			tile!.click();
+			flushSync();
+			await tick();
+			const values = [...target.querySelectorAll('input')].map((i) => (i as HTMLInputElement).value);
+			expect(values).not.toContain(url);
+		});
 	});
 });
 

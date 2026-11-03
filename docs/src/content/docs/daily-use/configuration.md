@@ -36,7 +36,7 @@ Project configs cannot override security-sensitive fields like API keys or vault
 
 Only **anthropic** and **openai with the Mistral endpoint** are exercised on every release. The other paths work in principle but are not regularly tested — see [LLM Providers](/setup/llm-providers/) for full details.
 
-> Prefer pinned model IDs (`mistral-medium-2604`) over floating tags like `mistral-medium-latest` — pins keep behavior reproducible across silent provider snapshot rolls. See [LLM Providers — Mistral](/setup/llm-providers/#mistral-france-eu) for the rationale.
+> Prefer pinned model IDs (`mistral-medium-2604`) over floating tags like `mistral-medium-latest` — pins keep behavior reproducible across silent provider snapshot rolls. See [LLM Providers — Mistral](/setup/llm-providers/#mistral-france-eu-endpoint--natively-supported) for the rationale.
 
 ### Model & Intelligence
 
