@@ -10,8 +10,8 @@ import { renderSecretsBriefing } from './engine-init.js';
 import type { LynoxConfig } from '../types/index.js';
 
 /**
- * The `<secrets>` briefing offers every name it lists as `secret:NAME`. The `secret:` gate refuses
- * a connection's token, so those names are left out. The boot renders the briefing before any API
+ * The `<secrets>` briefing offers every free name as `secret:NAME`. The `secret:` gate refuses
+ * a connection's token, so those names are listed apart, as their profile's. The boot renders the briefing before any API
  * profile is loaded, and the engine renders it again once they are: only a real boot shows that the
  * second render happens and sees the profiles. A unit test of the renderer hands it the filter
  * itself and cannot see whether the engine ever calls it.
@@ -72,6 +72,9 @@ describe('Engine boot — a connection token is not offered in the <secrets> bri
     expect(briefing).toContain('secret:FREE_KEY');
     expect(briefing).not.toContain(`secret:${ACCESS}`);
     expect(briefing, 'the configured refresh slot is a token too').not.toContain('secret:SHOP_RT');
+    // Still listed, as the profile's: left out, the vault reads as holding no access for it.
+    expect(briefing).toContain(`${ACCESS} of profile "shop-api"`);
+    expect(briefing).toContain('SHOP_RT of profile "shop-api"');
   }, 60_000);
 
   it('control: without the profile, the same names are all offered', async () => {
@@ -85,15 +88,27 @@ describe('Engine boot — a connection token is not offered in the <secrets> bri
 
 describe('renderSecretsBriefing', () => {
   const store = (names: string[]) => ({ listAgentVisibleNames: () => names, getMasked: () => '****abcd' });
+  const heldBy = (token: string, ...profiles: unknown[]) => (n: string) => (n === token ? profiles.map((name) => ({ name })) : []);
 
-  it('lists every visible name as a secret: reference, and leaves out what the filter calls a token', () => {
-    expect(renderSecretsBriefing(store(['A_KEY', 'B_KEY']))).toContain('secret:B_KEY');
-    const out = renderSecretsBriefing(store(['A_KEY', 'B_KEY']), (n) => n === 'B_KEY') ?? '';
-    expect(out).toContain('secret:A_KEY');
-    expect(out).not.toContain('B_KEY');
+  it('offers a free name as a secret: reference, and lists a token apart with its profile', () => {
+    expect(renderSecretsBriefing(store(['A_KEY', 'B_KEY']))).toContain('secret:B_KEY (****abcd)');
+    const out = renderSecretsBriefing(store(['A_KEY', 'B_KEY']), heldBy('B_KEY', 'shop')) ?? '';
+    expect(out).toContain('secret:A_KEY (****abcd)');
+    expect(out).not.toContain('secret:B_KEY');
+    expect(out).toMatch(/Connection tokens — used through their API profile, not referenced with secret:[^\n]*: B_KEY of profile "shop"/);
+    expect(out, 'a token\'s masked value is not shown').toContain('B_KEY of profile "shop"\n');
   });
 
-  it('renders nothing when only tokens are left', () => {
-    expect(renderSecretsBriefing(store(['B_KEY']), () => true)).toBeUndefined();
+  it('names no profile when two hold the token', () => {
+    const out = renderSecretsBriefing(store(['B_KEY']), heldBy('B_KEY', 'one', 'two')) ?? '';
+    expect(out).toMatch(/not collected again: B_KEY\n/);
+    expect(out).not.toContain('of profile');
+  });
+
+  it('lists only tokens when no free name is left, and nothing for an empty vault', () => {
+    const out = renderSecretsBriefing(store(['B_KEY']), heldBy('B_KEY', 'shop')) ?? '';
+    expect(out).toContain('B_KEY of profile "shop"');
+    expect(out).not.toMatch(/secret:[A-Z]/);
+    expect(renderSecretsBriefing(store([]))).toBeUndefined();
   });
 });

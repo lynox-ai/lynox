@@ -2,7 +2,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { collapseToSingleLine } from '../../core/sanitize.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
 import { toolLockFor } from '../../core/mandate-tool-lock.js';
-import { connectionTokenHolders } from '../../core/profile-secret-view.js';
+import { connectionTokenHolderName, connectionTokenHolders, describeConnectionToken, FORGING_CHARS } from '../../core/profile-secret-view.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -35,29 +35,6 @@ const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
  * agent's own span inside the box it was given.
  */
 const PROMPT_MAX_CHARS = 300;
-
-/**
- * What forges a quote rather than filling it: bidi overrides and isolates
- * (a span that reads forwards on screen and backwards in the store, so the
- * quote is no longer a quote) and the zero-width formatters (a box that looks
- * empty but is not). `collapseToSingleLine` covers neither — it handles C0/C1
- * and the exotic separators. LRM/RLM are left alone; see the note on the
- * client half in `chat-framing.ts`.
- */
-const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
-
-/**
- * Who holds a connection's token, for the texts below: the profile's name when exactly one stored
- * profile holds it, else nothing. `String()` because a name read from a stored file may be a number,
- * which `collapseToSingleLine` does not take; one line and bounded because a stored id is not
- * shaped by this tool.
- */
-const HOLDER_MAX_CHARS = 64;
-function holderOf(holders: readonly { name: unknown }[]): string | null {
-  if (holders.length !== 1) return null;
-  const name = [...collapseToSingleLine(String(holders[0]!.name).replace(FORGING_CHARS, ''))];
-  return name.length > HOLDER_MAX_CHARS ? `${name.slice(0, HOLDER_MAX_CHARS - 1).join('')}…` : name.join('');
-}
 
 /**
  * A name in the vault that holds a connection's token is used through that connection's API
@@ -156,8 +133,7 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       for (const n of names) {
         const holder = holdersOf(n);
         if (holder.length === 0) { free.push(n); continue; }
-        const who = holderOf(holder);
-        tokens.push(`${n}${who === null ? '' : ` of profile "${who}"`}`);
+        tokens.push(describeConnectionToken(n, holder));
       }
       const sections: string[] = [];
       if (free.length > 0) {
@@ -208,7 +184,7 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     const exactFree = exactMatches.filter(n => !isToken.has(n));
     if (exactMatches.length > 0 && exactFree.length === 0) {
       const named = exactMatches.map(n => {
-        const who = holderOf(holdersOf(n));
+        const who = connectionTokenHolderName(holdersOf(n));
         return `"${n}"${who === null ? '' : ` (profile "${who}")`}`;
       }).join(', ');
       return `A key with the same name is already in the vault and holds a connection's token: ${named}. ` +

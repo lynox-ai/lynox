@@ -25,6 +25,7 @@ import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
 import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
+import { collapseToSingleLine } from './sanitize.js';
 import type { SecretReleases } from './secret-releases.js';
 import type { VaultNameBindings } from './vault-name-bindings.js';
 import { DERIVED_NAME_SHAPE, shapedForLog, VAULT_NAME_SHAPE } from './profile-value-shape.js';
@@ -577,6 +578,35 @@ export function connectionTokenHolders(
   } catch {
     return [];
   }
+}
+
+/**
+ * What forges a quote rather than filling it: bidi overrides and isolates
+ * (a span that reads forwards on screen and backwards in the store, so the
+ * quote is no longer a quote) and the zero-width formatters (a box that looks
+ * empty but is not). `collapseToSingleLine` covers neither — it handles C0/C1
+ * and the exotic separators. LRM/RLM are left alone; see the note on the
+ * client half in `chat-framing.ts`.
+ */
+export const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
+
+/**
+ * Who holds a connection's token, for a text the model reads: the profile's name when exactly one
+ * stored profile holds it, else nothing. `String()` because a name read from a stored file may be
+ * a number, which `collapseToSingleLine` does not take; one line and bounded because a stored
+ * name is not shaped by the engine.
+ */
+const HOLDER_MAX_CHARS = 64;
+export function connectionTokenHolderName(holders: readonly { name: unknown }[]): string | null {
+  if (holders.length !== 1) return null;
+  const name = [...collapseToSingleLine(String(holders[0]!.name).replace(FORGING_CHARS, ''))];
+  return name.length > HOLDER_MAX_CHARS ? `${name.slice(0, HOLDER_MAX_CHARS - 1).join('')}…` : name.join('');
+}
+
+/** `NAME of profile "X"`, or the name alone when no single profile holds it. */
+export function describeConnectionToken(name: string, holders: readonly { name: unknown }[]): string {
+  const who = connectionTokenHolderName(holders);
+  return `${name}${who === null ? '' : ` of profile "${who}"`}`;
 }
 
 /**

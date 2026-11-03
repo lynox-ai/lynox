@@ -1809,7 +1809,7 @@ export class Engine {
       // the names that hold a connection's token come out of it (the `secret:` gate refuses them).
       if (this.secretStore && this.secretsBriefing !== undefined) {
         const apiStore = this._apiStore;
-        this.secretsBriefing = renderSecretsBriefing(this.secretStore, (n) => connectionTokenHolders(apiStore, n).length > 0);
+        this.secretsBriefing = renderSecretsBriefing(this.secretStore, (n) => connectionTokenHolders(apiStore, n));
       }
       // Once per database, after every stored profile is known: each vault secret whose profiles
       // agree on where it goes is bound there. A failure leaves the names unbound, which refuses
