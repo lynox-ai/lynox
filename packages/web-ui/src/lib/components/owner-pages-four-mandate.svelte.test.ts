@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
+import { getToasts } from '../stores/toast.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 // Removing a contact, deleting a file, deciding on the knowledge queue and changing memory are the
@@ -127,14 +128,91 @@ describe('contacts', () => {
 describe('files', () => {
 	it('lets a mandate download a file but not delete it', async () => {
 		await render('files');
-		expect(buttonByTitle('Download')).toBeDefined();
-		expect(buttonByTitle('Delete')).toBeUndefined();
+		expect(buttonByTitle(t('files.download'))).toBeDefined();
+		expect(buttonByTitle(t('files.delete'))).toBeUndefined();
 	});
 
 	it('offers the owner to delete it', async () => {
 		viewer = 'owner';
 		await render('files');
-		expect(buttonByTitle('Delete')).toBeDefined();
+		expect(buttonByTitle(t('files.delete'))).toBeDefined();
+	});
+
+	// Deleting cannot be undone: it asks first, and a refusal is said, not swallowed.
+	describe('deleting as the owner', () => {
+		const deletes = (): string[] =>
+			(fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock.calls
+				.filter(([, init]) => init?.method === 'DELETE').map(([url]) => String(url));
+		const answerDelete = (res: () => Response | Promise<Response>): void => {
+			const base = fetch as unknown as (url: string, init?: RequestInit) => Promise<Response>;
+			vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => (init?.method === 'DELETE' ? res() : base(url, init))));
+		};
+
+		beforeEach(() => { viewer = 'owner'; getToasts().splice(0); });
+
+		it('asks with the file\'s name and sends nothing when the owner declines', async () => {
+			const asked: string[] = [];
+			vi.stubGlobal('confirm', (q: string) => { asked.push(q); return false; });
+			await render('files');
+			buttonByTitle(t('files.delete'))!.click();
+			await settle();
+			expect(asked).toEqual([tf('files.delete_confirm', { name: 'offer.pdf' })]);
+			expect(deletes()).toEqual([]);
+		});
+
+		it('deletes the file once the owner confirms, and says nothing went wrong', async () => {
+			answerDelete(() => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+			await render('files');
+			buttonByTitle(t('files.delete'))!.click();
+			await settle();
+			expect(deletes()).toEqual([expect.stringContaining('/files?path=offer.pdf')]);
+			expect(getToasts()).toEqual([]);
+		});
+
+		it('says a refused delete with the server\'s reason, instead of swallowing it', async () => {
+			answerDelete(() => new Response(JSON.stringify({ error: 'File not found' }), { status: 404, headers: { 'Content-Type': 'application/json' } }));
+			await render('files');
+			buttonByTitle(t('files.delete'))!.click();
+			await settle();
+			const shown = getToasts().map((x) => [x.type, x.message]);
+			expect(shown).toEqual([['error', `${tf('files.delete_failed', { name: 'offer.pdf' })} (File not found)`]]);
+		});
+
+		it('says a delete the network dropped', async () => {
+			answerDelete(() => { throw new TypeError('Failed to fetch'); });
+			await render('files');
+			buttonByTitle(t('files.delete'))!.click();
+			await settle();
+			expect(getToasts().map((x) => x.message)).toEqual([tf('files.delete_failed', { name: 'offer.pdf' })]);
+		});
+
+		const listings = (): number =>
+			(fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock.calls
+				.filter(([url, init]) => init?.method === undefined && /\/files\?path=/.test(String(url))).length;
+
+		it.each([200, 404])('reloads the folder after a delete answered %i, as the toast says', async (status) => {
+			answerDelete(() => new Response(JSON.stringify(status === 200 ? { ok: true } : { error: 'File not found' }), { status, headers: { 'Content-Type': 'application/json' } }));
+			await render('files');
+			const before = listings();
+			buttonByTitle(t('files.delete'))!.click();
+			await settle();
+			expect(listings() - before).toBe(1);
+		});
+
+		it('sends one DELETE when the button is clicked again while the first is still running', async () => {
+			let answer: (r: Response) => void = () => undefined;
+			answerDelete(() => new Promise<Response>((resolve) => { answer = resolve; }));
+			await render('files');
+			const button = buttonByTitle(t('files.delete'))!;
+			button.click();
+			await settle();
+			button.click();
+			await settle();
+			expect(deletes()).toHaveLength(1);
+			answer(new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+			await settle();
+			expect(getToasts()).toEqual([]);
+		});
 	});
 });
 
@@ -238,7 +316,7 @@ describe('a session the server has not named as the owner\'s', () => {
 			expect(buttonByText(t('crm.remove'))).toBeUndefined();
 			unmount(component!);
 			await render('files');
-			expect(buttonByTitle('Delete')).toBeUndefined();
+			expect(buttonByTitle(t('files.delete'))).toBeUndefined();
 			unmount(component!);
 			const queue = await render('queue');
 			expect(buttonByText(t('knowledge.queue.approve'))).toBeUndefined();
@@ -285,7 +363,7 @@ describe('a page whose answer never comes', () => {
 				expect(notices()).toBe(1);
 				expect(target.textContent).toContain(t('settings.viewer_unavailable'));
 				for (const label of [t('knowledge.queue.approve'), t('knowledge.active.retire'), t('crm.remove')]) expect(buttonByText(label)).toBeUndefined();
-				expect(buttonByTitle('Delete')).toBeUndefined();
+				expect(buttonByTitle(t('files.delete'))).toBeUndefined();
 			} finally {
 				vi.useRealTimers();
 			}

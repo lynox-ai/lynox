@@ -14519,8 +14519,12 @@ export class LynoxHTTPApi {
         if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
         await unlink(resolved);
         jsonResponse(res, 200, { ok: true });
-      } catch {
-        errorResponse(res, 404, 'File not found');
+      } catch (err: unknown) {
+        // Only a missing file is "not found". Anything else (a permission error, a busy file)
+        // means the file is still there, and the client shows this reason next to its name.
+        const code = err instanceof Error && 'code' in err ? err.code : undefined;
+        if (code === 'ENOENT' || code === 'ENOTDIR') errorResponse(res, 404, 'File not found');
+        else errorResponse(res, 500, 'Could not delete the file');
       }
     }, ownerOnly('delete files'));
 
