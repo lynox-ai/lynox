@@ -19,7 +19,7 @@ describe('GET /api/threads and /api/threads/:id carry `contained` (real engine)'
   // Built at runtime, never a literal: a key-shaped fixture string is what the commit-time
   // secret scan looks for, and this repo is public.
   const SECRET = `t-${randomBytes(12).toString('hex')}`;
-  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY'];
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_MANAGED_INSTANCE_ID'];
   const saved: Record<string, string | undefined> = {};
   let api: LynoxHTTPApi | undefined;
   let baseUrl: string;
@@ -41,6 +41,13 @@ describe('GET /api/threads and /api/threads/:id carry `contained` (real engine)'
     const threads = (await get('/api/threads?limit=500'))['threads'] as Array<Record<string, unknown>>;
     return new Map(threads.map((t) => [t['id'] as string, t['contained']]));
   }
+  /** `contained_unknown` of the thread and of its list entry; `absent` where the field is left out. */
+  async function unknownOf(threadId: string): Promise<[unknown, unknown]> {
+    const thread = (await get(`/api/threads/${threadId}`))['thread'] as Record<string, unknown>;
+    const entry = ((await get('/api/threads?limit=500'))['threads'] as Array<Record<string, unknown>>).find((t) => t['id'] === threadId)!;
+    const field = (o: Record<string, unknown>): unknown => ('contained_unknown' in o ? o['contained_unknown'] : 'absent');
+    return [field(thread), field(entry)];
+  }
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-contained-get-'));
@@ -49,6 +56,8 @@ describe('GET /api/threads and /api/threads/:id carry `contained` (real engine)'
     process.env['LYNOX_HTTP_SECRET'] = SECRET;
     process.env['LYNOX_ALLOW_PLAIN_HTTP'] = 'true';
     process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
+    // A self-hosted instance unless a test says otherwise (`contained_unknown` follows it).
+    for (const k of ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_MANAGED_INSTANCE_ID']) delete process.env[k];
     reloadConfig();
     api = new LynoxHTTPApi();
     await api.init();
@@ -90,6 +99,9 @@ describe('GET /api/threads and /api/threads/:id carry `contained` (real engine)'
     expect(list.get('g-contained')).toBe(true);
     expect(list.get('g-free')).toBe(false);
     expect(list.get('g-other')).toBe(false);
+    // A record that says so, or says not, is no failed check.
+    expect(await unknownOf('g-contained')).toEqual(['absent', 'absent']);
+    expect(await unknownOf('g-free')).toEqual(['absent', 'absent']);
   });
 
   it('a record that cannot be read answers `contained: true`, in the thread and in the list', async () => {
@@ -102,10 +114,36 @@ describe('GET /api/threads and /api/threads/:id carry `contained` (real engine)'
     try {
       expect(await one('g-unread')).toBe(true);
       expect((await listed()).get('g-unread')).toBe(true);
+      // …and says it could not read it: the chat may never have read store data. Where to look
+      // follows the instance: its logs here (self-hosted), support on a provisioned one.
+      expect(await unknownOf('g-unread')).toEqual(['self-hosted', 'self-hosted']);
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      try {
+        expect(await unknownOf('g-unread')).toEqual(['provisioned', 'provisioned']);
+      } finally {
+        delete process.env['LYNOX_BILLING_TIER'];
+      }
     } finally {
       ctx.containment = real;
     }
     expect(await one('g-unread')).toBe(false);
     expect((await listed()).get('g-unread')).toBe(false);
+    expect(await unknownOf('g-unread')).toEqual(['absent', 'absent']);
+  });
+
+  it('a chat whose copy in the history says so stays known while engine.db cannot be read', async () => {
+    const ctx = engine().getToolContext();
+    const ts = engine().getThreadStore()!;
+    ts.createThread('g-mirrored', { title: 'x' });
+    ts.updateThread('g-mirrored', { message_count: 1 });
+    const real = ctx.containment;
+    const mirror = { has: (id: string) => id === 'g-mirrored', threadIds: (ids: readonly string[]) => ids.filter((id) => id === 'g-mirrored') };
+    ctx.containment = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never, mirror as never);
+    try {
+      expect(await one('g-mirrored')).toBe(true);
+      expect(await unknownOf('g-mirrored')).toEqual(['absent', 'absent']);
+    } finally {
+      ctx.containment = real;
+    }
   });
 });

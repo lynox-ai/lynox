@@ -9,6 +9,9 @@
 	import { onDestroy, untrack } from 'svelte';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import { googleOAuthErrorNotice } from '../stores/integrations/google-oauth-error.js';
 	import {
@@ -125,6 +128,7 @@
 	$effect(() => {
 		void loadManagedStatus();
 		void loadGoogleStatus();
+		void loadSettingsViewer();
 
 		// A pending Google claim is PARKED here, not executed. The user confirms it.
 		//
@@ -172,13 +176,15 @@
 <div class="p-6 max-w-4xl mx-auto space-y-4">
 	<a href="/app/settings/channels" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.channels.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.google')}</h1>
+	<ViewerUnavailableNotice />
 
-	{#if pendingClaimNonce}
+	{#if pendingClaimNonce && isOwnerSession()}
 		<!-- Deliberately a decision, not a notice. The account is what the owner confirms, so
 		     the states differ in what they let the user do (see `claimConfirmCopy`): Connect waits while the account is looked up,
 		     is offered once it is named or when there is no answer to go by, and is not offered
 		     when the grant names no account. The address is set apart in `<bdi>` so it cannot
 		     run into, or reorder, the sentence around it. -->
+
 		<div class="rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 p-5 space-y-3 text-warning">
 			<p class="text-sm">{claimCopy.before}{#if claimCopy.email !== null}<bdi class="font-medium text-text">{claimCopy.email}</bdi>{/if}{claimCopy.after}</p>
 			<p class="text-xs text-text-subtle">{t(claimCopy.hintKey)}</p>
@@ -214,6 +220,23 @@
 
 		{#if isGoogleLoading()}
 			<!-- loading -->
+		{:else if isMandateSession()}
+			<!-- A mandate's session: connecting, the access level and disconnecting are the
+			     owner's. The status stays in the header; what the connection covers shows as text. -->
+			<div class="space-y-3" data-testid="google-read-only">
+				<OwnerOnlyNotice />
+				{#if getGoogleStatus()?.authenticated && getGoogleStatus()?.scopes && getGoogleStatus()!.scopes!.length > 0}
+					<div class="flex flex-wrap gap-x-4 gap-y-1">
+						{#each grantedServices(getGoogleStatus()!.scopes!) as svc}
+							<span class="text-xs text-text-muted">
+								<span class="text-text">{svc.name}</span> — {t(svc.labelKey)}
+							</span>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{:else if !isOwnerSession()}
+			<!-- No control until the server said this is the owner's session. -->
 		{:else if isManagedGoogleClaiming() || isSwitchingToManaged()}
 			<div class="flex items-center gap-2 text-sm text-text-muted">
 				<span class="inline-block h-4 w-4 border-2 border-accent border-t-transparent rounded-full animate-spin"></span>

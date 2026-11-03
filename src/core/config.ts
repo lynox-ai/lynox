@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig, ModelProfile, ModelTier, TierSet, TierSlot } from '../types/index.js';
 import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId, modelIdExceedsMaxTier, profileNamed } from '../types/index.js';
-import { isMistralHost } from '../types/index.js';
+import { isMistralHost, toMistralEuBase } from '../types/index.js';
 import { cpSuppliesLLMKey } from '../server/billing-tier.js';
 import { readEnvAlias, envTier } from './env.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
@@ -11,12 +11,13 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
 import { pinnedVaultSlotForEndpoint } from './llm/catalog.js';
 import { TIER_PRESETS, expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from './tier-presets.js';
+import { providerListApplies, refusedProfileClass } from './contained-providers.js';
 
 const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
 
 /** The Mistral endpoints a pool tier's OpenAI-compatible provider may name. */
-export const POOL_MISTRAL_ENDPOINTS: ReadonlySet<string> = new Set([MISTRAL_API_BASE, 'https://api.mistral.ai']);
+export const POOL_MISTRAL_ENDPOINTS: ReadonlySet<string> = new Set([MISTRAL_API_BASE, 'https://api.eu.mistral.ai']);
 /** The one explicit endpoint a pool tier's Anthropic provider may name; unset means the same. */
 export const POOL_ANTHROPIC_ENDPOINT = 'https://api.anthropic.com';
 
@@ -269,8 +270,78 @@ export function loadConfig(): LynoxUserConfig {
   if (_cachedConfig) return _cachedConfig;
   const userConfig = readConfigFile(join(getUserConfigDir(), CONFIG_FILENAME));
   const projectConfig = readConfigFile(join(getProjectConfigDir(), CONFIG_FILENAME));
+  const notes: BuildNotes = { warn: (line) => console.warn(line), replacedSlots: [] };
+  _cachedConfig = buildConfig(userConfig, projectConfig, notes);
+  _replacedSlots = notes.replacedSlots;
+  return _cachedConfig;
+}
 
-  const merged: LynoxUserConfig = { ...userConfig };
+let _replacedSlots: readonly ReplacedSlot[] = [];
+
+/** The slots whose model the current load replaced, for GET /api/config to report. */
+export function replacedTierSlots(): readonly ReplacedSlot[] {
+  loadConfig();
+  return _replacedSlots;
+}
+
+/**
+ * The loader's refusal of a `tier_set` slot whose model it does not know and has nowhere safe to
+ * run (see the preset guard). Its own class, so a writer can name the model to the user and pass
+ * no other loader message on: a later throw there might quote an environment value.
+ */
+export class UnregisteredSlotModelError extends Error {
+  constructor(readonly modelId: string, message: string) {
+    super(message);
+    this.name = 'UnregisteredSlotModelError';
+  }
+}
+
+/** Whether two slot endpoints are the same: unset, empty and a trailing slash do not differ. */
+function sameEndpoint(a: string | undefined, b: string | undefined): boolean {
+  return (a ?? '').replace(/\/+$/, '') === (b ?? '').replace(/\/+$/, '');
+}
+
+/** A config.json `tier_set` slot whose model this engine does not know, and what runs instead. */
+export interface ReplacedSlot {
+  readonly tier: ModelTier;
+  /** The model the slot names. */
+  readonly model_id: string;
+  /** The preset's model the band runs instead, on the slot's own provider. */
+  readonly runs: string;
+}
+
+/** What one build of the config noticed beside its result. */
+interface BuildNotes {
+  /** Where the loader's warnings go: the log for the real load, nowhere for a candidate. */
+  readonly warn: (line: string) => void;
+  /** The config.json `tier_set` slots whose unregistered model the build replaced (see the preset guard). */
+  readonly replacedSlots: ReplacedSlot[];
+}
+
+/**
+ * What the loader would make of `candidate` as the user's config.json, without writing it:
+ * the `tier_set` slots whose model it would replace, or the error it would throw. For a writer
+ * that must refuse BEFORE it saves (PUT /api/config): the check is the loader itself, so the
+ * two cannot drift apart. The project config and the environment are read as the real load
+ * reads them.
+ */
+export function checkCandidateConfig(candidate: LynoxUserConfig): { replacedSlots: ReplacedSlot[]; error?: string; unknownModel?: string } {
+  const notes: BuildNotes = { warn: () => undefined, replacedSlots: [] };
+  try {
+    buildConfig(candidate, readConfigFile(join(getProjectConfigDir(), CONFIG_FILENAME)), notes);
+  } catch (err: unknown) {
+    return err instanceof UnregisteredSlotModelError
+      ? { replacedSlots: notes.replacedSlots, error: err.message, unknownModel: err.modelId }
+      : { replacedSlots: notes.replacedSlots, error: getErrorMessage(err) };
+  }
+  return { replacedSlots: notes.replacedSlots };
+}
+
+/** Merges `userConfig` and `projectConfig` with the environment; `loadConfig` caches the result. */
+function buildConfig(userConfig: LynoxUserConfig | null, projectConfig: LynoxUserConfig | null, notes: BuildNotes): LynoxUserConfig {
+  // A deep copy: the build deletes and replaces nested entries (refused `model_profiles`, the
+  // preset's slots), and for a candidate the input is the object PUT /api/config then saves.
+  const merged: LynoxUserConfig = structuredClone(userConfig ?? {});
 
   // Allowlist: project config cannot override security-sensitive fields
   const PROJECT_SAFE_KEYS: ReadonlySet<string> = new Set([
@@ -396,6 +467,10 @@ export function loadConfig(): LynoxUserConfig {
   if (apiBaseUrl) {
     merged.api_base_url = apiBaseUrl;
   }
+  // Mistral's global endpoint commits to no inference location; the EU regional one commits to
+  // EU/EFTA. A config file or env written before the move still names the global one: read it
+  // as the EU endpoint, so the region, the key promotion and the pool pairing below see it.
+  if (merged.api_base_url) merged.api_base_url = toMistralEuBase(merged.api_base_url);
   if (process.env['LYNOX_EMBEDDING_PROVIDER']) {
     const ep = process.env['LYNOX_EMBEDDING_PROVIDER'];
     if (ep === 'onnx' || ep === 'local') {
@@ -517,7 +592,7 @@ export function loadConfig(): LynoxUserConfig {
       // Non-blank but no usable hosts (e.g. ","). Warn + retain the config.json
       // value rather than silently overwriting it with an empty list — which
       // under allow-list would block ALL egress with no signal.
-      process.stderr.write('⚠ LYNOX_NETWORK_ALLOWED_HOSTS set but parsed to no hosts — ignoring it\n');
+      notes.warn('⚠ LYNOX_NETWORK_ALLOWED_HOSTS set but parsed to no hosts — ignoring it');
     }
   }
   if (process.env['LYNOX_USER']) {
@@ -632,6 +707,16 @@ export function loadConfig(): LynoxUserConfig {
       }
     } catch {
       // ignore malformed LYNOX_MODEL_PROFILES_JSON — boot without rather than crash
+    }
+  }
+  // On an instance connected to a Shopify store, a profile whose provider is not on the list
+  // (`contained-providers.ts` — the control plane's Mistral `worker` and `fallback`) is dropped
+  // here, so the worker runs on the main provider through the guard below instead of every
+  // background task being refused, and spawn(profile) does not offer a profile loaded here that
+  // could not run. A profile reaching a client another way is still refused when it sends.
+  if (merged.model_profiles && providerListApplies()) {
+    for (const [name, profile] of Object.entries(merged.model_profiles)) {
+      if (refusedProfileClass(profile) !== null) delete merged.model_profiles[name];
     }
   }
   // Guard a dangling worker_profile: if LYNOX_WORKER_PROFILE names a profile that
@@ -777,7 +862,7 @@ export function loadConfig(): LynoxUserConfig {
   // readable one is `env_overrides.tier_preset_ignored` on GET /api/config.
   if (envPreset !== undefined && envPreset !== '' && !expandTierPreset(envPreset)) {
     const shown = describePinForDisplay(envPreset);
-    console.warn(
+    notes.warn(
       `[lynox] Ignoring LYNOX_TIER_PRESET="${shown}": this engine does not know that preset. ` +
       `Known: ${Object.keys(TIER_PRESETS).join(', ')}. Routing falls back to the instance default — ` +
       `re-pin once the engine is on a version that carries the name.`,
@@ -804,7 +889,7 @@ export function loadConfig(): LynoxUserConfig {
   if (typeof merged.tier_preset === 'string' && !expandTierPreset(merged.tier_preset)) {
     const shown = describePinForDisplay(merged.tier_preset);
     merged.tier_preset = undefined;
-    console.warn(
+    notes.warn(
       `[lynox] Ignoring tier_preset "${shown}" from config.json: this engine does not know it. ` +
       `Known: ${Object.keys(TIER_PRESETS).join(', ')}. The instance keeps its own default routing; ` +
       `pick a strategy again in Settings to replace it.`,
@@ -827,15 +912,44 @@ export function loadConfig(): LynoxUserConfig {
     }
     // The preset is the base; an explicit config.json tier_set slot overrides it
     // per-slot, and the env block below overrides both (spread-last wins).
-    merged.tier_set = { ...expanded.tier_set, ...merged.tier_set };
+    // A config.json `tier_set` slot layered onto a preset must not smuggle an unregistered
+    // model into the Opus-rate FALLBACK_CAPABILITY (a ~9-100× misbill + a false disclosure).
+    // Such a slot on the preset's own provider and endpoint keeps everything but its model: the
+    // band runs the preset's model through the user's provider, endpoint and key. It used to
+    // throw, and for that slot the throw guarded nothing this does not: no unregistered model is
+    // routed, the content goes where the user sent it, and the same key pays. It cost the boot
+    // instead (the engine ctor's loadConfig() has no catch), and the settings page that could
+    // clear the value, since GET and PUT /api/config load too. A release that retires a model
+    // would have done that to every tenant who had it in a slot.
+    // PUT /api/config refuses to store such a slot in the first place (`checkCandidateConfig`).
+    const ownSlots = merged.tier_set ?? {};
+    merged.tier_set = { ...expanded.tier_set };
+    for (const [band, slot] of Object.entries(ownSlots) as [ModelTier, TierSlot | undefined][]) {
+      // Only on the SAME provider and endpoint: a slot that chose another provider or endpoint
+      // for its band keeps failing closed below. Running the preset's model there would mean
+      // the preset's provider, one the user had chosen against for that band.
+      const presetSlot = expanded.tier_set[band];
+      if (slot && !modelCapability(slot.model_id) && presetSlot !== undefined
+        && slot.provider === presetSlot.provider && sameEndpoint(slot.api_base_url, presetSlot.api_base_url)) {
+        notes.replacedSlots.push({ tier: band, model_id: slot.model_id, runs: presetSlot.model_id });
+        merged.tier_set[band] = { ...slot, model_id: presetSlot.model_id };
+        notes.warn(
+          `[lynox] Ignoring tier_set slot "${band}" from config.json: model "${describePinForDisplay(slot.model_id)}" is not registered, ` +
+          `so that band runs the "${describePinForDisplay(merged.tier_preset)}" strategy's model "${presetSlot.model_id}" on the same provider. Pick the model again in Settings to replace it.`,
+        );
+        continue;
+      }
+      // JSON carries no `undefined`, so a band without a slot here has none in the file.
+      if (slot !== undefined) merged.tier_set[band] = slot;
+    }
     merged.routing_mode = expanded.routing_mode;
-    // FAIL-CLOSED over the FINAL merged slots (not just the preset's): a config.json
-    // `tier_set` slot layered onto a preset must not smuggle an unregistered model
-    // past the guard into the Opus-rate FALLBACK_CAPABILITY (a ~9-100× misbill + a
-    // false disclosure).
+    // FAIL-CLOSED over what is left: a preset's own unregistered slot (an engine defect), and a
+    // config.json slot on another provider or endpoint (see above), whose band has nowhere safe
+    // to go. That one still costs the boot; PUT /api/config refuses to store it.
     for (const slot of Object.values(merged.tier_set)) {
       if (slot && !modelCapability(slot.model_id)) {
-        throw new Error(
+        throw new UnregisteredSlotModelError(
+          slot.model_id,
           `tier_preset "${merged.tier_preset}" resolves to an unregistered model "${slot.model_id}" — refusing to load (it would misbill at the Opus fallback rate and mis-disclose). Register the model in MODEL_CAPABILITIES first.`,
         );
       }
@@ -878,7 +992,7 @@ export function loadConfig(): LynoxUserConfig {
     if (admitted.ok) {
       merged.background_model = admitted.slot;
     } else {
-      console.warn(
+      notes.warn(
         `[lynox] background_model ${JSON.stringify(merged.background_model.model_id)} is not run (${admitted.refusal}); ` +
         `background tasks use ${merged.worker_profile ? `the worker profile "${merged.worker_profile}"` : 'the default model'}.`,
       );
@@ -913,7 +1027,7 @@ export function loadConfig(): LynoxUserConfig {
       // is roughly a tenfold price increase on the slot that runs every turn —
       // correctly metered, and therefore invisible until the invoice.
       if (dropped) {
-        console.warn(
+        notes.warn(
           `[lynox] tier_preset "${dropped}" resolved but none of its slots could be backed ` +
           `(missing provider credential or operator opt-in). Routing falls back to the base ` +
           `model for every band, which is materially more expensive. Provision the credential ` +
@@ -1021,7 +1135,12 @@ export function loadConfig(): LynoxUserConfig {
     }
   }
 
-  _cachedConfig = merged;
+  // What a replacement report says must still be true of the result: a band the environment's
+  // tier_set took over, or the managed constraints dropped, does not run the preset's model.
+  for (let i = notes.replacedSlots.length - 1; i >= 0; i--) {
+    const r = notes.replacedSlots[i]!;
+    if (merged.tier_set?.[r.tier]?.model_id !== r.runs) notes.replacedSlots.splice(i, 1);
+  }
   return merged;
 }
 

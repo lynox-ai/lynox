@@ -154,9 +154,10 @@ export interface OAuthPreset {
    * The provider's API runs on the host the preset derives, one per account (Shopify: the
    * store's `{shop}.myshopify.com`), so every host the template can build is an API host of the
    * provider, and a profile's `base_url` has to be the host its own parameter derives
-   * ({@link presetStoreHost}). Only for a `template` host. The store hosts are not in `apiHosts`
-   * and `presetNotFollowed` does not claim them: while Shopify is closed, a profile on a store
-   * gets the closed text, not a pointer to this preset.
+   * ({@link presetStoreHost}). Only for a `template` host. The store hosts are not in `apiHosts`:
+   * `presetNotFollowed` claims them only when asked to (`storesClaimed`), which the engine does
+   * while the store exchange is switched on. While Shopify is closed, a profile on a store gets
+   * the closed text, not a pointer to a preset that cannot connect.
    */
   readonly apiOnDerivedHost?: true;
   /**
@@ -596,10 +597,14 @@ export function presetScopeNeedUnmet(preset: OAuthPreset, profileScope: string |
  * no provider claims the host, or when the profile follows the one that does. Asked where a
  * profile is saved (`api_setup`) and where a request attaches a profile's credentials
  * (`http_request`, for a write), so a profile saved before the save refused it writes nothing.
+ * With `storesClaimed`, a provider on its derived host ({@link OAuthPreset.apiOnDerivedHost})
+ * claims every host its template can build as well, so a profile with a pasted token on a store
+ * is refused and pointed at the preset.
  */
 export function presetNotFollowed(
   profile: { readonly base_url: string; readonly auth?: { readonly type: string; readonly oauth?: { readonly preset_id?: string | undefined } | undefined } | undefined },
   register: PresetRegister = OAUTH_PRESETS,
+  options: { readonly storesClaimed?: boolean } = {},
 ): OAuthPreset | undefined {
   let host: string;
   try {
@@ -608,9 +613,34 @@ export function presetNotFollowed(
     return undefined;
   }
   // Every provider that claims the host: a profile that follows any of them is in order.
-  const claiming = register.ids().map((id) => register.get(id)).filter((p): p is OAuthPreset => p?.apiHosts.includes(host) === true);
+  const claiming = register.ids().map((id) => register.get(id)).filter((p): p is OAuthPreset => p !== undefined
+    && (p.apiHosts.includes(host) || (options.storesClaimed === true && presetDerivesHost(p, host, register))));
   const follows = (preset: OAuthPreset): boolean => profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === preset.id;
   return claiming.some(follows) ? undefined : claiming[0];
+}
+
+/**
+ * Whether `host` (lowercased, without trailing dots) is one that `preset`'s template builds from a
+ * parameter the preset accepts: the store hosts of a provider on its derived host. Asked through
+ * {@link derivePresetEndpoints}, so a host whose parameter the preset refuses is not claimed.
+ */
+function presetDerivesHost(preset: OAuthPreset, host: string, register: PresetRegister): boolean {
+  if (preset.apiOnDerivedHost !== true || preset.host.kind !== 'template') return false;
+  // One placeholder (`OAuthPresetHost`): the host is the text around it with a value in between,
+  // and the preset's own derivation decides whether that value is one it accepts.
+  const [before = '', after = ''] = preset.host.template.split(`{${preset.host.param}}`);
+  if (!host.startsWith(before) || !host.endsWith(after)) return false;
+  return !('kind' in derivePresetEndpoints(preset.id, { [preset.host.param]: host.slice(before.length, host.length - after.length) }, register));
+}
+
+/**
+ * The parameters a profile of `preset` names in `auth.oauth.preset_params`, as the model is told to
+ * write them: `{"shop": "<shop>"} (shop: …)`. Empty for a preset without any.
+ */
+export function presetParamsForModel(preset: OAuthPreset): string {
+  if (preset.params.length === 0) return '';
+  const shape = `{${preset.params.map((p) => `"${p.name}": "<${p.name}>"`).join(', ')}}`;
+  return `${shape} (${preset.params.map((p) => `${p.name}: ${p.describe}`).join('; ')})`;
 }
 
 /**

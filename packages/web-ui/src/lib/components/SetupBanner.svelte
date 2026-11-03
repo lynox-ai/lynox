@@ -1,9 +1,12 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { throwIfRefused } from '../api/save-refusal.js';
 	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
-	import { onMount } from 'svelte';
+	import { untrack } from 'svelte';
+	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { MISTRAL_API_BASE, isMistralPresetBase } from '../utils/mistral-endpoint.js';
 
 	type Provider = 'anthropic' | 'mistral' | 'openai';
 
@@ -29,7 +32,12 @@
 	let saveError = $state('');
 	let saveSuccess = $state(false);
 
-	onMount(async () => {
+	async function loadSetupState(): Promise<void> {
+		// Setting up the provider is the owner's (PUT /api/secrets and PUT /api/config are owner-only),
+		// so only the owner's session gets the banner and the wizard, once the server said so.
+		// Asked alongside the status, not before it: the owner's banner waits for the slower of the two
+		// answers, not for both in turn.
+		const viewerRead = loadSettingsViewer();
 		try {
 			const res = await fetch(`${getApiBase()}/secrets/status`);
 			if (res.ok) {
@@ -44,7 +52,7 @@
 				// Mistral + Custom both persist as `provider: 'openai'`. Sniff the
 				// Mistral base URL so re-opening the wizard restores the Mistral
 				// credential form instead of showing the generic Custom URL field.
-				const restored: Provider = narrowed === 'openai' && data.api_base_url === 'https://api.mistral.ai/v1'
+				const restored: Provider = narrowed === 'openai' && isMistralPresetBase(data.api_base_url)
 					? 'mistral'
 					: narrowed;
 				selectedProvider = restored;
@@ -82,7 +90,13 @@
 				}
 			}
 		} catch { /* silent — StatusBar handles engine-down state */ }
+		await viewerRead;
 		loaded = true;
+	}
+
+	// Once, on mount: `untrack` keeps the state the load reads from re-running it.
+	$effect(() => {
+		untrack(() => void loadSetupState());
 	});
 
 	function dismiss() {
@@ -129,7 +143,7 @@
 			const persistedProvider = selectedProvider === 'anthropic' ? 'anthropic' : 'openai';
 			const providerConfig: Record<string, unknown> = { provider: persistedProvider };
 			if (selectedProvider === 'mistral') {
-				providerConfig['api_base_url'] = 'https://api.mistral.ai/v1';
+				providerConfig['api_base_url'] = MISTRAL_API_BASE;
 				providerConfig['openai_model_id'] = mistralModel.trim() || 'mistral-large-2512';
 			}
 			if (selectedProvider === 'openai') {
@@ -155,7 +169,7 @@
 					key: keyForValidation,
 				};
 				if (selectedProvider === 'mistral') {
-					validateBody['api_base_url'] = 'https://api.mistral.ai/v1';
+					validateBody['api_base_url'] = MISTRAL_API_BASE;
 				}
 				if (selectedProvider === 'openai') {
 					validateBody['api_base_url'] = openaiUrl.trim();
@@ -214,16 +228,7 @@
 			// below dropped the server reason on the floor — saveCredentials
 			// was the worst-offender entry point because the cross-field
 			// validation for the OpenAI-compat provider lives there).
-			if (!configRes.ok) {
-				let serverMsg = '';
-				try {
-					const body = (await configRes.json()) as { error?: unknown };
-					if (typeof body.error === 'string') serverMsg = body.error;
-				} catch {
-					// non-JSON body — fall back to generic text
-				}
-				throw new Error(serverMsg || `Failed to save config (HTTP ${configRes.status})`);
-			}
+			await throwIfRefused(configRes);
 
 			saveSuccess = true;
 			apiKeyMissing = false;
@@ -273,7 +278,7 @@
 </script>
 
 <!-- Setup Wizard Modal -->
-{#if loaded && showWizard && apiKeyMissing}
+{#if loaded && showWizard && apiKeyMissing && isOwnerSession()}
 	<div class="fixed inset-0 z-[60] flex items-center justify-center bg-bg-overlay/60 backdrop-blur-sm p-4">
 		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -465,7 +470,7 @@
 {/if}
 
 <!-- Banner (after wizard dismissed or on revisit) -->
-{#if loaded && apiKeyMissing && !showWizard && !dismissed}
+{#if loaded && apiKeyMissing && !showWizard && !dismissed && isOwnerSession()}
 	<div role="alert" class="flex items-center justify-between gap-3 border-b border-warning/30 bg-warning/10 px-4 py-2 text-sm text-warning shrink-0">
 		<div class="flex items-center gap-2 min-w-0">
 			<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor">

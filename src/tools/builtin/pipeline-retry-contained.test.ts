@@ -3,6 +3,7 @@
  * from a contained chat carries that chat's data, so a retry from another chat contains that chat
  * before any step runs, or nothing runs (`pipeline.ts`, retry mode).
  */
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -75,7 +76,7 @@ function chat(thread: string | undefined): IAgent {
   toolContext.containment = containment;
   toolContext.runHistory = history;
   toolContext.threadStore = threads.store as never;
-  return { toolContext, currentThreadId: thread, getAvailableTools: () => tools } as unknown as IAgent;
+  return { toolContext, principal: OWNER_PRINCIPAL, currentThreadId: thread, getAvailableTools: () => tools } as unknown as IAgent;
 }
 
 const ID = 'wf-retry';

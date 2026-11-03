@@ -128,6 +128,9 @@ export interface AgentConfig {
   /** The `<secrets>` listing of the vault, given with the briefing but only to an owner's turn:
    *  the principal is per run, and a mandate reaches no owner secret by name (`agent.ts`). */
   secretsBriefing?:    string | undefined;
+  /** The blocks the engine wrapped while it built {@link briefing} (`collectOwnBlocks`), so the
+   *  briefing's scan does not read their closers as a boundary escape. */
+  briefingOwnBlocks?:  readonly string[] | undefined;
   autonomy?:           AutonomyLevel | undefined;
   /**
    * Capability contract authorising headless outbound writes. RESERVED SEAM

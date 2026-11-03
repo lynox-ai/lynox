@@ -49,6 +49,13 @@ describe('normalizeJudgeRule — the plan builds the verdict schema, it does not
     expect(() => normalizeJudgeRule({ rule: 'x', schema: { id: { type: 'integer' } } })).not.toThrow();
   });
 
+  it('refuses a rule over the limit with its counted length and the limit', () => {
+    expect(() => normalizeJudgeRule({ rule: 'x'.repeat(4_001), schema: { title: TITLE } }))
+      .toThrow('judge.rule has 4001 characters; it may have at most 4000. Shorten it by at least 1.');
+    expect(() => normalizeJudgeRule({ rule: 'x'.repeat(4_247), schema: { title: TITLE } })).toThrow(/has 4247 characters.*by at least 247\./);
+    expect(normalizeJudgeRule({ rule: 'x'.repeat(4_000), schema: { title: TITLE } }).rule).toHaveLength(4_000);
+  });
+
   it('refuses an empty rule, a bad tier, a bad field name, no fields', () => {
     expect(() => normalizeJudgeRule({ rule: '  ', schema: { title: TITLE } })).toThrow(/rule/);
     expect(() => normalizeJudgeRule({ rule: 'x', schema: { title: TITLE }, tier: 'turbo' })).toThrow(/tier/);

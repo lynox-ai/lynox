@@ -14,7 +14,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode, asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { DEFAULT_STEP_TIMEOUT_MS, undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import { UNKNOWN_GRANT } from '../../core/conversation-grants.js';
 import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { normalizeTier } from '../../types/index.js';
@@ -22,14 +22,14 @@ import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
-import { fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
+import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
 import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes } from '../../core/member-connection-notes.js';
 import { namedTarget, newCorrelationId, type AuditLog, type AuditPhase } from '../../core/audit-log.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal, type RequestPrincipal } from '../../core/request-principal.js';
+import { isOwnerPrincipal, type RequestPrincipal } from '../../core/request-principal.js';
 import { currentPlanRun, runAsWorkflowRun } from '../../core/plan-run-context.js';
 import { isEngineRowId } from '../../core/instance-trail.js';
 
@@ -107,13 +107,17 @@ function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipel
 export function getPipeline(id: string, runHistory?: RunHistory | null): PlannedPipeline | undefined {
   const direct = pipelineStore.get(id);
   if (direct) return direct;
-  // Prefix match in memory
-  for (const [key, val] of pipelineStore) {
-    if (key.startsWith(id)) return val;
+  // A saved workflow with exactly this id answers before any longer id that starts with it: a
+  // schedule checked and bound to the answer would otherwise target another workflow.
+  const row = runHistory?.getPlannedPipeline(id);
+  if (row?.id !== id) {
+    // Prefix match in memory
+    for (const [key, val] of pipelineStore) {
+      if (key.startsWith(id)) return val;
+    }
   }
   // Fall back to SQLite for cross-session persistence
   if (runHistory) {
-    const row = runHistory.getPlannedPipeline(id);
     if (row) {
       try {
         const planned = JSON.parse(row.manifest_json) as PlannedPipeline;
@@ -311,13 +315,18 @@ function buildProgressHooks(pipelineStreamHandler: EmittingStreamHandler | null,
 }
 
 function formatResult(state: RunState, name: string, resultLimit?: number): string {
+  // The name and the step ids are names, which take none of the places real text puts a character
+  // that renders as nothing; each goes in as a placeholder and is escaped on its own below.
+  const nonce = randomUUID();
+  const names: string[] = [];
+  const asName = (value: string): string => `__lynox_name_${names.push(value) - 1}_${nonce}__`;
   const steps: PipelineStepResult[] = [];
   let totalDuration = 0;
   let totalCost = 0;
 
   for (const [, output] of state.outputs) {
     steps.push({
-      stepId: output.stepId,
+      stepId: asName(output.stepId),
       result: truncateResult(output.result, resultLimit),
       durationMs: output.durationMs,
       tokensIn: output.tokensIn,
@@ -333,14 +342,22 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
 
   const result: PipelineResult = {
     pipelineId: state.runId,
-    name,
+    name: asName(name),
     status: state.status === 'completed' ? 'completed' : state.status === 'rejected' ? 'rejected' : 'failed',
     steps,
     totalDurationMs: totalDuration,
     totalCostUsd: totalCost,
   };
 
-  return JSON.stringify(result, null, 2);
+  // The name and the step ids are stored text, saved perhaps before the save refused characters
+  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show. In a step's
+  // result the places real text puts one stay, so an emoji or a Persian word reads as it is; in a
+  // name none does, so a ZWNJ an old step id carries between letters shows as well.
+  let json = escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
+  names.forEach((value, i) => {
+    json = json.replace(JSON.stringify(`__lynox_name_${i}_${nonce}__`), () => escapeHiddenInJson(JSON.stringify(value), { inPlace: false }));
+  });
+  return json;
 }
 
 // 2a/B3: both the pipeline_runs row and its pipeline_step_results rows are now
@@ -463,7 +480,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
       // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-      principal: deps.parentAgent?.principal,
+      principal: deps.parentAgent.principal,
       parentActiveScopes: deps.parentAgent?.activeScopes,
       // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
       // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -560,9 +577,12 @@ export interface PipelineDeps {
    * seed). Only the SEED direction lives here: the way BACK is already covered,
    * stronger, by the handler's unconditional `agent.noteUntrustedData?.()`
    * after every run (H-002/CORE-9 — any delegated run taints the caller).
-   * Absent for headless callers → the run starts clean.
+   * Required: it is also whom the run is for. Its principal builds every step agent and
+   * picks the lock, so a run with no agent would have no one to run as, and the owner is not
+   * a default this path may fill in (1055). A headless run goes through `runSavedWorkflow`,
+   * which takes its principal explicitly.
    */
-  parentAgent?: IAgent | undefined;
+  parentAgent: IAgent;
 }
 
 /** Outcome of a Saved-Workflows-library "Run" action. */
@@ -609,7 +629,9 @@ const MAX_WRITE_NOTES = 10;
 /** The mail tools that file for approval. */
 const QUEUEABLE_MAIL_TOOLS: ReadonlySet<string> = new Set(['mail_send', 'mail_reply']);
 const MAX_WRITE_NOTE_CHARS = 300;
-const MAX_MEMBER_NOTE_CHARS = 700;
+/** Long enough for the longest line a plan run's refusal writes: it names the member twice and
+ *  the profile once, and the sentence that says who decides comes last. */
+const MAX_MEMBER_NOTE_CHARS = 1500;
 
 /**
  * Collects the refused and possibly-landed write lines from the tool calls of a run's
@@ -750,15 +772,17 @@ export async function runSavedWorkflow(
   workflowId: string,
   runHistory: RunHistory | null,
   config: LynoxUserConfig,
-  params?: Record<string, unknown> | undefined,
-  runtime?: {
+  params: Record<string, unknown> | undefined,
+  runtime: {
     tools?: ToolEntry[] | undefined;
     toolContext?: ToolContext | undefined;
     memory?: IMemory | null | undefined;
     /** What the session that scheduled this run had taken in (see `TriggerRecord.created_untrusted`). */
     seed?: UntrustedCause | undefined;
-    /** Who started the run, when a request did; its steps are built for it (PRD D1). Absent = the owner. */
-    principal?: import('../../core/request-principal.js').RequestPrincipal | undefined;
+    /** Whom the run is for; its steps are built for it (PRD D1). Required, and the owner is
+     *  passed as `OWNER_PRINCIPAL`: a headless run has no agent to take it from, so a missing
+     *  one must not quietly read as the owner (1055). */
+    principal: import('../../core/request-principal.js').RequestPrincipal;
     /**
      * Whether this run passes the workflow's contract on (`decideRunGrant`), asked with the
      * workflow exactly as this function read it. Absent = no contract, whatever is stored:
@@ -799,7 +823,7 @@ export async function runSavedWorkflow(
      *  steps keep being refused a mail. Not part of `buildRunCtx`, which a chat's
      *  `run_workflow` shares. */
     approvalFiling?: import('../../core/approval-filing.js').ApprovalFilingContext | undefined;
-  } | undefined,
+  },
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
     return { ok: false, error: 'Run history is not available.' };
@@ -914,7 +938,7 @@ export async function runSavedWorkflow(
       runHistory,
       parentTools: runtime?.tools,
       parentToolContext: runtime?.toolContext,
-      principal: runtime?.principal,
+      principal: runtime.principal,
       parentMemory: runtime?.memory ?? null,
       // The decided contract — never the stored one directly — authorises this
       // headless run's declared outbound writes (enforced per-tool-call at
@@ -963,7 +987,8 @@ export async function runSavedWorkflow(
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
     };
   } catch (err: unknown) {
-    return { ok: false, error: `Workflow execution failed: ${getErrorMessage(err)}` };
+    // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+    return { ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}` };
   }
 }
 
@@ -990,18 +1015,21 @@ export interface WorkflowRunTrail {
  * workflow's id is whatever its file said. Exported for its test.
  */
 export function workflowRunTrail(
-  principal: RequestPrincipal | undefined,
+  principal: RequestPrincipal,
   auditLog: AuditLog | null,
-  run: { workflowId: string; oneShot: boolean; retry: boolean },
+  run: { workflowId: string; oneShot: boolean; retry: boolean; startedBy?: 'library' | undefined },
 ): WorkflowRunTrail | null {
-  // No agent: internal code, which runs as the owner (an agent always has a principal).
-  const p = principal ?? OWNER_PRINCIPAL;
+  const p = principal;
   if (isOwnerPrincipal(p) || currentPlanRun(p) !== undefined) return null;
   const correlationId = newCorrelationId();
   const named: ReadonlyArray<readonly [string, string | number | undefined]> = [
     ['workflow', isEngineRowId(run.workflowId) ? run.workflowId : undefined],
     ['one_shot', run.oneShot ? 'yes' : 'no'],
     ['retry', run.retry ? 'yes' : undefined],
+    // The owner pressed Run in the library (1055): the run is the mandate's, the start the owner's,
+    // in the words a plan's run started by hand uses, which the trail view shows (`started_hand`).
+    ['started', run.startedBy === 'library' ? 'hand' : undefined],
+    ['by', run.startedBy === 'library' ? 'owner' : undefined],
   ];
   const write = (phase: AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
     if (auditLog === null) throw new Error('no audit log');
@@ -1020,8 +1048,8 @@ export function workflowRunTrail(
 }
 
 /** Run `fn` under a workflow run's key when there is a trail; as it is otherwise. */
-function underWorkflowRun<T>(trail: WorkflowRunTrail | null, principal: RequestPrincipal | undefined, fn: () => T): T {
-  return trail === null ? fn() : runAsWorkflowRun(principal ?? OWNER_PRINCIPAL, trail.key, fn);
+function underWorkflowRun<T>(trail: WorkflowRunTrail | null, principal: RequestPrincipal, fn: () => T): T {
+  return trail === null ? fn() : runAsWorkflowRun(principal, trail.key, fn);
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
@@ -1103,7 +1131,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }
     }
 
-    const retryTrail = workflowRunTrail(deps.parentAgent?.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true });
+    const retryTrail = workflowRunTrail(deps.parentAgent.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true });
     if (retryTrail !== null) {
       try { retryTrail.begin(); } catch { return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }
@@ -1144,13 +1172,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       const prevGrants = prev.runTaint?.grants;
       if (prevGrants !== undefined) for (const id of prevGrants.members()) retryGrants?.add(id);
       else retryGrants?.add(UNKNOWN_GRANT);
-      const state = await underWorkflowRun(retryTrail, deps.parentAgent?.principal, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
+      const state = await underWorkflowRun(retryTrail, deps.parentAgent.principal, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
         source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
         autonomy: deps.autonomy,
         parentTools: deps.tools,
         parentToolContext: deps.toolContext,
         // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-        principal: deps.parentAgent?.principal,
+        principal: deps.parentAgent.principal,
         parentActiveScopes: deps.parentAgent?.activeScopes,
         // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
         // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -1186,7 +1214,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       retryOutcome = state.status === 'completed' ? 'success' : 'failed';
       return text;
     } catch (err: unknown) {
-      return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
+      // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+      return `Error: Workflow retry failed: ${stripHidden(getErrorMessage(err))}`;
     } finally {
       retryTrail?.end(retryOutcome, false);
     }
@@ -1221,6 +1250,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
 
   if (input.modifications?.length) {
+    // One run's changes: drop a step or change its task. Ids and the step list change only in the
+    // stored workflow (`update_workflow_steps`), where they are saved and checked.
+    if (input.modifications.some(m => m.action !== 'remove' && m.action !== 'update_task')) {
+      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.';
+    }
     const error = applyModifications(steps, input.modifications);
     if (error) return error;
   }
@@ -1250,7 +1284,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     validateManifest(manifest);
     // Before the run is marked run, with no await since the executed-guard above: a one-shot whose
     // start cannot be recorded stays unrun, and a second call cannot slip in between (660b).
-    trail = workflowRunTrail(deps.parentAgent?.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false });
+    trail = workflowRunTrail(deps.parentAgent.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false });
     if (trail !== null) {
       try { trail.begin(); } catch { trail = null; return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }
@@ -1264,13 +1298,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const runTaint = newRunTaint(deps.parentAgent);
-    const state = await underWorkflowRun(trail, deps.parentAgent?.principal, () => runManifest(manifest, deps.config, buildRunCtx({
+    const state = await underWorkflowRun(trail, deps.parentAgent.principal, () => runManifest(manifest, deps.config, buildRunCtx({
       source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
       autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
       // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-      principal: deps.parentAgent?.principal,
+      principal: deps.parentAgent.principal,
       parentActiveScopes: deps.parentAgent?.activeScopes,
       // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
       // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -1305,7 +1339,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return text;
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
-    return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
+    // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
+    return `Error: Workflow execution failed: ${stripHidden(getErrorMessage(err))}`;
   } finally {
     if (!isTemplate) inFlightNonTemplatePipelines.delete(planned.id);
     trail?.end(outcome, definitionRemoved);
@@ -1359,7 +1394,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
               model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Capability tier (omitted = fast)' },
               tools: { type: 'array', items: { type: 'string' }, description: 'Exact tool names this step needs, from your own toolset. bash only when a shell is essential.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'Step IDs whose output flows into this step\'s context' },
-              timeout_ms: { type: 'number', description: 'Timeout in ms (default: 600000)' },
+              timeout_ms: { type: 'number', description: `Timeout in ms (default: ${String(DEFAULT_STEP_TIMEOUT_MS)}, ${String(DEFAULT_STEP_TIMEOUT_MS / 60_000)} min)` },
             },
             required: ['id', 'task'],
           },

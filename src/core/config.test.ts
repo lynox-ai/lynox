@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, statSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { FIREWORKS_API_BASE } from './tier-presets.js';
 
 // We mock node:os and node:process to control homedir and cwd
 const tmpBase = mkdtempSync(join(tmpdir(), 'lynox-config-'));
@@ -172,6 +173,50 @@ describe('Config', () => {
         worker: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-8b-2512' },
       });
       process.env['LYNOX_BLOCKED_MODEL_IDS'] = 'claude-fable-';
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().worker_profile).toBe('worker');
+    });
+  });
+
+  describe('model profiles on an instance connected to a Shopify store (§E7 provider list)', () => {
+    const MISTRAL_WORKER = { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-8b-2512' };
+    afterEach(() => { delete process.env['LYNOX_SHOPIFY_EXCHANGE']; });
+
+    it('drops the control plane\'s Mistral worker profile, so the worker runs on the main provider', async () => {
+      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+      process.env['LYNOX_WORKER_PROFILE'] = 'worker';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({ worker: MISTRAL_WORKER, fallback: MISTRAL_WORKER });
+      const { loadConfig } = await import('./config.js');
+      const cfg = loadConfig();
+      expect(cfg.worker_profile).toBeUndefined();
+      expect(cfg.model_profiles ?? {}).toEqual({});
+    });
+
+    it('keeps a Fireworks worker profile with the control plane\'s key', async () => {
+      const poolKey = ['fw', 'pool', 'value'].join('-');
+      const saved = { tier: process.env['LYNOX_BILLING_TIER'], key: process.env['FIREWORKS_API_KEY'] };
+      try {
+        process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+        process.env['LYNOX_BILLING_TIER'] = 'managed';
+        process.env['FIREWORKS_API_KEY'] = poolKey;
+        process.env['LYNOX_WORKER_PROFILE'] = 'worker';
+        process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+          worker: { provider: 'openai', api_base_url: FIREWORKS_API_BASE, api_key: poolKey, model_id: 'accounts/fireworks/models/gpt-oss-120b' },
+          fallback: MISTRAL_WORKER,
+        });
+        const { loadConfig } = await import('./config.js');
+        const cfg = loadConfig();
+        expect(cfg.worker_profile).toBe('worker');
+        expect(Object.keys(cfg.model_profiles ?? {})).toEqual(['worker']);
+      } finally {
+        if (saved.tier === undefined) delete process.env['LYNOX_BILLING_TIER']; else process.env['LYNOX_BILLING_TIER'] = saved.tier;
+        if (saved.key === undefined) delete process.env['FIREWORKS_API_KEY']; else process.env['FIREWORKS_API_KEY'] = saved.key;
+      }
+    });
+
+    it('keeps the Mistral worker profile without the switch', async () => {
+      process.env['LYNOX_WORKER_PROFILE'] = 'worker';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({ worker: MISTRAL_WORKER });
       const { loadConfig } = await import('./config.js');
       expect(loadConfig().worker_profile).toBe('worker');
     });
@@ -659,6 +704,108 @@ describe('Config', () => {
       });
       const { loadConfig } = await import('./config.js');
       expect(() => loadConfig()).toThrow(/unregistered model "ghost-override-model"/);
+    });
+
+    it('an unregistered config slot on the preset\'s own provider runs the preset\'s model, and keeps the user\'s key', async () => {
+      // The registry-drift case: a release no longer knows the model, the provider is the same.
+      // It used to throw, which cost the boot and the settings page that could clear it.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        writeUserConfig({
+          tier_preset: 'max-quality',
+          tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model', api_key: 'sk-user-own' } },
+        });
+        const { loadConfig, replacedTierSlots } = await import('./config.js');
+        const config = loadConfig();
+        expect(config.tier_set?.deep).toEqual({ provider: 'anthropic', model_id: 'claude-opus-5', api_key: 'sk-user-own' });
+        expect(replacedTierSlots()).toEqual([{ tier: 'deep', model_id: 'claude-retired-model', runs: 'claude-opus-5' }]);
+        expect(warn.mock.calls.flat().join(' ')).toContain('claude-retired-model');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('the same endpoint written with a trailing slash still counts as the same provider', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const { FIREWORKS_API_BASE } = await import('./tier-presets.js');
+        writeUserConfig({
+          tier_preset: 'balanced',
+          tier_set: { deep: { provider: 'openai', model_id: 'accounts/fireworks/models/retired', api_base_url: `${FIREWORKS_API_BASE}/` } },
+        });
+        const { loadConfig } = await import('./config.js');
+        const deep = loadConfig().tier_set?.deep;
+        expect(deep?.model_id).toBe('accounts/fireworks/models/kimi-k3');
+        expect(deep?.api_base_url).toBe(`${FIREWORKS_API_BASE}/`);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('an unregistered config slot on ANOTHER endpoint still fails closed: its band is not sent elsewhere', async () => {
+      writeUserConfig({
+        tier_preset: 'balanced',
+        tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } },
+      });
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/unregistered model "my-local-model"/);
+    });
+
+    it('an unregistered config slot on ANOTHER provider still fails closed, even with no endpoint on either side', async () => {
+      writeUserConfig({
+        tier_preset: 'max-quality',
+        tier_set: { deep: { provider: 'mistral', model_id: 'mistral-retired-model' } },
+      });
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/unregistered model "mistral-retired-model"/);
+    });
+
+    it('checkCandidateConfig leaves the candidate as it was, even where the build deletes nested entries', async () => {
+      // On an instance connected to a Shopify store the build drops a profile on a provider not on
+      // the list. For a candidate that object is the one PUT /api/config then saves.
+      process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+      try {
+        const { checkCandidateConfig } = await import('./config.js');
+        const candidate = { model_profiles: { worker: { provider: 'openai', model_id: 'mistral-small-2506', api_base_url: 'https://api.mistral.ai/v1' } } };
+        const copy = structuredClone(candidate);
+        checkCandidateConfig(candidate as never);
+        expect(candidate).toEqual(copy);
+      } finally {
+        delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+      }
+    });
+
+    it('a replacement the environment\'s tier_set overrides is not reported: that band does not run it', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      process.env['LYNOX_TIER_SET_JSON'] = JSON.stringify({ deep: { provider: 'anthropic', model_id: 'claude-sonnet-5' } });
+      try {
+        writeUserConfig({ tier_preset: 'max-quality', tier_set: { deep: { provider: 'anthropic', model_id: 'claude-retired-model' } } });
+        const { loadConfig, replacedTierSlots } = await import('./config.js');
+        expect(loadConfig().tier_set?.deep?.model_id).toBe('claude-sonnet-5');
+        expect(replacedTierSlots()).toEqual([]);
+      } finally {
+        delete process.env['LYNOX_TIER_SET_JSON'];
+        warn.mockRestore();
+      }
+    });
+
+    it('checkCandidateConfig answers what the loader would do, and writes nothing', async () => {
+      writeUserConfig({ tier_preset: 'max-quality' });
+      const file = join(fakeHome, '.lynox', 'config.json');
+      const before = readFileSync(file, 'utf-8');
+      const { checkCandidateConfig, loadConfig } = await import('./config.js');
+      expect(checkCandidateConfig({
+        tier_preset: 'max-quality',
+        tier_set: { fast: { provider: 'anthropic', model_id: 'claude-retired-model' } },
+      })).toEqual({ replacedSlots: [{ tier: 'fast', model_id: 'claude-retired-model', runs: 'claude-haiku-4-5-20251001' }] });
+      const refused = checkCandidateConfig({
+        tier_preset: 'balanced',
+        tier_set: { deep: { provider: 'openai', model_id: 'my-local-model', api_base_url: 'https://llm.example.internal/v1' } },
+      });
+      expect(refused.error).toMatch(/unregistered model "my-local-model"/);
+      // Nothing written, and the real load still reads the file on disk.
+      expect(readFileSync(file, 'utf-8')).toBe(before);
+      expect(loadConfig().tier_set?.fast?.model_id).toBe('claude-haiku-4-5-20251001');
     });
 
     it('expands the ⚡ efficient preset (all-Fireworks slots) end-to-end', async () => {
@@ -1385,10 +1532,37 @@ describe('Config', () => {
   });
 
   it('LYNOX_API_BASE_URL (canonical) sets api_base_url', async () => {
-    process.env['LYNOX_API_BASE_URL'] = 'https://api.mistral.ai/v1';
+    process.env['LYNOX_API_BASE_URL'] = 'https://api.eu.mistral.ai/v1';
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
-    expect(config.api_base_url).toBe('https://api.mistral.ai/v1');
+    expect(config.api_base_url).toBe('https://api.eu.mistral.ai/v1');
+  });
+
+  // Mistral commits to EU/EFTA inference only for its regional endpoint. A config or env written
+  // before the move names the global one, and is read as the EU one.
+  it.each([
+    ['config.json, with /v1', 'file', 'https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'],
+    ['config.json, bare origin', 'file', 'https://api.mistral.ai', 'https://api.eu.mistral.ai'],
+    ['LYNOX_API_BASE_URL', 'env', 'https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'],
+  ] as const)('reads Mistral\'s global endpoint from %s as the EU one', async (_where, source, stored, expected) => {
+    if (source === 'env') process.env['LYNOX_API_BASE_URL'] = stored;
+    else {
+      const dir = join(fakeHome, '.lynox');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'config.json'), JSON.stringify({ provider: 'openai', api_base_url: stored }));
+    }
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_base_url).toBe(expected);
+  });
+
+  it('leaves every other endpoint as written, a spoof of the Mistral host included', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    for (const url of ['https://api.mistral.ai.evil.com/v1', 'https://api.us.mistral.ai/v1', 'https://api.groq.com/openai/v1']) {
+      writeFileSync(join(dir, 'config.json'), JSON.stringify({ provider: 'openai', api_base_url: url }));
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      expect((reloadConfig(), loadConfig()).api_base_url, url).toBe(url);
+    }
   });
 
   it('LYNOX_API_BASE_URL wins over the legacy ANTHROPIC_BASE_URL when both are set', async () => {
@@ -1652,7 +1826,7 @@ describe('Config', () => {
   // On a pool tier the key in the environment is the pool's; the endpoint a config file
   // names must be the one that key belongs to, or the key goes to another vendor.
   describe('an api_base_url from config.json on a pool tier', () => {
-    const MISTRAL = 'https://api.mistral.ai/v1';
+    const MISTRAL = 'https://api.eu.mistral.ai/v1';
     const ANTHROPIC = 'https://api.anthropic.com';
     const writeCfg = (cfg: Record<string, unknown>): void => {
       const dir = join(fakeHome, '.lynox');
@@ -1688,7 +1862,7 @@ describe('Config', () => {
       const cfg = (reloadConfig(), loadConfig());
       expect(cfg.api_base_url).toBe(MISTRAL);
       expect(cfg.api_key).toBe('sk-pool-mistral');
-      expect(await clientBase(cfg)).toContain('api.mistral.ai');
+      expect(await clientBase(cfg)).toContain('api.eu.mistral.ai');
     });
 
     it('on a pool tier, a leftover ANTHROPIC_BASE_URL does not decide the host either', async () => {
@@ -1720,7 +1894,9 @@ describe('Config', () => {
       const { loadConfig, reloadConfig } = await import('./config.js');
       for (const [cfgIn, expected] of [
         [{ provider: 'openai', api_base_url: MISTRAL }, MISTRAL],
-        [{ provider: 'openai', api_base_url: 'https://api.mistral.ai' }, 'https://api.mistral.ai'],
+        [{ provider: 'openai', api_base_url: 'https://api.eu.mistral.ai' }, 'https://api.eu.mistral.ai'],
+        // Written before the move: read as the EU endpoint, which the pool pairs.
+        [{ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' }, MISTRAL],
         [{ provider: 'anthropic', api_base_url: ANTHROPIC }, ANTHROPIC],
         [{ provider: 'anthropic' }, undefined],
       ] as const) {
