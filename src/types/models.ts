@@ -130,7 +130,8 @@ export function toMistralEuBase(url: string | undefined): string | undefined {
 // stronger generation for deep reasoning — pricier ($1.50/$7.50 vs Large's
 // $0.50/$1.50), the quality tradeoff. Mistral deprecated both on 2026-10-31 and
 // retires both on 2027-04-30 (deprecation table, read 2026-11-03). Mistral's
-// only 1M-context model, Large 4, is in public preview and not registered.
+// only 1M-context model, Large 4, is in public preview (changelog, 2026-10-06) and
+// not registered.
 export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
   // deep → mistral-medium-2604 (Mistral Medium 3.5): the stronger Mistral for
   // deep reasoning. Mistral Large 3 (2512) is the weaker deep; Medium 3.5 is a
