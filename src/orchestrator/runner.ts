@@ -542,7 +542,8 @@ export function runManifest(
     return Promise.reject(err instanceof Error ? err : new Error(String(err)));
   }
   if (refused !== undefined) return Promise.reject(new Error(refused));
-  // The public API's one default, resolved here and nowhere further in (see `StartedRunOptions`).
+  // The public API's default, resolved once for the whole run (see `StartedRunOptions`). The
+  // step spawners are public API too and resolve their own the same way.
   const started: StartedRunOptions = { ...options, principal: options.principal ?? OWNER_PRINCIPAL };
   if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, started);
   const runId = started.runId ?? randomUUID();

@@ -24,7 +24,12 @@
  * The census fails both ways: a place not in the list, a listed place that is gone, and a listed
  * place that no longer names its principal.
  *
- * What it still does not see: a value cast to the type (`as`), which the type checker believes;
+ * A cast (`as`, `<T>`, `satisfies`) or a non-null `!` on what a place hands over, or on its
+ * `principal`, names nothing: the type checker would believe it, so the census does not.
+ *
+ * What it still does not see: a principal removed after the place read its type, through a looser
+ * alias (`delete`, `Object.assign`); a value of type `any` assigned into a typed binding earlier;
+ * options taken from a parameter of any function, a callback's included ("passes through");
  * code that is not in the program (`eval`, a string-built import).
  */
 import { describe, it, expect } from 'vitest';
@@ -158,17 +163,31 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
     return false;
   };
 
+  /** A cast or a non-null assertion, which the type checker would take at its word. */
+  const asserted = (e: ts.Expression): boolean => {
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    return ts.isAsExpression(e) || ts.isTypeAssertionExpression(e) || ts.isSatisfiesExpression(e) || ts.isNonNullExpression(e);
+  };
+  /** The same, on the `principal` of an object literal handed over. */
+  const principalAsserted = (e: ts.Expression): boolean => {
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    return ts.isObjectLiteralExpression(e) && e.properties.some((p) =>
+      (ts.isPropertyAssignment(p) && p.name.getText().replace(/['"[\]]/g, '') === 'principal' && asserted(p.initializer))
+      || (ts.isSpreadAssignment(p) && asserted(p.expression)));
+  };
+
   const namesOf = (node: ts.CallExpression | ts.NewExpression, kind: Kind): Names | 'nothing' => {
     const args = node.arguments ?? ts.factory.createNodeArray<ts.Expression>();
     if (SPAWNERS.has(kind)) {
       const params = checker.getResolvedSignature(node)?.getParameters() ?? [];
       const at = params.findIndex((p) => p.getName() === 'principal');
       const arg = at >= 0 ? args[at] : undefined;
-      return arg && holdsPrincipal(checker.getTypeAtLocation(arg)) ? 'principal' : 'nothing';
+      return arg && !asserted(arg) && holdsPrincipal(checker.getTypeAtLocation(arg)) ? 'principal' : 'nothing';
     }
     const opts = args[OPTIONS_AT[kind] ?? -1];
     if (!opts) return 'nothing';
     const t = checker.getTypeAtLocation(opts);
+    if (asserted(opts) || principalAsserted(opts)) return 'nothing';
     const principal = property(t, 'principal', opts);
     if (principal && !principal.optional && holdsPrincipal(principal.type)) return 'principal';
     const internal = property(t, 'internal', opts);
@@ -218,9 +237,10 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
     return decl ? [checker.getTypeAtLocation(decl)] : [];
   });
   const MEMBER_NAMES = new Set(Object.keys(METHODS).map((k) => k.split('#')[1]!));
+  const FUNCTION_NAMES = new Set(Object.keys(FUNCTIONS));
 
   for (const sf of program.getSourceFiles()) {
-    if (sf.isDeclarationFile || !sf.fileName.startsWith(srcRoot)) continue;
+    if (sf.isDeclarationFile || !sf.fileName.startsWith(srcRoot + '/')) continue;
     const bind = (node: ts.Node): void => {
       if (ts.isBindingElement(node) && ts.isIdentifier(node.name) && ts.isObjectBindingPattern(node.parent)) {
         const decl = node.parent.parent;
@@ -236,7 +256,7 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
   const sites: Site[] = [];
   const refused: string[] = [];
   for (const sf of program.getSourceFiles()) {
-    if (sf.isDeclarationFile || !sf.fileName.startsWith(srcRoot) || /\.(test|spec)\.ts$/.test(sf.fileName)) continue;
+    if (sf.isDeclarationFile || !sf.fileName.startsWith(srcRoot + '/') || /\.(test|spec)\.ts$/.test(sf.fileName)) continue;
     const file = relative(srcRoot, sf.fileName);
     const at = (n: ts.Node): string => `${file}:${String(sf.getLineAndCharacterOfPosition(n.getStart()).line + 1)}`;
     const visit = (node: ts.Node): void => {
@@ -258,6 +278,12 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
         const t = checker.getTypeAtLocation(node);
         if (targetInstances.some((c) => checker.isTypeAssignableTo(c, t))) refused.push(`${at(node)} a type a target class satisfies: a call through it is not seen`);
       }
+      // A type with a member named like a target function: a module or object typed by it calls
+      // the function through the member, which resolves to the type, not to the function.
+      if ((ts.isInterfaceDeclaration(node) || ts.isTypeLiteralNode(node))
+        && node.members.some((m) => m.name !== undefined && FUNCTION_NAMES.has(m.name.getText().replace(/['"]/g, '')))) {
+        refused.push(`${at(node)} a type with a member named like a target function: a call through it is not seen`);
+      }
       node.forEachChild(visit);
     };
     visit(sf);
@@ -278,6 +304,8 @@ describe('principal census (735, 1173)', () => {
     const { sites, refused } = censusOf(programFor(ROOT), join(ROOT, 'src'));
     expect(refused).toEqual([]);
     expect(sites.map(key).sort()).toEqual(SITES.map(key).sort());
+    // A place that names nothing is the finding itself, never an entry of the list.
+    expect(SITES.filter((s) => s.names === 'nothing')).toEqual([]);
   }, 120_000);
 
   // A program of stand-ins under the same paths as the targets, one place per form.
@@ -299,7 +327,7 @@ import type { SessionStore } from './core/session-store.js';
 import { spawnInline, spawnViaAgent, spawnPipeline } from './orchestrator/runtime-adapter.js';
 import { runManifest } from './orchestrator/runner.js';
 import type { P } from './core/principal.js';
-declare const p: P; declare const maybe: P | undefined; declare const e: Engine; declare const store: SessionStore; declare const s: Session;
+declare const p: P; declare const maybe: P | undefined; declare const loose: any; declare const e: Engine; declare const store: SessionStore; declare const s: Session;
 declare function getSession(id: string): Session;
 export function literal() { new Agent({ principal: p }); new Agent({ model: 'x' }); }
 export function alias() { new Aliased({ principal: p }); new Aliased({}); }
@@ -309,7 +337,12 @@ export function undefinedValue() { e.createSession({ principal: maybe }); }
 export function shadowed() { const o = { model: 'x' }; { const o = { principal: p }; void o; } e.createSession(o); }
 export function loosened() { const o: { principal?: P | undefined } = { principal: p }; e.createSession(o); }
 export function computed() { e.createSession({ ['principal']: p }); }
+export function computedKey(k: string) { e.createSession({ [k]: p }); }
 export function internal() { void s.run('t', { internal: true }); }
+export function notInternal() { void s.run('t', { internal: false }); }
+export function cast() { e.createSession({ principal: maybe as P }); e.createSession({ principal: maybe! }); e.createSession({} as { principal: P }); spawnPipeline(1, maybe!); }
+export function anyValue() { e.createSession({ principal: loose }); }
+export interface Deps { runManifest(m: unknown, c: unknown, o: { principal?: P | undefined }): void }
 export function handedOn(opts: { principal?: P }) { store.getOrCreate('id', e, { ...opts }); }
 export function position(x: { principal: P }) { spawnInline(1, x.principal, maybe); spawnViaAgent(1, 2, p); spawnPipeline(1, p); }
 export async function dynamic() { const { runManifest: run } = await import('./orchestrator/runner.js'); run(1, 2, { principal: p }); const later = run; void later; }
@@ -354,7 +387,14 @@ export function harmless(x: unknown) { void Agent.MAX; return x instanceof Agent
       'createSession in shadowed · nothing',
       'createSession in loosened · nothing',
       'createSession in computed · principal',
+      'createSession in computedKey · nothing',
       'run in internal · internal',
+      'run in notInternal · nothing',
+      'createSession in cast · nothing',
+      'createSession in cast · nothing',
+      'createSession in cast · nothing',
+      'spawnPipeline in cast · nothing',
+      'createSession in anyValue · nothing',
       'getOrCreate in handedOn · passes through',
       'spawnInline in position · nothing',
       'spawnViaAgent in position · principal',
@@ -368,6 +408,8 @@ export function harmless(x: unknown) { void Agent.MAX; return x instanceof Agent
       'core/session-store.ts · createSession in getOrCreate · passes through',
     ]);
     expect(refused.map((r) => r.replace(/^x\.ts:\d+ /, ''))).toEqual([
+      // `Deps`: a module typed by it calls runManifest through the member.
+      'a type with a member named like a target function: a call through it is not seen',
       // `const later = run`: a name destructured from the module is the target.
       'a reference to run that is not a call',
       'a reference to createSession that is not a call',
