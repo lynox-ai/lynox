@@ -105,7 +105,8 @@ describe('BackupsView wiring', () => {
 		expect(src.match(/restoreSkippedLines\(/g) ?? []).toHaveLength(1);
 		expect(src.match(/data-testid="restore-skipped"/g) ?? []).toHaveLength(1);
 		expect(src.match(/skippedNotice = null/g) ?? []).toHaveLength(1);
-		// The success toast sits in the branch for a restore that skipped nothing.
+		// The success toast sits in the branch for a restore that skipped nothing, and nowhere else.
+		expect(src.match(/addToast\(t\('backups\.restore_success'\)/g) ?? []).toHaveLength(1);
 		expect(src).toMatch(/if \(outcome\.skipped\.length > 0\) \{[\s\S]*?\} else \{\s*addToast\(t\('backups\.restore_success'\)/);
 	});
 

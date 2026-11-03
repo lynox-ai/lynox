@@ -645,6 +645,33 @@ describe('restoreBackup writes only where createBackup writes', () => {
     expect(liveTier()).toBe('balanced');
   });
 
+  it('logs what it left out, since the view shows it only once', async () => {
+    const foreign = ['http-secret', 'vault.key', 'a1', 'a2', 'a3', 'a4'];
+    const { manager, backupPath } = await backupWith(foreign.map(path => ({ path, bytes: 'planted' })));
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+      expect(result.success).toBe(true);
+      const lines = write.mock.calls.map(([chunk]) => String(chunk)).filter(l => l.includes('restore left'));
+      expect(lines).toEqual(['[lynox:backup] restore left 6 entries out (no current area matches their name; they stay in the backup): http-secret, vault.key, a1, a2, a3, …\n']);
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('logs nothing about left-out entries when none were', async () => {
+    const { manager, backupPath } = await backupWith([{ path: 'memory/b.txt', bytes: 'plain' }]);
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+      expect(result.success).toBe(true);
+      expect(result.skipped).toEqual([]);
+      expect(write.mock.calls.some(([chunk]) => String(chunk).includes('restore left'))).toBe(false);
+    } finally {
+      write.mockRestore();
+    }
+  });
+
   it('writes no case variant of a directory and no directory name as a file', async () => {
     const odd = ['Workspace/x.txt', 'Memory/x.txt', 'workspace', 'CONFIG.JSON'];
     const { manager, backupPath } = await backupWith(odd.map(path => ({ path, bytes: 'planted' })));
