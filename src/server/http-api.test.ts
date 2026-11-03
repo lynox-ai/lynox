@@ -1895,11 +1895,27 @@ describe('LynoxHTTPApi', () => {
         author = 'mandate:jan@example.invalid';
         const foreign = await post();
         expect(foreign.status).toBe(403);
-        expect(((await foreign.json()) as { error: string }).error).toMatch(/^Not scheduled: this workflow holds steps another person with delegated access/);
+        const foreignBody = (await foreign.json()) as { error: string; code?: string };
+        expect(foreignBody.error).toMatch(/^Not scheduled: this workflow holds steps another person with delegated access/);
+        // The code lets the page word the refusal in its reader's language (UX-058, ux U-119).
+        expect(foreignBody.code).toBe('foreign_workflow');
         author = undefined;
-        expect((await post()).status).toBe(403);
+        const unread = await post();
+        expect(unread.status).toBe(403);
+        const unreadBody = (await unread.json()) as { error: string; code?: string };
+        expect(unreadBody.code).toBe('unreadable_workflow');
+        expect(unreadBody.error).toMatch(/^Not scheduled: lynox could not read who set up this workflow/);
         author = 'throws';
-        expect((await post()).status).toBe(403);
+        const thrown = await post();
+        expect(thrown.status).toBe(403);
+        const thrownBody = (await thrown.json()) as { error: string; code?: string };
+        expect(thrownBody.code).toBe('unreadable_workflow');
+        expect(thrownBody.error).toMatch(/^Not scheduled: lynox could not read who set up this workflow/);
+        // A workflow that is gone (the lookup finds none) is a 404 with its own code, before any refusal.
+        mockGetPipeline.mockReturnValueOnce(undefined);
+        const missing = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-gone', scheduleCron: '0 9 1 * *' }) });
+        expect(missing.status).toBe(404);
+        expect(((await missing.json()) as { code?: string }).code).toBe('missing_workflow');
         expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
         author = 'mandate:eva@example.invalid';
         expect((await post()).status).toBe(201);
@@ -12608,10 +12624,43 @@ describe('LynoxHTTPApi', () => {
         live = false;
         const res = await jsonFetch('/api/workflows/library');
         const body = await res.json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
-        expect(body.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true });
+        // No engine.db here, so no paused plan whose takeover covers it: none counted.
+        expect(body.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 });
         expect(body.workflows.find((w) => w.id === 'wf-o')).not.toHaveProperty('runs_as');
         mockHistoryGetWorkflowAuthorship.mockReset();
         mockHistoryGetPlannedPipelines.mockReturnValue([]);
+      });
+
+      it('reads the paused plans once per list and only when a listed workflow has ended, and a failed read counts none instead of failing the list', async () => {
+        repayRateWindow();
+        mockHistoryGetPlannedPipelines.mockReturnValue([
+          { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },
+          { id: 'wf-m2', manifest_name: 'M2', manifest_json: JSON.stringify({ template: true, name: 'M2', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-20T00:00:00Z' },
+        ]);
+        mockHistoryGetWorkflowAuthorship.mockImplementation((id: string) => (id === 'wf-m' || id === 'wf-m2' ? mandateMade : undefined));
+        const origDb = engineRef()['getEngineDb'];
+        const getDb = vi.fn((): never => { throw new Error('engine.db closed'); });
+        engineRef()['getEngineDb'] = () => ({ getDb });
+        type Lib = { workflows: Array<{ id: string; runs_as?: unknown }> };
+        try {
+          live = true;
+          const whileLive = await jsonFetch('/api/workflows/library');
+          expect(((await whileLive.json()) as Lib).workflows.map((w) => w.runs_as)).toEqual([0, 1].map(() => ({ person: 'eva@kanzlei.example', ended: false })));
+          // Nothing listed has ended: the paused plans are not read at all.
+          expect(getDb).not.toHaveBeenCalled();
+          live = false;
+          const ended = await jsonFetch('/api/workflows/library');
+          expect(ended.status).toBe(200);
+          const endedRows = ((await ended.json()) as Lib).workflows;
+          expect(endedRows.map((w) => w.runs_as)).toEqual([0, 1].map(() => ({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 })));
+          // Twin: the read was tried, so the 0 above is the fallback, not a skipped read — and
+          // tried once for both ended workflows, not once per row.
+          expect(getDb).toHaveBeenCalledTimes(1);
+        } finally {
+          engineRef()['getEngineDb'] = origDb;
+          mockHistoryGetWorkflowAuthorship.mockReset();
+          mockHistoryGetPlannedPipelines.mockReturnValue([]);
+        }
       });
 
       it('lists no one\'s email to a mandate reading the library', async () => {
@@ -12623,8 +12672,22 @@ describe('LynoxHTTPApi', () => {
         const cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
         try {
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'ida@kanzlei.example', mandateId: MID }));
-          const asMandate = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+          const asMandate = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown; schedule_refusal?: unknown }> };
           expect(asMandate.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('runs_as');
+          // What it does learn: this one is not its to schedule (UX-058), and not whose it is.
+          expect(asMandate.workflows.find((w) => w.id === 'wf-m')?.schedule_refusal).toBe('foreign');
+          expect(JSON.stringify(asMandate)).not.toContain('eva@kanzlei.example');
+          // Its own workflow and the owner's carry no refusal; one whose author cannot be read does.
+          mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: 'mandate:ida@kanzlei.example', createdMandateId: MID, mandateEditor: null, mandateEditorId: null });
+          const own = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; schedule_refusal?: unknown }> };
+          expect(own.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('schedule_refusal');
+          mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null });
+          const owners = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; schedule_refusal?: unknown }> };
+          expect(owners.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('schedule_refusal');
+          mockHistoryGetWorkflowAuthorship.mockReturnValue(undefined);
+          const unread = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; schedule_refusal?: unknown }> };
+          expect(unread.workflows.find((w) => w.id === 'wf-m')?.schedule_refusal).toBe('unreadable');
+          mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
           // Twin on the same machinery: the owner gets it.
           api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
           const asOwner = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
