@@ -69,6 +69,17 @@ export const MANDATE_OUTWARD_READERS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The tools on `MANDATE_TOOL_SURFACE` that read mail the instance stores (the inbox store, a
+ * copy of mail from outside). Each declares `storedMailRead`, and a mandate's call leaves a
+ * `read` row before it runs, as a read of the mailbox does: mail is in the trail on every way
+ * it is read (sec-core 2026-11-03). A separate class, not `MANDATE_OUTWARD_READERS`: the read
+ * stays inside the instance. A test over a booted registry holds the list to the declarations.
+ */
+export const MANDATE_STORED_MAIL_READERS: ReadonlySet<string> = new Set([
+  'inbox_read',
+]);
+
+/**
  * The engine's own tools a mandate's turn does not get, each with the reason. Together with
  * `MANDATE_TOOL_SURFACE` this is the closed classification a booted registry is checked
  * against: a new engine tool that is in neither fails that test until someone places it.
@@ -166,7 +177,7 @@ export const MANDATE_INSIDE_NON_WRITERS: Readonly<Record<string, string>> = Obje
   mail_read: 'reads mail, recorded as a read',
   mail_search: 'reads mail, recorded as a read',
   mail_triage: 'reads mail, recorded as a read',
-  inbox_read: 'reads the inbox store inside the instance',
+  inbox_read: 'reads the inbox store inside the instance, recorded as a read',
   mail_send: 'writes outside, recorded by the outward trail',
   mail_reply: 'writes outside, recorded by the outward trail',
   mail_connect: 'asks for a connection; the account write is the owner\'s route, refused for a mandate',

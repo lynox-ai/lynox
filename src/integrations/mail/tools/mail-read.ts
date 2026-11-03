@@ -14,6 +14,7 @@ import { detectInjectionAcross, wrapChannelMessage, wrapUntrustedData } from '..
 import { MailError } from '../provider.js';
 import { cleanBody } from '../triage/body-clean.js';
 import { resolveProvider, type MailRegistry, accountForRow } from './registry.js';
+import { accountsNotReadBy, leftOutRefusal } from '../../inbox/disabled-accounts.js';
 import { oneBlockLine } from '../block-line.js';
 import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 
@@ -50,12 +51,14 @@ export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadIn
         required: ['uid'],
       },
     },
-    handler: async (input: MailReadInput, _agent: IAgent): Promise<string> => {
+    handler: async (input: MailReadInput, agent: IAgent): Promise<string> => {
       try {
         if (typeof input.uid !== 'number' || !Number.isFinite(input.uid)) {
           return 'mail_read error: "uid" must be a number';
         }
         const provider = resolveProvider(registry, input.account);
+        // A run nobody watches does not read the mailboxes the inbox leaves out (F6).
+        if (accountsNotReadBy(agent).has(provider.accountId)) return leftOutRefusal('mail_read');
 
         const fetchOpts: { uid: number; folder?: string; includeHtml?: boolean } = { uid: input.uid };
         if (input.folder) fetchOpts.folder = input.folder;

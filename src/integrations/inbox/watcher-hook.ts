@@ -319,7 +319,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         tenantId: opts.tenantId,
         action: 'classified',
         actor: 'system',
-        payloadJson: JSON.stringify({ dead_letter: true, reason: 'queue_overflow' }),
+        payloadJson: JSON.stringify({
+          dead_letter: true, reason: 'queue_overflow',
+          ...(sensitive.isSensitive ? { sensitive_categories: sensitive.categories, sensitive_masked: useMasked } : {}),
+        }),
       },
     );
     // Store the body the classifier would have seen (masked variant under

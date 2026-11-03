@@ -787,7 +787,7 @@ export class InboxStateDb {
            AND (snooze_until IS NULL OR snooze_until <= ?)
            AND user_action IS NULL
            AND account_id NOT IN (SELECT value FROM json_each(?))
-         ORDER BY classified_at DESC
+         ORDER BY classified_at DESC, rowid DESC
          LIMIT ? OFFSET ?`,
       )
       .all(

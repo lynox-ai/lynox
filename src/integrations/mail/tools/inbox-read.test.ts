@@ -19,6 +19,14 @@ let hooks: MailHooks;
 
 const watched = { promptUser: vi.fn() } as unknown as IAgent;
 const unwatched = {} as unknown as IAgent;
+// A schedule's or a trigger's run: the worker loop wires a promptUser that parks the question,
+// and the run is autonomous (worker-loop.ts). Nobody watches it.
+const workerRun = { promptUser: vi.fn(), autonomy: 'autonomous' } as unknown as IAgent;
+const ACCOUNT = {
+  id: 'acct-1', displayName: 'Me', address: 'me@acme.example', preset: 'custom',
+  imap: { host: 'i', port: 993, secure: true }, smtp: { host: 's', port: 465, secure: true },
+  authType: 'imap', type: 'personal', isDefault: true,
+} as const;
 
 function boot(disabledAccounts?: ReadonlySet<string>): void {
   const client = { messages: { create: vi.fn() } } as unknown as Anthropic;
@@ -192,5 +200,106 @@ describe('inbox_read — behind its flag', () => {
     item({ subject: 'Über die Hooks' });
     const tool = createMailTools(new InMemoryMailRegistry(), { hooks } as never).find((t) => t.definition.name === 'inbox_read')!;
     expect(await tool.handler({ action: 'list', bucket: 'requires_user' }, watched)).toContain('Subject: Über die Hooks');
+  });
+});
+
+describe('inbox_read — what the inbox found at intake counts (B1)', () => {
+  // The intake check reads subject + up to 500 characters; the store keeps 200. Here the link
+  // sits in the first 200, and the words that make it a login link come after.
+  const LINK = 'https://app.example.com/auth?t=Zq81xP0aLm';
+  const snippet = `Guten Tag, hier ist Ihr Zugang: ${LINK} ${'Bitte beachten Sie unsere Hinweise. '.repeat(5)}Dies ist Ihr persönlicher Login Link, gültig für 15 Minuten.`;
+
+  it('withholds a mail the intake check skipped as sensitive, though its stored text looks harmless, and its stored thread copy', async () => {
+    mail.upsertAccount(ACCOUNT as never);
+    expect(snippet.indexOf('Login Link')).toBeGreaterThan(200);
+    expect(snippet.indexOf(LINK)).toBeLessThan(200);
+    const outcome = await runtime.hook('acct-1', {
+      uid: 1, messageId: '<link@x>', folder: 'INBOX', threadKey: 'imap:link', inReplyTo: undefined,
+      from: [{ address: 'noreply@app.example.com' }], to: [{ address: 'me@acme.example' }], cc: [], replyTo: [],
+      subject: 'Ihr Zugang', date: new Date('2026-11-01T10:00:00Z'), flags: [], snippet,
+      hasAttachments: false, attachmentCount: 0, sizeBytes: 0, isAutoReply: false,
+    });
+    expect(outcome).toBe('sensitive_skipped');
+    const [stored] = runtime.state.listItems();
+    // The stored text alone would pass the re-check: that is the case.
+    expect(stored!.snippet).toContain(LINK);
+    const list = await call({ action: 'list', bucket: 'requires_user' });
+    const item = await call({ action: 'item', id: stored!.id });
+    for (const out of [list, item]) {
+      expect(out).not.toContain(LINK);
+      expect(out).toContain('(withheld: sensitive content — password_reset)');
+    }
+  });
+
+  it('withholds an item whose intake audit names sensitive categories (a classified, masked mail)', async () => {
+    const id = runtime.state.insertItemWithAudit(
+      { accountId: 'acct-1', channel: 'email', threadKey: 't-masked', bucket: 'draft_ready', confidence: 0.8,
+        reasonDe: 'Bestätigung des Zugangs', classifiedAt: new Date(), classifierVersion: 'v1',
+        subject: 'Ihr Zugang', snippet: `Hier: ${LINK}`, fromAddress: 'noreply@app.example.com' },
+      { action: 'classified', actor: 'classifier', payloadJson: JSON.stringify({ bucket: 'draft_ready', sensitive_categories: ['password_reset'], sensitive_masked: true }) },
+    );
+    const out = await call({ action: 'item', id });
+    expect(out).not.toContain(LINK);
+    expect(out).toContain('(withheld: sensitive content — password_reset)');
+  });
+});
+
+describe('inbox_read — a worker run nobody watches has a promptUser (B2)', () => {
+  beforeEach(async () => {
+    await runtime.shutdown();
+    boot(new Set(['acct-secret']));
+  });
+
+  it('leaves the left-out accounts out for an autonomous run that has a promptUser', async () => {
+    const secret = item({ accountId: 'acct-secret', subject: 'Geheim' });
+    item({ subject: 'Normal' });
+    expect(await call({ action: 'counts' }, workerRun)).toContain('- requires_user: 1');
+    expect(await call({ action: 'list', bucket: 'requires_user' }, workerRun)).not.toContain('Geheim');
+    expect(await call({ action: 'item', id: secret }, workerRun)).toBe('inbox_read: no inbox item with this id.');
+  });
+
+  it('also leaves out the accounts named in the env now, not only those the runtime booted with', async () => {
+    vi.stubEnv('LYNOX_INBOX_DISABLED_ACCOUNTS', 'acct-later');
+    try {
+      item({ accountId: 'acct-later', subject: 'Später gesperrt' });
+      expect(await call({ action: 'list', bucket: 'requires_user' }, workerRun)).not.toContain('Später gesperrt');
+    } finally { vi.unstubAllEnvs(); }
+  });
+});
+
+describe('inbox_read — reading edges', () => {
+  it('pages with offset, defaults to 10, and turns a number it cannot use into the default', async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 12; i++) ids.push(item({ subject: `Nr ${String(i)}`, classifiedAt: new Date(Date.UTC(2026, 10, 1, 0, i)) }));
+    const first = await call({ action: 'list', bucket: 'requires_user' });
+    expect(first.match(/^id:/gm)?.length).toBe(10);
+    expect(first).toContain(`id:${ids[11]!}`);
+    const rest = await call({ action: 'list', bucket: 'requires_user', offset: 10 });
+    expect(rest.match(/^id:/gm)?.length).toBe(2);
+    expect(rest).toContain(`id:${ids[0]!}`);
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 2 ** 70]) {
+      const out = await call({ action: 'list', bucket: 'requires_user', limit: bad, offset: bad });
+      expect(out, String(bad)).not.toMatch(/failed/);
+    }
+    expect((await call({ action: 'list', bucket: 'requires_user', limit: Number.NaN })).match(/^id:/gm)?.length).toBe(10);
+  });
+
+  it('does not open another tenant\'s item', async () => {
+    const other = item({ tenantId: 'other-tenant', subject: 'Fremd' });
+    expect(await call({ action: 'item', id: other })).toBe('inbox_read: no inbox item with this id.');
+  });
+
+  it('shows the item\'s own message once, and the body from the older body store when no thread copy has one', async () => {
+    const id = item({ messageId: '<own@x>' });
+    const stored = runtime.state.getItem(id)!;
+    runtime.state.insertThreadMessage({
+      accountId: 'acct-1', threadKey: stored.threadKey, messageId: '<own@x>', fromAddress: 'kunde@example.com',
+      subject: 'Termin', snippet: 'eigene Nachricht', inboxItemId: id,
+    } as Parameters<InboxRuntime['state']['insertThreadMessage']>[0]);
+    runtime.state.saveItemBody(id, 'Text aus dem alten Speicher', 'imap');
+    const out = await call({ action: 'item', id });
+    expect(out).toContain('Text aus dem alten Speicher');
+    expect(out).not.toContain('Other stored messages');
+    expect(out).not.toContain('eigene Nachricht');
   });
 });

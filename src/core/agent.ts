@@ -4582,12 +4582,14 @@ export class Agent implements IAgent {
    * reads nothing outside, or one whose row was written. `false` when the row cannot be
    * written — no trail store, or the insert threw — and the call must not run. Like the
    * write's row it is built from `tc.input`, before any secret was resolved into it, and it
-   * names the target only: never what came back, never a query or a search text.
+   * names the target only: never what came back, never a query or a search text. A read of
+   * stored mail (`ToolEntry.storedMailRead`) gets the same row: mail is in the trail on every
+   * way it is read.
    */
   private _recordOutwardRead(tc: BetaToolUseBlock, tool: ToolEntry): boolean {
     const record = outwardReadRecorder(this, `${tc.name}:read`);
     if (record === null) return true;
-    const target = tool.outwardRead ? tool.outwardRead(tc.input as never) : null;
+    const target = tool.outwardRead?.(tc.input as never) ?? tool.storedMailRead?.(tc.input as never) ?? null;
     if (target === null) return true;
     try {
       record(target);

@@ -390,6 +390,19 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       return legacy !== null && legacy.bodyMd.length > 0 ? legacy.bodyMd : null;
     },
     threadOf: (item, limit) => state.listThreadMessages(item.accountId, item.threadKey, { tenantId: item.tenantId, limit }),
+    sensitiveAtIngest: (item) => {
+      const found = new Set<string>();
+      for (const entry of state.listAuditForItem(item.id, item.tenantId)) {
+        let payload: unknown;
+        try { payload = JSON.parse(entry.payloadJson); } catch { continue; }
+        const cats = (payload as { sensitive_categories?: unknown } | null)?.sensitive_categories;
+        if (Array.isArray(cats)) for (const c of cats) if (typeof c === 'string' && c.length > 0) found.add(c);
+      }
+      // The skip path files the item under this version; its audit names the categories, but
+      // the version alone already says the mail was sensitive.
+      if (found.size === 0 && item.classifierVersion === 'sensitive-prefilter') found.add('sensitive');
+      return [...found];
+    },
     disabledAccounts: disabledAccounts ?? new Set<string>(),
   };
 

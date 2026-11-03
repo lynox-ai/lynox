@@ -17,6 +17,7 @@ import type {
 } from '../provider.js';
 import type { IAgent } from '../../../types/index.js';
 import { InMemoryMailRegistry } from './registry.js';
+import { leftOutRefusal } from '../../inbox/disabled-accounts.js';
 import { createMailSearchTool } from './mail-search.js';
 import { createMailReadTool } from './mail-read.js';
 import { createMailSendTool } from './mail-send.js';
@@ -2138,5 +2139,32 @@ describe('mail_triage leaves out the inbox\'s left-out accounts when nobody watc
     const out = await createMailTriageTool(registry).handler({ account: 'secret-box' }, yesAgent);
     expect(secret.list).toHaveBeenCalled();
     expect(out).toContain('Vertraulich');
+  });
+
+  // A schedule's or trigger's run has a promptUser (the worker loop parks its questions) and
+  // is autonomous. It is a run nobody watches all the same.
+  const workerRun = { promptUser: async () => 'Yes', autonomy: 'autonomous' } as unknown as IAgent;
+
+  it('does not list it in a worker run, which has a promptUser', async () => {
+    const out = await createMailTriageTool(registry).handler({ account: 'secret-box' }, workerRun);
+    expect(secret.list).not.toHaveBeenCalled();
+    expect(out).toBe(UNWATCHED_LEFT_OUT);
+  });
+
+  it('mail_read and mail_search do not read it in a run nobody watches either, and do when the user is there', async () => {
+    const read = await createMailReadTool(registry).handler({ uid: 2, account: 'secret-box' }, workerRun);
+    expect(secret.fetch).not.toHaveBeenCalled();
+    expect(read).toBe(leftOutRefusal('mail_read'));
+    const one = await createMailSearchTool(registry).handler({ account: 'secret-box', subject: 'x' }, noPromptAgent);
+    expect(secret.search).not.toHaveBeenCalled();
+    expect(one).toBe(leftOutRefusal('mail_search'));
+    const all = await createMailSearchTool(registry).handler({ subject: 'x' }, workerRun);
+    expect(secret.search).not.toHaveBeenCalled();
+    expect(provider.search).toHaveBeenCalled();
+    expect(all).toContain('1 more account(s) not searched');
+    await createMailSearchTool(registry).handler({ account: 'secret-box', subject: 'x' }, yesAgent);
+    expect(secret.search).toHaveBeenCalled();
+    await createMailReadTool(registry).handler({ uid: 2, account: 'secret-box' }, yesAgent);
+    expect(secret.fetch).toHaveBeenCalled();
   });
 });

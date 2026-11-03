@@ -112,6 +112,7 @@ import { createDocsTool } from '../integrations/google/google-docs.js';
 import { createDriveTool } from '../integrations/google/google-drive.js';
 import { createSheetsTool } from '../integrations/google/google-sheets.js';
 import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tools/index.js';
+import { createInboxReadTool } from '../integrations/mail/tools/inbox-read.js';
 import { currentCallTwins, noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 import { readRunStop, withRunStop } from './run-stop.js';
 
@@ -7338,6 +7339,41 @@ describe('actor trail — a mandate\'s outward read', () => {
     const handler = vi.fn().mockResolvedValue('ok');
     await run(reader('http_request', handler), { url: 'https://api.example.invalid/x' }, { auditLog: owner.log });
     expect(handler).toHaveBeenCalledTimes(1);
+    expect(owner.recs).toEqual([]);
+  });
+
+  // sec-core 2026-11-03: a read of stored mail is in the trail as a read of the mailbox is.
+  it('writes one read row before a mandate\'s inbox_read, naming what it read and nothing of the mail; none for the owner', async () => {
+    const MAIL_TEXT = 'Vertraulicher Inhalt der Kundenmail';
+    const reader = {
+      countByBucket: () => ({ requires_user: 1, draft_ready: 0, auto_handled: 0 }),
+      listItems: () => [],
+      getItem: () => ({
+        id: 'inb_1_abc', tenantId: 'default', accountId: 'acct-1', channel: 'email', threadKey: 't', bucket: 'requires_user',
+        confidence: 1, reasonDe: MAIL_TEXT, classifiedAt: new Date(), classifierVersion: 'v1', userAction: undefined,
+        userActionAt: undefined, draftId: undefined, snoozeUntil: undefined, snoozeCondition: undefined, unsnoozeOnReply: false,
+        fromAddress: 'kunde@example.com', fromName: undefined, subject: MAIL_TEXT, mailDate: undefined, snippet: MAIL_TEXT,
+        messageId: undefined, inReplyTo: undefined, notifyOnUnsnooze: false, notifiedAt: undefined,
+      }),
+      bodyOf: () => MAIL_TEXT,
+      threadOf: () => [],
+      sensitiveAtIngest: () => [],
+      disabledAccounts: new Set<string>(),
+    };
+    const tool = createInboxReadTool({ inboxReader: reader as never }) as unknown as ToolEntry;
+    const mandate = recorder();
+    const handler = tool.handler;
+    const spied: ToolEntry = { ...tool, handler: vi.fn(async (input: never, agent: never) => {
+      expect(mandate.recs, 'the row precedes the read').toHaveLength(1);
+      return handler(input, agent);
+    }) };
+    const r = await run(spied, { action: 'item', id: 'inb_1_abc' }, { principal: MANDATE, auditLog: mandate.log });
+    expect(r.resultText).toContain('Vertraulicher');
+    expect(mandate.recs).toHaveLength(1);
+    expect(mandate.recs[0]).toMatchObject({ principal: MANDATE, action: 'inbox_read:read', target: 'item inb_1_abc', phase: 'read', runId: 'run-read-1' });
+    expect(JSON.stringify(mandate.recs[0])).not.toContain('Vertraulich');
+    const owner = recorder();
+    await run(tool, { action: 'counts' }, { auditLog: owner.log });
     expect(owner.recs).toEqual([]);
   });
 

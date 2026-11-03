@@ -20,7 +20,7 @@ import { resolveProviders, type MailRegistry, accountForRow } from './registry.j
 import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 import type { MailHooks, InboxLabel } from '../context.js';
 import { resolveThreadKey } from '../thread-key.js';
-import { inboxDisabledAccounts } from '../../inbox/disabled-accounts.js';
+import { accountsNotReadBy, leftOutRefusal } from '../../inbox/disabled-accounts.js';
 
 interface MailTriageInput {
   account?: string | undefined;
@@ -33,8 +33,7 @@ interface MailTriageInput {
 }
 
 /** Said when every account asked for is one a run nobody watches does not read. */
-export const UNWATCHED_LEFT_OUT =
-  'mail_triage: this account is not read in a run nobody watches — the owner left it out of the inbox as a sensitive mailbox. Ask the user to look at it in a chat.';
+export const UNWATCHED_LEFT_OUT = leftOutRefusal('mail_triage');
 
 const BUCKETS = new Set(['requires_user', 'draft_ready', 'auto_handled']);
 const USER_ACTIONS = new Set(['archived', 'replied', 'snoozed', 'unhandled']);
@@ -139,9 +138,9 @@ export function createMailTriageTool(registry: MailRegistry, hooks?: MailHooks):
         // A run nobody watches does not read the mailboxes the inbox leaves out (PRD
         // inbox-user-rules F6): they are the sensitive ones, and no one is there to see what
         // the run reads from them.
-        const leftOut = agent.promptUser ? new Set<string>() : inboxDisabledAccounts();
+        const leftOut = accountsNotReadBy(agent);
         const providers = resolved.filter((p) => !leftOut.has(p.accountId));
-        if (providers.length === 0) return UNWATCHED_LEFT_OUT;
+        if (providers.length === 0 && resolved.length > 0) return UNWATCHED_LEFT_OUT;
         const leftOutNote = resolved.length > providers.length
           ? `\n${String(resolved.length - providers.length)} more account(s) not read: a run nobody watches does not read the mailboxes the owner left out of the inbox.`
           : '';

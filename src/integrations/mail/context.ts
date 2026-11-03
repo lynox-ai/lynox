@@ -220,6 +220,12 @@ export interface InboxReader {
   bodyOf(item: InboxItem): string | null;
   /** The thread's stored messages, newest first. */
   threadOf(item: InboxItem, limit: number): ReadonlyArray<InboxThreadMessage>;
+  /**
+   * The sensitive categories the inbox found in the item's mail when it took it in, from the
+   * item's audit (none when it found none). The check ran on more of the mail than the store
+   * keeps, so a re-check of the stored text can miss what it found.
+   */
+  sensitiveAtIngest(item: InboxItem): ReadonlyArray<string>;
   /** Accounts the inbox leaves out (`LYNOX_INBOX_DISABLED_ACCOUNTS`). */
   disabledAccounts: ReadonlySet<string>;
 }
@@ -234,6 +240,8 @@ export interface InboxThreadMessage {
   direction: 'inbound' | 'outbound' | 'unknown';
   bodyMd?: string | undefined;
   snippet?: string | undefined;
+  /** The inbox item this message was stored with, when the inbox stored it with one. */
+  inboxItemId?: string | undefined;
 }
 
 /** The inbox's verdict on one thread, as `mail_triage` shows it. */

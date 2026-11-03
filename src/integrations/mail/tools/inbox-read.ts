@@ -7,8 +7,10 @@
 // Every text that comes from a mail — subject, sender name, snippet, the classifier's reason,
 // the stored body, a thread message — is checked for sensitive content (one-time codes,
 // password resets, keys, card numbers, IBANs) before it is returned, and withheld when it
-// holds any: the inbox stores the raw snippet of a thread message even when it skipped the
-// mail as sensitive, and a rule can file such a mail without the check having run. What is
+// holds any. The inbox's own verdict at intake counts too: it checked up to 500 characters
+// of the mail and keeps 200, so the stored text can look harmless where the mail was not, and
+// it stores the raw snippet of a thread message even when it skipped the mail as sensitive.
+// A rule can file a mail before that check runs; then the re-check here is the only one. What is
 // returned goes inside one untrusted-data block per item; the line in front of it carries
 // only the item id, the bucket, the user's action and the date, which the inbox sets itself.
 
@@ -16,7 +18,8 @@ import type { IAgent, ToolEntry } from '../../../types/index.js';
 import type { InboxBucket, InboxItem } from '../../../types/inbox.js';
 import { wrapUntrustedData } from '../../../core/data-boundary.js';
 import { getErrorMessage } from '../../../core/utils.js';
-import { detectSensitiveContent, type SensitiveCategory } from '../../inbox/sensitive-content.js';
+import { detectSensitiveContent } from '../../inbox/sensitive-content.js';
+import { accountsNotReadBy } from '../../inbox/disabled-accounts.js';
 import { oneBlockLine } from '../block-line.js';
 import type { InboxReader, InboxThreadMessage, MailHooks } from '../context.js';
 
@@ -42,10 +45,11 @@ export const INBOX_READ_LIMITS = {
   threadMessages: 10,
   listDefault: 10,
   listMax: 25,
+  offsetMax: 10_000,
 } as const;
 
 /** Said in place of a text that holds sensitive content. Fixed text, so nothing of it leaks. */
-export function withheldText(categories: ReadonlyArray<SensitiveCategory>): string {
+export function withheldText(categories: ReadonlyArray<string>): string {
   return `(withheld: sensitive content — ${[...new Set(categories)].join(', ')})`;
 }
 
@@ -67,7 +71,7 @@ function isoSecond(d: Date | undefined): string {
 }
 
 /** The sensitive categories in any of `texts`, or none. */
-function sensitiveIn(...texts: ReadonlyArray<string | undefined>): SensitiveCategory[] {
+function sensitiveIn(...texts: ReadonlyArray<string | undefined>): string[] {
   const body = texts.filter((t): t is string => typeof t === 'string' && t.length > 0).join('\n');
   return body.length === 0 ? [] : detectSensitiveContent({ subject: '', body }).categories;
 }
@@ -84,8 +88,8 @@ function itemHeader(item: InboxItem): string {
  * subject, the name, the snippet and the reason describe the same mail, so one that shows
  * the code can show it in another.
  */
-function itemBlock(item: InboxItem, body: string | null): string {
-  const hit = sensitiveIn(item.subject, item.fromName, item.snippet, item.reasonDe, body ?? undefined);
+function itemBlock(item: InboxItem, body: string | null, atIngest: ReadonlyArray<string>): string {
+  const hit = [...atIngest, ...sensitiveIn(item.subject, item.fromName, item.snippet, item.reasonDe, body ?? undefined)];
   const from = item.fromName ? `"${line(item.fromName, INBOX_READ_LIMITS.name)}" <${line(item.fromAddress, 320)}>` : line(item.fromAddress, 320);
   const text = hit.length > 0
     ? [`From: ${line(item.fromAddress, 320)}`, withheldText(hit)]
@@ -100,9 +104,11 @@ function itemBlock(item: InboxItem, body: string | null): string {
   return wrapUntrustedData(text.join('\n'), `inbox:${item.accountId}:item:${item.id}`);
 }
 
-function threadBlock(item: InboxItem, msg: InboxThreadMessage, n: number): string {
+function threadBlock(item: InboxItem, msg: InboxThreadMessage, n: number, atIngest: ReadonlyArray<string>): string {
   const text = msg.bodyMd !== undefined && msg.bodyMd.length > 0 ? msg.bodyMd : (msg.snippet ?? '');
-  const hit = sensitiveIn(msg.subject, msg.fromName, text);
+  // The message the item was taken in with is the mail the intake check judged.
+  const sameMail = msg.inboxItemId === item.id || (item.messageId !== undefined && msg.messageId === item.messageId);
+  const hit = [...(sameMail ? atIngest : []), ...sensitiveIn(msg.subject, msg.fromName, text)];
   const head = `${String(n)}. ${msg.direction} · date:${isoSecond(msg.mailDate)}`;
   const body = hit.length > 0
     ? [`From: ${line(msg.fromAddress, 320)}`, withheldText(hit)]
@@ -114,10 +120,19 @@ function threadBlock(item: InboxItem, msg: InboxThreadMessage, n: number): strin
   return `${head}\n${wrapUntrustedData(body.join('\n'), `inbox:${item.accountId}:thread:${item.id}:${String(n)}`)}`;
 }
 
-/** Accounts a run nobody watches does not read (`LYNOX_INBOX_DISABLED_ACCOUNTS`). */
+/** Accounts a run nobody watches does not read (`LYNOX_INBOX_DISABLED_ACCOUNTS`, F6). */
 function leftOut(reader: InboxReader, agent: IAgent): ReadonlySet<string> {
-  return agent.promptUser ? new Set<string>() : reader.disabledAccounts;
+  return accountsNotReadBy(agent, reader.disabledAccounts);
 }
+
+/** A whole number from the model's input, or `fallback` when it is none (NaN, Infinity, text). */
+function wholeNumber(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+/** An inbox item id as the store makes them (`state.ts` nextId). */
+const ITEM_ID = /^inb_[0-9]{1,16}_[a-z0-9]{1,16}$/;
 
 export const INBOX_READ_LEGEND =
   'Buckets: requires_user — the user has to act, or no classification ran; draft_ready — a short reply will do; ' +
@@ -140,13 +155,13 @@ function renderList(reader: InboxReader, agent: IAgent, input: InboxReadInput): 
   if (input.bucket === undefined || !BUCKETS.includes(input.bucket)) {
     return `inbox_read: "list" needs a bucket, one of ${BUCKETS.join(', ')}.`;
   }
-  const limit = Math.min(INBOX_READ_LIMITS.listMax, Math.max(1, Math.floor(input.limit ?? INBOX_READ_LIMITS.listDefault)));
-  const offset = Math.max(0, Math.floor(input.offset ?? 0));
+  const limit = wholeNumber(input.limit, INBOX_READ_LIMITS.listDefault, 1, INBOX_READ_LIMITS.listMax);
+  const offset = wholeNumber(input.offset, 0, 0, INBOX_READ_LIMITS.offsetMax);
   const items = reader.listItems(input.bucket, limit, offset, leftOut(reader, agent));
   if (items.length === 0) return `No open items in ${input.bucket}${offset > 0 ? ` after the first ${String(offset)}` : ''}.`;
   const parts: string[] = [`Open items in ${input.bucket}, newest first (${String(offset + 1)}–${String(offset + items.length)}):`, ''];
   for (const item of items) {
-    parts.push(itemHeader(item), itemBlock(item, null), '');
+    parts.push(itemHeader(item), itemBlock(item, null, reader.sensitiveAtIngest(item)), '');
   }
   parts.push(`To read one with its thread: inbox_read action "item" with its id. ${INBOX_READ_LEGEND}`);
   return parts.join('\n');
@@ -157,13 +172,14 @@ function renderItem(reader: InboxReader, agent: IAgent, input: InboxReadInput): 
   if (id.length === 0) return 'inbox_read: "item" needs the id of an item, as a list shows it.';
   const item = reader.getItem(id);
   if (item === null || leftOut(reader, agent).has(item.accountId)) return 'inbox_read: no inbox item with this id.';
-  const parts = [itemHeader(item), itemBlock(item, reader.bodyOf(item))];
+  const atIngest = reader.sensitiveAtIngest(item);
+  const parts = [itemHeader(item), itemBlock(item, reader.bodyOf(item), atIngest)];
   const thread = reader.threadOf(item, INBOX_READ_LIMITS.threadMessages);
   // The item's own message is already shown above.
   const others = thread.filter((m) => item.messageId === undefined || m.messageId !== item.messageId);
   if (others.length > 0) {
     parts.push('', `Other stored messages of the thread, newest first (${String(others.length)}):`);
-    others.forEach((m, i) => parts.push(threadBlock(item, m, i + 1)));
+    others.forEach((m, i) => parts.push(threadBlock(item, m, i + 1, atIngest)));
   }
   parts.push('', INBOX_READ_LEGEND);
   return parts.join('\n');
@@ -171,6 +187,14 @@ function renderItem(reader: InboxReader, agent: IAgent, input: InboxReadInput): 
 
 export function createInboxReadTool(hooks?: MailHooks): ToolEntry<InboxReadInput> {
   return {
+    // A mandate's read of stored mail leaves a `read` row, as its read of the mailbox does
+    // (sec-core 2026-11-03). The target names what was read, never what came back.
+    storedMailRead: (input) => {
+      if (input.action === 'counts') return 'counts';
+      if (input.action === 'list') return input.bucket !== undefined && BUCKETS.includes(input.bucket) ? `list ${input.bucket}` : 'list';
+      if (input.action === 'item') return typeof input.id === 'string' && ITEM_ID.test(input.id.trim()) ? `item ${input.id.trim()}` : 'item';
+      return 'inbox';
+    },
     definition: {
       name: 'inbox_read',
       description:
