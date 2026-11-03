@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { chmodSync, mkdirSync, statSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, statSync, symlinkSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
-import { BackupManager, isRestorableEntryPath } from './backup.js';
+import { BackupManager, filesystemFoldsNames, isRestorableEntryPath } from './backup.js';
 import { canonicalJson, deriveBackupKey, deriveManifestKey, encryptFile, decryptFile, isEncryptedBackupFile, manifestMac } from './backup-crypto.js';
 import { computeFileChecksum, verifySqliteIntegrity } from './backup-verify.js';
 
@@ -661,19 +661,104 @@ describe('restoreBackup writes only where createBackup writes', () => {
     expect(liveTier()).toBe('balanced');
   });
 
-  it('writes no name that ends like a staging temp', async () => {
+  it('restores a file of the user that ends in .restore-staging, and writes no name shaped like its own temp', async () => {
+    const temp = 'memory/a.txt.0123456789abcdef.restore-staging';
     const { manager, backupPath } = await backupWith([
-      { path: 'memory/a.txt.restore-staging', bytes: 'planted' },
+      { path: 'memory/notiz.restore-staging', bytes: 'mine' },
+      { path: temp, bytes: 'planted' },
       { path: 'memory/b.txt', bytes: 'plain' },
     ]);
 
     const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
 
-    expect(result.success).toBe(true);
-    expect(existsSync(join(lynoxDir, 'memory', 'a.txt.restore-staging'))).toBe(false);
-    expect(result.skipped).toEqual(['memory/a.txt.restore-staging']);
+    expect(result.success, String(result.error)).toBe(true);
+    expect(readFileSync(join(lynoxDir, 'memory', 'notiz.restore-staging'), 'utf-8')).toBe('mine');
+    expect(existsSync(join(lynoxDir, temp))).toBe(false);
+    // A temp is nobody's file: it is not reported as left out either.
+    expect(result.skipped).toEqual([]);
     // Control: a plain name inside the same directory is restored.
     expect(readFileSync(join(lynoxDir, 'memory', 'b.txt'), 'utf-8')).toBe('plain');
+    expect(readdirSync(join(lynoxDir, 'memory')).filter(n => /\.[0-9a-f]{16}\.restore-staging$/.test(n))).toEqual([]);
+  });
+
+  it('restores two names that differ only in case on a filesystem that keeps them apart', async () => {
+    const { manager, backupPath } = await backupWith([
+      { path: 'memory/Note.md', bytes: 'upper' },
+      { path: 'memory/note.md', bytes: 'lower' },
+    ]);
+
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+
+    expect(result.success, String(result.error)).toBe(true);
+    expect(readFileSync(join(lynoxDir, 'memory', 'Note.md'), 'utf-8')).toBe('upper');
+    expect(readFileSync(join(lynoxDir, 'memory', 'note.md'), 'utf-8')).toBe('lower');
+  });
+
+  it('refuses two names that differ only in case or Unicode form where the filesystem folds them, before replacing anything', async () => {
+    for (const [a, b] of [['memory/Note.md', 'memory/note.md'], ['memory/caf\u00e9.md', 'memory/cafe\u0301.md']] as const) {
+      const { manager, backupPath } = await backupWith([{ path: a, bytes: 'one' }, { path: b, bytes: 'two' }]);
+      const folds = vi.spyOn(manager as unknown as { namesFold: (dir: string) => boolean }, 'namesFold').mockReturnValue(true);
+      try {
+        const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+        expect(result.success, b).toBe(false);
+        expect(result.error).toMatch(/names one file twice on this machine/);
+        expect(result.pre_restore_backup_path).toBe('');
+        expect(liveTier()).toBe('deep');
+        expect(existsSync(join(lynoxDir, a))).toBe(false);
+        expect(folds).toHaveBeenCalledWith(lynoxDir);
+      } finally {
+        folds.mockRestore();
+      }
+    }
+  });
+
+  it('asks the filesystem whether it folds names: this one does not', () => {
+    expect(filesystemFoldsNames(lynoxDir)).toBe(false);
+    // The probe leaves nothing behind.
+    expect(readdirSync(lynoxDir).filter(n => n.startsWith('.lynox-fold-probe-'))).toEqual([]);
+  });
+
+  it('refuses a file entry over a live folder before any live file is replaced', async () => {
+    const { manager, backupPath } = await backupWith([{ path: 'memory/sub', bytes: 'a file' }]);
+    mkdirSync(join(lynoxDir, 'memory', 'sub'));
+    writeFileSync(join(lynoxDir, 'memory', 'sub', 'keep.txt'), 'kept');
+
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/memory\/sub is a folder on this machine, the backup has a file there/);
+    expect(result.pre_restore_backup_path).toBe('');
+    expect(liveTier()).toBe('deep');
+    expect(readFileSync(join(lynoxDir, 'memory', 'sub', 'keep.txt'), 'utf-8')).toBe('kept');
+  });
+
+  it('never writes through a link in the live data directory', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'lynox-link-target-'));
+    try {
+      const { manager, backupPath } = await backupWith([{ path: 'memory/linked/x.md', bytes: 'planted' }]);
+      symlinkSync(outside, join(lynoxDir, 'memory', 'linked'));
+
+      const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/memory\/linked is a link on this machine/);
+      expect(readdirSync(outside)).toEqual([]);
+      expect(liveTier()).toBe('deep');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('removes a temp a crashed restore left beside a file it restores', async () => {
+    const { manager, backupPath } = await backupWith([{ path: 'memory/b.txt', bytes: 'plain' }]);
+    const stale = join(lynoxDir, 'memory', 'b.txt.fedcba9876543210.restore-staging');
+    writeFileSync(stale, 'stale');
+
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+
+    expect(result.success, String(result.error)).toBe(true);
+    expect(existsSync(stale)).toBe(false);
+    // Control: a user's own file with the plain suffix in the same folder stays.
     expect(readFileSync(join(lynoxDir, 'memory', 'a.txt'), 'utf-8')).toBe('kept');
   });
 
@@ -908,7 +993,7 @@ describe('restoreBackup asks for the proof of origin', () => {
 
   it('does not let a leftover staging temp lend its mode to the restored file', async () => {
     const created = await mgr(false).createBackup();
-    const stale = join(lynoxDir, 'config.json.restore-staging');
+    const stale = join(lynoxDir, 'config.json.0123456789abcdef.restore-staging');
     writeFileSync(stale, 'stale');
     chmodSync(stale, 0o666);
 
@@ -916,6 +1001,7 @@ describe('restoreBackup asks for the proof of origin', () => {
 
     expect(result.success, String(result.error)).toBe(true);
     expect(statSync(join(lynoxDir, 'config.json')).mode & 0o777).toBe(0o600);
+    expect(existsSync(stale)).toBe(false);
   });
 
   it('asks before it verifies the files: a backup without proof and with a missing file is a question, not a verify error', async () => {
