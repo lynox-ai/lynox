@@ -149,11 +149,15 @@ describe('the Shopify customer text', () => {
     expect(reading).not.toHaveProperty('consent');
   });
 
-  // The text says lynox asks for no write access to orders, customers or stock. Such a scope may
-  // not come into the list without a new text.
-  it('allows no write scope for orders, customers or stock', () => {
+  // The text says a bulk run changes only product texts (paragraph 2) and lynox asks for no write
+  // access to orders, customers, stock or shipping (paragraph 3). Both hold only while
+  // `write_products` is the one write scope: any other (`write_inventory`, …) fails here.
+  it('allows no write scope besides write_products while paragraphs 2 and 3 say so', () => {
     expect(shopify.consentNotice?.paragraphs.join(' ')).toContain('Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.');
-    expect(shopify.allowedScopes.filter((s) => /^write_(orders|all_orders|customers|inventory|fulfillments)/.test(s))).toEqual([]);
+    expect(
+      shopify.allowedScopes.filter((s) => s.startsWith('write_') && s !== 'write_products'),
+      'Zustimmungstext Absatz 2/3 neu fassen und neu freigeben',
+    ).toEqual([]);
   });
 
   // The text names the fields a bulk run writes with this scope: those of the engine's product
@@ -167,9 +171,11 @@ describe('the Shopify customer text', () => {
     expect(shopify.consentNotice?.paragraphs[1]).toContain(`Ein Massenlauf ändert nur Texte bestehender Produkte: ${list}.`);
   });
 
-  // The image form writes alt texts through `fileUpdate`, which Shopify grants only with
-  // `write_files` or `write_themes`. Without either scope the text may not promise alt texts.
-  it('promises no image alt texts while the preset allows no scope that writes them', () => {
+  // The engine's image form writes alt texts through `fileUpdate`, which Shopify grants only with
+  // `write_files` or `write_themes`. Without either scope a bulk run writes no alt text, so the
+  // text may not promise one. (`write_products` can change an alt text through the deprecated
+  // `productUpdateMedia`; the engine has no form for it.)
+  it('promises no image alt texts while the preset allows no scope the engine\'s image form needs', () => {
     expect(SHOPIFY_MEDIA_WRITABLE_FIELDS).toEqual(['alt']);
     expect(shopify.allowedScopes.filter((s) => s === 'write_files' || s === 'write_themes')).toEqual([]);
     // Every text the page shows: the paragraphs, the frame and the names of the scopes.
@@ -184,14 +190,14 @@ describe('the Shopify customer text', () => {
   // the reminder, as bexio's is.
   it('holds the customer text byte for byte', () => {
     expect(shopify.consentNotice?.paragraphs).toEqual([
-      'lynox kann in deinem Shopify-Store Produkte ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an Shopify schickt, und er geschieht erst nach deinem Ja.',
-      'Die eine Ausnahme ist ein Massenlauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel und SEO-Beschreibung. Anlegen, löschen oder Preise ändern kann er nicht.',
+      'lynox kann in deinem Shopify-Store Produkte ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an Shopify schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in Shopify, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er.',
+      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Zuerst schreibt lynox eine einzige Änderung, die der Inhaber bestätigen muss, bevor der Rest folgt. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel und SEO-Beschreibung. Anlegen, löschen oder Preise ändern kann er nicht.',
       'Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.',
     ]);
     expect(shopify.consentNotice?.frame).toEqual({
       title: 'Schreibrechte für Shopify bestätigen',
       scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in Shopify:',
-      scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Das Recht ist damit breiter als das, was lynox damit tut.',
+      scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
       button: 'Zustimmen und weiter zu Shopify',
       afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in Shopify.',
     });
