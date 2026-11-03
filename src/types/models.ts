@@ -1046,7 +1046,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // The `deep` tier as of 2026-05-29 (replaced the deprecated magistral-medium-2509);
   // the Mistral quality leader on Set-Bench v4. Mistral's deprecation table
   // (docs.mistral.ai/getting-started/models, read 2026-11-03) lists it deprecated on
-  // 2026-10-31 and retired on 2027-04-30, with Large 4 as the replacement; `GET /v1/models`
+  // 2026-10-31 and retired on 2027-04-30, naming Large 4 as the alternative; `GET /v1/models`
   // does not report a deprecation for it yet. Large 4 is in public preview (Mistral
   // changelog, 2026-10-06) and is not registered here.
   'mistral-large-2512': {
@@ -1163,7 +1163,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // false-NO would hard-block every image message on the BYOK-Mistral main.
   // Mistral's deprecation table (docs.mistral.ai/getting-started/models, read 2026-11-03)
   // lists it, as mistral-medium-3-5, deprecated on 2026-10-31 and retired on 2027-04-30,
-  // with Large 4 as the replacement; `GET /v1/models` does not report a deprecation yet.
+  // naming Large 4 as the alternative; `GET /v1/models` does not report a deprecation yet.
   'mistral-medium-2604': {
     id: 'mistral-medium-2604',
     provider: 'openai',
