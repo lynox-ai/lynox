@@ -130,7 +130,7 @@ async function runOnce(provider: string, make: (tools: ToolEntry[]) => Agent, i:
 }
 
 const runs = Array.from({ length: RUNS }, (_, i) => ({ i, label: `image refusal #${String(i)}` }));
-const base = { maxIterations: 8, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' as const }) };
+const base = { maxIterations: 8, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const };
 
 let anthropicKey: string | undefined;
 try { anthropicKey = getApiKey(); } catch { anthropicKey = undefined; }
