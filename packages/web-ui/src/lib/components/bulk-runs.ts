@@ -194,11 +194,11 @@ export function bulkResumeKind(
 ): BulkResumeKind | null {
 	if ((run.phase !== 'approved' && run.phase !== 'writing') || run.haltKey === null || bulkAtProbe(run)) return null;
 	if (BULK_RESUME_NONE.has(run.haltKey)) return 'none';
-	// Targets left, every one within the maximum (`resumeOpen === resumeTries`: none held back by
-	// it, which writing on under a higher maximum would send), none of them sent to again, none
-	// still unclear, and some in conflict: each one left was sent to without a clear answer and
-	// has a third value at the provider now.
-	if (BULK_RESUME_WRITE.has(run.haltKey) && run.resumeTries > 0 && run.resumeOpen === run.resumeTries && run.resumeSends === 0
+	// Every target left within the maximum (`resumeOpen === resumeTries`: none held back by it,
+	// which writing on under a higher maximum would send), none of them sent to again, none still
+	// unclear, and some in conflict, so some are left: each one left was sent to without a clear
+	// answer and has a third value at the provider now.
+	if (BULK_RESUME_WRITE.has(run.haltKey) && run.resumeOpen === run.resumeTries && run.resumeSends === 0
 		&& run.sentUnknown === 0 && run.conflicts > 0) return 'nothing';
 	const narrow = (run.maxTargets ?? bulkWriting(run)) <= 1;
 	if (run.sentUnknown > 0 && run.resumeSends === 0 && (run.haltKey === 'maxTargets' || BULK_RESUME_WRITE.has(run.haltKey))
