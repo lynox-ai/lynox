@@ -300,7 +300,7 @@ describe('VoiceSettings', () => {
 	// sent; a locked side without a provider has nothing to name.
 	it('keeps an environment pin as sent and a locked side without a provider as not set', async () => {
 		const r = routes('mandate');
-		r['/voice/info'].stt = { ...r['/voice/info'].stt, locked: true, env_override: 'mistral-voxtral', provider: 'mistral-voxtral' } as typeof r['/voice/info']['stt'];
+		r['/voice/info'].stt = { ...r['/voice/info'].stt, locked: true, env_override: 'mistral-voxtral', provider: 'mistral-voxtral' } as unknown as typeof r['/voice/info']['stt'];
 		r['/voice/info'].tts = { ...r['/voice/info'].tts, locked: true, provider: null } as unknown as typeof r['/voice/info']['tts'];
 		await render(load, r);
 		expect(rows().slice(0, 2)).toEqual([
