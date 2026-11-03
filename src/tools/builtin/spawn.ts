@@ -1693,7 +1693,8 @@ async function executeThinker(
     }
   }
 
-  const agentConfig: AgentConfig = {
+  // `principal` required here (1173): the census reads by type whom this agent runs for.
+  const agentConfig: AgentConfig & { principal: import('../../core/request-principal.js').RequestPrincipal } = {
     name: spec.name,
     model,
     // A profile pins endpoint and model as one pair (`AgentConfig.modelPinnedByProfile`),
