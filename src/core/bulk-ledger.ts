@@ -1723,7 +1723,7 @@ export class BulkLedger {
     if (form !== null) {
       if (run.kind === 'undo') return { holds: true, missing: [] };
       if (this.unmeasuredProbeOf(host, SHOPIFY_PROBE_METHOD, form, run.id, 'own')) return { holds: true, missing: [] };
-      const other = this.unmeasuredProbeOf(host, SHOPIFY_PROBE_METHOD, form, run.id, 'other');
+      const other = this.unmeasuredProbeOf(host, SHOPIFY_PROBE_METHOD, form, run.id, 'any');
       return { holds: false, missing: [{ kind: form, cause: other ? 'other_run' : 'own_missing' }] };
     }
     const method = parseContractMethods(run.contract_json);
@@ -1748,7 +1748,7 @@ export class BulkLedger {
         // not count here, or this run's own was filed under the plain kind because its target was a
         // measured write. A confirmation filed plain before the write forms were told apart, on an
         // unmeasured target, is not that: the run has no probe of its own under today's rule.
-        const cause: BulkProbeCause = this.unmeasuredProbeOf(host, method, kind, run.id, 'other') ? 'other_run'
+        const cause: BulkProbeCause = this.unmeasuredProbeOf(host, method, kind, run.id, 'any') ? 'other_run'
           : own.get(host, method, kind, run.id) !== undefined && this.probeWroteMeasuredForm(run.id, host, method, kind) ? 'filed_measured'
           : 'own_missing';
         missing.push({ kind, cause });
@@ -1763,11 +1763,11 @@ export class BulkLedger {
 
   /**
    * Whether an unmeasured probe of `kind` (a resource path, or a Shopify write form) is confirmed
-   * on this host and verb: `own`, by run `runId`; `other`, by any other run. A row is the run's
-   * own under {@link unmeasuredProbeKind}, or under the kind without a run that rows filed before
-   * carry, read with their `run_id`.
+   * on this host and verb: `own`, by run `runId`; `any`, by any run. A row belongs to its run under
+   * {@link unmeasuredProbeKind}, or under the kind without a run that rows filed before carry, read
+   * with their `run_id`. Callers ask `any` only after `own` found none, so it finds another run's.
    */
-  private unmeasuredProbeOf(host: string, method: string, kind: string, runId: string, whose: 'own' | 'other'): boolean {
+  private unmeasuredProbeOf(host: string, method: string, kind: string, runId: string, whose: 'own' | 'any'): boolean {
     const legacy = `${UNMEASURED_PROBE}${kind}`;
     const db = this.engineDb.getDb();
     if (whose === 'own') {
@@ -1775,9 +1775,8 @@ export class BulkLedger {
         .get(host, method, unmeasuredProbeKind(runId, kind), legacy, runId) !== undefined;
     }
     return db.prepare(
-      `SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND run_id <> ?
-         AND (kind = ? OR kind = ? || run_id || ':' || ?)`,
-    ).get(host, method, runId, legacy, UNMEASURED_PROBE, kind) !== undefined;
+      `SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND (kind = ? OR kind = ? || run_id || ':' || ?)`,
+    ).get(host, method, legacy, UNMEASURED_PROBE, kind) !== undefined;
   }
 
   /**
