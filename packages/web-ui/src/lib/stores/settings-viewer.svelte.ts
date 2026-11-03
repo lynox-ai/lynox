@@ -51,6 +51,11 @@ export function isOwnerSession(): boolean {
 	return viewer === 'owner';
 }
 
+/** True once the server named whose session this is, whoever it named. */
+export function isViewerKnown(): boolean {
+	return viewer !== null;
+}
+
 /** True only after the first request and every retry got no answer (ux U-117). */
 export function isViewerUnavailable(): boolean {
 	return unavailable;
