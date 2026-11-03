@@ -206,10 +206,11 @@ describe('LLM_CATALOG', () => {
     expect(byId['ministral-14b-2512']?.tier).toBe('balanced');
     // Deep default is now Medium 3.5 (Large 3 kept as legacy option, still deep-tier).
     expect(byId['mistral-medium-2604']?.tier).toBe('deep');
-    expect(byId['mistral-medium-2604']?.pricing).toEqual({ input: 1.50, output: 7.50 });
+    // Headline prices are the EU endpoint's: list × 1.1.
+    expect(byId['mistral-medium-2604']?.pricing).toEqual({ input: 1.65, output: 8.25 });
     expect(byId['mistral-large-2512']?.tier).toBe('deep');
-    // Mistral Large 3 pricing — 75% cut vs Large 2
-    expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.50, output: 1.50 });
+    // Mistral Large 3 pricing — 75% cut vs Large 2 ($0.50/$1.50 list)
+    expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.55, output: 1.65 });
   });
 
   it('generic OpenAI-compatible preset accepts free-text model + base URL', () => {

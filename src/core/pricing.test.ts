@@ -433,31 +433,31 @@ describe('Pricing', () => {
     // silently misleads operators inspecting the run-history for an EU-
     // sovereign tenant — observed live on staging mistral-demo 2026-05-16
     // (12 870/17 tokens billed at $0.039 instead of the correct ~$0.026).
-    it('returns pinned Mistral pricing', () => {
-      // Small 4 model card, raw 2026-10-13: $0.15 / $0.6 (the old 0.20 was a retired Small's).
-      expect(getPricing('mistral-small-2603').input).toBe(0.15);
-      expect(getPricing('mistral-small-2603').output).toBe(0.60);
-      // Mistral Large 3 (Dec 2025): 75% price cut vs Large 2.
-      expect(getPricing('mistral-large-2512').input).toBe(0.50);
-      expect(getPricing('mistral-large-2512').output).toBe(1.50);
+    it('returns pinned Mistral pricing (list price × 1.1, the EU endpoint)', () => {
+      // Small 4 model card, raw 2026-10-13: $0.15 / $0.6 list (the old 0.20 was a retired Small's).
+      expect(getPricing('mistral-small-2603').input).toBe(0.165);
+      expect(getPricing('mistral-small-2603').output).toBe(0.66);
+      // Mistral Large 3 (Dec 2025): 75% price cut vs Large 2; $0.50/$1.50 list.
+      expect(getPricing('mistral-large-2512').input).toBe(0.55);
+      expect(getPricing('mistral-large-2512').output).toBe(1.65);
       // magistral-medium-2509 is gone from the registry: Mistral answers it 400.
       expect(hasKnownPricing('magistral-medium-2509')).toBe(false);
       // A remapped legacy id bills at the model that answers it (MISTRAL_SERVED_AS).
-      expect(getPricing('mistral-medium-2508').output).toBe(7.50);
+      expect(getPricing('mistral-medium-2508').output).toBe(8.25);
       // Gen-3 ministrals (2026-05-24): replaced retired -2410 in tier-map.
-      expect(getPricing('ministral-3b-2512').input).toBe(0.10);
-      expect(getPricing('ministral-8b-2512').input).toBe(0.15);
+      expect(getPricing('ministral-3b-2512').input).toBe(0.11);
+      expect(getPricing('ministral-8b-2512').input).toBe(0.165);
     });
 
     it('calculates mistral-large cost without overcharging', () => {
       // Regression guard: same shape as the staging mistral-demo run that
-      // exposed the missing entry. Mistral Large 3 rates ($0.50/$1.50) →
-      // 12,870 × $0.50/M + 17 × $1.50/M = $0.0064605.
+      // exposed the missing entry. Mistral Large 3 EU rates ($0.55/$1.65) →
+      // 12,870 × $0.55/M + 17 × $1.65/M = $0.00710655.
       const cost = calculateCost('mistral-large-2512', {
         input_tokens: 12_870,
         output_tokens: 17,
       });
-      expect(cost).toBeCloseTo(0.0064605, 7);
+      expect(cost).toBeCloseTo(0.00710655, 7);
     });
 
     it('charges cache reads at 10% of input rate (Mistral native prompt-cache)', () => {
