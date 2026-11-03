@@ -8,7 +8,7 @@
  * does not compile until it decides.
  */
 import type { MandateEnds } from '../core/mandate-ends.js';
-import { OWNER_PRINCIPAL, planAuthorshipOfWorkflow, planMandate, mandateIdOf, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, planAuthorshipOfWorkflow, planMandate, mandateIdOf, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
 import type { WorkflowAuthorship } from '../core/workflow-store.js';
 
 export type RunSource =
@@ -30,6 +30,7 @@ export type RunSource =
   | { readonly kind: 'nested' };
 
 export const WORKFLOW_ENDED_REFUSAL = 'This workflow was set up or changed by someone whose access has ended, so it does not run.';
+export const WORKFLOW_ENDED_MID_RUN = 'The access of someone who set up or changed this workflow ended while it ran, so it stopped before its next step.';
 export const WORKFLOW_UNREADABLE_REFUSAL = 'Could not read who set up this workflow, so it did not run.';
 export const NESTED_AT_TOP_REFUSAL = 'A nested run was started on its own, outside the run it belongs to, so it did not run.';
 
@@ -69,7 +70,44 @@ export function workflowRunsAs(a: WorkflowAuthorship | undefined): RequestPrinci
   return planMembers(undefined, planMandate(planAuthorshipOfWorkflow(a))).of ?? OWNER_PRINCIPAL;
 }
 
-export const LIBRARY_RUN_UNCONFIRMED = 'This workflow was changed after Run was pressed and waits for its steps to be reviewed again, so it did not run.';
+export const WORKFLOW_OF_ANOTHER_REFUSAL = 'This workflow was set up or last changed by another person with delegated access, so only the owner may run it.';
+
+/** Whom a run of a saved workflow started from a conversation is for: see {@link callerWorkflowRunAs}. */
+export type CallerWorkflowRun =
+  /** Runs as `principal`. `asPlan`: as a plan's run of that mandate with no stamp (`runAsPlanOf`). */
+  | { readonly kind: 'run'; readonly principal: RequestPrincipal; readonly asPlan: boolean }
+  | { readonly kind: 'refused'; readonly error: string };
+
+/**
+ * Whom a run of a saved workflow started from a conversation (a chat's or a worker session's
+ * `run_workflow`) is for (1100). The workflow decides, as the library's Run does
+ * (`workflowRunsAs`), and the caller only where it is narrower:
+ * - the owner runs a mandate's workflow as that mandate, as a plan's run with no stamp, so the
+ *   mandate's lock holds and its own connections stay out, and the owner's own as the owner;
+ * - a mandate runs its own workflow and the owner's as itself, in its own session's lock;
+ * - a mandate is refused another mandate's workflow, as a hand start of another mandate's plan is
+ *   (`PLAN_OF_ANOTHER_RESULT`), and one whose authorship cannot be read.
+ * For the owner an unreadable workflow gives the owner here; the runner refuses it
+ * (`sourceRefusal`) before any step.
+ */
+export function callerWorkflowRunAs(caller: RequestPrincipal, read: () => WorkflowAuthorship | undefined): CallerWorkflowRun {
+  let a: WorkflowAuthorship | undefined;
+  try {
+    a = read();
+  } catch {
+    a = undefined;
+  }
+  if (isOwnerPrincipal(caller)) {
+    const runAs = workflowRunsAs(a);
+    return { kind: 'run', principal: runAs, asPlan: !isOwnerPrincipal(runAs) };
+  }
+  if (a === undefined) return { kind: 'refused', error: WORKFLOW_UNREADABLE_REFUSAL };
+  const mark = planMandate(planAuthorshipOfWorkflow(a));
+  if (mark === undefined || principalTag(mark.principal) === principalTag(caller)) return { kind: 'run', principal: caller, asPlan: false };
+  return { kind: 'refused', error: WORKFLOW_OF_ANOTHER_REFUSAL };
+}
+
+export const LIBRARY_RUN_UNCONFIRMED ='This workflow was changed after Run was pressed and waits for its steps to be reviewed again, so it did not run.';
 export const LIBRARY_RUN_AUTHOR_CHANGED = 'Whom this workflow runs for changed after Run was pressed, or could not be read again, so it did not run. Press Run again.';
 
 /**

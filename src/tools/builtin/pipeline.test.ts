@@ -69,6 +69,14 @@ import type { RunHistory } from '../../core/run-history.js';
 // importActual) so the contract test exercises the actual option-shaping.
 import { buildRunCtx } from '../../orchestrator/runner.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import type { WorkflowAuthorship } from '../../core/workflow-store.js';
+import { WORKFLOW_OF_ANOTHER_REFUSAL, WORKFLOW_UNREADABLE_REFUSAL } from '../../orchestrator/run-source.js';
+
+/** The authorship row of a workflow the owner made (no mandate mark). */
+const OWNER_AUTHORSHIP: WorkflowAuthorship = {
+  createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-11-01T00:00:00.000Z',
+  coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null, coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
+};
 
 const mockConfig: LynoxUserConfig = {
   api_key: 'test-key',
@@ -2490,6 +2498,8 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
       (agent as unknown as { principal: unknown }).principal = MANDATE;
       // A stored workflow a mandate runs writes its run row first (660b): without a log it would not run.
       (agent.toolContext as Record<string, unknown>)['auditLog'] = { record: vi.fn() };
+      // The owner's workflow, which a mandate runs as itself (1100): one whose authorship cannot be read it may not run.
+      (agent.toolContext as Record<string, unknown>)['runHistory'] = { getPlannedPipeline: () => undefined, insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(), markPipelineExecuted: vi.fn(), getAvgStepCostByModelTier: () => undefined, getWorkflowAuthorship: () => OWNER_AUTHORSHIP };
       return agent;
     }
 
@@ -2736,7 +2746,8 @@ describe('the run row of a stored workflow run from a chat', () => {
     const recs: Rec[] = [];
     const marked = vi.fn(() => opts.removed !== false);
     const ctx = agent.toolContext as Record<string, unknown>;
-    ctx['runHistory'] = { getPlannedPipeline: () => undefined, insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(), markPipelineExecuted: marked };
+    // The owner's workflow, which the helper runs as itself (1100).
+    ctx['runHistory'] = { getPlannedPipeline: () => undefined, insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(), markPipelineExecuted: marked, getWorkflowAuthorship: () => OWNER_AUTHORSHIP };
     ctx['auditLog'] = opts.log === 'none' ? null : { record: (e: Rec) => { if (opts.log === 'throws') throw new Error('disk full'); recs.push(e); } };
     (agent as unknown as Record<string, unknown>)['principal'] = principal;
     return { agent, recs, marked };
@@ -2930,5 +2941,97 @@ describe('the run row of a stored workflow run from a chat', () => {
     mockRetryManifest.mockResolvedValueOnce({ ...makeRunState(), outputs });
     expect(await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent)).toMatch(/^Error: Workflow retry failed: outputs gone/);
     expect(recs.slice(2).map((r) => [r.phase, targetPairs(r.target).get('outcome') ?? null])).toEqual([['attempt', null], ['failed', 'failed']]);
+  });
+});
+
+// 1100: a saved workflow run from a conversation runs as whoever made or last changed it, as the
+// library's Run does, and the caller counts only where it is narrower.
+describe('a stored workflow run from a chat follows its author (1100)', () => {
+  const A = { kind: 'mandate' as const, email: 'a@example.invalid', mandateId: 'grant-a' };
+  const B = { kind: 'mandate' as const, email: 'b@example.invalid', mandateId: 'grant-b' };
+  const WF = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
+  const madeBy = (m: typeof A): WorkflowAuthorship => ({ ...OWNER_AUTHORSHIP, createdBy: `mandate:${m.email}`, createdMandateId: m.mandateId });
+
+  function seed(): string {
+    storePipeline(WF, {
+      id: WF, name: 'wf', goal: 'g', steps: [{ id: 'one', task: 'do one thing' }], reasoning: 'r', estimatedCost: 0.01,
+      createdAt: new Date().toISOString(), executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+    });
+    return WF;
+  }
+  function agentAs(principal: unknown, authorship: () => WorkflowAuthorship | undefined): IAgent {
+    const agent = makePipelineAgent();
+    const ctx = agent.toolContext as Record<string, unknown>;
+    ctx['runHistory'] = { getPlannedPipeline: () => undefined, insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(), markPipelineExecuted: vi.fn(), getWorkflowAuthorship: authorship };
+    ctx['auditLog'] = { record: vi.fn() };
+    (agent as unknown as Record<string, unknown>)['principal'] = principal;
+    return agent;
+  }
+  /** What the run saw: the principal it was handed and the plan it ran in. */
+  async function seenBy(): Promise<{ principal: unknown; planOf: unknown; stamp: unknown }> {
+    const { currentPlanOf, currentPlanStamp } = await import('../../core/plan-run-context.js');
+    return { principal: undefined, planOf: currentPlanOf(), stamp: currentPlanStamp() };
+  }
+  function captureRun(target: 'run' | 'retry'): { seen: Array<{ principal: unknown; planOf: unknown; stamp: unknown }> } {
+    const seen: Array<{ principal: unknown; planOf: unknown; stamp: unknown }> = [];
+    const impl = async (...args: unknown[]): Promise<RunState> => {
+      const ctx = args[target === 'run' ? 2 : 3] as Record<string, unknown>;
+      seen.push({ ...(await seenBy()), principal: ctx['principal'] });
+      return makeRunState();
+    };
+    (target === 'run' ? mockRunManifest : mockRetryManifest).mockImplementationOnce(impl);
+    return { seen };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRunManifest.mockReset();
+    mockRetryManifest.mockReset();
+    _resetPipelineStore();
+    mockValidateManifest.mockImplementation((m: unknown) => m);
+  });
+
+  it('the owner\'s chat runs a mandate\'s workflow as that mandate, as a plan\'s run with no stamp', async () => {
+    const { seen } = captureRun('run');
+    expect(await runWorkflowTool.handler({ workflow_id: seed() }, agentAs(OWNER_PRINCIPAL, () => madeBy(A)))).not.toMatch(/^Error/);
+    expect(seen).toEqual([{ principal: A, planOf: A, stamp: null }]);
+  });
+
+  it('control: the owner\'s chat runs the owner\'s workflow as the owner, in no plan', async () => {
+    const { seen } = captureRun('run');
+    expect(await runWorkflowTool.handler({ workflow_id: seed() }, agentAs(OWNER_PRINCIPAL, () => OWNER_AUTHORSHIP))).not.toMatch(/^Error/);
+    expect(seen).toEqual([{ principal: OWNER_PRINCIPAL, planOf: undefined, stamp: null }]);
+  });
+
+  it('a retry from the owner\'s chat runs as the mandate too', async () => {
+    const agent = agentAs(OWNER_PRINCIPAL, () => madeBy(A));
+    const id = seed();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    const { seen } = captureRun('retry');
+    expect(await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent)).not.toMatch(/^Error/);
+    expect(seen).toEqual([{ principal: A, planOf: A, stamp: null }]);
+  });
+
+  it('a mandate runs its own workflow and the owner\'s as itself, in its own session\'s lock', async () => {
+    for (const authorship of [madeBy(A), OWNER_AUTHORSHIP]) {
+      const { seen } = captureRun('run');
+      expect(await runWorkflowTool.handler({ workflow_id: seed() }, agentAs(A, () => authorship))).not.toMatch(/^Error/);
+      expect(seen).toEqual([{ principal: A, planOf: undefined, stamp: null }]);
+    }
+  });
+
+  it('a mandate is refused another mandate\'s workflow, and one whose authorship cannot be read, before any step', async () => {
+    expect(await runWorkflowTool.handler({ workflow_id: seed() }, agentAs(A, () => madeBy(B)))).toBe(`Error: ${WORKFLOW_OF_ANOTHER_REFUSAL}`);
+    expect(await runWorkflowTool.handler({ workflow_id: seed() }, agentAs(A, () => undefined))).toBe(`Error: ${WORKFLOW_UNREADABLE_REFUSAL}`);
+    expect(await runWorkflowTool.handler({ workflow_id: seed() }, agentAs(A, () => { throw new Error('db gone'); }))).toBe(`Error: ${WORKFLOW_UNREADABLE_REFUSAL}`);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('the same person under a later grant runs their workflow as themselves', async () => {
+    const { seen } = captureRun('run');
+    const later = { ...A, mandateId: 'grant-a2' };
+    expect(await runWorkflowTool.handler({ workflow_id: seed() }, agentAs(later, () => madeBy(A)))).not.toMatch(/^Error/);
+    expect(seen).toEqual([{ principal: later, planOf: undefined, stamp: null }]);
   });
 });

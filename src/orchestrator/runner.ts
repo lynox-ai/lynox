@@ -24,7 +24,7 @@ import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
-import { sourceRefusal, type RunSource } from './run-source.js';
+import { WORKFLOW_ENDED_MID_RUN, sourceRefusal, type RunSource } from './run-source.js';
 import { childFilingContext } from '../core/approval-filing.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
@@ -827,6 +827,30 @@ export async function retryManifest(
   });
 }
 
+/**
+ * Before each step (1100), read where the owner's stop is: a saved workflow whose maker's access
+ * has ended since the run started ends here, before its next step, as `sourceRefusal` refuses it
+ * at the start. A worker's plan run is also stopped by its sweep (`stopEndedStarters`); this is the
+ * same end for a run nothing else watches — the library's Run, a chat's `run_workflow` — and the
+ * worker records it as that sweep's stop. A check that throws ends the run too. A run that already
+ * ended on a cause of its own keeps it, as with the stop. True when the run must halt.
+ */
+function stopForEndedAuthor(options: RunManifestOptions, state: RunState): boolean {
+  if (options.source.kind !== 'saved') return false;
+  let ended: boolean;
+  try {
+    ended = sourceRefusal(options.source, options.depth ?? 0) !== undefined;
+  } catch {
+    ended = true;
+  }
+  if (!ended) return false;
+  if (state.status !== 'running') return true;
+  state.status = 'failed';
+  state.error = WORKFLOW_ENDED_MID_RUN;
+  state.completedAt = new Date().toISOString();
+  return true;
+}
+
 // --- Sequential execution (v1.0 behavior, zero behavior change) ---
 
 async function runSequential(
@@ -1064,6 +1088,7 @@ async function executeStep(
   // pool hands out after the stop (the scope can only abort agents that already exist).
   if (stoppedByOwner(options, state)) return 'halt';
   if (questionUnanswered(options, state)) return 'halt';
+  if (stopForEndedAuthor(options, state)) return 'halt';
 
   const stepStart = new Date().toISOString();
   // A2: the step's `pipeline_step` run id (declared before the try so the catch

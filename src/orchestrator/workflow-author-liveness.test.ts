@@ -43,7 +43,7 @@ vi.mock('../core/stream.js', () => ({
 import { runWorkflowTool, runSavedWorkflow, _resetPipelineStore, storePipeline } from '../tools/builtin/pipeline.js';
 import { runManifest, retryManifest } from './runner.js';
 import {
-  savedWorkflowSource, sourceRefusal, WORKFLOW_ENDED_REFUSAL, WORKFLOW_UNREADABLE_REFUSAL, NESTED_AT_TOP_REFUSAL,
+  savedWorkflowSource, sourceRefusal, WORKFLOW_ENDED_REFUSAL, WORKFLOW_ENDED_MID_RUN, WORKFLOW_OF_ANOTHER_REFUSAL, WORKFLOW_UNREADABLE_REFUSAL, NESTED_AT_TOP_REFUSAL,
   type RunSource,
 } from './run-source.js';
 import { createToolContext } from '../core/tool-context.js';
@@ -93,8 +93,9 @@ function engineContext(): ReturnType<typeof createToolContext> {
 
 function chat(principal?: IAgent['principal']): IAgent {
   const ctx = engineContext();
-  // A stored workflow a mandate runs writes its run row first (660b): without a log it would not run.
-  if (principal !== undefined) (ctx as unknown as Record<string, unknown>)['auditLog'] = { record: vi.fn() };
+  // A stored workflow run as a mandate writes its run row first (660b): without a log it would not
+  // run. Since 1100 that is the owner's chat too, on a mandate's workflow.
+  (ctx as unknown as Record<string, unknown>)['auditLog'] = { record: vi.fn() };
   return {
     toolContext: ctx,
     getAvailableTools: () => ctx.tools,
@@ -140,7 +141,8 @@ describe("a saved workflow a mandate shaped runs only while that mandate's grant
     authorship = BEAS;
     live = new Set(['grant-a']);
     const out = await runWorkflowTool.handler({ workflow_id: WF }, chat({ kind: 'mandate', email: 'ada@example.test', mandateId: 'grant-a' }));
-    expect(out).toBe(`Error: Workflow execution failed: ${WORKFLOW_ENDED_REFUSAL}`);
+    // Since 1100 refused before the runner: another mandate's workflow is not this mandate's to run.
+    expect(out).toBe(`Error: ${WORKFLOW_OF_ANOTHER_REFUSAL}`);
     expect(mockProcess).not.toHaveBeenCalled();
   });
 
@@ -318,5 +320,61 @@ describe('savedWorkflowSource — whom a saved workflow depends on', () => {
   it('a mandate without a grant id counts as ended, even with every grant live', () => {
     const src = savedWorkflowSource(WF, () => ({ ...BEAS, createdMandateId: null }), { isLive: () => true });
     expect(sourceRefusal(src, 0)).toBe(WORKFLOW_ENDED_REFUSAL);
+  });
+});
+
+// 1100: the check at the start is not the only one. A mandate whose access ends while the run is
+// under way ends the run before its next step, whoever started it.
+describe('an access that ends mid-run ends the run before its next step (1100)', () => {
+  function twoSteps(): void {
+    storePipeline(WF, { ...planned(), steps: [{ id: 'write', task: 'Write the report.' }, { id: 'send', task: 'Send the report.', input_from: ['write'] }] });
+  }
+  /** Step one's turn; `end` ends B's grant while it runs. */
+  function scriptFirst(end: boolean): void {
+    mockProcess.mockImplementationOnce(() => {
+      if (end) live!.delete('grant-b');
+      return Promise.resolve(endTurnResponse('Report written.'));
+    });
+  }
+
+  it("the owner's chat: B's grant ends during step one, step two never reaches the provider", async () => {
+    authorship = BEAS;
+    twoSteps();
+    scriptFirst(true);
+    scriptStep();
+    const out = await runWorkflowTool.handler({ workflow_id: WF }, chat());
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(out).toContain(WORKFLOW_ENDED_MID_RUN);
+  });
+
+  it('control: the grant stays live, both steps run', async () => {
+    authorship = BEAS;
+    twoSteps();
+    scriptFirst(false);
+    scriptStep();
+    const out = await runWorkflowTool.handler({ workflow_id: WF }, chat());
+    expect(mockProcess).toHaveBeenCalledTimes(2);
+    expect(out).not.toContain(WORKFLOW_ENDED_MID_RUN);
+  });
+
+  it("the library's run (runSavedWorkflow): the same end", async () => {
+    authorship = EDITED_BY_BEA;
+    twoSteps();
+    scriptFirst(true);
+    scriptStep();
+    const ctx = engineContext();
+    // As the library's Run hands it: the mandate the workflow runs as (1055).
+    const result = await runSavedWorkflow(WF, ctx.runHistory, config, undefined, { tools: ctx.tools, toolContext: ctx, principal: { kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' } });
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN });
+  });
+
+  it("control: the owner's own workflow does not depend on B and runs both steps when B's grant ends", async () => {
+    authorship = OWNERS;
+    twoSteps();
+    scriptFirst(true);
+    scriptStep();
+    await runWorkflowTool.handler({ workflow_id: WF }, chat());
+    expect(mockProcess).toHaveBeenCalledTimes(2);
   });
 });

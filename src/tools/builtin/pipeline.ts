@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { isFilingResult } from '../../core/approval-filing.js';
-import { savedWorkflowSource } from '../../orchestrator/run-source.js';
+import { WORKFLOW_ENDED_MID_RUN, callerWorkflowRunAs, savedWorkflowSource } from '../../orchestrator/run-source.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
@@ -30,7 +30,7 @@ import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core
 import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes } from '../../core/member-connection-notes.js';
 import { namedTarget, newCorrelationId, type AuditLog, type AuditPhase } from '../../core/audit-log.js';
 import { isOwnerPrincipal, type RequestPrincipal } from '../../core/request-principal.js';
-import { currentPlanRun, runAsWorkflowRun } from '../../core/plan-run-context.js';
+import { currentPlanRun, runAsPlanOf, runAsWorkflowRun } from '../../core/plan-run-context.js';
 import { isEngineRowId } from '../../core/instance-trail.js';
 
 const MAX_PLANS = 10;
@@ -347,6 +347,9 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
     steps,
     totalDurationMs: totalDuration,
     totalCostUsd: totalCost,
+    // A fixed sentence, never stored text: the model is told why the run stopped, so it does not
+    // retry it or report a step's failure (1100).
+    ...(state.error === WORKFLOW_ENDED_MID_RUN ? { endedBecause: WORKFLOW_ENDED_MID_RUN } : {}),
   };
 
   // The name and the step ids are stored text, saved perhaps before the save refused characters
@@ -1058,6 +1061,16 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return `Error: Workflow "${input.workflow_id}" not found.`;
   }
 
+  // Whom the run is for (1100): the workflow decides, as the library's Run does, and the caller
+  // only where it is narrower (`callerWorkflowRunAs`). The owner's chat or worker session running a
+  // mandate's workflow runs its steps under that mandate's lock, as a plan's run with no stamp, so
+  // the mandate's own connections stay out; before this they ran as the owner, with no lock.
+  const runFor = callerWorkflowRunAs(deps.parentAgent.principal, () => deps.runHistory?.getWorkflowAuthorship(planned.id));
+  if (runFor.kind === 'refused') return `Error: ${runFor.error}`;
+  const runAs = runFor.principal;
+  const asPlanOfAuthor = <T>(trail: WorkflowRunTrail | null, fn: () => T): T =>
+    runFor.asPlan ? runAsPlanOf(runAs, () => underWorkflowRun(trail, runAs, fn), null, trail?.key) : underWorkflowRun(trail, runAs, fn);
+
   // Interactive pipelines need a live prompt-capable session. Refuse with a
   // clear error rather than running steps that will throw "ask_user is not
   // set" deep in the run.
@@ -1131,7 +1144,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }
     }
 
-    const retryTrail = workflowRunTrail(deps.parentAgent.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true });
+    const retryTrail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true });
     if (retryTrail !== null) {
       try { retryTrail.begin(); } catch { return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }
@@ -1172,13 +1185,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       const prevGrants = prev.runTaint?.grants;
       if (prevGrants !== undefined) for (const id of prevGrants.members()) retryGrants?.add(id);
       else retryGrants?.add(UNKNOWN_GRANT);
-      const state = await underWorkflowRun(retryTrail, deps.parentAgent.principal, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
+      const state = await asPlanOfAuthor(retryTrail, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
         source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
         autonomy: deps.autonomy,
         parentTools: deps.tools,
         parentToolContext: deps.toolContext,
-        // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-        principal: deps.parentAgent.principal,
+        // Whom the run is for (1100, `runAs` above): its steps run under that lock (PRD D1, §3.13 E5).
+        principal: runAs,
         parentActiveScopes: deps.parentAgent?.activeScopes,
         // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
         // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -1284,7 +1297,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     validateManifest(manifest);
     // Before the run is marked run, with no await since the executed-guard above: a one-shot whose
     // start cannot be recorded stays unrun, and a second call cannot slip in between (660b).
-    trail = workflowRunTrail(deps.parentAgent.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false });
+    trail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false });
     if (trail !== null) {
       try { trail.begin(); } catch { trail = null; return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }
@@ -1298,13 +1311,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const runTaint = newRunTaint(deps.parentAgent);
-    const state = await underWorkflowRun(trail, deps.parentAgent.principal, () => runManifest(manifest, deps.config, buildRunCtx({
+    const state = await asPlanOfAuthor(trail, () => runManifest(manifest, deps.config, buildRunCtx({
       source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
       autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
-      // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-      principal: deps.parentAgent.principal,
+      // Whom the run is for (1100, `runAs` above): its steps run under that lock (PRD D1, §3.13 E5).
+      principal: runAs,
       parentActiveScopes: deps.parentAgent?.activeScopes,
       // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
       // abort is dead code for workflows: registration is conditional on a scope, and nothing
