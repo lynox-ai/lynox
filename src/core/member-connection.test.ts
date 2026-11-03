@@ -213,7 +213,7 @@ describe('a member\'s connection inside a plan\'s run', () => {
       // Spelled out, ux U-122: the ways on are the model's to name.
       expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}. This run of a workflow setup@example.org set up or changed was not started by a schedule of setup@example.org's, so it does not use connections setup@example.org made with their own login. `
         + 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. '
-        + 'Say so in your reply and name the ways on: setup@example.org can schedule this workflow, and once the owner confirms that plan with this connection listed, its scheduled runs use it; '
+        + 'Say so in your reply and name the ways on: setup@example.org can schedule this workflow, but its scheduled runs use this connection only after the owner confirms that plan with this connection listed; '
         + 'or the owner connects api.crm.example with their own login and asks lynox in a chat to do this step with that connection. Do not ask for permission to try again.');
     }, null, undefined, true);
   });

@@ -78,8 +78,9 @@ export const WORKFLOW_OF_ANOTHER_REFUSAL = 'Another person with delegated access
   + 'Do not copy this one, because a copy stays theirs, and do not change it, because changing it takes it over and stops them from running it. '
   + 'Otherwise ask the owner to run this one.';
 /** For a mandate only: the owner is refused the same workflow by the runner (`sourceRefusal`), so the way on is a new workflow. */
-export const WORKFLOW_UNREADABLE_FOR_MANDATE_REFUSAL = 'lynox could not read who set up this workflow, so it did not run. '
-  + 'Describe in chat what it should do and ask lynox to write a new workflow for it; a newly written workflow is yours.';
+export const WORKFLOW_UNREADABLE_FOR_MANDATE_REFUSAL = 'lynox could not read the record of who set up or last changed this workflow, so it did not run. '
+  + 'Nothing else about this workflow is known to be wrong, so do not name a cause such as its setup, its connections or a login. '
+  + 'To get the task done, offer to write a new workflow from what the user describes; a newly written workflow is theirs. Do not write or run one before the user agrees.';
 
 /** Whom a run of a saved workflow started from a conversation is for: see {@link callerWorkflowRunAs}. */
 export type CallerWorkflowRun =
