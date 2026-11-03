@@ -196,10 +196,11 @@ export function bulkResumeKind(
 	if (BULK_RESUME_NONE.has(run.haltKey)) return 'none';
 	// Every target left within the maximum (`resumeOpen === resumeTries`: none held back by it,
 	// which writing on under a higher maximum would send), none of them sent to again, none still
-	// unclear, and some in conflict, so some are left: each one left was sent to without a clear
-	// answer and has a third value at the provider now.
+	// unclear, and every one a conflict (`conflicts === resumeTries`, and some are left): each was
+	// sent to without a clear answer and has a third value at the provider now. Not a target a
+	// loop that died still holds, which is neither unclear on this page nor a conflict.
 	if (BULK_RESUME_WRITE.has(run.haltKey) && run.resumeOpen === run.resumeTries && run.resumeSends === 0
-		&& run.sentUnknown === 0 && run.conflicts > 0) return 'nothing';
+		&& run.sentUnknown === 0 && run.conflicts > 0 && run.conflicts === run.resumeTries) return 'nothing';
 	const narrow = (run.maxTargets ?? bulkWriting(run)) <= 1;
 	if (run.sentUnknown > 0 && run.resumeSends === 0 && (run.haltKey === 'maxTargets' || BULK_RESUME_WRITE.has(run.haltKey))
 		&& (run.probeConfirmed ? run.haltKey !== 'maxTargets' : narrow)) return 'check';

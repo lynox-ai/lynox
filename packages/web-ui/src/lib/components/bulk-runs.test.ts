@@ -568,6 +568,10 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('failureRate', { ...changed, resumeSends: 1 }))).toBe('write');
 		expect(bulkResumeKind(w('failureRate', { ...changed, conflicts: 0 }))).toBe('write');
 		expect(bulkResumeKind(w('failureRate', { ...changed, resumeTries: 0 }))).toBe('write');
+		// Nothing left at all (only targets whose content lynox may not send): no conflict, not this sentence.
+		expect(bulkResumeKind(w('failureRate', { ...changed, conflicts: 0, resumeOpen: 0, resumeTries: 0 }))).toBe('write');
+		// A target a loop that died still holds is neither unclear here nor a conflict: not 'nothing'.
+		expect(bulkResumeKind(w('failureRate', { ...changed, resumeOpen: 2, resumeTries: 2 }))).toBe('write');
 		// Targets the maximum holds back never changed: writing on, then a higher maximum, sends them.
 		expect(bulkResumeKind(w('stoppedByOwner', { ...changed, probeConfirmed: true, maxTargets: 2, resumeOpen: 3 }))).toBe('write');
 		expect(bulkResumeKind(w('failureRate', { ...changed, sentUnknown: 1 }))).toBe('check');
