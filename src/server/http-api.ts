@@ -8141,16 +8141,21 @@ export class LynoxHTTPApi {
       const viewer = this._principalOf(req);
       const ownerViews = isOwnerPrincipal(viewer);
       // For a workflow whose mandate has ended: how many of its paused plans would move it to the
-      // owner when taken over (ux U-079 (b), U-119). Read once, by the takeover's own decision; a
-      // failed read counts none, which leaves the card with the sentence that holds either way.
-      const coveredByTakeover = ownerViews ? (() => {
-        try {
-          const deps = this.#takeoverDepsIfReady();
-          return deps === null ? new Map<string, number>() : workflowsCoveredByTakeover(deps);
-        } catch {
-          return new Map<string, number>();
+      // owner when taken over (ux U-079 (b), U-119). Read once, by the takeover's own decision, and
+      // only when a listed workflow's mandate has ended; a failed read counts none, which leaves the
+      // card with the sentence that holds either way.
+      let coveredByTakeover: Map<string, number> | undefined;
+      const coveredCount = (workflowId: string): number => {
+        if (coveredByTakeover === undefined) {
+          try {
+            const deps = this.#takeoverDepsIfReady();
+            coveredByTakeover = deps === null ? new Map<string, number>() : workflowsCoveredByTakeover(deps);
+          } catch {
+            coveredByTakeover = new Map<string, number>();
+          }
         }
-      })() : new Map<string, number>();
+        return coveredByTakeover.get(workflowId) ?? 0;
+      };
       const { foreignWorkflowScheduleRefusalKind } = await import('../core/plan-stamp.js');
       for (const row of rows) {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
@@ -8215,7 +8220,7 @@ export class LynoxHTTPApi {
             const runAs = workflowRunsAs(authorshipOrNone(() => history.getWorkflowAuthorship(row.id)));
             if (runAs.kind !== 'mandate') return {};
             const ended = principalHasEnded(runAs, (id) => this._mandateLive(id));
-            return { runs_as: { person: runAs.email, ended, ...(ended ? { covered_by_takeover: coveredByTakeover.get(row.id) ?? 0 } : {}) } };
+            return { runs_as: { person: runAs.email, ended, ...(ended ? { covered_by_takeover: coveredCount(row.id) } : {}) } };
           })(),
         });
       }
@@ -8794,11 +8799,13 @@ export class LynoxHTTPApi {
         if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`, 'missing_workflow'); return; }
         // A schedule on another mandate's workflow ties both mandates into one plan, so a mandate
         // schedules only its own workflows and the owner's (`foreignWorkflowScheduleRefusal`).
-        const { foreignWorkflowScheduleRefusal, foreignWorkflowScheduleRefusalKind } = await import('../core/plan-stamp.js');
+        const { foreignWorkflowScheduleRefusalKind, FOREIGN_WORKFLOW_SCHEDULE_REFUSAL, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL } = await import('../core/plan-stamp.js');
         const refusalKind = foreignWorkflowScheduleRefusalKind(principal, planned.id, history);
         if (refusalKind !== null) {
           // The code lets the page word it in the reader's language (ux U-085); the text stays for every other client.
-          errorResponse(res, 403, foreignWorkflowScheduleRefusal(principal, planned.id, history) ?? '', refusalKind === 'foreign' ? 'foreign_workflow' : 'unreadable_workflow');
+          // One read decides both the text and the code.
+          if (refusalKind === 'foreign') errorResponse(res, 403, FOREIGN_WORKFLOW_SCHEDULE_REFUSAL, 'foreign_workflow');
+          else errorResponse(res, 403, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL, 'unreadable_workflow');
           return;
         }
         if (!isSchedulableWorkflow(planned)) {

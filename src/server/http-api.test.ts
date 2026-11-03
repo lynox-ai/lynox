@@ -12604,6 +12604,35 @@ describe('LynoxHTTPApi', () => {
         mockHistoryGetPlannedPipelines.mockReturnValue([]);
       });
 
+      it('reads the paused plans only for an ended workflow, and a failed read counts none instead of failing the list', async () => {
+        repayRateWindow();
+        mockHistoryGetPlannedPipelines.mockReturnValue([
+          { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },
+        ]);
+        mockHistoryGetWorkflowAuthorship.mockImplementation((id: string) => (id === 'wf-m' ? mandateMade : undefined));
+        const origDb = engineRef()['getEngineDb'];
+        const getDb = vi.fn((): never => { throw new Error('engine.db closed'); });
+        engineRef()['getEngineDb'] = () => ({ getDb });
+        type Lib = { workflows: Array<{ id: string; runs_as?: unknown }> };
+        try {
+          live = true;
+          const whileLive = await jsonFetch('/api/workflows/library');
+          expect(((await whileLive.json()) as Lib).workflows[0]?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: false });
+          // Nothing listed has ended: the paused plans are not read at all.
+          expect(getDb).not.toHaveBeenCalled();
+          live = false;
+          const ended = await jsonFetch('/api/workflows/library');
+          expect(ended.status).toBe(200);
+          expect(((await ended.json()) as Lib).workflows[0]?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 });
+          // Twin: the read was tried, so the 0 above is the fallback, not a skipped read.
+          expect(getDb).toHaveBeenCalledTimes(1);
+        } finally {
+          engineRef()['getEngineDb'] = origDb;
+          mockHistoryGetWorkflowAuthorship.mockReset();
+          mockHistoryGetPlannedPipelines.mockReturnValue([]);
+        }
+      });
+
       it('lists no one\'s email to a mandate reading the library', async () => {
         mockHistoryGetPlannedPipelines.mockReturnValue([
           { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },

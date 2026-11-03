@@ -114,7 +114,7 @@ describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)
 			{ ...base('wf-1', 'One plan'), runs_as: { person: EVA, ended: true, covered_by_takeover: 1 } },
 			{ ...base('wf-2', 'Two plans'), runs_as: { person: EVA, ended: true, covered_by_takeover: 2 } },
 		]);
-		expect(note(card('One plan'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Ein Plan, der ihn ausführt, ist deshalb pausiert. Übernimmst du einen davon unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir.`);
+		expect(note(card('One plan'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Ein Plan, der ihn ausführt, ist deshalb pausiert. Übernimmst du diesen Plan unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir.`);
 		expect(note(card('Two plans'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. 2 Pläne, die ihn ausführen, sind deshalb pausiert. Übernimmst du einen davon unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir.`);
 	});
 
@@ -130,7 +130,7 @@ describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)
 		await open('owner', [{ ...base('wf-e', 'Ended one'), runs_as: { person: EVA, ended: true, covered_by_takeover: 1 } }]);
 		const c = card('Ended one');
 		expect(c.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe(`Access ended: ${EVA}`);
-		expect(note(c)).toBe(`${EVA} created or last changed this workflow, and their access has ended. One schedule that runs it is paused for that reason. If you take one of them over under “Triggers” with “Take over”, this workflow runs under you afterwards too.`);
+		expect(note(c)).toBe(`${EVA} created or last changed this workflow, and their access has ended. One schedule that runs it is paused for that reason. If you take that schedule over under “Triggers” with “Take over”, this workflow runs under you afterwards too.`);
 	});
 });
 

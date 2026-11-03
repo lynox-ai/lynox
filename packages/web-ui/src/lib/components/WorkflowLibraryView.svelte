@@ -473,6 +473,9 @@
 			// Without a fresh list (reload failed) or without the workflow in it, there is nothing
 			// current to reopen the dialog on — the old object is exactly what must not come back.
 			const fresh = listed ? workflows.find((w) => w.id === resume.id) : undefined;
+			// A workflow that may no longer be scheduled (its mandate ended, or it is not this
+			// reader's to schedule) does not get the dialog back; its card now says why.
+			if (fresh && (accessEnded(fresh) || fresh.schedule_refusal !== undefined)) return;
 			if (!fresh) {
 				notice = t('workflow_library.stamp.reopen_schedule');
 				return;
@@ -781,7 +784,7 @@
 									<button
 										onclick={() => onScheduleClick(wf)}
 										disabled={accessEnded(wf) || wf.schedule_refusal !== undefined}
-										class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
+										class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50 md:[@media(hover:hover)]:disabled:opacity-0 group-hover:disabled:opacity-50 group-focus-within:disabled:opacity-50"
 									>
 										<Icon name="clock" size="xs" />
 										{t('workflow_library.schedule')}
@@ -790,7 +793,7 @@
 								<button
 									onclick={() => onEditInChat(wf)}
 									disabled={accessEnded(wf)}
-									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
+									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50 md:[@media(hover:hover)]:disabled:opacity-0 group-hover:disabled:opacity-50 group-focus-within:disabled:opacity-50"
 								>
 									<Icon name="chat" size="xs" />
 									{t('workflow_library.edit_in_chat')}
