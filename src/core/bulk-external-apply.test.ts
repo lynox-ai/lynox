@@ -1717,8 +1717,9 @@ describe('an unmeasured write form', () => {
       expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
       expect([ledger.probeKey(y), ledger.probeBlockFor(y)]).toEqual([null, null]);
       expect(ledger.resume(x, { checksum: ledger.computeChecksum(x)!, maxTargets: 2 }).ok).toBe(true);
-      expect(engineDb.getDb().prepare('SELECT kind, run_id FROM bulk_host_probes WHERE host = ? AND method = ? ORDER BY kind').all(HOST, 'PATCH'))
-        .toEqual([{ kind: `unmeasured:${x}:/products/`, run_id: x }, { kind: `unmeasured:${y}:/products/`, run_id: y }].sort((a, b) => a.kind.localeCompare(b.kind)));
+      const rows = engineDb.getDb().prepare('SELECT kind, run_id FROM bulk_host_probes WHERE host = ? AND method = ?').all(HOST, 'PATCH') as { kind: string; run_id: string }[];
+      expect(rows).toHaveLength(2);
+      expect(rows).toEqual(expect.arrayContaining([{ kind: `unmeasured:${x}:/products/`, run_id: x }, { kind: `unmeasured:${y}:/products/`, run_id: y }]));
     } finally {
       restore();
     }

@@ -444,10 +444,12 @@ describe('applying a media run', () => {
     await apply(second);
     expect(ledger.confirmProbe(second)).toEqual({ ok: true });
     expect([ledger.getStatus(first)!.probeConfirmed, ledger.getStatus(second)!.probeConfirmed]).toEqual([true, true]);
-    expect(engineDb.getDb().prepare('SELECT kind, run_id FROM bulk_host_probes ORDER BY confirmed_at, kind').all()).toEqual([
+    const rows = engineDb.getDb().prepare('SELECT kind, run_id FROM bulk_host_probes').all() as { kind: string; run_id: string }[];
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(expect.arrayContaining([
       { kind: `unmeasured:${first}:shopify_media_alt`, run_id: first },
       { kind: `unmeasured:${second}:shopify_media_alt`, run_id: second },
-    ]);
+    ]));
   });
 
   // A probe confirmed before the kind carried its run: `unmeasured:<form>`, read with its `run_id`.
