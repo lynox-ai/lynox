@@ -225,8 +225,8 @@ describe('writing on a halted run', () => {
 		});
 		await render();
 		expect(target.textContent).toContain(tf('bulk.resume.nothing_left', { provider: 'demo.myshopify.com' }));
-		// The conflict is worded as changed at the provider, not as a target lynox did not write.
-		expect(target.textContent).toContain(tf('bulk.conflicts_one', { provider: 'demo.myshopify.com' }));
+		// The conflict is worded as of the last read, not as a target lynox did not write.
+		expect(target.textContent).toContain(t('bulk.conflicts_one'));
 		expect(buttonByText(t('bulk.resume.write'))).toBeUndefined();
 		expect(buttonByText(t('bulk.resume.check'))).toBeUndefined();
 		expect(target.textContent).not.toContain(t('bulk.resume.window'));

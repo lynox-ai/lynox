@@ -558,14 +558,17 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('checksum', unclear))).toBe('none');
 	});
 
-	it('says targets changed at the provider and stay as they are, not that they were not written', () => {
-		// After a send without a clear answer lynox did send to them: "not written" would not hold.
-		const run = (conflicts: number) => ({ conflicts, targetSystem: 'http:shop.example.invalid' });
-		expect(bulkConflictsText(run(1), DE)).toBe('Ein Ziel hat sich bei shop.example.invalid seit der Vorschau geändert; lynox lässt es so stehen.');
-		expect(bulkConflictsText(run(3), DE)).toBe('3 Ziele haben sich bei shop.example.invalid seit der Vorschau geändert; lynox lässt sie so stehen.');
-		expect(bulkConflictsText(run(1), EN)).toBe('One target changed at shop.example.invalid since the preview; lynox leaves it as it is.');
-		expect(bulkConflictsText(run(3), EN)).toBe('3 targets changed at shop.example.invalid since the preview; lynox leaves them as they are.');
-		expect(bulkConflictsText(run(0), DE)).toBeNull();
+	it('says a conflict looked different than expected at the last read, one or several, and nothing at none', () => {
+		// True after an unclear send, for an undo, after a later resume and for a local run alike.
+		expect(bulkConflictsText({ conflicts: 1 }, DE)).toBe('Ein Ziel stand beim letzten Nachsehen anders da als erwartet; lynox hat es nicht überschrieben.');
+		expect(bulkConflictsText({ conflicts: 3 }, DE)).toBe('3 Ziele standen beim letzten Nachsehen anders da als erwartet; lynox hat sie nicht überschrieben.');
+		expect(bulkConflictsText({ conflicts: 1 }, EN)).toBe('One target looked different than expected when lynox last checked it; lynox did not overwrite it.');
+		expect(bulkConflictsText({ conflicts: 3 }, EN)).toBe('3 targets looked different than expected when lynox last checked them; lynox did not overwrite them.');
+		expect(bulkConflictsText({ conflicts: 0 }, DE)).toBeNull();
+		// The run title names one target in the singular, read from the real table.
+		expect(bulkLabel({ kind: 'apply', total: 1, targetSystem: 'http:shop.example.invalid' }, DE)).toBe('1 Ziel · shop.example.invalid');
+		expect(bulkLabel({ kind: 'undo', total: 1, targetSystem: 'http:shop.example.invalid' }, EN)).toBe('Undo · 1 target · shop.example.invalid');
+		expect(bulkLabel({ kind: 'apply', total: 2, targetSystem: 'http:shop.example.invalid' }, EN)).toBe('2 targets · shop.example.invalid');
 	});
 
 	it('offers nothing where every target left had changed at the provider after its unclear send', () => {
