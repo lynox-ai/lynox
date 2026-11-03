@@ -4,6 +4,21 @@ import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BackupManager } from './backup.js';
+
+/** A rename onto this path fails with EIO: a swap that breaks after staging went through. */
+const renameFault = vi.hoisted(() => ({ dest: null as string | null }));
+vi.mock('node:fs', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...fs,
+    renameSync: (from: import('node:fs').PathLike, to: import('node:fs').PathLike): void => {
+      if (renameFault.dest !== null && String(to) === renameFault.dest) {
+        throw Object.assign(new Error(`EIO: i/o error, rename '${String(from)}' -> '${String(to)}'`), { code: 'EIO' });
+      }
+      fs.renameSync(from, to);
+    },
+  };
+});
 import { reloadConfig } from './config.js';
 import { _resetWorkspaceAccess, workspaceAccess } from './workspace-access.js';
 
@@ -203,7 +218,7 @@ describe('backup — the workspace root', () => {
     const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.success).toBe(false);
     expect(JSON.parse(readFileSync(join(data, 'config.json'), 'utf8'))).toEqual({ default_tier: 'deep' });
-    expect(existsSync(join(data, 'config.json.restore-staging'))).toBe(false);
+    expect(readdirSync(data).filter(n => n.includes('.restore-staging'))).toEqual([]);
     expect(readFileSync(ws('http-api/b.txt'), 'utf8')).toBe('ZZ-b-live');
   });
 
@@ -213,9 +228,20 @@ describe('backup — the workspace root', () => {
     const created = await manager().createBackup();
     expect(created.success).toBe(true);
     writeFileSync(ws('http-api/a.txt'), 'ZZ-a-live');
-    mkdirSync(join(data, 'config.json.restore-staging'));
-    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
+    // config.json changes in the backup after the verify pass: its staging fails.
+    const m = manager();
+    const spy = vi.spyOn(m, 'createBackup').mockImplementation(async () => {
+      writeFileSync(join(created.path, 'config.json'), JSON.stringify({ default_tier: 'swapped' }));
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    let restored;
+    try {
+      restored = await m.restoreBackup(created.path, { allowUnverified: true });
+    } finally {
+      spy.mockRestore();
+    }
     expect(restored.success).toBe(false);
+    expect(restored.error).toMatch(/changed after it was verified/);
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a-live');
     expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
   });
@@ -226,12 +252,16 @@ describe('backup — the workspace root', () => {
     const created = await manager().createBackup();
     expect(created.success).toBe(true);
     writeFileSync(ws('http-api/a.txt'), 'ZZ-a-live');
-    // A directory where the backup has a file: staging beside it succeeds, the rename over it fails.
-    rmSync(join(data, 'config.json'));
-    mkdirSync(join(data, 'config.json'));
-    writeFileSync(join(data, 'config.json', 'keep'), 'x');
-    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
+    // The rename over the live config.json fails (an I/O error): staging went through, the swap did not.
+    renameFault.dest = join(data, 'config.json');
+    let restored;
+    try {
+      restored = await manager().restoreBackup(created.path, { allowUnverified: true });
+    } finally {
+      renameFault.dest = null;
+    }
     expect(restored.success).toBe(false);
+    expect(restored.error).toMatch(/EIO/);
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a-live');
     expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
   });

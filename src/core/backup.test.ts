@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { chmodSync, mkdirSync, statSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, statSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -463,15 +463,22 @@ describe('restoreBackup safety guards', () => {
     live.close();
     writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'deep' }));
 
-    // Force config.json's staging copy to fail mid-restore (AFTER history.db has
-    // already staged) by occupying its staging temp path with a directory —
-    // copyFileSync onto a directory throws EISDIR. (ESM blocks spying on fs, so
-    // this real-filesystem sabotage is the deterministic stand-in for a disk
-    // I/O error / ENOSPC on a later file.)
-    mkdirSync(join(lynoxDir, 'config.json.restore-staging'), { recursive: true });
-
-    const result = await manager.restoreBackup(created.path, { allowUnverified: true });
+    // Force config.json's staging to fail mid-restore (AFTER history.db has already
+    // staged): its bytes in the backup change after the verify pass, inside the safety
+    // backup, so staging finds a checksum it did not verify. The deterministic stand-in
+    // for a disk I/O error on a later file.
+    const spy = vi.spyOn(manager, 'createBackup').mockImplementation(async () => {
+      writeFileSync(join(created.path, 'config.json'), JSON.stringify({ default_tier: 'swapped' }));
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    let result;
+    try {
+      result = await manager.restoreBackup(created.path, { allowUnverified: true });
+    } finally {
+      spy.mockRestore();
+    }
     expect(result.success).toBe(false);
+    expect(result.error).toMatch(/changed after it was verified/);
 
     // history.db was NEVER reverted over the live DB: live still has its drifted
     // 4 rows, not the backup's 2. (The pre-fix in-place restore copied history.db
@@ -482,7 +489,7 @@ describe('restoreBackup safety guards', () => {
     const cfg = JSON.parse(readFileSync(join(lynoxDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
     expect(cfg['default_tier']).toBe('deep');
     // The staged temp for history.db was cleaned up on the abort.
-    expect(existsSync(join(lynoxDir, 'history.db.restore-staging'))).toBe(false);
+    expect(readdirSync(lynoxDir).filter(n => n.includes('.restore-staging'))).toEqual([]);
   });
 });
 
