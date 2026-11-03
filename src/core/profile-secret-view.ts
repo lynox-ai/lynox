@@ -594,36 +594,44 @@ export const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
  * Who holds a connection's token, for a text the model reads: the profile's name when exactly one
  * stored profile holds it, else nothing. Cleaned as the API block of the same briefing cleans it
  * (`oneLineInBriefing`: no format or default-ignorable characters, `<` escaped), and bounded,
- * because a stored name is not shaped by the engine. `String()` because a name read from a stored
+ * because a stored name is not shaped by the engine. Cut before the escape, so the bound counts
+ * the name and never ends inside an `&lt;`. `String()` because a name read from a stored
  * file may be a number. Callers quote it with `JSON.stringify`, so a `"` in it cannot end the quote.
  */
 const HOLDER_MAX_CHARS = 64;
 export function connectionTokenHolderName(holders: readonly { name: unknown }[]): string | null {
   if (holders.length !== 1) return null;
-  const name = [...collapseToSingleLine(oneLineInBriefing(String(holders[0]!.name)))];
-  return name.length > HOLDER_MAX_CHARS ? `${name.slice(0, HOLDER_MAX_CHARS - 1).join('')}…` : name.join('');
+  const raw = [...collapseToSingleLine(String(holders[0]!.name).replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, ''))];
+  const cut = raw.length > HOLDER_MAX_CHARS ? `${raw.slice(0, HOLDER_MAX_CHARS - 1).join('')}…` : raw.join('');
+  return oneLineInBriefing(cut);
 }
 
 /**
  * The connection tokens in the vault, COUNTED per profile, never named: `2 for profile "shop-api"`,
  * and `1 held by more than one profile` for those no single profile holds. A name is what a model
- * writes after `secret:`; listed by name, models sent `Bearer secret:<slot>` from this very line in
- * 20 of 23 runs (eval 915, 2026-11-03). Counted, the line still says the profile has its access, so
- * the model does not ask the owner for it again. Undefined when there is none.
+ * writes after `secret:`; listed by name, models copied it from this very line into requests
+ * (measured with tests/online/ask-secret-token-slot-eval.test.ts). Counted, the line still says the
+ * profile has its access, so the model does not ask the owner for it again. Counted per profile
+ * id, not per shown name: two profiles may share a name, and the shown name is cleaned and cut.
+ * The text claims no more than every token does: a refresh slot is never attached to a request,
+ * only used for the profile's own token exchange. Undefined when there is none.
  */
-export function describeConnectionTokens(holdersOfEach: readonly (readonly { name: unknown }[])[]): string | undefined {
+export function describeConnectionTokens(holdersOfEach: readonly (readonly { id?: unknown; name: unknown }[])[]): string | undefined {
   if (holdersOfEach.length === 0) return undefined;
-  const perProfile = new Map<string, number>();
+  const perProfile = new Map<string, { who: string; n: number }>();
   let shared = 0;
   for (const holders of holdersOfEach) {
     const who = connectionTokenHolderName(holders);
-    if (who === null) shared++;
-    else perProfile.set(who, (perProfile.get(who) ?? 0) + 1);
+    if (who === null) { shared++; continue; }
+    const key = `${typeof holders[0]!.id}:${String(holders[0]!.id ?? '')}:${typeof holders[0]!.name}:${String(holders[0]!.name)}`;
+    const seen = perProfile.get(key);
+    if (seen) seen.n++;
+    else perProfile.set(key, { who, n: 1 });
   }
-  const parts = [...perProfile].map(([who, n]) => `${String(n)} for profile ${JSON.stringify(who)}`);
+  const parts = [...perProfile.values()].map(({ who, n }) => `${String(n)} for profile ${JSON.stringify(who)}`);
   if (shared > 0) parts.push(`${String(shared)} held by more than one profile`);
-  return 'Connection tokens in the vault, used only by the API profile that holds them: a request to that '
-    + 'profile\'s base URL gets them attached. They are not referenced with secret: and not collected again: '
+  return 'Connection tokens in the vault, held by an API profile: the engine uses them for that profile\'s '
+    + 'requests itself. They are not referenced with secret: and not collected again: '
     + `${parts.join(', ')}.`;
 }
 

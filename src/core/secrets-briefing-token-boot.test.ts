@@ -97,7 +97,7 @@ describe('renderSecretsBriefing', () => {
     const out = renderSecretsBriefing(store(['A_KEY', 'B_KEY']), heldBy('B_KEY', 'shop')) ?? '';
     expect(out).toContain('secret:A_KEY (****abcd)');
     expect(out).not.toContain('secret:B_KEY');
-    expect(out).toMatch(/Connection tokens in the vault, used only by the API profile that holds them[^\n]*not referenced with secret:[^\n]*: 1 for profile "shop"\.\n/);
+    expect(out).toMatch(/Connection tokens in the vault, held by an API profile[^\n]*not referenced with secret:[^\n]*: 1 for profile "shop"\.\n/);
     expect(out, 'a token is not named, and its masked value not shown').not.toContain('B_KEY');
   });
 
@@ -105,6 +105,13 @@ describe('renderSecretsBriefing', () => {
     const out = renderSecretsBriefing(store(['B_KEY']), heldBy('B_KEY', 'one', 'two')) ?? '';
     expect(out).toContain('not collected again: 1 held by more than one profile.');
     expect(out).not.toContain('for profile');
+  });
+
+  it('counts two profiles that share a name apart, by id', () => {
+    const out = renderSecretsBriefing(store(['A_TOK', 'B_TOK']), (n) => [{ id: n === 'A_TOK' ? 'shop-a' : 'shop-b', name: 'Shop' }]) ?? '';
+    expect(out).toContain('1 for profile "Shop", 1 for profile "Shop".');
+    const same = renderSecretsBriefing(store(['A_TOK', 'B_TOK']), () => [{ id: 'shop-a', name: 'Shop' }]) ?? '';
+    expect(same, 'control: one profile\'s tokens add up').toContain(': 2 for profile "Shop".');
   });
 
   it('lists only tokens when no free name is left, and nothing for an empty vault', () => {

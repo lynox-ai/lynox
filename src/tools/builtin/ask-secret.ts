@@ -172,12 +172,14 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     //    genuine second key (and tempt referencing the WRONG existing one). Surface the
     //    sibling as a non-blocking hint on the prompt and STILL collect.
     const holdersOf = tokenHoldersFor(agent);
-    // `findNameMatches` leaves out the requested name itself. A token under exactly that name is
-    // the case that matters most (collecting it would overwrite the connection's token), so it is
-    // added here and turned away below like a near-identical one.
+    // `findNameMatches` leaves out the requested name itself. A token STORED under exactly that
+    // name is the case that matters most (collecting it would overwrite the connection's token), so
+    // it is added here and turned away below like a near-identical one. Stored, not merely named by
+    // a profile: an empty refresh slot is exactly what `api_setup` asks to be collected.
+    const stored = agent.secretStore?.listAgentVisibleNames?.() ?? [];
     const matches = [
       ...(agent.secretStore?.findNameMatches?.(input.name) ?? []),
-      ...(agent.secretStore && holdersOf(input.name).length > 0 ? [input.name] : []),
+      ...(stored.includes(input.name) && holdersOf(input.name).length > 0 ? [input.name] : []),
     ];
     const isToken = new Set(matches.filter(n => holdersOf(n).length > 0));
     const normName = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');

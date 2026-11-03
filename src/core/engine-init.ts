@@ -459,16 +459,16 @@ export function ensureVaultKey(): void {
  * value, except a name that holds a connection's token. Those are used through their API profile
  * and are counted per profile, not named (`describeConnectionTokens`). Left out entirely, the
  * briefing reads as if the vault had no access for the profile, and a model asks the owner for it
- * again under a new name (eval 915, 2026-11-03). `tokenHolders` answers the
+ * again under a new name (tests/online/ask-secret-token-slot-eval.test.ts). `tokenHolders` answers the
  * profiles that hold a name, empty for a free one. The boot renders the listing before the API
  * profiles are loaded, with no holders; the engine renders it again once they are.
  */
 export function renderSecretsBriefing(
   store: Pick<SecretStore, 'listAgentVisibleNames' | 'getMasked'>,
-  tokenHolders: (name: string) => readonly { name: unknown }[] = () => [],
+  tokenHolders: (name: string) => readonly { id?: unknown; name: unknown }[] = () => [],
 ): string | undefined {
   const free: string[] = [];
-  const tokens: (readonly { name: unknown }[])[] = [];
+  const tokens: (readonly { id?: unknown; name: unknown }[])[] = [];
   for (const n of store.listAgentVisibleNames()) {
     const holders = tokenHolders(n);
     if (holders.length === 0) free.push(`secret:${n} (${store.getMasked(n)})`);

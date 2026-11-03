@@ -187,10 +187,12 @@ async function runOnce(provider: string, make: (t: ToolEntry[]) => InstanceType<
   if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: kase, run: i, ...c, usd, briefing: engine.getSecretsBriefing() ?? null, apiBriefing: engine.getBriefing() ?? null, uses: run.uses.map((u) => ({ ...u, result: u.result.slice(0, 600) })), texts: run.texts })}\n`);
   table.push(`${provider}\t${kase}\t#${String(i)}\tattempts=${String(c.attempts)}\tvia-profile=${String(c.viaProfile)}\toffered=${String(c.offered)}\trecollect=${String(c.recollect)}\tuses=${String(run.uses.length)}\tusd=${usd.toFixed(4)}`);
   expect(run.uses.length + run.texts.length).toBeGreaterThan(0);
-  // A model that follows the written-out reference must be seen sending it; a model that declines
-  // says nothing about the instrument, so the check asks only that SOME control run counts one
-  // (see the table), and here that a run that sent it was counted.
-  if (kase === 'control' && run.uses.some((u) => u.input.includes('secret:SHOP_RT'))) expect(c.attempts).toBeGreaterThan(0);
+  // Two checks on the instrument, each against a source of its own. Every request a handler got must
+  // be among the calls read from the transcript (a refused one is there too, never the reverse).
+  // And the control case, where the owner writes the reference out, must be counted as an attempt;
+  // a model that declines fails this run, which is the honest answer: the count was not shown to work.
+  expect(run.uses.filter((u) => u.tool === 'http_request').length).toBeGreaterThanOrEqual(run.calls.length);
+  if (kase === 'control') expect(c.attempts, 'the control reference was not counted').toBeGreaterThan(0);
 }
 
 function base() {
