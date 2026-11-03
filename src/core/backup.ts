@@ -766,16 +766,16 @@ export class BackupManager {
     // (ext4 `chattr +F`, per-directory case sensitivity on NTFS).
     const folds = new Map<string, boolean>();
     for (const [a, b] of foldedPairs(dataDirEntries.map(entry => entry.path))) {
-      const dir = nearestExistingDir(this.lynoxDir, dirname(a));
-      let foldsHere = folds.get(dir);
+      const foldDir = nearestExistingDir(this.lynoxDir, dirname(a));
+      let foldsHere = folds.get(foldDir);
       if (foldsHere === undefined) {
         try {
-          foldsHere = this.namesFold(dir);
+          foldsHere = this.namesFold(foldDir);
         } catch (err: unknown) {
           const code = (err as { code?: unknown } | null)?.code;
           return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Could not tell whether this machine's filesystem tells ${JSON.stringify(a)} from ${JSON.stringify(b)}${typeof code === 'string' ? ` (${code})` : ''} — refusing to restore; nothing was replaced.` };
         }
-        folds.set(dir, foldsHere);
+        folds.set(foldDir, foldsHere);
       }
       if (foldsHere) {
         return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names two paths this machine's filesystem takes for one name, as it does not tell ${JSON.stringify(a)} from ${JSON.stringify(b)} — refusing to restore; nothing was replaced.` };
