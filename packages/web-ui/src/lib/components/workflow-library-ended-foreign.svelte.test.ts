@@ -79,7 +79,7 @@ afterEach(() => {
 });
 
 const EVA = 'eva@kanzlei.example';
-const ENDED_A = `${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Darum lässt er sich nicht mehr ausführen, auch nicht als Kopie. Beschreib lynox im Chat in deinen eigenen Worten, was er tun soll, und bitte lynox, dafür einen neuen Workflow zu schreiben, statt diesen zu kopieren oder zu ändern. Ein neu geschriebener Workflow gehört dir und läuft unter dir.`;
+const ENDED_A = `${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Darum lässt er sich nicht mehr ausführen, auch nicht als Kopie. Beschreib lynox im Chat in deinen eigenen Worten, was er tun soll, und bitte lynox, dafür einen neuen Workflow zu schreiben, statt diesen zu kopieren oder zu ändern. Ein neu geschriebener Workflow gehört dir und läuft unter dir.`;
 
 describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)', () => {
 	it('marks it, turns off Run, Schedule and Edit, keeps Rename and Delete, and says why under the buttons', async () => {
@@ -114,8 +114,8 @@ describe('the owner\'s library, a workflow whose person\'s access ended (UX-053)
 			{ ...base('wf-1', 'One plan'), runs_as: { person: EVA, ended: true, covered_by_takeover: 1 } },
 			{ ...base('wf-2', 'Two plans'), runs_as: { person: EVA, ended: true, covered_by_takeover: 2 } },
 		]);
-		expect(note(card('One plan'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Ein Plan, der ihn ausführt, ist deshalb pausiert. Übernimmst du diesen Plan unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir.`);
-		expect(note(card('Two plans'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. 2 Pläne, die ihn ausführen, sind deshalb pausiert. Übernimmst du einen davon unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir.`);
+		expect(note(card('One plan'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Ein Plan, der ihn ausführt, ist deshalb pausiert. Übernimmst du diesen Plan unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir.`);
+		expect(note(card('Two plans'))).toBe(`${EVA} hat diesen Workflow angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. 2 Pläne, die ihn ausführen, sind deshalb pausiert. Übernimmst du einen davon unter „Trigger“ mit „Übernehmen“, läuft danach auch dieser Workflow unter dir.`);
 	});
 
 	it('without a name says "a person with access", in the mark and the sentence', async () => {
