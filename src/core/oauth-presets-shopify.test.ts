@@ -105,7 +105,8 @@ describe('the Shopify customer text', () => {
     expect(consentFrameProblems(shopify.consentNotice!)).toEqual([]);
   });
 
-  it('comes before a link that asks for write_products, a reconnect included, and not before a read-only one', () => {
+  // `decideConnect` takes no existing grant, so a reconnect decides the same way as a first link.
+  it('comes before a link that asks for write_products and not before a read-only one', () => {
     const writing = connect('read_products write_products');
     expect(isRefusal(writing)).toBe(false);
     if (isRefusal(writing)) return;
@@ -124,16 +125,24 @@ describe('the Shopify customer text', () => {
     expect(shopify.allowedScopes.filter((s) => /^write_(orders|all_orders|customers|inventory|fulfillments)/.test(s))).toEqual([]);
   });
 
-  // The text names the fields a bulk run writes. They are the fields of the engine's write forms
-  // for products and for their images, not of the scope: a field added to a form fails here, and
-  // the text needs a new approval.
-  it('names exactly the fields the engine\'s Shopify write forms set', () => {
+  // The text names the fields a bulk run writes with this scope: those of the engine's product
+  // write form. A field added to the form fails here, and the text needs a new approval.
+  it('names exactly the fields the engine\'s Shopify product write form sets', () => {
     const named: Record<string, string> = { title: 'Titel', descriptionHtml: 'Beschreibung', seo_title: 'SEO-Titel', seo_description: 'SEO-Beschreibung' };
     const order = ['title', 'descriptionHtml', 'seo_title', 'seo_description'];
     for (const f of SHOPIFY_WRITABLE_FIELDS) expect(named[f], `a name for ${f}`).toBeDefined();
-    expect(SHOPIFY_MEDIA_WRITABLE_FIELDS).toEqual(['alt']);
     const fields = order.filter((f) => SHOPIFY_WRITABLE_FIELDS.includes(f)).map((f) => named[f]);
-    expect(shopify.consentNotice?.paragraphs[1]).toContain(`Ein Massenlauf ändert nur Texte bestehender Produkte: ${fields.join(', ')} und die Alt-Texte der Produktbilder.`);
+    const list = `${fields.slice(0, -1).join(', ')} und ${fields[fields.length - 1]}`;
+    expect(shopify.consentNotice?.paragraphs[1]).toContain(`Ein Massenlauf ändert nur Texte bestehender Produkte: ${list}.`);
+  });
+
+  // The image form writes alt texts through `fileUpdate`, which Shopify grants only with
+  // `write_files` or `write_themes`. Without either scope the text may not promise alt texts.
+  it('promises no image alt texts while the preset allows no scope that writes them', () => {
+    expect(SHOPIFY_MEDIA_WRITABLE_FIELDS).toEqual(['alt']);
+    expect(shopify.allowedScopes.filter((s) => s === 'write_files' || s === 'write_themes')).toEqual([]);
+    const text = [...shopify.consentNotice!.paragraphs, ...Object.values(shopify.consentNotice!.frame ?? {})].join(' ');
+    expect(text).not.toMatch(/Alt-Text|Bild/);
   });
 
   // The words the owner reads, byte for byte. A change to one needs a new approval; this test is
@@ -141,7 +150,7 @@ describe('the Shopify customer text', () => {
   it('holds the customer text byte for byte', () => {
     expect(shopify.consentNotice?.paragraphs).toEqual([
       'lynox kann in deinem Shopify-Store Produkte ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an Shopify schickt, und er geschieht erst nach deinem Ja.',
-      'Die eine Ausnahme ist ein Massenlauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel, SEO-Beschreibung und die Alt-Texte der Produktbilder. Anlegen, löschen oder Preise ändern kann er nicht.',
+      'Die eine Ausnahme ist ein Massenlauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel und SEO-Beschreibung. Anlegen, löschen oder Preise ändern kann er nicht.',
       'Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.',
     ]);
     expect(shopify.consentNotice?.frame).toEqual({

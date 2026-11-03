@@ -386,13 +386,14 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // Customer text. A change to a word needs a new approval; the test that holds this text
     // byte for byte is the reminder. Shown before every link that asks for write_products, a
     // new connection's or a reconnect's. The fields in the second paragraph are those of the
-    // engine's Shopify write forms, a test holds the two together.
+    // engine's product write form, a test holds the two together. Image alt texts are not among
+    // them: `fileUpdate` needs `write_files` or `write_themes`, which this preset refuses.
     consentNotice: {
       lang: 'de',
       writeScopes: ['write_products'],
       paragraphs: [
         'lynox kann in deinem Shopify-Store Produkte ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an Shopify schickt, und er geschieht erst nach deinem Ja.',
-        'Die eine Ausnahme ist ein Massenlauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel, SEO-Beschreibung und die Alt-Texte der Produktbilder. Anlegen, löschen oder Preise ändern kann er nicht.',
+        'Die eine Ausnahme ist ein Massenlauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel und SEO-Beschreibung. Anlegen, löschen oder Preise ändern kann er nicht.',
         'Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.',
       ],
       // The breadth under the list from shopify.dev, read 2026-10-28: write_products covers
