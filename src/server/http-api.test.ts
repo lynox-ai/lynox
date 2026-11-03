@@ -16703,6 +16703,8 @@ describe('LynoxHTTPApi', () => {
       expect(process.getuid?.(), 'this test needs a non-root user').not.toBe(0);
       writeFileSync(join(base, 'safe', 'sealed.txt'), 's');
       const seen: unknown[] = [];
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let lines: string[] = [];
       try {
         chmodSync(join(base, 'safe', 'sealed.txt'), 0o000);
         for (const route of ['download', 'read']) {
@@ -16713,9 +16715,13 @@ describe('LynoxHTTPApi', () => {
       } finally {
         chmodSync(join(base, 'safe', 'sealed.txt'), 0o600);
         rmSync(join(base, 'safe', 'sealed.txt'), { force: true });
+        lines = logged.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('/api/files/'));
+        logged.mockRestore();
       }
       const failed = { error: 'Could not read the file' };
       expect(seen).toEqual([['download', 500, failed], ['download', 404], ['read', 500, failed], ['read', 404]]);
+      // The reason behind the 500 is in the server's log, as for the folder listing.
+      expect(lines).toEqual(['[lynox] GET /api/files/download failed: EACCES', '[lynox] GET /api/files/read failed: EACCES']);
     });
 
     it('without isolation, closes the opened file when the header cannot be sent and for an empty file', async () => {
@@ -16729,13 +16735,15 @@ describe('LynoxHTTPApi', () => {
         for (let i = 0; i < 10; i++) {
           // The header write is what fails, as Node does for a header value it refuses.
           writeHead.mockImplementationOnce(() => { throw new TypeError('Invalid character in header content'); });
-          expect((await jsonFetch('/api/files/download?path=safe/once.txt')).status).toBe(500);
+          // The answer of the route itself, so the failed header write was the route's own.
+          const res = await jsonFetch('/api/files/download?path=safe/once.txt');
+          expect([res.status, await res.json()]).toEqual([500, { error: 'Could not read the file' }]);
         }
       } finally {
         writeHead.mockRestore();
       }
       for (let i = 0; i < 10; i++) expect((await jsonFetch('/api/files/download?path=safe/empty.txt')).status).toBe(200);
-      // A FileHandle left open is only closed by the garbage collector, so a missing close shows here.
+      // A FileHandle left open stays open until the garbage collector finds it.
       expect([held('once.txt'), held('empty.txt')]).toEqual([0, 0]);
     });
 
