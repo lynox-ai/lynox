@@ -14474,7 +14474,8 @@ export class LynoxHTTPApi {
         // is there and could not be read.
         const code = err instanceof Error && 'code' in err ? err.code : undefined;
         if (code === 'ENOENT' || code === 'ENOTDIR') { errorResponse(res, 404, 'File not found'); return; }
-        console.error(`[lynox] GET /api/files/download failed: ${String(code ?? (err instanceof Error ? err.message : err))}`);
+        // The error code only, never the error's text (it can carry a path).
+        console.error(`[lynox] GET /api/files/download failed: ${String(code ?? (err instanceof Error ? err.name : 'unknown'))}`);
         errorResponse(res, 500, 'Could not read the file');
       }
     }, READS);
@@ -14507,7 +14508,8 @@ export class LynoxHTTPApi {
         // As for the download: only a missing file is "not found".
         const code = err instanceof Error && 'code' in err ? err.code : undefined;
         if (code === 'ENOENT' || code === 'ENOTDIR') { errorResponse(res, 404, 'File not found'); return; }
-        console.error(`[lynox] GET /api/files/read failed: ${String(code ?? (err instanceof Error ? err.message : err))}`);
+        // The error code only, never the error's text (it can carry a path).
+        console.error(`[lynox] GET /api/files/read failed: ${String(code ?? (err instanceof Error ? err.name : 'unknown'))}`);
         errorResponse(res, 500, 'Could not read the file');
       }
     }, READS);
