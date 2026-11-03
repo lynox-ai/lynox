@@ -231,6 +231,8 @@ describe('the Google claim nonce in the URL', () => {
 		expect(posts[0]).toEqual({ path: '/google/claim-managed/preview', body: { claim_nonce: 'nonce-9' } });
 		expect(target.querySelector('bdi')?.textContent).toBe('owner@example.com');
 		expect(hasButton('Connect')).toBe(true);
+		// Still in the URL: the owner has not decided yet, so a further reload finds it too.
+		expect(param()).toBe('nonce-9');
 	});
 
 	it('stays while the owner has not decided, and leaves on Connect', async () => {
@@ -257,6 +259,7 @@ describe('the Google claim nonce in the URL', () => {
 		await render();
 		expect(target.querySelector('[data-testid="google-read-only"]')).not.toBeNull();
 		expect(param()).toBeNull();
+		expect(hasButton('Cancel')).toBe(false);
 	});
 });
 
