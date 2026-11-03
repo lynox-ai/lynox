@@ -543,7 +543,7 @@ export function runManifest(
   }
   if (refused !== undefined) return Promise.reject(new Error(refused));
   // The public API's default, resolved once for the whole run (see `StartedRunOptions`). The
-  // step spawners are public API too and resolve their own the same way.
+  // step spawners resolve their own the same way (`spawnInline` and `spawnPipeline` are public API).
   const started: StartedRunOptions = { ...options, principal: options.principal ?? OWNER_PRINCIPAL };
   if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, started);
   const runId = started.runId ?? randomUUID();

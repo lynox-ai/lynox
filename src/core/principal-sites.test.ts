@@ -24,13 +24,20 @@
  * The census fails both ways: a place not in the list, a listed place that is gone, and a listed
  * place that no longer names its principal.
  *
- * A cast (`as`, `<T>`, `satisfies`) or a non-null `!` on what a place hands over, or on its
- * `principal`, names nothing: the type checker would believe it, so the census does not.
+ *  - Refused too: a call by a target's name (`runManifest`, `createSession`, …) that does not
+ *    resolve to the target, whatever type made it compile.
+ * A cast (`as`, `<T>`), a `satisfies` or a non-null `!` on what a place hands over, on its
+ * `principal`, or on the initializer of the variable it hands over, names nothing: a cast and `!`
+ * are believed by the type checker, and `satisfies` keeps a narrower type than the place may
+ * assume, so the census asks for the plain value.
  *
  * What it still does not see: a principal removed after the place read its type, through a looser
- * alias (`delete`, `Object.assign`); a value of type `any` assigned into a typed binding earlier;
- * options taken from a parameter of any function, a callback's included ("passes through");
- * code that is not in the program (`eval`, a string-built import).
+ * alias (`delete`, `Object.assign`); a value of type `any` assigned into a typed binding earlier,
+ * or a cast more than one binding before the place; a call through an `any`-typed or union-typed
+ * receiver, `Reflect`, or a non-literal element access; options taken from a parameter of any
+ * function, a callback's included ("passes through"); code that is not in the program (`eval`, a
+ * string-built import). It reads the program as the compiler does and asserts no compile errors
+ * only for its self-test: the real tree's are the typecheck's.
  */
 import { describe, it, expect } from 'vitest';
 import ts from 'typescript';
@@ -176,18 +183,30 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
       || (ts.isSpreadAssignment(p) && asserted(p.expression)));
   };
 
+  /** The initializer of the variable an identifier names, one binding back. */
+  const initializerOf = (e: ts.Expression): ts.Expression | undefined => {
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    if (!ts.isIdentifier(e)) return undefined;
+    const d = resolve(checker.getSymbolAtLocation(e))?.valueDeclaration;
+    return d && ts.isVariableDeclaration(d) ? d.initializer : undefined;
+  };
+  const castAt = (e: ts.Expression): boolean => {
+    const init = initializerOf(e);
+    return asserted(e) || principalAsserted(e) || (init !== undefined && (asserted(init) || principalAsserted(init)));
+  };
+
   const namesOf = (node: ts.CallExpression | ts.NewExpression, kind: Kind): Names | 'nothing' => {
     const args = node.arguments ?? ts.factory.createNodeArray<ts.Expression>();
     if (SPAWNERS.has(kind)) {
       const params = checker.getResolvedSignature(node)?.getParameters() ?? [];
       const at = params.findIndex((p) => p.getName() === 'principal');
       const arg = at >= 0 ? args[at] : undefined;
-      return arg && !asserted(arg) && holdsPrincipal(checker.getTypeAtLocation(arg)) ? 'principal' : 'nothing';
+      return arg && !castAt(arg) && holdsPrincipal(checker.getTypeAtLocation(arg)) ? 'principal' : 'nothing';
     }
     const opts = args[OPTIONS_AT[kind] ?? -1];
     if (!opts) return 'nothing';
     const t = checker.getTypeAtLocation(opts);
-    if (asserted(opts) || principalAsserted(opts)) return 'nothing';
+    if (castAt(opts)) return 'nothing';
     const principal = property(t, 'principal', opts);
     if (principal && !principal.optional && holdsPrincipal(principal.type)) return 'principal';
     const internal = property(t, 'internal', opts);
@@ -237,7 +256,9 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
     return decl ? [checker.getTypeAtLocation(decl)] : [];
   });
   const MEMBER_NAMES = new Set(Object.keys(METHODS).map((k) => k.split('#')[1]!));
-  const FUNCTION_NAMES = new Set(Object.keys(FUNCTIONS));
+  /** Names a call may not carry unless it resolves to the target of that name. */
+  const GUARDED_NAMES = new Set([...Object.keys(FUNCTIONS), 'createSession', 'getOrCreate']);
+  const memberName = (m: ts.TypeElement): string => (m.name ? m.name.getText().replace(/['"`\[\]]/g, '') : '');
 
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile || !sf.fileName.startsWith(srcRoot + '/')) continue;
@@ -256,15 +277,26 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
   const sites: Site[] = [];
   const refused: string[] = [];
   for (const sf of program.getSourceFiles()) {
-    if (sf.isDeclarationFile || !sf.fileName.startsWith(srcRoot + '/') || /\.(test|spec)\.ts$/.test(sf.fileName)) continue;
+    if (!sf.fileName.startsWith(srcRoot + '/') || /\.(test|spec)\.ts$/.test(sf.fileName)) continue;
+    // A declaration file under src declares types only: the type guard reads it, nothing else does.
+    const declarationOnly = sf.isDeclarationFile;
     const file = relative(srcRoot, sf.fileName);
     const at = (n: ts.Node): string => `${file}:${String(sf.getLineAndCharacterOfPosition(n.getStart()).line + 1)}`;
     const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+      if (!declarationOnly && (ts.isCallExpression(node) || ts.isNewExpression(node))) {
         const kind = kindOfCall(node);
         if (kind) sites.push({ file, kind, fn: enclosingFn(node), names: namesOf(node, kind) });
+        // Called by a target's name but resolved elsewhere: a type, a module stand-in or a wrapper
+        // made it compile, and the census would not see whom it runs for. `getOrCreate` of one
+        // argument is the rate limiter's.
+        const callee = node.expression;
+        const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text
+          : ts.isElementAccessExpression(callee) && ts.isStringLiteralLike(callee.argumentExpression) ? callee.argumentExpression.text : '';
+        if (!kind && GUARDED_NAMES.has(name) && !(name === 'getOrCreate' && (node.arguments?.length ?? 0) < 2)) {
+          refused.push(`${at(node)} a call named ${name} that does not resolve to it`);
+        }
       }
-      if (ts.isIdentifier(node) || ts.isStringLiteral(node)) {
+      if (!declarationOnly && (ts.isIdentifier(node) || ts.isStringLiteral(node))) {
         const target = ts.isStringLiteral(node) ? (ts.isElementAccessExpression(node.parent) && node.parent.argumentExpression === node) : true;
         if (target && isTargetSymbol(checker.getSymbolAtLocation(node))) {
           const ref = ts.isStringLiteral(node) ? node.parent : node;
@@ -274,16 +306,11 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
       // An interface or type a target class satisfies through a member of a target's name: a call
       // through it resolves to the interface, not to the target.
       if ((ts.isInterfaceDeclaration(node) || ts.isTypeLiteralNode(node))
-        && node.members.some((m) => m.name !== undefined && MEMBER_NAMES.has(m.name.getText()))) {
+        && node.members.some((m) => MEMBER_NAMES.has(memberName(m)))) {
         const t = checker.getTypeAtLocation(node);
         if (targetInstances.some((c) => checker.isTypeAssignableTo(c, t))) refused.push(`${at(node)} a type a target class satisfies: a call through it is not seen`);
       }
-      // A type with a member named like a target function: a module or object typed by it calls
-      // the function through the member, which resolves to the type, not to the function.
-      if ((ts.isInterfaceDeclaration(node) || ts.isTypeLiteralNode(node))
-        && node.members.some((m) => m.name !== undefined && FUNCTION_NAMES.has(m.name.getText().replace(/['"]/g, '')))) {
-        refused.push(`${at(node)} a type with a member named like a target function: a call through it is not seen`);
-      }
+
       node.forEachChild(visit);
     };
     visit(sf);
@@ -341,8 +368,11 @@ export function computedKey(k: string) { e.createSession({ [k]: p }); }
 export function internal() { void s.run('t', { internal: true }); }
 export function notInternal() { void s.run('t', { internal: false }); }
 export function cast() { e.createSession({ principal: maybe as P }); e.createSession({ principal: maybe! }); e.createSession({} as { principal: P }); spawnPipeline(1, maybe!); }
+export function castMore() { e.createSession({ principal: <P>maybe }); e.createSession({ principal: p } satisfies { principal: P }); e.createSession({ ...({} as { principal: P }) }); const o = { principal: maybe! }; e.createSession(o); }
 export function anyValue() { e.createSession({ principal: loose }); }
 export interface Deps { runManifest(m: unknown, c: unknown, o: { principal?: P | undefined }): void }
+declare const deps: Deps; declare const loose2: { ['createSession'](o?: unknown): Session };
+export function stand() { deps.runManifest(1, 2, { principal: p }); loose2.createSession(); }
 export function handedOn(opts: { principal?: P }) { store.getOrCreate('id', e, { ...opts }); }
 export function position(x: { principal: P }) { spawnInline(1, x.principal, maybe); spawnViaAgent(1, 2, p); spawnPipeline(1, p); }
 export async function dynamic() { const { runManifest: run } = await import('./orchestrator/runner.js'); run(1, 2, { principal: p }); const later = run; void later; }
@@ -394,6 +424,10 @@ export function harmless(x: unknown) { void Agent.MAX; return x instanceof Agent
       'createSession in cast · nothing',
       'createSession in cast · nothing',
       'spawnPipeline in cast · nothing',
+      'createSession in castMore · nothing',
+      'createSession in castMore · nothing',
+      'createSession in castMore · nothing',
+      'createSession in castMore · nothing',
       'createSession in anyValue · nothing',
       'getOrCreate in handedOn · passes through',
       'spawnInline in position · nothing',
@@ -408,8 +442,11 @@ export function harmless(x: unknown) { void Agent.MAX; return x instanceof Agent
       'core/session-store.ts · createSession in getOrCreate · passes through',
     ]);
     expect(refused.map((r) => r.replace(/^x\.ts:\d+ /, ''))).toEqual([
-      // `Deps`: a module typed by it calls runManifest through the member.
-      'a type with a member named like a target function: a call through it is not seen',
+      // A bracketed member name is still the target's name.
+      'a type a target class satisfies: a call through it is not seen',
+      // A module or object typed to compile, called by the target's name.
+      'a call named runManifest that does not resolve to it',
+      'a call named createSession that does not resolve to it',
       // `const later = run`: a name destructured from the module is the target.
       'a reference to run that is not a call',
       'a reference to createSession that is not a call',
