@@ -732,10 +732,81 @@ describe('restoreBackup writes only where createBackup writes', () => {
         expect(result.pre_restore_backup_path).toBe('');
         expect(liveTier()).toBe('deep');
         expect(existsSync(join(lynoxDir, a))).toBe(false);
-        expect(folds).toHaveBeenCalledWith(lynoxDir);
+        expect(folds).toHaveBeenCalledWith(join(lynoxDir, 'memory'));
       } finally {
         folds.mockRestore();
       }
+    }
+  });
+
+  type FoldSeam = { namesFold: (dir: string) => boolean };
+
+  it('asks in the folder of the pair, where a filesystem may fold although the root does not', async () => {
+    const memory = join(lynoxDir, 'memory');
+    const { manager, backupPath } = await backupWith([{ path: 'memory/new/Note.md', bytes: 'one' }, { path: 'memory/new/note.md', bytes: 'two' }]);
+    // Only `memory/` folds; `memory/new/` does not exist yet and would inherit it.
+    const folds = vi.spyOn(manager as unknown as FoldSeam, 'namesFold').mockImplementation((dir) => dir === memory);
+    try {
+      const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/names one file twice on this machine/);
+      expect(folds.mock.calls).toEqual([[memory]]);
+      expect(liveTier()).toBe('deep');
+    } finally {
+      folds.mockRestore();
+    }
+  });
+
+  it('asks for every pair, not only the first', async () => {
+    const memory = join(lynoxDir, 'memory');
+    const { manager, backupPath } = await backupWith([
+      { path: 'memory/X.md', bytes: 'one' }, { path: 'memory/x.md', bytes: 'two' },
+      { path: 'artifacts/Y.md', bytes: 'three' }, { path: 'artifacts/y.md', bytes: 'four' },
+    ]);
+    const folds = vi.spyOn(manager as unknown as FoldSeam, 'namesFold').mockImplementation((dir) => dir !== memory);
+    try {
+      const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('"artifacts/Y.md" from "artifacts/y.md"');
+      expect(liveTier()).toBe('deep');
+    } finally {
+      folds.mockRestore();
+    }
+  });
+
+  it('refuses a file one entry names where another needs a folder, where the filesystem folds them', async () => {
+    const { manager, backupPath } = await backupWith([{ path: 'memory/A', bytes: 'a file' }, { path: 'memory/a/b.md', bytes: 'in a folder' }]);
+    const folds = vi.spyOn(manager as unknown as FoldSeam, 'namesFold').mockReturnValue(true);
+    try {
+      const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('"memory/A" from "memory/a/b.md"');
+      expect(result.pre_restore_backup_path).toBe('');
+      expect(existsSync(join(lynoxDir, 'memory', 'a'))).toBe(false);
+      expect(liveTier()).toBe('deep');
+    } finally {
+      folds.mockRestore();
+    }
+    // Control: where names are kept apart, both are restored.
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+    expect(result.success, String(result.error)).toBe(true);
+    expect(readFileSync(join(lynoxDir, 'memory', 'A'), 'utf-8')).toBe('a file');
+    expect(readFileSync(join(lynoxDir, 'memory', 'a', 'b.md'), 'utf-8')).toBe('in a folder');
+  });
+
+  it('refuses when it cannot ask the filesystem, before replacing anything', async () => {
+    const { manager, backupPath } = await backupWith([{ path: 'memory/Note.md', bytes: 'one' }, { path: 'memory/note.md', bytes: 'two' }]);
+    const folds = vi.spyOn(manager as unknown as FoldSeam, 'namesFold').mockImplementation(() => {
+      throw Object.assign(new Error('read-only file system'), { code: 'EROFS' });
+    });
+    try {
+      const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Could not tell whether this machine\'s filesystem tells "memory/Note.md" from "memory/note.md" (EROFS) — refusing to restore; nothing was replaced.');
+      expect(result.pre_restore_backup_path).toBe('');
+      expect(liveTier()).toBe('deep');
+    } finally {
+      folds.mockRestore();
     }
   });
 
@@ -801,7 +872,7 @@ describe('restoreBackup writes only where createBackup writes', () => {
 
     expect(result.success, String(result.error)).toBe(true);
     expect(existsSync(stale)).toBe(false);
-    // Control: a user's own file with the plain suffix in the same folder stays.
+    // Control: a file of the live folder the restore does not name stays.
     expect(readFileSync(join(lynoxDir, 'memory', 'a.txt'), 'utf-8')).toBe('kept');
   });
 

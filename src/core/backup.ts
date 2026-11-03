@@ -231,19 +231,43 @@ function duplicateEntry(paths: readonly string[]): string | null {
 }
 
 /**
- * The first two paths that differ only in case or Unicode form (`memory/X` and `memory/x`,
- * NFC `é` and NFD `é`). On a filesystem that folds names they are one file, and the second would
- * replace the first; on one that does not, both are real files of their own.
+ * Every pair of paths that a filesystem folding case or the Unicode form would make collide:
+ * two names for one file (`memory/X` and `memory/x`, NFC `é` and NFD `é`), and a file one entry
+ * names where another needs a folder (`memory/A` beside `memory/a/b`: staging the second makes the
+ * folder, and the swap's rename onto it fails after earlier files were replaced). On a filesystem
+ * that does not fold, each is a path of its own. The first path of a pair is the one whose folder
+ * decides. (The same string as a file and as a folder cannot both be in an archive.)
  */
-function foldedPair(paths: readonly string[]): [string, string] | null {
-  const seen = new Map<string, string>();
+function foldedPairs(paths: readonly string[]): Array<[string, string]> {
+  const fold = (p: string): string => p.normalize('NFC').toUpperCase().toLowerCase();
+  const files = new Map<string, string>();
+  const pairs: Array<[string, string]> = [];
   for (const path of paths) {
-    const key = path.normalize('NFC').toUpperCase().toLowerCase();
-    const other = seen.get(key);
-    if (other !== undefined && other !== path) return [other, path];
-    seen.set(key, path);
+    const other = files.get(fold(path));
+    if (other !== undefined && other !== path) pairs.push([other, path]);
+    else files.set(fold(path), path);
   }
-  return null;
+  for (const path of paths) {
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const file = files.get(fold(parts.slice(0, i).join('/')));
+      if (file !== undefined) pairs.push([file, path]);
+    }
+  }
+  return pairs;
+}
+
+/**
+ * The folder whose filesystem decides for `relDir`: itself, or the nearest one above it that exists
+ * (a folder the restore creates inherits how its parent treats names). Never above `root`.
+ */
+function nearestExistingDir(root: string, relDir: string): string {
+  let dir = join(root, relDir);
+  while (dir !== root && dir.startsWith(root + '/')) {
+    try { if (lstatSync(dir).isDirectory()) return dir; } catch { /* not there yet: one up */ }
+    dir = dirname(dir);
+  }
+  return root;
 }
 
 /**
@@ -732,12 +756,27 @@ export class BackupManager {
     }
 
     // Before the safety backup and before anything is staged: a target the swap could not take
-    // would fail it halfway, after earlier files were already replaced. The workspace set is checked
-    // by `stageIn` through its root's anchor.
+    // would fail it halfway, after earlier files were already replaced. The workspace set is not
+    // checked for folded names here: `stageIn` compares its paths as written.
     const dataDirEntries = written.filter(entry => !entry.path.startsWith(WORKSPACE_PREFIX));
-    const folded = foldedPair(dataDirEntries.map(entry => entry.path));
-    if (folded !== null && this.namesFold(this.lynoxDir)) {
-      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names one file twice on this machine, whose filesystem does not tell ${JSON.stringify(folded[0])} from ${JSON.stringify(folded[1])} — refusing to restore; nothing was replaced.` };
+    // Asked in the folder of each pair, not once at the root: a filesystem can fold per folder
+    // (ext4 `chattr +F`, per-directory case sensitivity on NTFS).
+    const folds = new Map<string, boolean>();
+    for (const [a, b] of foldedPairs(dataDirEntries.map(entry => entry.path))) {
+      const dir = nearestExistingDir(this.lynoxDir, dirname(a));
+      let foldsHere = folds.get(dir);
+      if (foldsHere === undefined) {
+        try {
+          foldsHere = this.namesFold(dir);
+        } catch (err: unknown) {
+          const code = (err as { code?: unknown } | null)?.code;
+          return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Could not tell whether this machine's filesystem tells ${JSON.stringify(a)} from ${JSON.stringify(b)}${typeof code === 'string' ? ` (${code})` : ''} — refusing to restore; nothing was replaced.` };
+        }
+        folds.set(dir, foldsHere);
+      }
+      if (foldsHere) {
+        return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names one file twice on this machine, whose filesystem does not tell ${JSON.stringify(a)} from ${JSON.stringify(b)} — refusing to restore; nothing was replaced.` };
+      }
     }
     for (const entry of dataDirEntries) {
       const problem = liveTargetProblem(this.lynoxDir, entry.path);
