@@ -28,7 +28,7 @@
  * catalog — or a non-Voxtral path for non-English text.
  *
  * No usage or rate-limit headers are exposed. Character counting for per-tenant
- * cost attribution happens facade-side. EU-hosted (Mistral La Plateforme, Paris).
+ * cost attribution happens facade-side. Calls Mistral's EU regional endpoint (api.eu.mistral.ai).
  */
 
 import { getErrorMessage } from '../utils.js';

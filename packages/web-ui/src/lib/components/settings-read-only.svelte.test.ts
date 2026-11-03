@@ -251,7 +251,7 @@ describe('ToolToggles', () => {
 
 describe('VoiceSettings', () => {
 	const load = () => import('./VoiceSettings.svelte');
-	const mistral = { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)', available: true };
+	const mistral = { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: true };
 	const routes = (viewer: Viewer) => ({
 		'/voice/info': {
 			speech_service_off: false,
@@ -268,7 +268,8 @@ describe('VoiceSettings', () => {
 		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('voice.save'));
 		expect(rows()).toEqual([
-			line(t('voice.stt_heading'), 'Mistral Voxtral (Paris, EU)'),
+			// The server names Mistral in English; the page shows it in the UI language (de here).
+			line(t('voice.stt_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
 			line(t('voice.tts_heading'), 'Auto'),
 			line(t('voice.tts_voice'), 'paul (de)'),
 		]);

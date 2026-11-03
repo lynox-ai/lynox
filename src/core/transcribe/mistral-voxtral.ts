@@ -13,7 +13,7 @@
  * ignored (verified in Phase 0). Biasing is handled app-side via the glossary
  * post-process — never in the API request.
  *
- * EU-hosted (Mistral La Plateforme, Paris). No US or China-based providers.
+ * Calls Mistral's EU regional endpoint (api.eu.mistral.ai). No US or China-based providers.
  */
 
 import { getErrorMessage } from '../utils.js';

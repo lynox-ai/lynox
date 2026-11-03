@@ -74,7 +74,7 @@ export interface MainChatModel {
 export interface CatalogProviderEntry {
   /**
    * Wire-level provider — what the engine sends to `createLLMClient`. Multiple
-   * UI entries can share a `provider` (e.g. both 'Mistral (EU-Paris)' and
+   * UI entries can share a `provider` (e.g. both 'Mistral (EU)' and
    * generic 'OpenAI-compatible endpoint' serialise to provider='openai'); the
    * UI keys buttons off `preset_id ?? provider` to disambiguate them.
    */
@@ -304,7 +304,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     context_window: 262_144,
     pricing: { input: 1.50, output: 7.50 },
     capabilities: ['tool_use'],
-    residency: 'EU-Paris (Mistral SAS)',
+    residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'The Mistral deep tier — a newer, stronger generation than Large 3 for deep reasoning and analysis (Large is being deprecated to legacy). 262k context, native prompt-cache. Text-only (no vision). Note Mistral has no 1M-context deep.',
   },
   {
@@ -314,7 +314,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     context_window: 256_000,
     pricing: { input: 0.50, output: 1.50 },
     capabilities: ['vision', 'tool_use'],
-    residency: 'EU-Paris (Mistral SAS)',
+    residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'Being deprecated to legacy — Medium 3.5 is the stronger deep now. Cheaper ($0.50/$1.50) and multimodal (vision), but weaker on deep analysis. 256k context, native prompt-cache.',
   },
   {
@@ -324,7 +324,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     context_window: 262_144,
     pricing: { input: 0.20, output: 0.20 },
     capabilities: ['vision', 'tool_use'],
-    residency: 'EU-Paris (Mistral SAS)',
+    residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'Gen-3 mid model, text+vision. Strong tool-ROUTER (100% Set-Bench) but below the R1/R3 orchestration floor as a main — the balanced tier now resolves to Medium 3.5 (WS2); 14B stays a catalog extra.',
   },
   {
@@ -334,7 +334,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     context_window: 131_072,
     pricing: { input: 0.10, output: 0.10 },
     capabilities: ['vision', 'tool_use'],
-    residency: 'EU-Paris (Mistral SAS)',
+    residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'Cheapest Mistral model. Orchestration, classification, routing. Gen-3 multimodal (text+vision).',
   },
   {
@@ -344,7 +344,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     context_window: 262_144,
     pricing: { input: 0.15, output: 0.15 },
     capabilities: ['vision', 'tool_use'],
-    residency: 'EU-Paris (Mistral SAS)',
+    residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'Recommended fast-tier default. Gen-3 multimodal (text+vision). 100% pass on all 8 bench axes at $0.00006–$0.00038 warm per loop.',
   },
 ];
