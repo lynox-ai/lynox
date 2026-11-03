@@ -266,7 +266,8 @@
 
 	/** Write on a run that halted while writing (`bulkResumeKind`), against the checksum of the
 	 *  run as this page showed it: a run that changed since is refused, never written on. A run
-	 *  halted at its maximum writes on only under the higher maximum the owner typed. */
+	 *  halted at its maximum writes on only under the higher maximum the owner typed. `check` is
+	 *  the same resume: its pass would send nothing and only reads the unclear targets. */
 	function resume(): Promise<void> {
 		return act(async () => {
 			if (!run?.checksum) return t('common.load_failed');
@@ -276,7 +277,7 @@
 				const max = bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run));
 				if (max === null) return tf('bulk.resume.max_more', { max: String(run.maxTargets ?? 0), all: String(bulkWriting(run)) });
 				body['maxTargets'] = max;
-			} else if (kind !== 'write') {
+			} else if (kind !== 'write' && kind !== 'check') {
 				return t('common.load_failed');
 			}
 			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body));
@@ -594,13 +595,20 @@
 								{/if}
 							</div>
 						{/if}
-						<p class="text-sm text-text-muted">{resumeText.kept}</p>
+						{#if resumeText.check}
+							<p class="text-sm">{resumeText.check}</p>
+						{/if}
+						{#if resumeText.kept}
+							<p class="text-sm text-text-muted">{resumeText.kept}</p>
+						{/if}
 						{#if resumeText.allows}
 							<p class="text-sm">{resumeText.allows}</p>
 						{/if}
-						<p class="text-sm text-text-muted">{t('bulk.resume.window')}</p>
+						{#if resumeKind !== 'check'}
+							<p class="text-sm text-text-muted">{t('bulk.resume.window')}</p>
+						{/if}
 						<div class="flex flex-wrap gap-2">
-							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{t('bulk.resume.write')}</button>
+							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{t(resumeKind === 'check' ? 'bulk.resume.check' : 'bulk.resume.write')}</button>
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
 					{/if}

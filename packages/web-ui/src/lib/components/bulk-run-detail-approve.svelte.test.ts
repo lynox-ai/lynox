@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // The approval of a preview: the owner sees every target, why lynox leaves one out, can take one
@@ -26,7 +26,7 @@ function makeRun(o: Partial<BulkRunDetailData> = {}): BulkRunDetailData {
 		id: 'r1', createdAt: '2026-10-28T00:00:00Z', targetSystem: 'http:demo.myshopify.com', phase: 'previewed', total: 3,
 		changes: { update: 1, create: 0, delete: 0, unchanged: 1, invalid: 1 }, applied: 0, failed: 0, conflicts: 0, sentUnknown: 0, undone: 0,
 		kind: 'apply', atomic: false, sourceRunId: null, writeMethod: null, probeConfirmed: false, writeForm: 'measured', haltReason: null, haltKey: null,
-		costUsd: 0, costCapUsd: null, judge: null, maxTargets: null, failedOnce: null, failureLimit: 0, resumeOpen: 0, resumeTries: 0, deselected: 0,
+		costUsd: 0, costCapUsd: null, judge: null, maxTargets: null, failedOnce: null, failureLimit: 0, resumeOpen: 0, resumeTries: 0, resumeSends: 0, deselected: 0,
 		checksum: 'c1', writeFormNote: null, writeFormConfirmation: null, judgeModel: null, resumesAt: null, probe: null, undoable: 0,
 		listFirstPage: null, listStartChecksum: null, listNote: null, judgeRule: null, judgeRuleHash: null, judgeServedBy: null, judgeOwnKey: false,
 		...o,
@@ -200,6 +200,33 @@ describe('writing on a halted run', () => {
 		buttonByText(t('bulk.resume.write'))!.click();
 		await settle();
 		expect(target.textContent).toContain('engine English');
+	});
+
+	// U-127: where writing on would send nothing and only read targets an earlier send left
+	// unclear, the button says so, and the resume carries no new maximum.
+	it('offers to check, not to write on, where the next pass would only read the unclear target', async () => {
+		run = makeRun({
+			phase: 'writing', total: 3, haltKey: 'failureRate', haltReason: 'engine reason', maxTargets: 1, probeConfirmed: false,
+			changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0,
+		});
+		await render();
+		expect(buttonByText(t('bulk.resume.write'))).toBeUndefined();
+		expect(target.textContent).not.toContain(t('bulk.resume.window'));
+		expect(target.textContent).toContain(tf('bulk.resume.check_before', { provider: 'demo.myshopify.com' }));
+		buttonByText(t('bulk.resume.check'))!.click();
+		await settle();
+		expect(posts).toEqual([{ url: expect.stringMatching(/\/bulk\/runs\/r1\/resume$/), body: { checksum: 'c1' } }]);
+	});
+
+	it('control: with a target left to send, the same halt writes on', async () => {
+		run = makeRun({
+			phase: 'writing', total: 3, haltKey: 'failureRate', haltReason: 'engine reason', maxTargets: 1, probeConfirmed: false,
+			changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 1,
+		});
+		await render();
+		expect(buttonByText(t('bulk.resume.check'))).toBeUndefined();
+		expect(buttonByText(t('bulk.resume.write'))).toBeDefined();
+		expect(target.textContent).toContain(t('bulk.resume.window'));
 	});
 });
 

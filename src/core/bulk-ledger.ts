@@ -219,6 +219,11 @@ export interface BulkRunStatus {
    *  so the pass reads on to the next one. Below
    *  {@link resumeOpen} when the cap stops the pass first. */
   resumeTries: number;
+  /** Of {@link resumeTries}, the targets the next pass sends the write verb to at most: not one
+   *  left unclear by an earlier send ({@link sentUnknown}), which the pass reads at the host and
+   *  records as written if it holds the planned value, and never sends again. Zero with unclear
+   *  targets open: writing on then only checks them. */
+  resumeSends: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
   conflicts: number;
   /** Targets of an external run that a send reached without a clear answer, and that are not
@@ -307,8 +312,9 @@ export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
  * would file a row this run does not hold (not confirmed yet, or another run's confirmation has
  * since taken the row); `too_many`, more
  * than one target applied, so it can no longer be a probe; `already_first`, its one applied target
- * is recorded as already holding the value, so it is no probe (a send of this run's that got no
- * clear answer may have set it). Null where none of these is known:
+ * is recorded as already holding the value and this run is not known to have sent to it (a run
+ * from before sends were told apart from finds), so it is no probe; one this run sent to without
+ * a clear answer and then found so is `confirm`. Null where none of these is known:
  * a run not approved yet, one whose probe is confirmed already, one whose single applied target
  * is neither, or one that applied nothing but has sent a write ({@link sentCount}). Such a send
  * takes the one place a maximum of one allows; whether writing on sends anything then depends on
@@ -1549,14 +1555,18 @@ export class BulkLedger {
     ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; sentUnknown: number | null };
     const pass = db.prepare(
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
-         SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent
+         SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent,
+         SUM(${RESUMABLE_SQL} AND ${UNCLEAR_SQL}) AS openUnclear
        FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}`,
-    ).get(row.id) as { writing: number; unknown: number | null; failedOnce: number | null; open: number | null; openSent: number | null };
+    ).get(row.id) as { writing: number; unknown: number | null; failedOnce: number | null; open: number | null; openSent: number | null; openUnclear: number | null };
     const open = pass.open ?? 0;
     const openSent = pass.openSent ?? 0;
     const cap = bulkWriteCap(row.max_targets, this.probeHolds(row));
     // A target already sent to takes nothing from the cap; one never sent to takes a place.
     const resumeTries = cap === null ? open : openSent + Math.min(open - openSent, Math.max(0, cap - this.sentCount(row.id)));
+    // An unclear target is sent to by this run already (`write_sent`), so it is in `resumeTries`;
+    // the next pass only reads it at the host and never sends it again.
+    const resumeSends = externalHostOf(row.target_system) === null ? resumeTries : Math.max(0, resumeTries - (pass.openUnclear ?? 0));
     return {
       id: row.id, createdAt: row.created_at, targetSystem: row.target_system, phase: row.phase, undo: row.undo,
       total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, deselected, invalidReasons,
@@ -1567,7 +1577,7 @@ export class BulkLedger {
       sentUnknown: externalHostOf(row.target_system) === null ? 0 : outcome.sentUnknown ?? 0,
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
-      failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries,
+      failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries, resumeSends,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
       probeConfirmed: this.probeHolds(row),
@@ -1896,7 +1906,10 @@ export class BulkLedger {
 
   /** The target {@link confirmProbe} would accept as this run's probe, with its host and
    *  verb: an external apply run that stopped with exactly one applied target, and that one
-   *  written. 'not_found' for no such run; null for a run that holds no probe. */
+   *  written — or sent to by this run without a clear answer and then found holding the planned
+   *  value, which is this run's send having arrived as far as anyone can read it (the owner
+   *  checks it at the host before confirming, like a written one). 'not_found' for no such
+   *  run; null for a run that holds no probe. */
   private probeCandidate(runId: string): { host: string; method: string; key: string; form: ShopifyWriteForm | null } | 'not_found' | null {
     const run = this.runRow(runId);
     if (!run) return 'not_found';
@@ -1906,10 +1919,14 @@ export class BulkLedger {
     if (host === null || method === null || run.kind !== 'apply') return null;
     const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
     const applied = (this.engineDb.getDb().prepare(
-      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0',
-    ).all(runId) as { target_key: string; result: string | null }[]);
+      'SELECT target_key, result, write_sent FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0',
+    ).all(runId) as { target_key: string; result: string | null; write_sent: number }[]);
     const only = applied[0];
-    if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') return null;
+    if (!stopped || applied.length !== 1 || !only || only.result === null) return null;
+    const result = this.engineDb.dec(only.result);
+    // `write_sent`, not `found_unsent = 0` alone: a run from before `unsent_tracked` leaves a
+    // target found so and never sent to at 0 as well.
+    if (result !== 'written' && !(result === 'already' && only.write_sent === 1)) return null;
     return { host, method, key: this.engineDb.dec(only.target_key), form };
   }
 

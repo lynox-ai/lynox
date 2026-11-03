@@ -321,7 +321,7 @@ describe('going on from a run that halted', () => {
 
 	it('offers no way on from a run that rolled back', () => {
 		for (const haltKey of ATOMIC) {
-			const run = { phase: 'aborted' as const, haltKey, probe: null, haltReason: 'x', probeConfirmed: true, maxTargets: null, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 } };
+			const run = { phase: 'aborted' as const, haltKey, probe: null, haltReason: 'x', probeConfirmed: true, maxTargets: null, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 0, resumeSends: 0 };
 			expect(bulkResumeKind(run), haltKey).toBeNull();
 			expect(bulkRestartKind({ ...run, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false }), haltKey).toBeNull();
 			expect(bulkCanUndo({ ...run, kind: 'apply', undoable: 2, atomic: true }), haltKey).toBe(false);
@@ -490,7 +490,7 @@ describe('going on from a run that halted', () => {
 	const w = (haltKey: string, o: Partial<BulkRunDetailData> = {}) => ({
 		phase: 'writing' as BulkRunDetailData['phase'], haltKey, haltReason: 'x', probe: null, targetSystem: 'http:shop.example.invalid',
 		probeConfirmed: true, changes: { update: 1000, create: 0, delete: 0, unchanged: 0, invalid: 0 },
-		maxTargets: 1000, applied: 550, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, ...o,
+		maxTargets: 1000, applied: 550, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, resumeSends: 398, sentUnknown: 0, ...o,
 	});
 	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff'];
 
@@ -522,6 +522,35 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('unavailable', { maxTargets: null }))).toBe('write');
 		// A changed run is past every way on, probe or not.
 		expect(bulkResumeKind(w('checksum', { probeConfirmed: false }))).toBe('none');
+	});
+
+	it('offers to check, not to write on, where the next pass would only read targets an earlier send left unclear', () => {
+		// The measured case: one target, its send unclear, the failure halt. Writing on sends nothing.
+		const unclear = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
+		expect(bulkResumeKind(w('failureRate', unclear))).toBe('check');
+		const one = 'Ob die Änderung bei shop.example.invalid angekommen ist, ist unklar, und lynox schickt sie nicht noch einmal. Nachprüfen liest bei shop.example.invalid nach, ob sie da ist; geschickt wird dabei nichts. Ist sie beim Nachprüfen nicht da, bitte lynox im Chat, für alles, was noch fehlt, einen neuen Lauf zu planen.';
+		const text = bulkResumeText(w('failureRate', unclear), true, DE);
+		// Checking sends nothing: no "before you continue writing", nothing said to be tried.
+		expect([text?.check, text?.before, text?.kept, text?.soFar, text?.allows]).toEqual([one, null, null, null, null]);
+		// After a check that did not find it, the run is at its maximum and still only checks.
+		expect(bulkResumeKind(w('maxTargets', unclear))).toBe('check');
+		expect(bulkResumeText(w('maxTargets', unclear), true, DE)?.check).toBe(one);
+		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 3 }), true, EN)?.check).toBe('It is unclear whether 3 changes reached shop.example.invalid, and lynox does not send them again. Check again looks in shop.example.invalid whether they are there; nothing is sent. If some are not there when you check, ask lynox in a chat to plan a new run for anything still missing.');
+		// A halt's own step still comes first.
+		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.';
+		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(reconnect);
+		// Anything left to send: writing on, as before.
+		expect(bulkResumeKind(w('failureRate', { ...unclear, resumeSends: 1 }))).toBe('write');
+		expect(bulkResumeKind(w('failureRate', { ...unclear, sentUnknown: 0 }))).toBe('write');
+		expect(bulkResumeText(w('failureRate', { ...unclear, resumeSends: 1 }), true, DE)?.check).toBeNull();
+		// With a probe, a run at its maximum is offered a higher one, which checks them too.
+		expect(bulkResumeKind(w('maxTargets', { ...unclear, probeConfirmed: true }))).toBe('max');
+		expect(bulkResumeKind(w('unavailable', { ...unclear, probeConfirmed: true, maxTargets: 10 }))).toBe('check');
+		// Without one, the engine refuses any resume above one target: nothing is offered.
+		expect(bulkResumeKind(w('unavailable', { ...unclear, maxTargets: 2 }))).toBeNull();
+		// A halt the page cannot write on from, and a changed run, stay as they were.
+		expect(bulkResumeKind(w('superseded', unclear))).toBeNull();
+		expect(bulkResumeKind(w('checksum', unclear))).toBe('none');
 	});
 
 	it('places every halt the engine names for a write run', () => {
@@ -566,7 +595,7 @@ describe('going on from a run that halted', () => {
 		});
 		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
 		// No way on past a changed run: no promise of what writing on keeps.
-		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, kept: null, soFar: null, allows: null });
+		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, kept: null, soFar: null, allows: null });
 	});
 
 	it('says all the rest is tried only when the maximum does not stop the pass first', () => {
