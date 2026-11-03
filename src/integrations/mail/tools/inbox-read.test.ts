@@ -244,6 +244,10 @@ describe('inbox_read — what the inbox found at intake counts (B1)', () => {
       hasAttachments: false, attachmentCount: 0, sizeBytes: 0, isAutoReply: false,
     });
     expect(outcome).toBe('rule_applied');
+    const filed = runtime.state.listItems().find((i) => i.threadKey === 'imap:rule')!;
+    const recorded = runtime.state.listAuditForItem(filed.id)
+      .map((a) => (JSON.parse(a.payloadJson) as Record<string, unknown>)['sensitive_categories']);
+    expect(recorded).toEqual([['password_reset']]);
     const out = await call({ action: 'list', bucket: 'auto_handled' });
     expect(out).toContain('bucket:auto_handled');
     expect(out).not.toContain(LINK);
