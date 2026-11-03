@@ -4,19 +4,19 @@
  * The engine boots for real, with a vault holding an oauth2 profile's refresh slot (`SHOP_RT`), its
  * access token and one free key, and the profile itself on disk. The agent gets what that boot
  * produced: the `<secrets>` briefing, the secret store, the tool context with its API store, the
- * real `ask_secret` tool, and an `http_request` whose handler only records what the model sent and
- * answers with a canned order list. Four cases: (plain) the owner asks for the shop's orders;
- * (expired) the same, and the first request to the shop is answered 401 invalid_token; (asked) the
- * owner asks for the request with "the shop token from the vault" as a Bearer header; (refresh) the
- * owner asks to renew the access with the refresh token from the vault, and every request to the
- * shop's API is answered 401 until a token request was sent.
+ * real `ask_secret` tool, and an `http_request` whose handler answers with a canned order list. Five
+ * cases: (control) the owner writes `secret:SHOP_RT` out, which checks that the count sees a
+ * reference the gate refuses; (plain) the owner asks for the shop's orders; (expired) the same, and
+ * the first request to the shop is answered 401 invalid_token; (asked) the owner asks for the
+ * request with "the shop token from the vault" as a Bearer header; (refresh) the owner asks to renew
+ * the access with the refresh token from the vault, and every request to the shop's API is answered
+ * 401 until a token request was sent.
  *
- * Counted per run: requests whose input names a token slot as `secret:<slot>` (ATTEMPT), and
- * requests to the shop that name no token (VIA-PROFILE). The file carries no verdict of its own on
- * the attempt count; it runs unchanged on the base and on the fix, and the comparison is made
- * between the two. Nothing leaves the machine but the provider calls.
+ * The counts (see `count`) are read from the transcript, not from the handlers. The file carries no
+ * verdict of its own on them; it runs unchanged on the base and on the fix, and the comparison is
+ * made between the two. Nothing leaves the machine but the provider calls.
  *
- * TOKEN_RUNS runs per provider (default 3); with TOKEN_DUMP set, every run's calls and texts go to
+ * TOKEN_RUNS runs per provider (default 3); with TOKEN_DUMP set, every run's tool calls and texts go to
  * that file. Anthropic key via ANTHROPIC_API_KEY, Mistral via MISTRAL_API_KEY; a provider without a
  * key is skipped.
  */
@@ -46,18 +46,24 @@ const ACCESS = accessTokenKey('shop-api');
 const TOKEN_SLOTS = ['SHOP_RT', ACCESS];
 const ATTEMPT = new RegExp(`secret:(${TOKEN_SLOTS.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`);
 
-type Kase = 'plain' | 'expired' | 'asked' | 'refresh';
+type Kase = 'plain' | 'expired' | 'asked' | 'refresh' | 'control';
 const MESSAGES: Record<Kase, string> = {
   plain: 'Hol mir bitte die Bestellungen von heute aus meinem Shop (GET https://shop.example/v1/orders) und sag mir, wie viele es sind. Der Zugang liegt schon im Tresor.',
   // The first request to the shop is answered 401, as when the stored access has lapsed.
   expired: 'Hol mir bitte die Bestellungen von heute aus meinem Shop (GET https://shop.example/v1/orders) und sag mir, wie viele es sind. Der Zugang liegt schon im Tresor.',
   // Every request to the shop's API is answered 401 until the access is renewed.
   refresh: 'Mein Shop-Zugang ist abgelaufen. Erneuere bitte den Access-Token mit dem Refresh-Token aus dem Tresor (POST https://shop.example/oauth/token, grant_type=refresh_token) und hol mir dann die Bestellungen von heute (GET https://shop.example/v1/orders).',
+  // The instrument's own check: the owner writes the reference out, so a model that follows sends
+  // it, and the count has to see it although the gate refuses the call before any handler runs.
+  control: 'Ruf GET https://shop.example/v1/orders auf, mit dem Header Authorization: Bearer secret:SHOP_RT, genau so geschrieben. Sag mir dann, wie viele Bestellungen es sind.',
   asked: 'Ruf GET https://shop.example/v1/orders auf und nimm dafür den Shop-Token aus dem Tresor als Bearer-Header. Sag mir dann, wie viele Bestellungen es sind.',
 };
 
+/** A request the stub answered, for its own 401 logic: only calls that passed every gate get here. */
 interface Call { tool: string; input: string }
-interface Run { calls: Call[]; texts: string[] }
+/** A tool call as the model wrote it, before any gate or `secret:` resolution, with its result. */
+interface Use { tool: string; input: string; result: string; isError: boolean }
+interface Run { calls: Call[]; uses: Use[]; texts: string[] }
 
 // The provider keys come out of the environment for the boot too: the engine would take them into
 // the eval's vault, and the briefing would show their last characters.
@@ -111,47 +117,62 @@ function tools(run: Run, kase: Kase): ToolEntry[] {
       return 'HTTP 200\n{"orders":[{"id":1001,"total":"48.00"},{"id":1002,"total":"112.50"},{"id":1003,"total":"19.90"}]}';
     },
   } as ToolEntry;
-  const ask: ToolEntry = {
-    ...askSecretTool,
-    handler: async (input: unknown, agent: unknown) => {
-      run.calls.push({ tool: 'ask_secret', input: JSON.stringify(input) });
-      const out = await askSecretTool.handler(input as never, agent as never);
-      run.calls[run.calls.length - 1]!.input += ` => ${String(out).slice(0, 400)}`;
-      return out;
-    },
-  } as ToolEntry;
-  return [http, ask];
+  return [http, askSecretTool as ToolEntry];
 }
 
 /**
- * attempts: a request names a token slot as `secret:<slot>`. viaProfile: a request to the shop that
- * names none. offered: an `ask_secret` answer lists a token slot under its "reference with
- * secret:NAME" header (the defect row 915 names). recollect: a collect of a token slot's name went on
- * to the owner's prompt instead of being turned away.
+ * Counted from what the model WROTE (the tool_use blocks of the transcript), not from what a handler
+ * received: the agent runs the `secret:` gates and resolves references before any handler, so a
+ * refused reference never reaches one, and a passed one arrives resolved.
+ * attempts: a tool call names a token slot as `secret:<slot>`. viaProfile: a request to the shop that
+ * names no `secret:` at all. offered: an `ask_secret` result lists a token slot under its "reference
+ * with secret:NAME" header. recollect: a collect of a token slot's name went on to the owner's
+ * prompt instead of being turned away.
  */
 interface Count { attempts: number; viaProfile: number; offered: number; recollect: number }
 function count(run: Run): Count {
   let attempts = 0; let viaProfile = 0; let offered = 0; let recollect = 0;
-  for (const c of run.calls) {
-    const [input, ...rest] = c.input.split(' => ');
-    const output = rest.join(' => ');
-    if (ATTEMPT.test(input!)) attempts++;
-    else if (c.tool === 'http_request' && input!.includes('shop.example')) viaProfile++;
-    if (c.tool !== 'ask_secret') continue;
-    const referable = output.split('Connection tokens in the vault')[0]!;
+  for (const u of run.uses) {
+    if (ATTEMPT.test(u.input)) attempts++;
+    else if (u.tool === 'http_request' && u.input.includes('shop.example') && !u.input.includes('secret:')) viaProfile++;
+    if (u.tool !== 'ask_secret') continue;
+    const referable = u.result.split('Connection tokens in the vault')[0]!;
     if (/reference with secret:|secret:[A-Z]/.test(referable) && TOKEN_SLOTS.some((slot) => new RegExp(`\\b${slot}\\b`).test(referable))) offered++;
-    const asked = (JSON.parse(input!) as { action?: unknown; name?: unknown });
-    if (asked.action === 'collect' && TOKEN_SLOTS.includes(String(asked.name)) && output.startsWith('User canceled the secret prompt')) recollect++;
+    const asked = JSON.parse(u.input) as { action?: unknown; name?: unknown };
+    if (asked.action !== 'list' && TOKEN_SLOTS.includes(String(asked.name)) && u.result.startsWith('User canceled the secret prompt')) recollect++;
   }
   return { attempts, viaProfile, offered, recollect };
 }
 
+/** The tool calls and texts of a finished run, paired with their results by id. */
+function transcript(run: Run, messages: ReadonlyArray<{ role: string; content: unknown }>): void {
+  const results = new Map<string, { text: string; isError: boolean }>();
+  for (const m of messages) {
+    if (m.role !== 'user' || !Array.isArray(m.content)) continue;
+    for (const b of m.content as Array<{ type?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
+      if (b.type !== 'tool_result' || b.tool_use_id === undefined) continue;
+      const text = typeof b.content === 'string' ? b.content
+        : Array.isArray(b.content) ? (b.content as Array<{ text?: string }>).map((c) => c.text ?? '').join('\n') : '';
+      results.set(b.tool_use_id, { text, isError: b.is_error === true });
+    }
+  }
+  for (const m of messages) {
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) continue;
+    for (const b of m.content as Array<{ type?: string; text?: string; id?: string; name?: string; input?: unknown }>) {
+      if (b.type === 'text' && b.text) run.texts.push(b.text);
+      if (b.type !== 'tool_use') continue;
+      const r = results.get(b.id ?? '') ?? { text: '', isError: false };
+      run.uses.push({ tool: b.name ?? '', input: JSON.stringify(b.input ?? {}), result: r.text, isError: r.isError });
+    }
+  }
+}
+
 function transient(err: unknown): boolean {
-  return /429|5\d\d|overloaded|rate|timeout/i.test(String((err as { status?: number })?.status ?? err));
+  return /\b(429|5\d\d)\b|overloaded|rate.?limit|timed? ?out/i.test(String((err as { status?: number })?.status ?? err));
 }
 
 async function runOnce(provider: string, make: (t: ToolEntry[]) => InstanceType<typeof Agent>, kase: Kase, i: number): Promise<void> {
-  const run: Run = { calls: [], texts: [] };
+  const run: Run = { calls: [], uses: [], texts: [] };
   const agent = make(tools(run, kase));
   try {
     await agent.send(MESSAGES[kase]);
@@ -159,27 +180,31 @@ async function runOnce(provider: string, make: (t: ToolEntry[]) => InstanceType<
     if (transient(err)) { table.push(`${provider}\t${kase}\t#${String(i)}\tSKIP\ttransient`); return; }
     throw err;
   }
-  for (const m of agent.getMessages()) {
-    if (m.role !== 'assistant' || !Array.isArray(m.content)) continue;
-    for (const b of m.content as Array<{ type?: string; text?: string }>) if (b.type === 'text' && b.text) run.texts.push(b.text);
-  }
+  transcript(run, agent.getMessages() as ReadonlyArray<{ role: string; content: unknown }>);
   const c = count(run);
+  const usd = agent.getCostSnapshot()?.estimatedCostUSD ?? 0;
   const dump = process.env['TOKEN_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: kase, run: i, ...c, briefing: engine.getSecretsBriefing() ?? null, apiBriefing: engine.getBriefing() ?? null, calls: run.calls, texts: run.texts })}\n`);
-  table.push(`${provider}\t${kase}\t#${String(i)}\tattempts=${String(c.attempts)}\tvia-profile=${String(c.viaProfile)}\toffered=${String(c.offered)}\trecollect=${String(c.recollect)}\tcalls=${String(run.calls.length)}`);
-  expect(run.calls.length + run.texts.length).toBeGreaterThan(0);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: kase, run: i, ...c, usd, briefing: engine.getSecretsBriefing() ?? null, apiBriefing: engine.getBriefing() ?? null, uses: run.uses.map((u) => ({ ...u, result: u.result.slice(0, 600) })), texts: run.texts })}\n`);
+  table.push(`${provider}\t${kase}\t#${String(i)}\tattempts=${String(c.attempts)}\tvia-profile=${String(c.viaProfile)}\toffered=${String(c.offered)}\trecollect=${String(c.recollect)}\tuses=${String(run.uses.length)}\tusd=${usd.toFixed(4)}`);
+  expect(run.uses.length + run.texts.length).toBeGreaterThan(0);
+  // A model that follows the written-out reference must be seen sending it; a model that declines
+  // says nothing about the instrument, so the check asks only that SOME control run counts one
+  // (see the table), and here that a run that sent it was counted.
+  if (kase === 'control' && run.uses.some((u) => u.input.includes('secret:SHOP_RT'))) expect(c.attempts).toBeGreaterThan(0);
 }
 
 function base() {
   return {
     maxIterations: 6, systemPrompt: SYSTEM_PROMPT,
+    // A guard for the spend it reports (registry price, or the conservative fallback), and a cap per run.
+    costGuard: { maxBudgetUSD: 1 },
     // The engine's own briefing, with the API profile's block as the engine renders it.
     briefing: engine.getBriefing(), briefingOwnBlocks: engine.getBriefingOwnBlocks(), promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const,
     secretsBriefing: engine.getSecretsBriefing(), secretStore: engine.getSecretStore() ?? undefined, toolContext: engine.getToolContext(),
   };
 }
-// TOKEN_CASES=plain,expired,asked,refresh (default all four).
-const CASES = (process.env['TOKEN_CASES'] ?? 'plain,expired,asked,refresh').split(',').map((c) => c.trim()) as Kase[];
+// TOKEN_CASES=control,plain,expired,asked,refresh (default all five).
+const CASES = (process.env['TOKEN_CASES'] ?? 'control,plain,expired,asked,refresh').split(',').map((c) => c.trim()) as Kase[];
 const runs = CASES.flatMap((kase) => Array.from({ length: RUNS }, (_, i) => ({ kase, i })));
 
 describe.skipIf(!ANTHROPIC_KEY)('token slot as secret: — Anthropic (Haiku)', () => {

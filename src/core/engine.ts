@@ -1806,7 +1806,7 @@ export class Engine {
       // engine restart re-projects it.
       this._toolContext.apiStore = this._apiStore;
       // The `<secrets>` briefing was rendered before any profile was known; now that they are,
-      // the names that hold a connection's token come out of it (the `secret:` gate refuses them).
+      // the names that hold a connection's token are listed apart, as used through their profile.
       if (this.secretStore && this.secretsBriefing !== undefined) {
         const apiStore = this._apiStore;
         this.secretsBriefing = renderSecretsBriefing(this.secretStore, (n) => connectionTokenHolders(apiStore, n));

@@ -17,7 +17,7 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, lapsedSlots, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, oneLineInBriefing, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, lapsedSlots, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
@@ -592,21 +592,22 @@ export const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
 
 /**
  * Who holds a connection's token, for a text the model reads: the profile's name when exactly one
- * stored profile holds it, else nothing. `String()` because a name read from a stored file may be
- * a number, which `collapseToSingleLine` does not take; one line and bounded because a stored
- * name is not shaped by the engine.
+ * stored profile holds it, else nothing. Cleaned as the API block of the same briefing cleans it
+ * (`oneLineInBriefing`: no format or default-ignorable characters, `<` escaped), and bounded,
+ * because a stored name is not shaped by the engine. `String()` because a name read from a stored
+ * file may be a number. Callers quote it with `JSON.stringify`, so a `"` in it cannot end the quote.
  */
 const HOLDER_MAX_CHARS = 64;
 export function connectionTokenHolderName(holders: readonly { name: unknown }[]): string | null {
   if (holders.length !== 1) return null;
-  const name = [...collapseToSingleLine(String(holders[0]!.name).replace(FORGING_CHARS, ''))];
+  const name = [...collapseToSingleLine(oneLineInBriefing(String(holders[0]!.name)))];
   return name.length > HOLDER_MAX_CHARS ? `${name.slice(0, HOLDER_MAX_CHARS - 1).join('')}…` : name.join('');
 }
 
 /** `NAME of profile "X"`, or the name alone when no single profile holds it. */
 export function describeConnectionToken(name: string, holders: readonly { name: unknown }[]): string {
   const who = connectionTokenHolderName(holders);
-  return `${name}${who === null ? '' : ` of profile "${who}"`}`;
+  return `${name}${who === null ? '' : ` of profile ${JSON.stringify(who)}`}`;
 }
 
 /**

@@ -172,8 +172,14 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     //    legitimately holds more than one distinct key, so blocking here would dead-end a
     //    genuine second key (and tempt referencing the WRONG existing one). Surface the
     //    sibling as a non-blocking hint on the prompt and STILL collect.
-    const matches = agent.secretStore?.findNameMatches?.(input.name) ?? [];
     const holdersOf = tokenHoldersFor(agent);
+    // `findNameMatches` leaves out the requested name itself. A token under exactly that name is
+    // the case that matters most (collecting it would overwrite the connection's token), so it is
+    // added here and turned away below like a near-identical one.
+    const matches = [
+      ...(agent.secretStore?.findNameMatches?.(input.name) ?? []),
+      ...(agent.secretStore && holdersOf(input.name).length > 0 ? [input.name] : []),
+    ];
     const isToken = new Set(matches.filter(n => holdersOf(n).length > 0));
     const normName = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
     const reqNorm = normName(input.name);
@@ -185,7 +191,7 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     if (exactMatches.length > 0 && exactFree.length === 0) {
       const named = exactMatches.map(n => {
         const who = connectionTokenHolderName(holdersOf(n));
-        return `"${n}"${who === null ? '' : ` (profile "${who}")`}`;
+        return `"${n}"${who === null ? '' : ` (profile ${JSON.stringify(who)})`}`;
       }).join(', ');
       return `A key with the same name is already in the vault and holds a connection's token: ${named}. ` +
         `It is used through that API profile, not referenced with secret:, and not collected again. ` +
