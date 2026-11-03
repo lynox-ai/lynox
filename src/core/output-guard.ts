@@ -132,10 +132,10 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
  */
 const OWN_CLOSER = '\n</untrusted_data>';
 
-export function scanRegionOf(result: string, ownBlocks: readonly string[] | undefined): string {
-  if (!ownBlocks || ownBlocks.length === 0) return result;
-  const taken: Array<[number, number]> = [];
-  const closers: number[] = [];
+/** Where each own block sits in `result`: each found at most once, never overlapping, by start. */
+function locateOwnBlocks(result: string, ownBlocks: readonly string[] | undefined): Array<{ at: number; stop: number; block: string }> {
+  if (!ownBlocks || ownBlocks.length === 0) return [];
+  const found: Array<{ at: number; stop: number; block: string }> = [];
   for (const block of ownBlocks) {
     if (!block.endsWith(OWN_CLOSER)) continue;
     let from = 0;
@@ -143,14 +143,17 @@ export function scanRegionOf(result: string, ownBlocks: readonly string[] | unde
       const at = result.indexOf(block, from);
       if (at < 0) break;
       const stop = at + block.length;
-      if (taken.some(([a, b]) => at < b && stop > a)) { from = at + 1; continue; }
-      taken.push([at, stop]);
-      closers.push(stop - OWN_CLOSER.length);
+      if (found.some((f) => at < f.stop && stop > f.at)) { from = at + 1; continue; }
+      found.push({ at, stop, block });
       break;
     }
   }
+  return found.sort((a, b) => a.at - b.at);
+}
+
+export function scanRegionOf(result: string, ownBlocks: readonly string[] | undefined): string {
+  const closers = locateOwnBlocks(result, ownBlocks).map((f) => f.stop - OWN_CLOSER.length);
   if (closers.length === 0) return result;
-  closers.sort((a, b) => a - b);
   // Each closer is replaced by the newline it consumed, NOT by nothing. That
   // newline is the last character of the body, and three patterns need it: `role
   // impersonation` (/^(assistant|human):\s/im) and both `provenance marker
@@ -164,6 +167,54 @@ export function scanRegionOf(result: string, ownBlocks: readonly string[] | unde
     cursor = at + OWN_CLOSER.length;
   }
   return out + result.slice(cursor);
+}
+
+/**
+ * Where a briefing's injection warning belongs: on the whole briefing, on some of the
+ * engine's own blocks in it, or nowhere.
+ *
+ * A block the engine wrapped already carries its own warning when its body was flagged
+ * (`wrapUntrustedData`). If every hit in the briefing comes from such blocks, the briefing
+ * as a whole needs no warning, only a pointer to them: a warning on the whole briefing makes
+ * the model choose between all of lynox's context and none (1027's staging run, where
+ * Sonnet dropped the agent performance block and the API profiles with it).
+ *
+ * The whole briefing is warned whenever the hit cannot be placed inside those blocks: a hit
+ * in text the engine did not wrap, a pattern the per-block scans do not find themselves
+ * (one that spans a block's edge, or one the scan's windows cut differently), or no flagged
+ * block at all. Noisy, never open.
+ */
+export type BriefingInjection =
+  | { readonly scope: 'none' }
+  | { readonly scope: 'whole' }
+  | { readonly scope: 'parts'; readonly sources: readonly string[] };
+
+const OWN_SOURCE = /^<untrusted_data source="([^"]*)">/;
+
+export function briefingInjection(briefing: string, ownBlocks: readonly string[] | undefined): BriefingInjection {
+  const all = detectInjectionAttempt(scanRegionOf(briefing, ownBlocks));
+  if (!all.detected) return { scope: 'none' };
+  const located = locateOwnBlocks(briefing, ownBlocks);
+  // Everything outside the engine's blocks, each block replaced by a line break.
+  let outside = '';
+  let cursor = 0;
+  for (const f of located) {
+    outside += briefing.slice(cursor, f.at) + '\n';
+    cursor = f.stop;
+  }
+  outside += briefing.slice(cursor);
+  if (detectInjectionAttempt(outside).detected) return { scope: 'whole' };
+  const covered = new Set<string>();
+  const sources: string[] = [];
+  for (const f of located) {
+    const patterns = detectInjectionAttempt(scanRegionOf(f.block, [f.block])).patterns;
+    if (patterns.length === 0) continue;
+    for (const p of patterns) covered.add(p);
+    const source = OWN_SOURCE.exec(f.block)?.[1] ?? 'untrusted_data';
+    if (!sources.includes(source)) sources.push(source);
+  }
+  if (sources.length === 0 || !all.patterns.every((p) => covered.has(p))) return { scope: 'whole' };
+  return { scope: 'parts', sources };
 }
 
 /**
