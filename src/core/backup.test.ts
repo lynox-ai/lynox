@@ -652,8 +652,8 @@ describe('restoreBackup writes only where createBackup writes', () => {
     try {
       const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
       expect(result.success).toBe(true);
-      const lines = write.mock.calls.map(([chunk]) => String(chunk)).filter(l => l.includes('restore left'));
-      expect(lines).toEqual(['[lynox:backup] restore left 6 entries out (no current area matches their name; they stay in the backup): http-secret, vault.key, a1, a2, a3, …\n']);
+      const lines = write.mock.calls.map(([chunk]) => String(chunk)).filter(l => l.includes('did not write back'));
+      expect(lines).toEqual(['[lynox:backup] restore did not write back 6 of the backup\'s entries (no current area matches their name; they stay in the backup): http-secret, vault.key, a1, a2, a3, …\n']);
     } finally {
       write.mockRestore();
     }
@@ -666,7 +666,7 @@ describe('restoreBackup writes only where createBackup writes', () => {
       const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
       expect(result.success).toBe(true);
       expect(result.skipped).toEqual([]);
-      expect(write.mock.calls.some(([chunk]) => String(chunk).includes('restore left'))).toBe(false);
+      expect(write.mock.calls.some(([chunk]) => String(chunk).includes('did not write back'))).toBe(false);
     } finally {
       write.mockRestore();
     }

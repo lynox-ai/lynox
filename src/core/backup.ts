@@ -836,7 +836,7 @@ export class BackupManager {
 
       // The view shows these once; a reload loses them, so they are also in the log.
       if (skipped.length > 0) {
-        process.stderr.write(`[lynox:backup] restore left ${String(skipped.length)} entries out (no current area matches their name; they stay in the backup): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}\n`);
+        process.stderr.write(`[lynox:backup] restore did not write back ${String(skipped.length)} of the backup's entries (no current area matches their name; they stay in the backup): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}\n`);
       }
       return {
         success: true,
