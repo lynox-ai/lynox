@@ -3536,8 +3536,9 @@ export class WorkerLoop {
     const endedEntry = this.activeTasks.get(task.id);
     // A liveness read that throws is no end found: the run is recorded as a failure and retried,
     // and the plan is not paused for it. The runner stopped the run on its own read (a throw there
-    // counts as ended, `stopForEndedAuthor`), so no step ran; its error, which the escalation and
-    // the end event carry, still says that an access ended.
+    // counts as ended, `stopForEndedAuthor`), so no further step ran; its error, which the end
+    // event carries and, for a run without a webhook event, the escalation, still says that an
+    // access ended.
     const planEnded = (entry: ActiveTask): boolean => { try { return this.#planHasEnded(entry); } catch { return false; } };
     if (result.ok && result.error === WORKFLOW_ENDED_MID_RUN && endedEntry !== undefined && planEnded(endedEntry)) {
       endedEntry.accessEnded = true;
