@@ -1952,6 +1952,8 @@ describe('what a resume after a failure halt may still do', () => {
     // k000 and k002 written, k001 sent and failed: the cap of 3 is spent, and of the 38 open
     // only k001 may still be sent to.
     expect([s.haltReason, s.applied, s.resumeOpen, s.resumeTries]).toEqual([BULK_HALT_REASONS.maxTargets, 2, 38, 1]);
+    // A local writer's failed send is known, so the next pass sends to k001 again.
+    expect([s.sentUnknown, s.resumeSends]).toEqual([0, 1]);
     // The maximum the halt names, which writing on has to go above.
     expect(s.maxTargets).toBe(3);
   });

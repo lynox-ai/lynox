@@ -1126,9 +1126,60 @@ describe('the write verb and the one-target probe', () => {
       s.items.get('/products/1')!['price'] = '15.00';
       await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 1 });
-      // Never sent to (`write_sent` 0): someone else set the value, so it proves nothing about the run.
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).not.toContain('/products/1');
+      // Never sent to: someone else set the value, so it proves nothing about the run.
       expect(ledger.probeKey(runId)).toBeNull();
       expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a target whose send the host refused, found as planned later, is no probe: someone else set it', async () => {
+    const s = shop();
+    s.special.set('PATCH /products/1', { status: 422 });
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      // A clear refusal: nothing unclear, so the next pass may send to it again.
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, failed: 1, sentUnknown: 0, resumeSends: 1 });
+
+      s.special.delete('PATCH /products/1');
+      s.items.get('/products/1')!['price'] = '15.00';
+      expect(ledger.resume(runId, { checksum }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 1 });
+      // The write form failed at the host; the value there is someone else's, so it confirms nothing.
+      expect(ledger.probeKey(runId)).toBeNull();
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: 'already_first' });
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a target whose unclear send was followed by a conflict is not counted among the sends of the next pass', async () => {
+    const s = shop();
+    s.special.set('PATCH /products/1', { status: 303 });
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      s.special.delete('PATCH /products/1');
+      // Someone set a third value: the check finds a conflict, and the run still never sends it again.
+      s.items.get('/products/1')!['price'] = '99.00';
+      expect(ledger.resume(runId, { checksum }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, conflicts: 1, sentUnknown: 0, resumeTries: 1, resumeSends: 0 });
     } finally {
       restore();
     }
