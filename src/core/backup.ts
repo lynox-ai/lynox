@@ -7,9 +7,9 @@
  * All operations are designed to be safe during concurrent lynox operation.
  */
 
-import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
 import { deriveBackupKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
@@ -154,9 +154,10 @@ export interface RestoreResult {
   code?: 'unverified_backup' | 'workspace_sidecar_mode' | undefined;
   provenance?: BackupProvenance | undefined;
   /**
-   * Entries the restore did not write: a name outside the inventory, one renamed since the backup
-   * was made, or a name ending in `.restore-staging` (which `createBackup` does copy when a file
-   * in a backed-up directory carries it). Archive paths. Empty when every entry was restored.
+   * Entries the restore did not write: a name outside the inventory, or one renamed since the
+   * backup was made. Archive paths. Empty when every entry was restored. A restore temp that a
+   * crashed restore left in a backed-up directory (`STAGING_TEMP`) is neither written nor named
+   * here: it is nobody's file.
    */
   skipped?: string[] | undefined;
 }
@@ -186,7 +187,18 @@ const SQLITE_DBS = BACKUP_SQLITE_DBS;
 const COPY_DIRS = BACKUP_COPY_DIRS;
 const COPY_FILES = BACKUP_COPY_FILES;
 
-const STAGING_SUFFIX = '.restore-staging';
+/**
+ * The temp a restore stages an entry to, beside its target: `<name>.<16 hex>.restore-staging`. Random
+ * per entry, so two entries never share one (a filesystem that folds case or the Unicode form makes
+ * `memory/X` and `memory/x` one file, and a fixed temp name then let the second staging delete the
+ * first one's temp). Only this exact shape is reserved: a user's own `notes.restore-staging` is
+ * restored like any other file.
+ */
+const STAGING_TEMP = /\.[0-9a-f]{16}\.restore-staging$/;
+
+function stagingTempFor(destFile: string): string {
+  return `${destFile}.${randomBytes(8).toString('hex')}.restore-staging`;
+}
 
 /**
  * Whether a restore writes this entry: only where `createBackup` writes, a database or file of the
@@ -198,7 +210,7 @@ const STAGING_SUFFIX = '.restore-staging';
  * the temp of its neighbour.
  */
 function isBackedUpEntryPath(path: string): boolean {
-  if (path.endsWith(STAGING_SUFFIX)) return false;
+  if (STAGING_TEMP.test(path)) return false;
   const slash = path.indexOf('/');
   if (slash === -1) return SQLITE_DBS.includes(path) || COPY_FILES.includes(path);
   return COPY_DIRS.includes(path.slice(0, slash));
@@ -214,6 +226,99 @@ function duplicateEntry(paths: readonly string[]): string | null {
   for (const path of paths) {
     if (seen.has(path)) return path;
     seen.add(path);
+  }
+  return null;
+}
+
+/**
+ * Every pair of paths that a filesystem folding case or the Unicode form would make collide:
+ * two names for one file (`memory/X` and `memory/x`, NFC `é` and NFD `é`), and a file one entry
+ * names where another needs a folder (`memory/A` beside `memory/a/b`: staging the second makes the
+ * folder, and the swap's rename onto it fails after earlier files were replaced). On a filesystem
+ * that does not fold, each is a path of its own. The first path of a pair is the one whose folder
+ * decides. (The same string as a file and as a folder cannot both be in an archive.)
+ */
+function foldedPairs(paths: readonly string[]): Array<[string, string]> {
+  const fold = (p: string): string => p.normalize('NFC').toUpperCase().toLowerCase();
+  const files = new Map<string, string>();
+  const pairs: Array<[string, string]> = [];
+  for (const path of paths) {
+    const other = files.get(fold(path));
+    if (other !== undefined && other !== path) pairs.push([other, path]);
+    else files.set(fold(path), path);
+  }
+  for (const path of paths) {
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const file = files.get(fold(parts.slice(0, i).join('/')));
+      if (file !== undefined) pairs.push([file, path]);
+    }
+  }
+  return pairs;
+}
+
+/**
+ * The folder whose filesystem decides for `relDir`: itself, or the nearest one above it that exists
+ * (a folder the restore creates inherits how its parent treats names). Never above `root`.
+ */
+function nearestExistingDir(root: string, relDir: string): string {
+  let dir = join(root, relDir);
+  while (dir !== root && dir.startsWith(root + '/')) {
+    try { if (lstatSync(dir).isDirectory()) return dir; } catch { /* not there yet: one up */ }
+    dir = dirname(dir);
+  }
+  return root;
+}
+
+/**
+ * Whether the filesystem holding `dir` folds names: one file written under a lower-case name with an
+ * accent in NFC form, then looked up in upper case and in NFD form. Either lookup that finds it folds.
+ */
+/** The fold probe's file, of exactly this shape; a crash between writing and removing it leaves it behind. */
+const FOLD_PROBE = /^\.lynox-fold-probe-[0-9a-f]{12}-\u00e9a$/;
+
+export function filesystemFoldsNames(dir: string, exists: (path: string) => boolean = existsSync): boolean {
+  const base = `.lynox-fold-probe-${randomBytes(6).toString('hex')}-\u00e9a`;
+  const probe = join(dir, base);
+  writeFileSync(probe, '', { flag: 'wx', mode: 0o600 });
+  try {
+    return exists(join(dir, base.toUpperCase())) || exists(join(dir, base.normalize('NFD')));
+  } finally {
+    rmSync(probe, { force: true });
+  }
+}
+
+/**
+ * Why a live path cannot take an entry, checked before anything is staged: a symbolic link on the
+ * way inside the data directory (writing through it would land outside), or a directory where the
+ * backup has a file (the swap's rename would fail after earlier files were already replaced).
+ */
+/** Remove what a crashed restore left in `dir`: files and links of exactly `STAGING_TEMP`'s or `FOLD_PROBE`'s shape. */
+function removeStagingTemps(dir: string): void {
+  for (const name of readdirSync(dir)) {
+    if (!STAGING_TEMP.test(name) && !FOLD_PROBE.test(name)) continue;
+    const path = join(dir, name);
+    if (lstatSync(path).isDirectory()) continue;
+    rmSync(path, { force: true });
+  }
+}
+
+function liveTargetProblem(lynoxDir: string, entryPath: string): string | null {
+  const parts = entryPath.split('/');
+  let at = lynoxDir;
+  for (let i = 0; i < parts.length; i++) {
+    at = join(at, parts[i] as string);
+    let st;
+    try {
+      st = lstatSync(at);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+    const last = i === parts.length - 1;
+    if (!last && st.isSymbolicLink()) return `${parts.slice(0, i + 1).join('/')} is a link on this machine; the restore does not write through it`;
+    if (!last && !st.isDirectory()) return `${parts.slice(0, i + 1).join('/')} is a file on this machine, the backup has a folder there`;
+    if (last && st.isDirectory()) return `${entryPath} is a folder on this machine, the backup has a file there`;
   }
   return null;
 }
@@ -537,6 +642,11 @@ export class BackupManager {
 
   // ── Restore ──
 
+  /** Whether the filesystem holding `dir` folds names (`filesystemFoldsNames`); a seam for tests on one that does not. */
+  protected namesFold(dir: string): boolean {
+    return filesystemFoldsNames(dir);
+  }
+
   async restoreBackup(backupPath: string, options: RestoreOptions = {}): Promise<RestoreResult> {
     this._running++;
     try {
@@ -577,7 +687,8 @@ export class BackupManager {
     // backup holding a name the inventory has since renamed must stay restorable.
     const isWritten = (entry: BackupFileEntry): boolean => entry.type !== 'directory' && isBackedUpEntryPath(entry.path);
     const written = manifest.files.filter(isWritten);
-    const skipped = manifest.files.filter(entry => entry.type !== 'directory' && !isWritten(entry)).map(entry => entry.path);
+    // A restore temp left in a backed-up directory is nobody's file: not written, not named.
+    const skipped = manifest.files.filter(entry => entry.type !== 'directory' && !isWritten(entry) && !STAGING_TEMP.test(entry.path)).map(entry => entry.path);
     const duplicate = duplicateEntry(written.map(entry => entry.path));
     if (duplicate !== null) {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path twice — refusing to restore: ${JSON.stringify(duplicate)}` };
@@ -647,6 +758,36 @@ export class BackupManager {
       }
     }
 
+    // Before the safety backup and before anything is staged: a target the swap could not take
+    // would fail it halfway, after earlier files were already replaced. The workspace set is not
+    // checked for folded names here: `stageIn` compares its paths as written.
+    const dataDirEntries = written.filter(entry => !entry.path.startsWith(WORKSPACE_PREFIX));
+    // Asked in the folder of each pair, not once at the root: a filesystem can fold per folder
+    // (ext4 `chattr +F`, per-directory case sensitivity on NTFS).
+    const folds = new Map<string, boolean>();
+    for (const [a, b] of foldedPairs(dataDirEntries.map(entry => entry.path))) {
+      const foldDir = nearestExistingDir(this.lynoxDir, dirname(a));
+      let foldsHere = folds.get(foldDir);
+      if (foldsHere === undefined) {
+        try {
+          foldsHere = this.namesFold(foldDir);
+        } catch (err: unknown) {
+          const code = (err as { code?: unknown } | null)?.code;
+          return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Could not tell whether this machine's filesystem tells ${JSON.stringify(a)} from ${JSON.stringify(b)}${typeof code === 'string' ? ` (${code})` : ''} — refusing to restore; nothing was replaced.` };
+        }
+        folds.set(foldDir, foldsHere);
+      }
+      if (foldsHere) {
+        return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names two paths this machine's filesystem takes for one name, as it does not tell ${JSON.stringify(a)} from ${JSON.stringify(b)} — refusing to restore; nothing was replaced.` };
+      }
+    }
+    for (const entry of dataDirEntries) {
+      const problem = liveTargetProblem(this.lynoxDir, entry.path);
+      if (problem !== null) {
+        return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Refusing to restore: ${problem}. Nothing was replaced.` };
+      }
+    }
+
     // Safety: attempt backup of current state before restore (best-effort, don't block restore on failure)
     let safetyPath = '';
     try {
@@ -676,6 +817,7 @@ export class BackupManager {
       let workspaceStaged: { staged: StagedWrite; release: () => void } | null = null;
       try {
         const workspaceEntries: BackupFileEntry[] = [];
+        const swept = new Set<string>();
         for (const entry of written) {
           // The workspace set is staged through the root's anchor below, never by name: the
           // root may live outside the data dir.
@@ -683,15 +825,19 @@ export class BackupManager {
 
           const srcFile = join(backupPath, entry.path);
           const destFile = join(this.lynoxDir, entry.path);
+          // Checked again here: the safety backup ran in between, and so may anything else.
+          const problem = liveTargetProblem(this.lynoxDir, entry.path);
+          if (problem !== null) throw new Error(`Refusing to restore: ${problem}. Nothing was replaced.`);
 
           // Ensure parent directory exists
           const destDir = join(destFile, '..');
           mkdirSync(destDir, { recursive: true, mode: 0o700 });
+          if (!swept.has(destDir)) { removeStagingTemps(destDir); swept.add(destDir); }
 
-          const tmpFile = `${destFile}.restore-staging`;
+          // A fresh name each time, created exclusively: nothing left over lends it a mode, and no
+          // other entry can delete it.
+          const tmpFile = stagingTempFor(destFile);
           const raw = readEntryBytes(srcFile, entry, manifest.encrypted === true);
-          // A leftover temp would keep its own mode through the rename; start from none.
-          rmSync(tmpFile, { force: true });
           writeFileSync(tmpFile, key !== null ? decryptBuffer(raw, key, entry.path) : raw, { mode: 0o600, flag: 'wx' });
           staged.push({ tmp: tmpFile, dest: destFile });
         }
@@ -730,6 +876,10 @@ export class BackupManager {
         }
       }
 
+      // The view shows these once; a reload loses them, so they are also in the log.
+      if (skipped.length > 0) {
+        process.stderr.write(`[lynox:backup] restore did not write back ${String(skipped.length)} of the backup's entries (no current area matches their name; they stay in the backup): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}\n`);
+      }
       return {
         success: true,
         pre_restore_backup_path: safetyPath,

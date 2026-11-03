@@ -100,6 +100,16 @@ describe('BackupsView wiring', () => {
 	// satisfy. A COUNT of call sites is that: dropping either call makes it 1,
 	// adding a raw-object save path does not make it 2.
 
+	it('shows the entries a restore left out in the view, and the success toast only when there are none (U-132)', () => {
+		// Counts, not absences: one call builds the notice, one block shows it, one control closes it.
+		expect(src.match(/restoreSkippedLines\(/g) ?? []).toHaveLength(1);
+		expect(src.match(/data-testid="restore-skipped"/g) ?? []).toHaveLength(1);
+		expect(src.match(/skippedNotice = null/g) ?? []).toHaveLength(1);
+		// The success toast sits in the branch for a restore that skipped nothing, and nowhere else.
+		expect(src.match(/addToast\(t\('backups\.restore_success'\)/g) ?? []).toHaveLength(1);
+		expect(src).toMatch(/if \(outcome\.skipped\.length > 0\) \{[\s\S]*?\} else \{\s*addToast\(t\('backups\.restore_success'\)/);
+	});
+
 	it('has no control that writes backup_schedule', () => {
 		expect(src).not.toContain('backup_schedule');
 		expect(src).not.toContain('backup-schedule');
@@ -153,7 +163,9 @@ describe('requestRestore', () => {
 
 	it('reports a restore and any other refusal as they are', async () => {
 		vi.stubGlobal('fetch', reply({ success: true }, 200));
-		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'restored' });
+		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'restored', skipped: [], backupPath: null });
+		vi.stubGlobal('fetch', reply({ success: true, skipped: ['memory/old.md', 7], backup_path: '/data/backups/b1' }, 200));
+		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'restored', skipped: ['memory/old.md'], backupPath: '/data/backups/b1' });
 		vi.stubGlobal('fetch', reply({ success: false, error: 'verification failed' }, 500));
 		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'failed', error: 'verification failed' });
 	});
@@ -195,3 +207,4 @@ describe('retentionChangeFromNever', () => {
 		}
 	});
 });
+

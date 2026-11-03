@@ -12945,7 +12945,8 @@ export class LynoxHTTPApi {
         // asks before it sends this.
         const allowUnverified = (body as { allow_unverified?: unknown } | null)?.allow_unverified === true;
         const result = await bm.restoreBackup(backupPath, { allowUnverified });
-        jsonResponse(res, result.success ? 200 : result.code !== undefined ? 409 : 500, result);
+        // `backup_path`: where an entry the restore left out (`skipped`) can still be taken from by hand.
+        jsonResponse(res, result.success ? 200 : result.code !== undefined ? 409 : 500, result.success ? { ...result, backup_path: backupPath } : result);
         // Auto-restart after successful restore so restored data takes effect
         if (result.success) {
           setTimeout(() => { process.exit(0); }, 500);
