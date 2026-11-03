@@ -146,6 +146,7 @@ import type { SessionOptions } from './session.js';
 import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
 import { DEFAULT_PER_JOB_TIMEOUT_MS } from '../integrations/inbox/classifier/queue.js';
+import { inboxDisabledAccounts } from '../integrations/inbox/disabled-accounts.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -914,10 +915,7 @@ export class Engine {
       const folderBlacklist = new Set(
         folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
       );
-      const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-      const disabledAccounts = new Set(
-        disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-      );
+      const disabledAccounts = inboxDisabledAccounts();
       const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
         mailStateDb: this._mailStateDb,
         anthropicClient: this.client,
@@ -950,6 +948,8 @@ export class Engine {
         this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
         // What the classifier made of each mail, for mail_triage.
         this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
+        // The store as the inbox view reads it, for inbox_read.
+        this._mailContext.hooks.inboxReader = runtime.inboxReader;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -2246,10 +2246,7 @@ export class Engine {
           folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
         );
         // Per-account opt-out: comma-separated mail_account ids.
-        const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-        const disabledAccounts = new Set(
-          disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-        );
+        const disabledAccounts = inboxDisabledAccounts();
         const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
           mailStateDb,
           anthropicClient: this.client,
@@ -2294,6 +2291,8 @@ export class Engine {
           this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
           // What the classifier made of each mail, for mail_triage.
           this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
+          // The store as the inbox view reads it, for inbox_read.
+          this._mailContext.hooks.inboxReader = runtime.inboxReader;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —

@@ -50,7 +50,7 @@ export const MANDATE_TOOL_SURFACE: ReadonlySet<string> = new Set([
   'artifact_save', 'artifact_list', 'artifact_delete', 'artifact_history', 'artifact_restore',
   'media_process',
   // integrations the owner connected
-  'mail_read', 'mail_search', 'mail_triage', 'mail_send', 'mail_reply', 'mail_connect',
+  'mail_read', 'mail_search', 'mail_triage', 'mail_send', 'mail_reply', 'mail_connect', 'inbox_read',
   'google_calendar', 'google_docs', 'google_drive', 'google_sheets', 'calendar_read',
 ]);
 
@@ -166,6 +166,7 @@ export const MANDATE_INSIDE_NON_WRITERS: Readonly<Record<string, string>> = Obje
   mail_read: 'reads mail, recorded as a read',
   mail_search: 'reads mail, recorded as a read',
   mail_triage: 'reads mail, recorded as a read',
+  inbox_read: 'reads the inbox store inside the instance',
   mail_send: 'writes outside, recorded by the outward trail',
   mail_reply: 'writes outside, recorded by the outward trail',
   mail_connect: 'asks for a connection; the account write is the owner\'s route, refused for a mandate',
