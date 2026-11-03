@@ -46,8 +46,7 @@ export function inboxLabelText(label: InboxLabel | null): string | null {
 /** The inbox's reason, shown only beside a verdict the list shows: a label it drops has no reason either. */
 export function inboxReasonText(label: InboxLabel | null): string | null {
   if (inboxLabelText(label) === null) return null;
-  const reason = label?.reason?.trim();
-  return reason ? reason : null;
+  return label?.reason?.trim() || null;
 }
 
 /** What the `inbox:` labels mean, shown once above the list when any message carries one. */
