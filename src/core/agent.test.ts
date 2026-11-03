@@ -7363,10 +7363,10 @@ describe('actor trail — a mandate\'s outward read', () => {
     const tool = createInboxReadTool({ inboxReader: reader as never }) as unknown as ToolEntry;
     const mandate = recorder();
     const handler = tool.handler;
-    const spied: ToolEntry = { ...tool, handler: vi.fn(async (input: never, agent: never) => {
+    const spied: ToolEntry = { ...tool, handler: (async (input: never, agent: never) => {
       expect(mandate.recs, 'the row precedes the read').toHaveLength(1);
       return handler(input, agent);
-    }) };
+    }) as ToolEntry['handler'] };
     const r = await run(spied, { action: 'item', id: 'inb_1_abc' }, { principal: MANDATE, auditLog: mandate.log });
     expect(r.resultText).toContain('Vertraulicher');
     expect(mandate.recs).toHaveLength(1);

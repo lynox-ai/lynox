@@ -40,7 +40,10 @@ function payload(n: number, sensitive: InboxQueuePayload['sensitive'] | null = S
       accountAddress: 'me@acme.example', accountDisplayName: 'Me', subject: 'Code',
       fromAddress: 'noreply@bank.example', fromDisplayName: 'Bank', body: 'Ihr Code lautet ******',
     },
-    envelope: { fromAddress: 'noreply@bank.example', subject: 'Code', messageId: `<m${String(n)}@x>` },
+    envelope: {
+      fromAddress: 'noreply@bank.example', fromName: undefined, subject: 'Code', mailDate: undefined,
+      snippet: undefined, messageId: `<m${String(n)}@x>`, inReplyTo: undefined,
+    },
     ...(sensitive !== null && sensitive !== undefined ? { sensitive } : {}),
   };
 }
