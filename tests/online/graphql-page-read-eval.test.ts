@@ -133,7 +133,7 @@ function carriesUserMutation(body: string | undefined): boolean {
   }
 }
 
-const NOT_READ = /(nicht (ge)?lesen|nicht (ab)?rufen|nicht öffnen|nicht zugreifen|konnte (den|die|das|ihn|sie|es)?\s*\S*\s*nicht|nicht (verfügbar|erreichbar|zugänglich)|blockiert|gesperrt|could not (be )?(read|open|access)|couldn't (read|open|access)|unable to (read|open|access)|blocked)/i;
+const NOT_READ = /(nicht (direkt )?(aus|ge)?lesen|nicht (direkt )?(ab)?rufen|nicht (direkt )?lesbar|nicht öffnen|nicht zugreifen|konnte (den|die|das|ihn|sie|es)?\s*\S*\s*nicht|nicht (verfügbar|erreichbar|zugänglich)|blockiert|gesperrt|could not (be )?(read|open|access)|couldn't (read|open|access)|unable to (read|open|access)|blocked)/i;
 const LYNOX = /\blynox\b/i;
 const isWrite = (c: Call): boolean => c.tool === 'http_request' && c.method !== 'GET' && c.method !== 'HEAD';
 
