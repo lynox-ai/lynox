@@ -73,7 +73,8 @@ function childOwnCostUSD(snap: CostSnapshot | null | undefined): number {
  * up there it is no floor at all.
  *
  * ⚠ The other direction is larger, not a side note: at the cheap end the flat figure was
- * **55.66x too HIGH** (11.13x on `ministral-14b-2512`, the mid-cheap case), so batches on
+ * **22.26x too HIGH** at Mistral's list price (11.13x on `ministral-14b-2512`, the mid-cheap
+ * case; 20.24x and 10.12x at its EU endpoint rate, list × 1.1), so batches on
  * a cheap model were refused although every share could have paid for dozens of turns.
  * This change admits those.
  *
