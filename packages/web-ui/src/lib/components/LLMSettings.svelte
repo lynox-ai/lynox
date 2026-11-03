@@ -31,6 +31,7 @@
 	import { buildMainModelOptions, selectMainModelKey, mainModelOptionKey, findMainModelOptionByKey, isExpensiveModel, formatContextWindow, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
+	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 	import { cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
@@ -359,6 +360,9 @@
 				const u = new URL(baseUrl);
 				host = u.hostname.toLowerCase();
 				hostPort = u.host.toLowerCase();
+				// A config saved on Mistral's global endpoint is the Mistral preset too; the
+				// engine reads it as the EU endpoint the preset now names (core catalog.ts).
+				if (host === 'api.mistral.ai') { host = 'api.eu.mistral.ai'; hostPort = host; }
 			} catch { /* invalid — falls through to the generic tile */ }
 			if (host) {
 				const matched = candidates.find((c) => {
@@ -695,7 +699,7 @@
 		// 404s against Ollama, which has never heard of that model.
 		const freeTextModel = entry.models.length === 0;
 		if (entry.base_url_default && !entry.requires_base_url) {
-			// Pinned preset (e.g. Mistral → api.mistral.ai). Stamp it so
+			// Pinned preset (e.g. Mistral → api.eu.mistral.ai). Stamp it so
 			// save→reload round-trips back to this preset and the user
 			// doesn't have to type a URL they didn't choose.
 			config = {
@@ -707,11 +711,12 @@
 			};
 		} else if (entry.requires_base_url
 			&& config.api_base_url
-			&& providers.some((p) => p.base_url_default === config.api_base_url)) {
+			&& (providers.some((p) => p.base_url_default === config.api_base_url) || isMistralPresetBase(config.api_base_url))) {
 			// Switching FROM a pinned preset (Mistral) TO a free-text one
 			// (openai-compat). Detect "the URL we have was stamped by a
 			// pinned preset" via membership in `base_url_default` across
-			// the catalog. Also clear openai_model_id (mistral-large-2512
+			// the catalog — or Mistral's global endpoint, which the preset
+			// stamped before it moved to the EU one. Also clear openai_model_id (mistral-large-2512
 			// pinned against a free-text endpoint would 404 every probe).
 			config = { ...config, api_base_url: '', openai_model_id: '' };
 		} else if (!entry.requires_base_url && !entry.base_url_default) {
@@ -1433,7 +1438,7 @@
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.base_url')}</span>
 					<input type="url" disabled={!loaded || providerLocked}
-						placeholder="https://api.mistral.ai/v1"
+						placeholder="https://api.eu.mistral.ai/v1"
 						bind:value={config.api_base_url} oninput={markDirty}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 				</label>

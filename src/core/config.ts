@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig, ModelProfile, ModelTier, TierSet, TierSlot } from '../types/index.js';
 import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId, modelIdExceedsMaxTier, profileNamed } from '../types/index.js';
-import { isMistralHost } from '../types/index.js';
+import { isMistralHost, toMistralEuBase } from '../types/index.js';
 import { cpSuppliesLLMKey } from '../server/billing-tier.js';
 import { readEnvAlias, envTier } from './env.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
@@ -17,7 +17,7 @@ const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
 
 /** The Mistral endpoints a pool tier's OpenAI-compatible provider may name. */
-export const POOL_MISTRAL_ENDPOINTS: ReadonlySet<string> = new Set([MISTRAL_API_BASE, 'https://api.mistral.ai']);
+export const POOL_MISTRAL_ENDPOINTS: ReadonlySet<string> = new Set([MISTRAL_API_BASE, 'https://api.eu.mistral.ai']);
 /** The one explicit endpoint a pool tier's Anthropic provider may name; unset means the same. */
 export const POOL_ANTHROPIC_ENDPOINT = 'https://api.anthropic.com';
 
@@ -467,6 +467,10 @@ function buildConfig(userConfig: LynoxUserConfig | null, projectConfig: LynoxUse
   if (apiBaseUrl) {
     merged.api_base_url = apiBaseUrl;
   }
+  // Mistral's global endpoint commits to no inference location; the EU regional one commits to
+  // EU/EFTA. A config file or env written before the move still names the global one: read it
+  // as the EU endpoint, so the region, the key promotion and the pool pairing below see it.
+  if (merged.api_base_url) merged.api_base_url = toMistralEuBase(merged.api_base_url);
   if (process.env['LYNOX_EMBEDDING_PROVIDER']) {
     const ep = process.env['LYNOX_EMBEDDING_PROVIDER'];
     if (ep === 'onnx' || ep === 'local') {

@@ -236,7 +236,7 @@ describe('Mistral tier-set', () => {
     expect(MISTRAL_MODEL_MAP.fast).toBe('ministral-8b-2512');
     expect(MISTRAL_MODEL_MAP.balanced).toBe('mistral-medium-2604');
     expect(MISTRAL_MODEL_MAP.deep).toBe('mistral-medium-2604');
-    expect(MISTRAL_API_BASE).toBe('https://api.mistral.ai/v1');
+    expect(MISTRAL_API_BASE).toBe('https://api.eu.mistral.ai/v1');
   });
 
   it('getOpenAIModelMap detects the mistral base URL', () => {

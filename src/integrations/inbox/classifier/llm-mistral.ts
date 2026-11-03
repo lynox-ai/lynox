@@ -1,7 +1,7 @@
 // === Inbox classifier — Mistral EU LLM caller ===
 //
 // Direct REST adapter for Mistral's chat-completions endpoint, used as
-// the EU-resident classifier provider. Hits api.mistral.ai/v1 in
+// the EU-resident classifier provider. Hits api.eu.mistral.ai/v1 in
 // Frankfurt; no third-party SDK, no AnthropicLike shim — the OpenAI
 // adapter in core/openai-adapter.ts only implements `beta.messages.stream`,
 // while the inbox classifier issues a single non-streaming
@@ -22,7 +22,7 @@ import type { LLMCaller } from './index.js';
  * the alias resolved to on that day. What the alias pointed at before then is not recorded.
  */
 export const DEFAULT_MISTRAL_MODEL = 'mistral-small-2603';
-export const DEFAULT_MISTRAL_BASE_URL = 'https://api.mistral.ai/v1';
+export const DEFAULT_MISTRAL_BASE_URL = 'https://api.eu.mistral.ai/v1';
 export const DEFAULT_MAX_TOKENS = 256;
 
 export interface MistralEuOptions {
