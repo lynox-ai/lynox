@@ -424,10 +424,8 @@ export async function previewManagedGoogleClaim(claimNonce: string, timeoutMs = 
 	}
 }
 
-/** Claims the parked grant; true only when the engine took it. */
-export async function claimManagedGoogleTokens(claimNonce: string): Promise<boolean> {
+export async function claimManagedGoogleTokens(claimNonce: string): Promise<void> {
 	managedGoogleClaiming = true;
-	let claimed = false;
 	try {
 		const res = await fetch(`${getApiBase()}/google/claim-managed`, {
 			method: 'POST',
@@ -435,7 +433,6 @@ export async function claimManagedGoogleTokens(claimNonce: string): Promise<bool
 			body: JSON.stringify({ claim_nonce: claimNonce }),
 		});
 		if (res.ok) {
-			claimed = true;
 			addToast(t('integrations.google_connected_managed'), 'success');
 			await loadGoogleStatus();
 		} else {
@@ -446,7 +443,6 @@ export async function claimManagedGoogleTokens(claimNonce: string): Promise<bool
 		addToast(t('common.error'), 'error');
 	}
 	managedGoogleClaiming = false;
-	return claimed;
 }
 
 /**

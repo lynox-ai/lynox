@@ -194,22 +194,15 @@ describe('the Google claim nonce in the URL', () => {
 	let configAnswers: boolean;
 	/** While set, `GET /api/config` waits for it. */
 	let configHold: Promise<void> | null;
-	/** Whether the engine refuses the claim itself. */
-	let claimRefused: boolean;
 
 	beforeEach(() => {
 		configAnswers = true;
 		configHold = null;
-		claimRefused = false;
 		const inner = vi.mocked(fetch);
 		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 			const u = String(url);
 			if (u.endsWith('/config') && configHold) await configHold;
 			if (u.endsWith('/config') && !configAnswers) throw new TypeError('Failed to fetch');
-			if (u.endsWith('/google/claim-managed') && claimRefused) {
-				posts.push({ path: '/google/claim-managed', body: JSON.parse(String(init?.body ?? '{}')) as unknown });
-				return new Response(JSON.stringify({ error: 'erasure_in_progress' }), { status: 409, headers: { 'Content-Type': 'application/json' } });
-			}
 			return inner(url, init);
 		}));
 	});
@@ -255,17 +248,6 @@ describe('the Google claim nonce in the URL', () => {
 		button('Connect').click();
 		await settle();
 		expect(param()).toBeNull();
-	});
-
-	it('stays when the engine refuses the claim on Connect, so a reload finds it', async () => {
-		claimRefused = true;
-		await render();
-		releasePreview(answer({ email: 'owner@example.com' }));
-		await settle();
-		button('Connect').click();
-		await settle();
-		expect(posts.map((p) => p.path)).toEqual(['/google/claim-managed/preview', '/google/claim-managed']);
-		expect(param()).toBe('nonce-9');
 	});
 
 	it('leaves on Cancel', async () => {
