@@ -571,6 +571,24 @@ describe('a connection token is offered as no secret: reference', () => {
     expect(promptSecret).toHaveBeenCalledTimes(1);
   });
 
+  it('collect: a scoped child does not collect a token slot outside its scope, stored or not', async () => {
+    // A scoped view lists only the child's names, so the stored-name check cannot see the token.
+    const scoped = (promptSecret: IAgent['promptSecret']): IAgent => {
+      const agent = agentWith([], [], [shop], promptSecret);
+      const store = agent.secretStore as unknown as Record<string, unknown>;
+      store['explainUnresolved'] = (n: string) => (n === FREE ? undefined : 'out-of-scope');
+      return agent;
+    };
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const out = await askSecretTool.handler({ name: 'SHOP_RT', prompt: 'p' }, scoped(promptSecret));
+    expect(out).toContain("connection's token slot outside this session's secret scope");
+    expect(promptSecret).not.toHaveBeenCalled();
+    // Control: a free name outside the scope is collected as before (not a token slot).
+    const other = await askSecretTool.handler({ name: 'OTHER_KEY', prompt: 'p' }, scoped(promptSecret));
+    expect(other).not.toContain('outside');
+    expect(promptSecret).toHaveBeenCalledTimes(1);
+  });
+
   it('a long profile name is cut before it is escaped, so no entity is cut in half', async () => {
     const angled = { ...shop, name: '<'.repeat(70) } as unknown as ApiProfile;
     const out = await askSecretTool.handler({ action: 'list' }, agentWith(['SHOP_RT'], [], [angled]));

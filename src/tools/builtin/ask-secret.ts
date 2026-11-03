@@ -172,6 +172,15 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     //    genuine second key (and tempt referencing the WRONG existing one). Surface the
     //    sibling as a non-blocking hint on the prompt and STILL collect.
     const holdersOf = tokenHoldersFor(agent);
+    // A scoped view (a spawned child) lists only its own names, so the stored-name check below
+    // cannot see a token outside the scope, while its writes are not narrowed. A connection's token
+    // slot outside the scope is not the child's to collect, stored or not. Asked of scope
+    // membership (`explainUnresolved`), never of the vault: the answer reaches the model, and one
+    // drawn from existence would be an oracle over the vault.
+    if (agent.secretStore?.explainUnresolved?.(input.name) === 'out-of-scope' && holdersOf(input.name).length > 0) {
+      return `"${input.name}" is a connection's token slot outside this session's secret scope. ` +
+        `It is used through that API profile and is not collected here.`;
+    }
     // `findNameMatches` leaves out the requested name itself. A token STORED under exactly that
     // name is the case that matters most (collecting it would overwrite the connection's token), so
     // it is added here and turned away below like a near-identical one. Stored, not merely named by
