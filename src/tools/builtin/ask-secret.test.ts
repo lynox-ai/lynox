@@ -582,8 +582,10 @@ describe('a connection token is offered as no secret: reference', () => {
     const promptSecret = vi.fn().mockResolvedValue('saved');
     for (const inner of [['SHOP_RT'], []]) {
       const out = await askSecretTool.handler({ name: 'SHOP_RT', prompt: 'p' }, child(inner, [FREE], promptSecret));
-      expect(out, `vault ${JSON.stringify(inner)}`).toContain("token slot outside this session's secret scope");
-      expect(out, 'it names the way forward').toContain('in its secret_scope');
+      expect(out, `vault ${JSON.stringify(inner)}`).toContain("token slot outside this agent's vault scope");
+      // The same answer whether stored or empty (it is drawn from scope membership), so the way
+      // forward is one that holds in both: report the scope the task needs.
+      expect(out, 'it names the way forward').toContain('report back that this task needs secret_scope: "SHOP_RT"');
     }
     expect(promptSecret).not.toHaveBeenCalled();
     // In scope, an empty slot is collected as for any session.

@@ -178,9 +178,9 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     // membership (`explainUnresolved`), never of the vault: the answer reaches the model, and one
     // drawn from existence would be an oracle over the vault.
     if (agent.secretStore?.explainUnresolved?.(input.name) === 'out-of-scope' && holdersOf(input.name).length > 0) {
-      return `"${input.name}" is a connection's token slot outside this session's secret scope, so it is not ` +
-        `collected here. The session that started this one can collect it, or start this one again with ` +
-        `"${input.name}" in its secret_scope.`;
+      return `"${input.name}" is a connection's token slot outside this agent's vault scope, so it is not ` +
+        `collected here. This is a scope decision — whether the vault holds it is not something this agent ` +
+        `is told. Either proceed without it, or report back that this task needs secret_scope: "${input.name}".`;
     }
     // `findNameMatches` leaves out the requested name itself. A token STORED under exactly that
     // name is the case that matters most (collecting it would overwrite the connection's token), so
