@@ -297,7 +297,7 @@ describe('bootstrapInbox — wiring', () => {
       us.budget.recordUsage(1_000_000, 1_000_000);
       eu.budget.recordUsage(1_000_000, 1_000_000);
       expect(us.budget.snapshot().spentUSD).toBeCloseTo(6.0, 6); // Haiku $1 + $5
-      expect(eu.budget.snapshot().spentUSD).toBeCloseTo(0.75, 6); // Mistral Small 4 $0.15 + $0.60
+      expect(eu.budget.snapshot().spentUSD).toBeCloseTo(0.825, 6); // Mistral Small 4 EU $0.165 + $0.66
     } finally {
       await us.shutdown();
       await eu.shutdown();
