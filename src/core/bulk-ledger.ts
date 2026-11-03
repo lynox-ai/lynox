@@ -1930,7 +1930,9 @@ export class BulkLedger {
     // `unknown_sends`, not `write_sent`: a send the host clearly refused keeps `write_sent` and
     // proves the write form does not work there, so a value found after it was set by someone
     // else. Not `found_unsent = 0` alone either: a run from before `unsent_tracked` leaves a
-    // target found so and never sent to at 0 as well.
+    // target found so and never sent to at 0 as well. A send from before refusals were counted
+    // (v54) reads as unclear: the backfill could not tell the two apart, so it takes the side of
+    // a send that may have landed.
     if (result !== 'written' && !(result === 'already' && only.unknown_sends > 0)) return null;
     return { host, method, key: this.engineDb.dec(only.target_key), form };
   }
