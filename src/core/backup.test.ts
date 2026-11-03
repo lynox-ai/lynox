@@ -714,6 +714,10 @@ describe('restoreBackup writes only where createBackup writes', () => {
 
   it('asks the filesystem whether it folds names: this one does not', () => {
     expect(filesystemFoldsNames(lynoxDir)).toBe(false);
+    // Each lookup on its own decides: one that finds the upper-case name, one that finds the NFD form.
+    expect(filesystemFoldsNames(lynoxDir, (p) => p !== p.toLowerCase() && basename(p) === basename(p).toUpperCase())).toBe(true);
+    expect(filesystemFoldsNames(lynoxDir, (p) => p !== p.normalize('NFC'))).toBe(true);
+    expect(filesystemFoldsNames(lynoxDir, () => false)).toBe(false);
     // The probe leaves nothing behind.
     expect(readdirSync(lynoxDir).filter(n => n.startsWith('.lynox-fold-probe-'))).toEqual([]);
   });
@@ -747,6 +751,18 @@ describe('restoreBackup writes only where createBackup writes', () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+
+  it('leaves a user file ending in .restore-staging beside a file it restores, and restores that file', async () => {
+    const { manager, backupPath } = await backupWith([{ path: 'memory/b.txt', bytes: 'plain' }]);
+    const users = join(lynoxDir, 'memory', 'b.txt.restore-staging');
+    writeFileSync(users, 'mine');
+
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+
+    expect(result.success, String(result.error)).toBe(true);
+    expect(readFileSync(join(lynoxDir, 'memory', 'b.txt'), 'utf-8')).toBe('plain');
+    expect(readFileSync(users, 'utf-8')).toBe('mine');
   });
 
   it('removes a temp a crashed restore left beside a file it restores', async () => {

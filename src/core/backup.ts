@@ -250,12 +250,12 @@ function foldedPair(paths: readonly string[]): [string, string] | null {
  * Whether the filesystem holding `dir` folds names: one file written under a lower-case name with an
  * accent in NFC form, then looked up in upper case and in NFD form. Either lookup that finds it folds.
  */
-export function filesystemFoldsNames(dir: string): boolean {
+export function filesystemFoldsNames(dir: string, exists: (path: string) => boolean = existsSync): boolean {
   const base = `.lynox-fold-probe-${randomBytes(6).toString('hex')}-\u00e9a`;
   const probe = join(dir, base);
   writeFileSync(probe, '', { flag: 'wx', mode: 0o600 });
   try {
-    return existsSync(join(dir, base.toUpperCase())) || existsSync(join(dir, base.normalize('NFD')));
+    return exists(join(dir, base.toUpperCase())) || exists(join(dir, base.normalize('NFD')));
   } finally {
     rmSync(probe, { force: true });
   }
