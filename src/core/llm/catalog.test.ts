@@ -169,6 +169,18 @@ describe('LLM_CATALOG', () => {
     expect(checked).toBeGreaterThan(0); // the guard actually exercised the registry-backed entries
   });
 
+  it('a Mistral catalog model lists vision exactly when the registry gives it vision', () => {
+    // Medium 3.5 was listed text-only here while the registry (verified live) and Mistral's
+    // model list both give it vision.
+    const mistral = getCatalogEntryByKey('mistral')!;
+    expect(mistral.models.length).toBeGreaterThan(0);
+    for (const model of mistral.models) {
+      const cap = MODEL_CAPABILITIES[model.id];
+      expect(cap, model.id).toBeDefined();
+      expect(model.capabilities?.includes('vision') ?? false, `${model.id} vision`).toBe(cap!.features.vision);
+    }
+  });
+
   it('vertex models use Vertex-specific IDs (haiku drops date suffix)', () => {
     const entry = getCatalogForProvider('vertex')!;
     const byTier = Object.fromEntries(entry.models.map((m) => [m.tier, m]));

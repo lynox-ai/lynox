@@ -309,9 +309,9 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     label: 'Mistral Medium 3.5',
     context_window: 262_144,
     pricing: euHeadline(1.50, 7.50),
-    capabilities: ['tool_use'],
+    capabilities: ['vision', 'tool_use'],
     residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
-    notes: 'The Mistral deep tier — a newer, stronger generation than Large 3 for deep reasoning and analysis (Large is being deprecated to legacy). 262k context, native prompt-cache. Text-only (no vision). Note Mistral has no 1M-context deep.',
+    notes: 'The Mistral deep tier — a newer, stronger generation than Large 3 for deep reasoning and analysis (Large is being deprecated to legacy). 256k context, native prompt-cache, vision. Note Mistral has no 1M-context deep. Mistral retires it on 2027-04-30.',
   },
   {
     id: 'mistral-large-2512',
