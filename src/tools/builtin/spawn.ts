@@ -64,7 +64,7 @@ function childOwnCostUSD(snap: CostSnapshot | null | undefined): number {
  * child's model is not restricted to the tier defaults, and because an earlier version of
  * this comment counted a set it had not measured. Over all **40** ids in
  * `MODEL_CAPABILITIES` (counted 2026-10-13) a cold first turn runs from **$0.00224576**
- * (`ministral-3b-2512`) to
+ * (`ministral-3b-2512`; $0.002470336 since Mistral is priced at its EU endpoint rate, × 1.1) to
  * **$0.88** (`claude-fable-5`: 20k prefix at $20/Mtok plus 9 600 output tokens at
  * $50/Mtok); over the three tier defaults it is $0.052288 / $0.192 / $0.44, a spread of
  * 8.41x. So the flat $0.05 this replaces was nearly exact for the fast tier and **17.60x

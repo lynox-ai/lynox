@@ -2722,7 +2722,8 @@ describe('spawn_agent tool', () => {
     });
 
     it('a sub-cent floor is REACHED by the solo figure, not rounded under it', () => {
-      // $0.00224576 is the cheapest priced id in this registry. Flooring it to four decimals
+      // $0.00224576 was the cheapest priced id in this registry at Mistral's list price (the EU
+      // rate makes it $0.002470336); it stays here as a sub-cent floor. Flooring it to four decimals
       // gives $0.0022 — under the floor, so a caller typing the printed figure is refused
       // again. The figure has to be ceiled because it is a figure to REACH.
       const cheapest = 0.00224576;

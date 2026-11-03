@@ -822,7 +822,7 @@ describe('Mistral prices are the EU endpoint\'s: list price × 1.1', () => {
     const { MODEL_CAPABILITIES, MISTRAL_EU_PRICE_FACTOR } = await import('./models.js');
     expect(MISTRAL_EU_PRICE_FACTOR).toBe(1.1);
     // By name, so a Mistral model added later without the factor (or without a row here) fails.
-    const mistralIds = Object.keys(MODEL_CAPABILITIES).filter((id) => /stral|^open-mistral/.test(id)).sort();
+    const mistralIds = Object.keys(MODEL_CAPABILITIES).filter((id) => /stral|^open-mistral|^mixtral/.test(id)).sort();
     expect(mistralIds).toEqual(Object.keys(LIST).sort());
     const priced = mistralIds.map((id) => [id, MODEL_CAPABILITIES[id]!.pricing]);
     const expected = mistralIds.map((id) => {
