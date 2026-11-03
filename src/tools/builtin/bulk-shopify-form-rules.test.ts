@@ -161,7 +161,7 @@ describe('the bulk_plan schema', () => {
 // fileUpdate needs write_files or write_themes, which the Shopify preset never asks for: an image
 // plan over such a connection would be approved and then fail at Shopify for every target.
 describe('an image plan on a store connection that may not write image alt texts', () => {
-  const NO_SCOPE = 'source_list.form shopify_media writes image alt texts, which needs exactly one Shopify store connection for target_host, granted the scope write_files or write_themes; target_host has no such connection. Tell the user in one sentence that image alt texts cannot be changed on this store with its connection as it is.';
+  const NO_SCOPE = "source_list.form shopify_media writes image alt texts, which needs a Shopify connection granted write_files or write_themes; the Shopify connection lynox sets up asks for neither, so this store's connection cannot write them. Tell the user in one sentence that lynox cannot change image alt texts in this store, and offer to write alt texts in this chat from the product names and what the user says about the images, so they can enter them in Shopify themselves. Do not suggest reconnecting the store or changing the connection.";
   const connection = (profile: unknown) => ({ getByHostname: (h: string) => h === HOST ? profile : undefined });
   const planOn = (store: unknown, input: Record<string, unknown>): Promise<string> =>
     bulkPlanTool.handler({ target_system: 'http', target_host: HOST, ...input } as Parameters<typeof bulkPlanTool.handler>[0],
