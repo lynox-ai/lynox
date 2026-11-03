@@ -21,7 +21,7 @@ import { accessTokenKey, collectVaultKeys, oneLineInBriefing, grantTokenNames, h
 import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
-import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
+import { currentPlanOf, currentPlanOwnerStarted, currentPlanStamp } from './plan-run-context.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
 import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
@@ -1226,6 +1226,15 @@ export function memberConnectionRefusal(
   // a plan's run acting for anyone else reaches it no more than any other reader.
   if (inPlan !== 'no-plan') {
     const ownPlan = own && memberConnectionReader(profile, reader, mode, ends);
+    // The owner started this run of the person's workflow (1100): no schedule stands behind it, so
+    // there is no confirmation that could list the connection, and nobody needs telling.
+    // Its own end, with the ways on (ux U-122); the shared sentences stay as they are.
+    if (ownPlan && inPlan === 'unlisted' && currentPlanOwnerStarted()) {
+      return `${lead}. This run of a workflow ${person} set up or changed was not started by a schedule of ${person}'s, so it does not use connections ${person} made with their own login. `
+        + `${RUN_REFUSAL_FINAL} In your reply, say so. The person reading your reply is the owner of this instance, not ${person}. `
+        + `Tell them to connect ${provider} themselves under Settings → APIs and then ask lynox in a chat to do this step with that connection. `
+        + `Do not suggest running this workflow again, and do not ask ${person} to do anything. Do not ask for permission to try again.`;
+    }
     if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${planRefusalFinal(person)}`;
     if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;
     // Not "only in their own session" for the member's own: their access does not carry this

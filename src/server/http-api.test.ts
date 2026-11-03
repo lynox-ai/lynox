@@ -12593,6 +12593,33 @@ describe('LynoxHTTPApi', () => {
         expect(phases).toEqual(['attempt', 'failed']);
       });
 
+      // 1100: a run that a refused member connection kept from the provider is no success in the log.
+      it('ends the run record as failed when a member connection was refused, though every step completed', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const { MEMBER_CONNECTION_PREFIX } = await import('../core/member-connection-notes.js');
+        const { currentPlanOwnerStarted } = await import('../core/plan-run-context.js');
+        let ownerStarted: boolean | undefined;
+        const record = vi.fn();
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record });
+        const phasesOf = (): string[] => record.mock.calls.map((c) => c[0] as { action: string; phase: string }).filter((r) => r.action === 'workflow:run').map((r) => r.phase);
+        try {
+          mockRunSavedWorkflow.mockImplementationOnce(async () => {
+            ownerStarted = currentPlanOwnerStarted();
+            return { ok: true, runId: 'run-1', status: 'completed', writeNotes: [`${MEMBER_CONNECTION_PREFIX} eva@kanzlei.example set up this connection`] };
+          });
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          expect(phasesOf()).toEqual(['attempt', 'failed']);
+          // The refusal it got names the owner as the one who started it, not a schedule.
+          expect(ownerStarted).toBe(true);
+          // CONTROL: another note under a completed run leaves it a success.
+          record.mockClear();
+          mockRunSavedWorkflow.mockResolvedValueOnce({ ok: true, runId: 'run-2', status: 'completed', writeNotes: ['A write may have landed before a refused redirect.'] });
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          expect(phasesOf()).toEqual(['attempt', 'done']);
+        } finally { engineRef()['getAuditLog'] = origLog; }
+      });
+
       it('does not run the mandate\'s workflow when its start cannot be recorded', async () => {
         mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
         const origLog = engineRef()['getAuditLog'];
@@ -16908,7 +16935,27 @@ describe('LynoxHTTPApi', () => {
       expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('outside');
     });
 
-    const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
+    it('says a delete the file system refused as a failure, not as "File not found", and keeps the file', async () => {
+      repayRateWindow();
+      // root ignores directory permissions, so the refusal this test needs cannot happen there
+      expect(process.getuid?.(), 'this test needs a non-root user').not.toBe(0);
+      mkdirSync(join(ws, 'locked'));
+      writeFileSync(join(ws, 'locked', 'keep.txt'), 'k');
+      try {
+        // 0o500: the file can be looked at but not removed; 0o000: not even looked at.
+        for (const mode of [0o500, 0o000]) {
+          chmodSync(join(ws, 'locked'), mode);
+          const res = await jsonFetch('/api/files?path=locked/keep.txt', { method: 'DELETE' });
+          expect([mode.toString(8), res.status, await res.json()]).toEqual([mode.toString(8), 500, { error: 'Could not delete the file' }]);
+        }
+        chmodSync(join(ws, 'locked'), 0o700);
+        expect(readFileSync(join(ws, 'locked', 'keep.txt'), 'utf8')).toBe('k');
+      } finally {
+        chmodSync(join(ws, 'locked'), 0o700);
+      }
+    });
+
+    const openFds =(): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
 
     it('downloads a file whose name is outside Latin-1, under that name', async () => {
       repayRateWindow();
