@@ -16935,7 +16935,27 @@ describe('LynoxHTTPApi', () => {
       expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('outside');
     });
 
-    const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
+    it('says a delete the file system refused as a failure, not as "File not found", and keeps the file', async () => {
+      repayRateWindow();
+      // root ignores directory permissions, so the refusal this test needs cannot happen there
+      expect(process.getuid?.(), 'this test needs a non-root user').not.toBe(0);
+      mkdirSync(join(ws, 'locked'));
+      writeFileSync(join(ws, 'locked', 'keep.txt'), 'k');
+      try {
+        // 0o500: the file can be looked at but not removed; 0o000: not even looked at.
+        for (const mode of [0o500, 0o000]) {
+          chmodSync(join(ws, 'locked'), mode);
+          const res = await jsonFetch('/api/files?path=locked/keep.txt', { method: 'DELETE' });
+          expect([mode.toString(8), res.status, await res.json()]).toEqual([mode.toString(8), 500, { error: 'Could not delete the file' }]);
+        }
+        chmodSync(join(ws, 'locked'), 0o700);
+        expect(readFileSync(join(ws, 'locked', 'keep.txt'), 'utf8')).toBe('k');
+      } finally {
+        chmodSync(join(ws, 'locked'), 0o700);
+      }
+    });
+
+    const openFds =(): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
 
     it('downloads a file whose name is outside Latin-1, under that name', async () => {
       repayRateWindow();

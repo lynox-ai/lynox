@@ -134,7 +134,9 @@ export function deleteAreaFile(t: AreaTarget): void {
   try {
     st = statEntry(t.anchor, t.rel);
   } catch (err) {
-    throw onTheWay(err) ?? new AreaRefusal(404, 'File not found');
+    // Any other error (a directory on the way the server may not read) leaves the file in place,
+    // so it is not answered as "not found": the route reports it as a failed delete.
+    throw onTheWay(err) ?? err;
   }
   if (st === null) throw new AreaRefusal(404, 'File not found');
   if (st.type !== 'file' && st.type !== 'symlink') throw new AreaRefusal(400, 'Not a file');
