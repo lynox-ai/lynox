@@ -41,7 +41,7 @@ vi.mock('../core/stream.js', () => ({
 }));
 
 import { runWorkflowTool, runSavedWorkflow, _resetPipelineStore, storePipeline } from '../tools/builtin/pipeline.js';
-import { runManifest, retryManifest } from './runner.js';
+import { runManifest, retryManifest, stopForEndedAuthor } from './runner.js';
 import {
   savedWorkflowSource, sourceRefusal, WORKFLOW_ENDED_REFUSAL, WORKFLOW_ENDED_MID_RUN, WORKFLOW_OF_ANOTHER_REFUSAL, WORKFLOW_UNREADABLE_REFUSAL, NESTED_AT_TOP_REFUSAL,
   type RunSource,
@@ -389,5 +389,23 @@ describe('an access that ends mid-run ends the run before its next step (1100)',
     scriptStep();
     await runWorkflowTool.handler({ workflow_id: WF }, chat());
     expect(mockProcess).toHaveBeenCalledTimes(2);
+  });
+});
+
+// 1100: the check before a step keeps an end the run already has, as the owner's stop does.
+describe('stopForEndedAuthor keeps a cause the run already ended on', () => {
+  const ended: RunSource = { kind: 'saved', workflowId: WF, authors: [{ kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' }], ends: { isLive: () => false } };
+  const state = (status: 'running' | 'failed', error?: string) => ({ runId: 'r', status, outputs: new Map(), startedAt: new Date().toISOString(), ...(error ? { error } : {}) }) as unknown as Parameters<typeof stopForEndedAuthor>[1];
+
+  it('a run that already failed on a step halts, and keeps that step\'s error', () => {
+    const s = state('failed', 'step two: the API answered 500');
+    expect(stopForEndedAuthor({ source: ended } as Parameters<typeof stopForEndedAuthor>[0], s)).toBe(true);
+    expect(s.error).toBe('step two: the API answered 500');
+  });
+
+  it('CONTROL: a running run halts with the mid-run end as its error', () => {
+    const s = state('running');
+    expect(stopForEndedAuthor({ source: ended } as Parameters<typeof stopForEndedAuthor>[0], s)).toBe(true);
+    expect([s.status, s.error]).toEqual(['failed', WORKFLOW_ENDED_MID_RUN]);
   });
 });

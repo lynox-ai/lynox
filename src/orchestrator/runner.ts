@@ -835,7 +835,7 @@ export async function retryManifest(
  * worker records it as that sweep's stop. A check that throws ends the run too. A run that already
  * ended on a cause of its own keeps it, as with the stop. True when the run must halt.
  */
-function stopForEndedAuthor(options: RunManifestOptions, state: RunState): boolean {
+export function stopForEndedAuthor(options: RunManifestOptions, state: RunState): boolean {
   if (options.source.kind !== 'saved') return false;
   let ended: boolean;
   try {
