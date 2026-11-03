@@ -344,6 +344,8 @@ describe('principal census (735, 1173)', () => {
     'core/engine.ts': "import type { P } from './principal.js';\nimport { Session } from './session.js';\nexport class Engine { createSession(o?: { principal?: P | undefined; model?: string }): Session { return new Session(this, o); } }",
     'core/session-store.ts': "import type { P } from './principal.js';\nimport type { Engine } from './engine.js';\nimport type { Session } from './session.js';\nexport class SessionStore { getOrCreate(_id: string, e: Engine, o?: { principal?: P | undefined }): Session { return e.createSession(o); } }",
     'orchestrator/runner.ts': "import type { P } from '../core/principal.js';\nexport function runManifest(_m: unknown, _c: unknown, _o: { principal?: P | undefined }): void {}\nexport function retryManifest(_m: unknown, _s: unknown, _c: unknown, _o: { principal?: P | undefined }): void {}",
+    // A declaration file under src: read by the type guard only.
+    'types/ext.d.ts': "import type { Session } from '../core/session.js';\nexport interface ExtRunner { run(task: string, o?: unknown): Promise<string> }\nexport type Keep = Session;",
     'orchestrator/runtime-adapter.ts': "import type { P } from '../core/principal.js';\nexport function spawnInline(_s: unknown, _ctx: unknown, principal?: P | undefined): void { void principal; }\nexport function spawnViaAgent(_s: unknown, _ctx: unknown, principal?: P | undefined): void { void principal; }\nexport function spawnPipeline(_s: unknown, principal?: P | undefined): void { void principal; }",
   };
   const CASES = `
@@ -442,6 +444,8 @@ export function harmless(x: unknown) { void Agent.MAX; return x instanceof Agent
       'core/session-store.ts · createSession in getOrCreate · passes through',
     ]);
     expect(refused.map((r) => r.replace(/^x\.ts:\d+ /, ''))).toEqual([
+      // `ExtRunner` in a declaration file under src.
+      'types/ext.d.ts:2 a type a target class satisfies: a call through it is not seen',
       // A bracketed member name is still the target's name.
       'a type a target class satisfies: a call through it is not seen',
       // A module or object typed to compile, called by the target's name.
