@@ -348,7 +348,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
       frame: {
         title: 'Schreibrechte für bexio bestätigen',
         scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-        scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Das Recht ist damit breiter als das, was lynox damit tut.',
+        scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
         button: 'Zustimmen und weiter zu bexio',
         afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
       },
@@ -388,7 +388,10 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // byte for byte is the reminder. Shown before every link that asks for write_products, a
     // new connection's or a reconnect's. The fields in the second paragraph are those of the
     // engine's product write form, a test holds the two together. Image alt texts are not among
-    // them: `fileUpdate` needs `write_files` or `write_themes`, which this preset refuses.
+    // them: the engine's image form writes through `fileUpdate`, which needs `write_files` or
+    // `write_themes`, and this preset refuses both. `write_products` itself can change an alt
+    // text (the deprecated `productUpdateMedia`), which a chat request may send after a yes;
+    // paragraph 1 and the line under the scope list cover that.
     consentNotice: {
       lang: 'de',
       writeScopes: ['write_products'],
@@ -403,7 +406,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
       frame: {
         title: 'Schreibrechte für Shopify bestätigen',
         scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in Shopify:',
-        scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Das Recht ist damit breiter als das, was lynox damit tut.',
+        scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
         button: 'Zustimmen und weiter zu Shopify',
         afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in Shopify.',
       },
