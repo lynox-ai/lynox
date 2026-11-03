@@ -98,7 +98,7 @@ export function shopifyFilterRefusal(key: string): string {
 }
 
 /** What a filter value may hold, in the words of its refusal; the form's rules in bulk_plan say the same. */
-export const SHOPIFY_FILTER_VALUE_RULE = `letters, digits, single spaces and ${[...FILTER_PUNCTUATION].join(' ')} ; every word starts with a letter or digit, - stands only between two letters or digits, and OR, AND, NOT are not allowed as words`;
+export const SHOPIFY_FILTER_VALUE_RULE = `letters, digits, single spaces and ${[...FILTER_PUNCTUATION].join(' ')} ; every word starts with a letter or digit, - stands only between two letters or digits, no run of letters and digits is OR, AND or NOT in any letter case (so Forget-Me-Not and Salt and Pepper are refused), and at most 255 characters`;
 
 const LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
 const ALLOWED_CODE_POINT = /^[\p{L}\p{M}\p{N} -]$/u;

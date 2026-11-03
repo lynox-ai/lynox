@@ -115,7 +115,15 @@ describe('the refusal sentence', () => {
   };
 
   it('is the one fixed sentence, with the key and never the value', () => {
-    expect(SENTENCE).toBe("source_list.filters.vendor may hold letters, digits, single spaces and _ . & ' / + ; every word starts with a letter or digit, - stands only between two letters or digits, and OR, AND, NOT are not allowed as words.");
+    expect(SENTENCE).toBe("source_list.filters.vendor may hold letters, digits, single spaces and _ . & ' / + ; every word starts with a letter or digit, - stands only between two letters or digits, no run of letters and digits is OR, AND or NOT in any letter case (so Forget-Me-Not and Salt and Pepper are refused), and at most 255 characters.");
+  });
+
+  // The sentence is prompt surface: each case it names is what the rule does.
+  it('names cases the rule refuses and one it takes, as the rule decides them', () => {
+    for (const v of ['Forget-Me-Not', 'Salt and Pepper', 'Rock/Or', 'x'.repeat(256)]) expect(isShopifyFilterValue(v), v).toBe(false);
+    for (const v of ['Andorra', 'Notebook', 'x'.repeat(255)]) expect(isShopifyFilterValue(v), v).toBe(true);
+    expect(SENTENCE).toContain('Forget-Me-Not and Salt and Pepper are refused');
+    expect(SENTENCE).toContain('at most 255 characters');
   });
 
   it('names exactly the punctuation the rule takes inside a word, checked against the rule for every ASCII character', () => {
