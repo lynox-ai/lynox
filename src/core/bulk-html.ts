@@ -55,9 +55,6 @@ function canonicalHtml(value: string): string {
  * what lies between them, never a prefix cut at a `>` inside a quoted value, nor a CDATA section of
  * foreign content, which is inert text. The text around them stays out, so editing it is no change.
  */
-/** A start tag in a dropped stretch whose name is followed by an attribute. */
-const DROPPED_WITH_ATTRIBUTES = /<[A-Za-z][^\s/>]*[\s/]+[^\s/>]/;
-
 /** Elements whose content the tokenizer reads as text, scripting on: a `<` there is a character. */
 const RAW_TEXT_PARENTS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext']);
 
@@ -315,16 +312,16 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     }
     const before = input.before ?? '';
     // What the fragment drops, a multiset against the before-image's own, byte for byte. A stretch
-    // with a start tag that carries attributes is never held: the same bytes are inert where the
-    // before-image has them (a `template`, a `select`) and land on the page's own element where the
-    // after-state puts them, and the place is not compared. Held is only what can move layout.
-    // Where the before-image carries the same attributed stretch, planning again never helps: the
-    // owner has to remove it in the shop, and the refusal says so (`markup_dropped_before`).
+    // the before-image does not hold as often is refused: it is the value's own, and the owner
+    // never reads it. One it holds is passed, attributed or not, because it never reaches the shop:
+    // the run stores and sends the canonical form (1130, `canonicalAfterOf`, the send's
+    // `rawHtmlField`), and serialising drops every such stretch. So the shop's own stray tag is
+    // cleaned by the write instead of refusing the value; `markup_dropped_before` is no longer
+    // returned (U-103: cleaned, not refused).
     const held = counts(droppedTagsOf(before));
     for (const tag of droppedTagsOf(input.after)) {
       const n = held.get(tag) ?? 0;
       const detail = `The value carries a tag the page reads but this check cannot place: ${tag}`;
-      if (DROPPED_WITH_ATTRIBUTES.test(tag)) return refused(n > 0 ? 'markup_dropped_before' : 'markup_dropped', detail);
       if (n === 0) return refused('markup_dropped', detail);
       held.set(tag, n - 1);
     }

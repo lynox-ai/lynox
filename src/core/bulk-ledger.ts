@@ -1809,6 +1809,30 @@ export class BulkLedger {
   }
 
   /**
+   * An after-state as the run stores, and so sends, it (1130): each HTML field of the run
+   * ({@link htmlFieldsOf}) in the canonical bytes the markup check reads, not the planner's or the
+   * verdict's raw bytes. The fragment parser drops what it cannot place (a `<body onload>`), so raw
+   * bytes could carry to the page what the check never saw. Done where the after-state is stored,
+   * so what is checked, stored, compared and sent is one value. A value whose canonical form is
+   * not stable is left as it is: the check refuses it (`not_canonical`), and so does the send.
+   * A field equal to its before-image is the store's own value and stays byte for byte: the check
+   * skips it, and rewriting it would turn an unchanged field into a write.
+   * Comments and text keep their characters (a block comment, a shortcode); text is re-escaped.
+   */
+  private canonicalAfterOf(runId: string, after: unknown, before: unknown): unknown {
+    if (!isPlainRecord(after)) return after;
+    const held = isPlainRecord(before) ? before : {};
+    const fields = this.htmlFieldsOf(runId).filter((f) => typeof after[f] === 'string' && after[f] !== held[f]);
+    if (fields.length === 0) return after;
+    const out: Record<string, unknown> = { ...after };
+    for (const f of fields) {
+      const canonical = canonicalHtml(after[f] as string);
+      if (canonicalHtml(canonical) === canonical) out[f] = canonical;
+    }
+    return out;
+  }
+
+  /**
    * The fields a run compares under `htmlEqual` rather than byte for byte (PRD shopify-preset §21.2
    * item 5): the HTML fields of a Shopify product run, its undos included. A WooCommerce run keeps
    * today's comparison (§21.4, N5): its store's rewriting is not measured.
@@ -2447,7 +2471,9 @@ export class BulkLedger {
     const row = db.prepare('SELECT after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { after_planned: string | null } | undefined;
     if (!row || row.after_planned === null) return false;
     const before: BeforeImage = { absent: false, value: read.before };
-    const after = completedAfter ?? JSON.parse(this.engineDb.dec(row.after_planned)) as unknown;
+    // Stored canonical in its HTML fields (1130): the preview checked this after-state against this
+    // before-image just now, and the write sends what is stored.
+    const after = this.canonicalAfterOf(runId, completedAfter ?? JSON.parse(this.engineDb.dec(row.after_planned)) as unknown, read.before);
     // The before-image holds exactly F, so comparing whole images compares over F (§6 P4). A
     // judged target's after-state is its template until the verdict: its change is not known.
     const html = this.comparedAsHtml(runId);
@@ -2775,9 +2801,10 @@ export class BulkLedger {
       // A verdict on a Shopify run is completed as a planned after-state is (`shopifyPairedAfter`):
       // a write never sends one seo field without the other.
       const run = this.runRow(runId);
-      const after = run !== undefined && this.shopifyFormOfRun(run) !== null && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
+      // Stored canonical in its HTML fields (1130), as the markup check read it.
+      const after = this.canonicalAfterOf(runId, run !== undefined && this.shopifyFormOfRun(run) !== null && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
         ? shopifyPairedAfter(verdict.after, before.value)
-        : verdict.after;
+        : verdict.after, before.absent ? null : before.value);
       return db.prepare(
         `UPDATE bulk_targets SET after_planned = ?, change = ?, error = NULL, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
       ).run(this.engineDb.enc(JSON.stringify(after)), classifyChange(before, after, this.comparedAsHtml(runId)), at, runId, seq, token, runId).changes === 1;
