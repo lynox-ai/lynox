@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { setLocale } from '../i18n.svelte.js';
+import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -39,9 +40,15 @@ let posts: Array<{ path: string; body: unknown }>;
 let releasePreview: (r: Response) => void;
 /** What `/api/google/status` answers. */
 let status: Record<string, unknown>;
+/** Whose session `GET /api/config` names. */
+let viewer: string;
 
 beforeEach(() => {
 	setLocale('en');
+	// The confirmation is the owner's to give: the page shows it once `GET /api/config` says so.
+	resetSettingsViewer();
+	viewer = 'owner';
+	releasePreview = () => {};
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	posts = [];
@@ -56,6 +63,7 @@ beforeEach(() => {
 			}
 		}
 		if (u.endsWith('/google/status')) return new Response(JSON.stringify(status), { status: 200, headers: { 'Content-Type': 'application/json' } });
+		if (u.endsWith('/config')) return new Response(JSON.stringify({ viewer }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
 	}));
 });
@@ -159,5 +167,14 @@ describe('the Google claim confirmation', () => {
 		await settle();
 		expect(posts.map((p) => p.path)).toEqual(['/google/claim-managed/preview']);
 		expect(target.textContent).not.toContain('owner@example.com');
+	});
+
+	it('is not shown to a mandate: the claim is the owner\'s to confirm', async () => {
+		viewer = 'mandate';
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		expect(target.textContent).not.toContain('owner@example.com');
+		expect([...target.querySelectorAll('button')].map((b) => b.textContent?.trim())).not.toContain('Cancel');
 	});
 });
