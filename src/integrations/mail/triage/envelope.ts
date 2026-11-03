@@ -72,6 +72,9 @@ export function renderTriageList(
   labelOf?: (env: MailEnvelope) => string | null,
   // The ordinal of the first message, so a list rendered in several groups numbers on.
   firstOrdinal = 1,
+  // The inbox's reason for its verdict. Model text derived from the mail, so it goes inside the
+  // message's untrusted block, never next to the label in the header.
+  reasonOf?: (env: MailEnvelope) => string | null,
 ): string {
   if (envelopes.length === 0) return '(no messages)';
   const acctLabel = accountId ?? 'unknown';
@@ -98,9 +101,11 @@ export function renderTriageList(
     // two lines, and the second can imitate the `N. uid:… · date:…` label above — inside
     // this envelope's block, but naming another message's uid. Collapsing it here, at the
     // renderer, covers every provider that fills the envelope.
+    const reason = reasonOf?.(envelopes[i]!) ?? null;
     const headerBlock = [
       `From: ${oneBlockLine(v.from)}`,
       `Subject: ${oneBlockLine(v.subject)}`,
+      ...(reason ? [`Inbox reason: ${truncate(oneBlockLine(reason).replace(/\s+/g, ' '), 200)}`] : []),
       ...(body ? ['', body] : []),
     ].join('\n');
     lines.push(wrapUntrustedData(headerBlock, `mail:${acctLabel}:envelope:${String(v.uid)}`));

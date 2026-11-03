@@ -360,7 +360,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       try {
         // The same lookup the watcher makes before it classifies (watcher-hook.ts).
         const item = state.findItemByThread(accountId, threadKey);
-        return item ? { bucket: item.bucket, userAction: item.userAction } : null;
+        return item ? { bucket: item.bucket, userAction: item.userAction, reason: item.reasonDe } : null;
       } catch {
         // A read for display: a failed lookup shows no verdict rather than failing the triage.
         return null;
