@@ -321,7 +321,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     pricing: euHeadline(0.50, 1.50),
     capabilities: ['vision', 'tool_use'],
     residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
-    notes: 'Being deprecated to legacy — Medium 3.5 is the stronger deep now. Cheaper ($0.55/$1.65 on the EU endpoint) and multimodal (vision), but weaker on deep analysis. 256k context, native prompt-cache. Mistral retires it on 2027-04-30.',
+    notes: 'Medium 3.5 is the stronger deep. Cheaper ($0.55/$1.65 on the EU endpoint) and multimodal (vision), but weaker on deep analysis. 256k context, native prompt-cache. Mistral retires it on 2027-04-30.',
   },
   {
     id: 'ministral-14b-2512',
