@@ -1902,11 +1902,15 @@ describe('LynoxHTTPApi', () => {
         author = undefined;
         const unread = await post();
         expect(unread.status).toBe(403);
-        expect(((await unread.json()) as { code?: string }).code).toBe('unreadable_workflow');
+        const unreadBody = (await unread.json()) as { error: string; code?: string };
+        expect(unreadBody.code).toBe('unreadable_workflow');
+        expect(unreadBody.error).toMatch(/^Not scheduled: lynox could not read who set up this workflow/);
         author = 'throws';
         const thrown = await post();
         expect(thrown.status).toBe(403);
-        expect(((await thrown.json()) as { code?: string }).code).toBe('unreadable_workflow');
+        const thrownBody = (await thrown.json()) as { error: string; code?: string };
+        expect(thrownBody.code).toBe('unreadable_workflow');
+        expect(thrownBody.error).toMatch(/^Not scheduled: lynox could not read who set up this workflow/);
         // A workflow that is gone (the lookup finds none) is a 404 with its own code, before any refusal.
         mockGetPipeline.mockReturnValueOnce(undefined);
         const missing = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-gone', scheduleCron: '0 9 1 * *' }) });
@@ -12604,12 +12608,13 @@ describe('LynoxHTTPApi', () => {
         mockHistoryGetPlannedPipelines.mockReturnValue([]);
       });
 
-      it('reads the paused plans only for an ended workflow, and a failed read counts none instead of failing the list', async () => {
+      it('reads the paused plans once per list and only when a listed workflow has ended, and a failed read counts none instead of failing the list', async () => {
         repayRateWindow();
         mockHistoryGetPlannedPipelines.mockReturnValue([
           { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },
+          { id: 'wf-m2', manifest_name: 'M2', manifest_json: JSON.stringify({ template: true, name: 'M2', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-20T00:00:00Z' },
         ]);
-        mockHistoryGetWorkflowAuthorship.mockImplementation((id: string) => (id === 'wf-m' ? mandateMade : undefined));
+        mockHistoryGetWorkflowAuthorship.mockImplementation((id: string) => (id === 'wf-m' || id === 'wf-m2' ? mandateMade : undefined));
         const origDb = engineRef()['getEngineDb'];
         const getDb = vi.fn((): never => { throw new Error('engine.db closed'); });
         engineRef()['getEngineDb'] = () => ({ getDb });
@@ -12617,14 +12622,16 @@ describe('LynoxHTTPApi', () => {
         try {
           live = true;
           const whileLive = await jsonFetch('/api/workflows/library');
-          expect(((await whileLive.json()) as Lib).workflows[0]?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: false });
+          expect(((await whileLive.json()) as Lib).workflows.map((w) => w.runs_as)).toEqual([0, 1].map(() => ({ person: 'eva@kanzlei.example', ended: false })));
           // Nothing listed has ended: the paused plans are not read at all.
           expect(getDb).not.toHaveBeenCalled();
           live = false;
           const ended = await jsonFetch('/api/workflows/library');
           expect(ended.status).toBe(200);
-          expect(((await ended.json()) as Lib).workflows[0]?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 });
-          // Twin: the read was tried, so the 0 above is the fallback, not a skipped read.
+          const endedRows = ((await ended.json()) as Lib).workflows;
+          expect(endedRows.map((w) => w.runs_as)).toEqual([0, 1].map(() => ({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 })));
+          // Twin: the read was tried, so the 0 above is the fallback, not a skipped read — and
+          // tried once for both ended workflows, not once per row.
           expect(getDb).toHaveBeenCalledTimes(1);
         } finally {
           engineRef()['getEngineDb'] = origDb;

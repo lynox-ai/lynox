@@ -309,23 +309,22 @@ describe('what the refuter of the fixes found', () => {
 
 	// UX-053/058: the reloaded list says the workflow's access ended, or that it is not this reader's to schedule.
 	it.each([
-		['its access ended', { ...WF, runs_as: { person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 } }],
-		['it is not the reader\'s to schedule', { ...WF, schedule_refusal: 'foreign' }],
-	])('a workflow that may no longer be scheduled after the stamp (%s) does not get the dialog back, and its card says why', async (_why, blocked) => {
-		{
-			await open('owner', WF, {
-				'GET /workflows/library': [{ status: 200, body: { workflows: [WF], viewer: 'owner' } }, { status: 200, body: { workflows: [blocked], viewer: 'owner' } }],
-				'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
-				'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
-				'POST /workflows/wf-1/confirm': [{ status: 200, body: {} }],
+		['its access ended', { ...WF, runs_as: { person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 } }, 'ended'],
+		['it is not the reader\'s to schedule', { ...WF, schedule_refusal: 'foreign' }, 'foreign'],
+	])('a workflow that may no longer be scheduled after the stamp (%s) does not get the dialog back, and its card says why', async (_why, blocked, note) => {
+		await open('owner', WF, {
+			'GET /workflows/library': [{ status: 200, body: { workflows: [WF], viewer: 'owner' } }, { status: 200, body: { workflows: [blocked], viewer: 'owner' } }],
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 200, body: {} }],
 			});
 			await click(byText('Planen'));
 			await click(byText('Bestätigen & planen'));
 			await click(q('stamp-confirm'));
 			expect(byText('Bestätigen & planen')).toBeNull();
-			expect(target.querySelector('[data-library-note]')).not.toBeNull();
+			// The note that names this case, not just any note.
+			expect([...target.querySelectorAll('[data-library-note]')].map((n) => n.getAttribute('data-library-note'))).toEqual([note]);
 			expect(target.textContent).not.toContain('Öffne „Planen“ noch einmal');
-		}
 	});
 
 
