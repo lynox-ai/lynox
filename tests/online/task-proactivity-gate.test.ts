@@ -131,7 +131,7 @@ function haikuAgent(c: Case, apiKey: string): Agent {
     name: 'proactivity-haiku', model: HAIKU, apiKey, provider: 'anthropic',
     systemPrompt: SYSTEM_PROMPT, briefing: BRIEFING, maxIterations: 3, tools: TOOLS,
     toolContext: createToolContext({}),
-    promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' }),
+    promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const,
   });
 }
 
@@ -150,7 +150,7 @@ describe.skipIf(!hasApiKey())('Online: task-proactivity gate — Anthropic (Sonn
       name: 'proactivity-sonnet', model: SONNET, apiKey, provider: 'anthropic',
       systemPrompt: SYSTEM_PROMPT, briefing: BRIEFING, maxIterations: 3, tools: TOOLS,
       toolContext: createToolContext({}),
-      promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' }),
+      promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const,
     }), c);
   }, 60_000);
 });
@@ -164,7 +164,7 @@ describe.skipIf(!MISTRAL_KEY)('Online: task-proactivity gate — Mistral (mistra
       apiKey: MISTRAL_KEY!, apiBaseURL: 'https://api.mistral.ai/v1', openaiModelId: 'mistral-large-2512',
       systemPrompt: SYSTEM_PROMPT, briefing: BRIEFING, maxIterations: 3, tools: TOOLS,
       toolContext: createToolContext({}),
-      promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' }),
+      promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const,
     }), c);
   }, 60_000);
 });

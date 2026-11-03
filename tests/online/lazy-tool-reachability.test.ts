@@ -173,10 +173,10 @@ function buildFixtureTools(): ToolEntry[] {
     stubbed(createMailSearchTool(mailRegistry), MAIL_SEARCH_CANNED),
     stubbed(createMailSendTool(mailRegistry), 'stub: email sent (simulated)'),
     stubbed(createMailTriageTool(mailRegistry), MAIL_TRIAGE_CANNED),
-    stubbed(createCalendarTool(googleAuth), 'stub: calendar checked (simulated)'),
-    stubbed(createDocsTool(googleAuth), 'stub: doc content unavailable in this reachability test'),
-    stubbed(createDriveTool(googleAuth), 'stub: no matching files (simulated)'),
-    stubbed(createSheetsTool(googleAuth), 'stub: sheet content unavailable in this reachability test'),
+    stubbed(createCalendarTool(() => googleAuth), 'stub: calendar checked (simulated)'),
+    stubbed(createDocsTool(() => googleAuth), 'stub: doc content unavailable in this reachability test'),
+    stubbed(createDriveTool(() => googleAuth), 'stub: no matching files (simulated)'),
+    stubbed(createSheetsTool(() => googleAuth), 'stub: sheet content unavailable in this reachability test'),
   ];
 }
 
