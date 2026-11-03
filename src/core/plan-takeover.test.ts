@@ -435,6 +435,26 @@ describe('which workflows a takeover would move to the owner, and through how ma
     }
   });
 
+  it('opens only the paused plans, not every plan that runs a workflow', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    // Plans of another workflow: the paused plan's own read does not reach them, only the scan could.
+    workflow(b, 'w2', { email: 'h@x.ch' });
+    for (const id of ['live-1', 'live-2', 'live-3']) plan(b, id, { effect: 'run_workflow', workflow: 'w2' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const opened: string[] = [];
+    const t = b.triggers;
+    const triggers: TakeoverDeps['triggers'] = {
+      getById: (id, opts) => { opened.push(id); return t.getById(id, opts); },
+      endWait: t.endWait.bind(t), setConfirmedAt: t.setConfirmedAt.bind(t), getStampConnections: t.getStampConnections.bind(t),
+    };
+    expect(workflowsCoveredByTakeover(deps(b, { triggers })).get('w')).toBe(1);
+    // A list read for every ended workflow on the page must not open each live plan as well.
+    expect(opened).toEqual(['p']);
+  });
+
   it('a paused plan whose takeover leaves the workflow with a live member is not counted', () => {
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' });
