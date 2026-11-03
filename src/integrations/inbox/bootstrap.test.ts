@@ -107,7 +107,8 @@ describe('bootstrapInbox — wiring', () => {
     expect(before?.bucket).toBe('draft_ready');
     expect(before?.userAction).toBeUndefined();
     runtime.state.updateUserAction(id, 'replied');
-    expect(runtime.inboxLabelOf('acct-1', 't-l')).toEqual({ bucket: 'draft_ready', userAction: 'replied' });
+    expect(before?.reason).toBe('r');
+    expect(runtime.inboxLabelOf('acct-1', 't-l')).toEqual({ bucket: 'draft_ready', userAction: 'replied', reason: 'r' });
     expect(runtime.inboxLabelOf('acct-2', 't-l')).toBeNull();
     expect(runtime.inboxLabelOf('acct-1', 't-unknown')).toBeNull();
   });
