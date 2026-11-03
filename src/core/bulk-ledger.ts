@@ -1913,7 +1913,7 @@ export class BulkLedger {
    *  value, which is this run's send having arrived as far as anyone can read it (the owner
    *  checks it at the host before confirming, like a written one). 'not_found' for no such
    *  run; null for a run that holds no probe. */
-  private probeCandidate(runId: string): { host: string; method: string; key: string; form: ShopifyWriteForm | null } | 'not_found' | null {
+  private probeCandidate(runId: string): { host: string; method: string; key: string; form: ShopifyWriteForm | null; found: boolean } | 'not_found' | null {
     const run = this.runRow(runId);
     if (!run) return 'not_found';
     const host = externalHostOf(run.target_system);
@@ -1934,7 +1934,14 @@ export class BulkLedger {
     // (v54) reads as unclear: the backfill could not tell the two apart, so it takes the side of
     // a send that may have landed.
     if (result !== 'written' && !(result === 'already' && only.unknown_sends > 0)) return null;
-    return { host, method, key: this.engineDb.dec(only.target_key), form };
+    return { host, method, key: this.engineDb.dec(only.target_key), form, found: result === 'already' };
+  }
+
+  /** Whether the probe {@link probeKey} names was found holding its value after a send without
+   *  a clear answer, rather than written with one: lynox cannot say it wrote it, since someone
+   *  else may have set the same value. False where there is no probe to confirm. */
+  probeFound(runId: string): boolean {
+    return this.probeToConfirm(runId)?.found ?? false;
   }
 
   /** The key of the target {@link confirmProbe} would accept for this run, or null. For the
@@ -1948,7 +1955,7 @@ export class BulkLedger {
    *  probe is confirmed, confirming again changes nothing. Where another run's confirmation has
    *  since taken the row, confirming files it again. Null for a key that is not a URL, which
    *  {@link confirmProbe} could not file either. */
-  private probeToConfirm(runId: string): { host: string; method: string; key: string } | null {
+  private probeToConfirm(runId: string): { host: string; method: string; key: string; found: boolean } | null {
     const candidate = this.probeCandidate(runId);
     if (candidate === null || candidate === 'not_found') return null;
     let kind: string;

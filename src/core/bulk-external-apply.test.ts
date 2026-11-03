@@ -1099,6 +1099,8 @@ describe('the write verb and the one-target probe', () => {
         // This run's own send, found arrived: the probe, confirmed like a written one.
         expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, sentUnknown: 0, haltReason: BULK_HALT_REASONS.maxTargets });
         expect(ledger.probeKey(runId)).toBe(url(1));
+        // Found, not written: the page says lynox cannot tell it wrote it.
+        expect(ledger.probeFound(runId)).toBe(true);
         expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: 'confirm' });
         expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
         expect(ledger.getStatus(runId)).toMatchObject({ resumeTries: 0, resumeSends: 0 });
@@ -1296,6 +1298,7 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, haltReason: BULK_HALT_REASONS.maxTargets });
       // The written target is the probe; the one found as planned is none.
       expect(ledger.probeKey(runId)).toBe(url(2));
+      expect(ledger.probeFound(runId)).toBe(false);
       // So the run stands at its probe: one target written, the found one not counted.
       expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: 'confirm' });
       expect(ledger.confirmProbe(runId)).toEqual({ ok: true });

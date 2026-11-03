@@ -321,7 +321,7 @@ describe('going on from a run that halted', () => {
 
 	it('offers no way on from a run that rolled back', () => {
 		for (const haltKey of ATOMIC) {
-			const run = { phase: 'aborted' as const, haltKey, probe: null, haltReason: 'x', probeConfirmed: true, maxTargets: null, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 0, resumeSends: 0 };
+			const run = { phase: 'aborted' as const, haltKey, probe: null, haltReason: 'x', probeConfirmed: true, maxTargets: null, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 0, resumeSends: 0, resumeTries: 0, conflicts: 0 };
 			expect(bulkResumeKind(run), haltKey).toBeNull();
 			expect(bulkRestartKind({ ...run, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false }), haltKey).toBeNull();
 			expect(bulkCanUndo({ ...run, kind: 'apply', undoable: 2, atomic: true }), haltKey).toBe(false);
@@ -490,7 +490,7 @@ describe('going on from a run that halted', () => {
 	const w = (haltKey: string, o: Partial<BulkRunDetailData> = {}) => ({
 		phase: 'writing' as BulkRunDetailData['phase'], haltKey, haltReason: 'x', probe: null, targetSystem: 'http:shop.example.invalid',
 		probeConfirmed: true, changes: { update: 1000, create: 0, delete: 0, unchanged: 0, invalid: 0 },
-		maxTargets: 1000, applied: 550, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, resumeSends: 398, sentUnknown: 0, ...o,
+		maxTargets: 1000, applied: 550, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, resumeSends: 398, sentUnknown: 0, conflicts: 0, ...o,
 	});
 	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff'];
 
@@ -528,14 +528,14 @@ describe('going on from a run that halted', () => {
 		// The measured case: one target, its send unclear, the failure halt. Writing on sends nothing.
 		const unclear = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
 		expect(bulkResumeKind(w('failureRate', unclear))).toBe('check');
-		const one = 'Ob die Änderung bei shop.example.invalid angekommen ist, ist unklar, und lynox schickt sie nicht noch einmal. Nachprüfen liest bei shop.example.invalid nach, ob sie da ist; geschickt wird dabei nichts. Ist sie beim Nachprüfen nicht da, bitte lynox im Chat, für alles, was noch fehlt, einen neuen Lauf zu planen.';
+		const one = 'Nachprüfen liest bei shop.example.invalid nach, ob die Änderung da ist; geschickt wird dabei nichts.';
 		const text = bulkResumeText(w('failureRate', unclear), true, DE);
 		// Checking sends nothing: no "before you continue writing", nothing said to be tried.
 		expect([text?.check, text?.before, text?.kept, text?.soFar, text?.allows]).toEqual([one, null, null, null, null]);
 		// After a check that did not find it, the run is at its maximum and still only checks.
 		expect(bulkResumeKind(w('maxTargets', unclear))).toBe('check');
 		expect(bulkResumeText(w('maxTargets', unclear), true, DE)?.check).toBe(one);
-		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 3 }), true, EN)?.check).toBe('It is unclear whether 3 changes reached shop.example.invalid, and lynox does not send them again. Check again looks in shop.example.invalid whether they are there; nothing is sent. If some are not there when you check, ask lynox in a chat to plan a new run for anything still missing.');
+		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 3 }), true, EN)?.check).toBe('Check again looks in shop.example.invalid whether the changes are there; nothing is sent.');
 		// A halt's own step still comes first.
 		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.';
 		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(reconnect);
@@ -551,6 +551,26 @@ describe('going on from a run that halted', () => {
 		// A halt the page cannot write on from, and a changed run, stay as they were.
 		expect(bulkResumeKind(w('superseded', unclear))).toBeNull();
 		expect(bulkResumeKind(w('checksum', unclear))).toBe('none');
+	});
+
+	it('offers nothing where every target left had changed at the provider after its unclear send', () => {
+		// The check found a third value: a conflict, never sent again, and no longer unclear.
+		const changed = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 0, conflicts: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
+		expect(bulkResumeKind(w('failureRate', changed))).toBe('nothing');
+		const text = bulkResumeText(w('blocked', changed), true, DE);
+		expect([text?.check, text?.before, text?.kept, text?.soFar, text?.allows]).toEqual([
+			'Dieser Lauf schickt nichts mehr. Für Ziele, die sich bei shop.example.invalid inzwischen geändert hatten, bitte lynox im Chat, einen neuen Lauf zu planen; er liest den aktuellen Stand.', null, null, null, null]);
+		expect(bulkResumeText(w('failureRate', changed), true, EN)?.check).toBe('This run sends nothing more. For targets that had changed in shop.example.invalid in the meantime, ask lynox in a chat to plan a new run; it reads the current state.');
+		// No support link without the halt's own sentence.
+		expect(bulkSupportMailto({ ...w('blocked', changed), id: 'run-7', listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false }, true, DE)).toBeNull();
+		// Each part of the rule holds it: something left to send, no conflict, nothing left at all,
+		// a target still unclear, or a halt the run cannot write on from.
+		expect(bulkResumeKind(w('failureRate', { ...changed, resumeSends: 1 }))).toBe('write');
+		expect(bulkResumeKind(w('failureRate', { ...changed, conflicts: 0 }))).toBe('write');
+		expect(bulkResumeKind(w('failureRate', { ...changed, resumeTries: 0 }))).toBe('write');
+		expect(bulkResumeKind(w('failureRate', { ...changed, sentUnknown: 1 }))).toBe('check');
+		expect(bulkResumeKind(w('maxTargets', changed))).toBeNull();
+		expect(bulkResumeKind(w('maxTargets', { ...changed, probeConfirmed: true }))).toBe('max');
 	});
 
 	it('places every halt the engine names for a write run', () => {

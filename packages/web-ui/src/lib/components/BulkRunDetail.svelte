@@ -579,6 +579,8 @@
 					{/if}
 					{#if resumeKind === 'none'}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.resume.none')}</p>
+					{:else if resumeKind === 'nothing'}
+						<p class="text-sm">{resumeText.check}</p>
 					{:else}
 						{#if resumeText.soFar}
 							<p class="text-sm">{resumeText.soFar}</p>
@@ -657,8 +659,8 @@
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
 					<p class="text-sm">{run.probe.fields.length > 0
-						? tf('bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
-						: tf('bulk.probe.explain_whole', { target: bulkVisibleText(run.probe.key), provider })}</p>
+						? tf(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
+						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: bulkVisibleText(run.probe.key), provider })}</p>
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
 						<span>{tf(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>
