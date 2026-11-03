@@ -14412,7 +14412,7 @@ export class LynoxHTTPApi {
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
         const { createReadStream } = await import('node:fs');
-        const { stat } = await import('node:fs/promises');
+        const { open, stat } = await import('node:fs/promises');
         const { basename } = await import('node:path');
         // With isolation: the file is opened once through the workspace's open directory, and its
         // size, its checks and the stream all come from that one open file.
@@ -14453,16 +14453,28 @@ export class LynoxHTTPApi {
         if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
         if (st.size > 100 * 1024 * 1024) { errorResponse(res, 413, 'File too large'); return; }
         const name = basename(resolved);
-        res.writeHead(200, {
-          'Content-Type': 'application/octet-stream',
-          'Content-Disposition': attachmentDisposition(name),
-          'Content-Length': st.size,
-        });
+        // Opened before the header goes out, so a file the server may not read is answered as a
+        // failed read instead of a 200 that breaks off.
+        const fh = await open(resolved, 'r');
+        try {
+          res.writeHead(200, {
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': attachmentDisposition(name),
+            'Content-Length': st.size,
+          });
+        } catch (err) {
+          await fh.close();
+          throw err;
+        }
         // Bounded by the size answered in Content-Length, also when the file grows.
-        if (st.size === 0) { res.end(); return; }
-        await sendExactly(createReadStream(resolved, { start: 0, end: st.size - 1 }), res, st.size);
-      } catch {
-        errorResponse(res, 404, 'File not found');
+        if (st.size === 0) { await fh.close(); res.end(); return; }
+        await sendExactly(fh.createReadStream({ start: 0, end: st.size - 1 }), res, st.size);
+      } catch (err: unknown) {
+        // Only a missing file is "not found". Anything else (a permission error) means the file
+        // is there and could not be read.
+        const code = err instanceof Error && 'code' in err ? err.code : undefined;
+        if (code === 'ENOENT' || code === 'ENOTDIR') errorResponse(res, 404, 'File not found');
+        else errorResponse(res, 500, 'Could not read the file');
       }
     }, READS);
 
@@ -14490,8 +14502,11 @@ export class LynoxHTTPApi {
         if (st.size > 1024 * 1024) { errorResponse(res, 413, 'File too large for preview (max 1 MB)'); return; }
         const content = await readFile(resolved, 'utf-8');
         jsonResponse(res, 200, { content });
-      } catch {
-        errorResponse(res, 404, 'File not found');
+      } catch (err: unknown) {
+        // As for the download: only a missing file is "not found".
+        const code = err instanceof Error && 'code' in err ? err.code : undefined;
+        if (code === 'ENOENT' || code === 'ENOTDIR') errorResponse(res, 404, 'File not found');
+        else errorResponse(res, 500, 'Could not read the file');
       }
     }, READS);
 
