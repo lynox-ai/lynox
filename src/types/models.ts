@@ -116,7 +116,7 @@ export function toMistralEuBase(url: string | undefined): string | undefined {
  * and behaviour-drift in managed-EU tenants.
  *   fast     → ministral-8b-2512      (gen 3 edge model; took the fast slot from mistral-small-2603)
  *   balanced → mistral-medium-2604    (WS2: the 14B main fell below the R1/R3 floor)
- *   deep     → mistral-medium-2604    (Medium 3.5 — the stronger Mistral deep; Large 3 → legacy)
+ *   deep     → mistral-medium-2604    (Medium 3.5 — the stronger Mistral deep; both retire 2027-04-30)
  * (Keep this block in sync with MISTRAL_MODEL_MAP below — the values are
  *  pinned by tests/doc-drift.test.ts.)
  *
@@ -126,23 +126,24 @@ export function toMistralEuBase(url: string | undefined): string | undefined {
  * fast-tier moves to ministral-8b-2512 (gen 3 edge, ~$0.15/M, multimodal, 256k ctx).
  */
 // Refreshed 2026-07-21: `deep` moves to mistral-medium-2604 (Mistral Medium
-// 3.5). Mistral Large 3 (2512) is being deprecated to a legacy option and is
-// the weaker deep; Medium 3.5 is a newer, stronger generation for deep
-// reasoning — pricier ($1.50/$7.50 vs Large's $0.50/$1.50) and text-only (no
-// vision), the quality tradeoff. Mistral still has no 1M-context deep (262k
-// ceiling).
+// 3.5). Mistral Large 3 (2512) is the weaker deep; Medium 3.5 is a newer,
+// stronger generation for deep reasoning — pricier ($1.50/$7.50 vs Large's
+// $0.50/$1.50), the quality tradeoff. Mistral deprecated both on 2026-10-31 and
+// retires both on 2027-04-30 (deprecation table, read 2026-11-03). Mistral's
+// only 1M-context model, Large 4, is in public preview (changelog, 2026-10-06) and
+// not registered.
 export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
   // deep → mistral-medium-2604 (Mistral Medium 3.5): the stronger Mistral for
-  // deep reasoning. Mistral Large 3 (2512) is being deprecated to legacy and is
-  // the weaker deep; Medium 3.5 is a newer generation that beats it on analysis
-  // (pricier at $1.50/$7.50 vs Large's $0.50/$1.50 — the quality tradeoff). Note
-  // Mistral has no 1M-context deep — 262k is the ceiling here.
+  // deep reasoning. Mistral Large 3 (2512) is the weaker deep; Medium 3.5 is a
+  // newer generation that beats it on analysis (pricier at $1.50/$7.50 vs Large's
+  // $0.50/$1.50 — the quality tradeoff). Both retire on 2027-04-30. 262k is the
+  // ceiling among the registered Mistral models.
   'deep':     'mistral-medium-2604',
   // balanced → mistral-medium-2604 too: the WS2 wire-replay measured Ministral
   // 14B BELOW the R1/R3 orchestration floor (answers deep-worthy tasks inline,
   // 2/22 escalate over 3 tasks) — the same finding that moved the managed
   // presets (#1045). Mistral has nothing between 14B and Medium 3.5 (Large 3 is
-  // the WEAKER deep, going legacy), so balanced==deep here — honest for a
+  // the WEAKER deep), so balanced==deep here — honest for a
   // provider whose best model is the ladder's ceiling; deep escalation on
   // BYOK-Mistral changes budget/framing, not the model.
   'balanced': 'mistral-medium-2604',
@@ -715,8 +716,9 @@ export const CACHE_READ_MULTIPLIER = 0.1;
 
 /**
  * Legacy Mistral ids the API answers with ANOTHER model, mapped to the registry entry of
- * the model that answers (measured 2026-10-13: the response's `model` field, and the
- * alias lists of `GET /v1/models`). The legacy entry carries that model's pricing and
+ * the model that answers (measured 2026-10-13; on the EU endpoint 2026-11-03 a call with each
+ * dated legacy id answered under an alias of the mapped entry in `GET /v1/models`, and the
+ * `-latest` ids are aliases of it in that listing). The legacy entry carries that model's pricing and
  * context window, so the cost cap counts what Mistral bills.
  */
 export const MISTRAL_SERVED_AS: Readonly<Record<string, string>> = Object.freeze({
@@ -1039,15 +1041,20 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'Ministral 14B',
     provenance: 'EU',
   },
-  // Mistral Large 3 (Dec 2025): 256k context, $0.50/$1.50 (75% price cut vs Large 2),
+  // Mistral Large 3 (Dec 2025): 262 144 context, 256k in binary k (`GET /v1/models` on the EU
+  // endpoint, 2026-11-03; this entry had the decimal 256 000), $0.50/$1.50 list (75% price cut vs Large 2),
   // multimodal input (text+image), structured-outputs, function-calling, prefix-cache.
   // The `deep` tier as of 2026-05-29 (replaced the deprecated magistral-medium-2509);
-  // the Mistral quality leader on Set-Bench v4.
+  // the Mistral quality leader on Set-Bench v4. Mistral's deprecation table
+  // (docs.mistral.ai/getting-started/models, read 2026-11-03) lists it deprecated on
+  // 2026-10-31 and retired on 2027-04-30, naming Large 4 as the alternative; `GET /v1/models`
+  // does not report a deprecation for it yet. Large 4 is in public preview (Mistral
+  // changelog, 2026-10-06) and is not registered here.
   'mistral-large-2512': {
     id: 'mistral-large-2512',
     provider: 'openai',
     tier: 'deep',
-    contextWindow: 256_000,
+    contextWindow: 262_144,
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
@@ -1068,7 +1075,8 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // wired into MISTRAL_MODEL_MAP — they're only referenced by set-bench and
   // cost-guard so the user can opt-in via openai_model_id.
   //
-  // ⚠ SERVED-AS (measured live 2026-10-13):
+  // ⚠ SERVED-AS (measured live 2026-10-13; on the EU endpoint 2026-11-03 each dated legacy id
+  // still answered as the same successor, by an alias of it):
   // Mistral does not refuse a retired id, it answers it with a successor and names that
   // successor in the response's `model` field. A legacy config that pins one of these ids
   // therefore runs on — and is billed for — another model. Each such entry carries the
@@ -1154,6 +1162,9 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // both), completing the check the verify-live-or-false convention owed here →
   // GEN3. Medium 3.5 carries both the balanced and deep Mistral tiers, so a
   // false-NO would hard-block every image message on the BYOK-Mistral main.
+  // Mistral's deprecation table (docs.mistral.ai/getting-started/models, read 2026-11-03)
+  // lists it, as mistral-medium-3-5, deprecated on 2026-10-31 and retired on 2027-04-30,
+  // naming Large 4 as the alternative; `GET /v1/models` does not report a deprecation yet.
   'mistral-medium-2604': {
     id: 'mistral-medium-2604',
     provider: 'openai',
