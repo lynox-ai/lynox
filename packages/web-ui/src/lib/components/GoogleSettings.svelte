@@ -115,19 +115,23 @@
 	}
 
 	/**
-	 * Ends the parked claim, and only then takes `google_oauth` out of the URL. Until the claim is
-	 * confirmed or dropped the nonce stays there, so a reload parks it again: the card needs the
-	 * owner's session, and when `GET /api/config` never answers, the reload the page asks for is
-	 * the owner's only way back to it.
+	 * `google_oauth` leaves the URL only when the claim has ended: dropped, or taken by the engine.
+	 * Until then the nonce stays there, so a reload parks it again: the card needs the owner's
+	 * session, and when `GET /api/config` never answers, the reload the page asks for is the
+	 * owner's only way back to it. A confirm whose claim fails keeps it for the same reason.
 	 */
-	function dropPendingClaim(): void {
-		pendingClaimNonce = null;
-		pendingClaimPreview = null;
+	function clearClaimParam(): void {
 		if (typeof window === 'undefined') return;
 		const url = new URL(window.location.href);
 		if (!url.searchParams.has('google_oauth')) return;
 		url.searchParams.delete('google_oauth');
 		window.history.replaceState({}, '', url.toString());
+	}
+
+	function dropPendingClaim(): void {
+		pendingClaimNonce = null;
+		pendingClaimPreview = null;
+		clearClaimParam();
 	}
 
 	// A session the server named as not the owner's never sees the card: the claim is dropped.
@@ -137,8 +141,9 @@
 
 	function confirmPendingClaim(): void {
 		const nonce = pendingClaimNonce;
-		dropPendingClaim();
-		if (nonce) void claimManagedGoogleTokens(nonce);
+		pendingClaimNonce = null;
+		pendingClaimPreview = null;
+		if (nonce) void claimManagedGoogleTokens(nonce).then((claimed) => { if (claimed) clearClaimParam(); });
 	}
 
 	$effect(() => {
