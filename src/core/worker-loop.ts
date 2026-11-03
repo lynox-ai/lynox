@@ -3534,9 +3534,10 @@ export class WorkerLoop {
     // on the plan pauses. Keyed on the run's own error and on the plan having ended, so a step
     // whose error happens to read the same is still a failure.
     const endedEntry = this.activeTasks.get(task.id);
-    // A liveness read that throws is no end found: the run is recorded as the failure it is and
-    // retried, rather than told to the owner as an access that ended and the plan paused for it.
-    // The runner stops a run on such a read too (`stopForEndedAuthor`), so no step runs either way.
+    // A liveness read that throws is no end found: the run is recorded as a failure and retried,
+    // and the plan is not paused for it. The runner stopped the run on its own read (a throw there
+    // counts as ended, `stopForEndedAuthor`), so no step ran; its error, which the escalation and
+    // the end event carry, still says that an access ended.
     const planEnded = (entry: ActiveTask): boolean => { try { return this.#planHasEnded(entry); } catch { return false; } };
     if (result.ok && result.error === WORKFLOW_ENDED_MID_RUN && endedEntry !== undefined && planEnded(endedEntry)) {
       endedEntry.accessEnded = true;
