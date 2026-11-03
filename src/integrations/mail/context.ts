@@ -204,6 +204,12 @@ export interface InboxLabel {
   bucket: InboxBucket;
   /** Set once the user archived, replied to or snoozed the item. */
   userAction?: InboxUserAction | undefined;
+  /**
+   * The classifier's one-line reason for the verdict (`reasonDe`). Written by a model from the
+   * mail itself, so it is the mail's text in other words: `mail_triage` shows it only inside the
+   * message's untrusted-data block, never in the framing.
+   */
+  reason?: string | undefined;
 }
 
 /**
