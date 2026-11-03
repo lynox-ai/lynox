@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent, ChangesetManagerLike } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
-import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
+import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, AUDIT_UNAVAILABLE_STORED_MAIL_READ, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
 import { currentCallSignal, noteCallFiled, noteOwnStopSentence } from './call-connection.js';
@@ -7375,6 +7375,18 @@ describe('actor trail — a mandate\'s outward read', () => {
     const owner = recorder();
     await run(tool, { action: 'counts' }, { auditLog: owner.log });
     expect(owner.recs).toEqual([]);
+  });
+
+  it('does not run a mandate\'s inbox_read whose row cannot be written, and says it is the stored mail that is not read unrecorded', async () => {
+    for (const auditLog of [failing, null]) {
+      const handler = vi.fn().mockResolvedValue('ok');
+      const tool: ToolEntry = { ...makeTool('inbox_read', handler), storedMailRead: () => 'counts' };
+      const r = await run(tool, { action: 'counts' }, { principal: MANDATE, auditLog });
+      expect(handler, String(auditLog)).not.toHaveBeenCalled();
+      expect(r.isError).toBe(true);
+      expect(r.resultText).toContain(JSON.stringify(AUDIT_UNAVAILABLE_STORED_MAIL_READ).slice(1, -1));
+      expect(r.resultText).not.toContain('outside the instance');
+    }
   });
 
   it('names the approval entry on the end row of a write filed for the owner, and nothing for one not filed', async () => {

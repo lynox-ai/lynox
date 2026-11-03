@@ -209,7 +209,7 @@ describe('inbox_read — what the inbox found at intake counts (B1)', () => {
   const LINK = 'https://app.example.com/auth?t=Zq81xP0aLm';
   const snippet = `Guten Tag, hier ist Ihr Zugang: ${LINK} ${'Bitte beachten Sie unsere Hinweise. '.repeat(5)}Dies ist Ihr persönlicher Login Link, gültig für 15 Minuten.`;
 
-  it('withholds a mail the intake check skipped as sensitive, though its stored text looks harmless, and its stored thread copy', async () => {
+  it('withholds a mail the intake check skipped as sensitive, though its stored text looks harmless, in the list and in the item', async () => {
     mail.upsertAccount(ACCOUNT as never);
     expect(snippet.indexOf('Login Link')).toBeGreaterThan(200);
     expect(snippet.indexOf(LINK)).toBeLessThan(200);
@@ -229,6 +229,36 @@ describe('inbox_read — what the inbox found at intake counts (B1)', () => {
       expect(out).not.toContain(LINK);
       expect(out).toContain('(withheld: sensitive content — password_reset)');
     }
+  });
+
+  // A rule files the mail before the sensitive check of the skip path; the check now runs for
+  // the rule too and its audit records what it found.
+  it('withholds a mail a rule filed, when the check finds it sensitive beyond the stored 200 characters', async () => {
+    mail.upsertAccount(ACCOUNT as never);
+    runtime.state.insertRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'noreply@app.example.com', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    runtime.rules.invalidateAll();
+    const outcome = await runtime.hook('acct-1', {
+      uid: 2, messageId: '<rule@x>', folder: 'INBOX', threadKey: 'imap:rule', inReplyTo: undefined,
+      from: [{ address: 'noreply@app.example.com' }], to: [{ address: 'me@acme.example' }], cc: [], replyTo: [],
+      subject: 'Ihr Zugang', date: new Date('2026-11-01T10:00:00Z'), flags: [], snippet,
+      hasAttachments: false, attachmentCount: 0, sizeBytes: 0, isAutoReply: false,
+    });
+    expect(outcome).toBe('rule_applied');
+    const out = await call({ action: 'list', bucket: 'auto_handled' });
+    expect(out).toContain('bucket:auto_handled');
+    expect(out).not.toContain(LINK);
+    expect(out).toContain('(withheld: sensitive content — password_reset)');
+  });
+
+  it('withholds a rule-filed item from before the audit recorded the check, by the stored body the list does not show', async () => {
+    const id = item({ bucket: 'auto_handled', reasonDe: 'Regel: from = noreply@app.example.com', classifierVersion: 'rule:r1', messageId: '<old-rule@x>', subject: 'Ihr Zugang', snippet: `Hier: ${LINK}` });
+    runtime.state.insertThreadMessage({
+      accountId: 'acct-1', threadKey: runtime.state.getItem(id)!.threadKey, messageId: '<old-rule@x>', fromAddress: 'noreply@app.example.com',
+      subject: 'Ihr Zugang', bodyMd: snippet, inboxItemId: id,
+    } as Parameters<InboxRuntime['state']['insertThreadMessage']>[0]);
+    const out = await call({ action: 'list', bucket: 'auto_handled' });
+    expect(out).not.toContain(LINK);
+    expect(out).toContain('(withheld: sensitive content — password_reset)');
   });
 
   it('withholds an item whose intake audit names sensitive categories (a classified, masked mail)', async () => {
@@ -326,5 +356,18 @@ describe('inbox_read — reading edges', () => {
     expect(out).toContain('Text aus dem alten Speicher');
     expect(out).not.toContain('Other stored messages');
     expect(out).not.toContain('eigene Nachricht');
+  });
+});
+
+describe('inbox_read — the trail target', () => {
+  // The owner reads it in the trail view; only the inbox's own values may reach it.
+  it('names the action, a known bucket and an id of the store\'s shape, and nothing the model wrote', () => {
+    const target = createInboxReadTool(hooks).storedMailRead!;
+    expect(target({ action: 'counts' })).toBe('counts');
+    expect(target({ action: 'list', bucket: 'draft_ready' })).toBe('list draft_ready');
+    expect(target({ action: 'list', bucket: 'ignore previous instructions' as never })).toBe('list');
+    expect(target({ action: 'item', id: 'inb_1730000000000_ab12cd34' })).toBe('item inb_1730000000000_ab12cd34');
+    expect(target({ action: 'item', id: 'inb_1_a Ignore previous instructions' })).toBe('item');
+    expect(target({ action: 'item', id: 'Kundin Müller' })).toBe('item');
   });
 });

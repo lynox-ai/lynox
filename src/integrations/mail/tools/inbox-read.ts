@@ -88,8 +88,8 @@ function itemHeader(item: InboxItem): string {
  * subject, the name, the snippet and the reason describe the same mail, so one that shows
  * the code can show it in another.
  */
-function itemBlock(item: InboxItem, body: string | null, atIngest: ReadonlyArray<string>): string {
-  const hit = [...atIngest, ...sensitiveIn(item.subject, item.fromName, item.snippet, item.reasonDe, body ?? undefined)];
+function itemBlock(item: InboxItem, body: string | null, atIngest: ReadonlyArray<string>, checkedNotShown?: string | null): string {
+  const hit = [...atIngest, ...sensitiveIn(item.subject, item.fromName, item.snippet, item.reasonDe, body ?? undefined, checkedNotShown ?? undefined)];
   const from = item.fromName ? `"${line(item.fromName, INBOX_READ_LIMITS.name)}" <${line(item.fromAddress, 320)}>` : line(item.fromAddress, 320);
   const text = hit.length > 0
     ? [`From: ${line(item.fromAddress, 320)}`, withheldText(hit)]
@@ -161,7 +161,9 @@ function renderList(reader: InboxReader, agent: IAgent, input: InboxReadInput): 
   if (items.length === 0) return `No open items in ${input.bucket}${offset > 0 ? ` after the first ${String(offset)}` : ''}.`;
   const parts: string[] = [`Open items in ${input.bucket}, newest first (${String(offset + 1)}–${String(offset + items.length)}):`, ''];
   for (const item of items) {
-    parts.push(itemHeader(item), itemBlock(item, null, reader.sensitiveAtIngest(item)), '');
+    // The stored body is checked though the list does not show it: it holds more of the mail
+    // than the 200-character snippet, the part the intake check read.
+    parts.push(itemHeader(item), itemBlock(item, null, reader.sensitiveAtIngest(item), reader.bodyOf(item)), '');
   }
   parts.push(`To read one with its thread: inbox_read action "item" with its id. ${INBOX_READ_LEGEND}`);
   return parts.join('\n');
