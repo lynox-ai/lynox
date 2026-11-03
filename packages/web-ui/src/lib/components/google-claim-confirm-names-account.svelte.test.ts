@@ -174,6 +174,9 @@ describe('the Google claim confirmation', () => {
 		await render();
 		releasePreview(answer({ email: 'owner@example.com' }));
 		await settle();
+		// The mandate's own view is there, so the page knows whose session it is: the missing
+		// confirmation is the owner check, not a viewer that never loaded.
+		expect(target.querySelector('[data-testid="google-read-only"]')).not.toBeNull();
 		expect(target.textContent).not.toContain('owner@example.com');
 		expect([...target.querySelectorAll('button')].map((b) => b.textContent?.trim())).not.toContain('Cancel');
 	});
