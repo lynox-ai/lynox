@@ -204,6 +204,22 @@ describe('a member\'s connection inside a plan\'s run', () => {
     runAsPlanOf(B, () => { expect(read(refreshed, B)).toBe('access-value'); }, listed(stamped));
   });
 
+  // 1100: the owner started this run of the member's workflow (the library's Run, the owner's
+  // chat): no schedule stands behind it, so it speaks of no confirmation the owner could change.
+  it('in a run the owner started, is not read either, and says the owner started it, not a schedule', () => {
+    const p = crm({ oauth_grant: G });
+    runAsPlanOf(B, () => {
+      expect(read(p, B)).toBeNull();
+      // Spelled out, ux U-122: the ways on are the model's to name.
+      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}. This run of a workflow setup@example.org set up or changed was not started by a schedule of setup@example.org's, so it does not use connections setup@example.org made with their own login. `
+        + 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. '
+        + 'In your reply, say so. The person reading your reply is the owner of this instance, not setup@example.org. '
+        + 'Tell them to connect api.crm.example themselves under Settings → APIs and then ask lynox in a chat to do this step with that connection. '
+        + 'Do not suggest running this workflow again, and do not ask setup@example.org to do anything. Do not ask for permission to try again.');
+    }, null, undefined, true);
+  });
+
+
   it('is not listed without a grant id, so a plan does not read it', () => {
     const p = crm();
     expect(stampEntriesFor(B, { knownProfiles: () => [p] }, ends(['M-1']))).toEqual([]);

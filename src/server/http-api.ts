@@ -98,6 +98,7 @@ import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orchestrator/run-source.js';
 import { runAsPlanOf } from '../core/plan-run-context.js';
+import { MEMBER_CONNECTION_PREFIX } from '../core/member-connection-notes.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
@@ -8580,8 +8581,12 @@ export class LynoxHTTPApi {
         } else {
           let outcome: 'success' | 'failed' = 'failed';
           try {
-            result = await runAsPlanOf(runAs, run, null, trail.key);
-            if (result.ok && result.status === 'completed') outcome = 'success';
+            result = await runAsPlanOf(runAs, run, null, trail.key, /* the owner pressed Run */ true);
+            // A run that a refused member connection kept from the provider is no success in the
+            // log either (1100), as the worker ends such a run (`withMemberNotes`); the answer
+            // already lists the line under `writeNotes`.
+            const memberRefused = result.ok && (result.writeNotes ?? []).some((n) => n.startsWith(MEMBER_CONNECTION_PREFIX));
+            if (result.ok && result.status === 'completed' && !memberRefused) outcome = 'success';
           } finally {
             trail.end(outcome, false);
           }

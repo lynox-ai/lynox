@@ -12593,6 +12593,33 @@ describe('LynoxHTTPApi', () => {
         expect(phases).toEqual(['attempt', 'failed']);
       });
 
+      // 1100: a run that a refused member connection kept from the provider is no success in the log.
+      it('ends the run record as failed when a member connection was refused, though every step completed', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const { MEMBER_CONNECTION_PREFIX } = await import('../core/member-connection-notes.js');
+        const { currentPlanOwnerStarted } = await import('../core/plan-run-context.js');
+        let ownerStarted: boolean | undefined;
+        const record = vi.fn();
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record });
+        const phasesOf = (): string[] => record.mock.calls.map((c) => c[0] as { action: string; phase: string }).filter((r) => r.action === 'workflow:run').map((r) => r.phase);
+        try {
+          mockRunSavedWorkflow.mockImplementationOnce(async () => {
+            ownerStarted = currentPlanOwnerStarted();
+            return { ok: true, runId: 'run-1', status: 'completed', writeNotes: [`${MEMBER_CONNECTION_PREFIX} eva@kanzlei.example set up this connection`] };
+          });
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          expect(phasesOf()).toEqual(['attempt', 'failed']);
+          // The refusal it got names the owner as the one who started it, not a schedule.
+          expect(ownerStarted).toBe(true);
+          // CONTROL: another note under a completed run leaves it a success.
+          record.mockClear();
+          mockRunSavedWorkflow.mockResolvedValueOnce({ ok: true, runId: 'run-2', status: 'completed', writeNotes: ['A write may have landed before a refused redirect.'] });
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          expect(phasesOf()).toEqual(['attempt', 'done']);
+        } finally { engineRef()['getAuditLog'] = origLog; }
+      });
+
       it('does not run the mandate\'s workflow when its start cannot be recorded', async () => {
         mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
         const origLog = engineRef()['getAuditLog'];
