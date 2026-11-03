@@ -126,6 +126,8 @@
 		const options = side.providers.map((p) => ({ value: p.id, label: providerName(p) }));
 		// Pinned by the environment or locked on a managed instance: the picker shows the provider in use.
 		const value = side.env_override || side.locked ? side.provider : (chosen ?? 'auto');
+		// Locked: the row names the provider as the owner's locked picker does.
+		if (side.locked && !side.env_override && value) return { label, value: lockedName(value) };
 		return { label, value: optionLabel(value, options) };
 	}
 	const mandateRows = $derived.by(() => {
