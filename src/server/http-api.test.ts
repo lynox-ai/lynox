@@ -5361,6 +5361,29 @@ describe('LynoxHTTPApi', () => {
       expect(body.state).toBe('invalid');
     });
 
+    it('POST /api/secrets/validate-key checks Mistral\'s global endpoint at the EU one', async () => {
+      // This file shares ONE per-IP rate window: the request below is paid back after.
+      const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
+      const { setPinnedTransportForTests } = await import('../core/network-guard.js');
+      const hosts: string[] = [];
+      const restoreTransport = setPinnedTransportForTests(async (input) => {
+        hosts.push(input.hostname);
+        return new Response('{}', { status: 401 });
+      });
+      try {
+        const res = await jsonFetch('/api/secrets/validate-key', {
+          method: 'POST',
+          body: JSON.stringify({ provider: 'openai', key: 'sk-test', api_base_url: 'https://api.mistral.ai/v1' }),
+        });
+        expect(res.status).toBe(200);
+        expect(hosts).toEqual(['api.eu.mistral.ai']);
+      } finally {
+        restoreTransport();
+        for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+      }
+    });
+
     it('PUT stores a secret', async () => {
       const res = await jsonFetch('/api/secrets/NEW_KEY', {
         method: 'PUT',
@@ -14581,7 +14604,7 @@ describe('LynoxHTTPApi', () => {
       // A curated host is not enough: it must belong to the provider the save leaves in place,
       // or the pool's key goes to the other vendor (the Anthropic key to Mistral, or back).
       describe('PUT /api/config pairs api_base_url with the provider', () => {
-        const MISTRAL = 'https://api.mistral.ai/v1';
+        const MISTRAL = 'https://api.eu.mistral.ai/v1';
         // This file shares ONE per-IP rate window; the requests below are paid back so a test
         // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
         const rateCounts = (): Map<string, { count: number }> =>
@@ -14633,12 +14656,23 @@ describe('LynoxHTTPApi', () => {
             expect((await put({ api_base_url: 'https://api.anthropic.com' })).status).toBe(200);
           });
           await withStored({ provider: 'openai', api_base_url: MISTRAL }, async () => {
+            expect((await put({ api_base_url: 'https://api.eu.mistral.ai' })).status).toBe(200);
+          });
+          // A page loaded before the move, or a file written before it, names Mistral's global
+          // endpoint. It is taken, as the EU one.
+          await withStored({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1' }, async () => {
+            expect((await put({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' })).status).toBe(200);
             expect((await put({ api_base_url: 'https://api.mistral.ai' })).status).toBe(200);
           });
           // The Web UI sends every field back on each save; an unpaired value already in the
           // file is not refused, the loader drops it.
           await withStored({ provider: 'anthropic', api_base_url: MISTRAL }, async () => {
             expect((await put({ provider: 'anthropic', api_base_url: MISTRAL })).status).toBe(200);
+          });
+          // The same unpaired value, written before the move, names the global endpoint: sent
+          // back unchanged it is still the stored value, not a new choice.
+          await withStored({ provider: 'anthropic', api_base_url: 'https://api.mistral.ai/v1' }, async () => {
+            expect((await put({ provider: 'anthropic', api_base_url: 'https://api.mistral.ai/v1' })).status).toBe(200);
           });
         });
       });
@@ -16090,6 +16124,31 @@ describe('LynoxHTTPApi', () => {
       } finally {
         restoreTransport();
         for (const [name, v] of [['LYNOX_BILLING_TIER', keep.tier], ['LYNOX_MANAGED_MODE', keep.mode], ['MISTRAL_API_KEY', keep.mistral]] as const) {
+          if (v === undefined) delete process.env[name]; else process.env[name] = v;
+        }
+      }
+    });
+
+    // A page loaded before the move to Mistral's EU endpoint still sends the global one. The probe
+    // goes where a model request would go, the EU endpoint, and on a pool tier it is paired with
+    // the pool's endpoint, so the stored key is used. Typed with the EU URL it is the same probe.
+    it.each(['https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'])('a probe of %s on a pool tier goes to the EU endpoint with the stored Mistral key', async (baseUrl) => {
+      const keep = { tier: process.env['LYNOX_BILLING_TIER'], mistral: process.env['MISTRAL_API_KEY'] };
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['MISTRAL_API_KEY'] = 'sk-pool-mistral-eu-probe';
+      const { setPinnedTransportForTests } = await import('../core/network-guard.js');
+      const outbound: string[] = [];
+      const restoreTransport = setPinnedTransportForTests(async (input) => {
+        outbound.push(`${input.hostname} ${new Headers(input.headers).get('authorization') ?? ''}`);
+        return new Response('{}', { status: 401 });
+      });
+      try {
+        const res = await llmTestFetch({ provider: 'openai', base_url: baseUrl });
+        expect(res.status).toBe(200);
+        expect(outbound).toEqual(['api.eu.mistral.ai Bearer sk-pool-mistral-eu-probe']);
+      } finally {
+        restoreTransport();
+        for (const [name, v] of [['LYNOX_BILLING_TIER', keep.tier], ['MISTRAL_API_KEY', keep.mistral]] as const) {
           if (v === undefined) delete process.env[name]; else process.env[name] = v;
         }
       }
@@ -23585,5 +23644,31 @@ describe('the connection form of a built-in provider (/api/api-profiles/:id/clie
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can enter the app credentials of a built-in provider.');
     expect(h.set).not.toHaveBeenCalled();
+  });
+});
+
+describe('moveMistralEndpointsToEu', () => {
+  it('moves the global endpoint to the EU one, at the top level and in every tier slot', async () => {
+    const { moveMistralEndpointsToEu } = await import('./http-api.js');
+    const update = {
+      api_base_url: 'https://api.mistral.ai/v1',
+      tier_set: {
+        fast: { api_base_url: 'https://api.mistral.ai' },
+        deep: { api_base_url: 'https://api.fireworks.ai/inference/v1' },
+        balanced: {},
+      },
+    };
+    moveMistralEndpointsToEu(update);
+    expect(update.api_base_url).toBe('https://api.eu.mistral.ai/v1');
+    expect(update.tier_set.fast.api_base_url).toBe('https://api.eu.mistral.ai');
+    expect(update.tier_set.deep.api_base_url).toBe('https://api.fireworks.ai/inference/v1');
+    expect(update.tier_set.balanced).toEqual({});
+  });
+
+  it('leaves a spoof of the Mistral host as written', async () => {
+    const { moveMistralEndpointsToEu } = await import('./http-api.js');
+    const update = { api_base_url: 'https://api.mistral.ai.evil.com/v1' };
+    moveMistralEndpointsToEu(update);
+    expect(update.api_base_url).toBe('https://api.mistral.ai.evil.com/v1');
   });
 });

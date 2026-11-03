@@ -92,7 +92,7 @@ import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
 import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded , toMistralEuBase } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
@@ -790,7 +790,7 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
  * On Managed, `provider` is constrained to a curated set so a customer
  * cannot point the engine at a free-text endpoint we'd then proxy traffic to.
  * Anthropic: always allowed (CP-pinned default). `openai` provider is allowed
- * ONLY when paired with the Mistral preset (`api_base_url ==='https://api.mistral.ai/v1'`).
+ * ONLY when paired with the Mistral preset (`api_base_url ==='https://api.eu.mistral.ai/v1'`).
  * `custom` / `vertex` are blocked on Managed (free-text or GCP-OAuth surfaces
  * the CP doesn't manage). Returns null when accepted, a 403-reason string
  * otherwise.
@@ -812,6 +812,17 @@ const MANAGED_CURATED_HOSTS = new Set<string>([
   ...MANAGED_OPENAI_MISTRAL_HOSTS,
   POOL_ANTHROPIC_ENDPOINT,
 ]);
+
+/** Rewrites a config update's Mistral global-endpoint URLs (top level and tier slots) to the EU one. */
+export function moveMistralEndpointsToEu(update: {
+  api_base_url?: string | undefined;
+  tier_set?: Partial<Record<string, { api_base_url?: string | undefined } | undefined>> | undefined;
+}): void {
+  if (update.api_base_url) update.api_base_url = toMistralEuBase(update.api_base_url);
+  for (const slot of Object.values(update.tier_set ?? {})) {
+    if (slot?.api_base_url) slot.api_base_url = toMistralEuBase(slot.api_base_url);
+  }
+}
 
 function enforceManagedProviderConstraints(
   update: Record<string, unknown>,
@@ -7200,7 +7211,8 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const provider = b && typeof b['provider'] === 'string' ? b['provider'] : '';
       const key = b && typeof b['key'] === 'string' ? b['key'] : '';
-      const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? b['api_base_url'] : '';
+      // Mistral's global endpoint is checked where a model request would go: the EU one.
+      const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? toMistralEuBase(b['api_base_url']) : '';
       if (!provider || !key) { errorResponse(res, 400, 'Missing provider or key'); return; }
       const { validateAnthropicKey, validateMistralKey, validateOpenAICompatKey } = await import('../cli/docker-installer.js');
       try {
@@ -7717,6 +7729,10 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
+      // A page loaded before the Mistral move, or a stored value sent back unchanged, still names
+      // Mistral's global endpoint. It is saved as the EU regional one, which the gates below and
+      // every reader expect.
+      moveMistralEndpointsToEu(parsed.data);
       // Sonnet-variant selection: the schema admits any 1–64-char string
       // (`balanced_model` is intentionally NOT a z.enum — an unrecognised value
       // must degrade at the resolver, not null the whole `.strict()` config).
@@ -7794,7 +7810,7 @@ export class LynoxHTTPApi {
         // effective model blocklist (env-merged by loadConfig) rides along so
         // the gate can 403 a blocked tier_set/tier_preset model honestly.
         const storedConfig = readUserConfig();
-        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? [], { provider: storedConfig.provider, api_base_url: storedConfig.api_base_url });
+        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? [], { provider: storedConfig.provider, api_base_url: toMistralEuBase(storedConfig.api_base_url) });
         if (providerReason) {
           errorResponse(res, 403, providerReason);
           return;
@@ -10303,7 +10319,9 @@ export class LynoxHTTPApi {
         return;
       }
       const bodyKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
-      const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
+      // A page loaded before the move to Mistral's EU endpoint sends the global one: the probe goes
+      // where a model request would go, the EU endpoint, and pairs with the pool's endpoint.
+      const baseUrl = typeof b['base_url'] === 'string' ? toMistralEuBase(b['base_url']) : '';
       // On an instance connected to a Shopify store a probe goes only where a model request may
       // go (`contained-providers.ts`): a typed key is the user's, and another endpoint is refused
       // before anything is sent. An empty key is the stored one, which on a pool tier is the pool's.

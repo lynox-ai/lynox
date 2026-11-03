@@ -1,7 +1,7 @@
 /**
  * Mistral Voxtral Mini Transcribe v2 provider.
  *
- * POST https://api.mistral.ai/v1/audio/transcriptions (multipart):
+ * POST https://api.eu.mistral.ai/v1/audio/transcriptions (multipart):
  *   - file: audio blob (WebM/Opus, MP3, WAV, OGG all accepted)
  *   - model: voxtral-mini-2602
  *   - language: de | en | auto (optional)
@@ -32,7 +32,7 @@ export const VOXTRAL_TRANSCRIBE_MODEL = 'voxtral-mini-2602';
  */
 export const VOXTRAL_USD_PER_MIN = 0.003;
 
-const API_URL = 'https://api.mistral.ai/v1/audio/transcriptions';
+const API_URL = 'https://api.eu.mistral.ai/v1/audio/transcriptions';
 
 /** Extension → MIME mapping for the multipart blob content type. */
 const MIME_BY_EXT: Record<string, string> = {
