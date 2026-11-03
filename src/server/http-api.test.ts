@@ -14765,6 +14765,48 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      it('PUT /api/config names a refused endpoint without its credentials, query or fragment, and keeps a curated one as entered', async () => {
+        // This file shares one per-IP rate window; these requests are paid back.
+        repayRateWindow();
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const refusal = async (update: Record<string, unknown>): Promise<string> => {
+            const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(update) });
+            expect(res.status).toBe(403);
+            return (await res.json() as { error: string }).error;
+          };
+          // The endpoint check, the Mistral pairing check and a tier slot (any string, no scheme;
+          // here with an apostrophe and an `@` in the password, so the host starts after the last `@`).
+          const top = await refusal({ api_base_url: 'https://u:SECRET@h.example/v1?key=SECRET#SECRET' });
+          expect(top).toContain("cannot set api_base_url to 'https://h.example/v1'");
+          const paired = await refusal({ provider: 'openai', api_base_url: 'https://u:SECRET@h.example/v1?key=SECRET' });
+          expect(paired).toContain("api_base_url; got 'https://h.example/v1'");
+          const slot = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: "u:SE'CRET@SECRET@h.example/v1?key=SECRET" } } });
+          expect(slot).toContain("api_base_url 'h.example/v1' is not a curated");
+          // A `?` inside the password must not shield it, and a full-width `@` counts as one.
+          const shielded = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'u:SECRET?x@h.example/v1' } } });
+          expect(shielded).toContain("api_base_url 'h.example/v1' is not a curated");
+          const lookalike = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'u:SECRET\uFF20h.example/v1' } } });
+          expect(lookalike).toContain("api_base_url 'h.example/v1' is not a curated");
+          const encoded = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'u:SECRET%40h.example/v1' } } });
+          expect(encoded).toContain("api_base_url 'h.example/v1' is not a curated");
+          for (const error of [top, paired, slot, shielded, lookalike, encoded]) expect(error).not.toContain('SECRET');
+          // An `@` in the query of a parseable URL is not a credential: the host stays.
+          expect(await refusal({ api_base_url: 'https://h.example/v1?next=a@b.example' })).toContain("cannot set api_base_url to 'https://h.example/v1'");
+          // The other way: a curated endpoint is saved as it was entered.
+          const MISTRAL = 'https://api.eu.mistral.ai/v1';
+          const saved = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ provider: 'openai', api_base_url: MISTRAL, openai_model_id: 'mistral-medium-2604' }) });
+          expect(saved.status).toBe(200);
+          const { saveUserConfig } = await import('../core/config.js');
+          const written = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1)?.[0];
+          expect(written?.['api_base_url']).toBe(MISTRAL);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       it('PUT /api/config does NOT reject a tier_set slot on the curated Mistral host (no over-rejection)', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
