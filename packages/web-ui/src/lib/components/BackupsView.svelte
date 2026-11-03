@@ -3,7 +3,7 @@
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { pickBackupConfig, fetchBackupConfig, requestRestore, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
+	import { pickBackupConfig, fetchBackupConfig, requestRestore, restoreSkippedLines, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
 	import { backupCoverageNotice, type BackupCoverageFields } from '../backup-coverage.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
@@ -23,6 +23,8 @@
 	let confirmRestore = $state<string | null>(null);
 	/** A restore the engine refused for want of a proof of origin, with its reason, awaiting a second yes. */
 	let unverified = $state<{ id: string; reason: string; mismatch: boolean } | null>(null);
+	/** After a restore that left entries out: what was not written and where it still is (U-132). Stays until closed. */
+	let skippedNotice = $state<string[] | null>(null);
 	let error = $state('');
 
 	// Backup settings (loaded from config)
@@ -126,7 +128,13 @@
 			const outcome = await requestRestore(getApiBase(), backupId, allowUnverified);
 			unverified = null;
 			if (outcome.kind === 'restored') {
-				addToast(t('backups.restore_success'), 'success', 6000);
+				if (outcome.skipped.length > 0) {
+					// A list of paths is not read in a toast's six seconds: it stays in the view instead.
+					const encrypted = backups.find((b) => b.backup_id === backupId)?.encrypted === true;
+					skippedNotice = restoreSkippedLines(outcome.skipped, outcome.backupPath, encrypted, t, tf);
+				} else {
+					addToast(t('backups.restore_success'), 'success', 6000);
+				}
 			} else if (outcome.kind === 'ask') {
 				unverified = { id: backupId, reason: outcome.reason, mismatch: outcome.mismatch };
 			} else {
@@ -174,6 +182,18 @@
 
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{/if}
+
+	{#if skippedNotice}
+		<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm mb-4" role="status" data-testid="restore-skipped">
+			{#each skippedNotice as line}
+				<p class="break-words [overflow-wrap:anywhere] mb-1 last:mb-0">{line}</p>
+			{/each}
+			<button onclick={() => skippedNotice = null}
+				class="mt-2 rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs hover:bg-bg-subtle">
+				{t('common.dismiss')}
+			</button>
+		</div>
 	{/if}
 
 	<!-- Backup List -->

@@ -86,7 +86,8 @@ export async function fetchBackupConfig(apiBase: string): Promise<BackupConfigFi
  * `mismatch`: a signature is there and does not match, which is a stronger warning than none.
  */
 export type RestoreOutcome =
-	| { kind: 'restored' }
+	/** `skipped`: entries the restore did not write (archive paths); `backupPath`: the backup's folder on the server. */
+	| { kind: 'restored'; skipped: string[]; backupPath: string | null }
 	| { kind: 'ask'; reason: string; mismatch: boolean }
 	| { kind: 'failed'; error: string | undefined };
 
@@ -100,8 +101,38 @@ export async function requestRestore(apiBase: string, backupId: string, allowUnv
 		method: 'POST',
 		...(allowUnverified ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allow_unverified: true }) } : {}),
 	});
-	const data = (await res.json()) as { success?: boolean; error?: string; code?: string; provenance?: string };
-	if (data.success === true) return { kind: 'restored' };
+	const data = (await res.json()) as { success?: boolean; error?: string; code?: string; provenance?: string; skipped?: unknown; backup_path?: unknown };
+	if (data.success === true) {
+		const skipped = Array.isArray(data.skipped) ? data.skipped.filter((p): p is string => typeof p === 'string') : [];
+		return { kind: 'restored', skipped, backupPath: typeof data.backup_path === 'string' ? data.backup_path : null };
+	}
 	if (data.code === 'unverified_backup' && !allowUnverified) return { kind: 'ask', reason: data.error ?? '', mismatch: data.provenance === 'mismatch' };
 	return { kind: 'failed', error: data.error };
+}
+
+/** How many skipped paths the notice names before it says how many more there are. */
+export const SKIPPED_SHOWN = 5;
+
+/**
+ * The lines of the notice after a restore that left entries out (U-132): what was not written and
+ * why, then where the owner can still get one. Only a self-hosted engine restores (the route refuses
+ * on a managed instance), so the way out is the backup folder, or, for an encrypted backup, the
+ * honest "not one by one today". `tf`/`t` are passed in so the function stays pure.
+ */
+export function restoreSkippedLines(
+	skipped: readonly string[],
+	backupPath: string | null,
+	encrypted: boolean,
+	t: (key: string) => string,
+	tf: (key: string, vars: Record<string, string>) => string,
+): string[] {
+	const n = skipped.length;
+	if (n === 0) return [];
+	const one = n === 1;
+	const more = n - SKIPPED_SHOWN;
+	const list = skipped.slice(0, SKIPPED_SHOWN).join(', ') + (more > 0 ? ` ${tf('backups.restore_skipped_more', { more: String(more) })}` : '');
+	const lines = [tf(one ? 'backups.restore_skipped_one' : 'backups.restore_skipped', { n: String(n), list })];
+	if (encrypted) lines.push(t(one ? 'backups.restore_skipped_self_encrypted_one' : 'backups.restore_skipped_self_encrypted'));
+	else if (backupPath !== null) lines.push(tf(one ? 'backups.restore_skipped_self_one' : 'backups.restore_skipped_self', { path: backupPath }));
+	return lines;
 }

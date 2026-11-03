@@ -1019,6 +1019,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'backups.restore_mismatch': { de: 'Der Herkunftsnachweis dieses Backups passt nicht zu deinem Schlüssel: Es wurde verändert oder unter einem anderen Schlüssel erstellt. Es wurde nicht wiederhergestellt.', en: 'This backup\'s proof of origin does not match your key: it was changed, or made under another key. It was not restored.' },
 	'backups.restore_anyway': { de: 'Trotzdem wiederherstellen', en: 'Restore anyway' },
 	'backups.restore_unverified_confirm': { de: 'Ohne Herkunftsnachweis wiederherstellen', en: 'Restore without proof of origin' },
+	'backups.restore_skipped': { de: 'Backup wiederhergestellt, aber {n} Einträge hat lynox nicht zurückgeschrieben, weil ihr Name zu keinem heutigen Bereich passt: {list}. Sie bleiben in diesem Backup, solange du es behältst.', en: 'Backup restored, but lynox did not write back {n} entries because their names match no current area: {list}. They stay in this backup for as long as you keep it.' },
+	'backups.restore_skipped_one': { de: 'Backup wiederhergestellt, aber einen Eintrag hat lynox nicht zurückgeschrieben, weil sein Name zu keinem heutigen Bereich passt: {list}. Er bleibt in diesem Backup, solange du es behältst.', en: 'Backup restored, but lynox did not write back one entry because its name matches no current area: {list}. It stays in this backup for as long as you keep it.' },
+	'backups.restore_skipped_more': { de: 'und {more} weitere', en: 'and {more} more' },
+	'backups.restore_skipped_self': { de: 'Brauchst du einen davon, kopier ihn von Hand aus dem Backup-Ordner: {path}', en: 'If you need one of them, copy it by hand from the backup folder: {path}' },
+	'backups.restore_skipped_self_one': { de: 'Brauchst du ihn, kopier ihn von Hand aus dem Backup-Ordner: {path}', en: 'If you need it, copy it by hand from the backup folder: {path}' },
+	'backups.restore_skipped_self_encrypted': { de: 'Das Backup ist verschlüsselt; einzeln herausholen lassen sich diese Einträge heute nicht.', en: 'The backup is encrypted; these entries cannot be taken out one by one today.' },
+	'backups.restore_skipped_self_encrypted_one': { de: 'Das Backup ist verschlüsselt; einzeln herausholen lässt sich dieser Eintrag heute nicht.', en: 'The backup is encrypted; this entry cannot be taken out on its own today.' },
 	'backups.restore_failed': { de: 'Wiederherstellung fehlgeschlagen.', en: 'Restore failed.' },
 	// What a backup covers (backup-coverage.ts; ux U-030).
 	'backups.coverage_omitted_badge': { de: 'ohne Arbeitsbereich', en: 'without workspace' },
