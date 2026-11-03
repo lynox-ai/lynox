@@ -221,7 +221,7 @@ describe('writing on a halted run', () => {
 	it('says the run sends nothing more where every target left changed at the provider, and offers no button', async () => {
 		run = makeRun({
 			phase: 'writing', total: 3, haltKey: 'failureRate', haltReason: 'engine reason', maxTargets: 1, probeConfirmed: false,
-			changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 0, conflicts: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0,
+			changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 0, conflicts: 1, resumeOpen: 1, resumeTries: 1, resumeSends: 0,
 		});
 		await render();
 		expect(target.textContent).toContain(tf('bulk.resume.nothing_left', { provider: 'demo.myshopify.com' }));

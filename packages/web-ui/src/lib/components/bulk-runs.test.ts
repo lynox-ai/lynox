@@ -321,7 +321,7 @@ describe('going on from a run that halted', () => {
 
 	it('offers no way on from a run that rolled back', () => {
 		for (const haltKey of ATOMIC) {
-			const run = { phase: 'aborted' as const, haltKey, probe: null, haltReason: 'x', probeConfirmed: true, maxTargets: null, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 0, resumeSends: 0, resumeTries: 0, conflicts: 0 };
+			const run = { phase: 'aborted' as const, haltKey, probe: null, haltReason: 'x', probeConfirmed: true, maxTargets: null, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 0, resumeSends: 0, resumeTries: 0, resumeOpen: 0, conflicts: 0 };
 			expect(bulkResumeKind(run), haltKey).toBeNull();
 			expect(bulkRestartKind({ ...run, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false }), haltKey).toBeNull();
 			expect(bulkCanUndo({ ...run, kind: 'apply', undoable: 2, atomic: true }), haltKey).toBe(false);
@@ -555,7 +555,7 @@ describe('going on from a run that halted', () => {
 
 	it('offers nothing where every target left had changed at the provider after its unclear send', () => {
 		// The check found a third value: a conflict, never sent again, and no longer unclear.
-		const changed = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 0, conflicts: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
+		const changed = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 0, conflicts: 1, resumeOpen: 1, resumeTries: 1, resumeSends: 0 };
 		expect(bulkResumeKind(w('failureRate', changed))).toBe('nothing');
 		const text = bulkResumeText(w('blocked', changed), true, DE);
 		expect([text?.check, text?.before, text?.kept, text?.soFar, text?.allows]).toEqual([
@@ -568,6 +568,8 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('failureRate', { ...changed, resumeSends: 1 }))).toBe('write');
 		expect(bulkResumeKind(w('failureRate', { ...changed, conflicts: 0 }))).toBe('write');
 		expect(bulkResumeKind(w('failureRate', { ...changed, resumeTries: 0 }))).toBe('write');
+		// Targets the maximum holds back never changed: writing on, then a higher maximum, sends them.
+		expect(bulkResumeKind(w('stoppedByOwner', { ...changed, probeConfirmed: true, maxTargets: 2, resumeOpen: 3 }))).toBe('write');
 		expect(bulkResumeKind(w('failureRate', { ...changed, sentUnknown: 1 }))).toBe('check');
 		expect(bulkResumeKind(w('maxTargets', changed))).toBeNull();
 		expect(bulkResumeKind(w('maxTargets', { ...changed, probeConfirmed: true }))).toBe('max');
