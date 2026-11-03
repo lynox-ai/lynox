@@ -575,12 +575,12 @@ export function graphqlUrlWrites(url: string): boolean {
 }
 
 /**
- * A query key as the servers that may receive it name it: PHP drops leading spaces and reads
- * `name[]` as `name`, ASP.NET compares keys without case. So ` query`, `QUERY` and `query[]` are
- * all `query`.
+ * A query key as the servers that may receive it name it: PHP ends a key at a NUL, drops leading
+ * spaces and reads `name[...]` as `name` (a newline inside the brackets included), ASP.NET compares
+ * keys without case. So ` query`, `QUERY`, `query[]` and `query%00x` are all `query`.
  */
 function queryKeyName(key: string): string {
-  return key.trimStart().toLowerCase().replace(/\[.*$/, '');
+  return key.split('\0')[0]!.trimStart().toLowerCase().replace(/\[[\s\S]*$/, '');
 }
 
 /**
