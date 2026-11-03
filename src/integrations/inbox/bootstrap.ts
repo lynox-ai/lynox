@@ -42,7 +42,7 @@ import {
   type InboxQueuePayload,
   type InboxRunnerPolicy,
 } from './runner.js';
-import { InboxStateDb } from './state.js';
+import { DEFAULT_TENANT_ID, InboxStateDb } from './state.js';
 import { reconcileOutboundReply } from './outbound-reconcile.js';
 import type { SensitiveMode } from './sensitive-content.js';
 import {
@@ -51,6 +51,7 @@ import {
   type OnInboundMailHook,
 } from './watcher-hook.js';
 import type { MailStateDb } from '../mail/state.js';
+import type { InboxReader } from '../mail/context.js';
 import { PROVIDER_NOT_ON_LIST_REFUSAL, providerListApplies } from '../../core/contained-providers.js';
 import { FixedTextError } from '../../core/error-egress.js';
 
@@ -71,6 +72,8 @@ export interface InboxRuntime {
   onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']>;
   /** Wire as `MailHooks.inboxLabelOf` — the classifier's verdict for `mail_triage`. */
   inboxLabelOf: NonNullable<import('../mail/context.js').MailHooks['inboxLabelOf']>;
+  /** Wire as `MailHooks.inboxReader` — the store as `inbox_read` reads it. */
+  inboxReader: InboxReader;
   /**
    * Operator-driven cold-start re-run. The HTTP layer resolves the
    * `MailProvider` from its registry and hands it in; runtime closes over
@@ -367,6 +370,36 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       }
     };
 
+  // The store as the inbox view reads it (api.ts handleGetCounts / handleListItems /
+  // handleGetItemFull / handleGetItemThread), scoped to this runtime's tenant.
+  const readerTenant = opts.tenantId ?? DEFAULT_TENANT_ID;
+  const inboxReader: InboxReader = {
+    countByBucket: (exclude) => state.countItemsByBucket(readerTenant, exclude),
+    listItems: (bucket, limit, offset, exclude) =>
+      state.listOpenItems({ tenantId: readerTenant, bucket, limit, offset, excludeAccounts: exclude }),
+    getItem: (id) => state.getItem(id, readerTenant),
+    bodyOf: (item) => {
+      const tm = item.messageId !== undefined && item.messageId.length > 0
+        ? state.getThreadMessageByMessageId(item.accountId, item.messageId, item.tenantId)
+        : null;
+      if (tm !== null && tm.bodyMd !== undefined && tm.bodyMd.length > 0) return tm.bodyMd;
+      const legacy = state.getItemBody(item.id);
+      return legacy !== null && legacy.bodyMd.length > 0 ? legacy.bodyMd : null;
+    },
+    threadOf: (item, limit) => state.listThreadMessages(item.accountId, item.threadKey, { tenantId: item.tenantId, limit }),
+    sensitiveAtIngest: (item) => {
+      const found = new Set<string>();
+      for (const entry of state.listAuditForItem(item.id, item.tenantId)) {
+        let payload: unknown;
+        try { payload = JSON.parse(entry.payloadJson); } catch { continue; }
+        const cats = (payload as { sensitive_categories?: unknown } | null)?.sensitive_categories;
+        if (Array.isArray(cats)) for (const c of cats) if (typeof c === 'string' && c.length > 0) found.add(c);
+      }
+      return [...found];
+    },
+    disabledAccounts: disabledAccounts ?? new Set<string>(),
+  };
+
   const onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']> =
     (accountId, outboundCtx) => {
       // Message-ID match is account-agnostic; the account scopes only the
@@ -416,6 +449,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     onAccountAdded,
     onOutboundReconcile,
     inboxLabelOf,
+    inboxReader,
     runColdStart,
     sensitiveMode: opts.sensitiveMode ?? 'skip',
     shutdown: async (shutdownOpts) => {
