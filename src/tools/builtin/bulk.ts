@@ -175,7 +175,7 @@ function mediaWritableFor(input: BulkPlanInput, agent: IAgent): boolean {
 /** The refusal of an image plan on a store connection that may not write image alt texts: the
  *  write would fail at Shopify for every target, after the owner approved it. Without the form's
  *  rules, which would name the alt text it cannot write. */
-const SHOPIFY_MEDIA_NO_SCOPE = `source_list.form shopify_media writes image alt texts, which needs a Shopify store connection for target_host granted the scope ${SHOPIFY_MEDIA_WRITE_SCOPES.join(' or ')}, and target_host has no such connection. Tell the user in one sentence that image alt texts cannot be changed on this store.`;
+const SHOPIFY_MEDIA_NO_SCOPE = `source_list.form shopify_media writes image alt texts, which needs exactly one Shopify store connection for target_host, granted the scope ${SHOPIFY_MEDIA_WRITE_SCOPES.join(' or ')}; target_host has no such connection. Tell the user in one sentence that image alt texts cannot be changed on this store with its connection as it is.`;
 
 /** A plan on a Shopify store's host that does not use a Shopify form: the refusal it got (a path
  *  that is not a woocommerce list, a source file that does not exist) says nothing about the store,
