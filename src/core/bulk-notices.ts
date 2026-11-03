@@ -27,7 +27,8 @@ export interface BulkNotices {
   readonly readDone: string;
   readonly listEmpty: string;
   readonly listWaiting: string;
-  /** A filtered Shopify list that matched no product, by which filters it has. */
+  /** A filtered Shopify list that matched no product, by which filters it has: the finding and
+   *  the next step, never the value (ux U-123). The task tool gives the same text to a model. */
   listNoMatch(filters: 'product_type' | 'vendor' | 'both'): string;
   readonly judgeDone: string;
   applyCounts(c: BulkApplyCounts): string;
@@ -74,8 +75,8 @@ const EN: BulkNotices = Object.freeze({
   listEmpty: 'Bulk list read done. The list holds no target that could be planned.',
   listWaiting: 'Bulk list read done. Review the targets, then start reading them.',
   listNoMatch: (filters: 'product_type' | 'vendor' | 'both') => filters === 'both'
-    ? 'Bulk list read done. No product matched the list\'s filter; check its values against the store\'s product types and vendors. Tell the user in one sentence that no product holds both values.'
-    : `Bulk list read done. No product matched the list's filter; check its value against the store's ${filters === 'product_type' ? 'product types' : 'vendors'}. Tell the user in one sentence which value matched no product.`,
+    ? 'List read: no product has both the product type and the vendor in the filter. Check both values in the store, then ask lynox in a chat to plan the list again.'
+    : `List read: no product has the ${filters === 'product_type' ? 'product type' : 'vendor'} in the filter. Check the value in the store, then ask lynox in a chat to plan the list again.`,
   judgeDone: 'Bulk judge done. The run is ready for review.',
   applyCounts: (c: BulkApplyCounts) => applyCounts(c, {
     unclear: (k) => `${k} unclear: sent without a clear answer, not sent again.`,
@@ -122,8 +123,8 @@ const DE: BulkNotices = Object.freeze({
   listEmpty: 'Liste gelesen. Sie enthält kein Ziel, das sich planen lässt.',
   listWaiting: 'Liste gelesen. Prüf die Ziele und starte dann das Lesen.',
   listNoMatch: (filters: 'product_type' | 'vendor' | 'both') => filters === 'both'
-    ? 'Liste gelesen. Kein Produkt passt zum Filter der Liste; prüf die Werte gegen die Produkttypen und Hersteller des Shops. Sag dem Nutzer in einem Satz, dass kein Produkt beide Werte hat.'
-    : `Liste gelesen. Kein Produkt passt zum Filter der Liste; prüf den Wert gegen die ${filters === 'product_type' ? 'Produkttypen' : 'Hersteller'} des Shops. Sag dem Nutzer in einem Satz, welcher Wert kein Produkt traf.`,
+    ? 'Liste gelesen: Kein Produkt hat zugleich Produkttyp und Anbieter aus dem Filter. Prüf beide Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.'
+    : `Liste gelesen: Kein Produkt hat den ${filters === 'product_type' ? 'Produkttyp' : 'Anbieter'} aus dem Filter. Prüf den Wert im Shop und bitte lynox im Chat, die Liste neu zu planen.`,
   judgeDone: 'Beurteilung fertig. Der Massenlauf wartet auf deine Prüfung.',
   applyCounts: (c: BulkApplyCounts) => applyCounts(c, {
     unclear: (k) => `${k} unklar: gesendet ohne klare Antwort, nicht wiederholt.`,

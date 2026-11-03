@@ -30,7 +30,7 @@ import { shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { ApiStore } from './api-store.js';
 import { SecretStore } from './secret-store.js';
-import { WorkerLoop } from './worker-loop.js';
+import { REMINDER_BODY_MAX, WorkerLoop } from './worker-loop.js';
 import { mintStorePass } from './store-pass.js';
 import { withListQuery, withShopifyApply, withShopifyRead, type ListQueryConstraints, type ShopifyReadPhase } from '../tools/permission-guard.js';
 import { bulkPlanTool } from '../tools/builtin/bulk.js';
@@ -367,36 +367,31 @@ describe('reading a store\'s product list narrowed by a filter', () => {
     expect(s.requests.map((r) => r.variables['q'])).toEqual(['id:>0 AND product_type:"Tee"', 'id:>2500 AND product_type:"Tee"']);
   });
 
-  it.each([
-    [{ product_type: 'Hoodie Secret' }, 'its value against the store\'s product types. Tell the user in one sentence which value matched no product.'],
-    [{ vendor: 'Hoodie Secret' }, 'its value against the store\'s vendors. Tell the user in one sentence which value matched no product.'],
+  // The finding and the next step, word for word (ux U-123): the summary is pushed to the owner in
+  // the owner's language and is what the task tool gives a model, so it holds no instruction to a
+  // model, never the planner's value, and fits web push's cut with its counts.
+  const NO_MATCH: [string, Record<string, string>, string][] = [
+    ['en', { product_type: 'Hoodie Secret' }, 'List read: no product has the product type in the filter. Check the value in the store, then ask lynox in a chat to plan the list again.'],
+    ['en', { vendor: 'Hoodie Secret' }, 'List read: no product has the vendor in the filter. Check the value in the store, then ask lynox in a chat to plan the list again.'],
     // Each value matches products here (tees; Beta's 30), but no product holds both.
-    [{ product_type: 'Tee', vendor: 'Beta' }, 'its values against the store\'s product types and vendors. Tell the user in one sentence that no product holds both values.'],
-  ])('says that no product matched %j, against what it names and without the value', async (filters, tail) => {
+    ['en', { product_type: 'Tee', vendor: 'Beta' }, 'List read: no product has both the product type and the vendor in the filter. Check both values in the store, then ask lynox in a chat to plan the list again.'],
+    ['de', { product_type: 'Hoodie Secret' }, 'Liste gelesen: Kein Produkt hat den Produkttyp aus dem Filter. Prüf den Wert im Shop und bitte lynox im Chat, die Liste neu zu planen.'],
+    ['de', { vendor: 'Hoodie Secret' }, 'Liste gelesen: Kein Produkt hat den Anbieter aus dem Filter. Prüf den Wert im Shop und bitte lynox im Chat, die Liste neu zu planen.'],
+    ['de', { product_type: 'Tee', vendor: 'Beta' }, 'Liste gelesen: Kein Produkt hat zugleich Produkttyp und Anbieter aus dem Filter. Prüf beide Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.'],
+  ];
+  it.each(NO_MATCH)('says in %s that no product matched %j: the push text word for word, then the counts', async (lang, filters, text) => {
     groups();
-    const out = await runBulkPreview(startedList(filtered(filters)), deps());
+    const out = await runBulkPreview(startedList(filtered(filters)), deps({ notices: BULK_NOTICES[lang as 'en' | 'de'] }));
     expect(out.status).toBe('done');
-    expect(out.summary).toContain(`No product matched the list's filter; check ${tail}`);
-    expect(out.summary).not.toContain('Hoodie');
+    expect(out.summary.startsWith(`${text} `), out.summary).toBe(true);
+    expect(out.summary.slice(text.length + 1)).toBe(BULK_NOTICES[lang as 'en' | 'de'].previewCounts(0, 0, 0, 0));
+    expect(out.summary.length).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+    for (const instruction of ['Tell the user', 'Sag dem Nutzer', 'Hoodie', 'Secret', 'Beta']) expect(out.summary).not.toContain(instruction);
   });
 
   it('keeps the sentence of an empty list without a filter', async () => {
-    const all = startedList();
-    const summary = (await runBulkPreview(all, deps())).summary;
-    expect(summary).toContain('The list holds no target that could be planned.');
-    expect(summary).not.toContain('No product matched');
-  });
-
-  // The summary is pushed to the owner too (bulk-notices.ts): it speaks the owner's language.
-  it.each([
-    [{ product_type: 'Hoodie Secret' }, 'Kein Produkt passt zum Filter der Liste; prüf den Wert gegen die Produkttypen des Shops.'],
-    [{ vendor: 'Hoodie Secret' }, 'Kein Produkt passt zum Filter der Liste; prüf den Wert gegen die Hersteller des Shops.'],
-    [{ product_type: 'Tee', vendor: 'Beta' }, 'Kein Produkt passt zum Filter der Liste; prüf die Werte gegen die Produkttypen und Hersteller des Shops.'],
-  ])('says in German that no product matched %j, and an empty list without a filter as before', async (filters, sentence) => {
-    groups();
-    const out = await runBulkPreview(startedList(filtered(filters)), deps({ notices: BULK_NOTICES.de }));
-    expect(out.summary.startsWith(`Liste gelesen. ${sentence}`), out.summary).toBe(true);
-    expect(out.summary).not.toContain('Hoodie');
+    const summary = (await runBulkPreview(startedList(), deps())).summary;
+    expect(summary.startsWith('Bulk list read done. The list holds no target that could be planned.'), summary).toBe(true);
   });
 
   it('keeps the German sentence of an empty list without a filter', async () => {
