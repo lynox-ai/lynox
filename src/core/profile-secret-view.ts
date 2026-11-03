@@ -1151,8 +1151,9 @@ export function memberConnectionRefusal(
     // Its own end, with the ways on (ux U-122); the shared sentences stay as they are.
     if (ownPlan && inPlan === 'unlisted' && currentPlanOwnerStarted()) {
       return `${lead}. This run of a workflow ${person} set up or changed was not started by a schedule of ${person}'s, so it does not use connections ${person} made with their own login. `
-        + `${RUN_REFUSAL_FINAL} In your reply, say so. The person reading your reply is the owner of this instance: tell them they can connect ${provider} with their own login `
-        + 'and then ask lynox in a chat to do this step with that connection. Do not ask for permission to try again.';
+        + `${RUN_REFUSAL_FINAL} In your reply, say so. The person reading your reply is the owner of this instance, not ${person}. `
+        + `Tell them to connect ${provider} themselves under Settings → APIs and then ask lynox in a chat to do this step with that connection. `
+        + `Do not suggest running this workflow again, and do not ask ${person} to do anything. Do not ask for permission to try again.`;
     }
     if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${planRefusalFinal(person)}`;
     if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;

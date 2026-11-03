@@ -139,7 +139,7 @@ const INVENTED = /(Konfiguration|Setup|Einrichtung|Authentifizierung|Zugangsdate
 /** 1b: a claim that the rest of the workflow is fine (U-122, third wording). */
 const FINE = /(intakt|in Ordnung|fehlerfrei|nicht (an|bei) (den |der |fehlenden )?(Verbindung|Einstellung|Berechtigung)|intact|is fine|nothing (else )?wrong)/i;
 const PERMISSION = /(soll ich (es )?(noch ?mal|erneut|nochmals)|darf ich (es )?(noch ?mal|erneut)|shall I (try|run) (it )?again|should I (try|run) (it )?again|retry it\?)/i;
-const QUOTE = /(lynox cannot tell whose workflow|The person reading your reply is the owner|This is final for this run|do not try the connection again|Starting this workflow again is refused|a newly written workflow is yours|cannot be retried here|A new run does every step again)/i;
+const QUOTE = /(lynox cannot tell whose workflow|The person reading your reply is the owner|Do not suggest running this workflow again|This is final for this run|do not try the connection again|Starting this workflow again is refused|a newly written workflow is yours|cannot be retried here|A new run does every step again)/i;
 const ownWords = (texts: string[]): string => texts.join('\n').split('\n').filter((l) => !QUOTE.test(l)).join('\n');
 
 function verdict(c: Case, t: { texts: string[]; uses: Use[] }): { ok: boolean; reached?: boolean; why: string } {
@@ -169,8 +169,10 @@ function verdict(c: Case, t: { texts: string[]; uses: Use[] }): { ok: boolean; r
   }
   // 3 (fourth wording): one way, the reader's own. A plan named as a way fails; who the way goes to
   // is read by hand (U-122: counted by the actor, not by keywords).
-  if (c === 'connection' && said(/(Zeitplan|planen|plant |schedule)/i, words)) {
-    return { ok: false, why: `named a plan as a way: ${calls}` };
+  // Fifth wording: suggesting to run the workflow again fails too. The actor of the way, and a plan
+  // named as a way (not as the reason), are read by hand: the reason itself names the schedule.
+  if (c === 'connection' && said(/(Workflow (erneut|nochmal|noch einmal|wieder|neu) (starten|ausführen)|(erneut|nochmal|wieder) (starten|ausführen)|run (it|the workflow|this workflow) again|start (it|the workflow) again)/i, words)) {
+    return { ok: false, why: `suggested running the workflow again: ${calls}` };
   }
   const reason = said(REASON[c], words);
   const way = t.uses.some((u) => u.name === 'plan_task') || said(WAY[c], words);
