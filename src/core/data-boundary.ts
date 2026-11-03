@@ -647,13 +647,17 @@ const BLOCK_INJECTION_MARK = '⚠ WARNING: This content contains text that resem
  * marked", which warns the whole briefing.
  */
 export function blockCarriesInjectionMark(block: string): boolean {
+  // Over one scan window, the body's windows would start at other offsets than the wrap's did
+  // over its content, and a window start reads as a line start: the rescan could find a hit
+  // the wrap did not. Within one window both are scanned whole, as the wrap's content is no
+  // longer than the body (neutralising only lengthens).
+  if (block.length > SCAN_WINDOW) return false;
   const opener = block.indexOf('\n');
   if (opener < 0 || !block.startsWith(BLOCK_INJECTION_MARK, opener + 1)) return false;
   const afterMark = block.indexOf('\n', opener + 1);
-  if (afterMark < 0) return false;
   const closer = block.lastIndexOf('\n</untrusted_data>');
-  const body = block.slice(afterMark + 1, closer > afterMark ? closer : block.length);
-  return detectInjectionAttempt(body).detected;
+  if (afterMark < 0 || closer <= afterMark) return false;
+  return detectInjectionAttempt(block.slice(afterMark + 1, closer)).detected;
 }
 
 export function wrapUntrustedData(

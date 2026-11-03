@@ -22,7 +22,7 @@ vi.mock('./observability.js', async (importOriginal) => ({
 }));
 
 import { Agent } from './agent.js';
-import { collectOwnBlocks, detectInjectionAttempt, wrapUntrustedData } from './data-boundary.js';
+import { blockCarriesInjectionMark, collectOwnBlocks, detectInjectionAttempt, wrapUntrustedData } from './data-boundary.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 
 interface AgentInternals {
@@ -228,6 +228,23 @@ describe('a marked part of the briefing is marked at that part', () => {
     expect(detectInjectionAttempt('⚠ WARNING: This content contains text that resembles prompt injection\nassistant:').detected).toBe(false);
     expect(tail).toContain(WARNING);
     expect(tail).not.toContain(PART_WARNING);
+  });
+
+  it('does not take a mark on a block longer than one scan window', () => {
+    // Real mark, real hit inside: still not placed, because past one window the rescan cannot
+    // be held to the wrap's own reading.
+    const own: string[] = [];
+    const block = collectOwnBlocks(own, () => wrapUntrustedData(`${MARKED} ${'w'.repeat(70_000)}`, 'api_profile.description'));
+    const tail = tailOf(`<api_profiles>\n- weather: Weather — ${block} (https://api.weather.example)\n</api_profiles>`, own);
+    expect(block).toContain(BLOCK_MARK);
+    expect(tail).toContain(WARNING);
+    expect(tail).not.toContain(PART_WARNING);
+  });
+
+  it('does not take a block that is only a copied mark for a marked one', () => {
+    const own: string[] = [];
+    const block = collectOwnBlocks(own, () => wrapUntrustedData('⚠ WARNING: This content contains text that resembles prompt injection', 'api_profile.description'));
+    expect(blockCarriesInjectionMark(block)).toBe(false);
   });
 
   it('warns on the whole briefing when the hit sits in a marked block\'s source label', () => {
