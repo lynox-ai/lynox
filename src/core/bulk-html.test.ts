@@ -24,7 +24,7 @@ describe('markupOf', () => {
   it('counts a bare element as a triple of its own, so a bare <script> is not invisible', () => {
     const { triples, occurrences } = markupOf(tree('<script></script>'));
     expect(triples).toEqual([{ namespace: 'html', element: 'script', attribute: null, value: null, inTemplate: false }]);
-    expect(occurrences).toEqual([{ kind: 'element', namespace: 'html', name: 'script', attributes: [], text: '', inTemplate: false }]);
+    expect(occurrences).toEqual([{ kind: 'element', namespace: 'html', name: 'script', attributes: [], text: '', layout: null, inTemplate: false }]);
   });
 
   it('walks template contents and marks them', () => {
@@ -90,6 +90,13 @@ describe('checkMarkup: the allowlist and the multiset', () => {
     expect(reason('<style>p{}</style>', '<style>p{color:red}</style>')).toBe('content_changed');
     expect(reason('<svg><script>a()</script></svg>', '<svg><script>b()</script></svg>')).toBe('content_changed');
     expect(reason('<noscript>a</noscript>', '<noscript>b</noscript>')).toBe('content_changed');
+  });
+
+  it('refuses a held foreign script whose text moves between it and an element below it', () => {
+    const held = '<svg><script>a=1;/*b()*/<g></g><g></g></script></svg>';
+    expect(reason(held, '<svg><script>a=1;<g>/*</g>b()<g>*/</g></script></svg>')).toBe('content_changed');
+    // Control: held as it is, it passes.
+    expect(reason(held, held)).toBe('ok');
   });
 
   it('refuses a second bare script beside a held one', () => {
