@@ -42,6 +42,11 @@ import { BULK_MAX_TARGETS } from './bulk-plan.js';
 import type { IAgent } from '../types/index.js';
 
 const HOST = 'acme.myshopify.com';
+// The store connection of HOST, granted the scope image alt texts need (`shopifyMediaWritable`), so a
+// plan in the image form gets past the scope check to what this file tests.
+const IMAGE_WRITING_STORE = {
+  getByHostname: (h: string) => h === HOST ? { auth: { type: 'oauth2', oauth: { preset_id: 'shopify' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
+};
 const ENDPOINT = `https://${HOST}/admin/api/2026-10/graphql.json`;
 const gid = (n: number): string => `gid://shopify/Product/${String(n)}`;
 const scan = (): null => null;
@@ -443,7 +448,7 @@ describe('the switch', () => {
 });
 
 describe('bulk_plan with a Shopify source', () => {
-  const agent = (): IAgent => ({ toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent;
+  const agent = (): IAgent => ({ toolContext: { bulkLedger: ledger, apiStore: IMAGE_WRITING_STORE }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent;
   const plan = (input: Record<string, unknown>): Promise<string> => bulkPlanTool.handler(
     { target_system: 'http', target_host: HOST, source_list: { form: 'shopify', after: { title: 'x' } }, ...input } as Parameters<typeof bulkPlanTool.handler>[0], agent(),
   );

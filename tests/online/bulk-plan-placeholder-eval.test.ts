@@ -33,6 +33,11 @@ import { HAIKU } from './setup.js';
 
 const RUNS = Number(process.env['PH_RUNS'] ?? 3);
 const STORE = 'acme-demo.myshopify.com';
+// The store connection of STORE, granted the scope image alt texts need (`shopifyMediaWritable`), so a
+// plan in the image form gets past the scope check to what this file tests.
+const IMAGE_WRITING_STORE = {
+  getByHostname: (h: string) => h === STORE ? { auth: { type: 'oauth2', oauth: { preset_id: 'shopify' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
+};
 
 const PRODUCTS = JSON.stringify({
   products: [
@@ -74,7 +79,7 @@ const CASES: Case[] = [
 
 /** `bulk_plan` itself, on a ledger of its own per run; every call and answer is kept. */
 function realBulkPlan(ledger: BulkLedger, plans: Plan[]): ToolEntry {
-  const owner = { toolContext: { bulkLedger: ledger }, currentThreadId: 'form-eval', principal: OWNER_PRINCIPAL } as unknown as IAgent;
+  const owner = { toolContext: { bulkLedger: ledger, apiStore: IMAGE_WRITING_STORE }, currentThreadId: 'form-eval', principal: OWNER_PRINCIPAL } as unknown as IAgent;
   return {
     ...(bulkPlanTool as ToolEntry),
     handler: async (input: unknown) => {

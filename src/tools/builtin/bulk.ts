@@ -2,7 +2,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { BULK_HALT_REASONS, BulkPreviewCapError, bulkFoundAsPlannedNote, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
 import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
 import { isShopifyListForm, listReadContract, parseListSource } from '../../core/bulk-list.js';
-import { shopifyBulkReadEnabled } from '../../core/bulk-shopify.js';
+import { SHOPIFY_MEDIA_WRITE_SCOPES, shopifyBulkReadEnabled, shopifyMediaWritable } from '../../core/bulk-shopify.js';
 import { detectSecretInContent } from './http.js';
 import {
   BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_QUERY_PAGE, BulkSourceError,
@@ -144,7 +144,7 @@ function refusePlannerStartDomains(input: BulkPlanInput): void {
  *  the first fault, and the schema does not describe the form, so a model would learn the rules
  *  one refusal at a time. */
 const SHOPIFY_FORM_RULES: Record<string, string> = {
-  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.`,
+  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null; a judge (then without after) sets only the same fields, each of type "string".`,
   shopify_media: `Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only ${SHOPIFY_MEDIA_WRITABLE_FIELDS.join(', ')}, as text of at most ${String(SHOPIFY_ALT_MAX_CHARS)} characters or null. For product fields, use form shopify.`,
 };
 
@@ -158,14 +158,29 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
     const list = input.source_list;
     const form = typeof list === 'object' && list !== null ? (list as Record<string, unknown>)['form'] : undefined;
     if (!(err instanceof BulkSourceError) || !isShopifyListForm(form) || err.message === SHOPIFY_READ_OFF) throw err;
-    throw new BulkSourceError(`${err.message} ${SHOPIFY_FORM_RULES[String(form)]!}`);
+    if (err.message === SHOPIFY_MEDIA_NO_SCOPE) throw err;
+    // The image form is named only where the store connection may write image alt texts.
+    const images = form === 'shopify' && mediaWritableFor(input, agent) ? ' For the images of the products, use form shopify_media.' : '';
+    throw new BulkSourceError(`${err.message} ${SHOPIFY_FORM_RULES[String(form)]!}${images}`);
   }
 }
+
+/** Whether the store connection of the plan's target_host may write image alt texts
+ *  (`shopifyMediaWritable`): the one profile mapped to that host, read from the API store. */
+function mediaWritableFor(input: BulkPlanInput, agent: IAgent): boolean {
+  const host = typeof input.target_host === 'string' ? canonicalHost(input.target_host) : null;
+  return host !== null && shopifyMediaWritable(agent.toolContext?.apiStore?.getByHostname(host));
+}
+
+/** The refusal of an image plan on a store connection that may not write image alt texts: the
+ *  write would fail at Shopify for every target, after the owner approved it. Without the form's
+ *  rules, which would name the alt text it cannot write. */
+const SHOPIFY_MEDIA_NO_SCOPE = `source_list.form shopify_media writes image alt texts, which needs the Shopify scope ${SHOPIFY_MEDIA_WRITE_SCOPES.join(' or ')} on the store connection, and the connection for target_host holds neither. Product fields can be changed with form shopify; tell the user in one sentence that image alt texts cannot be changed on this store connection.`;
 
 /** A plan on a Shopify store's host that does not use a Shopify form: the refusal it got (a path
  *  that is not a woocommerce list, a source file that does not exist) says nothing about the store,
  *  and the schema does not describe the forms, so the hint names them. */
-function shopifyHostHint(input: BulkPlanInput): string {
+function shopifyHostHint(input: BulkPlanInput, agent: IAgent): string {
   if (input.target_system !== 'http' || typeof input.target_host !== 'string') return '';
   // With the read off, both forms are refused: naming them would only cost another round.
   if (!shopifyBulkReadEnabled()) return '';
@@ -173,7 +188,10 @@ function shopifyHostHint(input: BulkPlanInput): string {
   if (host === null || !isShopifyStoreHostName(host)) return '';
   const list = input.source_list;
   if (typeof list === 'object' && list !== null && isShopifyListForm((list as Record<string, unknown>)['form'])) return '';
-  return ' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields) or shopify_media (image alt texts).';
+  // The image form only where the connection may write it (`mediaWritableFor`).
+  return mediaWritableFor(input, agent)
+    ? ' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields) or shopify_media (image alt texts).'
+    : ' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields).';
 }
 
 const SHOPIFY_READ_OFF = 'Reading a Shopify store in a bulk run is switched off on this instance.';
@@ -194,6 +212,8 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     // A judge plans its fields F like an after-state: the Shopify parse below bounds them to the
     // writable fields. Only the product form takes one: an image run writes its alt text from
     // source_list.after until a judge is decided for it. A verb would name a write nothing grants.
+    // Before every other check of the form: no plan in it can be written over this connection.
+    if (form === 'shopify_media' && !mediaWritableFor(input, agent)) throw new BulkSourceError(SHOPIFY_MEDIA_NO_SCOPE);
     if (judgeInput !== undefined && form !== 'shopify') throw new BulkSourceError(`source_list.form ${form} does not take judge yet: give the fields to set in source_list.after.`);
     if (input.write_method !== undefined) throw new BulkSourceError(`source_list.form ${form} does not take write_method: the engine writes a store with its own form.`);
   }
@@ -282,7 +302,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           // keyword lookup in a chat opened from a read-only one. A plan that breaks one gets them all
           // with its refusal (`SHOPIFY_FORM_RULES`), since the checks name only the first they meet.
           properties: {
-            form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com); shopify_media: the images of its products.' },
+            form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com); shopify_media: the images of its products, only where the store connection may write files (scope write_files or write_themes).' },
             path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products. Not for the Shopify forms.' },
             filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status); values are 1–64 letters, digits, - or _.' },
             id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },
@@ -420,7 +440,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           'Only the user can approve and apply it, outside this chat; bulk_status shows how far it got.',
       ].join('\n');
     } catch (err: unknown) {
-      if (err instanceof BulkSourceError) return `Error: ${err.message}${shopifyHostHint(input)}`;
+      if (err instanceof BulkSourceError) return `Error: ${err.message}${shopifyHostHint(input, agent)}`;
       // The cap refuses a planner who is not the owner; its text is ux's and names no run.
       if (err instanceof BulkPreviewCapError) return `Error: ${err.message}`;
       // Data-store errors name the collection or filter column the caller passed —

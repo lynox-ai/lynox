@@ -15,6 +15,11 @@ import type { IAgent } from '../../types/index.js';
  * the rest one refusal at a time (measured with tests/online/bulk-plan-shopify-form-eval.test.ts).
  */
 const HOST = 'acme.myshopify.com';
+// The store connection of HOST, granted the scope image alt texts need (`shopifyMediaWritable`), so a
+// plan in the image form gets past the scope check to what this file tests.
+const IMAGE_WRITING_STORE = {
+  getByHostname: (h: string) => h === HOST ? { auth: { type: 'oauth2', oauth: { preset_id: 'shopify' } }, oauth_grant: { granted_scope: ['read_products', 'write_products', 'write_files'] } } : undefined,
+};
 const FLAG = 'LYNOX_FEATURE_SHOPIFY_BULK_READ';
 const PRODUCT_RULES = 'Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after sets only title, seo_title, seo_description, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.';
 const IMAGE_RULES = 'Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only alt, as text of at most 512 characters or null. For product fields, use form shopify.';
@@ -41,7 +46,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const agent = (): IAgent => ({ toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent;
+const agent = (): IAgent => ({ toolContext: { bulkLedger: ledger, apiStore: IMAGE_WRITING_STORE }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent;
 const plan = (input: Record<string, unknown>): Promise<string> =>
   bulkPlanTool.handler({ target_system: 'http', target_host: HOST, ...input } as Parameters<typeof bulkPlanTool.handler>[0], agent());
 
@@ -150,5 +155,56 @@ describe('the bulk_plan schema', () => {
   it('lets a judged list plan without after through the dispatch validator', () => {
     const judged = { target_system: 'http', target_host: HOST, source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { seo_title: { type: 'string', maxLength: 70 } } } };
     expect(validateToolInput(bulkPlanTool.definition.input_schema, judged)).toEqual({ ok: true, errors: [] });
+  });
+});
+
+// fileUpdate needs write_files or write_themes, which the Shopify preset never asks for: an image
+// plan over such a connection would be approved and then fail at Shopify for every target.
+describe('an image plan on a store connection that may not write image alt texts', () => {
+  const NO_SCOPE = 'source_list.form shopify_media writes image alt texts, which needs the Shopify scope write_files or write_themes on the store connection, and the connection for target_host holds neither. Product fields can be changed with form shopify; tell the user in one sentence that image alt texts cannot be changed on this store connection.';
+  const connection = (profile: unknown) => ({ getByHostname: (h: string) => h === HOST ? profile : undefined });
+  const planOn = (store: unknown, input: Record<string, unknown>): Promise<string> =>
+    bulkPlanTool.handler({ target_system: 'http', target_host: HOST, ...input } as Parameters<typeof bulkPlanTool.handler>[0],
+      ({ toolContext: { bulkLedger: ledger, apiStore: store }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL }) as unknown as IAgent);
+  const runs = (): unknown => engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get();
+  const preset = (grant: Record<string, unknown> | undefined, scope = 'read_products,write_products') =>
+    ({ auth: { type: 'oauth2', oauth: { preset_id: 'shopify', scope } }, ...(grant ? { oauth_grant: grant } : {}) });
+
+  it.each([
+    ['no connection for the store', null],
+    ['a preset connection granted the product scopes only', connection(preset({ granted_scope: ['read_products', 'write_products'] }))],
+    ['a preset connection with no recorded grant, asking for the product scopes', connection(preset(undefined))],
+    ['a grant narrower than a write_files ask', connection(preset({ granted_scope: ['read_products'] }, 'read_products,write_files'))],
+    ['a profile that is no OAuth connection', connection({ auth: { type: 'bearer' }, oauth_grant: { granted_scope: ['write_files'] } })],
+  ])('refuses it with its own reason, without the form\'s rules, over %s', async (_what, store) => {
+    const answer = await planOn(store, { source_list: { form: 'shopify_media', after: { alt: 'x' } } });
+    expect(answer).toBe(`Error: ${NO_SCOPE}`);
+    expect(runs()).toEqual({ n: 0 });
+  });
+
+  it.each([
+    ['write_files', ['read_products', 'write_files']],
+    ['write_themes', ['read_products', 'write_themes']],
+  ])('records it over a connection granted %s', async (_scope, granted) => {
+    const answer = await planOn(connection(preset({ granted_scope: granted })), { source_list: { form: 'shopify_media', after: { alt: 'x' } } });
+    expect(answer).toMatch(/^List dry run recorded/);
+    expect(runs()).toEqual({ n: 1 });
+  });
+
+  it('refuses the image form before its other checks, so a judge or write method does not hide it', async () => {
+    const store = connection(preset({ granted_scope: ['read_products', 'write_products'] }));
+    expect(await planOn(store, { write_method: 'PUT', source_list: { form: 'shopify_media', after: { alt: 'x' } } })).toBe(`Error: ${NO_SCOPE}`);
+    expect(await planOn(store, { source_list: { form: 'shopify_media' }, judge: { rule: 'r', schema: { alt: { type: 'string', maxLength: 100 } } } })).toBe(`Error: ${NO_SCOPE}`);
+  });
+
+  it('records a product plan over the same connection, and its refusals and the host hint do not name the image form', async () => {
+    const store = connection(preset({ granted_scope: ['read_products', 'write_products'] }));
+    expect(await planOn(store, { source_list: { form: 'shopify', after: { seo_title: 'x' } } })).toMatch(/^List dry run recorded/);
+    const refused = await planOn(store, { write_method: 'PUT', source_list: { form: 'shopify', after: { title: 'x' } } });
+    expect(refused.endsWith(` ${PRODUCT_RULES.replace(' For the images of the products, use form shopify_media.', '')}`), refused).toBe(true);
+    expect(refused).not.toContain('shopify_media');
+    const woo = await planOn(store, { source_list: { form: 'woocommerce', path: '/admin/api/2025-01/products.json', after: { title: 'x' } } });
+    expect(woo.endsWith(' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields).'), woo).toBe(true);
+    expect(woo).not.toContain('shopify_media');
   });
 });

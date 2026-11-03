@@ -172,8 +172,12 @@ describe('the Shopify customer text', () => {
   it('promises no image alt texts while the preset allows no scope that writes them', () => {
     expect(SHOPIFY_MEDIA_WRITABLE_FIELDS).toEqual(['alt']);
     expect(shopify.allowedScopes.filter((s) => s === 'write_files' || s === 'write_themes')).toEqual([]);
-    const text = [...shopify.consentNotice!.paragraphs, ...Object.values(shopify.consentNotice!.frame ?? {})].join(' ');
-    expect(text).not.toMatch(/Alt-Text|Bild/);
+    // Every text the page shows: the paragraphs, the frame and the names of the scopes.
+    const text = [...shopify.consentNotice!.paragraphs, ...Object.values(shopify.consentNotice!.frame ?? {}), ...Object.values(shopify.consentNotice!.scopeNames ?? {})].join(' ');
+    const IMAGE_WORDS = /alt[- ]?text|bild|foto|medi/i;
+    // The pattern catches each way the page could name images, in either case.
+    for (const word of ['Alt-Text', 'Alttext', 'alt text', 'Bilder', 'Fotos', 'Medien', 'media']) expect(word).toMatch(IMAGE_WORDS);
+    expect(text).not.toMatch(IMAGE_WORDS);
   });
 
   // The words the owner reads, byte for byte. A change to one needs a new approval; this test is
