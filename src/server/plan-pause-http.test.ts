@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { LynoxHTTPApi, TAKEOVER_REFUSALS } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
-import { PLAN_PAUSE_DEFAULT, setPlanPauseForTests } from '../core/plan-pause.js';
+import { PLAN_PAUSE_DEFAULT, setPlanPauseForTests, writePause } from '../core/plan-pause.js';
 import type { Engine } from '../core/engine.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 
@@ -333,6 +333,43 @@ describe('the pause is held to its takeover (real engine)', () => {
         for (const col of stored) expect(r.json, `${what} ${col}`).not.toHaveProperty(col);
       }
     } finally { off(); }
+  });
+
+  it("the library counts, at an ended mandate's workflow, the paused plans whose takeover moves it to the owner (UX-053)", async () => {
+    // A mandate of its own, so ending it touches no other case here.
+    const who = { kind: 'mandate' as const, email: 'ole@example.invalid', mandateId: 'TEST-MANDATE-COVER' };
+    const history = engine.getRunHistory()!;
+    history.insertPlannedPipeline({
+      id: 'wf-cover', name: 'Cover', goal: 'g', steps: [{ id: 's1', task: 't' }], reasoning: '', estimatedCost: 0,
+      createdAt: '2026-01-01T00:00:00.000Z', template: true,
+    }, who);
+    // Made well before the pause: a mark in the pause's own second counts as after it.
+    db().prepare("UPDATE workflows SET created_at = '2026-01-01 00:00:00' WHERE id = 'wf-cover'").run();
+    const nowS = Math.floor(Date.now() / 1000);
+    engine.getMandateEnds()!.record({ kind: 'mandate', email: who.email, mandateId: who.mandateId, mandateExp: nowS - 3600 }, nowS - 7200);
+    const runs = (id: string): void => {
+      history.insertTrigger({
+        id, title: 'Runs it', source: 'cron', effect: 'run_workflow', pipelineId: 'wf-cover', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+        confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: `mandate:${who.email}`, createdMandateId: who.mandateId,
+      });
+    };
+    const pause = (id: string): void => {
+      writePause(db(), id, [{ mandateId: who.mandateId, email: who.email, reason: 'expired', endsAt: nowS - 3600, roles: ['created'], closedPrompt: false }]);
+    };
+    const card = async (): Promise<Record<string, unknown> | undefined> =>
+      ((await ask('GET', '/api/workflows/library', ownerCookie)).json['workflows'] as Array<Record<string, unknown>>).find((w) => w['id'] === 'wf-cover');
+    runs('cover-1');
+    runs('cover-2');
+    try {
+      // No plan paused yet: nothing a takeover would move.
+      expect((await card())?.['runs_as']).toEqual({ person: who.email, ended: true, covered_by_takeover: 0 });
+      pause('cover-1');
+      expect((await card())?.['runs_as']).toEqual({ person: who.email, ended: true, covered_by_takeover: 1 });
+      pause('cover-2');
+      expect((await card())?.['runs_as']).toEqual({ person: who.email, ended: true, covered_by_takeover: 2 });
+    } finally {
+      db().prepare("DELETE FROM triggers WHERE id LIKE 'cover-%'").run();
+    }
   });
 });
 
