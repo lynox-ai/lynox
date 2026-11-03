@@ -26,6 +26,7 @@ import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
 import { sourceRefusal, type RunSource } from './run-source.js';
 import { childFilingContext } from '../core/approval-filing.js';
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -235,6 +236,14 @@ export interface RunManifestOptions {
 }
 
 /**
+ * The options a run carries once it has started: the public default of `principal` (absent = the
+ * owner) is resolved once, where the run is entered (`runManifest`), so no step inside it can read
+ * an absent one and fall back somewhere else (register 1173). Every step spawner is handed this
+ * principal, and the census (`principal-sites.test.ts`) checks by type that it is never undefined.
+ */
+export type StartedRunOptions = RunManifestOptions & { principal: import('../core/request-principal.js').RequestPrincipal };
+
+/**
  * Inputs to {@link buildRunCtx}. `autonomy` is a **required key** (value may be
  * `undefined`) so every call site must consciously decide the run's permission
  * posture — the headless saved-workflow path passes `'autonomous'`, in-session
@@ -313,7 +322,7 @@ export interface RunCtxInput {
  * `runGuardedSavedWorkflow`, so adding a wrapper here would double-bill
  * (prd-review A3).
  */
-export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
+export function buildRunCtx(input: RunCtxInput): StartedRunOptions {
   return {
     source: input.source,
     autonomy: input.autonomy,
@@ -533,15 +542,17 @@ export function runManifest(
     return Promise.reject(err instanceof Error ? err : new Error(String(err)));
   }
   if (refused !== undefined) return Promise.reject(new Error(refused));
-  if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, options);
-  const runId = options.runId ?? randomUUID();
-  return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...options, runId }));
+  // The public API's one default, resolved here and nowhere further in (see `StartedRunOptions`).
+  const started: StartedRunOptions = { ...options, principal: options.principal ?? OWNER_PRINCIPAL };
+  if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, started);
+  const runId = started.runId ?? randomUUID();
+  return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...started, runId }));
 }
 
 async function runManifestInGroup(
   manifest: Manifest,
   config: LynoxUserConfig,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
 ): Promise<RunState> {
   const depth = options.depth ?? 0;
   if (depth > MAX_PIPELINE_DEPTH) {
@@ -736,10 +747,10 @@ async function runManifestInGroup(
   // Effective options carry the (possibly-augmented) parentPrompt so
   // executeStep / spawners pick up the per-run budget without mutating the
   // caller's options.
-  const withPrompt: RunManifestOptions = parentPrompt === options.parentPrompt
+  const withPrompt: StartedRunOptions = parentPrompt === options.parentPrompt
     ? options
     : { ...options, parentPrompt };
-  const effectiveOptions: RunManifestOptions = dropGrant
+  const effectiveOptions: StartedRunOptions = dropGrant
     ? { ...withPrompt, capabilityContract: undefined, isAcceptedParam: undefined }
     : withPrompt;
 
@@ -834,7 +845,7 @@ async function runSequential(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
@@ -901,7 +912,7 @@ async function runParallel(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
@@ -1046,7 +1057,7 @@ async function executeStep(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<StepResult> {

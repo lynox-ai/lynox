@@ -4661,7 +4661,8 @@ export class LynoxHTTPApi {
         : undefined;
       // Always an object so the Tier-2 eager-persist checkpoint hook can be
       // attached below (once runId + buffer exist). effort/thinking stay optional.
-      const runOptions: import('../core/session.js').RunOptions = {
+      // `principal` required here (1173): the census reads by type whom this run is for.
+      const runOptions: import('../core/session.js').RunOptions & { principal: import('../core/request-principal.js').RequestPrincipal } = {
         ...(runEffort ? { effort: runEffort } : {}),
         ...(runThinking ? { thinking: runThinking } : {}),
         // Always named, the owner included: the session keeps the last run's principal
