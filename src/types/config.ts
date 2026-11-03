@@ -802,8 +802,8 @@ export interface LynoxUserConfig {
   background_model?: TierSlot | null | undefined;
   /**
    * LLM mode for managed instances. 'standard' (default) uses Claude Sonnet 4.6 via Anthropic Direct.
-   * 'eu-sovereign' switches the main LLM to Mistral Large 3 via the OpenAI adapter (Paris) — full
-   * EU data sovereignty, no CLOUD Act exposure. Toggleable in the Web UI under Settings → LLM Mode.
+   * 'eu-sovereign' switches the main LLM to Mistral Large 3 via the OpenAI adapter on
+   * Mistral's EU regional endpoint. Toggleable in the Web UI under Settings → LLM Mode.
    * Engine.init() reads this and overrides provider/api_key/api_base_url at runtime.
    */
   llm_mode?: 'standard' | 'eu-sovereign' | undefined;

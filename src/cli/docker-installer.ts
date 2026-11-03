@@ -923,7 +923,7 @@ export async function runDockerInstaller(args: readonly string[] = []): Promise<
       ? (ni.provider === 'openai-compatible' ? 'custom' : ni.provider)
       : await select<ProviderChoice>([
         { label: 'Claude (Anthropic)', value: 'anthropic', hint: 'recommended — tested' },
-        { label: 'Mistral', value: 'mistral', hint: 'Paris, EU — tested' },
+        { label: 'Mistral', value: 'mistral', hint: 'EU and EFTA — tested' },
         { label: 'OpenAI-compatible', value: 'custom', hint: 'Ollama / LM Studio / Groq / LiteLLM / vLLM — experimental' },
       ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'anthropic';
 
