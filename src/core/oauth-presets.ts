@@ -331,7 +331,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
       oneOf: ['contact_show', 'contact_edit'],
       why: 'the question before each write names the contact it concerns, and reading a contact needs one of these',
     }],
-    // Customer text, approved 2026-10-14. A change to a word needs a new approval; the test that
+    // Customer text, approved 2026-11-03. A change to a word needs a new approval; the test that
     // holds this text byte for byte is the reminder.
     consentNotice: {
       lang: 'de',
@@ -341,7 +341,8 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
         'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
         'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
       ],
-      // The page around the text, approved 2026-10-21 (reviewed first), under the same
+      // The page around the text, approved 2026-10-21 (reviewed first), its line under the list
+      // 2026-11-03, under the same
       // rule: a changed word needs a new approval. The names follow bexio's own breadth, which
       // documents each of these scopes as write access to its resource and does not say what
       // that leaves out, so the line under the list says what it covers.
@@ -384,14 +385,14 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // (`shopify-graphql.ts`), and Shopify grants a write only to the token, so the scope sits on
     // the connection. It is asked for only when the profile names it. No other write scope.
     allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products'],
-    // Customer text. A change to a word needs a new approval; the test that holds this text
-    // byte for byte is the reminder. Shown before every link that asks for write_products, a
-    // new connection's or a reconnect's. The fields in the second paragraph are those of the
-    // engine's product write form, a test holds the two together. Image alt texts are not among
-    // them: the engine's image form writes through `fileUpdate`, which needs `write_files` or
-    // `write_themes`, and this preset refuses both. `write_products` itself can change an alt
-    // text (the deprecated `productUpdateMedia`), which a chat request may send after a yes;
-    // paragraph 1 and the line under the scope list cover that.
+    // Customer text, approved 2026-11-03. A change to a word needs a new approval; the test that
+    // holds this text byte for byte is the reminder. Shown before every link that asks for
+    // write_products, a new connection's or a reconnect's. The fields in the second paragraph
+    // are those of the engine's product write form, a test holds the two together. Image alt
+    // texts are not among them: the engine's image form writes through `fileUpdate`, which
+    // needs `write_files` or `write_themes`, and this preset refuses both. `write_products`
+    // itself can change an alt text (the deprecated `productUpdateMedia`), which a chat request
+    // may send after a yes; paragraph 1 and the line under the scope list cover that.
     consentNotice: {
       lang: 'de',
       writeScopes: ['write_products'],
