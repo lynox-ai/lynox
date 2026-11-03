@@ -1566,8 +1566,8 @@ describe('Config', () => {
   });
 
   // The control plane's worker and fallback profiles arrive with the URL it wrote, which can be
-  // the global one. They are read as the EU endpoint too, so the host a provider failure reports
-  // is the host that was called. Another host in the same blob stays as written.
+  // the global one. The loaded profile names the EU endpoint; another host in the same blob stays
+  // as written.
   it('reads a model profile on Mistral\'s global endpoint as the EU one, and leaves other hosts', async () => {
     process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
       worker: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-w', model_id: 'ministral-14b-2512' },
@@ -1829,6 +1829,14 @@ describe('Config', () => {
       process.env['LYNOX_BILLING_TIER'] = 'managed';
       process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({ fallback: envProfile });
       writeProfiles({ model_profiles: { mine: fileProfile, fallback: { ...fileProfile } } });
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().model_profiles).toEqual({ fallback: envProfile });
+    });
+
+    it('keeps an environment profile on the global Mistral URL on a pool tier, read as the EU one', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({ fallback: { ...envProfile, api_base_url: 'https://api.mistral.ai/v1' } });
+      writeProfiles({ model_profiles: { mine: { ...fileProfile, api_base_url: 'https://api.mistral.ai/v1' } } });
       const { loadConfig } = await import('./config.js');
       expect(loadConfig().model_profiles).toEqual({ fallback: envProfile });
     });
