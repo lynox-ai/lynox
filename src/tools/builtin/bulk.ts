@@ -159,25 +159,31 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
     const form = typeof list === 'object' && list !== null ? (list as Record<string, unknown>)['form'] : undefined;
     if (!(err instanceof BulkSourceError) || !isShopifyListForm(form) || err.message === SHOPIFY_READ_OFF) throw err;
     if (err.message === SHOPIFY_MEDIA_NO_SCOPE) throw err;
-    // The image form is named only where the store connection may write image alt texts.
-    const images = form === 'shopify' && mediaWritableFor(input, agent) ? ' For the images of the products, use form shopify_media.' : '';
+    // The image form is named only where the store connection may run it; elsewhere the product
+    // rules say why a bulk run cannot change alt texts and what to offer instead.
+    const images = form !== 'shopify' ? '' : mediaWritableFor(input, agent) ? ' For the images of the products, use form shopify_media.' : ` ${SHOPIFY_MEDIA_NOTE}`;
     throw new BulkSourceError(`${err.message} ${SHOPIFY_FORM_RULES[String(form)]!}${images}`);
   }
 }
 
-/** Whether the store connection of the plan's target_host may write image alt texts
+/** Whether the store connection of the plan's target_host may run the bulk image form
  *  (`shopifyMediaWritable`): the one profile mapped to that host, read from the API store. */
 function mediaWritableFor(input: BulkPlanInput, agent: IAgent): boolean {
   const host = typeof input.target_host === 'string' ? canonicalHost(input.target_host) : null;
   return host !== null && shopifyMediaWritable(agent.toolContext?.apiStore?.getByHostname(host), host);
 }
 
-/** The refusal of an image plan on a store connection that may not write image alt texts: the
+/** The refusal of an image plan on a store connection that may not run the bulk image form: the
  *  write would fail at Shopify for every target, after the owner approved it. Without the form's
- *  rules, which would name the alt text it cannot write. */
-// ux U-126: no way out the preset cannot give (a reconnect asks for the same scopes), and an
-// offer the chat can always keep. The scope names come from SHOPIFY_MEDIA_WRITE_SCOPES.
-const SHOPIFY_MEDIA_NO_SCOPE = `source_list.form shopify_media writes image alt texts, which needs a Shopify connection granted ${SHOPIFY_MEDIA_WRITE_SCOPES.join(' or ')}; the Shopify connection lynox sets up asks for neither, so this store's connection cannot write them. Tell the user in one sentence that lynox cannot change image alt texts in this store, and offer to write alt texts in this chat from the product names and what the user says about the images, so they can enter them in Shopify themselves. Do not suggest reconnecting the store or changing the connection.`;
+ *  rules, which would name the alt text it cannot write. ux U-126: it speaks of the bulk run only
+ *  (a single approved request may still reach alt texts through another mutation), names no way
+ *  out the preset cannot give (a reconnect asks for the same scopes), and makes an offer the chat
+ *  can always keep. */
+const SHOPIFY_MEDIA_NO_SCOPE = `source_list.form shopify_media writes image alt texts through fileUpdate, which needs a Shopify connection granted ${SHOPIFY_MEDIA_WRITE_SCOPES.join(' or ')}; the Shopify connection lynox sets up asks for neither, so a bulk run cannot change image alt texts in this store. Tell the user in one sentence that a bulk run cannot change image alt texts here, and offer to write alt texts in this chat from the product names and what the user says about the images, so they can enter them in Shopify themselves. Do not suggest reconnecting the store or changing the connection.`;
+
+/** The same, where a plan never named the image form: added to the product form's rules and to
+ *  the hint on a store whose connection may not run it, so a model learns it on every way in. */
+const SHOPIFY_MEDIA_NOTE = 'Image alt texts: a bulk run cannot change them in this store, because its Shopify connection may not write files. If the user asks to change alt texts for many images, tell them so in one sentence and offer to write alt texts in this chat from the product names and what the user says about the images, so they can enter them in Shopify themselves.';
 
 /** A plan on a Shopify store's host that does not use a Shopify form: the refusal it got (a path
  *  that is not a woocommerce list, a source file that does not exist) says nothing about the store,
@@ -190,10 +196,10 @@ function shopifyHostHint(input: BulkPlanInput, agent: IAgent): string {
   if (host === null || !isShopifyStoreHostName(host)) return '';
   const list = input.source_list;
   if (typeof list === 'object' && list !== null && isShopifyListForm((list as Record<string, unknown>)['form'])) return '';
-  // The image form only where the connection may write it (`mediaWritableFor`).
+  // The image form only where the connection may run it (`mediaWritableFor`); elsewhere the note.
   return mediaWritableFor(input, agent)
     ? ' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields) or shopify_media (image alt texts).'
-    : ' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields).';
+    : ` target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields). ${SHOPIFY_MEDIA_NOTE}`;
 }
 
 const SHOPIFY_READ_OFF = 'Reading a Shopify store in a bulk run is switched off on this instance.';

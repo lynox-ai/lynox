@@ -9,8 +9,9 @@
  *
  * `bulk_plan` is the real tool on a real ledger in a temporary directory, over a store connection
  * granted the product scopes only; the other tools answer canned and nothing is sent anywhere.
- * A run is measured only when an image plan reached the refusal. What the test asserts is the
- * structure (the refusal came, no image plan was tried again after it, no run was recorded); the
+ * A run is measured from the first answer that carries the refusal of the image plan or the note
+ * the product rules and the store hint carry (`SHOPIFY_MEDIA_NOTE`). What the test asserts is the
+ * structure (one of them came, no plan was tried after it, no run was recorded); the
  * reply is judged by hand against ux's criteria, from the dump: with MEDIA_DUMP set, every run's
  * calls and final reply go to that file. Runs per provider: MEDIA_RUNS (default 3). Anthropic key
  * as the other online tests read it (`getApiKey`), Mistral via MISTRAL_API_KEY; a provider without
@@ -71,6 +72,8 @@ function realBulkPlan(ledger: BulkLedger, calls: Call[]): ToolEntry {
 }
 
 const REFUSED = /^Error: source_list\.form shopify_media writes image alt texts/;
+// The note the product rules and the store hint carry on a connection without the image scope.
+const NOTED = /Image alt texts: a bulk run cannot change them in this store/;
 
 const table: string[] = [];
 const dirs: string[] = [];
@@ -112,14 +115,17 @@ async function runOnce(provider: string, make: (tools: ToolEntry[]) => Agent, i:
   } finally {
     engineDb.close();
   }
-  const refusedAt = calls.findIndex((c) => REFUSED.test(c.answer));
-  const replanned = refusedAt === -1 ? 0 : calls.slice(refusedAt + 1).filter((c) => formOf(c.input) === 'shopify_media').length;
+  // Reached: the refusal or the note, whichever came first. After it, any further plan counts:
+  // another form is a way out that does not exist, the image form again is a retry.
+  const refusedAt = calls.findIndex((c) => REFUSED.test(c.answer) || NOTED.test(c.answer));
+  const replanned = refusedAt === -1 ? 0 : calls.slice(refusedAt + 1).length;
+  const how = refusedAt === -1 ? 'none' : REFUSED.test(calls[refusedAt]!.answer) ? 'refusal' : 'note';
   const dump = process.env['MEDIA_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, run: i, refused: refusedAt !== -1, replanned, runs, calls, reply })}\n`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, run: i, reached: how, replanned, runs, calls, reply })}\n`);
   const verdict = refusedAt === -1 ? 'NO-REFUSAL' : replanned > 0 || runs > 0 ? 'FAIL' : 'JUDGE';
-  table.push(`${provider}\t#${String(i)}\t${verdict}\treplanned=${String(replanned)} runs=${String(runs)}\t${reply.replace(/\s+/g, ' ').slice(0, 160)}`);
-  expect(refusedAt, 'the image plan never reached the refusal').not.toBe(-1);
-  expect(replanned, 'an image plan was tried again after the refusal').toBe(0);
+  table.push(`${provider}\t#${String(i)}\t${verdict}\tvia=${how} replanned=${String(replanned)} runs=${String(runs)}\t${reply.replace(/\s+/g, ' ').slice(0, 160)}`);
+  expect(refusedAt, 'neither the refusal nor the note reached the model').not.toBe(-1);
+  expect(replanned, 'a plan was tried again after the refusal or the note').toBe(0);
   expect(runs).toBe(0);
 }
 

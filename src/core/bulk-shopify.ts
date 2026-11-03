@@ -21,12 +21,12 @@ import { isFeatureEnabled } from './features.js';
 import { presetStoreHost } from './oauth-presets.js';
 import type { ApiProfile } from './api-store.js';
 
-/** The Shopify scopes either of which `fileUpdate` needs to write an image's alt text (PRD
+/** The Shopify scopes either of which `fileUpdate`, the bulk image form's write, needs (PRD
  *  shopify-preset §16.6). The Shopify preset asks for neither (`oauth-presets.ts`). */
 export const SHOPIFY_MEDIA_WRITE_SCOPES: readonly string[] = Object.freeze(['write_files', 'write_themes']);
 
 /**
- * Whether the store connection for `host` may write image alt texts: the engine's own Shopify
+ * Whether the store connection for `host` may run the bulk image form (`fileUpdate`): the engine's own Shopify
  * connection to that store (`presetStoreHost`, the same profile the write attaches) whose grant,
  * as Shopify answered it, holds `write_files` or `write_themes`. Without a recorded grant nothing
  * is known beyond the ask, and the preset never asks for either, so that counts as no.

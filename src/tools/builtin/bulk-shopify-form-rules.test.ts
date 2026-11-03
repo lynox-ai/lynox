@@ -161,7 +161,8 @@ describe('the bulk_plan schema', () => {
 // fileUpdate needs write_files or write_themes, which the Shopify preset never asks for: an image
 // plan over such a connection would be approved and then fail at Shopify for every target.
 describe('an image plan on a store connection that may not write image alt texts', () => {
-  const NO_SCOPE = "source_list.form shopify_media writes image alt texts, which needs a Shopify connection granted write_files or write_themes; the Shopify connection lynox sets up asks for neither, so this store's connection cannot write them. Tell the user in one sentence that lynox cannot change image alt texts in this store, and offer to write alt texts in this chat from the product names and what the user says about the images, so they can enter them in Shopify themselves. Do not suggest reconnecting the store or changing the connection.";
+  const NO_SCOPE = "source_list.form shopify_media writes image alt texts through fileUpdate, which needs a Shopify connection granted write_files or write_themes; the Shopify connection lynox sets up asks for neither, so a bulk run cannot change image alt texts in this store. Tell the user in one sentence that a bulk run cannot change image alt texts here, and offer to write alt texts in this chat from the product names and what the user says about the images, so they can enter them in Shopify themselves. Do not suggest reconnecting the store or changing the connection.";
+  const NOTE = "Image alt texts: a bulk run cannot change them in this store, because its Shopify connection may not write files. If the user asks to change alt texts for many images, tell them so in one sentence and offer to write alt texts in this chat from the product names and what the user says about the images, so they can enter them in Shopify themselves.";
   const connection = (profile: unknown) => ({ getByHostname: (h: string) => h === HOST ? profile : undefined });
   const planOn = (store: unknown, input: Record<string, unknown>): Promise<string> =>
     bulkPlanTool.handler({ target_system: 'http', target_host: HOST, ...input } as Parameters<typeof bulkPlanTool.handler>[0],
@@ -212,14 +213,14 @@ describe('an image plan on a store connection that may not write image alt texts
     expect(await planOn(store, { source_list: { form: 'shopify_media' }, judge: { rule: 'r', schema: { alt: { type: 'string', maxLength: 100 } } } })).toBe(`Error: ${NO_SCOPE}`);
   });
 
-  it('records a product plan over the same connection, and its refusals and the host hint do not name the image form', async () => {
+  it('records a product plan over the same connection; its refusals and the host hint do not name the image form and carry the bulk-run note', async () => {
     const store = connection(preset({ granted_scope: ['read_products', 'write_products'] }));
     expect(await planOn(store, { source_list: { form: 'shopify', after: { seo_title: 'x' } } })).toMatch(/^List dry run recorded/);
     const refused = await planOn(store, { write_method: 'PUT', source_list: { form: 'shopify', after: { title: 'x' } } });
-    expect(refused.endsWith(` ${PRODUCT_RULES.replace(' For the images of the products, use form shopify_media.', '')}`), refused).toBe(true);
+    expect(refused.endsWith(` ${PRODUCT_RULES.replace(' For the images of the products, use form shopify_media.', '')} ${NOTE}`), refused).toBe(true);
     expect(refused).not.toContain('shopify_media');
     const woo = await planOn(store, { source_list: { form: 'woocommerce', path: '/admin/api/2025-01/products.json', after: { title: 'x' } } });
-    expect(woo.endsWith(' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields).'), woo).toBe(true);
+    expect(woo.endsWith(` target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields). ${NOTE}`), woo).toBe(true);
     expect(woo).not.toContain('shopify_media');
   });
 });
