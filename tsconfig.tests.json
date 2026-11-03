@@ -24,6 +24,12 @@
     "incremental": false
   },
   "include": ["tests/security", "tests/contract-env.test.ts",
+    // The online evals. vitest leaves them out unless opted in (`scripts/vitest-online-opt-in.ts`)
+    // and, opted in, runs them without a type check. A stub of the wrong shape then fails only at
+    // run time, and where an eval swallows it, it changes what the eval measures without a symptom:
+    // a `promptSecret` stub that resolved an object made `ask_secret` return nothing instead of its
+    // cancel text, so a model that called it was not told to keep the secret out of the chat.
+    "tests/online",
     // The pinned-fetch bridge, which adapts fetchPinned's transport back onto a
     // `globalThis.fetch` stub for the suites whose subject moved to the
     // connector surface. It calls into the network guard, so it has exactly the

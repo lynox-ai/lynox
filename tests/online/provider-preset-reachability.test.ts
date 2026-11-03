@@ -53,7 +53,7 @@
  * wire.
  */
 import { describe, it, expect } from 'vitest';
-import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import type { BetaContentBlockParam as ContentBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../../src/core/agent.js';
 import { createToolContext } from '../../src/core/tool-context.js';
 import { catalogEntryKey } from '../../src/core/llm/catalog.js';

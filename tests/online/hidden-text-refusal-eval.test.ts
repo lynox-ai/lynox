@@ -102,7 +102,7 @@ async function runOnce(provider: string, make: (t: ToolEntry[]) => Agent, kase: 
 // HIDDEN_CASES=copy or refused runs only that case.
 const CASES = (process.env['HIDDEN_CASES'] ?? 'copy,refused').split(',').map((c) => c.trim());
 const runs = CASES.flatMap((kase) => Array.from({ length: RUNS }, (_, i) => ({ kase, i })));
-const base = { maxIterations: 6, systemPrompt: SYSTEM_PROMPT, promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' as const }) };
+const base = { maxIterations: 6, systemPrompt: SYSTEM_PROMPT, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('hidden-text refusal — Anthropic (Haiku)', () => {
