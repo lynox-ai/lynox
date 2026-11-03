@@ -169,10 +169,11 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     expect(ledger.recordRead(id, seq, { invalid: reason! })).toBe(true);
     const status = ledger.getStatus(id)!;
     expect(status.invalidReasons).toEqual({ shortcode_changed: 1 });
-    expect(formatStatus(status)).toContain('shortcode_changed: the new text has a [shortcode] whose attributes or content contain &, < or >; '
-      + 'writing it would change those characters and the shop might read the shortcode differently. Writing them as references '
-      + 'such as &amp; does not help: the shop reads those literally. Plan the value again without '
-      + 'these characters inside the shortcode, or leave this field to the owner to change in the shop.');
+    const note = formatStatus(status);
+    expect(note).toContain('shortcode_changed: the new text has a [shortcode] whose attributes or content contain &, < or >, '
+      + 'written as such or as references like &amp;. lynox cannot write it: either form changes what the shop reads.');
+    expect(note).toContain('do not change, drop or encode them to make the plan pass: tell the owner that lynox cannot write this shortcode '
+      + 'and leave the field to them to change in the shop.');
   });
 });
 
