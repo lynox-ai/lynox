@@ -400,7 +400,9 @@
 			const catBody = (await catRes.json()) as { providers: CatalogProvider[] };
 			providers = catBody.providers;
 			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks; available_tier_presets?: Record<string, PresetInfo>; capabilities?: { durable_memory_capture_degraded?: boolean } };
-			noteViewer(configBody);
+			// Asked before a sign-in reset, the body is the earlier session's: none of it is taken,
+			// and the page asks again for the session it now belongs to.
+			if (!noteViewer(configBody)) { void load(); return; }
 			config = configBody;
 			locks = configBody.locks ?? {};
 			availablePresets = configBody.available_tier_presets ?? {};

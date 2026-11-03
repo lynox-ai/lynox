@@ -36,6 +36,8 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	refreshFails = false;
 	refreshHangs = null;
+	loadHangs = null;
+	loadNamesReplaced = true;
 	keepOnPut = false;
 	replaceOnPut = false;
 	setLocale(localeBefore);
@@ -59,6 +61,9 @@ const PRESET = {
 };
 let refreshFails = false;
 let refreshHangs: Promise<void> | null = null;
+/** Holds back every read of the config made while it is set; with `loadNamesReplaced`, those answers name a replaced deep tier. */
+let loadHangs: Promise<void> | null = null;
+let loadNamesReplaced = true;
 let keepOnPut = false;
 /** The saved config carries a retired model: from the PUT on, the engine replaces deep. */
 let replaceOnPut = false;
@@ -75,6 +80,12 @@ async function render(viewer: 'owner' | 'mandate', replaced: unknown[] | undefin
 	let put = false;
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const path = String(url).split('?')[0]!;
+		if (loadHangs && init?.method !== 'PUT' && path.endsWith('/config')) {
+			const hold = loadHangs;
+			const asked = { ...(JSON.parse(JSON.stringify(config)) as Record<string, unknown>), ...(loadNamesReplaced ? { replaced_tier_slots: REPLACED } : {}) };
+			await hold;
+			return Response.json(asked);
+		}
 		if (refreshHangs && init?.method !== 'PUT' && path.endsWith('/config') && put) {
 			// The answer describes the config as it was when asked, and arrives when the test says so.
 			const asked = JSON.parse(JSON.stringify(config)) as unknown;
@@ -281,6 +292,41 @@ describe('a tier that runs another model than the stored one (ux U-118)', () => 
 			// Positive control: the stored preset's detail is on screen, where the line would sit.
 			expect(target.textContent).toContain('Claude Opus 5');
 			expect(lines()).toHaveLength(reset ? 0 : 1);
+		});
+	}
+	for (const reset of [false, true]) {
+		it(reset
+			? 'the first read of the config, answered after a sign-in reset, is not taken and is asked again'
+			: 'control: the same first read without a reset in between is taken', async () => {
+			let answer!: () => void;
+			loadHangs = new Promise<void>((r) => { answer = r; });
+			await render('owner', undefined);
+			const fetchMock = fetch as unknown as { mock: { calls: [string, RequestInit?][] } };
+			const reads = (): number => fetchMock.mock.calls.filter(([u, i]) => i?.method !== 'PUT' && String(u).split('?')[0]!.endsWith('/config')).length;
+			const before = reads();
+			expect(before).toBeGreaterThan(0);
+			expect(radios()).toHaveLength(0);
+			// The first reads were asked before the reset and answer after it, naming a replaced deep tier.
+			if (reset) resetSettingsViewer();
+			// What the page asks from now on names nothing replaced; after a reset it is held back too,
+			// so the screen between the old answer and the new one shows what the page took from the old.
+			let again = (): void => {};
+			loadNamesReplaced = false;
+			loadHangs = reset ? new Promise<void>((r) => { again = r; }) : null;
+			answer();
+			await settle();
+			if (reset) {
+				expect(radios()).toHaveLength(0);
+				expect(lines()).toEqual([]);
+				loadHangs = null;
+				again();
+				await settle();
+			}
+			// Positive control: the page is loaded, the stored preset's detail is on screen.
+			expect(target.textContent).toContain('Claude Opus 5');
+			expect(lines()).toHaveLength(reset ? 0 : 1);
+			// The page asks once more, for the session it now belongs to; that answer names nothing replaced.
+			expect(reads() - before).toBe(reset ? 1 : 0);
 		});
 	}
 });
