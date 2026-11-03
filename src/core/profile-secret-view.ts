@@ -1150,7 +1150,7 @@ export function memberConnectionRefusal(
     // there is no confirmation that could list the connection, and nobody needs telling.
     // Its own end, with the ways on (ux U-122); the shared sentences stay as they are.
     if (ownPlan && inPlan === 'unlisted' && currentPlanOwnerStarted()) {
-      return `${lead}. This run of a workflow ${person} set up or changed was started by the owner, not by a schedule, so it does not use connections ${person} made with their own login. `
+      return `${lead}. This run of a workflow ${person} set up or changed was not started by a schedule of ${person}'s, so it does not use connections ${person} made with their own login. `
         + `${RUN_REFUSAL_FINAL} Say so in your reply and name the ways on: ${person} can schedule this workflow, and once the owner confirms that plan with this connection listed, its scheduled runs use it; `
         + `or the owner connects ${provider} with their own login and asks lynox in a chat to do this step with that connection. Do not ask for permission to try again.`;
     }

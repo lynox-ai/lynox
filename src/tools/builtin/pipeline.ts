@@ -1058,7 +1058,10 @@ function underWorkflowRun<T>(trail: WorkflowRunTrail | null, principal: RequestP
   return trail === null ? fn() : runAsWorkflowRun(principal, trail.key, fn);
 }
 
-export const RETRY_OTHER_PRINCIPAL_REFUSAL = 'The last run of this workflow was for someone else, so it cannot be retried here. Run it again instead of retrying it.';
+// ux U-122. A retry reuses the outputs of the steps that completed (`cachedOutputs`), hence "continue".
+export const RETRY_OTHER_PRINCIPAL_REFUSAL = 'The last run of this workflow was for someone else, so it cannot be retried here: a retry would continue from what that run read. '
+  + 'Start a new run instead. A new run does every step again from the start, so first tell the user that steps of the last run may already have changed something, '
+  + 'such as sending mail or writing data, and start it only if they want that done again.';
 
 /** Whom a run was for, as one string: the person's tag and, for a mandate, its grant. */
 function principalKey(p: RequestPrincipal): string {
