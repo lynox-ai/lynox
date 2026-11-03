@@ -32,9 +32,11 @@
  * assume, so the census asks for the plain value.
  *
  * What it still does not see: a principal removed after the place read its type, through a looser
- * alias (`delete`, `Object.assign`); a value of type `any` assigned into a typed binding earlier,
- * or a cast more than one binding before the place; a call through an `any`-typed or union-typed
- * receiver, `Reflect`, or a non-literal element access; options taken from a parameter of any
+ * alias (`delete`, `Object.assign`); a value of type `any` assigned into a typed binding earlier;
+ * a cast anywhere but on the value handed over or on the `const` initializer it names (a parameter
+ * default, a destructured binding, a later assignment, two bindings back); a call that carries no
+ * target's name and does not resolve to a target (an `any` receiver with a computed callee,
+ * `Reflect`, a non-literal element access); options taken from a parameter of any
  * function, a callback's included ("passes through"); code that is not in the program (`eval`, a
  * string-built import). It reads the program as the compiler does and asserts no compile errors
  * only for its self-test: the real tree's are the typecheck's.
@@ -258,6 +260,7 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
   const MEMBER_NAMES = new Set(Object.keys(METHODS).map((k) => k.split('#')[1]!));
   /** Names a call may not carry unless it resolves to the target of that name. */
   const GUARDED_NAMES = new Set([...Object.keys(FUNCTIONS), 'createSession', 'getOrCreate']);
+  const FUNCTION_NAMES = new Set(Object.keys(FUNCTIONS));
   const memberName = (m: ts.TypeElement): string => (m.name ? m.name.getText().replace(/['"`\[\]]/g, '') : '');
 
   for (const sf of program.getSourceFiles()) {
@@ -309,6 +312,12 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
         && node.members.some((m) => MEMBER_NAMES.has(memberName(m)))) {
         const t = checker.getTypeAtLocation(node);
         if (targetInstances.some((c) => checker.isTypeAssignableTo(c, t))) refused.push(`${at(node)} a type a target class satisfies: a call through it is not seen`);
+      }
+      // A type with a member named like a target function: whatever is typed by it calls, takes or
+      // hands on the function through the member, which resolves to the type, not to the function.
+      // Beside the call-name guard, not instead of it: a member taken as a value carries no call.
+      if ((ts.isInterfaceDeclaration(node) || ts.isTypeLiteralNode(node)) && node.members.some((m) => FUNCTION_NAMES.has(memberName(m)))) {
+        refused.push(`${at(node)} a type with a member named like a target function: a call through it is not seen`);
       }
 
       node.forEachChild(visit);
@@ -446,6 +455,8 @@ export function harmless(x: unknown) { void Agent.MAX; return x instanceof Agent
     expect(refused.map((r) => r.replace(/^x\.ts:\d+ /, ''))).toEqual([
       // `ExtRunner` in a declaration file under src.
       'types/ext.d.ts:2 a type a target class satisfies: a call through it is not seen',
+      // `Deps`: a type with a member named like a target function.
+      'a type with a member named like a target function: a call through it is not seen',
       // A bracketed member name is still the target's name.
       'a type a target class satisfies: a call through it is not seen',
       // A module or object typed to compile, called by the target's name.
