@@ -112,6 +112,16 @@ describe('a marked part of the briefing is marked at that part', () => {
     expect(tail).toContain('weekly runs: 12');
   });
 
+  it('names only the marked block\'s source, not a clean block\'s', () => {
+    const own: string[] = [];
+    const clean = collectOwnBlocks(own, () => wrapUntrustedData('Weekly report.', 'task.title'));
+    const marked = collectOwnBlocks(own, () => wrapUntrustedData(MARKED, 'api_profile.description'));
+    const tail = tailOf(`- task: ${clean}\n- crm: CRM — ${marked} (https://api.crm.example)`, own);
+    const line = tail.split('\n').find((l) => l.includes("Injection patterns detected in the briefing's")) ?? '';
+    expect(line).toContain('api_profile.description block,');
+    expect(line).not.toContain('task.title');
+  });
+
   it('still leads the whole briefing with the fence', () => {
     const { briefing, own } = twoProfiles(MARKED);
     const tail = tailOf(briefing, own);
