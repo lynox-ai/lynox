@@ -30,7 +30,10 @@ export type RunSource =
   | { readonly kind: 'nested' };
 
 export const WORKFLOW_ENDED_REFUSAL = 'This workflow was set up or changed by someone whose access has ended, so it does not run.';
-export const WORKFLOW_ENDED_MID_RUN = 'The access of someone who set up or changed this workflow ended while it ran, so it stopped before its next step.';
+// Texts reviewed with ux (U-122).
+export const WORKFLOW_ENDED_MID_RUN = 'The access of someone who set up or changed this workflow ended while it ran, so it stopped before its next step. '
+  + 'The steps listed in this result ran; the others did not. Starting this workflow again is refused for the same reason, so do not start it again. '
+  + 'If the remaining steps are still needed, tell the user they can describe them in chat and ask lynox to do them or to write a new workflow for them.';
 export const WORKFLOW_UNREADABLE_REFUSAL = 'Could not read who set up this workflow, so it did not run.';
 export const NESTED_AT_TOP_REFUSAL = 'A nested run was started on its own, outside the run it belongs to, so it did not run.';
 
@@ -70,7 +73,13 @@ export function workflowRunsAs(a: WorkflowAuthorship | undefined): RequestPrinci
   return planMembers(undefined, planMandate(planAuthorshipOfWorkflow(a))).of ?? OWNER_PRINCIPAL;
 }
 
-export const WORKFLOW_OF_ANOTHER_REFUSAL = 'This workflow was set up or last changed by another person with delegated access, so only the owner may run it.';
+export const WORKFLOW_OF_ANOTHER_REFUSAL = 'Another person with delegated access set up or last changed this workflow, so only they or the owner may run it. '
+  + 'To run this task yourself, describe in chat what it should do and ask lynox to write a new workflow for it; a newly written workflow is yours. '
+  + 'Do not copy this one, because a copy stays theirs, and do not change it, because changing it takes it over and stops them from running it. '
+  + 'Otherwise ask the owner to run this one.';
+/** For a mandate only: the owner is refused the same workflow by the runner (`sourceRefusal`), so the way on is a new workflow. */
+export const WORKFLOW_UNREADABLE_FOR_MANDATE_REFUSAL = 'lynox could not read who set up this workflow, so it did not run. '
+  + 'Describe in chat what it should do and ask lynox to write a new workflow for it; a newly written workflow is yours.';
 
 /** Whom a run of a saved workflow started from a conversation is for: see {@link callerWorkflowRunAs}. */
 export type CallerWorkflowRun =
@@ -101,7 +110,7 @@ export function callerWorkflowRunAs(caller: RequestPrincipal, read: () => Workfl
     const runAs = workflowRunsAs(a);
     return { kind: 'run', principal: runAs, asPlan: !isOwnerPrincipal(runAs) };
   }
-  if (a === undefined) return { kind: 'refused', error: WORKFLOW_UNREADABLE_REFUSAL };
+  if (a === undefined) return { kind: 'refused', error: WORKFLOW_UNREADABLE_FOR_MANDATE_REFUSAL };
   const mark = planMandate(planAuthorshipOfWorkflow(a));
   if (mark === undefined || principalTag(mark.principal) === principalTag(caller)) return { kind: 'run', principal: caller, asPlan: false };
   return { kind: 'refused', error: WORKFLOW_OF_ANOTHER_REFUSAL };

@@ -65,6 +65,8 @@ const EDITED_BY_BEA: WorkflowAuthorship = { ...OWNERS, mandateEditor: B, mandate
  *  and which grants are live (`null` = no store of mandate ends). */
 let authorship: WorkflowAuthorship | undefined | 'throws';
 let live: Set<string> | null;
+/** Set mid-run by a test: the store of mandate ends throws from then on. */
+let liveThrows = false;
 
 function planned(): PlannedPipeline {
   return {
@@ -87,7 +89,7 @@ function engineContext(): ReturnType<typeof createToolContext> {
       return id === WF ? authorship : undefined;
     },
   } as Record<string, unknown>, { get: (t, k) => (typeof k === 'string' && k in t ? t[k] : () => undefined) }) as unknown as NonNullable<typeof ctx.runHistory>;
-  ctx.mandateEnds = live === null ? null : { isLive: (id: string) => live!.has(id) };
+  ctx.mandateEnds = live === null ? null : { isLive: (id: string) => { if (liveThrows) throw new Error('engine.db is gone'); return live!.has(id); } };
   return ctx;
 }
 
@@ -118,6 +120,7 @@ beforeEach(() => {
   storePipeline(WF, planned());
   authorship = OWNERS;
   live = new Set(['grant-b']);
+  liveThrows = false;
 });
 
 describe("a saved workflow a mandate shaped runs only while that mandate's grant is live", () => {
@@ -367,6 +370,16 @@ describe('an access that ends mid-run ends the run before its next step (1100)',
     const result = await runSavedWorkflow(WF, ctx.runHistory, config, undefined, { tools: ctx.tools, toolContext: ctx, principal: { kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' } });
     expect(mockProcess).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN });
+  });
+
+  it('a store of ends that throws mid-run ends the run before its next step too', async () => {
+    authorship = BEAS;
+    twoSteps();
+    mockProcess.mockImplementationOnce(() => { liveThrows = true; return Promise.resolve(endTurnResponse('Report written.')); });
+    scriptStep();
+    const out = await runWorkflowTool.handler({ workflow_id: WF }, chat());
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(out).toContain(WORKFLOW_ENDED_MID_RUN);
   });
 
   it("control: the owner's own workflow does not depend on B and runs both steps when B's grant ends", async () => {

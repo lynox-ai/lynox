@@ -1148,7 +1148,12 @@ export function memberConnectionRefusal(
     const ownPlan = own && memberConnectionReader(profile, reader, mode, ends);
     // The owner started this run of the person's workflow (1100): no schedule stands behind it, so
     // there is no confirmation that could list the connection, and nobody needs telling.
-    if (ownPlan && inPlan === 'unlisted' && currentPlanOwnerStarted()) return `${lead}, and this run of a workflow ${person} set up was started by the owner, not by a schedule, so it does not use connections ${person} made with their own login. ${planRefusalFinalForRun()}`;
+    // Its own end, with the ways on (ux U-122); the shared sentences stay as they are.
+    if (ownPlan && inPlan === 'unlisted' && currentPlanOwnerStarted()) {
+      return `${lead}. This run of a workflow ${person} set up or changed was started by the owner, not by a schedule, so it does not use connections ${person} made with their own login. `
+        + `${RUN_REFUSAL_FINAL} Say so in your reply and name the ways on: ${person} can schedule this workflow, and once the owner confirms that plan with this connection listed, its scheduled runs use it; `
+        + `or the owner connects ${provider} with their own login and asks lynox in a chat to do this step with that connection. Do not ask for permission to try again.`;
+    }
     if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${planRefusalFinal(person)}`;
     if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;
     // Not "only in their own session" for the member's own: their access does not carry this

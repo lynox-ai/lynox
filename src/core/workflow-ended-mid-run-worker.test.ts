@@ -79,9 +79,10 @@ function boot(): { loop: WorkerLoop; history: RunHistory; db: ReturnType<EngineD
   const router = { hasChannels: () => false, notify: vi.fn(async () => []) } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000);
   closers.push(() => loop.stop());
-  // The workflow is the owner's; the schedule is the mandate's, so the plan depends on it.
-  engineDb.getDb().prepare("INSERT INTO workflows (id, name, definition_json, created_at) VALUES ('wf', 'Report', ?, '2026-01-01 00:00:00')")
-    .run(JSON.stringify({ id: 'wf', name: 'Report', steps: [] }));
+  // The mandate made the workflow and its schedule: the runner's mid-run end reads the workflow's
+  // authors, so this is the plan it can end that way.
+  engineDb.getDb().prepare("INSERT INTO workflows (id, name, definition_json, created_by, created_mandate_id, created_at) VALUES ('wf', 'Report', ?, ?, ?, '2026-01-01 00:00:00')")
+    .run(JSON.stringify({ id: 'wf', name: 'Report', steps: [] }), `mandate:${EMAIL}`, GRANT);
   history.insertTrigger({
     id: 'p', title: 'Weekly report', source: 'cron', effect: 'run_workflow', pipelineId: 'wf', scheduleCron: '0 9 * * 1', nextRunAt: DUE,
     confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: `mandate:${EMAIL}`, createdMandateId: GRANT,

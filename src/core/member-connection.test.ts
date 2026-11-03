@@ -210,8 +210,18 @@ describe('a member\'s connection inside a plan\'s run', () => {
     const p = crm({ oauth_grant: G });
     runAsPlanOf(B, () => {
       expect(read(p, B)).toBeNull();
-      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}, and this run of a workflow setup@example.org set up was started by the owner, not by a schedule, so it does not use connections setup@example.org made with their own login. ${FINAL_RUN}`);
+      // Spelled out, ux U-122: the ways on are the model's to name.
+      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}. This run of a workflow setup@example.org set up or changed was started by the owner, not by a schedule, so it does not use connections setup@example.org made with their own login. `
+        + 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again. '
+        + 'Say so in your reply and name the ways on: setup@example.org can schedule this workflow, and once the owner confirms that plan with this connection listed, its scheduled runs use it; '
+        + 'or the owner connects api.crm.example with their own login and asks lynox in a chat to do this step with that connection. Do not ask for permission to try again.');
     }, null, undefined, true);
+  });
+
+  // The first way on that text names: the same connection in a plan whose stamp lists it is used.
+  it('the way on it names: a plan of that person whose stamp lists the connection reads it', () => {
+    const p = crm({ oauth_grant: G });
+    runAsPlanOf(B, () => { expect(read(p, B)).not.toBeNull(); }, listed(p));
   });
 
   it('is not listed without a grant id, so a plan does not read it', () => {
