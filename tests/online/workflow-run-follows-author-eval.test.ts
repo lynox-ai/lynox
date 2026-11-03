@@ -211,7 +211,7 @@ async function runOne(provider: string, c: Case, agent: Agent, i: number): Promi
 }
 
 const runs = Array.from({ length: RUNS }, (_, i) => ({ i, label: `run #${String(i)}` }));
-const base = (c: Case) => ({ maxIterations: 6, tools: tools(c), systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' as const }) });
+const base = (c: Case) => ({ maxIterations: 6, tools: tools(c), systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const });
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 const MISTRAL_KEY = process.env['MISTRAL_API_KEY'];
