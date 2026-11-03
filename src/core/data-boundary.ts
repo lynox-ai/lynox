@@ -429,6 +429,34 @@ function scanWindowForInjection(content: string): string[] {
 }
 
 /**
+ * Where the injection patterns match in `content`: each match's label and its [start, end)
+ * offsets. For a caller that has to know WHERE a hit lies, which
+ * {@link detectInjectionAttempt} does not say: it returns labels only, so a hit inside one
+ * block and a hit with the same label across that block's edge look the same.
+ *
+ * A match is looked for from every position, not only after the previous one, so a match
+ * that starts inside another is still seen. Not windowed: meant for engine-sized text such
+ * as the briefing, not a multi-MB tool result.
+ *
+ * Returns null when `content` holds format characters: the patterns run on the folded text
+ * there (see {@link foldFormatChars}), and its offsets are not offsets in `content`. A caller
+ * reads null as "cannot place the hits".
+ */
+export function injectionHitSpans(content: string): Array<{ label: string; start: number; end: number }> | null {
+  if (FORMAT_CHAR.test(content)) return null;
+  const hits: Array<{ label: string; start: number; end: number }> = [];
+  for (const { pattern, label, requires } of INJECTION_PATTERNS) {
+    if (requires && !requires.test(content)) continue;
+    const re = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+    for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+      hits.push({ label, start: m.index, end: m.index + m[0].length });
+      re.lastIndex = m.index + 1;
+    }
+  }
+  return hits;
+}
+
+/**
  * Scan content for indirect prompt injection attempts. Windowed so the bounded
  * wildcard patterns stay cheap on arbitrarily long attacker-controlled content.
  */

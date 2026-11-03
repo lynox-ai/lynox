@@ -1,5 +1,5 @@
 import { channels } from './observability.js';
-import { detectInjectionAttempt } from './data-boundary.js';
+import { detectInjectionAttempt, injectionHitSpans } from './data-boundary.js';
 
 // === Write content scanning ===
 
@@ -179,10 +179,12 @@ export function scanRegionOf(result: string, ownBlocks: readonly string[] | unde
  * the model choose between all of lynox's context and none (1027's staging run, where
  * Sonnet dropped the agent performance block and the API profiles with it).
  *
- * The whole briefing is warned whenever the hit cannot be placed inside those blocks: a hit
- * in text the engine did not wrap, a pattern the per-block scans do not find themselves
- * (one that spans a block's edge, or one the scan's windows cut differently), or no flagged
- * block at all. Noisy, never open.
+ * Placed by POSITION, not by label: a hit across a block's edge can carry the same label as
+ * a hit inside the block, and a label check would read it as covered. The whole briefing is
+ * warned whenever a hit cannot be placed wholly inside one of those blocks: a hit in text the
+ * engine did not wrap, one that runs across a block's edge, a label the windowed scan reports
+ * and the position scan does not find, or a briefing with format characters, whose offsets
+ * the scan cannot give (`injectionHitSpans`). Noisy, never open.
  */
 export type BriefingInjection =
   | { readonly scope: 'none' }
@@ -192,29 +194,32 @@ export type BriefingInjection =
 const OWN_SOURCE = /^<untrusted_data source="([^"]*)">/;
 
 export function briefingInjection(briefing: string, ownBlocks: readonly string[] | undefined): BriefingInjection {
-  const all = detectInjectionAttempt(scanRegionOf(briefing, ownBlocks));
-  if (!all.detected) return { scope: 'none' };
+  // The region scanRegionOf builds, and where each of the engine's blocks sits in it: its
+  // body up to and including the line break that stands in for its closer.
   const located = locateOwnBlocks(briefing, ownBlocks);
-  // Everything outside the engine's blocks, each block replaced by a line break.
-  let outside = '';
+  const ranges: Array<{ start: number; end: number; block: string }> = [];
+  let region = '';
   let cursor = 0;
   for (const f of located) {
-    outside += briefing.slice(cursor, f.at) + '\n';
+    region += briefing.slice(cursor, f.at);
+    const start = region.length;
+    region += briefing.slice(f.at, f.stop - OWN_CLOSER.length) + '\n';
+    ranges.push({ start, end: region.length, block: f.block });
     cursor = f.stop;
   }
-  outside += briefing.slice(cursor);
-  if (detectInjectionAttempt(outside).detected) return { scope: 'whole' };
-  const covered = new Set<string>();
+  region += briefing.slice(cursor);
+  const all = detectInjectionAttempt(region);
+  if (!all.detected) return { scope: 'none' };
+  const hits = injectionHitSpans(region);
+  if (hits === null || !all.patterns.every((p) => hits.some((h) => h.label === p))) return { scope: 'whole' };
   const sources: string[] = [];
-  for (const f of located) {
-    const patterns = detectInjectionAttempt(scanRegionOf(f.block, [f.block])).patterns;
-    if (patterns.length === 0) continue;
-    for (const p of patterns) covered.add(p);
-    const source = OWN_SOURCE.exec(f.block)?.[1] ?? 'untrusted_data';
+  for (const hit of hits) {
+    const home = ranges.find((r) => hit.start >= r.start && hit.end <= r.end);
+    if (!home) return { scope: 'whole' };
+    const source = OWN_SOURCE.exec(home.block)?.[1] ?? 'untrusted_data';
     if (!sources.includes(source)) sources.push(source);
   }
-  if (sources.length === 0 || !all.patterns.every((p) => covered.has(p))) return { scope: 'whole' };
-  return { scope: 'parts', sources };
+  return sources.length === 0 ? { scope: 'whole' } : { scope: 'parts', sources };
 }
 
 /**
