@@ -35,7 +35,7 @@ import { ALL_NAMESPACES } from '../types/index.js';
 import { INSTANCE_WRITE_SITES } from './mandate-tool-lock.js';
 import type { KnowledgeStoreResult } from '../types/index.js';
 import { configurePersistentBudget } from './session-budget.js';
-import { describeConnectionToken } from './profile-secret-view.js';
+import { describeConnectionTokens } from './profile-secret-view.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
 import { configureMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
@@ -456,10 +456,10 @@ export function ensureVaultKey(): void {
 
 /**
  * The `<secrets>` listing: every agent-visible name as a `secret:` reference, with its masked
- * value, except a name that holds a connection's token. The `secret:` gate refuses those, so they
- * are listed apart as used through their API profile, with the profile that holds them. They stay
- * listed: left out, the briefing reads as if the vault had no access for the profile, and a model
- * asks the owner for it again under a new name (eval 915, 2026-11-03). `tokenHolders` answers the
+ * value, except a name that holds a connection's token. Those are used through their API profile
+ * and are counted per profile, not named (`describeConnectionTokens`). Left out entirely, the
+ * briefing reads as if the vault had no access for the profile, and a model asks the owner for it
+ * again under a new name (eval 915, 2026-11-03). `tokenHolders` answers the
  * profiles that hold a name, empty for a free one. The boot renders the listing before the API
  * profiles are loaded, with no holders; the engine renders it again once they are.
  */
@@ -468,16 +468,17 @@ export function renderSecretsBriefing(
   tokenHolders: (name: string) => readonly { name: unknown }[] = () => [],
 ): string | undefined {
   const free: string[] = [];
-  const tokens: string[] = [];
+  const tokens: (readonly { name: unknown }[])[] = [];
   for (const n of store.listAgentVisibleNames()) {
     const holders = tokenHolders(n);
     if (holders.length === 0) free.push(`secret:${n} (${store.getMasked(n)})`);
-    else tokens.push(describeConnectionToken(n, holders));
+    else tokens.push(holders);
   }
-  if (free.length === 0 && tokens.length === 0) return undefined;
+  const tokenLine = describeConnectionTokens(tokens);
+  if (free.length === 0 && tokenLine === undefined) return undefined;
   const lines: string[] = [];
   if (free.length > 0) lines.push(free.join(', '));
-  if (tokens.length > 0) lines.push(`Connection tokens — used through their API profile, not referenced with secret: and not collected again: ${tokens.join(', ')}`);
+  if (tokenLine !== undefined) lines.push(tokenLine);
   return compose([renderFence('secrets', lines.join('\n'))]);
 }
 

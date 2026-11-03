@@ -72,9 +72,11 @@ describe('Engine boot — a connection token is not offered in the <secrets> bri
     expect(briefing).toContain('secret:FREE_KEY');
     expect(briefing).not.toContain(`secret:${ACCESS}`);
     expect(briefing, 'the configured refresh slot is a token too').not.toContain('secret:SHOP_RT');
-    // Still listed, as the profile's: left out, the vault reads as holding no access for it.
-    expect(briefing).toContain(`${ACCESS} of profile "shop-api"`);
-    expect(briefing).toContain('SHOP_RT of profile "shop-api"');
+    // Still there, counted as the profile's: left out, the vault reads as holding no access for it.
+    // Never named: a name is what a model writes after secret:.
+    expect(briefing).toContain('2 for profile "shop-api"');
+    expect(briefing).not.toContain(ACCESS);
+    expect(briefing).not.toContain('SHOP_RT');
   }, 60_000);
 
   it('control: without the profile, the same names are all offered', async () => {
@@ -95,19 +97,19 @@ describe('renderSecretsBriefing', () => {
     const out = renderSecretsBriefing(store(['A_KEY', 'B_KEY']), heldBy('B_KEY', 'shop')) ?? '';
     expect(out).toContain('secret:A_KEY (****abcd)');
     expect(out).not.toContain('secret:B_KEY');
-    expect(out).toMatch(/Connection tokens — used through their API profile, not referenced with secret:[^\n]*: B_KEY of profile "shop"/);
-    expect(out, 'a token\'s masked value is not shown').toContain('B_KEY of profile "shop"\n');
+    expect(out).toMatch(/Connection tokens in the vault, used only by the API profile that holds them[^\n]*not referenced with secret:[^\n]*: 1 for profile "shop"\.\n/);
+    expect(out, 'a token is not named, and its masked value not shown').not.toContain('B_KEY');
   });
 
   it('names no profile when two hold the token', () => {
     const out = renderSecretsBriefing(store(['B_KEY']), heldBy('B_KEY', 'one', 'two')) ?? '';
-    expect(out).toMatch(/not collected again: B_KEY\n/);
-    expect(out).not.toContain('of profile');
+    expect(out).toContain('not collected again: 1 held by more than one profile.');
+    expect(out).not.toContain('for profile');
   });
 
   it('lists only tokens when no free name is left, and nothing for an empty vault', () => {
     const out = renderSecretsBriefing(store(['B_KEY']), heldBy('B_KEY', 'shop')) ?? '';
-    expect(out).toContain('B_KEY of profile "shop"');
+    expect(out).toContain('1 for profile "shop"');
     expect(out).not.toMatch(/secret:[A-Z]/);
     expect(renderSecretsBriefing(store([]))).toBeUndefined();
   });

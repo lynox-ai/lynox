@@ -604,10 +604,27 @@ export function connectionTokenHolderName(holders: readonly { name: unknown }[])
   return name.length > HOLDER_MAX_CHARS ? `${name.slice(0, HOLDER_MAX_CHARS - 1).join('')}…` : name.join('');
 }
 
-/** `NAME of profile "X"`, or the name alone when no single profile holds it. */
-export function describeConnectionToken(name: string, holders: readonly { name: unknown }[]): string {
-  const who = connectionTokenHolderName(holders);
-  return `${name}${who === null ? '' : ` of profile ${JSON.stringify(who)}`}`;
+/**
+ * The connection tokens in the vault, COUNTED per profile, never named: `2 for profile "shop-api"`,
+ * and `1 held by more than one profile` for those no single profile holds. A name is what a model
+ * writes after `secret:`; listed by name, models sent `Bearer secret:<slot>` from this very line in
+ * 20 of 23 runs (eval 915, 2026-11-03). Counted, the line still says the profile has its access, so
+ * the model does not ask the owner for it again. Undefined when there is none.
+ */
+export function describeConnectionTokens(holdersOfEach: readonly (readonly { name: unknown }[])[]): string | undefined {
+  if (holdersOfEach.length === 0) return undefined;
+  const perProfile = new Map<string, number>();
+  let shared = 0;
+  for (const holders of holdersOfEach) {
+    const who = connectionTokenHolderName(holders);
+    if (who === null) shared++;
+    else perProfile.set(who, (perProfile.get(who) ?? 0) + 1);
+  }
+  const parts = [...perProfile].map(([who, n]) => `${String(n)} for profile ${JSON.stringify(who)}`);
+  if (shared > 0) parts.push(`${String(shared)} held by more than one profile`);
+  return 'Connection tokens in the vault, used only by the API profile that holds them: a request to that '
+    + 'profile\'s base URL gets them attached. They are not referenced with secret: and not collected again: '
+    + `${parts.join(', ')}.`;
 }
 
 /**

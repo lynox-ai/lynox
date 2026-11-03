@@ -2,7 +2,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { collapseToSingleLine } from '../../core/sanitize.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
 import { toolLockFor } from '../../core/mandate-tool-lock.js';
-import { connectionTokenHolderName, connectionTokenHolders, describeConnectionToken, FORGING_CHARS } from '../../core/profile-secret-view.js';
+import { connectionTokenHolderName, connectionTokenHolders, describeConnectionTokens, FORGING_CHARS } from '../../core/profile-secret-view.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -129,20 +129,19 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       }
       const holdersOf = tokenHoldersFor(agent);
       const free: string[] = [];
-      const tokens: string[] = [];
+      const tokens: ReturnType<typeof holdersOf>[] = [];
       for (const n of names) {
         const holder = holdersOf(n);
-        if (holder.length === 0) { free.push(n); continue; }
-        tokens.push(describeConnectionToken(n, holder));
+        if (holder.length === 0) free.push(n);
+        else tokens.push(holder);
       }
       const sections: string[] = [];
       if (free.length > 0) {
         const listing = free.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');
         sections.push(`Secrets already in the vault — reference with secret:NAME, never re-collect an existing one:\n${listing}`);
       }
-      if (tokens.length > 0) {
-        sections.push(`Connection tokens in the vault — used through their API profile, not referenced with secret: and not collected again:\n${tokens.join(', ')}`);
-      }
+      const tokenLine = describeConnectionTokens(tokens);
+      if (tokenLine !== undefined) sections.push(tokenLine);
       return sections.join('\n');
     }
 
