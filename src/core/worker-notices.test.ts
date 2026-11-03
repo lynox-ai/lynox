@@ -43,8 +43,19 @@ function workerSamples(n: WorkerNotices): Record<string, string> {
     failedStepsLabel: n.failedStepsLabel, writesLabel: n.writesLabel, workflowRef: n.workflowRef('r-1', 'w-1'),
     workflowReply: n.workflowReply('(x)'), reminderTitle: n.reminderTitle, interrupted: n.interrupted,
     confirmationSkipped: n.confirmationSkipped, workflowCompleted: n.workflowCompleted('r-1'),
-    workflowGone: n.workflowGone(undefined), workflowGoneId: n.workflowGone('w-1'),
+    workflowGone: n.workflowGone(undefined), workflowGoneId: n.workflowGone('w-1'), eventRunFailed: n.eventRunFailed,
   };
+}
+/** The reasons a bulk run halts on in ordinary use: each has a German sentence (ux U-099, U-105). */
+const ORDINARY_HALTS = [
+  'timeBudget', 'failureRate', 'consecutiveFailures', 'stoppedByOwner', 'maxTargets', 'awaitingStart', 'expired',
+  'unavailable', 'credential', 'unauthorized', 'blocked', 'contract', 'costCap', 'spendLimit', 'creditRefused',
+  'probeRequired', 'mandateEnded',
+] as const satisfies readonly (keyof typeof BULK_HALT_REASONS)[];
+/** The unclear-send warning alone, as the counts open with it. */
+function applyWarning(n: BulkNotices, sentUnknown: number): string {
+  const all = n.applyCounts({ applied: 0, foundAsPlanned: 0, failed: 0, conflicts: 0, undone: 0, total: 1, sentUnknown });
+  return all.slice(0, all.indexOf('.') + 1);
 }
 function bulkSamples(n: BulkNotices): Record<string, string> {
   return {
@@ -53,8 +64,7 @@ function bulkSamples(n: BulkNotices): Record<string, string> {
     applyCounts: n.applyCounts({ applied: 3, foundAsPlanned: 1, failed: 1, conflicts: 0, undone: 0, total: 5, sentUnknown: 1 }),
     previewCounts: n.previewCounts(2, 1, 0, 3), judgeCounts: n.judgeCounts(2, 1, 0, 3), costs: n.costs(2, 0.01),
     previewStopped: n.previewStopped, listStopped: n.listStopped, judgeStopped: n.judgeStopped,
-    ...Object.fromEntries(['timeBudget', 'failureRate', 'consecutiveFailures', 'stoppedByOwner', 'maxTargets', 'awaitingStart', 'expired']
-      .map((k) => [`halted.${k}`, n.halted('apply', BULK_HALT_REASONS[k as keyof typeof BULK_HALT_REASONS])])),
+    ...Object.fromEntries(ORDINARY_HALTS.map((k) => [`halted.${k}`, n.halted('apply', BULK_HALT_REASONS[k])])),
   };
 }
 
@@ -72,12 +82,12 @@ describe('the notice tables', () => {
   it('has a German sentence for every English one of a bulk run', () => {
     const [en, de] = [bulkSamples(BULK_NOTICES.en), bulkSamples(BULK_NOTICES.de)];
     expect(Object.keys(en).filter((k) => en[k] === de[k])).toEqual([]);
-    // Each of the seven ordinary reasons is a German sentence, not the stored English text.
-    for (const k of ['timeBudget', 'failureRate', 'consecutiveFailures', 'stoppedByOwner', 'maxTargets', 'awaitingStart', 'expired'] as const) {
+    // Each ordinary reason is a German sentence, not the stored English text.
+    for (const k of ORDINARY_HALTS) {
       expect([k, BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS[k]).includes(BULK_HALT_REASONS[k])]).toEqual([k, false]);
     }
     // A reason the table has no German for is quoted as stored, not dropped.
-    expect(BULK_NOTICES.de.halted('preview', BULK_HALT_REASONS.unavailable)).toBe(`Vorschau angehalten: ${BULK_HALT_REASONS.unavailable}.`);
+    expect(BULK_NOTICES.de.halted('preview', BULK_HALT_REASONS.checksum)).toBe(`Vorschau angehalten: ${BULK_HALT_REASONS.checksum}.`);
   });
 
   it('names a German workflow status it knows, and leaves out one it does not', () => {
@@ -102,6 +112,17 @@ describe('the notice tables', () => {
         const body = `${lead} ${b.applyCounts(c)}`;
         expect([lang, lead, body.length <= REMINDER_BODY_MAX]).toEqual([lang, lead, true]);
       }
+      // A longer reason leaves the cut to the counts, but the lead and the warning after it stand
+      // whole: at most 180 for lead and reason in every phase (ux U-105), which leaves the
+      // warning room even with a four-digit count.
+      const warning = applyWarning(b, 9_999);
+      for (const phase of ['apply', 'preview', 'judge'] as const) {
+        for (const k of ORDINARY_HALTS) {
+          const lead = b.halted(phase, BULK_HALT_REASONS[k]);
+          expect([lang, phase, k, lead.length <= 180]).toEqual([lang, phase, k, true]);
+          expect([lang, phase, k, `${lead} ${warning}`.length <= REMINDER_BODY_MAX]).toEqual([lang, phase, k, true]);
+        }
+      }
       const counts = b.applyCounts(c);
       expect(counts.indexOf(lang === 'de' ? 'unklar' : 'unclear')).toBeLessThan(counts.indexOf(lang === 'de' ? 'geschrieben' : 'applied'));
       // A count of 0 is left out, but what was written and the total always stand.
@@ -115,7 +136,7 @@ describe('the notice tables', () => {
     for (const lang of ['de', 'en'] as const) {
       const n = WORKER_NOTICES[lang];
       for (const body of [n.consentOneBody(longest, true), n.consentManyBody, n.interrupted, n.confirmationSkipped,
-        n.workflowGone(undefined), n.containedResult, n.containedQuestion,
+        n.workflowGone(undefined), n.containedResult, n.containedQuestion, n.eventRunFailed,
         // Three digits before the point, so the room is real (ux U-099).
         `${n.budgetCut('cost', '$150.00')}\n\n${n.containedResult}`, `${n.budgetCut('turns', '300')}\n\n${n.containedResult}`]) {
         expect([lang, body.length <= REMINDER_BODY_MAX]).toEqual([lang, true]);
@@ -204,7 +225,6 @@ const STILL_ENGLISH: readonly string[] = [
   'src/core/bulk-apply.ts: \'Bulk run is halted — resume it to continue.\'',
   'src/core/bulk-apply.ts: `Bulk run halted: ${BULK_HALT_REASONS.checksum}.`',
   'src/core/bulk-apply.ts: `Bulk run halted: ${BULK_HALT_REASONS.shopifyWriteOff}.`',
-  'src/core/bulk-apply.ts: `Bulk run halted: ${BULK_HALT_REASONS.unavailable}.`',
   'src/core/bulk-apply.ts: `Bulk run halted: ${BULK_HALT_REASONS.runUnrecorded}.`',
   'src/core/bulk-apply.ts: \'Bulk run stopped by another loop.\'',
   'src/core/bulk-apply.ts: \'Bulk run waiting for targets another loop holds.\'',

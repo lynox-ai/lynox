@@ -171,8 +171,7 @@ export function bulkHaltText(
 		spent: bulkUsd(run.costUsd),
 	};
 	const tier = managed === false ? 'selfhost' : 'managed';
-	const beforeKey = key === 'unauthorized' ? 'bulk.halt.credential_before'
-		: key === 'blocked' || key === 'spendLimit' ? `bulk.halt.${key}_before_${tier}`
+	const beforeKey = key === 'blocked' || key === 'spendLimit' ? `bulk.halt.${key}_before_${tier}`
 		: `bulk.halt.${key}_before`;
 	const before = i18n.tf(beforeKey, vars);
 	// A judged run's `unavailable` may also be its model; a run without a judge has none to blame.
@@ -230,7 +229,8 @@ export function bulkResumeText(
 		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
 		: i18n.tf(`bulk.halt.${key}`, vars);
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
-		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
+		: key === 'credential' ? 'bulk.halt.credential_before'
+		: key === 'unauthorized' || key === 'unavailable' ? `bulk.halt.${key}_before`
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
 		: key === 'markupAddedByShop' ? 'bulk.halt.markupAddedByShop_before'
 		: null;
