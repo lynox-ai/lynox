@@ -646,6 +646,7 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
  *  of tags the page reads, whose way out differs from planning again (U-103). */
 const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
 	markup_dropped: 'markup_dropped', markup_dropped_before: 'markup_dropped_before',
+	shortcode_changed: 'shortcode_changed',
 };
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */

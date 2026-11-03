@@ -171,8 +171,11 @@ export type BulkInvalidReason =
   /** an HTML value carries a tag the fragment drops but the page reads, which its field does not hold */
   | 'markup_dropped'
   /** as `markup_dropped`, with attributes, and the field's current value carries it already: only
-   *  the owner removing it in the shop lets the field be written */
-  | 'markup_dropped_before';
+   *  the owner removing it in the shop lets the field be written. No longer recorded since the run
+   *  sends the canonical form (1130); kept for rows recorded before. */
+  | 'markup_dropped_before'
+  /** an HTML value holds a shortcode whose text the canonical form the run sends would change */
+  | 'shortcode_changed';
 
 /** Every markup refusal is a reason a target can record. */
 const _markupRefusalsAreReasons: MarkupRefusal extends BulkInvalidReason ? true : never = true;

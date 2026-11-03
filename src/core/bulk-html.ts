@@ -279,7 +279,8 @@ export type MarkupRefusal =
   | 'hidden_char'
   | 'not_canonical'
   | 'markup_dropped'
-  | 'markup_dropped_before';
+  | 'markup_dropped_before'
+  | 'shortcode_changed';
 
 export interface MarkupCheckInput {
   /** The field's before-image; null where the target has none. */
@@ -300,6 +301,30 @@ function refused(reason: MarkupRefusal, detail: string): MarkupCheckResult {
   return { ok: false, reason, detail: detail.length > DETAIL_MAX ? `${detail.slice(0, DETAIL_MAX)}…` : detail };
 }
 
+/** A shortcode's own tag, opening or closing: `[name]`, `[name attr="…"]`, `[/name]`. */
+const SHORTCODE_TAG = /\[\/?[A-Za-z][\w-]*(?:[\s/][^[\]]*)?\]/g;
+/** A paired shortcode and what it encloses, which its handler reads as a string too. */
+const SHORTCODE_PAIR = /\[([A-Za-z][\w-]*)(?:[\s/][^[\]]*)?\]([\s\S]*?)\[\/\1\]/g;
+
+/** The text of every shortcode in a value: its tags, and the text it encloses without HTML tags
+ *  (a `<img/>` that becomes `<img>` reads the same; an `&` that becomes `&amp;` does not). */
+function shortcodeTextOf(value: string): string[] {
+  const tags = value.match(SHORTCODE_TAG) ?? [];
+  const enclosed = [...value.matchAll(SHORTCODE_PAIR)].map((m) => (m[2] ?? '').replace(/<[^<>]*>/g, ''));
+  return [...tags, ...enclosed];
+}
+
+/** The first shortcode text the canonical form does not keep byte for byte, or null. */
+export function shortcodeChangedBy(value: string, canonical: string): string | null {
+  if (value === canonical) return null;
+  const was = shortcodeTextOf(value);
+  const now = shortcodeTextOf(canonical);
+  for (let i = 0; i < Math.max(was.length, now.length); i++) {
+    if (was[i] !== now[i]) return was[i] ?? now[i] ?? null;
+  }
+  return null;
+}
+
 /** Whether a verdict's or a plan's value for an HTML field adds markup the owner does not read. */
 export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
   try {
@@ -309,6 +334,14 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     }
     if (!endsClosed(input.after)) {
       return refused('not_canonical', 'The value leaves a tag, a comment, raw text or an element open at its end.');
+    }
+    // A shortcode (`[name attr="…"]…[/name]`) is read by the shop's server from the stored string,
+    // not by an HTML parser: the canonical form the run sends turns its `&`, `<` and `>` into
+    // entities or cuts it at a `<`, so the shop would read another shortcode. Refused, not
+    // rewritten (U-103).
+    const changed = shortcodeChangedBy(input.after, canonical);
+    if (changed !== null) {
+      return refused('shortcode_changed', `Writing would change the shortcode text: ${changed}`);
     }
     const before = input.before ?? '';
     // What the fragment drops, a multiset against the before-image's own, byte for byte. A stretch

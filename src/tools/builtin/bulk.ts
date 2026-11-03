@@ -50,7 +50,7 @@ function formatUsd(usd: number, round: 'down' | 'nearest' = 'nearest'): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
-function formatStatus(s: BulkRunStatus): string {
+export function formatStatus(s: BulkRunStatus): string {
   const invalid = Object.entries(s.invalidReasons).map(([r, n]) => `${r} ${String(n)}`).join(', ');
   const lines = [
     `Bulk ${s.kind === 'undo' ? `undo run ${s.id} of run ${s.sourceRunId ?? '(deleted)'}` : `run ${s.id}`} ` +
@@ -65,6 +65,11 @@ function formatStatus(s: BulkRunStatus): string {
     lines.push('effect_field: the after-state sets a field whose value sets off an effect at the provider — ' +
       'an email to a customer, a payment, or a change of someone\'s access or data. A bulk run never writes ' +
       'such a field: leave it out, or make that change in the provider\'s own interface.');
+  }
+  if ((s.invalidReasons.shortcode_changed ?? 0) > 0) {
+    lines.push('shortcode_changed: the new text has a [shortcode] whose attributes or content contain &, < or >; ' +
+      'writing it would change those characters and the shop might read the shortcode differently. Plan the value ' +
+      'again without these characters inside the shortcode, or leave this field to the owner to change in the shop.');
   }
   if (s.judge !== null) {
     lines.push(`A model decides each target's new values with the run's rule: ` +

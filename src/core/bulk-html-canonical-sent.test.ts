@@ -8,7 +8,10 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mintBulkContract } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
-import { checkMarkup, droppedTagsOf } from './bulk-html.js';
+import { verdictTextRefusal } from './bulk-judge.js';
+import { checkMarkup, droppedTagsOf, shortcodeChangedBy } from './bulk-html.js';
+import { canonicalHtml } from './html-tree.js';
+import { formatStatus } from '../tools/builtin/bulk.js';
 import { rawHtmlField, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
@@ -113,6 +116,48 @@ describe('the ledger stores an HTML field in its canonical bytes (1130)', () => 
     const { id, seq } = listed({ name: 'a<br/>b' });
     expect(ledger.recordRead(id, seq, { before: { name: 'x' } })).toBe(true);
     expect(storedAfter(id)['name']).toBe('a<br/>b');
+  });
+});
+
+describe('a shortcode the canonical form would change is refused, not rewritten (1130, U-103)', () => {
+  const check = (after: string, before: string | null = null) => checkMarkup({ before, after, storeHost: HOST, startDomains: [] });
+  it('refuses &, < and > in a shortcode\'s attributes and in what it encloses, naming the shortcode', () => {
+    expect(check('<p>[button url="/a?x=1&y=2"]Kaufen[/button]</p>')).toEqual({ ok: false, reason: 'shortcode_changed', detail: 'Writing would change the shortcode text: [button url="/a?x=1&y=2"]' });
+    expect(check('[x a="b>c"]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+    expect(check('[x a="1 < 2"]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+    expect(check('[embed]https://youtu.be/abc?t=1&list=x[/embed]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+    expect(shortcodeChangedBy('[embed]a&b[/embed]', canonicalHtml('[embed]a&b[/embed]'))).toBe('a&b');
+  });
+
+  it('passes a shortcode the canonical form keeps, and HTML tags that read the same inside one', () => {
+    expect(check('<p>[product_page id="99"]</p>')).toEqual({ ok: true });
+    expect(check('[button url="/a?x=1&amp;y=2"]Kaufen[/button]')).toEqual({ ok: true });
+    // `<br/>` becomes `<br>` inside the pair: the enclosed text reads the same.
+    expect(check('[note]a<br/>b[/note]')).toEqual({ ok: true });
+    // CONTROL: an & outside any shortcode is HTML text, and becomes &amp; harmlessly.
+    expect(check('<p>Salz & Pfeffer</p>')).toEqual({ ok: true });
+  });
+
+  it('refuses no field the run leaves as it is, though its shortcode carries an &', () => {
+    const raw = '[button url="/a?x=1&y=2"]Kaufen[/button]';
+    const { id, seq } = listed({ description: raw });
+    expect(ledger.recordRead(id, seq, { before: { description: raw } })).toBe(true);
+    expect(ledger.getPreview(id)[0]?.change).toBe('unchanged');
+  });
+
+  it('records the refusal the preview finds, and tells the model the way out', () => {
+    const after = { description: '[button url="/a?x=1&y=2"]Neu[/button]' };
+    const { form } = parseListSource(HOST, { path: '/wp-json/wc/v3/products', after }, 'PUT', () => null);
+    // The preview's rule for a planner's after-state (bulk-preview.ts `planMarkupRefusal`).
+    const reason = verdictTextRefusal(after, { description: '<p>x</p>' }, { listForm: form, storeHost: HOST, startDomains: [] });
+    expect(reason).toBe('shortcode_changed');
+    const { id, seq } = listed(after);
+    expect(ledger.recordRead(id, seq, { invalid: reason! })).toBe(true);
+    const status = ledger.getStatus(id)!;
+    expect(status.invalidReasons).toEqual({ shortcode_changed: 1 });
+    expect(formatStatus(status)).toContain('shortcode_changed: the new text has a [shortcode] whose attributes or content contain &, < or >; '
+      + 'writing it would change those characters and the shop might read the shortcode differently. Plan the value again without '
+      + 'these characters inside the shortcode, or leave this field to the owner to change in the shop.');
   });
 });
 
