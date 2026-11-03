@@ -434,7 +434,7 @@ describe('applying a media run', () => {
     ledger.approve(first, { checksum: ledger.computeChecksum(first)!, unmeasuredConfirmed: true, maxTargets: 1 });
     await apply(first);
     expect(ledger.confirmProbe(first)).toEqual({ ok: true });
-    expect(engineDb.getDb().prepare('SELECT host, method, kind FROM bulk_host_probes').all()).toEqual([{ host: HOST, method: 'POST', kind: 'unmeasured:shopify_media_alt' }]);
+    expect(engineDb.getDb().prepare('SELECT host, method, kind FROM bulk_host_probes').all()).toEqual([{ host: HOST, method: 'POST', kind: `unmeasured:${first}:shopify_media_alt` }]);
     mediaOf(image(11))!.alt = 'A1';
     engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(first);
     const second = await previewed();
