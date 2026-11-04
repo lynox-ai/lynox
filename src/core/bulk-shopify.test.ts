@@ -1541,6 +1541,21 @@ describe('a judged Shopify run', () => {
     }
   });
 
+  it('says no product matched when every listed one fell out before the judge', async () => {
+    fill(2);
+    s.groups = new Map([[10, { product_type: 'Gemüse' }], [20, { product_type: 'GEMÜSE' }]]);
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await judgedRun({ product_type: 'Gemuse' });
+      const out = await runBulkPreview(id, deps());
+      expect(out.status).toBe('done');
+      expect(out.summary.startsWith('List read: no product has the product type in the filter.'), out.summary).toBe(true);
+      expect(ledger.getPreview(id).map((t) => t.error)).toEqual(['not_in_filter', 'not_in_filter']);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('halts before the next paid call once the operator switches Shopify off', async () => {
     fill(3);
     vi.stubEnv(FLAG, '1');
