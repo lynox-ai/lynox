@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MEASURED_WRITE_FORMS } from './bulk-write-forms.js';
 import {
   OAUTH_PRESETS,
   askedScopes,
@@ -602,7 +603,8 @@ describe('the scopes a grant holds and the scopes a connection asks for', () => 
   });
 
   it('has nothing to compare for a scope the provider refuses, a provider that adds scopes of its own, or a profile of no provider', () => {
-    expect(askedScopes({ preset_id: 'shopify', scope: 'write_products' })).toBeUndefined();
+    expect(askedScopes({ preset_id: 'shopify', scope: 'write_files' })).toBeUndefined();
+    expect(askedScopes({ preset_id: 'shopify', scope: 'read_products write_products' })).toEqual(['read_products', 'write_products']);
     expect(askedScopes({ preset_id: 'bexio', scope: 'contact_show' })).toBeUndefined();
     expect(askedScopes({})).toBeUndefined();
     expect(askedScopes({ scope: 'a b' })).toBeUndefined();
@@ -611,5 +613,17 @@ describe('the scopes a grant holds and the scopes a connection asks for', () => 
   it('names what a grant holds beyond the ask, once each, and nothing for a narrower one', () => {
     expect(scopesBeyondAsked(['read_products', 'write_products', 'write_products'], ['read_products', 'read_orders'])).toEqual(['write_products']);
     expect(scopesBeyondAsked(['read_products'], ['read_products', 'read_orders'])).toEqual([]);
+  });
+});
+
+// bexio's consent text says a bulk run changes only what was tested at bexio, "today only existing
+// contacts". On a connected account a run writes only in a measured form (`bulk-external.ts`), so
+// the text holds while bexio's measured forms are exactly the contact update. A form added there
+// fails here, and the text needs a new approval.
+describe('the bexio customer text and the forms a bulk run may write there', () => {
+  it('names existing contacts while the contact update is bexio\'s only measured write form', () => {
+    const bexio = MEASURED_WRITE_FORMS.filter((f) => f.host === 'api.bexio.com');
+    expect(bexio.map((f) => [f.path.source, [...f.methods]])).toEqual([['^\\/2\\.0\\/contact\\/[0-9]+$', ['POST']]]);
+    expect(OAUTH_PRESETS.get('bexio')?.consentNotice?.paragraphs[1]).toContain('Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte.');
   });
 });
