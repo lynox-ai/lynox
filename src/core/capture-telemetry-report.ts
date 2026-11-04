@@ -380,8 +380,9 @@ export interface CaptureReport {
    * How the recovery pass routed each fact it wrote, and what came of it.
    *
    * The pair is the point: `written` alone cannot separate "the narrowing works" from
-   * "the narrowing leaks". `fact_user_stated` is the only rule that writes without a
-   * human check, so its `written` count is the volume this change newly releases — and a
+   * "the narrowing leaks". On a turn that read something, `fact_user_stated` is the only
+   * rule that writes without a human check (on a clean turn, `turn_trusted` does), so its
+   * `written` count is the volume the narrowing newly releases — and a
    * later rejection of one of those entries is the precision cost, visible nowhere else
    * (a rejected entry looks identical to a rejected queued one once it has a status).
    *
