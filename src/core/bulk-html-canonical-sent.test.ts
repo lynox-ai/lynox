@@ -346,7 +346,7 @@ describe('the shortcode scans read what the patterns read, in linear time (1130)
   });
 
   it('reads a value of many brackets without a closing one in linear time', () => {
-    for (const value of ['['.repeat(200_000), '[a'.repeat(100_000), '[/'.repeat(100_000) + ']', '<![CDATA['.repeat(20_000) + ']', `[${'a'.repeat(100_000)}]`.repeat(2) + '[/a]'.repeat(1000)]) {
+    for (const value of ['['.repeat(200_000), '[a'.repeat(100_000), '[/'.repeat(100_000) + ']', '<![CDATA['.repeat(20_000) + ']', `[${'a'.repeat(100_000)}]` + '[/'.repeat(200_000) + ']', `[${'a'.repeat(100_000)}]`.repeat(2) + '[/a]'.repeat(1000)]) {
       const start = performance.now();
       shortcodeTextOf(value);
       expect(performance.now() - start, `${value.slice(0, 12)}… of ${value.length}`).toBeLessThan(1500);
