@@ -86,6 +86,15 @@ export interface ToolEntry<TInput = unknown> {
    */
   redactInputForAudit?: ((input: TInput) => unknown) | undefined;
   /**
+   * For a tool that writes a file named by its `path` field: the file it would write for that
+   * path, resolved as its handler resolves it (the workspace, a link in it, the artifacts
+   * directory), or `null` when the handler would refuse the path. The Permission Guard reads its
+   * sensitive-path rules against this as well as against the path as written, so a link or a
+   * confinement cannot put the file written out of the rules' sight. Declared here, next to the
+   * handler that resolves the same way, so the guard needs no import of the tool.
+   */
+  writeTarget?: ((path: string) => string | null) | undefined;
+  /**
    * Declares this tool as destructive. The Permission Guard warns in
    * interactive mode and BLOCKS in autonomous mode based on this flag.
    *
