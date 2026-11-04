@@ -873,10 +873,12 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused', shop_added_markup: 'shop_added_markup',
 };
 /** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
- *  of tags the page reads, whose way out differs from planning again (U-103). */
+ *  of tags the page reads, whose way out differs from planning again (U-103), and of links, in a
+ *  shortcode as much as in HTML (U-148). */
 const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
 	markup_dropped: 'markup_dropped', markup_dropped_before: 'markup_dropped_before',
 	shortcode_changed: 'shortcode_changed',
+	new_link_domain: 'new_link_domain', url_scheme: 'url_scheme', url_control_char: 'url_control_char',
 };
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
@@ -891,8 +893,9 @@ const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
  *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
 export function bulkInvalidText(
 	reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n,
-	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's. */
-	context?: { field: string | undefined; host: string | null; dataStore: boolean },
+	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's.
+	 *  With `new_link_domain`: whether the run has a judge, whose start takes allowed link domains. */
+	context?: { field: string | undefined; host: string | null; dataStore: boolean; judged?: boolean },
 ): string {
 	// The field the judge only reads that held a credential, named so the owner knows which one to
 	// clean (U-140): on Shopify by its readable name, in the data store by the owner's column name,
@@ -907,7 +910,9 @@ export function bulkInvalidText(
 	}
 	const anyForm = BULK_INVALID_ANY_FORM[reason];
 	if (anyForm !== undefined) {
-		return i18n.tf(`bulk.invalid.${anyForm}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
+		// Only a judged start takes allowed link domains: a run without a judge is not told to add one.
+		const key = anyForm === 'new_link_domain' && context?.judged === true ? 'new_link_domain_judged' : anyForm;
+		return i18n.tf(`bulk.invalid.${key}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
 	}
 	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
 	if (key === undefined) return i18n.tf('bulk.invalid.other', { code: bulkVisibleText(reason) });
