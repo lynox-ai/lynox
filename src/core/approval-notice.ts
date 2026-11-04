@@ -18,13 +18,14 @@
  * it fired, and lost with a restart: the stamp and the timer live in the engine process, and a
  * restart starts a fresh minute.
  *
- * The sentences are German unless the instance's language is exactly `en` (`LYNOX_LANGUAGE` or
- * `language` in config.json); any other value, or none, keeps German. The value is read per round,
- * though the engine only takes a new one at restart.
+ * The sentences follow {@link noticeLanguage}: the configured language when it is German or
+ * English, otherwise German on an instance the control plane provisioned and English on a
+ * self-hosted one. The value is read per round, though the engine only takes a new one at restart.
  */
 import type { NotificationMessage, NotificationRouter } from './notification-router.js';
 import type { FiledEntry } from './approval-store.js';
 import { runOutsideGroup } from './run-group.js';
+import { noticeLanguage } from './notice-language.js';
 
 /** The owner's push, in German. */
 export const APPROVAL_NOTICE_OWNER: Readonly<NotificationMessage> = Object.freeze({
@@ -61,9 +62,12 @@ export const APPROVAL_NOTICE_MANDATE_EN: Readonly<NotificationMessage> = Object.
   body: "Your email is waiting for the owner's approval.",
 });
 
-/** The two pushes for the instance's language: English for `en`, German otherwise. */
-export function approvalNotices(language: string | undefined): readonly [Readonly<NotificationMessage>, Readonly<NotificationMessage>] {
-  return language?.trim().toLowerCase() === 'en'
+/** The two pushes for the instance's language ({@link noticeLanguage}). */
+export function approvalNotices(
+  language: string | undefined,
+  provisioned?: boolean,
+): readonly [Readonly<NotificationMessage>, Readonly<NotificationMessage>] {
+  return noticeLanguage(language, provisioned) === 'en'
     ? [APPROVAL_NOTICE_OWNER_EN, APPROVAL_NOTICE_MANDATE_EN]
     : [APPROVAL_NOTICE_OWNER, APPROVAL_NOTICE_MANDATE];
 }
@@ -75,7 +79,7 @@ export interface ApprovalNotifierDeps {
   readonly router: Pick<NotificationRouter, 'notify'>;
   /** Whether the queue is on; read at each filing and before a held round, so turning it off stops the pushes at once. */
   readonly enabled: () => boolean;
-  /** The instance's configured language, read per round; anything but `en` means German. */
+  /** The instance's configured language, read per round; see {@link noticeLanguage}. */
   readonly language?: (() => string | undefined) | undefined;
   /** A clock that does not step back; `performance.now` by default, so a wall-clock correction cannot hold pushes back. */
   readonly now?: (() => number) | undefined;

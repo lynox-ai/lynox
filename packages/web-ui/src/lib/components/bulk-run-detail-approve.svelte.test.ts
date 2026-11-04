@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // The approval of a preview: the owner sees every target, why lynox leaves one out, can take one
@@ -26,7 +26,7 @@ function makeRun(o: Partial<BulkRunDetailData> = {}): BulkRunDetailData {
 		id: 'r1', createdAt: '2026-10-28T00:00:00Z', targetSystem: 'http:demo.myshopify.com', phase: 'previewed', total: 3,
 		changes: { update: 1, create: 0, delete: 0, unchanged: 1, invalid: 1 }, applied: 0, failed: 0, conflicts: 0, sentUnknown: 0, undone: 0,
 		kind: 'apply', atomic: false, sourceRunId: null, writeMethod: null, probeConfirmed: false, writeForm: 'measured', haltReason: null, haltKey: null,
-		costUsd: 0, costCapUsd: null, judge: null, maxTargets: null, failedOnce: null, failureLimit: 0, resumeOpen: 0, resumeTries: 0, deselected: 0,
+		costUsd: 0, costCapUsd: null, judge: null, maxTargets: null, failedOnce: null, failureLimit: 0, resumeOpen: 0, resumeTries: 0, resumeSends: 0, deselected: 0,
 		checksum: 'c1', writeFormNote: null, writeFormConfirmation: null, judgeModel: null, resumesAt: null, probe: null, undoable: 0,
 		listFirstPage: null, listStartChecksum: null, listNote: null, judgeRule: null, judgeRuleHash: null, judgeServedBy: null, judgeOwnKey: false,
 		...o,
@@ -74,7 +74,8 @@ beforeEach(() => {
 			return reply({});
 		}
 		gets.push(u);
-		if (u.endsWith('/config')) return reply({ managed: true });
+		// The owner's session: the page offers its acts only once the server says so.
+		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
 		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
@@ -201,6 +202,122 @@ describe('writing on a halted run', () => {
 		await settle();
 		expect(target.textContent).toContain('engine English');
 	});
+
+	// U-127: where writing on would send nothing and only read targets an earlier send left
+	// unclear, the button says so, and the resume carries no new maximum.
+	it('offers to check, not to write on, where the next pass would only read the unclear target', async () => {
+		run = makeRun({
+			phase: 'writing', total: 3, haltKey: 'failureRate', haltReason: 'engine reason', maxTargets: 1, probeConfirmed: false,
+			changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0,
+		});
+		await render();
+		expect(buttonByText(t('bulk.resume.write'))).toBeUndefined();
+		expect(target.textContent).not.toContain(t('bulk.resume.window'));
+		expect(target.textContent).toContain(tf('bulk.resume.check_before', { provider: 'demo.myshopify.com' }));
+		buttonByText(t('bulk.resume.check'))!.click();
+		await settle();
+		expect(posts).toEqual([{ url: expect.stringMatching(/\/bulk\/runs\/r1\/resume$/), body: { checksum: 'c1' } }]);
+	});
+
+	it('says the run sends nothing more where every target left changed at the provider, and offers no button', async () => {
+		run = makeRun({
+			phase: 'writing', total: 3, haltKey: 'failureRate', haltReason: 'engine reason', maxTargets: 1, probeConfirmed: false,
+			changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 0, conflicts: 1, resumeOpen: 1, resumeTries: 1, resumeSends: 0,
+		});
+		await render();
+		expect(target.textContent).toContain(tf('bulk.resume.nothing_left', { provider: 'demo.myshopify.com' }));
+		expect(buttonByText(t('bulk.resume.write'))).toBeUndefined();
+		expect(buttonByText(t('bulk.resume.check'))).toBeUndefined();
+		expect(target.textContent).not.toContain(t('bulk.resume.window'));
+	});
+
+	it('control: with a target left to send, the same halt writes on', async () => {
+		run = makeRun({
+			phase: 'writing', total: 3, haltKey: 'failureRate', haltReason: 'engine reason', maxTargets: 1, probeConfirmed: false,
+			changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 1,
+		});
+		await render();
+		expect(buttonByText(t('bulk.resume.check'))).toBeUndefined();
+		expect(buttonByText(t('bulk.resume.write'))).toBeDefined();
+		expect(target.textContent).toContain(t('bulk.resume.window'));
+	});
+});
+
+// A run halted on markup its store added to a written description: the page names it in its own
+// words, marks the product, wherever it sits in the list, and offers writing on.
+describe('a run halted on markup its store added', () => {
+	it('marks exactly the product the store changed, past the first page, and offers writing on', async () => {
+		run = makeRun({
+			phase: 'writing', haltKey: 'markupAddedByShop', haltReason: 'engine English', applied: 8, probeConfirmed: true, total: 9, shopAddedMarkup: 1,
+			changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+		});
+		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false,
+			written: i < 8, ...(i === 7 ? { shopAddedMarkup: true as const } : {}),
+		}));
+		await render();
+		const marked = [...target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')]
+			.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+		expect(marked).toEqual(['gid://shopify/Product/8']);
+		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop'));
+		expect(target.textContent).toContain(t('bulk.halt.markupAddedByShop_before'));
+		expect(target.textContent).not.toContain('engine English');
+		expect(buttonByText(t('bulk.resume.write'))).toBeDefined();
+	});
+
+	it('still loads the marked product past the first page once another halt replaced the reason', async () => {
+		run = makeRun({
+			phase: 'writing', haltKey: 'unavailable', haltReason: 'engine English', applied: 8, probeConfirmed: true, total: 9, shopAddedMarkup: 1,
+			changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+		});
+		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false,
+			written: i < 8, ...(i === 7 ? { shopAddedMarkup: true as const } : {}),
+		}));
+		await render();
+		expect(target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')).toHaveLength(1);
+	});
+});
+
+// A run whose store kept descriptions otherwise than sent, without outside markup: counted and
+// named, not halted — one line on the run, a neutral mark on each product, wherever it sits.
+describe('a run whose store kept descriptions otherwise than sent', () => {
+	const rewritten = (marked: number[], extra: Partial<BulkTarget> = {}): void => {
+		run = makeRun({
+			phase: 'done', applied: 9, probeConfirmed: true, total: 9, hostRewrote: marked.length,
+			changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+		});
+		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false,
+			written: true, ...(marked.includes(i + 1) ? { hostRewrote: true as const, ...extra } : {}),
+		}));
+	};
+	const markedKeys = (): string[] => [...target.querySelectorAll('[data-testid="bulk-host-rewrote"]')]
+		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+
+	it('names one product in the singular, and marks it past the first page', async () => {
+		rewritten([8]);
+		await render();
+		expect(target.querySelector('[data-testid="bulk-host-rewrote-count"]')?.textContent).toBe(t('bulk.run.host_rewrote_one'));
+		expect(markedKeys()).toEqual(['gid://shopify/Product/8']);
+	});
+
+	it('names three products with their number, and marks each', async () => {
+		rewritten([2, 5, 9]);
+		await render();
+		expect(target.querySelector('[data-testid="bulk-host-rewrote-count"]')?.textContent).toBe(tf('bulk.run.host_rewrote', { n: '3' }));
+		expect(markedKeys()).toEqual(['gid://shopify/Product/2', 'gid://shopify/Product/5', 'gid://shopify/Product/9']);
+	});
+
+	it('shows no line on a run with none, and only the red mark on a product the store added markup to', async () => {
+		rewritten([]);
+		await render();
+		expect(target.querySelector('[data-testid="bulk-host-rewrote-count"]')).toBeNull();
+		rewritten([3], { shopAddedMarkup: true });
+		await render();
+		expect(target.querySelectorAll('[data-testid="bulk-host-rewrote"]')).toHaveLength(0);
+		expect(target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')).toHaveLength(1);
+	});
 });
 
 // An atomic run that rolled back: the page says why in its own words, marks the targets the
@@ -304,6 +421,25 @@ describe('the sentence and the way on for a halt', () => {
 		expect(target.textContent).toContain(t('bulk.halt.wait_owner_only'));
 		expect(buttonByText(t('bulk.start.judge'))).toBeUndefined();
 	});
+
+	// sec-core / U-127: a probe found as planned after an unclear send is not one lynox can say it
+	// wrote, so it is explained in its own words; a written probe keeps the old ones.
+	const middle = (key: string): string => t(key).split('{target}')[1]!.split('{provider}')[0]!;
+	for (const fields of [['title'], []]) {
+		const whole = fields.length === 0;
+		it(`explains a probe found after an unclear send in its own words${whole ? ', whole target' : ''}`, async () => {
+			run = makeRun({ phase: 'writing', haltKey: 'probeRequired', haltReason: 'engine English', applied: 1, probe: { key: 'gid://shopify/Product/1', fields, found: true } });
+			await render();
+			expect(target.textContent).toContain(middle(whole ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_found'));
+			expect(target.textContent).not.toContain(t(whole ? 'bulk.probe.explain_whole' : 'bulk.probe.explain').split('{target}')[0]!);
+		});
+		it(`control: a written probe keeps the old words${whole ? ', whole target' : ''}`, async () => {
+			run = makeRun({ phase: 'writing', haltKey: 'probeRequired', haltReason: 'engine English', applied: 1, probe: { key: 'gid://shopify/Product/1', fields, found: false } });
+			await render();
+			expect(target.textContent).toContain(t(whole ? 'bulk.probe.explain_whole' : 'bulk.probe.explain').split('{target}')[0]!);
+			expect(target.textContent).not.toContain(middle(whole ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_found'));
+		});
+	}
 
 	it('at a probe the server does not offer, says to plan again instead of naming a button', async () => {
 		run = makeRun({ phase: 'writing', haltKey: 'probeRequired', haltReason: 'engine English', applied: 1, probe: null });

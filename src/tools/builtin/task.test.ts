@@ -660,6 +660,101 @@ describe('Task Tools', () => {
 
     // To-dos: a mandate's turn reaches only those it created — see 'a mandate's turn and its
     // to-dos' below, which runs with the to-do reads on either store.
+    it('task_create schedules only the mandate\'s own workflows and the owner\'s', async () => {
+      const other: RequestPrincipal = { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' };
+      // The same address under a renewed grant is the same mandate.
+      const renewed: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'grant-2' };
+      const save = (id: string, by: RequestPrincipal | null): void => {
+        history.insertPlannedPipeline({
+          id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+        }, by);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      save('wf-other', other);
+      save('wf-own', renewed);
+      save('wf-owner', null);
+      save('wf-taken', renewed);
+      save('wf-taken', other);
+      const schedule = (id: string, by: RequestPrincipal): Promise<string> =>
+        taskCreateTool.handler({ title: `On ${id}`, assignee: 'lynox', workflow_id: id, schedule: '0 9 * * 1' }, makeAgent(undefined, by));
+      const scheduled = (id: string): boolean => tm.listTriggers({}).some((x) => x.pipeline_id === id);
+
+      expect(await schedule('wf-other', mandate)).toMatch(/^Error: workflow wf-other: Not scheduled: this workflow holds steps another person with delegated access/);
+      expect(await schedule('wf-taken', mandate)).toMatch(/^Error: workflow wf-taken: Not scheduled/);
+      expect(scheduled('wf-other')).toBe(false);
+      expect(scheduled('wf-taken')).toBe(false);
+      expect(await schedule('wf-own', mandate)).toContain('Workflow task created');
+      expect(await schedule('wf-owner', mandate)).toContain('Workflow task created');
+      // The owner schedules any workflow.
+      expect(await schedule('wf-other', OWNER_PRINCIPAL)).toContain('Workflow task created');
+      expect(scheduled('wf-other')).toBe(true);
+    });
+
+    // What the refusal advises (ux U-085): a newly written workflow is the mandate's own; a copy of
+    // the other's carries its mark and is refused like it; a change makes it the mandate's own,
+    // which is why the text advises against it rather than calling it a dead end.
+    it('task_create: a new workflow is the mandate\'s, a copy of another\'s is not, a change makes it its own', async () => {
+      const other: RequestPrincipal = { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' };
+      const wf = (id: string) => ({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true });
+      const save = (id: string, by: RequestPrincipal | null, copiedFrom?: string): void => {
+        history.insertPlannedPipeline(wf(id), by, copiedFrom);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      save('wf-theirs', other);
+      save('wf-written', mandate);
+      save('wf-copied', mandate, 'wf-theirs');
+      save('wf-changed', other);
+      save('wf-changed', mandate);
+      const schedule = (id: string): Promise<string> =>
+        taskCreateTool.handler({ title: `On ${id}`, assignee: 'lynox', workflow_id: id, schedule: '0 9 * * 1' }, makeAgent(undefined, mandate));
+      expect(await schedule('wf-written')).toContain('Workflow task created');
+      expect(await schedule('wf-copied')).toMatch(/^Error: workflow wf-copied: Not scheduled: this workflow holds steps/);
+      expect(await schedule('wf-changed')).toContain('Workflow task created');
+      expect(await schedule('wf-theirs')).toMatch(/^Error: workflow wf-theirs: Not scheduled/);
+    });
+
+    it('task_create schedules the workflow it checked, not another one a prefix also names', async () => {
+      const save = (id: string): void => {
+        history.insertPlannedPipeline({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, mandate);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      save('wf-dup-1');
+      save('wf-dup-2');
+      const { getPipeline } = await import('./pipeline.js');
+      const checked = getPipeline('wf-dup', history)!.id;
+      expect(await taskCreateTool.handler({ title: 'Dup', assignee: 'lynox', workflow_id: 'wf-dup', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate))).toContain('Workflow task created');
+      expect(tm.listTriggers({}).find((x) => x.title === 'Dup')!.pipeline_id).toBe(checked);
+    });
+
+    it('task_create refuses a mandate a workflow it cannot find, and lets the owner through to the worker', async () => {
+      expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate)))
+        .toMatch(/^Error: workflow wf-nowhere: Not scheduled: lynox found no saved workflow with this id/);
+      expect(tm.listTriggers({}).some((x) => x.title === 'Ghost')).toBe(false);
+      expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent())).toContain('Workflow task created');
+    });
+
+    it('task_create schedules the workflow its exact id names, not a longer one that starts with it', async () => {
+      const save = (id: string, by: RequestPrincipal | null): void => {
+        history.insertPlannedPipeline({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, by);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      // The longer id first, so a lookup in insertion order meets it before the exact one.
+      save('wf-exact-1x', { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' });
+      save('wf-exact-1', mandate);
+      // The longer one in the process cache too, as an earlier lookup leaves it.
+      const { getPipeline } = await import('./pipeline.js');
+      expect(getPipeline('wf-exact-1x', history)?.id).toBe('wf-exact-1x');
+      expect(await taskCreateTool.handler({ title: 'Exact', assignee: 'lynox', workflow_id: 'wf-exact-1', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate))).toContain('Workflow task created');
+      expect(tm.listTriggers({}).find((x) => x.title === 'Exact')!.pipeline_id).toBe('wf-exact-1');
+    });
+
+    it('task_create tells a mandate a stored workflow it cannot read apart from a missing one', async () => {
+      history.insertPlannedPipeline({ id: 'wf-garbled', name: 'g', goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, mandate);
+      engine.getDb().prepare("UPDATE workflows SET definition_json = '{' WHERE id = 'wf-garbled'").run();
+      expect(await taskCreateTool.handler({ title: 'Garbled', assignee: 'lynox', workflow_id: 'wf-garbled', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate)))
+        .toMatch(/^Error: workflow wf-garbled: Not scheduled: lynox could not read who set up this workflow/);
+    });
+
     it('control: a mandate\'s task_create assigned to lynox makes a schedule', async () => {
       const result = await taskCreateTool.handler({ title: 'Mandate run', assignee: 'lynox' }, makeAgent(undefined, mandate));
       expect(result).toMatch(/^Task created: /);

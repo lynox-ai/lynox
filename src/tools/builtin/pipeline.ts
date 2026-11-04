@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { isFilingResult } from '../../core/approval-filing.js';
-import { savedWorkflowSource } from '../../orchestrator/run-source.js';
+import { WORKFLOW_ENDED_MID_RUN, callerWorkflowRunAs, savedWorkflowSource } from '../../orchestrator/run-source.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
@@ -14,7 +14,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode, asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { DEFAULT_STEP_TIMEOUT_MS, undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import { UNKNOWN_GRANT } from '../../core/conversation-grants.js';
 import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { normalizeTier } from '../../types/index.js';
@@ -27,10 +27,11 @@ import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
-import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes } from '../../core/member-connection-notes.js';
+import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes, noteMemberConnection, runCollectingMemberNotes } from '../../core/member-connection-notes.js';
 import { namedTarget, newCorrelationId, type AuditLog, type AuditPhase } from '../../core/audit-log.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal, type RequestPrincipal } from '../../core/request-principal.js';
-import { currentPlanRun, runAsWorkflowRun } from '../../core/plan-run-context.js';
+import { isOwnerPrincipal, mandateIdOf, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import type { WorkflowAuthorship } from '../../core/workflow-store.js';
+import { currentPlanRun, runAsPlanOf, runAsWorkflowRun } from '../../core/plan-run-context.js';
 import { isEngineRowId } from '../../core/instance-trail.js';
 
 const MAX_PLANS = 10;
@@ -47,7 +48,8 @@ const pipelineStore = new Map<string, PlannedPipeline>();
 // `originThreadId` is the chat whose run produced the state: the chat that started it, then the
 // last chat that retried it. A retry hands the state's cached outputs to whoever retries it, so a
 // retry from another chat is a read of the run.
-type ExecutedState = { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined; originThreadId?: string | undefined };
+// `ranAs`: whom the run was for (`principalKey`), so a retry under anyone else is refused (1100).
+type ExecutedState = { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined; originThreadId?: string | undefined; ranAs: string };
 const executedStates = new Map<string, ExecutedState>();
 
 // Non-template reentrancy guard: a non-template (run-once) pipeline currently
@@ -107,13 +109,17 @@ function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipel
 export function getPipeline(id: string, runHistory?: RunHistory | null): PlannedPipeline | undefined {
   const direct = pipelineStore.get(id);
   if (direct) return direct;
-  // Prefix match in memory
-  for (const [key, val] of pipelineStore) {
-    if (key.startsWith(id)) return val;
+  // A saved workflow with exactly this id answers before any longer id that starts with it: a
+  // schedule checked and bound to the answer would otherwise target another workflow.
+  const row = runHistory?.getPlannedPipeline(id);
+  if (row?.id !== id) {
+    // Prefix match in memory
+    for (const [key, val] of pipelineStore) {
+      if (key.startsWith(id)) return val;
+    }
   }
   // Fall back to SQLite for cross-session persistence
   if (runHistory) {
-    const row = runHistory.getPlannedPipeline(id);
     if (row) {
       try {
         const planned = JSON.parse(row.manifest_json) as PlannedPipeline;
@@ -311,13 +317,18 @@ function buildProgressHooks(pipelineStreamHandler: EmittingStreamHandler | null,
 }
 
 function formatResult(state: RunState, name: string, resultLimit?: number): string {
+  // The name and the step ids are names, which take none of the places real text puts a character
+  // that renders as nothing; each goes in as a placeholder and is escaped on its own below.
+  const nonce = randomUUID();
+  const names: string[] = [];
+  const asName = (value: string): string => `__lynox_name_${names.push(value) - 1}_${nonce}__`;
   const steps: PipelineStepResult[] = [];
   let totalDuration = 0;
   let totalCost = 0;
 
   for (const [, output] of state.outputs) {
     steps.push({
-      stepId: output.stepId,
+      stepId: asName(output.stepId),
       result: truncateResult(output.result, resultLimit),
       durationMs: output.durationMs,
       tokensIn: output.tokensIn,
@@ -333,17 +344,25 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
 
   const result: PipelineResult = {
     pipelineId: state.runId,
-    name,
+    name: asName(name),
     status: state.status === 'completed' ? 'completed' : state.status === 'rejected' ? 'rejected' : 'failed',
     steps,
     totalDurationMs: totalDuration,
     totalCostUsd: totalCost,
+    // A fixed sentence, never stored text: the model is told why the run stopped, so it does not
+    // retry it or report a step's failure (1100).
+    ...(state.error === WORKFLOW_ENDED_MID_RUN ? { endedBecause: WORKFLOW_ENDED_MID_RUN } : {}),
   };
 
   // The name and the step ids are stored text, saved perhaps before the save refused characters
-  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show. The places
-  // real text puts one stay, so an emoji or a Persian word in a step's result reads as it is.
-  return escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
+  // that render as nothing (`hidden-text.ts`): escaped, they are the same JSON and show. In a step's
+  // result the places real text puts one stay, so an emoji or a Persian word reads as it is; in a
+  // name none does, so a ZWNJ an old step id carries between letters shows as well.
+  let json = escapeHiddenInJson(JSON.stringify(result, null, 2), { inPlace: true });
+  names.forEach((value, i) => {
+    json = json.replace(JSON.stringify(`__lynox_name_${i}_${nonce}__`), () => escapeHiddenInJson(JSON.stringify(value), { inPlace: false }));
+  });
+  return json;
 }
 
 // 2a/B3: both the pipeline_runs row and its pipeline_step_results rows are now
@@ -466,7 +485,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
       // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-      principal: deps.parentAgent?.principal,
+      principal: deps.parentAgent.principal,
       parentActiveScopes: deps.parentAgent?.activeScopes,
       // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
       // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -563,9 +582,12 @@ export interface PipelineDeps {
    * seed). Only the SEED direction lives here: the way BACK is already covered,
    * stronger, by the handler's unconditional `agent.noteUntrustedData?.()`
    * after every run (H-002/CORE-9 — any delegated run taints the caller).
-   * Absent for headless callers → the run starts clean.
+   * Required: it is also whom the run is for. Its principal builds every step agent and
+   * picks the lock, so a run with no agent would have no one to run as, and the owner is not
+   * a default this path may fill in (1055). A headless run goes through `runSavedWorkflow`,
+   * which takes its principal explicitly.
    */
-  parentAgent?: IAgent | undefined;
+  parentAgent: IAgent;
 }
 
 /** Outcome of a Saved-Workflows-library "Run" action. */
@@ -612,7 +634,9 @@ const MAX_WRITE_NOTES = 10;
 /** The mail tools that file for approval. */
 const QUEUEABLE_MAIL_TOOLS: ReadonlySet<string> = new Set(['mail_send', 'mail_reply']);
 const MAX_WRITE_NOTE_CHARS = 300;
-const MAX_MEMBER_NOTE_CHARS = 700;
+/** Long enough for the longest line a plan run's refusal writes: it names the member twice and
+ *  the profile once, and the sentence that says who decides comes last. */
+const MAX_MEMBER_NOTE_CHARS = 1500;
 
 /**
  * Collects the refused and possibly-landed write lines from the tool calls of a run's
@@ -753,15 +777,17 @@ export async function runSavedWorkflow(
   workflowId: string,
   runHistory: RunHistory | null,
   config: LynoxUserConfig,
-  params?: Record<string, unknown> | undefined,
-  runtime?: {
+  params: Record<string, unknown> | undefined,
+  runtime: {
     tools?: ToolEntry[] | undefined;
     toolContext?: ToolContext | undefined;
     memory?: IMemory | null | undefined;
     /** What the session that scheduled this run had taken in (see `TriggerRecord.created_untrusted`). */
     seed?: UntrustedCause | undefined;
-    /** Who started the run, when a request did; its steps are built for it (PRD D1). Absent = the owner. */
-    principal?: import('../../core/request-principal.js').RequestPrincipal | undefined;
+    /** Whom the run is for; its steps are built for it (PRD D1). Required, and the owner is
+     *  passed as `OWNER_PRINCIPAL`: a headless run has no agent to take it from, so a missing
+     *  one must not quietly read as the owner (1055). */
+    principal: import('../../core/request-principal.js').RequestPrincipal;
     /**
      * Whether this run passes the workflow's contract on (`decideRunGrant`), asked with the
      * workflow exactly as this function read it. Absent = no contract, whatever is stored:
@@ -802,7 +828,7 @@ export async function runSavedWorkflow(
      *  steps keep being refused a mail. Not part of `buildRunCtx`, which a chat's
      *  `run_workflow` shares. */
     approvalFiling?: import('../../core/approval-filing.js').ApprovalFilingContext | undefined;
-  } | undefined,
+  },
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
     return { ok: false, error: 'Run history is not available.' };
@@ -917,7 +943,7 @@ export async function runSavedWorkflow(
       runHistory,
       parentTools: runtime?.tools,
       parentToolContext: runtime?.toolContext,
-      principal: runtime?.principal,
+      principal: runtime.principal,
       parentMemory: runtime?.memory ?? null,
       // The decided contract — never the stored one directly — authorises this
       // headless run's declared outbound writes (enforced per-tool-call at
@@ -994,18 +1020,22 @@ export interface WorkflowRunTrail {
  * workflow's id is whatever its file said. Exported for its test.
  */
 export function workflowRunTrail(
-  principal: RequestPrincipal | undefined,
+  principal: RequestPrincipal,
   auditLog: AuditLog | null,
-  run: { workflowId: string; oneShot: boolean; retry: boolean },
+  run: { workflowId: string; oneShot: boolean; retry: boolean; startedBy?: 'library' | 'owner-chat' | undefined },
 ): WorkflowRunTrail | null {
-  // No agent: internal code, which runs as the owner (an agent always has a principal).
-  const p = principal ?? OWNER_PRINCIPAL;
+  const p = principal;
   if (isOwnerPrincipal(p) || currentPlanRun(p) !== undefined) return null;
   const correlationId = newCorrelationId();
   const named: ReadonlyArray<readonly [string, string | number | undefined]> = [
     ['workflow', isEngineRowId(run.workflowId) ? run.workflowId : undefined],
     ['one_shot', run.oneShot ? 'yes' : 'no'],
     ['retry', run.retry ? 'yes' : undefined],
+    // The owner pressed Run in the library (1055): the run is the mandate's, the start the owner's,
+    // in the words a plan's run started by hand uses, which the trail view shows (`started_hand`).
+    // The same words for the owner's chat or session running a mandate's workflow (1100).
+    ['started', run.startedBy !== undefined ? 'hand' : undefined],
+    ['by', run.startedBy !== undefined ? 'owner' : undefined],
   ];
   const write = (phase: AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
     if (auditLog === null) throw new Error('no audit log');
@@ -1024,8 +1054,31 @@ export function workflowRunTrail(
 }
 
 /** Run `fn` under a workflow run's key when there is a trail; as it is otherwise. */
-function underWorkflowRun<T>(trail: WorkflowRunTrail | null, principal: RequestPrincipal | undefined, fn: () => T): T {
-  return trail === null ? fn() : runAsWorkflowRun(principal ?? OWNER_PRINCIPAL, trail.key, fn);
+function underWorkflowRun<T>(trail: WorkflowRunTrail | null, principal: RequestPrincipal, fn: () => T): T {
+  return trail === null ? fn() : runAsWorkflowRun(principal, trail.key, fn);
+}
+
+// ux U-122. A retry reuses the outputs of the steps that completed (`cachedOutputs`), hence "continue".
+export const RETRY_OTHER_PRINCIPAL_REFUSAL = 'The last run of this workflow was for someone else, so it cannot be retried here: a retry would continue from what that run read. '
+  + 'Start a new run instead. A new run does every step again from the start, so first tell the user that steps of the last run may already have changed something, '
+  + 'such as sending mail or writing data, and start it only if they want that done again.';
+
+/** Whom a run was for, as one string: the person's tag and, for a mandate, its grant. */
+function principalKey(p: RequestPrincipal): string {
+  return `${principalTag(p)}#${mandateIdOf(p) ?? ''}`;
+}
+
+/** A reader of a workflow's authorship that asks the store once and answers every later call
+ *  from that answer, a throw included. */
+function authorshipReadOnce(runHistory: RunHistory | null | undefined, id: string): () => WorkflowAuthorship | undefined {
+  let read: { a: WorkflowAuthorship | undefined } | { err: unknown } | undefined;
+  return () => {
+    if (read === undefined) {
+      try { read = { a: runHistory?.getWorkflowAuthorship(id) }; } catch (err: unknown) { read = { err }; }
+    }
+    if ('err' in read) throw read.err;
+    return read.a;
+  };
 }
 
 async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
@@ -1033,6 +1086,33 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   if (!planned) {
     return `Error: Workflow "${input.workflow_id}" not found.`;
   }
+
+  // Whom the run is for (1100): the workflow decides, as the library's Run does, and the caller
+  // only where it is narrower (`callerWorkflowRunAs`). The owner's chat or worker session running a
+  // mandate's workflow runs its steps under that mandate's lock, as a plan's run with no stamp, so
+  // the mandate's own connections stay out; before this they ran as the owner, with no lock.
+  // Authorship is read ONCE and both decisions take it from that read: whom the run is for and the
+  // run's source (`savedWorkflowSource`). Two reads could disagree — one that throws, then one
+  // that succeeds, would run a mandate's steps as the owner.
+  const readAuthorship = authorshipReadOnce(deps.runHistory, planned.id);
+  const runFor = callerWorkflowRunAs(deps.parentAgent.principal, readAuthorship);
+  if (runFor.kind === 'refused') return `Error: ${runFor.error}`;
+  const runAs = runFor.principal;
+  const source = savedWorkflowSource(planned.id, readAuthorship, deps.toolContext?.mandateEnds);
+  // Set by the run: a member connection was refused in it, so it is no success in the log (1100).
+  let memberRefused = false;
+  const asPlanOfAuthor = async <T>(trail: WorkflowRunTrail | null, fn: () => Promise<T>): Promise<T> => {
+    if (!runFor.asPlan) return underWorkflowRun(trail, runAs, fn);
+    const asPlan = (): Promise<T> => runAsPlanOf(runAs, () => underWorkflowRun(trail, runAs, fn), null, trail?.key, /* the owner started it */ true);
+    // The run gets a collector of its own, so a line it repeats from an earlier run in the same
+    // collecting run (the worker's) still counts, and a line of a call beside it does not. Its
+    // lines then go on to that outer collector, which ends that run with them.
+    const collected = runCollectingMemberNotes(asPlan);
+    try { return await collected.done; } finally {
+      memberRefused = collected.notes.size > 0;
+      for (const line of collected.notes) noteMemberConnection(line);
+    }
+  };
 
   // Interactive pipelines need a live prompt-capable session. Refuse with a
   // clear error rather than running steps that will throw "ask_user is not
@@ -1093,6 +1173,12 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     if (!prev) {
       return `Error: No previous execution found for pipeline "${planned.id}". Execute it first before retrying.`;
     }
+    // A retry hands the earlier run's step results to this run and re-runs its snapshot of the
+    // steps: under anyone but whom that run was for, it would carry one person's results into
+    // another's run, or re-run a mandate's steps without its lock (1100).
+    if (prev.ranAs !== principalKey(runAs)) {
+      return `Error: ${RETRY_OTHER_PRINCIPAL_REFUSAL}`;
+    }
     // A run started from a contained chat carries that chat's data, and a retry re-runs steps
     // on its cached outputs and returns them here: this chat is contained too before any step
     // runs, or nothing runs.
@@ -1107,7 +1193,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }
     }
 
-    const retryTrail = workflowRunTrail(deps.parentAgent?.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true });
+    const retryTrail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: planned.template !== true, retry: true, ...(runFor.asPlan ? { startedBy: 'owner-chat' as const } : {}) });
     if (retryTrail !== null) {
       try { retryTrail.begin(); } catch { return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }
@@ -1148,13 +1234,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       const prevGrants = prev.runTaint?.grants;
       if (prevGrants !== undefined) for (const id of prevGrants.members()) retryGrants?.add(id);
       else retryGrants?.add(UNKNOWN_GRANT);
-      const state = await underWorkflowRun(retryTrail, deps.parentAgent?.principal, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
-        source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
+      const state = await asPlanOfAuthor(retryTrail, () => retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
+        source,
         autonomy: deps.autonomy,
         parentTools: deps.tools,
         parentToolContext: deps.toolContext,
-        // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-        principal: deps.parentAgent?.principal,
+        // Whom the run is for (1100, `runAs` above): its steps run under that lock (PRD D1, §3.13 E5).
+        principal: runAs,
         parentActiveScopes: deps.parentAgent?.activeScopes,
         // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
         // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -1183,11 +1269,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // this chat is its origin from here on: it carries the first origin's rows if that one was
       // contained, and its own if a re-run step contained it. Keeping the first origin would let
       // the next retry from a third chat skip the check while this chat is contained.
-      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin });
+      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin, ranAs: principalKey(runAs) });
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents, prev.state.outputs);
       const text = formatResult(state, planned.name, resultLimit);
       // Set last: a throw above returns an error, and the end row must not say success then.
-      retryOutcome = state.status === 'completed' ? 'success' : 'failed';
+      retryOutcome = state.status === 'completed' && !memberRefused ? 'success' : 'failed';
       return text;
     } catch (err: unknown) {
       // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
@@ -1226,6 +1312,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
 
   if (input.modifications?.length) {
+    // One run's changes: drop a step or change its task. Ids and the step list change only in the
+    // stored workflow (`update_workflow_steps`), where they are saved and checked.
+    if (input.modifications.some(m => m.action !== 'remove' && m.action !== 'update_task')) {
+      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.';
+    }
     const error = applyModifications(steps, input.modifications);
     if (error) return error;
   }
@@ -1255,7 +1346,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     validateManifest(manifest);
     // Before the run is marked run, with no await since the executed-guard above: a one-shot whose
     // start cannot be recorded stays unrun, and a second call cannot slip in between (660b).
-    trail = workflowRunTrail(deps.parentAgent?.principal, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false });
+    trail = workflowRunTrail(runAs, deps.toolContext?.auditLog ?? null, { workflowId: planned.id, oneShot: !isTemplate, retry: false, ...(runFor.asPlan ? { startedBy: 'owner-chat' as const } : {}) });
     if (trail !== null) {
       try { trail.begin(); } catch { trail = null; return WORKFLOW_RUN_UNRECORDED_RESULT; }
     }
@@ -1269,13 +1360,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const runTaint = newRunTaint(deps.parentAgent);
-    const state = await underWorkflowRun(trail, deps.parentAgent?.principal, () => runManifest(manifest, deps.config, buildRunCtx({
-      source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
+    const state = await asPlanOfAuthor(trail, () => runManifest(manifest, deps.config, buildRunCtx({
+      source,
       autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
-      // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
-      principal: deps.parentAgent?.principal,
+      // Whom the run is for (1100, `runAs` above): its steps run under that lock (PRD D1, §3.13 E5).
+      principal: runAs,
       parentActiveScopes: deps.parentAgent?.activeScopes,
       // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
       // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -1298,7 +1389,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentChangeset: deps.parentAgent?.changeset,
     })));
 
-    recordExecutedState(planned.id, { manifest, state, runTaint, originThreadId: (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined });
+    recordExecutedState(planned.id, { manifest, state, runTaint, originThreadId: (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined, ranAs: principalKey(runAs) });
     if (!isTemplate) {
       try { definitionRemoved = deps.runHistory?.markPipelineExecuted(planned.id) === true; } catch { /* fire-and-forget */ }
     }
@@ -1306,7 +1397,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     debitInSessionWorkflowCost(deps, state, manifest.agents, null);
     const text = formatResult(state, planned.name, resultLimit);
     // Set last: a throw above returns an error, and the end row must not say success then.
-    outcome = state.status === 'completed' ? 'success' : 'failed';
+    outcome = state.status === 'completed' && !memberRefused ? 'success' : 'failed';
     return text;
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
@@ -1365,7 +1456,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
               model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Capability tier (omitted = fast)' },
               tools: { type: 'array', items: { type: 'string' }, description: 'Exact tool names this step needs, from your own toolset. bash only when a shell is essential.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'Step IDs whose output flows into this step\'s context' },
-              timeout_ms: { type: 'number', description: 'Timeout in ms (default: 600000)' },
+              timeout_ms: { type: 'number', description: `Timeout in ms (default: ${String(DEFAULT_STEP_TIMEOUT_MS)}, ${String(DEFAULT_STEP_TIMEOUT_MS / 60_000)} min)` },
             },
             required: ['id', 'task'],
           },

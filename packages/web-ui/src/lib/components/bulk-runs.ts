@@ -11,6 +11,22 @@ export interface BulkI18n {
 	tf: (key: string, vars: Record<string, string>) => string;
 }
 
+/** The sentences that name the owner's own act ("you approved", "you took out", "the limit you
+ *  set"). Every such act is the owner's alone (the routes refuse a mandate), so a mandate's
+ *  session reads each in its `_mandate` form, which names the owner instead (ux U-111). */
+export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
+	'bulk.intro', 'bulk.deselect.taken_out',
+	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
+	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
+	'bulk.halt.mandateEnded', 'bulk.halt.checksum',
+]);
+
+/** `i18n` as a mandate's session reads it: the keys above in their `_mandate` form. */
+export function bulkMandateI18n(i18n: BulkI18n): BulkI18n {
+	const key = (k: string): string => (BULK_MANDATE_KEYS.has(k) ? `${k}_mandate` : k);
+	return { t: (k) => i18n.t(key(k)), tf: (k, vars) => i18n.tf(key(k), vars) };
+}
+
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
 export type BulkChange = 'update' | 'create' | 'delete' | 'unchanged' | 'invalid';
 
@@ -27,6 +43,10 @@ export interface BulkRun {
 	/** Targets not written because an earlier send reached them without a clear answer; the
 	 *  engine does not send to them again. */
 	sentUnknown: number;
+	/** Written targets the store kept with markup lynox did not send. Optional: an older engine sends none. */
+	shopAddedMarkup?: number | undefined;
+	/** Written targets whose store kept a description otherwise than sent, without outside markup: counted, not halted. */
+	hostRewrote?: number | undefined;
 	undone: number;
 	kind: 'apply' | 'undo';
 	atomic: boolean;
@@ -50,6 +70,9 @@ export interface BulkRun {
 	resumeOpen: number;
 	/** Of those, the most the next pass may write to under the approved maximum. */
 	resumeTries: number;
+	/** Of those, the most the next pass sends to: not a target left unclear (`sentUnknown`),
+	 *  which it only reads at the provider. Zero with unclear targets open: writing on only checks. */
+	resumeSends: number;
 	/** Writing targets the owner took out before approving; not counted in `changes`. */
 	deselected: number;
 }
@@ -60,7 +83,9 @@ export interface BulkRunDetailData extends BulkRun {
 	writeFormConfirmation: string | null;
 	judgeModel: string | null;
 	resumesAt: string | null;
-	probe: { key: string; fields: string[] } | null;
+	/** The target the run waits on as its probe. `found`: lynox sent to it without a clear answer
+	 *  and then found it as planned, so it cannot say it wrote it; absent reads as written. */
+	probe: { key: string; fields: string[]; found?: boolean } | null;
 	/** Targets an undo would take back now, a failed external write that may have landed included. */
 	undoable: number;
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
@@ -165,26 +190,41 @@ export function bulkHaltText(
 /** A write run's halts that writing on moves on from, each with its own sentence on the page. */
 const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
-	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff',
+	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff', 'markupAddedByShop',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
 const BULK_RESUME_NONE = new Set(['checksum', 'contract']);
 
 /** How an approved run that halted goes on: write on (`write`), write on under a higher maximum
- *  (`max`), or not at all (`none`). Null for a run that did not halt while writing, for one at its
+ *  (`max`), only check the targets an earlier send left unclear (`check`: the next pass would send
+ *  nothing and only read those at the provider; offered again after a check that did not find
+ *  them, since a change can arrive late), not at all because the run would send nothing more
+ *  (`nothing`: every target left had changed at the provider since its send, a conflict), or not
+ *  at all because the run changed (`none`). A run at its maximum whose probe
+ *  holds is offered `max`: a higher maximum checks them too. Null for a run that did not halt while writing, for one at its
  *  probe (it has its own way on), and on a halt this page has no sentence for: then it shows the
  *  engine's reason and offers nothing. Null too where the engine would refuse the resume for want
  *  of a probe: without one, a run writes on only under a maximum of one target, so a higher
  *  maximum is refused, and so is writing on under a maximum above one. */
-export type BulkResumeKind = 'write' | 'max' | 'none';
+export type BulkResumeKind = 'write' | 'max' | 'check' | 'nothing' | 'none';
 
 export function bulkResumeKind(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'maxTargets' | 'changes'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'maxTargets' | 'changes' | 'sentUnknown' | 'resumeSends' | 'resumeTries' | 'resumeOpen' | 'conflicts'>,
 ): BulkResumeKind | null {
 	if ((run.phase !== 'approved' && run.phase !== 'writing') || run.haltKey === null || bulkAtProbe(run)) return null;
 	if (BULK_RESUME_NONE.has(run.haltKey)) return 'none';
-	if (!run.probeConfirmed && (run.haltKey === 'maxTargets' || (run.maxTargets ?? bulkWriting(run)) > 1)) return null;
+	// Every target left within the maximum (`resumeOpen === resumeTries`: none held back by it,
+	// which writing on under a higher maximum would send), none of them sent to again, none still
+	// unclear, and every one a conflict (`conflicts === resumeTries`, and some are left): each was
+	// sent to without a clear answer and has a third value at the provider now. Not a target a
+	// loop that died still holds, which is neither unclear on this page nor a conflict.
+	if (BULK_RESUME_WRITE.has(run.haltKey) && run.resumeOpen === run.resumeTries && run.resumeSends === 0
+		&& run.sentUnknown === 0 && run.conflicts > 0 && run.conflicts === run.resumeTries) return 'nothing';
+	const narrow = (run.maxTargets ?? bulkWriting(run)) <= 1;
+	if (run.sentUnknown > 0 && run.resumeSends === 0 && (run.haltKey === 'maxTargets' || BULK_RESUME_WRITE.has(run.haltKey))
+		&& (run.probeConfirmed ? run.haltKey !== 'maxTargets' : narrow)) return 'check';
+	if (!run.probeConfirmed && (run.haltKey === 'maxTargets' || !narrow)) return null;
 	if (run.haltKey === 'maxTargets') return 'max';
 	return BULK_RESUME_WRITE.has(run.haltKey) ? 'write' : null;
 }
@@ -193,10 +233,10 @@ export function bulkResumeKind(
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
 export function bulkResumeText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts'>,
 	managed: boolean | null,
 	i18n: BulkI18n,
-): { cause: string; before: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
+): { cause: string; before: string | null; check: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
 	const kind = bulkResumeKind(run);
 	if (kind === null) return null;
 	const key = run.haltKey!;
@@ -214,9 +254,19 @@ export function bulkResumeText(
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
+		: key === 'markupAddedByShop' ? 'bulk.halt.markupAddedByShop_before'
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
-	if (kind === 'none') return { cause, before, kept: null, soFar: null, allows: null };
+	if (kind === 'none') return { cause, before, check: null, kept: null, soFar: null, allows: null };
+	// Nothing to send: no step before writing on applies, and what is left needs a new run.
+	if (kind === 'nothing') return { cause, before: null, check: i18n.tf('bulk.resume.nothing_left', vars), kept: null, soFar: null, allows: null };
+	// Checking sends nothing, so the failures' "before you continue writing" does not apply; a
+	// halt's own step (reconnect the access, switch writing back on) still comes first.
+	if (kind === 'check') {
+		const check = run.sentUnknown === 1 ? i18n.tf('bulk.resume.check_before', vars)
+			: i18n.tf('bulk.resume.check_before_many', { ...vars, n: String(run.sentUnknown) });
+		return { cause, before: failures ? null : before, check, kept: null, soFar: null, allows: null };
+	}
 	// "All the rest" holds only when the approved maximum does not stop the pass first; a run
 	// written on under a new maximum is bounded by that one. With no target confirmed as written,
 	// nothing is said to stay: a write sent and failed may still have reached its target, which the
@@ -225,12 +275,12 @@ export function bulkResumeText(
 	const kept = i18n.t(run.applied === 0
 		? (capped ? 'bulk.resume.kept_write_none_capped' : 'bulk.resume.kept_write_none')
 		: (capped ? 'bulk.resume.kept_write_capped' : 'bulk.resume.kept_write'));
-	if (!failures) return { cause, before, kept, soFar: null, allows: null };
+	if (!failures) return { cause, before, check: null, kept, soFar: null, allows: null };
 	const f = run.failed;
 	const soFar = run.failedOnce === null
 		? (f === 1 ? i18n.t('bulk.resume.failed_so_far_at_least_one') : i18n.tf('bulk.resume.failed_so_far_at_least', { n: String(f) }))
 		: (run.failedOnce === 1 ? i18n.t('bulk.resume.failed_so_far_one') : i18n.tf('bulk.resume.failed_so_far', { n: String(run.failedOnce) }));
-	return { cause, before, kept, soFar, allows: bulkResumeAllows(limit, open, i18n) };
+	return { cause, before, check: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n) };
 }
 
 /** What writing on lets fail before the run stops again. The next pass's failures are bounded
@@ -402,6 +452,11 @@ export interface BulkTarget {
 	written?: boolean | undefined;
 	/** A rollback or an undo took this run's write back. */
 	undone?: boolean | undefined;
+	/** Written, and the store kept it with markup lynox did not send: the target the halt
+	 *  `markupAddedByShop` is about. Set only where it holds. */
+	shopAddedMarkup?: true | undefined;
+	/** Written, and the store kept the description otherwise than sent, without outside markup. */
+	hostRewrote?: true | undefined;
 }
 
 /** The external host of a run's target system, or null for a local run. */
@@ -539,18 +594,22 @@ export function bulkStateText(
 }
 
 /** What the page says under "halted because": its own sentence where it has one, else the
- *  engine's reason. `startButton` as for {@link bulkStateText}. */
+ *  engine's reason. `startButton` as for {@link bulkStateText}. `mandate`: a session the page
+ *  offers no act (a mandate's, or one whose owner is not known yet) is shown no step that names a
+ *  button it does not see: a run waiting for its start says who starts it. */
 export function bulkHaltCause(
 	run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0] & Parameters<typeof bulkStateText>[0],
 	managed: boolean | null,
 	startButton: string | null,
 	i18n: BulkI18n,
+	mandate = false,
 ): string {
 	if (bulkAtProbe(run) && run.haltKey === 'maxTargets') return i18n.t('bulk.halted_after_probe');
 	const own = bulkHaltText(run, managed, i18n)?.cause ?? bulkResumeText(run, managed, i18n)?.cause ?? bulkRollbackText(run, i18n)?.cause;
 	if (own !== undefined) return own;
+	if (mandate && bulkWaitsForStart(run)) return i18n.t('bulk.halt.wait_owner_only');
 	const state = bulkStateText(run, startButton, i18n);
-	if (state !== null) return state.step === null ? state.cause : `${state.cause} ${state.step}`;
+	if (state !== null) return state.step === null || mandate ? state.cause : `${state.cause} ${state.step}`;
 	return run.haltReason ?? '';
 }
 
@@ -564,13 +623,15 @@ const BULK_SUPPORT_HALTS = new Set(['blocked', 'shopifyWriteOff']);
  *  the run and its host and nothing else from the run; null on any other halt, on a
  *  self-hosted instance, and where the page shows no such sentence. */
 export function bulkSupportMailto(
-	run: Pick<BulkRunDetailData, 'id' | 'phase' | 'haltKey' | 'targetSystem' | 'probe' | 'haltReason' | 'probeConfirmed' | 'maxTargets' | 'changes' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>,
+	run: Pick<BulkRunDetailData, 'id' | 'phase' | 'haltKey' | 'targetSystem' | 'probe' | 'haltReason' | 'probeConfirmed' | 'maxTargets' | 'changes' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey' | 'sentUnknown' | 'resumeSends' | 'resumeTries' | 'resumeOpen' | 'conflicts'>,
 	managed: boolean | null,
 	i18n: BulkI18n,
 ): string | null {
 	if (managed === false || run.haltKey === null || !BULK_SUPPORT_HALTS.has(run.haltKey)) return null;
 	// The sentence stands with the way on: a restart for a planned run, writing on for one that wrote.
-	const shown = run.phase === 'planned' ? bulkRestartKind(run) !== null : bulkResumeKind(run) !== null;
+	// `nothing` leaves the halt's own sentence out, so the link has nothing to stand with.
+	const resumeKind = run.phase === 'planned' ? null : bulkResumeKind(run);
+	const shown = run.phase === 'planned' ? bulkRestartKind(run) !== null : resumeKind !== null && resumeKind !== 'nothing';
 	if (!shown) return null;
 	const subject = i18n.tf('bulk.halt.support_subject', { run: run.id, host: bulkSystemName(run.targetSystem, i18n) });
 	return `mailto:${BULK_SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}`;
@@ -610,7 +671,12 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	list_item_mismatch: 'list_item_mismatch',
 	list_item_truncated: 'list_item_truncated',
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
-	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char',
+	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused', shop_added_markup: 'shop_added_markup',
+};
+/** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
+ *  of tags the page reads, whose way out differs from planning again (U-103). */
+const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
+	markup_dropped: 'markup_dropped', markup_dropped_before: 'markup_dropped_before',
 };
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
@@ -624,6 +690,10 @@ const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
  *  lynox does not change it, and the next step; elsewhere the reason by its code and the step
  *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
 export function bulkInvalidText(reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n): string {
+	const anyForm = BULK_INVALID_ANY_FORM[reason];
+	if (anyForm !== undefined) {
+		return i18n.tf(`bulk.invalid.${anyForm}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
+	}
 	const key = shopify ? BULK_INVALID_SHOPIFY[reason] : undefined;
 	if (key === undefined) return i18n.tf('bulk.invalid.other', { code: bulkVisibleText(reason) });
 	const support = BULK_INVALID_SUPPORT[key];

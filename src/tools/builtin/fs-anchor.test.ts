@@ -155,6 +155,17 @@ describe('file tools reach the workspace through its open directory', () => {
     expect(readFileSync(join(outside, 'target.txt'), 'utf8')).toBe('kept');
   });
 
+  it('read_file names the way out for a file with a second name: the user gives the content again, word for word', async () => {
+    writeFileSync(join(outside, 'target.txt'), 'kept');
+    linkSync(join(outside, 'target.txt'), join(ws, 'hard.txt'));
+    const message = await readFileTool.handler({ path: join(ws, 'hard.txt') }).then(() => '', (err: Error) => err.message);
+    expect(message).toBe(
+      `read_file: ${join(ws, 'hard.txt')} has more than one name (a hard link); the file tools do not read such a file, because its other name may be a file outside the workspace. ` +
+      'Nothing was read. Do not read it with bash either, for the same reason. ' +
+      'Tell the user that this file could not be read, and ask them to give you its content another way, for example by uploading it again.',
+    );
+  });
+
   it('edits only an existing file and never through a link at the file', async () => {
     await expect(editFileTool.handler({ path: join(ws, 'none.txt'), old_string: 'a', new_string: 'b' }, agent()))
       .rejects.toThrow(/file does not exist/);

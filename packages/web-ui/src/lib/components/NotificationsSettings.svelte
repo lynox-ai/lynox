@@ -9,6 +9,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { isHostedInstance } from '../utils/billing-tier.js';
 	import {
 		initNotifications,
@@ -28,6 +29,10 @@
 		patchThrottle,
 		defaultBrowserTz,
 	} from '../stores/integrations/notifications.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { onOff } from './settings-readonly/values.js';
 
 	// The control plane's mail when an escalation reached nobody. Shown on every instance the
 	// control plane runs (any tier, hosted included); self-host has no control plane to send it.
@@ -37,9 +42,11 @@
 
 	async function loadEscalationMail(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) return;
 			const body = (await res.json()) as { managed?: string; escalation_mail?: boolean };
+			noteViewer(body);
 			cpInstance = isHostedInstance(body.managed);
 			escalationMail = body.escalation_mail !== false;
 		} catch { /* the card stays hidden */ }
@@ -62,12 +69,12 @@
 				addToast(t('notifications.escalation_mail_owner_only'), 'error', 5000);
 				return;
 			}
-			if (!res.ok) throw new Error();
+			await throwIfRefused(res);
 			addToast(t('notifications.escalation_mail_saved'), 'success', 3000);
-		} catch {
+		} catch (e) {
 			// Back to the stored value: the checkbox must not show a state that was not saved.
 			escalationMail = !escalationMail;
-			addToast(t('notifications.escalation_mail_save_failed'), 'error', 5000);
+			addToast(saveFailedText(e, t('notifications.escalation_mail_save_failed')), 'error', 5000);
 		} finally {
 			escalationMailSaving = false;
 		}
@@ -78,12 +85,44 @@
 		void loadInboxPushPref();
 		void loadEscalationMail();
 	});
+
+	// A mandate's session (ux U-104): the inbox push settings and the escalation mail as text. Changing
+	// them is the owner's (PATCH /api/inbox/notification-prefs and PUT /api/config are owner-only).
+	const mandateRows = $derived.by(() => {
+		const rows: { label: string; value: string }[] = [];
+		const prefs = getPrefs();
+		if (prefs) {
+			rows.push({ label: t('integrations.push_inbox_toggle'), value: onOff(prefs.inboxPushEnabled) });
+			const q = prefs.quietHours;
+			rows.push({
+				label: t('integrations.push_quiet_hours_toggle'),
+				value: q.enabled
+					? `${onOff(true)} (${t('integrations.push_quiet_hours_from')} ${q.start} ${t('integrations.push_quiet_hours_to')} ${q.end}, ${q.tz})`
+					: onOff(false),
+			});
+			rows.push({
+				label: t('integrations.push_throttle_title'),
+				value: `${prefs.perMinute} ${t('integrations.push_throttle_per_minute')}, ${prefs.perHour} ${t('integrations.push_throttle_per_hour')}`,
+			});
+			if (prefs.accounts.length > 1) {
+				for (const acct of prefs.accounts) rows.push({ label: `${acct.displayName} <${acct.address}>`, value: onOff(!acct.muted) });
+			}
+		}
+		if (cpInstance) rows.push({ label: t('notifications.escalation_mail_heading'), value: onOff(escalationMail) });
+		return rows;
+	});
 </script>
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
 	<a href="/app/settings/channels" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.channels.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.notifications')}</h1>
 
+	<!--
+		A mixed page in a mandate's session (ux U-104): push on this device is the mandate's own
+		(/push/subscribe, /unsubscribe and /test are not owner-only, and a mandate's subscription ends
+		with its grant), so it stays as it is. What the owner sets — the inbox push settings and the
+		escalation mail — is shown below as text, under the owner-only notice.
+	-->
 	{#if isIosWithoutPwa()}
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-center justify-between mb-4">
@@ -130,7 +169,7 @@
 			<!-- Per-category opt-out + Quiet Hours + throttle + per-account
 				mute. All keys live in the same envelope and are PATCHed
 				deltas; backend defaults missing fields. -->
-			{#if getPrefs()}
+			{#if getPrefs() && !isMandateSession()}
 			{@const prefs = getPrefs()!}
 			<div class="mt-4 space-y-3 border-t border-border pt-3">
 				<label class="flex items-start gap-2 cursor-pointer text-sm">
@@ -269,7 +308,14 @@
 	</div>
 	{/if}
 
-	{#if cpInstance}
+	{#if isMandateSession()}
+	{#if mandateRows.length > 0}
+	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5 space-y-3">
+		<OwnerOnlyNotice />
+		<ReadOnlyRows rows={mandateRows} />
+	</div>
+	{/if}
+	{:else if cpInstance}
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5 space-y-3" data-escalation-mail>
 		<div>
 			<h2 class="font-medium">{t('notifications.escalation_mail_heading')}</h2>

@@ -172,6 +172,8 @@ describe('the bexio API is reached only through the provider', () => {
     const out = await apiSetupTool.handler({ action: 'refine', id: 'bexio-pat', refine: { addNotes: ['x'] } }, agentWith(store)) as string;
     expect(out).toContain('Error: the stored profile "bexio-pat" cannot be refined: the API of bexio is connected only through this engine\'s built-in "bexio" provider');
     expect(out).toContain('Change this profile with api_setup action="update"; reading through it works until then.');
+    // bexio's host is a constant: it has no parameter to name.
+    expect(out).not.toContain('preset_params');
   });
 
   it('control: saves the profile that goes through the provider', async () => {

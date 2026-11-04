@@ -321,7 +321,7 @@ describe('going on from a run that halted', () => {
 
 	it('offers no way on from a run that rolled back', () => {
 		for (const haltKey of ATOMIC) {
-			const run = { phase: 'aborted' as const, haltKey, probe: null, haltReason: 'x', probeConfirmed: true, maxTargets: null, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 } };
+			const run = { phase: 'aborted' as const, haltKey, probe: null, haltReason: 'x', probeConfirmed: true, maxTargets: null, changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, sentUnknown: 0, resumeSends: 0, resumeTries: 0, resumeOpen: 0, conflicts: 0 };
 			expect(bulkResumeKind(run), haltKey).toBeNull();
 			expect(bulkRestartKind({ ...run, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false }), haltKey).toBeNull();
 			expect(bulkCanUndo({ ...run, kind: 'apply', undoable: 2, atomic: true }), haltKey).toBe(false);
@@ -393,7 +393,7 @@ describe('going on from a run that halted', () => {
 	it('places every halt the engine names', () => {
 		const STARTS = ['awaitingStart', 'listed'];
 		const ENDS_THE_RUN = ['superseded', 'mandateEnded'];
-		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff'];
+		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff', 'markupAddedByShop'];
 		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkRestartKind({ ...base, haltKey });
@@ -424,7 +424,7 @@ describe('going on from a run that halted', () => {
 		// A judged run may also have stopped on its model.
 		expect(bulkHaltText(at('unavailable', { judge: judged.judge }), true, DE)?.cause)
 			.toBe('Der Lauf kam nicht weiter. shop.example.invalid oder das KI-Modell hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.');
-		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in your instance\'s log. So lynox stopped reading at that point.', before: null });
+		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
 		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
 			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, verbraucht 0.0034 USD.');
 		expect(bulkHaltText(at('blocked'), true, DE)).toEqual({
@@ -490,7 +490,7 @@ describe('going on from a run that halted', () => {
 	const w = (haltKey: string, o: Partial<BulkRunDetailData> = {}) => ({
 		phase: 'writing' as BulkRunDetailData['phase'], haltKey, haltReason: 'x', probe: null, targetSystem: 'http:shop.example.invalid',
 		probeConfirmed: true, changes: { update: 1000, create: 0, delete: 0, unchanged: 0, invalid: 0 },
-		maxTargets: 1000, applied: 550, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, ...o,
+		maxTargets: 1000, applied: 550, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, resumeSends: 398, sentUnknown: 0, conflicts: 0, ...o,
 	});
 	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff'];
 
@@ -524,6 +524,61 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('checksum', { probeConfirmed: false }))).toBe('none');
 	});
 
+	it('offers to check, not to write on, where the next pass would only read targets an earlier send left unclear', () => {
+		// The measured case: one target, its send unclear, the failure halt. Writing on sends nothing.
+		const unclear = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
+		expect(bulkResumeKind(w('failureRate', unclear))).toBe('check');
+		const one = 'Nachprüfen liest bei shop.example.invalid nach, ob die Änderung da ist; geschickt wird dabei nichts.';
+		const text = bulkResumeText(w('failureRate', unclear), true, DE);
+		// Checking sends nothing: no "before you continue writing", nothing said to be tried.
+		expect([text?.check, text?.before, text?.kept, text?.soFar, text?.allows]).toEqual([one, null, null, null, null]);
+		// After a check that did not find it, the run is at its maximum and still only checks.
+		expect(bulkResumeKind(w('maxTargets', unclear))).toBe('check');
+		expect(bulkResumeText(w('maxTargets', unclear), true, DE)?.check).toBe(one);
+		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 3 }), true, EN)?.check).toBe('Check again looks in shop.example.invalid whether the changes are there; nothing is sent.');
+		// A halt's own step still comes first.
+		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.';
+		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(reconnect);
+		// Anything left to send: writing on, as before.
+		expect(bulkResumeKind(w('failureRate', { ...unclear, resumeSends: 1 }))).toBe('write');
+		expect(bulkResumeKind(w('failureRate', { ...unclear, sentUnknown: 0 }))).toBe('write');
+		expect(bulkResumeText(w('failureRate', { ...unclear, resumeSends: 1 }), true, DE)?.check).toBeNull();
+		// With a probe, a run at its maximum is offered a higher one, which checks them too.
+		expect(bulkResumeKind(w('maxTargets', { ...unclear, probeConfirmed: true }))).toBe('max');
+		expect(bulkResumeKind(w('unavailable', { ...unclear, probeConfirmed: true, maxTargets: 10 }))).toBe('check');
+		// Without one, the engine refuses any resume above one target: nothing is offered.
+		expect(bulkResumeKind(w('unavailable', { ...unclear, maxTargets: 2 }))).toBeNull();
+		// A halt the page cannot write on from, and a changed run, stay as they were.
+		expect(bulkResumeKind(w('superseded', unclear))).toBeNull();
+		expect(bulkResumeKind(w('checksum', unclear))).toBe('none');
+	});
+
+	it('offers nothing where every target left had changed at the provider after its unclear send', () => {
+		// The check found a third value: a conflict, never sent again, and no longer unclear.
+		const changed = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 0, conflicts: 1, resumeOpen: 1, resumeTries: 1, resumeSends: 0 };
+		expect(bulkResumeKind(w('failureRate', changed))).toBe('nothing');
+		const text = bulkResumeText(w('blocked', changed), true, DE);
+		expect([text?.check, text?.before, text?.kept, text?.soFar, text?.allows]).toEqual([
+			'Dieser Lauf schickt nichts mehr. Für Ziele, die sich bei shop.example.invalid inzwischen geändert hatten, bitte lynox im Chat, einen neuen Lauf zu planen; er liest den aktuellen Stand.', null, null, null, null]);
+		expect(bulkResumeText(w('failureRate', changed), true, EN)?.check).toBe('This run sends nothing more. For targets that had changed in shop.example.invalid in the meantime, ask lynox in a chat to plan a new run; it reads the current state.');
+		// No support link without the halt's own sentence.
+		expect(bulkSupportMailto({ ...w('blocked', changed), id: 'run-7', listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false }, true, DE)).toBeNull();
+		// Each part of the rule holds it: something left to send, no conflict, nothing left at all,
+		// a target still unclear, or a halt the run cannot write on from.
+		expect(bulkResumeKind(w('failureRate', { ...changed, resumeSends: 1 }))).toBe('write');
+		expect(bulkResumeKind(w('failureRate', { ...changed, conflicts: 0 }))).toBe('write');
+		expect(bulkResumeKind(w('failureRate', { ...changed, resumeTries: 0 }))).toBe('write');
+		// Nothing left at all (only targets whose content lynox may not send): no conflict, not this sentence.
+		expect(bulkResumeKind(w('failureRate', { ...changed, conflicts: 0, resumeOpen: 0, resumeTries: 0 }))).toBe('write');
+		// A target a loop that died still holds is neither unclear here nor a conflict: not 'nothing'.
+		expect(bulkResumeKind(w('failureRate', { ...changed, resumeOpen: 2, resumeTries: 2 }))).toBe('write');
+		// Targets the maximum holds back never changed: writing on, then a higher maximum, sends them.
+		expect(bulkResumeKind(w('stoppedByOwner', { ...changed, probeConfirmed: true, maxTargets: 2, resumeOpen: 3 }))).toBe('write');
+		expect(bulkResumeKind(w('failureRate', { ...changed, sentUnknown: 1 }))).toBe('check');
+		expect(bulkResumeKind(w('maxTargets', changed))).toBeNull();
+		expect(bulkResumeKind(w('maxTargets', { ...changed, probeConfirmed: true }))).toBe('max');
+	});
+
 	it('places every halt the engine names for a write run', () => {
 		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
 		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete'];
@@ -552,7 +607,7 @@ describe('going on from a run that halted', () => {
 		// Under twenty targets the halt comes at the first failure.
 		expect(bulkResumeText(w('failureRate', { failureLimit: 0 }), true, EN)?.cause).toBe('In this pass, a target could not be written.');
 		expect(bulkResumeText(w('consecutiveFailures'), true, DE)?.cause).toBe('Dreimal hintereinander liess sich ein Ziel nicht schreiben.');
-		expect(bulkResumeText(w('unrecorded'), true, DE)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll deiner Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
+		expect(bulkResumeText(w('unrecorded'), true, DE)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN)?.cause).toBe('The run reached the approved maximum: 40 targets.');
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 1 }), true, DE)?.cause).toBe('Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.');
 		expect(bulkResumeText(w('unauthorized'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. If there is no profile, ask lynox in the chat to set up the access.');
@@ -566,7 +621,7 @@ describe('going on from a run that halted', () => {
 		});
 		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
 		// No way on past a changed run: no promise of what writing on keeps.
-		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, kept: null, soFar: null, allows: null });
+		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, kept: null, soFar: null, allows: null });
 	});
 
 	it('says all the rest is tried only when the maximum does not stop the pass first', () => {
@@ -884,6 +939,19 @@ describe('what the preview says about a target lynox leaves out', () => {
 		const odd = 'read\u202efailed';
 		expect(bulkVisibleText(odd)).not.toBe(odd);
 		expect(bulkInvalidText(odd, true, true, own)).toBe(`skip (${bulkVisibleText(odd)})`);
+	});
+	it('words the HTML check\'s refusals of dropped tags on every run, with where to remove them (U-103)', () => {
+		const table: Record<string, string> = {
+			'bulk.invalid.markup_dropped': 'plan again', 'bulk.invalid.markup_dropped_before': 'remove them {where}',
+			'bulk.invalid.where_shopify': 'in Shopify', 'bulk.invalid.where_other': 'where you manage them', 'bulk.invalid.other': 'skip ({code})',
+		};
+		const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => (table[k] ?? k).replace(/\{(\w+)\}/g, (_, n: string) => v[n] ?? '') };
+		for (const shopify of [true, false]) {
+			expect(bulkInvalidText('markup_dropped', shopify, true, own)).toBe('plan again');
+		}
+		expect(bulkInvalidText('markup_dropped_before', true, true, own)).toBe('remove them in Shopify');
+		expect(bulkInvalidText('markup_dropped_before', false, true, own)).toBe('remove them where you manage them');
+		expect(i18nSource).toMatch(/'bulk\.invalid\.markup_dropped_before': \{ de: '[^']*\{where\}[^']*', en: "[^"]*\{where\}[^"]*" \}/);
 	});
 	it('adds the way to support on a managed instance only, and an unknown one reads as managed', () => {
 		expect(bulkInvalidText('read_failed', true, true, i18n)).toBe('bulk.invalid.read_failed bulk.invalid.persists_support');
