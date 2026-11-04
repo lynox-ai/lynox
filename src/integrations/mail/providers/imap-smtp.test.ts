@@ -310,6 +310,16 @@ describe('ImapSmtpProvider — list: automatic mail', () => {
     expect(byUid.get(1)).toMatchObject({ isAutoReply: true, isAutoReplied: true });
     expect(byUid.get(2)).toMatchObject({ isAutoReply: true, isAutoReplied: false });
     expect(byUid.get(3)).toMatchObject({ isAutoReply: false, isAutoReplied: false });
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers, 'list() asks the server for the header, or every listed mail reads as not automatic').toContain('auto-submitted');
+  });
+
+  it('asks for the auto-submitted header when it searches too', async () => {
+    probe.search.mockResolvedValue([1]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([makeFetchMessage({ uid: 1 })]));
+    await new ImapSmtpProvider(ACCOUNT, credResolver).search({ text: 'x' });
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers).toContain('auto-submitted');
   });
 });
 

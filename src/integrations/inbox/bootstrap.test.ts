@@ -312,7 +312,7 @@ describe('bootstrapInbox — wiring', () => {
       json: async () => ({ choices: [{ message: { content } }], usage: { prompt_tokens: tokens, completion_tokens: tokens } }),
       text: async () => '',
     }) as unknown as Response;
-    /** The label the rule check gave the rule named `name` (labels are drawn per call). */
+    /** The label the rule check gave the rule named `name`, read from the prompt. */
     const labelOf = (user: string, name: string): string => {
       const m = new RegExp(`Regel (R\\d+) \\| Name: ${name} \\|`).exec(user);
       if (!m) throw new Error(`no label for ${name}`);

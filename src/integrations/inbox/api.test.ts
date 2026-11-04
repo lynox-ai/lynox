@@ -946,6 +946,12 @@ describe('rules endpoints — description rules (PRD inbox-user-rules E3/E11)', 
     expect(handleCreateRule(deps, { ...base, matcherValue: 'eine zu viel' })).toMatchObject({ status: 400, body: { error: `at most ${String(MAX_DESCRIPTION_RULES)} description rules per account` } });
     expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: 'andere Art' }).status).toBe(201);
   });
+
+  it('refuses a description rule whose name names a rule label, and keeps such a name for the other kinds', () => {
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '1');
+    expect(handleCreateRule(deps, { ...base, matcherValue: 'Terminanfragen', name: 'Wie R1' })).toMatchObject({ status: 400, body: { error: 'name must not name a rule label such as R1' } });
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: 'Termin', name: 'Wie R1' }).status).toBe(201);
+  });
 });
 
 describe('handleListItems ruleId=', () => {

@@ -22,7 +22,7 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
-import { charCount, cutChars, descriptionProblem, MAX_DESCRIPTION_RULES, ruleLine } from './rule-text.js';
+import { charCount, cutChars, descriptionProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
 import { isFeatureEnabled } from '../../core/features.js';
 
 export interface InboxApiDeps {
@@ -965,6 +965,8 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
   // One line, as the agent's proposals are cut: the name lands in audit rows the model can read.
   const name = typeof body.name === 'string' ? ruleLine(body.name) : '';
   if (charCount(name) > MAX_RULE_NAME_CHARS) return bad(`name exceeds ${MAX_RULE_NAME_CHARS} chars`);
+  // The name sits next to the description in the rule check's prompt.
+  if (body.matcherKind === 'matches_description' && namesRuleLabel(name)) return bad('name must not name a rule label such as R1');
   const id = deps.state.insertRule({
     accountId: body.accountId,
     matcherKind: body.matcherKind,

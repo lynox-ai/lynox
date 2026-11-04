@@ -728,6 +728,8 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
+            // The watcher lists new mail; without this header no listed mail is ever automatic.
+            headers: ['auto-submitted'],
           },
           { uid: true },
         )) {
@@ -893,6 +895,8 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
+            // The watcher lists new mail; without this header no listed mail is ever automatic.
+            headers: ['auto-submitted'],
           },
           { uid: true },
         )) {
