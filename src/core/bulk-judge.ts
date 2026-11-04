@@ -387,6 +387,10 @@ export function verdictTextRefusal(
   const seo = checkSeoAfter(run.listForm, after, before, own);
   if (!seo.ok) return seo.reason;
   const html = htmlFieldsOfListForm(run.listForm);
+  // `shortcode_changed` is returned only once every field passed every other check: the preview
+  // offers such a target's values to the owner to paste into the shop by hand (1130), so another
+  // field's script, foreign link or hidden character must win over it.
+  let shortcode: BulkInvalidReason | null = null;
   for (const [field, value] of Object.entries(after)) {
     if (typeof value !== 'string') continue;
     const was = Object.hasOwn(before, field) && typeof before[field] === 'string' ? before[field] as string : null;
@@ -395,7 +399,8 @@ export function verdictTextRefusal(
       // A list run always has its host; without one, links cannot be resolved: refused.
       if (run.storeHost === null) return 'not_canonical';
       const checked = checkMarkup({ before: was, after: value, storeHost: run.storeHost, startDomains: run.startDomains });
-      if (!checked.ok) return checked.reason;
+      if (!checked.ok && checked.reason === 'shortcode_changed') shortcode = checked.reason;
+      else if (!checked.ok) return checked.reason;
       continue;
     }
     if ((run.listForm !== null || run.storeHost !== null) && !plainTextMarkupOf(was, value).ok) return 'markup_in_text';
@@ -404,7 +409,7 @@ export function verdictTextRefusal(
       if (n > (held.get(cp) ?? 0)) return 'hidden_char';
     }
   }
-  return null;
+  return shortcode;
 }
 
 /**
@@ -459,7 +464,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     if (!target) continue;
     const token = newToken();
     if (!ledger.claimJudge(runId, seq, token, now(), JUDGE_CLAIM_STALE_MS)) continue;
-    const record = (verdict: { after: unknown } | { invalid: BulkInvalidReason }): void => {
+    const record = (verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown> }): void => {
       ledger.recordJudgement(runId, seq, token, verdict, now());
     };
     if (target.before.absent) {
@@ -579,7 +584,13 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       }
       const textRefused = verdictTextRefusal(verdict, beforeRow, textRun);
       if (textRefused !== null) {
-        record({ invalid: textRefused });
+        // A shortcode refusal keeps the judge's values for the owner to copy (1130) — unless they
+        // carry a credential, which the preview must not show either.
+        const text = JSON.stringify(verdict);
+        const keep = textRefused === 'shortcode_changed' && deps.scanSecret(text) === null
+          && (!external || refuseExternalAfter(target.key, verdict, deps.scanSecret) === null)
+          && deps.maskVault(text) === text && (stringsIn(verdict)?.every((v) => deps.maskVault(v) === v) ?? false);
+        record(keep ? { invalid: textRefused, refused: verdict } : { invalid: textRefused });
         return;
       }
       if (external) {

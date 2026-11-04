@@ -8,8 +8,8 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mintBulkContract } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
-import { verdictTextRefusal } from './bulk-judge.js';
-import { checkMarkup, droppedTagsOf, shortcodeChangedBy } from './bulk-html.js';
+import { runBulkJudge, verdictTextRefusal, type BulkJudgeDeps } from './bulk-judge.js';
+import { checkMarkup, droppedTagsOf, shortcodeChangedBy, shortcodeRefusalOf } from './bulk-html.js';
 import { canonicalHtml } from './html-tree.js';
 import { formatStatus } from '../tools/builtin/bulk.js';
 import { rawHtmlField, runBulkEffect, type TargetWriter } from './bulk-apply.js';
@@ -41,9 +41,9 @@ afterEach(() => {
 });
 
 /** A WooCommerce list run with product 1 listed and its reads started; `judged` plans a judge. */
-function listed(after: Record<string, unknown>, judged = false): { id: string; seq: number } {
-  const source = parseListSource(HOST, { path: '/wp-json/wc/v3/products', after: judged ? judgeTemplate(rule) : after }, 'PUT', () => null);
-  const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source, readContract, ...(judged ? { judge: rule } : {}) });
+function listed(after: Record<string, unknown>, judged = false, judgeRule = rule): { id: string; seq: number } {
+  const source = parseListSource(HOST, { path: '/wp-json/wc/v3/products', after: judged ? judgeTemplate(judgeRule) : after }, 'PUT', () => null);
+  const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source, readContract, ...(judged ? { judge: judgeRule } : {}) });
   if (!out.ok) throw new Error(out.reason);
   const id = out.status.id;
   if (!ledger.resumePreview(id, Date.now(), { listChecksum: ledger.listStartChecksum(id)! }).ok) throw new Error('list start');
@@ -129,6 +129,21 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     expect(shortcodeChangedBy('[embed]a&b[/embed]', canonicalHtml('[embed]a&b[/embed]'))).toBe('a&b');
   });
 
+  it('refuses shortcodes whose names or attributes WordPress allows beyond letters and words', () => {
+    // A digit, `_`, `:` or `.` in the name, `=` right after it, a `[` in an attribute, an enclosing
+    // pair with such a name: each one the canonical form changes, and each was let through before.
+    for (const after of ['[3d-gallery title="A & B"]', '[_x a="1&2"]', '[ns:code a="a&b"]', '[a.b a="&"]', '[x="A&B"]', '[x a="[&"]', '[ns:box]a&b[/ns:box]']) {
+      expect(canonicalHtml(after), `${after}: the canonical form changes it`).not.toBe(after);
+      expect(check(after), after).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+    }
+    // The CDATA opener's brackets are passed over, a shortcode of its own inside the section is not.
+    const inCdata = '<svg><![CDATA[ [x a="&"] ]]></svg>';
+    expect(canonicalHtml(inCdata)).not.toBe(inCdata);
+    // (`checkMarkup` refuses the section itself first, as markup the page drops.)
+    expect(shortcodeRefusalOf(inCdata, null)).toBe('Writing would change the shortcode text: [x a="&"]');
+    expect(shortcodeRefusalOf('<svg><![CDATA[ x ]]></svg>', null), 'the opener alone is no shortcode').toBeNull();
+  });
+
   it('passes a shortcode the canonical form keeps, and HTML tags that read the same inside one', () => {
     expect(check('<p>[product_page id="99"]</p>')).toEqual({ ok: true });
     // A shortcode the field already holds, references and all, is the owner's own.
@@ -177,13 +192,95 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
       + 'Only where you wrote these characters yourself, plan the value again without them.');
     // …and the preview does show it: the whole planned value of the field the refusal is about.
     const shown = ledger.getPreview(id).find((p) => p.seq === seq)!;
-    expect(shown.refusedValue).toEqual({ field: 'description', value: after.description });
+    expect(shown.refusedValues).toEqual([{ field: 'description', value: after.description }]);
   });
 
   it('CONTROL: a target refused for another reason carries no value to copy', () => {
     const { id, seq } = listed({ description: '[button url="/a?x=1&y=2"]Neu[/button]' });
     expect(ledger.recordRead(id, seq, { invalid: 'markup_dropped' })).toBe(true);
-    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValue).toBeUndefined();
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toBeUndefined();
+  });
+});
+
+describe('a judged run refused for shortcode_changed shows the judge\'s value to copy (1130)', () => {
+  const both = normalizeJudgeRule({ rule: 'Rewrite both descriptions.', schema: {
+    description: { type: 'string', maxLength: 2000 }, short_description: { type: 'string', maxLength: 2000 },
+  } }, { idField: 'id' });
+  // A shortcode the description already holds, a reference and all: the owner's own, not refused.
+  const own = '[button url="/a?x=1&amp;y=2"]Kaufen[/button]';
+  const before = { description: `<p>alt</p>${own}`, short_description: '<p>kurz</p>' };
+  const verdict = { description: `<p>neu</p>${own}`, short_description: '[pbutton url="/b?x=1&y=2"]Los[/pbutton]' };
+
+  /** Judge the run's one target with a stub model that answers `after`; `over` replaces deps. */
+  async function judge(after: Record<string, unknown>, over: Partial<BulkJudgeDeps> = {}): Promise<{ id: string; seq: number }> {
+    const { id, seq } = listed({}, true, both);
+    expect(ledger.recordRead(id, seq, { before })).toBe(true);
+    const call = (async () => ({ data: { keep: false, after }, inputTokens: 1, outputTokens: 1, costUsd: 0.001, modelId: 'claude-haiku-4-5' })) as unknown as BulkJudgeDeps['call'];
+    await runBulkJudge(id, {
+      ledger, call,
+      resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as never }),
+      gate: async () => ({ runId: 'g', blockedReason: null }),
+      report: () => {}, bookSpend: () => {}, budgetAllows: () => true,
+      scanSecret: (t) => (t.includes('sk-live-') ? 'api_key' : null), maskVault: (t) => t,
+      ...over,
+    });
+    return { id, seq };
+  }
+
+  it('shows only the field the check refuses, not the one whose shortcode the field already holds', async () => {
+    expect(verdictTextRefusal(verdict, before, { listForm: 'woocommerce', storeHost: HOST, startDomains: [] })).toBe('shortcode_changed');
+    const { id, seq } = await judge(verdict);
+    const shown = ledger.getPreview(id).find((p) => p.seq === seq)!;
+    expect([shown.change, shown.error]).toEqual(['invalid', 'shortcode_changed']);
+    expect(shown.refusedValues).toEqual([{ field: 'short_description', value: verdict.short_description }]);
+  });
+
+  it('shows each field the check refuses when both are', async () => {
+    const twice = { description: '[box a="1&2"]x[/box]', short_description: verdict.short_description };
+    const { id, seq } = await judge(twice);
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([
+      { field: 'description', value: twice.description }, { field: 'short_description', value: twice.short_description },
+    ]);
+  });
+
+  it('keeps nothing to show where the value carries a credential', async () => {
+    const secret = await judge({ ...verdict, short_description: '[pbutton url="/b?k=sk-live-1&y=2"]Los[/pbutton]' });
+    const s = ledger.getPreview(secret.id).find((p) => p.seq === secret.seq)!;
+    expect([s.error, s.refusedValues]).toEqual(['shortcode_changed', undefined]);
+  });
+
+  it('keeps nothing to show where the value carries a vault value', async () => {
+    const vaulted = await judge(verdict, { maskVault: (t) => t.replace('/b?x=1', '***') });
+    const v = ledger.getPreview(vaulted.id).find((p) => p.seq === vaulted.seq)!;
+    expect([v.error, v.refusedValues]).toEqual(['shortcode_changed', undefined]);
+  });
+
+  it('keeps nothing to show where the verdict is one an external run refuses as a write', async () => {
+    const { id, seq } = await judge({ ...verdict, extra: { nested: true } });
+    const shown = ledger.getPreview(id).find((p) => p.seq === seq)!;
+    expect([shown.error, shown.refusedValues]).toEqual(['shortcode_changed', undefined]);
+  });
+
+  it('CONTROL: a verdict refused for another reason keeps no value either', async () => {
+    const { id, seq } = await judge({ ...verdict, short_description: '<p>neu <a href="https://evil.example/x">x</a></p>' });
+    const shown = ledger.getPreview(id).find((p) => p.seq === seq)!;
+    expect([shown.error, shown.refusedValues]).toEqual(['new_link_domain', undefined]);
+  });
+
+  it('refuses a value for its link, script or hidden character before its shortcode, so none is offered to paste', () => {
+    const sc = '[box a="1&2"]x[/box]';
+    const at = (after: string): string => {
+      const r = checkMarkup({ before: '<p>kurz</p>', after, storeHost: HOST, startDomains: [] });
+      return r.ok ? 'ok' : r.reason;
+    };
+    expect(at(sc)).toBe('shortcode_changed');
+    expect(at(`${sc}<p><a href="https://evil.example/x">x</a></p>`)).toBe('new_link_domain');
+    expect(at(`${sc}<script>x()</script>`)).toBe('element_not_allowed');
+    expect(at(`<p>a‮b</p>${sc}`)).toBe('hidden_char');
+    // Across fields: the other field's reason wins, whichever field comes first.
+    const run = { listForm: 'woocommerce' as const, storeHost: HOST, startDomains: [] as string[] };
+    expect(verdictTextRefusal({ description: sc, short_description: '<p><a href="https://evil.example/x">x</a></p>' }, before, run)).toBe('new_link_domain');
+    expect(verdictTextRefusal({ description: sc, short_description: '<p>neu</p>' }, before, run)).toBe('shortcode_changed');
   });
 });
 

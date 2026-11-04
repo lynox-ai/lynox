@@ -428,9 +428,9 @@ export interface BulkTarget {
 	shopAddedMarkup?: true | undefined;
 	/** Written, and the store kept the description otherwise than sent, without outside markup. */
 	hostRewrote?: true | undefined;
-	/** Refused for `shortcode_changed`: the field and its whole planned value, for the owner to copy
-	 *  into the shop (1130). Set only where it holds. */
-	refusedValue?: { field: string; value: string } | undefined;
+	/** Refused for `shortcode_changed`: each field the shortcode check refuses, with its whole
+	 *  planned value, for the owner to copy into the shop (1130). Set only where one holds. */
+	refusedValues?: { field: string; value: string }[] | undefined;
 }
 
 /** How much of a long value the preview shows before „show the whole text“ (ux U-103). */

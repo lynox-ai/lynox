@@ -464,8 +464,11 @@
 											{/if}
 											{#if target.change === 'invalid' && target.error}
 												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n)}</p>
-												{#if target.error === 'shortcode_changed' && target.refusedValue}
-													<BulkRefusedValue value={target.refusedValue.value} />
+												{#if target.error === 'shortcode_changed' && target.refusedValues}
+													{#each target.refusedValues as { field, value } (field)}
+														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle">{bulkVisibleText(field)}:</div>{/if}
+														<BulkRefusedValue {value} />
+													{/each}
 												{/if}
 											{/if}
 											{#if approving && (target.deselected || writes(target))}

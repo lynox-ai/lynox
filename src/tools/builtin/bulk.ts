@@ -52,7 +52,7 @@ function formatUsd(usd: number, round: 'down' | 'nearest' = 'nearest'): string {
 
 /** What the model reads when a target is left out for `shortcode_changed` (1130, U-103): the way
  *  out, not only the diagnosis. The way out is the preview, which shows the owner the whole
- *  planned text to copy (`refusedValue`); the model points there and writes no text of its own,
+ *  planned text to copy (`refusedValues`); the model points there and writes no text of its own,
  *  since three wordings that asked it to copy or leave the link failed in a real-model eval. */
 export const SHORTCODE_CHANGED_NOTE = 'shortcode_changed: the new text has a [shortcode] containing &, < or > that lynox cannot write. ' +
   'The preview shows the owner the whole new text exactly as planned, to copy into the shop themselves. Tell the owner that. ' +

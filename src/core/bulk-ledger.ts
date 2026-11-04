@@ -24,7 +24,7 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, prin
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
-import { checkMarkup, droppedTagsOf, endsClosed, holdsShortcodeMarkup, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
+import { checkMarkup, droppedTagsOf, endsClosed, shortcodeRefusalOf, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
@@ -566,10 +566,11 @@ export interface PreviewTarget {
    *  and removes, each with its full value (PRD shopify-preset §20.2 item 5, M3). Computed here
    *  from the parser's tree, so the view shows it and computes nothing. */
   markupChanges?: FieldMarkupChange[] | undefined;
-  /** A target refused for `shortcode_changed` (1130): the HTML field it is about with its whole
-   *  planned value, as the planner wrote it. Nothing is written for it, so the owner copies this
-   *  value into the shop themselves. Set only where it holds. */
-  refusedValue?: { field: string; value: string } | undefined;
+  /** A target refused for `shortcode_changed` (1130): each HTML field whose value the shortcode
+   *  check refuses against that field's before-image, with its whole value as the planner or the
+   *  judge wrote it. Nothing is written for the target, so the owner copies these values into the
+   *  shop themselves. Set only where one holds. */
+  refusedValues?: { field: string; value: string }[] | undefined;
   /** Written, and its read-back held markup the write never sent (PRD shopify-preset §21.2
    *  item 6): the target the halt `markupAddedByShop` is about. Set only where it holds. */
   shopAddedMarkup?: true | undefined;
@@ -756,6 +757,16 @@ function onlySentFields(before: BeforeImage, sent: BeforeImage): BeforeImage {
 
 function isPlainRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Whether the shortcode check refuses this value of one field. A value the parser cannot read
+ *  is refused by `checkMarkup` for another reason, so it is not one the preview shows to copy. */
+function refusesShortcode(value: string, was: string | null): boolean {
+  try {
+    return shortcodeRefusalOf(value, was) !== null;
+  } catch {
+    return false;
+  }
 }
 
 /** The target paths an external run's stored contract grants. */
@@ -1537,12 +1548,16 @@ export class BulkLedger {
           return c.added.length + c.removed.length > 0 ? [c] : [];
         })
         : [];
-      // The field a `shortcode_changed` refusal is about, with the whole value the planner wrote.
-      const refusedField = r.change === 'invalid' && r.error === 'shortcode_changed' && after !== null && typeof after === 'object'
-        ? htmlFields.find((f) => { const v = (after as Record<string, unknown>)[f]; return typeof v === 'string' && holdsShortcodeMarkup(v); })
-        : undefined;
-      const refusedValue = refusedField === undefined ? undefined
-        : { field: refusedField, value: (after as Record<string, unknown>)[refusedField] as string };
+      // The fields a `shortcode_changed` refusal is about, each with the whole value written for it:
+      // only those the shortcode check refuses against their own before-image, so a shortcode a
+      // field already holds does not stand in for the one refused in another field.
+      const refusedValues = r.change === 'invalid' && r.error === 'shortcode_changed' && after !== null && typeof after === 'object'
+        ? htmlFields.flatMap((f) => {
+          const value = (after as Record<string, unknown>)[f];
+          const was = prior !== null && typeof prior === 'object' ? (prior as Record<string, unknown>)[f] : null;
+          return typeof value === 'string' && refusesShortcode(value, typeof was === 'string' ? was : null) ? [{ field: f, value }] : [];
+        })
+        : [];
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
@@ -1551,7 +1566,7 @@ export class BulkLedger {
         ...(r.host_rewrote === 1 ? { hostRewrote: true as const } : {}),
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
-        ...(refusedValue !== undefined ? { refusedValue } : {}),
+        ...(refusedValues.length > 0 ? { refusedValues } : {}),
       };
     });
   }
@@ -2797,17 +2812,23 @@ export class BulkLedger {
    * verdict, and only while the run is `planned`: a loop whose claim expired cannot overwrite
    * the verdict of the loop that took it over, and a verdict in flight does not write into a run
    * that was superseded (PRD bulk-loop §3.1).
+   *
+   * A verdict refused for `shortcode_changed` keeps the values the judge wrote (`refused`), as
+   * the plan's own refusal keeps the plan: the preview shows them to the owner to copy into the
+   * shop (1130). Nothing reads them as a write, since the target is invalid.
    */
-  recordJudgement(runId: string, seq: number, token: string, verdict: { after: unknown } | { invalid: BulkInvalidReason }, now: number = Date.now()): boolean {
+  recordJudgement(runId: string, seq: number, token: string, verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown> | undefined }, now: number = Date.now()): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND judge_claim_token = ? AND judged_at IS NULL AND change != 'invalid'
       AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND phase = 'planned')`;
     const at = new Date(now).toISOString();
     return db.transaction((): boolean => {
       if ('invalid' in verdict) {
+        const kept = verdict.invalid === 'shortcode_changed' && verdict.refused !== undefined
+          ? this.engineDb.enc(JSON.stringify(verdict.refused)) : null;
         return db.prepare(
-          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
-        ).run(verdict.invalid, at, runId, seq, token, runId).changes === 1;
+          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, after_planned = COALESCE(?, after_planned), judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
+        ).run(verdict.invalid, kept, at, runId, seq, token, runId).changes === 1;
       }
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;

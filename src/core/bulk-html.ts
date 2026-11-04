@@ -301,10 +301,18 @@ function refused(reason: MarkupRefusal, detail: string): MarkupCheckResult {
   return { ok: false, reason, detail: detail.length > DETAIL_MAX ? `${detail.slice(0, DETAIL_MAX)}…` : detail };
 }
 
-/** A shortcode's own tag, opening or closing: `[name]`, `[name attr="…"]`, `[/name]`. */
-const SHORTCODE_TAG = /\[\/?[A-Za-z][\w-]*(?:[\s/][^[\]]*)?\]/g;
-/** A paired shortcode and what it encloses, which its handler reads as a string too. */
-const SHORTCODE_PAIR = /\[([A-Za-z][\w-]*)(?:[\s/][^[\]]*)?\]([\s\S]*?)\[\/\1\]/g;
+/** A shortcode's own tag, opening or closing: `[name]`, `[name attr="…"]`, `[/name]`. Taken as any
+ *  text from a `[` to the next `]`, not by WordPress's grammar for a name: a store registers names
+ *  with digits, `_`, `:` or `.` first or inside (`[3d-gallery]`, `[ns:code]`), writes `=` right after
+ *  the name (`[x="…"]`) and allows `[` in an attribute, and a narrower pattern let those pass
+ *  unchecked. Bracketed prose that is no shortcode is read as one too, so it is refused rather than
+ *  rewritten when it changes. The two brackets of a CDATA opener (`<![CDATA[`) are not a shortcode's:
+ *  the shop would read one only under a shortcode named `CDATA`, and the tree checks below are what
+ *  judge the section's text. */
+const SHORTCODE_TAG = /(?<!<!|<!\[CDATA)\[[^\]]*\]/g;
+/** A paired shortcode and what it encloses, which its handler reads as a string too. The name is
+ *  anything WordPress allows in one: no whitespace and none of `[ ] / = < > & " '`. */
+const SHORTCODE_PAIR = /(?<!<!|<!\[CDATA)\[([^\s[\]/=<>&"']+)[^\]]*\]([\s\S]*?)\[\/\1\]/g;
 
 /** The text of every shortcode in a value: its tags, and the text it encloses without HTML tags
  *  (a `<img/>` that becomes `<img>` reads the same; an `&` that becomes `&amp;` does not). */
@@ -312,12 +320,6 @@ function shortcodeTextOf(value: string): string[] {
   const tags = value.match(SHORTCODE_TAG) ?? [];
   const enclosed = [...value.matchAll(SHORTCODE_PAIR)].map((m) => (m[2] ?? '').replace(/<[^<>]*>/g, ''));
   return [...tags, ...enclosed];
-}
-
-/** Whether a value holds a shortcode whose text carries `&`, `<` or `>`: the field a
- *  `shortcode_changed` refusal is about (1130). */
-export function holdsShortcodeMarkup(value: string): boolean {
-  return shortcodeTextOf(value).some((s) => /[&<>]/.test(s));
 }
 
 /** The first shortcode text the canonical form does not keep byte for byte, or null. */
@@ -351,6 +353,18 @@ export function shortcodeReferenceNotHeld(value: string, before: string): string
   return null;
 }
 
+/**
+ * Why writing this value of one HTML field would change a shortcode in it, or null: the
+ * `shortcode_changed` refusal of `checkMarkup`, for one field against that field's before-image.
+ * The preview asks it per field, so the value it shows the owner is the one refused (1130).
+ */
+export function shortcodeRefusalOf(after: string, before: string | null): string | null {
+  const changed = shortcodeChangedBy(after, canonicalHtml(after));
+  if (changed !== null) return `Writing would change the shortcode text: ${changed}`;
+  const spelled = shortcodeReferenceNotHeld(after, before ?? '');
+  return spelled === null ? null : `The shortcode spells a character as a reference the shop reads literally: ${spelled}`;
+}
+
 /** Whether a verdict's or a plan's value for an HTML field adds markup the owner does not read. */
 export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
   try {
@@ -361,19 +375,7 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     if (!endsClosed(input.after)) {
       return refused('not_canonical', 'The value leaves a tag, a comment, raw text or an element open at its end.');
     }
-    // A shortcode (`[name attr="…"]…[/name]`) is read by the shop's server from the stored string,
-    // not by an HTML parser: the canonical form the run sends turns its `&`, `<` and `>` into
-    // entities or cuts it at a `<`, so the shop would read another shortcode. Refused, not
-    // rewritten (U-103).
-    const changed = shortcodeChangedBy(input.after, canonical);
-    if (changed !== null) {
-      return refused('shortcode_changed', `Writing would change the shortcode text: ${changed}`);
-    }
     const before = input.before ?? '';
-    const spelled = shortcodeReferenceNotHeld(input.after, before);
-    if (spelled !== null) {
-      return refused('shortcode_changed', `The shortcode spells a character as a reference the shop reads literally: ${spelled}`);
-    }
     // What the fragment drops, a multiset against the before-image's own, byte for byte. A stretch
     // the before-image does not hold as often is refused: it is the value's own, and the owner
     // never reads it. One it holds is passed, attributed or not, because it never reaches the shop:
@@ -391,7 +393,16 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     // Each tree of the after-state against the before-image's tree of the same kind.
     const raw = checkTrees(parseHtmlFragment(before), parseHtmlFragment(input.after), input);
     if (!raw.ok) return raw;
-    return checkTrees(parseHtmlFragment(canonicalHtml(before)), parseHtmlFragment(canonical), input);
+    const tree = checkTrees(parseHtmlFragment(canonicalHtml(before)), parseHtmlFragment(canonical), input);
+    if (!tree.ok) return tree;
+    // A shortcode (`[name attr="…"]…[/name]`) is read by the shop's server from the stored string,
+    // not by an HTML parser: the canonical form the run sends turns its `&`, `<` and `>` into
+    // entities or cuts it at a `<`, so the shop would read another shortcode. Refused, not
+    // rewritten (U-103). Asked LAST: the preview offers a value refused for this reason to the
+    // owner to paste into the shop by hand, so it must have passed every other check — a link to
+    // another domain, a script or a hidden character is refused for its own reason first.
+    const shortcode = shortcodeRefusalOf(input.after, input.before);
+    return shortcode === null ? tree : refused('shortcode_changed', shortcode);
   } catch {
     // parse5 does not throw on any string; this is the fixed reason should it ever.
     return refused('not_canonical', 'The value could not be read as HTML.');
