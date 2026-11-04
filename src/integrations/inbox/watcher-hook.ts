@@ -19,7 +19,7 @@
 
 import type { MailEnvelope } from '../mail/provider.js';
 import { resolveThreadKey } from '../mail/thread-key.js';
-import type { InboxChannel } from '../../types/index.js';
+import type { InboxChannel, InboxItem } from '../../types/index.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxQueuePayload } from './runner.js';
@@ -108,6 +108,66 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     ? new Set([...opts.folderBlacklist].map((f) => f.toLowerCase()))
     : undefined;
   const disabledAccounts = opts.disabledAccounts;
+
+  /**
+   * A new message in a thread the inbox already holds (PRD inbox-user-rules E6). It is stored as a
+   * thread message after the same sensitive check a first mail gets: without its text on `skip`,
+   * masked on `mask`. A `replied` item opens again for it, unless it is an automatic reply; the
+   * bucket stays, and no rule or classifier runs. Without a Message-ID, or when the message is
+   * stored already, nothing happens. Only Gmail and Graph have threads: on IMAP every mail is an
+   * item of its own and never comes here.
+   */
+  const recordFollowUp = (existing: InboxItem, env: MailEnvelope, mode: SensitiveMode): void => {
+    const messageId = env.messageId;
+    if (messageId === undefined || messageId.length === 0) return;
+    if (opts.state.hasThreadMessage(existing.tenantId, existing.accountId, messageId)) return;
+    const fields = envelopeToItemInputFields(env);
+    const sensitive = analyzeSensitiveContent({ subject: env.subject, body: env.snippet });
+    let subject = fields.subject ?? '';
+    let snippet = fields.snippet;
+    if (sensitive.isSensitive && mode === 'skip') {
+      snippet = undefined;
+    } else if (sensitive.isSensitive && mode === 'mask') {
+      const masked = envelopeToItemInputFields({ ...env, subject: sensitive.masked.subject, snippet: sensitive.masked.body });
+      subject = masked.subject ?? '';
+      snippet = masked.snippet;
+    }
+    const input: ThreadMessageInput = {
+      tenantId: existing.tenantId,
+      accountId: existing.accountId,
+      threadKey: existing.threadKey,
+      messageId,
+      fromAddress: fields.fromAddress ?? '',
+      subject,
+      direction: 'inbound',
+      inboxItemId: existing.id,
+    };
+    if (fields.fromName !== undefined) input.fromName = fields.fromName;
+    if (fields.inReplyTo !== undefined) input.inReplyTo = fields.inReplyTo;
+    if (fields.mailDate !== undefined) input.mailDate = fields.mailDate;
+    if (snippet !== undefined) input.snippet = snippet;
+    const reopened = opts.state.runInTransaction(() => {
+      opts.state.insertThreadMessage(input);
+      if (existing.userAction !== 'replied' || env.isAutoReply) return false;
+      if (!opts.state.reopenReplied(existing.id, existing.tenantId)) return false;
+      opts.state.appendAudit({
+        tenantId: existing.tenantId,
+        itemId: existing.id,
+        action: 'reopened_on_reply',
+        actor: 'system',
+        payloadJson: JSON.stringify({
+          trigger: 'inbound_mail',
+          ...(sensitive.isSensitive ? { sensitive_categories: sensitive.categories } : {}),
+        }),
+      });
+      return true;
+    });
+    if (reopened && opts.notifier && existing.bucket === 'requires_user') {
+      const item = opts.state.getItem(existing.id, existing.tenantId);
+      if (item) void opts.notifier.notifyNewItem(item);
+    }
+  };
+
   return async (accountId, env): Promise<InboxHookOutcome> => {
     if (disabledAccounts?.has(accountId)) return 'ignored';
     if (folderBlacklistLower?.has(env.folder.toLowerCase())) return 'ignored';
@@ -149,6 +209,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           });
         });
       }
+      recordFollowUp(existing, env, sensitiveMode);
       return 'duplicate';
     }
 

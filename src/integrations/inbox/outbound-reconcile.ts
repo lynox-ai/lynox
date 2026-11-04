@@ -34,6 +34,12 @@ export function reconcileOutboundReply(
   // so the rare cross-account + no-Message-ID combination stays uncovered.
   let item = ctx.originalMessageId ? state.findItemByMessageId(ctx.originalMessageId) : null;
   let matchedBy = 'message_id';
+  // A reply to a later message of the thread (a follow-up the inbox stored, which reopened the
+  // item): its Message-ID is a thread message's, not the item's.
+  if (!item && ctx.originalMessageId) {
+    item = state.findItemByThreadMessageId(ctx.originalMessageId);
+    matchedBy = 'thread_message_id';
+  }
   if (!item && ctx.originalThreadKey) {
     item = state.findItemByThread(accountId, ctx.originalThreadKey);
     matchedBy = 'thread_key';

@@ -519,6 +519,49 @@ export class InboxStateDb {
   }
 
   /**
+   * The item whose thread holds a message with this Message-ID — a later message of the thread,
+   * not the one the item was filed from (`findItemByMessageId` covers that). Keyed on the
+   * Message-ID alone, for the same reason: a reply can leave from another account.
+   */
+  findItemByThreadMessageId(messageId: string): InboxItem | null {
+    if (!messageId) return null;
+    const row = this.db
+      .prepare<[string], ItemRow>(
+        `SELECT i.* FROM inbox_thread_messages t
+           JOIN inbox_items i
+             ON i.tenant_id = t.tenant_id AND i.account_id = t.account_id AND i.thread_key = t.thread_key
+          WHERE t.message_id = ?
+          ORDER BY i.classified_at DESC LIMIT 1`,
+      )
+      .get(messageId);
+    return row ? rowToItem(row) : null;
+  }
+
+  /** Whether the thread store already holds this message for this account. */
+  hasThreadMessage(tenantId: string, accountId: string, messageId: string): boolean {
+    const row = this.db
+      .prepare<[string, string, string], { n: number }>(
+        'SELECT 1 AS n FROM inbox_thread_messages WHERE tenant_id = ? AND account_id = ? AND message_id = ? LIMIT 1',
+      )
+      .get(tenantId, accountId, messageId);
+    return row !== undefined;
+  }
+
+  /**
+   * Open a `replied` item again (a new message came into its thread). Only a `replied` item: an
+   * archived or snoozed one keeps the user's choice. Returns whether the row changed.
+   */
+  reopenReplied(id: string, tenantId: string): boolean {
+    const result = this.db
+      .prepare<[string, string], unknown>(
+        `UPDATE inbox_items SET user_action = NULL, user_action_at = NULL
+          WHERE id = ? AND tenant_id = ? AND user_action = 'replied'`,
+      )
+      .run(id, tenantId) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /**
    * v11 thread-walk: all items sharing a thread_key, newest-first.
    *
    * PRD-INBOX-PHASE-3 §"Reading-Pane + Thread API" — `MailProvider.search`
