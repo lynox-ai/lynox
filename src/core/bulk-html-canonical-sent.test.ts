@@ -125,7 +125,7 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     expect(check('<p>[button url="/a?x=1&y=2"]Kaufen[/button]</p>')).toEqual({ ok: false, reason: 'shortcode_changed', detail: 'Writing would change the shortcode text: [button url="/a?x=1&y=2"]' });
     expect(check('[x a="b>c"]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
     expect(check('[x a="1 < 2"]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
-    expect(check('[embed]https://youtu.be/abc?t=1&list=x[/embed]')).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+    expect(check(`[embed]https://${HOST}/v?t=1&list=x[/embed]`)).toMatchObject({ ok: false, reason: 'shortcode_changed' });
     expect(shortcodeChangedBy('[embed]a&b[/embed]', canonicalHtml('[embed]a&b[/embed]'))).toBe('a&b');
   });
 
@@ -546,5 +546,74 @@ describe('a write sends what the ledger stored, and never raw HTML (1130)', () =
     const out = await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: () => s.writer });
     expect(out.status).toBe('done');
     expect(s.sent).toEqual([{ description: '<p>a<br>b</p>' }, { description: own }]);
+  });
+});
+
+// 1222: to the HTML trees a shortcode is text, but the shop's server prints its attributes and what
+// it encloses into embeds, buttons and frames. Its links are held to the same domains as an HTML link.
+describe('a link inside a shortcode is held to the run\'s domains (1222)', () => {
+  const check = (after: string, before: string | null = null, startDomains: string[] = []) =>
+    checkMarkup({ before, after, storeHost: HOST, startDomains });
+  const foreign = { ok: false, reason: 'new_link_domain', detail: 'evil.example' };
+
+  it('refuses a foreign domain in every form WordPress reads an attribute', () => {
+    for (const after of [
+      '[video src="https://evil.example/a.mp4"]',
+      "[video src='https://evil.example/a.mp4']",
+      '[video src=https://evil.example/a.mp4]',
+      '[video "https://evil.example/a.mp4"]',
+      '[video https://evil.example/a.mp4]',
+      '[iframe src="//evil.example/x" /]',
+      '<p>Text [audio mp3="https://Evil.Example./a.mp3"] mehr</p>',
+      '[video\u00a0src="https://evil.example/a.mp4"]',
+    ]) expect(check(after), after).toEqual(foreign);
+  });
+
+  it('refuses a foreign domain in the text a pair encloses', () => {
+    expect(check('[embed]https://evil.example/x[/embed]')).toEqual(foreign);
+    expect(check('<p>[embed] <strong>//evil.example/x</strong> [/embed]</p>')).toEqual(foreign);
+  });
+
+  it('refuses a scheme a link may not have, as written and as the page decodes it', () => {
+    expect(check('[button url="javascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    expect(check('[button url="  javascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    expect(check('[button url="&#x6a;avascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    expect(check('[link]javascript:alert(1)[/link]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    expect(check('[button url="java\tscript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_control_char' });
+  });
+
+  it('asks before shortcode_changed, so a value offered to copy carries no foreign link', () => {
+    expect(check('[button url="https://evil.example/?a=1&b=2"]Go[/button]')).toEqual(foreign);
+    // Twin: the same shortcode on the store's own domain is refused for its `&` alone.
+    expect(check(`[button url="https://${HOST}/?a=1&b=2"]Go[/button]`)).toMatchObject({ ok: false, reason: 'shortcode_changed' });
+  });
+
+  it('passes the store, a relative path, a start domain, and what the before-image already links to', () => {
+    expect(check(`[video src="https://${HOST}/a.mp4"]`)).toEqual({ ok: true });
+    expect(check(`[video src="https://cdn.${HOST}/a.mp4"]`)).toEqual({ ok: true });
+    expect(check('[button url="/sale/tee"]Zum Angebot[/button]')).toEqual({ ok: true });
+    expect(check('[video src="https://evil.example/a.mp4"]', null, ['evil.example'])).toEqual({ ok: true });
+    expect(check('<p>x [video src="https://evil.example/b.mp4"]</p>', '<p><a href="https://evil.example/">x</a></p>')).toEqual({ ok: true });
+    expect(check('<p>[embed]https://evil.example/b[/embed]</p>', '<p>[video src="https://evil.example/a.mp4"]</p>')).toEqual({ ok: true });
+    // Prose in brackets is not a link.
+    for (const after of ['<p>[Hinweis: neu]</p>', '<p>[siehe unten] und [Preis 20 CHF]</p>', '[button size=large]Zum Angebot[/button]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('passes a value the before-image\'s shortcodes hold as often, and not one copy more', () => {
+    const own = '[x a="note:b"]';
+    expect(check(`<p>${own}</p>`, `<p>${own}</p>`)).toEqual({ ok: true });
+    expect(check(`<p>${own}${own}</p>`, `<p>${own}</p>`)).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // Twin: without the before-image the one copy is refused.
+    expect(check(`<p>${own}</p>`)).toMatchObject({ ok: false, reason: 'url_scheme' });
+  });
+
+  it('reads values of many attributes, quotes and colons in linear time', () => {
+    for (const value of [`[x ${'"a'.repeat(100_000)}]`, `[x ${'a='.repeat(100_000)}]`, `[x ${"a='".repeat(60_000)}]`, `[e]${'a:'.repeat(100_000)}[/e]`, `[e]${' //'.repeat(60_000)}[/e]`]) {
+      const start = performance.now();
+      check(value);
+      expect(performance.now() - start, `${value.slice(0, 12)}… of ${value.length}`).toBeLessThan(3000);
+    }
   });
 });

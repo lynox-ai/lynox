@@ -544,6 +544,11 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     if (!raw.ok) return raw;
     const tree = checkTrees(parseHtmlFragment(canonicalHtml(before)), parseHtmlFragment(canonical), input);
     if (!tree.ok) return tree;
+    // A link inside a shortcode is text to the trees above, but the shop's server turns it into an
+    // embed, a button or a frame: held to the same domains as an HTML link (1222). Before
+    // `shortcode_changed`, so a value offered to copy never carries one.
+    const shortcodeLinks = checkShortcodeLinks(input);
+    if (!shortcodeLinks.ok) return shortcodeLinks;
     // A shortcode (`[name attr="…"]…[/name]`) is read by the shop's server from the stored string,
     // not by an HTML parser: the canonical form the run sends turns its `&`, `<` and `>` into
     // entities or cuts it at a `<`, so the shop would read another shortcode. Refused, not
@@ -822,6 +827,69 @@ function hostAsWritten(value: string): string | undefined {
   const host = authority.slice(authority.lastIndexOf('@') + 1);
   if (host.startsWith('[')) return host.slice(0, host.indexOf(']') + 1);
   return host.replace(/:\d*$/, '');
+}
+
+// --- Links inside shortcodes (1222).
+
+/** WordPress's own reading of a shortcode's attributes (`get_shortcode_atts_regex`): a named value
+ *  in double, single or no quotes, or a positional one. */
+const SHORTCODE_ATTRIBUTE = /([\w-]+)\s*=\s*"([^"]*)"(?:\s|$)|([\w-]+)\s*=\s*'([^']*)'(?:\s|$)|([\w-]+)\s*=\s*([^\s'"]+)(?:\s|$)|"([^"]*)"(?:\s|$)|'([^']*)'(?:\s|$)|(\S+)(?:\s|$)/g;
+
+/** A token of a shortcode's enclosed text that reads as a link: a scheme with no space after its
+ *  colon (`https://…`, `javascript:…`), or a protocol-relative `//…`. "Hinweis: neu" is prose. */
+const ENCLOSED_LINK = /(?:^|[\s>"'(])((?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)[^\s<>"'[\]]+)/g;
+
+/** The values a shortcode in this text may turn into a link: every attribute value of an opening
+ *  tag, and every link-shaped token of the text a pair encloses. */
+function shortcodeLinksOf(value: string): string[] {
+  const out: string[] = [];
+  for (const tag of shortcodeTagsOf(value)) {
+    // WordPress reads a no-break and a zero-width space between attributes as a space.
+    const inner = tag.slice(1, -1).replace(/[\u00a0\u200b]/g, ' ');
+    if (inner.startsWith('/')) continue;
+    const rest = inner.slice(nameRunAt(tag, 0, tag.length - 1)).replace(/\/\s*$/, '');
+    for (const m of rest.matchAll(SHORTCODE_ATTRIBUTE)) {
+      const v = m[2] ?? m[4] ?? m[6] ?? m[7] ?? m[8] ?? m[9];
+      if (v !== undefined && v.trim() !== '') out.push(v);
+    }
+  }
+  for (const enclosed of shortcodeEnclosedOf(value)) {
+    for (const m of enclosed.matchAll(ENCLOSED_LINK)) out.push(m[1]!);
+  }
+  return out;
+}
+
+/** A value as written and as a browser reads it once the shop prints it into an attribute: with
+ *  its character references decoded (`&#x6a;avascript:` is `javascript:`), trimmed as a URL is. */
+function linkForms(value: string): string[] {
+  const decoded = value.includes('&') ? textBelow(parseHtmlFragment(value.replace(/</g, '&lt;'))) : value;
+  return [...new Set([value.trim(), decoded.trim()])];
+}
+
+/**
+ * Whether every link a shortcode of the value may print points where an HTML link may: the store,
+ * a start domain, or a domain the before-image already links to, in HTML or in a shortcode. A value
+ * the before-image's shortcodes hold as often is the owner's own and passes as it stands.
+ */
+function checkShortcodeLinks(input: MarkupCheckInput): MarkupCheckResult {
+  const before = input.before ?? '';
+  const held = counts(shortcodeLinksOf(before));
+  const linked = linkedDomains(markupOf(parseHtmlFragment(before)).triples, input.storeHost);
+  for (const v of held.keys()) {
+    for (const form of linkForms(v)) {
+      const target = linkTarget(form, input.storeHost);
+      if (target.ok) linked.add(`${target.kind}:${target.domain}`);
+    }
+  }
+  for (const v of shortcodeLinksOf(input.after)) {
+    const n = held.get(v) ?? 0;
+    if (n > 0) { held.set(v, n - 1); continue; }
+    for (const form of linkForms(v)) {
+      const link = checkLink(form, input, linked);
+      if (!link.ok) return link;
+    }
+  }
+  return { ok: true };
 }
 
 // --- Plain-text fields.
