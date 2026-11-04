@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -46,6 +46,26 @@ afterEach(() => {
 });
 
 describe('a restore where the platform has no fd-relative open', () => {
+  it('stages two files of one folder, sweeps a crashed restore\'s temp, and keeps the modes', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'x backed up');
+    writeFileSync(join(data, 'memory', 'y.md'), 'y backed up');
+    const m = new BackupManager(data, { backupDir: join(tmp, 'backups'), retentionDays: 30, encrypt: false }, null);
+    const created = await m.createBackup();
+    expect(created.success).toBe(true);
+    writeFileSync(join(data, 'memory', 'x.md'), 'x live');
+    writeFileSync(join(data, 'memory', 'y.md'), 'y live');
+    const stale = join(data, 'memory', 'x.md.0123456789abcdef.restore-staging');
+    writeFileSync(stale, 'left by a crash');
+    unsupported.dir = realpathSync(data);
+    const result = await m.restoreBackup(created.path, { allowUnverified: true });
+    expect(result.success, String(result.error)).toBe(true);
+    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('x backed up');
+    expect(readFileSync(join(data, 'memory', 'y.md'), 'utf8')).toBe('y backed up');
+    expect(readdirSync(join(data, 'memory')).filter(n => n.includes('restore-staging'))).toEqual([]);
+    expect(statSync(join(data, 'memory', 'x.md')).mode & 0o777).toBe(0o600);
+  });
+
+
   it('writes the data-dir set by name, and leaves no temp behind', async () => {
     writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
     const m = new BackupManager(data, { backupDir: join(tmp, 'backups'), retentionDays: 30, encrypt: false }, null);

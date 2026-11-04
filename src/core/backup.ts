@@ -375,12 +375,18 @@ function stageByName(root: string, source: Iterable<StageEntry>): StagedWrite {
     for (const { tmp } of staged.slice(from)) { try { rmSync(tmp, { force: true }); } catch { /* best-effort */ } }
   };
   let bytes = 0;
+  // Each folder is swept once, before this restore writes a temp into it: its own temps have the
+  // shape the sweep removes.
+  const swept = new Set<string>();
   try {
     for (const entry of source) {
       const dest = join(root, entry.rel);
       mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
-      for (const name of readdirSync(dirname(dest))) {
-        if (STAGING_TEMP.test(name) && !lstatSync(join(dirname(dest), name)).isDirectory()) rmSync(join(dirname(dest), name), { force: true });
+      if (!swept.has(dirname(dest))) {
+        swept.add(dirname(dest));
+        for (const name of readdirSync(dirname(dest))) {
+          if (STAGING_TEMP.test(name) && !lstatSync(join(dirname(dest), name)).isDirectory()) rmSync(join(dirname(dest), name), { force: true });
+        }
       }
       const tmp = `${dest}.${randomBytes(8).toString('hex')}.restore-staging`;
       writeFileSync(tmp, entry.data, { mode: 0o600, flag: 'wx' });
@@ -418,7 +424,7 @@ function stageByName(root: string, source: Iterable<StageEntry>): StagedWrite {
 
 /** An error's text without the fd paths the anchored writes go through: the user reads it, and they name no file. */
 function withoutFdPaths(message: string): string {
-  return message.replace(/\/proc\/self\/fd\/\d+\//g, '');
+  return message.replace(/\/(?:proc\/(?:self|thread-self|\d+)|dev)\/fd\/\d+(?:\/|(?=['"\s)]|$))/g, '');
 }
 
 /** The nearest folder below the anchor that exists, from `relDir` up; '' is the anchor itself. */
