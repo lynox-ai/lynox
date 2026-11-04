@@ -295,4 +295,10 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint g
     const { home } = sandbox();
     expect(start(home, { LYNOX_VAULT_KEY_SOURCE: 'env' }).keySource).toBe('minted');
   });
+
+  it('says none over an existing vault, also when the environment said env', () => {
+    const { home, lynox } = sandbox();
+    writeFileSync(join(lynox, 'vault.db'), 'encrypted');
+    expect(start(home, { LYNOX_VAULT_KEY_SOURCE: 'env' }).keySource).toBe('none');
+  });
 });
