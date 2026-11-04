@@ -17,7 +17,7 @@
 // canary cohort, and full-body fetching can land alongside the read-pane
 // integration in Phase 2.
 
-import type { MailEnvelope } from '../mail/provider.js';
+import type { MailAuthType, MailEnvelope } from '../mail/provider.js';
 import { resolveThreadKey } from '../mail/thread-key.js';
 import type { InboxChannel, InboxItem } from '../../types/index.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
@@ -41,8 +41,15 @@ function channelFromAccountId(_accountId: string): InboxChannel {
  * `MailStateDb.getAccount(id)`; tests pass a plain Map.
  */
 export interface AccountResolver {
-  resolve(accountId: string): { address: string; displayName: string } | null;
+  resolve(accountId: string): { address: string; displayName: string; authType?: MailAuthType | undefined } | null;
 }
+
+/**
+ * Providers whose watch envelope cannot tell an automatic reply: Graph's delta query carries no
+ * headers, so `isAutoReply` is always false there (`providers/oauth-graph.ts`, ENVELOPE_FIELDS).
+ * Before such an account reopens an item, the hook asks `confirmAutoReply`.
+ */
+const AUTO_REPLY_NOT_IN_ENVELOPE: ReadonlySet<MailAuthType> = new Set(['oauth_microsoft']);
 
 export interface HookQueue {
   enqueue(payload: InboxQueuePayload): boolean;
@@ -80,6 +87,13 @@ export interface InboxClassifierHookOptions {
    * whole inbox feature. Engine wiring populates from env.
    */
   disabledAccounts?: ReadonlySet<string> | undefined;
+  /**
+   * Reads the full message of an account whose envelope cannot tell an automatic reply
+   * (`AUTO_REPLY_NOT_IN_ENVELOPE`) and answers whether it is one. Asked only before a follow-up
+   * would reopen a replied item. Missing, or throwing, the item reopens: losing a customer's
+   * message weighs more than one needless notification.
+   */
+  confirmAutoReply?: ((accountId: string, env: MailEnvelope) => Promise<boolean>) | undefined;
 }
 
 /**
@@ -117,7 +131,12 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
    * stored already, nothing happens. Only Gmail and Graph have threads: on IMAP every mail is an
    * item of its own and never comes here.
    */
-  const recordFollowUp = (existing: InboxItem, env: MailEnvelope, mode: SensitiveMode, ownAddress: string): void => {
+  const recordFollowUp = async (
+    existing: InboxItem,
+    env: MailEnvelope,
+    mode: SensitiveMode,
+    account: { address: string; authType?: MailAuthType | undefined },
+  ): Promise<void> => {
     const messageId = env.messageId;
     if (messageId === undefined || messageId.length === 0) return;
     if (opts.state.hasThreadMessage(existing.tenantId, existing.accountId, messageId)) return;
@@ -146,15 +165,24 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     if (fields.inReplyTo !== undefined) input.inReplyTo = fields.inReplyTo;
     if (fields.mailDate !== undefined) input.mailDate = fields.mailDate;
     if (snippet !== undefined) input.snippet = snippet;
+    // Only a `replied` item opens; `reopenReplied` checks that again in its UPDATE.
+    let opens = existing.userAction === 'replied'
+      && !env.isAutoReply
+      // Our own mail coming back into the thread (a copy of the reply) is no new customer message.
+      && (fields.fromAddress ?? '').toLowerCase() !== account.address.toLowerCase()
+      // A message older than the reply (a backfill or a redelivery) did not come after it.
+      && !(fields.mailDate !== undefined && existing.userActionAt !== undefined
+        && fields.mailDate.getTime() <= existing.userActionAt.getTime());
+    if (opens && opts.confirmAutoReply && account.authType !== undefined && AUTO_REPLY_NOT_IN_ENVELOPE.has(account.authType)) {
+      try {
+        if (await opts.confirmAutoReply(existing.accountId, env)) opens = false;
+      } catch {
+        // Unknown: reopen (see `confirmAutoReply`).
+      }
+    }
     const reopened = opts.state.runInTransaction(() => {
       opts.state.insertThreadMessage(input);
-      // Only a `replied` item opens; `reopenReplied` checks that in the same UPDATE.
-      if (env.isAutoReply) return false;
-      // Our own mail coming back into the thread (a copy of the reply) is no new customer message.
-      if ((fields.fromAddress ?? '').toLowerCase() === ownAddress.toLowerCase()) return false;
-      // A message older than the reply (a backfill or a redelivery) did not come after it.
-      if (fields.mailDate !== undefined && existing.userActionAt !== undefined
-        && fields.mailDate.getTime() <= existing.userActionAt.getTime()) return false;
+      if (!opens) return false;
       if (!opts.state.reopenReplied(existing.id, existing.tenantId, fields.mailDate ?? new Date())) return false;
       opts.state.appendAudit({
         tenantId: existing.tenantId,
@@ -215,7 +243,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           });
         });
       }
-      recordFollowUp(existing, env, sensitiveMode, account.address);
+      await recordFollowUp(existing, env, sensitiveMode, account);
       return 'duplicate';
     }
 

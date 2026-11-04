@@ -4,7 +4,7 @@ import { InboxStateDb } from './state.js';
 import { InboxRulesLoader } from './rules-loader.js';
 import { createInboxClassifierHook, type AccountResolver, type HookQueue } from './watcher-hook.js';
 import { reconcileOutboundReply } from './outbound-reconcile.js';
-import type { MailAccountConfig, MailEnvelope } from '../mail/provider.js';
+import type { MailAccountConfig, MailAuthType, MailEnvelope } from '../mail/provider.js';
 import type { OutboundContext } from '../mail/context.js';
 import type { InboxBucket } from '../../types/index.js';
 import type { SensitiveMode } from './sensitive-content.js';
@@ -242,6 +242,64 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     });
     expect(inbox.getItem(mine)!.userAction).toBe('replied');
     expect(inbox.getItem(theirs)!.userAction).toBeUndefined();
+  });
+
+  describe('an account whose watch envelope cannot tell an automatic reply (Graph)', () => {
+    function hookFor(authType: MailAuthType, confirm: (id: string, env: MailEnvelope) => Promise<boolean>) {
+      return createInboxClassifierHook({
+        state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+        accounts: { resolve: (id: string) => (id === ACCOUNT.id ? { address: ACCOUNT.address, displayName: ACCOUNT.displayName, authType } : null) },
+        confirmAutoReply: confirm,
+      });
+    }
+
+    it('does not reopen when the fetched message is an automatic reply', async () => {
+      const id = seedReplied();
+      const confirm = vi.fn(async () => true);
+      await hookFor('oauth_microsoft', confirm)(ACCOUNT.id, envelope());
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(confirm.mock.calls[0]?.[0]).toBe(ACCOUNT.id);
+      expect(messageIds()).toEqual(['<first@x>', '<follow@x>']);
+      expect(inbox.getItem(id)!.userAction).toBe('replied');
+      expect(notifyNewItem).not.toHaveBeenCalled();
+    });
+
+    it('reopens when the fetched message is none', async () => {
+      const id = seedReplied();
+      const confirm = vi.fn(async () => false);
+      await hookFor('oauth_microsoft', confirm)(ACCOUNT.id, envelope());
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    });
+
+    it('reopens when the lookup fails', async () => {
+      const id = seedReplied();
+      const confirm = vi.fn(async () => { throw new Error('graph down'); });
+      await hookFor('oauth_microsoft', confirm)(ACCOUNT.id, envelope());
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    });
+
+    it('Gmail and IMAP never ask, their envelope tells', async () => {
+      for (const authType of ['oauth_google', 'imap'] as const) {
+        const id = seedReplied();
+        const confirm = vi.fn(async () => true);
+        await hookFor(authType, confirm)(ACCOUNT.id, envelope({ messageId: `<follow-${authType}@x>` }));
+        expect(confirm).not.toHaveBeenCalled();
+        expect(inbox.getItem(id)!.userAction).toBeUndefined();
+        mail.close();
+        mail = new MailStateDb({ path: ':memory:' });
+        mail.upsertAccount(ACCOUNT);
+        inbox = new InboxStateDb(mail.getConnection());
+      }
+    });
+
+    it('is not asked when nothing would reopen', async () => {
+      seedReplied('requires_user', 'archived');
+      const confirm = vi.fn(async () => true);
+      await hookFor('oauth_microsoft', confirm)(ACCOUNT.id, envelope());
+      expect(confirm).not.toHaveBeenCalled();
+    });
   });
 
   it('the store reopens only a replied item', () => {
