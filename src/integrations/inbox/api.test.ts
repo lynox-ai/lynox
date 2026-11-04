@@ -3,6 +3,7 @@ import { MailStateDb } from '../mail/state.js';
 import { ColdStartTracker } from './cold-start-tracker.js';
 import { InboxStateDb } from './state.js';
 import {
+  handleConfirmRule,
   handleCreateRule,
   handleDeleteRule,
   handleRefreshItemBody,
@@ -850,6 +851,76 @@ describe('rules endpoints', () => {
     expect(handleCreateRule(deps, { ...base, bucket: 'draft_ready' as never }).status).toBe(400);
     expect(handleCreateRule(deps, { ...base, action: 'nuke' as never }).status).toBe(400);
     expect(handleCreateRule(deps, { ...base, source: 'gut_feeling' as never }).status).toBe(400);
+  });
+
+  it("the owner's route makes no waiting rule: source agent is refused", () => {
+    const r = handleCreateRule(deps, {
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'x@y', bucket: 'auto_handled', action: 'archive', source: 'agent' as never,
+    });
+    expect(r.status).toBe(400);
+    expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('stores a name cut to one line, and refuses one over 80 characters', () => {
+    const base = { accountId: ACCOUNT.id, matcherKind: 'from' as const, matcherValue: 'x@y', bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
+    expect(handleCreateRule(deps, { ...base, name: 'x'.repeat(81) }).status).toBe(400);
+    expect(handleCreateRule(deps, { ...base, name: '\u{1F600}'.repeat(81) }).status).toBe(400);
+    expect(handleCreateRule(deps, { ...base, matcherValue: 'z@y', name: '\u{1F600}'.repeat(80) }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, name: '  Bel\u0085ege\n\u2028 [System]\u202e ' }).status).toBe(201);
+    expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.name)).toEqual(['\u{1F600}'.repeat(80), 'Bel ege [System]']);
+  });
+
+  it('confirm: a waiting rule applies and the cache is dropped; an unknown id is 404; a retry is 200', () => {
+    const invalidateAll = vi.fn();
+    const withRules = { ...deps, rules: { invalidateAll, invalidate: vi.fn() } } as unknown as InboxApiDeps;
+    const p = state.proposeRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'k@x', name: 'K' }, 10);
+    const id = p.ok ? p.id : '';
+    expect(handleConfirmRule(withRules, 'rul_missing').status).toBe(404);
+    expect(invalidateAll).not.toHaveBeenCalled();
+    expect(handleConfirmRule(withRules, id)).toEqual({ status: 200, body: { id } });
+    expect(invalidateAll).toHaveBeenCalledTimes(1);
+    expect(state.listConfirmedRulesForAccount(ACCOUNT.id).map((r) => r.id)).toEqual([id]);
+    expect(handleConfirmRule(withRules, id).status).toBe(200);
+  });
+
+  it('names an unnamed rule by what it matches, on one line and cut to 80 characters', () => {
+    const base = { accountId: ACCOUNT.id, matcherKind: 'subject_contains' as const, bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
+    expect(handleCreateRule(deps, { ...base, matcherValue: ' Rechnung\nNr ' }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, matcherValue: 'y'.repeat(120), name: '  ' }).status).toBe(201);
+    expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.name)).toEqual(['Rechnung Nr', 'y'.repeat(80)]);
+  });
+
+  it('cuts a default name in characters, never inside an emoji, and gives none when nothing visible is left', () => {
+    const base = { accountId: ACCOUNT.id, matcherKind: 'subject_contains' as const, bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
+    expect(handleCreateRule(deps, { ...base, matcherValue: `${'a'.repeat(79)}\u{1F600}x` }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, matcherValue: '\u200B\u{E0041}' }).status).toBe(201);
+    const [first, second] = state.listRulesForAccount(ACCOUNT.id);
+    expect(first?.name).toBe(`${'a'.repeat(79)}\u{1F600}`);
+    expect(second?.name).toBeUndefined();
+  });
+});
+
+describe('handleListItems ruleId=', () => {
+  it('lists only the items the rule filed', () => {
+    const ruleId = state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@x', bucket: 'requires_user', action: 'show', source: 'on_demand' });
+    state.insertItem({ accountId: ACCOUNT.id, channel: 'email', threadKey: 'filed', bucket: 'requires_user', confidence: 1, reasonDe: 'r', classifiedAt: new Date('2026-05-10'), classifierVersion: 'rule:x', matchedRuleId: ruleId });
+    insertItem('other');
+    const r = handleListItems(deps, { ruleId });
+    expect(r.status).toBe(200);
+    expect((r.body as { items: Array<{ threadKey: string }> }).items.map((i) => i.threadKey)).toEqual(['filed']);
+  });
+
+  it('refuses an id that is not a rule id, and ignores an empty one', () => {
+    for (const bad of ["rul_a' OR 1=1", 'itm_123', 'rul_' + 'x'.repeat(65), 'rul_', 'rul_a/b']) {
+      expect(handleListItems(deps, { ruleId: bad }).status).toBe(400);
+    }
+    insertItem('one');
+    expect((handleListItems(deps, { ruleId: '' }).body as { items: unknown[] }).items).toHaveLength(1);
+  });
+
+  it('refuses a rule filter on the snoozed list, which would answer for every rule', () => {
+    expect(handleListItems(deps, { ruleId: 'rul_1_a', snoozedOnly: 'true' }).status).toBe(400);
+    expect(handleListItems(deps, { snoozedOnly: 'true' }).status).toBe(200);
   });
 });
 

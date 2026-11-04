@@ -204,6 +204,24 @@ export interface MailHooks {
    * Absent while the inbox is off. Wired with the runtime and replaced when it is rebuilt.
    */
   inboxReader?: InboxReader;
+  /**
+   * Not an event but a write: a rule the agent proposes (`inbox_rule_propose`). It waits for the
+   * owner and applies only once confirmed. Absent while the inbox is off.
+   */
+  inboxRuleProposer?: InboxRuleProposer;
+}
+
+/** What `inbox_rule_propose` may do: file one waiting rule, nothing else. */
+export interface InboxRuleProposer {
+  propose(input: {
+    accountId: string;
+    matcherKind: 'from' | 'subject_contains';
+    matcherValue: string;
+    name: string;
+    runId?: string | undefined;
+  }): { ok: true; id: string } | { ok: false; reason: 'limit'; pending: number };
+  /** At most this many waiting proposals per account. */
+  readonly maxPending: number;
 }
 
 /** What `inbox_read` reads: the inbox store of one runtime, read-only. */
@@ -213,8 +231,9 @@ export interface InboxReader {
    * items of `exclude` (accounts).
    */
   countByBucket(exclude: ReadonlySet<string>): Record<InboxBucket, number>;
-  /** The open items of one bucket, the ones `countByBucket` counts, newest first. */
-  listItems(bucket: InboxBucket, limit: number, offset: number, exclude: ReadonlySet<string>): ReadonlyArray<InboxItem>;
+  /** The open items of one bucket, the ones `countByBucket` counts, newest first; with `ruleId`,
+   *  only those that rule filed. */
+  listItems(bucket: InboxBucket, limit: number, offset: number, exclude: ReadonlySet<string>, ruleId?: string): ReadonlyArray<InboxItem>;
   getItem(id: string): InboxItem | null;
   /** The item's own message text, or null when none is stored (a skipped sensitive mail). */
   bodyOf(item: InboxItem): string | null;

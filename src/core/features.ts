@@ -20,6 +20,7 @@ export type FeatureFlag =
   | 'inbound-webhooks'
   | 'approval-queue'
   | 'inbox-read'
+  | 'inbox-user-rules'
   | 'shopify-bulk-read'
   | 'bulk-runs';
 
@@ -36,6 +37,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'inbound-webhooks': 'LYNOX_FEATURE_INBOUND_WEBHOOKS',
   'approval-queue': 'LYNOX_FEATURE_APPROVAL_QUEUE',
   'inbox-read': 'LYNOX_FEATURE_INBOX_READ',
+  'inbox-user-rules': 'LYNOX_FEATURE_INBOX_USER_RULES',
   'shopify-bulk-read': 'LYNOX_FEATURE_SHOPIFY_BULK_READ',
   'bulk-runs': 'LYNOX_FEATURE_BULK_RUNS',
 };
@@ -95,6 +97,11 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // open items per bucket, a bucket's items, one item with its thread. Read-only. Default OFF,
   // and off means the tool is not registered.
   'inbox-read': false,
+  // Inbox rules the agent proposes and the owner confirms (`inbox_rule_propose`, PRD
+  // inbox-user-rules E7). Default OFF until the rule view can show and confirm a proposal: off
+  // means the tool is not registered, so no proposal waits where nobody sees it. Confirmed rules,
+  // names and the filter by rule work either way.
+  'inbox-user-rules': false,
   // A bulk run may list a Shopify store's products and read their before-images through its
   // GraphQL API (`core/bulk-shopify.ts`). Such a run reads only: nothing can approve it until
   // a write form for the store exists. Default OFF; `bulk_plan` refuses the source with it off,

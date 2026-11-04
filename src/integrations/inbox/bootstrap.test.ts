@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
 import { MailStateDb } from '../mail/state.js';
-import { bootstrapInbox } from './bootstrap.js';
+import { bootstrapInbox, MAX_PENDING_RULE_PROPOSALS } from './bootstrap.js';
 import { ClassifierQueue } from './classifier/queue.js';
 import { InboxCostBudget } from './cost-budget.js';
 import { InboxRulesLoader } from './rules-loader.js';
@@ -111,6 +111,23 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.inboxLabelOf('acct-1', 't-l')).toEqual({ bucket: 'draft_ready', userAction: 'replied', reason: 'r' });
     expect(runtime.inboxLabelOf('acct-2', 't-l')).toBeNull();
     expect(runtime.inboxLabelOf('acct-1', 't-unknown')).toBeNull();
+  });
+
+  it('the rule proposer files waiting rules in its tenant, at most ten per account, and the runtime does not apply them', () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, tenantId: 't-9' });
+    expect(runtime.inboxRuleProposer.maxPending).toBe(MAX_PENDING_RULE_PROPOSALS);
+    expect(MAX_PENDING_RULE_PROPOSALS).toBe(10);
+    for (let i = 0; i < 10; i++) {
+      expect(runtime.inboxRuleProposer.propose({ accountId: 'acct-1', matcherKind: 'from', matcherValue: `p${String(i)}@x`, name: 'P', runId: 'run-1' }).ok).toBe(true);
+    }
+    expect(runtime.inboxRuleProposer.propose({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'p10@x', name: 'P' }))
+      .toEqual({ ok: false, reason: 'limit', pending: 10 });
+    const stored = runtime.state.listRulesForAccount('acct-1', 't-9');
+    expect(stored).toHaveLength(10);
+    expect(stored.every((r) => r.source === 'agent' && r.confirmedAt === undefined && r.runId === 'run-1')).toBe(true);
+    expect(runtime.state.listRulesForAccount('acct-1')).toHaveLength(0);
+    expect(runtime.rules.match({ tenantId: 't-9', accountId: 'acct-1', from: 'p0@x', subject: '', listId: undefined } as never)).toBeNull();
   });
 
   it('shows no verdict, rather than throwing, when the lookup fails', () => {

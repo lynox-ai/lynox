@@ -299,28 +299,51 @@ describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
     expect(inbox.listItems()[0]?.classifierVersion).toBe('sensitive-prefilter');
   });
 
-  it('rule short-circuit takes precedence over the sensitive pre-filter', async () => {
-    inbox.insertRule({
-      accountId: ACCOUNT.id,
-      matcherKind: 'from',
-      matcherValue: 'mustermann@example.com',
-      bucket: 'auto_handled',
-      action: 'archive',
-      source: 'on_demand',
+  // PRD inbox-user-rules F1: a rule that files a sensitive mail as handled does not apply, the
+  // owner's own included; the mail goes to "requires you" without a model, in every mode.
+  for (const mode of ['skip', 'mask', 'allow'] as const) {
+    it(`an auto_handled rule does not silence a sensitive mail (mode ${mode})`, async () => {
+      const ruleId = inbox.insertRule({
+        accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+        bucket: 'auto_handled', action: 'archive', source: 'on_demand',
+      });
+      const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: mode });
+      const outcome = await hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'OTP 482917' }));
+      expect(outcome).toBe('sensitive_skipped');
+      const item = inbox.listItems()[0]!;
+      expect(item.bucket).toBe('requires_user');
+      expect(item.classifierVersion).toBe('sensitive-prefilter');
+      expect(item.matchedRuleId).toBeUndefined();
+      expect(queue.enqueue).not.toHaveBeenCalled();
+      const payload = JSON.parse(inbox.listAuditForItem(item.id)[0]!.payloadJson) as Record<string, unknown>;
+      expect(payload['rule_withheld']).toBe(ruleId);
+      expect(payload['sensitive_mode']).toBe(mode);
+    });
+  }
+
+  it('a requires_user rule still files a sensitive mail, and the item names the rule', async () => {
+    const ruleId = inbox.insertRule({
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+      bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Kunde Mustermann',
     });
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
-    // Sensitive content present BUT rule matches first → archive path,
-    // no sensitive-prefilter audit category.
-    await hook(
-      ACCOUNT.id,
-      envelope({
-        subject: 'Your code',
-        snippet: 'OTP 482917',
-      }),
-    );
-    const items = inbox.listItems();
-    expect(items[0]?.bucket).toBe('auto_handled');
-    expect(items[0]?.classifierVersion).toMatch(/^rule:/);
+    expect(await hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'OTP 482917' }))).toBe('rule_applied');
+    const item = inbox.listItems()[0]!;
+    expect(item.bucket).toBe('requires_user');
+    expect(item.matchedRuleId).toBe(ruleId);
+    const payload = JSON.parse(inbox.listAuditForItem(item.id)[0]!.payloadJson) as Record<string, unknown>;
+    expect(payload['rule_name']).toBe('Kunde Mustermann');
+  });
+
+  it('an auto_handled rule still files a mail that is not sensitive', async () => {
+    const ruleId = inbox.insertRule({
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+      bucket: 'auto_handled', action: 'archive', source: 'on_demand',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ subject: 'Wochenbericht', snippet: 'Anbei der Bericht.' }))).toBe('rule_applied');
+    expect(inbox.listItems()[0]!.bucket).toBe('auto_handled');
+    expect(inbox.listItems()[0]!.matchedRuleId).toBe(ruleId);
   });
 });
 

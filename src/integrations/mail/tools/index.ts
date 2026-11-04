@@ -9,6 +9,7 @@ export { createMailReplyTool } from './mail-reply.js';
 export { createMailTriageTool } from './mail-triage.js';
 export { createMailConnectTool } from './mail-connect.js';
 export { createInboxReadTool } from './inbox-read.js';
+export { createInboxRuleProposeTool } from './inbox-rule-propose.js';
 
 import type { ToolEntry } from '../../../types/index.js';
 import { createMailSearchTool } from './mail-search.js';
@@ -18,6 +19,7 @@ import { createMailReplyTool } from './mail-reply.js';
 import { createMailTriageTool } from './mail-triage.js';
 import { createMailConnectTool } from './mail-connect.js';
 import { createInboxReadTool } from './inbox-read.js';
+import { createInboxRuleProposeTool } from './inbox-rule-propose.js';
 import { isFeatureEnabled } from '../../../core/features.js';
 import type { MailRegistry } from './registry.js';
 import type { MailContext } from '../context.js';
@@ -41,6 +43,9 @@ export function createMailTools(registry: MailRegistry, ctx?: MailContext): Tool
     createMailConnectTool() as ToolEntry,
     // Reads the inbox store; behind its flag until the cut is through (PRD inbox-user-rules Teil 1).
     ...(isFeatureEnabled('inbox-read') ? [createInboxReadTool(ctx?.hooks) as ToolEntry] : []),
+    // Proposes a rule the owner confirms; behind its flag until the rule view can show a proposal
+    // (PRD inbox-user-rules Teil 3), so none waits where nobody sees it.
+    ...(isFeatureEnabled('inbox-user-rules') ? [createInboxRuleProposeTool(registry, ctx?.hooks) as ToolEntry] : []),
   ];
 }
 

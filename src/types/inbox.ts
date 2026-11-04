@@ -43,8 +43,9 @@ export type InboxRuleMatcherKind = 'from' | 'subject_contains' | 'list_id';
 
 export type InboxRuleAction = 'archive' | 'mark_read' | 'label' | 'show';
 
-/** How a rule entered the system — proactive threshold suggestion or chat-issued. */
-export type InboxRuleSource = 'proactive_threshold' | 'on_demand';
+/** How a rule entered the system — proactive threshold suggestion, chat-issued, or proposed by
+ *  the agent (`inbox_rule_propose`), which the owner confirms before it applies. */
+export type InboxRuleSource = 'proactive_threshold' | 'on_demand' | 'agent';
 
 export interface InboxItem {
   id: string;
@@ -97,6 +98,8 @@ export interface InboxItem {
    *  re-snooze + unsnooze of the same item doesn't re-fire the stale
    *  reminder — only fires when the current snooze_until > notified_at. */
   notifiedAt: Date | undefined;
+  /** The rule that filed this item (v20); cleared when the rule is deleted. */
+  matchedRuleId?: string | undefined;
 }
 
 export interface InboxAuditEntry {
@@ -121,4 +124,10 @@ export interface InboxRule {
   action: InboxRuleAction;
   createdAt: Date;
   source: InboxRuleSource;
+  /** What the rule is called — the topic of the items it files. Absent on rules from before v20. */
+  name?: string | undefined;
+  /** When the owner confirmed it; absent while a proposed rule waits. Only confirmed rules apply. */
+  confirmedAt?: Date | undefined;
+  /** The run that proposed it (`source: 'agent'`). */
+  runId?: string | undefined;
 }
