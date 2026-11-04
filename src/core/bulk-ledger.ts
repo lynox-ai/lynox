@@ -32,7 +32,7 @@ import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
-import { judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
+import { contextFieldsOfListForm, judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
 import type { ContainmentMirror } from './history-markers.js';
@@ -136,6 +136,9 @@ export type BulkInvalidReason =
   // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
   /** the target's current state holds something shaped like a credential, so it is not sent to a model */
   | 'secret_in_before'
+  /** a field of the context C (`JudgeRule.context`) holds something shaped like a credential, so
+   *  the target is not sent to a model; which field is recorded beside it (`context_secret_field`) */
+  | 'secret_in_context'
   /** the model's reply was cut off before its verdict was complete */
   | 'cut_off'
   /** the model's verdict did not fit the rule's schema */
@@ -601,6 +604,9 @@ export interface PreviewTarget {
   /** Written, and the store kept an HTML field otherwise than sent, within what the run may write:
    *  counted and named, not halted. Set only where it holds. */
   hostRewrote?: true | undefined;
+  /** With `secret_in_context`: the field of the rule's context C that held it, by its name, so the
+   *  owner knows which one to clean. Never its value. */
+  contextField?: string | undefined;
   /** The owner took this target out of the write before approving (`deselectTarget`). */
   deselected: boolean;
   /** This run wrote the target: recorded as applied, and not found already as planned. */
@@ -1539,16 +1545,19 @@ export class BulkLedger {
       // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test.
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
          (applied_at IS NOT NULL AND found_unsent = 0 AND ${WRITING_SQL}) AS written, undone_at IS NOT NULL AS undone,
-         shop_added_markup, host_rewrote
+         shop_added_markup, host_rewrote, context_secret_field
        FROM bulk_targets WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
       deselected_at: string | null; written: number; undone: number; shop_added_markup: number; host_rewrote: number;
+      context_secret_field: number | null;
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
     const judged = (run?.judge_rule ?? null) !== null;
+    // The field of C a `secret_in_context` names, by its name in the rule (the owner cleans it there).
+    const contextNames = judged ? this.judgeRuleOf(run!).context ?? [] : [];
     // An undo's list is what it restores: the HTML fields of the run its family started from.
     const htmlFields = this.htmlFieldsOf(runId);
     return rows.map((r) => {
@@ -1577,6 +1586,8 @@ export class BulkLedger {
         error: r.error, deselected: r.deselected_at !== null, written: r.written === 1, undone: r.undone === 1,
         ...(r.shop_added_markup === 1 ? { shopAddedMarkup: true as const } : {}),
         ...(r.host_rewrote === 1 ? { hostRewrote: true as const } : {}),
+        ...(r.error === 'secret_in_context' && r.context_secret_field !== null && contextNames[r.context_secret_field] !== undefined
+          ? { contextField: contextNames[r.context_secret_field]! } : {}),
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
       };
@@ -1645,10 +1656,13 @@ export class BulkLedger {
     return JSON.parse(this.engineDb.dec(row.judge_rule!)) as JudgeRule;
   }
 
-  /** Why planning would refuse a judged run's stored rule today, or null. */
-  private judgeRuleRefusal(row: Pick<RunRow, 'judge_rule'>): string | null {
+  /** Why planning would refuse a judged run's stored rule today, or null. On a list run with the
+   *  list's id field and form, as planning had them, so a context naming the id field or a name
+   *  its form does not read is refused at the start too. */
+  private judgeRuleRefusal(row: Pick<RunRow, 'judge_rule' | 'list_source'>): string | null {
     try {
-      normalizeJudgeRule(this.judgeRuleOf(row));
+      const source = row.list_source === null ? null : JSON.parse(this.engineDb.dec(row.list_source)) as BulkListSource;
+      normalizeJudgeRule(this.judgeRuleOf(row), source === null ? {} : { idField: source.idField, contextFields: contextFieldsOfListForm(source.form) });
       return null;
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return err.message;
@@ -2557,6 +2571,9 @@ export class BulkLedger {
     /** The title the same read answered, on a run compared in its store's saved form
      *  ({@link comparedInSavedForm}): classified with, never stored. */
     titleNow?: string | null,
+    /** The context C the same read answered (PRD shopify-preset §20.2 item 7): stored beside the
+     *  image for the judge, never part of it — not compared, not diffed, not undone. */
+    context?: Readonly<Record<string, unknown>>,
   ): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL
@@ -2578,8 +2595,11 @@ export class BulkLedger {
       && sameValue(read.before, shopifySavedForm(after, titleNow), html);
     const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : saved ? 'unchanged' : classifyChange(before, after, html);
     return db.transaction((): boolean => {
-      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ? WHERE ${guard}`)
-        .run(this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)), runId, seq, runId).changes === 1;
+      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ?, context = ? WHERE ${guard}`)
+        .run(
+          this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)),
+          context === undefined ? null : this.engineDb.enc(JSON.stringify(context)), runId, seq, runId,
+        ).changes === 1;
       if (stored) this.noteConnection(runId, seq, 'read', via);
       return stored;
     })();
@@ -2856,13 +2876,23 @@ export class BulkLedger {
     ).run(runId, seq, token);
   }
 
-  /** A target the judge is to decide: its key and before-image. */
-  loadJudgeTarget(runId: string, seq: number): { key: string; before: BeforeImage } | null {
+  /** A target the judge is to decide: its key, before-image, and the context its read stored
+   *  (null where none was: a run without C, a data-store run, a target read before C). */
+  loadJudgeTarget(runId: string, seq: number): { key: string; before: BeforeImage; context: Record<string, unknown> | null } | null {
     const r = this.engineDb.getDb().prepare(
-      `SELECT target_key, before FROM bulk_targets WHERE run_id = ? AND seq = ? AND change != 'invalid' AND before IS NOT NULL`,
-    ).get(runId, seq) as { target_key: string; before: string } | undefined;
+      `SELECT target_key, before, context FROM bulk_targets WHERE run_id = ? AND seq = ? AND change != 'invalid' AND before IS NOT NULL`,
+    ).get(runId, seq) as { target_key: string; before: string; context: string | null } | undefined;
     if (!r) return null;
-    return { key: this.engineDb.dec(r.target_key), before: JSON.parse(this.engineDb.dec(r.before)) as BeforeImage };
+    return {
+      key: this.engineDb.dec(r.target_key), before: JSON.parse(this.engineDb.dec(r.before)) as BeforeImage,
+      context: r.context === null ? null : JSON.parse(this.engineDb.dec(r.context)) as Record<string, unknown>,
+    };
+  }
+
+  /** The fields of context C a judged run reads (its rule's `context`), or none. */
+  judgeContextOf(runId: string): readonly string[] {
+    const r = this.runRow(runId);
+    return r === undefined || r.judge_rule === null ? [] : this.judgeRuleOf(r).context ?? [];
   }
 
   /** Book a paid call into the run's spend. No phase guard: what was paid stays counted,
@@ -2879,7 +2909,12 @@ export class BulkLedger {
    * the verdict of the loop that took it over, and a verdict in flight does not write into a run
    * that was superseded (PRD bulk-loop §3.1).
    */
-  recordJudgement(runId: string, seq: number, token: string, verdict: { after: unknown } | { invalid: BulkInvalidReason }, now: number = Date.now()): boolean {
+  recordJudgement(
+    runId: string, seq: number, token: string,
+    /** `contextField`: with `secret_in_context`, the index in the rule's `context` of the field that held it. */
+    verdict: { after: unknown } | { invalid: BulkInvalidReason; contextField?: number | undefined },
+    now: number = Date.now(),
+  ): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND judge_claim_token = ? AND judged_at IS NULL AND change != 'invalid'
       AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND phase = 'planned')`;
@@ -2887,8 +2922,8 @@ export class BulkLedger {
     return db.transaction((): boolean => {
       if ('invalid' in verdict) {
         return db.prepare(
-          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
-        ).run(verdict.invalid, at, runId, seq, token, runId).changes === 1;
+          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, context_secret_field = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
+        ).run(verdict.invalid, verdict.contextField ?? null, at, runId, seq, token, runId).changes === 1;
       }
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;

@@ -4,6 +4,7 @@ import { InboxStateDb } from './state.js';
 import { InboxRulesLoader } from './rules-loader.js';
 import { createInboxClassifierHook, type AccountResolver, type HookQueue } from './watcher-hook.js';
 import { reconcileOutboundReply } from './outbound-reconcile.js';
+import { resolveChatContext } from '../../core/chat-context.js';
 import type { MailAccountConfig, MailAuthType, MailEnvelope } from '../mail/provider.js';
 import type { OutboundContext } from '../mail/context.js';
 import type { InboxBucket } from '../../types/index.js';
@@ -69,6 +70,10 @@ function hook(sensitiveMode?: SensitiveMode) {
     state: inbox, rules: new InboxRulesLoader(inbox), queue, accounts, notifier: { notifyNewItem },
     ...(sensitiveMode !== undefined ? { sensitiveMode } : {}),
   });
+}
+
+function stored(messageId: string) {
+  return inbox.listThreadMessages(ACCOUNT.id, THREAD).find((m) => m.messageId === messageId)!;
 }
 
 function messageIds(): string[] {
@@ -337,11 +342,64 @@ describe('follow-up mails in a known thread (part 1b)', () => {
       }
     });
 
-    it('is not asked when nothing would reopen', async () => {
-      seedReplied('requires_user', 'archived');
+    it('is asked also when nothing would reopen, and the answer is stored with the message', async () => {
+      const id = seedReplied('requires_user', 'archived');
       const confirm = vi.fn(async () => true);
       await hookFor('oauth_microsoft', confirm)(ACCOUNT.id, envelope());
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(stored('<follow@x>').autoReply).toBe(true);
+      expect(inbox.getItem(id)!.userAction).toBe('archived');
+    });
+
+    it('stores false when the fetched message is none, and leaves it unknown when the lookup fails', async () => {
+      seedReplied();
+      await hookFor('oauth_microsoft', vi.fn(async () => false))(ACCOUNT.id, envelope());
+      expect(stored('<follow@x>').autoReply).toBe(false);
+      await hookFor('oauth_microsoft', vi.fn(async () => { throw new Error('graph down'); }))(ACCOUNT.id, envelope({ messageId: '<follow2@x>' }));
+      expect(stored('<follow2@x>').autoReply).toBeUndefined();
+    });
+
+    it('is not asked for our own mail coming back into the thread', async () => {
+      seedReplied();
+      const confirm = vi.fn(async () => false);
+      await hookFor('oauth_microsoft', confirm)(ACCOUNT.id, envelope({ from: [{ address: ACCOUNT.address }], messageId: '<own@x>' }));
       expect(confirm).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the automatic-reply mark stored with a follow-up', () => {
+    it('is false for a customer message, true for an automatic reply the envelope names', async () => {
+      seedReplied();
+      await hook()(ACCOUNT.id, envelope());
+      await hook()(ACCOUNT.id, envelope({ isAutoReply: true, messageId: '<ooo@x>' }));
+      expect(stored('<follow@x>').autoReply).toBe(false);
+      expect(stored('<ooo@x>').autoReply).toBe(true);
+    });
+
+    it('a later store of the same message without a mark keeps the mark', () => {
+      seedReplied();
+      inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<m@x>', fromAddress: 'k@x', subject: 's', autoReply: true });
+      inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<m@x>', fromAddress: 'k@x', subject: 's' });
+      expect(stored('<m@x>').autoReply).toBe(true);
+      inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<n@x>', fromAddress: 'k@x', subject: 's' });
+      inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<n@x>', fromAddress: 'k@x', subject: 's', autoReply: false });
+      expect(stored('<n@x>').autoReply).toBe(false);
+    });
+
+    it('our own mail is stored as sent, without a mark', async () => {
+      seedReplied();
+      await hook()(ACCOUNT.id, envelope({ from: [{ address: 'ME@acme.example' }], messageId: '<own@x>' }));
+      expect(stored('<own@x>').direction).toBe('outbound');
+      expect(stored('<own@x>').autoReply).toBeUndefined();
+    });
+
+    it('"Reply in chat" then answers the follow-up, not the out-of-office reply after it', async () => {
+      const id = seedReplied();
+      await hook()(ACCOUNT.id, envelope({ date: new Date('2026-11-04T09:00:00Z') }));
+      await hook()(ACCOUNT.id, envelope({ isAutoReply: true, messageId: '<ooo@x>', snippet: 'Ich bin bis Montag abwesend.', date: new Date('2026-11-04T10:00:00Z') }));
+      const out = resolveChatContext(null, { kind: 'mail', id }, inbox)!;
+      expect(out).toContain('Message: Die Lieferung ist immer noch nicht da.');
+      expect(out).not.toContain('abwesend');
     });
   });
 

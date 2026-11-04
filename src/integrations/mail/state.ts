@@ -572,6 +572,16 @@ const MIGRATIONS: string[] = [
      FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
    );
    COMMIT;`,
+
+  // v19: whether a stored thread message is an automatic reply (an out-of-office note): 1 yes,
+  // 0 checked and no, NULL not checked. The watcher hook sets it for a follow-up in a thread the
+  // inbox holds; "Reply in chat" answers the newest inbound follow-up, and only one marked 0. Rows
+  // from before carry NULL and are never taken, so nothing is backfilled: such an item keeps
+  // answering its first mail, as before. One transaction, as v17.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (19);
+   ALTER TABLE inbox_thread_messages ADD COLUMN auto_reply INTEGER;
+   COMMIT;`,
 ];
 
 export interface MailStateDbOptions {

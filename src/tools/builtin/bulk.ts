@@ -9,7 +9,7 @@ import {
   bulkFileKey, parseSourceText, planDataStore, planWorkspace, readBulkKey, rowsToSource,
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
-import { judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { contextFieldsOfListForm, judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
 import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 
@@ -202,7 +202,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     const raw = typeof listInput === 'object' && listInput !== null ? listInput as Record<string, unknown> : {};
     if (raw['after'] !== undefined) throw new BulkSourceError('With judge, source_list takes no "after": the model decides each target\'s values.');
     const idField = typeof raw['id_field'] === 'string' ? raw['id_field'] : 'id';
-    judge = normalizeJudgeRule(judgeInput, { idField });
+    judge = normalizeJudgeRule(judgeInput, { idField, contextFields: contextFieldsOfListForm(raw['form']) });
     // A store takes its product fields as text: a verdict of another type would be judged and paid
     // for, then refused by the write document for the whole run. A field the store cannot be
     // written is left to the Shopify parse below, which names the fields that can.
@@ -299,6 +299,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             rule: { type: 'string', description: 'What to decide for each target, in plain words (up to 4000 characters).' },
             schema: { type: 'object', description: 'The fields the model sets, field name → {type: "string", maxLength} or {type: "string", enum: [...]} or {type: "number"|"integer"} or {type: "boolean"}. No pattern, no lists or nested objects; at most 20 fields.' },
             tier: { type: 'string', enum: ['fast', 'balanced', 'deep'], description: 'Which tier places the call (its provider, its limit). The model that judges is set per provider, not by the tier. Default fast.' },
+            context: { type: 'array', items: { type: 'string' }, description: 'Optional: other fields of each target the model reads to decide, but never sets — not a field of schema, not the id field; at most 20. The user sees them before starting the run, and they go to the model too.' },
           },
           required: ['rule', 'schema'],
         },
@@ -366,6 +367,10 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             if (!(JUDGE_COLUMN_TYPES[fieldType] ?? []).includes(col.type)) {
               throw new BulkSourceError(`judge.schema gives ${f} the type ${fieldType}, which its ${col.type} column does not take.`);
             }
+          }
+          // A context column is read from the row as it is, never written: it only has to exist.
+          for (const f of judge.context ?? []) {
+            if (!colDefs.has(f)) throw new BulkSourceError(`judge.context names ${f}, which is not a column of the target collection.`);
           }
           const template = judgeTemplate(judge);
           // A verdict replaces F on an existing row; a row that is not there has nothing to judge.

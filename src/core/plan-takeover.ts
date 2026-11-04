@@ -244,7 +244,13 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
 
   // Everyone the owner is shown: who the plan was paused for, as they are now (a renewed grant is
   // live again), every other mandate whose mark the takeover covers, and the member that stays.
+  // One entry per access, not per address: the same person under an ended grant and under a live
+  // one are two members with their own roles (a role is read per grant, `rolesOn`), so neither
+  // takes the other's lines, and the one that stays is the live one.
+  const grantKey = (email: string, mandateId: string | undefined): string => `${email}\u0000${mandateId ?? ''}`;
+  const seen = new Set<string>();
   const members: TakeoverMember[] = pausedForOf(trigger.paused_for).entries.map((e) => {
+    seen.add(grantKey(e.email, e.mandateId));
     const principal = { kind: 'mandate' as const, email: e.email, mandateId: e.mandateId };
     const ended = principalHasEnded(principal, isLive);
     // A login whose workflow read failed pauses for its mandate knowing only its roles on the plan
@@ -262,14 +268,30 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
       : []),
   ];
   const named = (p: Extract<RequestPrincipal, { kind: 'mandate' }>): void => {
-    if (members.some((m) => m.name === p.email)) return;
+    const key = grantKey(p.email, p.mandateId);
+    if (seen.has(key)) return;
+    // A mark without a grant id (written before marks carried one) names the person, not an
+    // access: it adds nobody the list already has under that address, and its roles (read for the
+    // id-less mark only, `rolesOn`) go to that member instead of being lost.
+    // To the live member under that address when there is one, as the web-ui's T-5 reads it.
+    const live = members.findIndex((m) => m.name === p.email && !m.ended);
+    const same = p.mandateId === undefined ? (live >= 0 ? live : members.findIndex((m) => m.name === p.email)) : -1;
+    if (same >= 0) {
+      const had = members[same]!;
+      members[same] = { ...had, roles: [...had.roles, ...roles(p).filter((r) => !had.roles.includes(r))] };
+      return;
+    }
+    seen.add(key);
     members.push({ name: p.email, roles: roles(p), ended: principalHasEnded(p, isLive), reason: null });
   };
+  const candidates: Array<Extract<RequestPrincipal, { kind: 'mandate' }>> = [];
   for (const m of coveredMarks) {
     if (!isMandateTag(m.tag)) continue;
-    named({ kind: 'mandate', email: m.tag!.slice(MANDATE_TAG_PREFIX.length), ...(m.id ? { mandateId: m.id } : {}) });
+    candidates.push({ kind: 'mandate', email: m.tag!.slice(MANDATE_TAG_PREFIX.length), ...(m.id ? { mandateId: m.id } : {}) });
   }
-  if (runsAs.kind === 'mandate') named(runsAs);
+  if (runsAs.kind === 'mandate') candidates.push(runsAs);
+  // Marks with a grant id first, so the rule for one without holds in either order of the columns.
+  for (const p of [...candidates.filter((c) => c.mandateId !== undefined), ...candidates.filter((c) => c.mandateId === undefined)]) named(p);
 
   // The grant ids the audit row names: every mark the takeover covers, no address.
   const coveredMandates = new Set<string>();
