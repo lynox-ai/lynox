@@ -81,8 +81,8 @@ const EN: BulkNotices = Object.freeze({
     ? 'List read: no product has both the product type and the vendor in the filter. Check both values in the store, then ask lynox in a chat to plan the list again.'
     : `List read: no product has the ${filters === 'product_type' ? 'product type' : 'vendor'} in the filter. Check the value in the store, then ask lynox in a chat to plan the list again.`,
   listNoneLeft: (filters: 'product_type' | 'vendor' | 'both') => filters === 'both'
-    ? 'Preview: products found, but none with product type and vendor spelled as in the filter. Check the spelling in the store, then ask lynox in a chat to plan again.'
-    : `Preview: products found, but none with the ${filters === 'product_type' ? 'product type' : 'vendor'} spelled as in the filter. Check the spelling in the store, then ask lynox in a chat to plan again.`,
+    ? 'Preview: products found, but none with both product type and vendor spelled as in the filter. Ask lynox in a chat to plan again with the spellings the store shows.'
+    : `Preview: products found, but none with the ${filters === 'product_type' ? 'product type' : 'vendor'} spelled as in the filter. Ask lynox in a chat to plan again with the spelling the store shows.`,
   judgeDone: 'Bulk judge done. The run is ready for review.',
   applyCounts: (c: BulkApplyCounts) => applyCounts(c, {
     unclear: (k) => `${k} unclear: sent without a clear answer, not sent again.`,
@@ -132,8 +132,8 @@ const DE: BulkNotices = Object.freeze({
     ? 'Liste gelesen: Kein Produkt hat zugleich Produkttyp und Anbieter aus dem Filter. Prüf beide Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.'
     : `Liste gelesen: Kein Produkt hat den ${filters === 'product_type' ? 'Produkttyp' : 'Anbieter'} aus dem Filter. Prüf den Wert im Shop und bitte lynox im Chat, die Liste neu zu planen.`,
   listNoneLeft: (filters: 'product_type' | 'vendor' | 'both') => filters === 'both'
-    ? 'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter wie im Filter geschrieben. Prüf die Schreibweise im Shop und bitte lynox im Chat, neu zu planen.'
-    : `Vorschau: Produkte gefunden, aber bei keinem ist der ${filters === 'product_type' ? 'Produkttyp' : 'Anbieter'} wie im Filter geschrieben. Prüf die Schreibweise im Shop und bitte lynox im Chat, neu zu planen.`,
+    ? 'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter beide wie im Filter geschrieben. Bitte lynox im Chat, mit der Schreibweise aus dem Shop neu zu planen.'
+    : `Vorschau: Produkte gefunden, aber bei keinem ist der ${filters === 'product_type' ? 'Produkttyp' : 'Anbieter'} wie im Filter geschrieben. Bitte lynox im Chat, mit der Schreibweise aus dem Shop neu zu planen.`,
   judgeDone: 'Beurteilung fertig. Der Massenlauf wartet auf deine Prüfung.',
   applyCounts: (c: BulkApplyCounts) => applyCounts(c, {
     unclear: (k) => `${k} unklar: gesendet ohne klare Antwort, nicht wiederholt.`,

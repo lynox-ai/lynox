@@ -26,7 +26,7 @@ import {
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
-import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyPairedAfter, shopifyTargetIo } from './bulk-shopify.js';
+import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoneLeftSentence, shopifyPairedAfter, shopifyTargetIo } from './bulk-shopify.js';
 import { SHOPIFY_READ_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { ApiStore } from './api-store.js';
@@ -472,18 +472,44 @@ describe('reading a store\'s product list narrowed by a filter', () => {
       expect(out.summary.startsWith('Bulk preview done.'), out.summary).toBe(true);
     });
 
+    // ux U-143, all six word for word: the finding, then the way out that changes what is checked.
+    it('words every case as ux decided it (U-143)', () => {
+      expect([BULK_NOTICES.en.listNoneLeft('product_type'), BULK_NOTICES.en.listNoneLeft('vendor'), BULK_NOTICES.en.listNoneLeft('both')]).toEqual([
+        'Preview: products found, but none with the product type spelled as in the filter. Ask lynox in a chat to plan again with the spelling the store shows.',
+        'Preview: products found, but none with the vendor spelled as in the filter. Ask lynox in a chat to plan again with the spelling the store shows.',
+        'Preview: products found, but none with both product type and vendor spelled as in the filter. Ask lynox in a chat to plan again with the spellings the store shows.',
+      ]);
+      expect([BULK_NOTICES.de.listNoneLeft('product_type'), BULK_NOTICES.de.listNoneLeft('vendor'), BULK_NOTICES.de.listNoneLeft('both')]).toEqual([
+        'Vorschau: Produkte gefunden, aber bei keinem ist der Produkttyp wie im Filter geschrieben. Bitte lynox im Chat, mit der Schreibweise aus dem Shop neu zu planen.',
+        'Vorschau: Produkte gefunden, aber bei keinem ist der Anbieter wie im Filter geschrieben. Bitte lynox im Chat, mit der Schreibweise aus dem Shop neu zu planen.',
+        'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter beide wie im Filter geschrieben. Bitte lynox im Chat, mit der Schreibweise aus dem Shop neu zu planen.',
+      ]);
+    });
+
+    it('says nothing of a run without targets, or of one where another reason left a target out', () => {
+      const say = BULK_NOTICES.en;
+      expect(shopifyNoneLeftSentence({ product_type: 'Gemuse' }, { total: 0, invalidReasons: {} }, say)).toBeNull();
+      expect(shopifyNoneLeftSentence({ product_type: 'Gemuse' }, { total: 2, invalidReasons: { not_in_filter: 1, read_failed: 1 } }, say)).toBeNull();
+      expect(shopifyNoneLeftSentence({ product_type: 'Gemuse' }, null, say)).toBeNull();
+      expect(shopifyNoneLeftSentence({}, { total: 2, invalidReasons: { not_in_filter: 2 } }, say)).toBeNull();
+      // Twin: the same run with every target out as not_in_filter says it.
+      expect(shopifyNoneLeftSentence({ product_type: 'Gemuse' }, { total: 2, invalidReasons: { not_in_filter: 2 } }, say)).toBe(say.listNoneLeft('product_type'));
+    });
+
     it('fits web push\'s cut with the largest counts a run can have, in both languages and for every filter', () => {
       for (const say of [BULK_NOTICES.en, BULK_NOTICES.de]) for (const kind of ['product_type', 'vendor', 'both'] as const) {
-        const counts = [say.previewCounts(BULK_MAX_TARGETS, BULK_MAX_TARGETS, BULK_MAX_TARGETS, BULK_MAX_TARGETS), say.judgeCounts(BULK_MAX_TARGETS, BULK_MAX_TARGETS, BULK_MAX_TARGETS, BULK_MAX_TARGETS)];
+        // The sentence comes only when every target is out as not_in_filter: its counts are 0 read
+        // or judged and N invalid of N, at most BULK_MAX_TARGETS.
+        const counts = [say.previewCounts(0, BULK_MAX_TARGETS, 0, BULK_MAX_TARGETS), say.judgeCounts(0, BULK_MAX_TARGETS, 0, BULK_MAX_TARGETS)];
         for (const c of counts) expect(`${say.listNoneLeft(kind)} ${c}`.length, `${kind} ${c}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
       }
     });
 
     it.each([
-      ['en', { product_type: 'Gemuse' }, 'Preview: products found, but none with the product type spelled as in the filter. Check the spelling in the store, then ask lynox in a chat to plan again.'],
-      ['de', { vendor: 'Gemuse' }, 'Vorschau: Produkte gefunden, aber bei keinem ist der Anbieter wie im Filter geschrieben. Prüf die Schreibweise im Shop und bitte lynox im Chat, neu zu planen.'],
-      ['en', { product_type: 'Gemuse', vendor: 'Gemuse' }, 'Preview: products found, but none with product type and vendor spelled as in the filter. Check the spelling in the store, then ask lynox in a chat to plan again.'],
-      ['de', { product_type: 'Gemuse', vendor: 'Gemuse' }, 'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter wie im Filter geschrieben. Prüf die Schreibweise im Shop und bitte lynox im Chat, neu zu planen.'],
+      ['en', { product_type: 'Gemuse' }, 'Preview: products found, but none with the product type spelled as in the filter. Ask lynox in a chat to plan again with the spelling the store shows.'],
+      ['de', { vendor: 'Gemuse' }, 'Vorschau: Produkte gefunden, aber bei keinem ist der Anbieter wie im Filter geschrieben. Bitte lynox im Chat, mit der Schreibweise aus dem Shop neu zu planen.'],
+      ['en', { product_type: 'Gemuse', vendor: 'Gemuse' }, 'Preview: products found, but none with both product type and vendor spelled as in the filter. Ask lynox in a chat to plan again with the spellings the store shows.'],
+      ['de', { product_type: 'Gemuse', vendor: 'Gemuse' }, 'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter beide wie im Filter geschrieben. Bitte lynox im Chat, mit der Schreibweise aus dem Shop neu zu planen.'],
     ])('says in %s that the search listed products none of which is spelled as %j, when every listed one fell out as not_in_filter', async (lang, filters, text) => {
       fill(2);
       const spelled = (v: string): Record<string, string> => Object.fromEntries(Object.keys(filters).map((k) => [k, v]));
