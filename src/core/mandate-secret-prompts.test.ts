@@ -146,6 +146,7 @@ describe('ask_secret refuses a mandate before any dialog, and asks the owner', (
     const owner = await ask(undefined);
     expect(owner.store.explainUnresolved).toHaveBeenCalledWith('SHOPIFY_TOKEN');
     expect(owner.store.listAgentVisibleNames).toHaveBeenCalled();
+    expect(owner.store.findNameMatches).toHaveBeenCalled();
     expect(owner.touched.length).toBeGreaterThan(0);
   });
 
