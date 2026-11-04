@@ -211,8 +211,8 @@ export class ArtifactStore {
 
   /**
    * Run `op` on the store's handle; `byName` where the platform has none. An error from the
-   * kernel names the file by its path below the store, not by the process handle it went through
-   * (`/proc/self/fd/…`), which the model would copy.
+   * kernel names the file by its path below the store, not by the process handle path it went
+   * through, which the model would copy.
    */
   private atDir<T>(rel: string, op: (anchor: WorkspaceAnchor) => T, byName: () => T): T {
     const anchor = this.liveAnchor();
