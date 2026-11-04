@@ -137,6 +137,8 @@
 				}
 			} else if (outcome.kind === 'ask') {
 				unverified = { id: backupId, reason: outcome.reason, mismatch: outcome.mismatch };
+			} else if (outcome.kind === 'running') {
+				addToast(t('backups.restore_running'), 'error', 12000);
 			} else {
 				addToast(outcome.error ?? t('backups.restore_failed'), 'error', 6000);
 			}

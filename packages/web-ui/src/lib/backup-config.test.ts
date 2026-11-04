@@ -161,6 +161,14 @@ describe('requestRestore', () => {
 		expect(JSON.parse(String(init.body))).toEqual({ allow_unverified: true });
 	});
 
+	it('turns a restore refused because another one runs into its own outcome, whatever its text (U-139)', async () => {
+		vi.stubGlobal('fetch', reply({ success: false, code: 'restore_in_progress', error: 'any text' }, 409));
+		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'running' });
+		// Control: the same status without the code stays a failure with the engine's text.
+		vi.stubGlobal('fetch', reply({ success: false, error: 'any text' }, 409));
+		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'failed', error: 'any text' });
+	});
+
 	it('reports a restore and any other refusal as they are', async () => {
 		vi.stubGlobal('fetch', reply({ success: true }, 200));
 		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'restored', skipped: [], backupPath: null });
