@@ -475,6 +475,13 @@ describe('a preview whose SEO text gains an &', () => {
 		expect(markedKeys()).toEqual(['gid://shopify/Product/1', 'gid://shopify/Product/3']);
 	});
 
+	it('shows no line where every marked product is taken out, and keeps their marks', async () => {
+		gaining([1, 3], [1, 3]);
+		await render();
+		expect(line()).toBeUndefined();
+		expect(markedKeys()).toEqual(['gid://shopify/Product/1', 'gid://shopify/Product/3']);
+	});
+
 	it('shows no line where none gains one, nor on a run that is not awaiting approval', async () => {
 		gaining([]);
 		await render();
