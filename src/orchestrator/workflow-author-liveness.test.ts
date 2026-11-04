@@ -508,7 +508,7 @@ describe('a sub-run stops before its next step when a maker\'s access ends durin
 // 1184, review r2: steps of one phase run side by side. A sibling that fails after a sub-run
 // stopped the run for its makers' access does not replace that cause.
 describe("a sibling's later failure keeps the access stop (1184)", () => {
-  it('sub-run stops for the end, then a sibling in the same phase fails under stop: the run keeps the end', async () => {
+  it.each(['stop', 'continue'] as const)('sub-run stops for the end, then a sibling in the same phase fails under %s: the run keeps the end', async (onFailure) => {
     const liveSet = new Set(['grant-b']);
     const source: RunSource = { kind: 'saved', workflowId: WF, authors: [{ kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' }], ends: { isLive: (id) => liveSet.has(id) } };
     let siblingFailedAt = 0;
@@ -532,13 +532,15 @@ describe("a sibling's later failure keeps the access stop (1184)", () => {
           pipeline: [{ id: 'inner-write', task: 'Write the report.' }, { id: 'inner-send', task: 'Send the report.', input_from: ['inner-write'] }] },
         { id: 'sibling', agent: 'sibling', runtime: 'inline' as const, task: 'Post the summary.' },
       ],
-      gate_points: [], on_failure: 'stop' as const,
+      gate_points: [], on_failure: onFailure,
     };
     const state = await runManifest(manifest, config, { source, parentTools: [], hooks: { onError: (id: string) => { if (id === 'outer') stopSeenAt = Date.now(); } } });
     // The order the test is about: the sub-run's stop was recorded before the sibling failed.
     expect(stopSeenAt).toBeGreaterThan(0);
     expect(siblingFailedAt).toBeGreaterThan(stopSeenAt);
     expect([state.status, state.error]).toEqual(['failed', WORKFLOW_ENDED_MID_RUN_ERROR]);
+    // Under continue the sibling's own failure is still recorded as its output (review r3).
+    if (onFailure === 'continue') expect(state.outputs.get('sibling')?.error).toBe('the API answered 500');
   });
 });
 

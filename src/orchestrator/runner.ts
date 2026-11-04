@@ -1349,10 +1349,13 @@ async function executeStep(
       }
       return 'halt';
     }
-    // A sibling in the same phase already ended the run for its makers' access: that cause stays.
-    // This step's failure or rejection may follow from the same end, and only that cause tells the
-    // worker to stop the plan and the model not to start it again (1184, review r2).
-    if (state.status !== 'running' && isAuthorStop(state.error)) return 'halt';
+    // A sibling in the same phase already ended the run for its makers' access: the two branches
+    // below that would write the run's own cause leave it. This step's failure or rejection may
+    // follow from the same end, and only that cause tells the worker to stop the plan and the model
+    // not to start it again (1184, review r2). Under `continue` and `notify` nothing overwrites it,
+    // so the step's failure is still recorded and notified there (review r3).
+    const overwritesCause = err instanceof GateRejectedError || err instanceof GateExpiredError || manifest.on_failure === 'stop';
+    if (overwritesCause && state.status !== 'running' && isAuthorStop(state.error)) return 'halt';
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
       state.status = 'rejected';
