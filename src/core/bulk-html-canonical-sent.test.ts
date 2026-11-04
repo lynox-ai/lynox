@@ -567,6 +567,9 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
       '<p>Text [audio mp3="https://Evil.Example./a.mp3"] mehr</p>',
       '[video\u00a0src="https://evil.example/a.mp4"]',
     ]) expect(check(after), after).toEqual(foreign);
+    // A zero-width space ends the name as WordPress reads it. Held once by the before-image, so the
+    // hidden-character rule passes it and the link is what is read.
+    expect(check('<p>[video\u200bsrc="https://evil.example/a.mp4"]</p>', '<p>[video\u200bsrc="/a.mp4"]</p>')).toEqual(foreign);
   });
 
   it('refuses a foreign domain in the text a pair encloses', () => {

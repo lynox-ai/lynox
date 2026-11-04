@@ -844,10 +844,11 @@ const ENCLOSED_LINK = /(?:^|[\s>"'(])((?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)[^\s<>"'[
 function shortcodeLinksOf(value: string): string[] {
   const out: string[] = [];
   for (const tag of shortcodeTagsOf(value)) {
-    // WordPress reads a no-break and a zero-width space between attributes as a space.
-    const inner = tag.slice(1, -1).replace(/[\u00a0\u200b]/g, ' ');
-    if (inner.startsWith('/')) continue;
-    const rest = inner.slice(nameRunAt(tag, 0, tag.length - 1)).replace(/\/\s*$/, '');
+    // WordPress reads a no-break and a zero-width space as a space, the name included: in
+    // `[video\u200bsrc="…"]` the name is `video` and `src` an attribute.
+    const spaced = tag.replace(/[\u00a0\u200b]/g, ' ');
+    if (spaced.startsWith('[/')) continue;
+    const rest = spaced.slice(1 + nameRunAt(spaced, 0, spaced.length - 1), -1).replace(/\/\s*$/, '');
     for (const m of rest.matchAll(SHORTCODE_ATTRIBUTE)) {
       const v = m[2] ?? m[4] ?? m[6] ?? m[7] ?? m[8] ?? m[9];
       if (v !== undefined && v.trim() !== '') out.push(v);
