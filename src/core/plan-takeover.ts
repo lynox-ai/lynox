@@ -248,11 +248,11 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
     const principal = { kind: 'mandate' as const, email: e.email, mandateId: e.mandateId };
     const ended = principalHasEnded(principal, isLive);
     // A login whose workflow read failed pauses for its mandate knowing only its roles on the plan
-    // itself (`pauseEndedPlans`). When the takeover moves the workflow, its workflow roles are read
-    // here, where the workflow reads, so F2 and the role lines say so. A pause that knew a workflow
-    // role keeps its roles.
+    // itself (`pauseEndedPlans`). Its workflow roles are read here, where the workflow reads — on
+    // the same grant only — so F2 says the workflow moves, and the member that stays is said to
+    // have changed it when it did. A pause that knew a workflow role keeps its roles.
     const knewWorkflow = e.roles.some(isWorkflowRole);
-    const added = knewWorkflow || !coverWorkflow ? [] : roles(principal).filter(isWorkflowRole);
+    const added = knewWorkflow ? [] : roles(principal).filter(isWorkflowRole);
     return { name: e.email, roles: [...e.roles, ...added], ended, reason: ended ? e.reason : null };
   });
   const coveredMarks: Array<{ tag: string | undefined; id: string | undefined }> = [

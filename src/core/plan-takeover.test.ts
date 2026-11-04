@@ -267,18 +267,30 @@ describe('the workflow’s side', () => {
       .toEqual([true, [['h@x.ch', ['created', 'workflow-created']]]]);
   });
 
-  it('a workflow the takeover leaves with its member adds no role to the pause', () => {
+  it('a login pause whose member renewed and changed the workflow after it: the member stays, and is said to have changed it', () => {
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' });
     plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
     ended(b, 'h@x.ch');
     writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: [], closedPrompt: false }]);
-    // A live member changes the workflow after the pause: the takeover leaves the workflow with it.
-    editor(b, 'workflows', 'w', 'm2@x.ch', 'g-m2@x.ch', null);
+    renewed(b, 'h@x.ch');
+    editor(b, 'workflows', 'w', 'h@x.ch', 'g-h@x.ch', null);
     b.db.prepare("UPDATE workflows SET mandate_edited_at = datetime('now', '+1 minute') WHERE id = 'w'").run();
-    renewed(b, 'm2@x.ch');
     const p = takeoverPreview(deps(b), 'p');
-    expect(p.kind === 'preview' && [p.preview.workflow?.takenOver, p.preview.members.find((m) => m.name === 'h@x.ch')?.roles]).toEqual([false, []]);
+    expect(p.kind === 'preview' && [p.preview.workflow?.takenOver, p.preview.runsAs, p.preview.members.map((m) => [m.name, m.roles])])
+      .toEqual([false, tag('h@x.ch'), [['h@x.ch', ['workflow-created', 'workflow-edited']]]]);
+  });
+
+  it('the workflow roles read are the pause’s grant’s only: another person’s change adds none', () => {
+    const b = box();
+    workflow(b, 'w');
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['created'], closedPrompt: false }]);
+    editor(b, 'workflows', 'w', 'm2@x.ch');
+    ended(b, 'm2@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.members.find((m) => m.name === 'h@x.ch')?.roles).toEqual(['created']);
   });
 
   it('a pause that knew its roles keeps them, also when the workflow reads otherwise now', () => {
@@ -326,8 +338,10 @@ describe('the workflow’s side', () => {
     const p = takeoverPreview(deps(b), 'p');
     if (p.kind !== 'preview') throw new Error('no preview');
     expect([p.preview.runsAs, p.preview.workflow?.takenOver]).toEqual([tag('h@x.ch'), false]);
-    // Its grant is live again: the preview says so.
-    expect(p.preview.members).toEqual([{ name: 'h@x.ch', roles: ['created'], ended: false, reason: null }]);
+    // Its grant is live again: the preview says so. The pause knew no workflow role (the helper here
+    // writes 'created' only); the workflow's own marks of this grant are read, so the member that
+    // stays is said to have changed it.
+    expect(p.preview.members).toEqual([{ name: 'h@x.ch', roles: ['created', 'workflow-created', 'workflow-edited'], ended: false, reason: null }]);
     takeOver(deps(b), 'p', p.preview.expect);
     expect(planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))?.principal.email).toBe('h@x.ch');
   });
