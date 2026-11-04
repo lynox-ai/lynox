@@ -439,7 +439,8 @@ export function writeResolvedFile(path: string, data: string, create: boolean): 
 /**
  * The umask a write by name would apply. `processUmask` reads it from /proc and assumes 077
  * without /proc, which would make every new file private on macOS; there the process's own umask
- * is read instead (in the main thread, where the file tools run).
+ * is read instead (in the main thread, where the file tools run). `writeInPlace` (the workspace's
+ * open directory) still takes `processUmask` as before, so without /proc its new files stay 0600.
  */
 function creatingUmask(): number {
   return existsSync('/proc/self/status') ? processUmask() : process.umask();
@@ -730,7 +731,9 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       try {
         const st = fstatSync(fd);
         // Before anything is compared: whether old_string matches would tell the content of a
-        // file the write then refuses.
+        // file the write then refuses. A folder comes first: it has more than one link (`.`), and
+        // only a regular file can have a second name.
+        if (!st.isFile()) throw new Error(`${realPath} is not a regular file; edit_file edits only regular files.`);
         if (st.nlink > 1) {
           throw new Error(
             target.kind === 'path' && isInArtifactsRoot(realPath)
@@ -738,7 +741,6 @@ export const editFileTool: ToolEntry<EditFileInput> = {
               : secondNameRefusal(realPath),
           );
         }
-        if (!st.isFile()) throw new Error(`${realPath} is not a regular file; edit_file edits only regular files.`);
         original = readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, realPath).toString('utf-8');
       } catch (err) {
         if (isReadLimit(err)) {

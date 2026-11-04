@@ -86,6 +86,11 @@ describe('writeResolvedFile', () => {
     expect(await readFile(join(outside, 'second.txt'), 'utf-8')).toBe('hello');
   });
 
+  it('says a folder at the file by its own path, not by a process handle', async () => {
+    await mkdir(ws('folder'));
+    expect(refusalOf(() => writeResolvedFile(ws('folder'), 'x', false))).toBe(`${ws('folder')} is not a regular file; nothing was written.`);
+  });
+
   it('refuses a path that is not absolute', () => {
     expect(() => writeResolvedFile('workspace/a.txt', 'x', true)).toThrow(/not a resolved file path/);
   });
@@ -156,12 +161,19 @@ describe('the file tools write outside the artifacts directory through writeReso
     );
   });
 
-  it('write_file says a refused open by the file\'s own path, not by a process handle', async () => {
+  // Root writes a read-only file, so nothing would be refused.
+  it.skipIf(process.getuid?.() === 0)('write_file says a refused open by the file\'s own path, not by a process handle', async () => {
     await writeFile(ws('ro.txt'), 'x');
     await chmod(ws('ro.txt'), 0o444);
     const message = await writeFileTool.handler({ path: 'ro.txt', content: 'y' }, agent()).then(() => '', (err: Error) => err.message);
-    if (process.getuid?.() === 0) return; // root writes a read-only file; nothing is refused
     expect(message).toBe(`write_file: EACCES: permission denied: ${ws('ro.txt')}`);
+  });
+
+  it('edit_file says a folder is not a regular file, not that it has a second name', async () => {
+    await mkdir(ws('folder'));
+    await expect(editFileTool.handler({ path: 'folder', old_string: 'a', new_string: 'b' }, agent())).rejects.toThrow(
+      `edit_file: ${ws('folder')} is not a regular file; edit_file edits only regular files.`,
+    );
   });
 });
 
