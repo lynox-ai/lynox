@@ -486,6 +486,15 @@ export class BackupManager {
    * process do not interleave there; another process is not covered.)
    */
   private _restoring = false;
+  /**
+   * The list's provenance per backup, so `listBackups` does not canonicalize and MAC every manifest
+   * on every call. Keyed by the backup's folder name; valid while the manifest's bytes hash to the
+   * digest they were checked under. Bound to the content, not to the file's times: a write through
+   * `mmap` into a page already dirty, or a write in the same tick of a coarse clock, changes
+   * neither mtime nor ctime. Only the list reads it: a restore checks the manifest it is about to
+   * act on afresh.
+   */
+  private readonly _listProvenance = new Map<string, { digest: string; provenance: BackupProvenance }>();
 
   constructor(lynoxDir: string, config: BackupConfig, vaultKey: string | null) {
     this.lynoxDir = lynoxDir;
@@ -1078,6 +1087,19 @@ export class BackupManager {
     }
   }
 
+  /**
+   * The provenance the list shows for one backup: from the cache while the manifest's bytes hash to
+   * `digest`, the digest they were checked under; checked afresh and kept otherwise. The digest and
+   * the manifest come from the same read.
+   */
+  private listProvenance(name: string, digest: string, manifest: BackupManifest): BackupProvenance {
+    const cached = this._listProvenance.get(name);
+    if (cached !== undefined && cached.digest === digest) return cached.provenance;
+    const provenance = this.provenanceOf(manifest);
+    this._listProvenance.set(name, { digest, provenance });
+    return provenance;
+  }
+
   private provenanceOf(manifest: BackupManifest): BackupProvenance {
     if (!this.vaultKey) return 'no-key';
     const auth: unknown = manifest.auth;
@@ -1099,6 +1121,7 @@ export class BackupManager {
 
     const entries = readdirSync(this.backupDir, { withFileTypes: true });
     const manifests: BackupListEntry[] = [];
+    const seen = new Set<string>();
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -1106,12 +1129,20 @@ export class BackupManager {
       const manifestPath = join(this.backupDir, entry.name, 'manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
-        manifests.push({ ...manifest, backup_id: entry.name, provenance: this.provenanceOf(manifest) });
+        const raw = readFileSync(manifestPath);
+        const manifest = JSON.parse(raw.toString('utf-8')) as BackupManifest;
+        seen.add(entry.name);
+        // Without a vault key there is no MAC to check (`no-key`), so nothing to keep or to hash.
+        const provenance = this.vaultKey
+          ? this.listProvenance(entry.name, createHash('sha256').update(raw).digest('hex'), manifest)
+          : this.provenanceOf(manifest);
+        manifests.push({ ...manifest, backup_id: entry.name, provenance });
       } catch {
         // Skip corrupt manifests
       }
     }
+    // A backup that is gone takes its cached answer with it.
+    for (const name of this._listProvenance.keys()) if (!seen.has(name)) this._listProvenance.delete(name);
 
     // Sort newest first
     manifests.sort((a, b) => b.created_at.localeCompare(a.created_at));
