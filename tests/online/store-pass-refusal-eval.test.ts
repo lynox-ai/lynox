@@ -161,7 +161,7 @@ async function runOnce(provider: string, make: (t: ToolEntry[]) => InstanceType<
 // STORE_CASES=no-type or token runs only that case.
 const CASES = (process.env['STORE_CASES'] ?? 'no-type,token').split(',').map((c) => c.trim()) as Kase[];
 const runs = CASES.flatMap((kase) => Array.from({ length: RUNS }, (_, i) => ({ kase, i })));
-const base = { maxIterations: 6, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' as const }) };
+const base = { maxIterations: 6, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('store-pass refusal — Anthropic (Haiku)', () => {

@@ -86,6 +86,15 @@ export interface ToolEntry<TInput = unknown> {
    */
   redactInputForAudit?: ((input: TInput) => unknown) | undefined;
   /**
+   * For a tool that writes a file named by its `path` field: the file it would write for that
+   * path, resolved as its handler resolves it (the workspace, a link in it, the artifacts
+   * directory), or `null` when the handler would refuse the path. The Permission Guard reads its
+   * sensitive-path rules against this as well as against the path as written, so a link or a
+   * confinement cannot put the file written out of the rules' sight. Declared here, next to the
+   * handler that resolves the same way, so the guard needs no import of the tool.
+   */
+  writeTarget?: ((path: string) => string | null) | undefined;
+  /**
    * Declares this tool as destructive. The Permission Guard warns in
    * interactive mode and BLOCKS in autonomous mode based on this flag.
    *
@@ -139,6 +148,15 @@ export interface ToolEntry<TInput = unknown> {
    * exactly when it is on `MANDATE_OUTWARD_READERS` (`mandate-tool-lock.ts`).
    */
   outwardRead?: ((input: TInput) => string | null) | undefined;
+  /**
+   * What a call reads of MAIL THE INSTANCE STORES — the inbox store, a copy of mail from
+   * outside — as the target it reads (an action, an item id), or `null` for a call that reads
+   * none. Never content. A mandate's call that returns a target leaves a `read` row before it
+   * runs and does not run without it, as for `outwardRead` (`Agent._recordOutwardRead`): mail
+   * is in the trail on every way it is read, the stored copy included (sec-core 2026-11-03).
+   * A tool a mandate may use declares this exactly when it is on `MANDATE_STORED_MAIL_READERS`.
+   */
+  storedMailRead?: ((input: TInput) => string | null) | undefined;
   /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of

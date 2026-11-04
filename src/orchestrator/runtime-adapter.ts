@@ -1032,8 +1032,9 @@ export async function spawnViaAgent(
     userTimezone,
     // Inherited, so anything THIS step spawns is reachable by the same abort.
     abortScope,
-    // And the run's principal, so a mandate's step runs under the mandate's lock.
-    principal,
+    // And the run's principal, so a mandate's step runs under the mandate's lock. Absent is the
+    // public API's owner, resolved here so the agent is never handed an undefined one (1173).
+    principal: principal ?? OWNER_PRINCIPAL,
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -1418,8 +1419,9 @@ export async function spawnInline(
     memory: parentMemory ?? undefined,
     // Inherited, so anything THIS step spawns is reachable by the same abort.
     abortScope,
-    // And the run's principal, so a mandate's step runs under the mandate's lock.
-    principal,
+    // And the run's principal, so a mandate's step runs under the mandate's lock. Absent is the
+    // public API's owner, resolved here so the agent is never handed an undefined one (1173).
+    principal: principal ?? OWNER_PRINCIPAL,
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -1622,8 +1624,8 @@ export async function spawnPipeline(
     // pipeline's agents reachable by nothing, which is the shape the scoping is meant to
     // remove rather than relocate.
     abortScope,
-    // The nested run's steps are built for the same principal as this one.
-    principal,
+    // The nested run's steps are built for the same principal as this one (absent = the owner, 1173).
+    principal: principal ?? OWNER_PRINCIPAL,
     // …and with the same ToolContext, so they run under the engine's egress policy.
     parentToolContext,
     // …and in the same chat, so a nested step keeps that chat's private mode.

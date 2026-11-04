@@ -149,10 +149,14 @@ describe('bulk run helpers', () => {
 // German word for word, English the engine's own constants. Compared as whole
 // lines of the table — i18n is a Svelte module and cannot be imported here.
 describe('a Shopify run\'s field names and note', () => {
-	it('names the four fields of a store readably, and any other field or host by its own name', () => {
+	it('names the fields a store run writes or its judge reads readably, and any other field or host by its own name', () => {
 		expect(bulkFieldLabelKey('acme.myshopify.com', 'seo_title')).toBe('bulk.field.shopify.seo_title');
 		expect(bulkFieldLabelKey('acme.myshopify.com', 'descriptionHtml')).toBe('bulk.field.shopify.descriptionHtml');
-		expect(bulkFieldLabelKey('acme.myshopify.com', 'vendor')).toBeNull();
+		// The context's fields (U-140): read, never written, named as the Shopify admin names them.
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'vendor')).toBe('bulk.field.shopify.vendor');
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'productType')).toBe('bulk.field.shopify.productType');
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'tags')).toBe('bulk.field.shopify.tags');
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'handle')).toBeNull();
 		expect(bulkFieldLabelKey('acme.myshopify.com', 'constructor')).toBeNull();
 		expect(bulkFieldLabelKey('shop.example.com', 'title')).toBeNull();
 		expect(bulkFieldLabelKey(null, 'title')).toBeNull();
@@ -252,7 +256,7 @@ describe('the bulk pages show supplied text only through bulkVisibleText', () =>
 				const after = expr.slice(hit.index! + hit[0].length);
 				if (/(bulkVisibleText|bulkValueText)\($/.test(before)) continue;
 				// Its second argument goes through bulkVisibleText inside (tested below).
-				if (/bulkFieldNamesText\(host, $/.test(before)) continue;
+				if (/bulkFieldNamesText\(host, \[?$/.test(before)) continue;
 				// A reason is a lookup key; one without a sentence is shown through bulkVisibleText (tested).
 				if (/bulkInvalidText\($/.test(before)) continue;
 				// A key of an object literal names a placeholder; it shows nothing.
@@ -942,5 +946,47 @@ describe('what the preview says about a target lynox leaves out', () => {
 		expect(bulkSkippedHead(counts({ invalid: 5, unchanged: 1 }), true, echo)).toEqual({ text: 'bulk.nothing.products', nothing: true });
 		expect(bulkSkippedHead(counts({ unchanged: 2 }, 3), false, echo)).toEqual({ text: 'bulk.nothing.targets', nothing: true });
 		expect(bulkSkippedHead(counts({ delete: 1 }), false, echo).nothing).toBe(false);
+	});
+});
+
+describe('the context C the judge only reads (U-140)', () => {
+	const HERE = fileURLToPath(new URL('.', import.meta.url));
+	const source = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
+	const table: Record<string, string> = {
+		'bulk.invalid.secret_in_context': 'field {field} holds a key', 'bulk.invalid.secret_in_context_column': 'column {field} holds a key',
+		'bulk.invalid.secret_in_context_field': 'entry field {field} holds a key',
+		'bulk.field.shopify.vendor': 'Vendor', 'bulk.field.shopify.tags': 'Tags', 'bulk.invalid.other': 'skip ({code})',
+	};
+	const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => (table[k] ?? k).replace(/\{(\w+)\}/g, (_, n: string) => v[n] ?? '') };
+
+	it('names the field that held a credential: on Shopify by its readable name, in the data store by the column', () => {
+		expect(bulkInvalidText('secret_in_context', true, true, own, { field: 'vendor', host: 'acme.myshopify.com', dataStore: false }))
+			.toBe('field Vendor holds a key');
+		expect(bulkInvalidText('secret_in_context', true, true, own, { field: 'tags', host: 'acme.myshopify.com', dataStore: false }))
+			.toBe('field Tags holds a key');
+		expect(bulkInvalidText('secret_in_context', false, true, own, { field: 'note', host: null, dataStore: true }))
+			.toBe('column note holds a key');
+		// A column name is the owner's text: shown through bulkVisibleText, as every supplied value.
+		const odd = 'no‮te';
+		expect(bulkInvalidText('secret_in_context', false, true, own, { field: odd, host: null, dataStore: true }))
+			.toBe(`column ${bulkVisibleText(odd)} holds a key`);
+		// Neither a store nor the data store: by the field's name as the list has it.
+		expect(bulkInvalidText('secret_in_context', false, true, own, { field: 'x', host: 'api.example.com', dataStore: false }))
+			.toBe('entry field x holds a key');
+		expect(bulkInvalidText('secret_in_context', false, true, own, { field: odd, host: 'api.example.com', dataStore: false }))
+			.toBe(`entry field ${bulkVisibleText(odd)} holds a key`);
+	});
+
+	it('words every new text as ux decided it, in both languages', () => {
+		for (const line of [
+			"'bulk.field.shopify.productType': { de: 'Produkttyp', en: 'Product type' }",
+			"'bulk.field.shopify.vendor': { de: 'Anbieter', en: 'Vendor' }",
+			"'bulk.field.shopify.tags': { de: 'Tags', en: 'Tags' }",
+			"'bulk.start.context_fields': { de: 'Felder, die das Modell nur liest', en: 'Fields the model only reads' }",
+			"'bulk.start.context_explain': { de: 'Ihre Werte gehen zusammen mit den Feldern oben an {provider}, damit das Modell besser urteilen kann. lynox schreibt sie nie.', en: 'Their values go to {provider} together with the fields above, so the model can judge better. lynox never writes them.' }",
+			"'bulk.invalid.secret_in_context': { de: 'Das Feld {field} dieses Produkts enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt das Produkt deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es in Shopify, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Feldern neu zu planen.', en: 'The field {field} of this product contains something that looks like a password or key. lynox does not judge this product and sends nothing of it to the AI model. Remove it in Shopify, or ask lynox in the chat to plan the run again without {field} among the fields it reads.' }",
+			"'bulk.invalid.secret_in_context_column': { de: 'Die Spalte {field} dieser Zeile enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt die Zeile deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es in der Tabelle, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Spalten neu zu planen.', en: 'The column {field} of this row contains something that looks like a password or key. lynox does not judge this row and sends nothing of it to the AI model. Remove it in the table, or ask lynox in the chat to plan the run again without {field} among the columns it reads.' }",
+			"'bulk.invalid.secret_in_context_field': { de: 'Das Feld {field} dieses Eintrags enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt den Eintrag deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es dort, wo du diesen Eintrag pflegst, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Feldern neu zu planen.', en: 'The field {field} of this entry contains something that looks like a password or key. lynox does not judge this entry and sends nothing of it to the AI model. Remove it where you keep this entry, or ask lynox in the chat to plan the run again without {field} among the fields it reads.' }",
+		]) expect(source).toContain(line);
 	});
 });

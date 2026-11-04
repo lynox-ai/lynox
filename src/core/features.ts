@@ -19,6 +19,7 @@ export type FeatureFlag =
   | 'workflow-reviewed-grant'
   | 'inbound-webhooks'
   | 'approval-queue'
+  | 'inbox-read'
   | 'shopify-bulk-read'
   | 'bulk-runs';
 
@@ -34,6 +35,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'workflow-reviewed-grant': 'LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT',
   'inbound-webhooks': 'LYNOX_FEATURE_INBOUND_WEBHOOKS',
   'approval-queue': 'LYNOX_FEATURE_APPROVAL_QUEUE',
+  'inbox-read': 'LYNOX_FEATURE_INBOX_READ',
   'shopify-bulk-read': 'LYNOX_FEATURE_SHOPIFY_BULK_READ',
   'bulk-runs': 'LYNOX_FEATURE_BULK_RUNS',
 };
@@ -89,6 +91,10 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // behaviour exactly. The store and its sweep work either way, so entries from an on-period
   // still expire and are purged after it is turned off.
   'approval-queue': false,
+  // The agent's read of the inbox store, `inbox_read` (`integrations/mail/tools/inbox-read.ts`):
+  // open items per bucket, a bucket's items, one item with its thread. Read-only. Default OFF,
+  // and off means the tool is not registered.
+  'inbox-read': false,
   // A bulk run may list a Shopify store's products and read their before-images through its
   // GraphQL API (`core/bulk-shopify.ts`). Such a run reads only: nothing can approve it until
   // a write form for the store exists. Default OFF; `bulk_plan` refuses the source with it off,

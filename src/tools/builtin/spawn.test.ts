@@ -2722,7 +2722,8 @@ describe('spawn_agent tool', () => {
     });
 
     it('a sub-cent floor is REACHED by the solo figure, not rounded under it', () => {
-      // $0.00224576 is the cheapest priced id in this registry. Flooring it to four decimals
+      // $0.00224576 was the cheapest priced id in this registry at Mistral's list price (the EU
+      // rate makes it $0.002470336); it stays here as a sub-cent floor. Flooring it to four decimals
       // gives $0.0022 — under the floor, so a caller typing the printed figure is refused
       // again. The figure has to be ceiled because it is a figure to REACH.
       const cheapest = 0.00224576;
@@ -3665,11 +3666,13 @@ describe('spawn_agent tool', () => {
       // The ask here is sub-cent, which is what makes the assertion able to see its subject.
       // (2) The first version put its shares 0.19 % above the floor, so a routine price
       // refresh of one registry entry would flip it from "admitted + note" to "refused" and
-      // the failure would read as a formatter bug. $0.0095 across two children asking
-      // $0.005 leaves 5.7 % of margin.
+      // the failure would read as a formatter bug. (3) The Mistral EU price (list × 1.1) raised
+      // the 14B's floor to about $0.00495, over the $0.00475 shares, and two children over it
+      // need more than a cent, which renders with two decimals. So the children run on the 3B,
+      // whose floor is far under $0.00475: $0.0095 across two children asking $0.005.
       const { reloadConfig } = await import('../../core/config.js');
       vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
-        tiny: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-14b-2512' },
+        tiny: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-3b-2512' },
       }));
       reloadConfig();
       try {
@@ -3736,8 +3739,8 @@ describe('spawn_agent tool', () => {
           { agents: [{ name: 't1', task: 'A', profile: 'tiny' }, { name: 't2', task: 'B', profile: 'tiny' }] },
           agent,
         ).then(() => null, (e: unknown) => e as Error);
-        expect(err, 'refused: $0.001 each is under one $0.0045 turn').not.toBeNull();
-        expect(err!.message, 'the floor is readable').toMatch(/\$0\.0045/);
+        expect(err, 'refused: $0.001 each is under one $0.0049 turn').not.toBeNull();
+        expect(err!.message, 'the floor is readable').toMatch(/\$0\.0049/);
         expect(err!.message, 'and so is the share').toMatch(/\$0\.0010/);
         // ⚠ Scoped on purpose: this holds for THIS fixture, not for the function. Four
         // decimals narrow the class, they do not close it — anything below $0.00005 still

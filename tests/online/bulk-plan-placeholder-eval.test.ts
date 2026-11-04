@@ -136,7 +136,7 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
 // PH_CASES=u1 runs only that case.
 const ONLY = process.env['PH_CASES']?.split(',').map((x) => `(${x.trim()})`);
 const runs = CASES.filter((c) => !ONLY || ONLY.some((o) => c.label.startsWith(o))).flatMap((c) => Array.from({ length: RUNS }, (_, i) => ({ c, i, label: `${c.label} #${String(i)}` })));
-const base = { maxIterations: 8, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' as const }) };
+const base = { maxIterations: 8, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('bulk_plan placeholder — Anthropic (Haiku)', () => {

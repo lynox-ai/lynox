@@ -39,7 +39,7 @@ import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
-import { connectionTokenAllowed } from './profile-secret-view.js';
+import { connectionTokenAllowed, connectionTokenHolders } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
@@ -122,6 +122,7 @@ import {
   applyEgressSettings,
   generateInitBriefing,
   initSecrets,
+  renderSecretsBriefing,
   ensureVaultKey,
   initScopes,
   initMemoryInstance,
@@ -146,6 +147,7 @@ import type { SessionOptions } from './session.js';
 import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
 import { DEFAULT_PER_JOB_TIMEOUT_MS } from '../integrations/inbox/classifier/queue.js';
+import { inboxDisabledAccounts } from '../integrations/inbox/disabled-accounts.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -855,6 +857,21 @@ export class Engine {
    * And the instance's language, for the reminder poller's title (`notice-language.ts`): set here
    * so the cold boot and the rebootstrap cannot hand the inbox different ones.
    */
+  /**
+   * What the inbox reads through the mail registry. `confirmAutoReply`: an envelope from Graph's
+   * watch carries no headers, so before a follow-up reopens a replied item the hook asks for the
+   * full message, whose envelope reads Auto-Submitted. Looked up at call time, so a provider
+   * added or replaced later is the one asked. No provider: throw, and the hook reopens.
+   */
+  private _applyInboxMailLookups(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
+    bootOpts.confirmAutoReply = async (accountId, env) => {
+      const provider = this._mailContext?.registry.get(accountId);
+      if (!provider) throw new Error(`no mail provider for ${accountId}`);
+      const message = await provider.fetch({ uid: env.uid, folder: env.folder });
+      return message.envelope.isAutoReply;
+    };
+  }
+
   private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
     const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
     if (key !== undefined) bootOpts.mistralApiKey = key;
@@ -914,10 +931,7 @@ export class Engine {
       const folderBlacklist = new Set(
         folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
       );
-      const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-      const disabledAccounts = new Set(
-        disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-      );
+      const disabledAccounts = inboxDisabledAccounts();
       const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
         mailStateDb: this._mailStateDb,
         anthropicClient: this.client,
@@ -933,6 +947,7 @@ export class Engine {
       const runHistoryForInbox = this.getRunHistory();
       if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
       this._applyInboxKeyAndMeter(bootOpts);
+      this._applyInboxMailLookups(bootOpts);
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
         // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
@@ -950,6 +965,8 @@ export class Engine {
         this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
         // What the classifier made of each mail, for mail_triage.
         this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
+        // The store as the inbox view reads it, for inbox_read.
+        this._mailContext.hooks.inboxReader = runtime.inboxReader;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -1804,6 +1821,12 @@ export class Engine {
       // memory, and GET /api/api-profiles keeps returning [] until the next
       // engine restart re-projects it.
       this._toolContext.apiStore = this._apiStore;
+      // The `<secrets>` briefing was rendered before any profile was known; now that they are,
+      // the names that hold a connection's token are listed apart, as used through their profile.
+      if (this.secretStore && this.secretsBriefing !== undefined) {
+        const apiStore = this._apiStore;
+        this.secretsBriefing = renderSecretsBriefing(this.secretStore, (n) => connectionTokenHolders(apiStore, n));
+      }
       // Once per database, after every stored profile is known: each vault secret whose profiles
       // agree on where it goes is bound there. A failure leaves the names unbound, which refuses
       // their sends rather than letting them go anywhere, and the next boot tries again.
@@ -2246,10 +2269,7 @@ export class Engine {
           folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
         );
         // Per-account opt-out: comma-separated mail_account ids.
-        const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-        const disabledAccounts = new Set(
-          disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-        );
+        const disabledAccounts = inboxDisabledAccounts();
         const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
           mailStateDb,
           anthropicClient: this.client,
@@ -2270,6 +2290,7 @@ export class Engine {
         const runHistoryForInbox = this.getRunHistory();
         if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
         this._applyInboxKeyAndMeter(bootOpts);
+        this._applyInboxMailLookups(bootOpts);
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured
@@ -2294,6 +2315,8 @@ export class Engine {
           this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
           // What the classifier made of each mail, for mail_triage.
           this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
+          // The store as the inbox view reads it, for inbox_read.
+          this._mailContext.hooks.inboxReader = runtime.inboxReader;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —

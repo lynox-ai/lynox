@@ -100,7 +100,7 @@
 			// has to be on the page to be seen. So is a run with a product its store kept with markup
 			// lynox did not send: the halt's sentence points at it, and the mark outlives that halt.
 			const approving = r.body.phase === 'previewed' && r.body.kind === 'apply';
-			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0;
+			const whole = approving || bulkRollbackIncomplete(r.body) || (r.body.shopAddedMarkup ?? 0) > 0 || (r.body.hostRewrote ?? 0) > 0;
 			const shown = whole ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
 			if (whole && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
@@ -410,6 +410,9 @@
 			{#if run.conflicts > 0}
 				<p class="text-sm text-text-muted">{tf('bulk.conflicts', { n: String(run.conflicts) })}</p>
 			{/if}
+			{#if (run.hostRewrote ?? 0) > 0}
+				<p class="text-sm text-text-muted" data-testid="bulk-host-rewrote-count">{run.hostRewrote === 1 ? t('bulk.run.host_rewrote_one') : tf('bulk.run.host_rewrote', { n: String(run.hostRewrote) })}</p>
+			{/if}
 			{#if sentUnknownText}
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{sentUnknownText}</p>
 			{/if}
@@ -436,6 +439,9 @@
 											{#if target.shopAddedMarkup}
 												<span class="ml-1 inline-block rounded-full bg-danger/15 border border-danger/40 px-1.5 text-[11px] text-danger" data-testid="bulk-shop-added-markup">{t('bulk.target.shop_added_markup')}</span>
 											{/if}
+											{#if target.hostRewrote && !target.shopAddedMarkup}
+												<span class="ml-1 inline-block rounded-full bg-bg-subtle border border-border px-1.5 text-[11px] text-text-muted" data-testid="bulk-host-rewrote">{t('bulk.target.host_rewrote')}</span>
+											{/if}
 											{#if bulkRollbackLeft(run, target)}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
 											{/if}
@@ -457,7 +463,7 @@
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
 											{#if target.change === 'invalid' && target.error}
-												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n)}</p>
+												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store' })}</p>
 											{/if}
 											{#if approving && (target.deselected || writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
@@ -525,6 +531,18 @@
 							{/each}
 						</ul>
 					</div>
+					{#if run.judgeRule.context && run.judgeRule.context.length > 0}
+						<!-- The context C goes to the judge's provider too: shown before the start the hash binds (U-140). -->
+						<div data-testid="bulk-start-context">
+							<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.context_fields')}</h3>
+							<ul class="text-sm space-y-0.5">
+								{#each run.judgeRule.context as field (field)}
+									<li>{#if shopify}{bulkFieldNamesText(host, [field], t)}{:else}<code class="text-xs">{bulkVisibleText(field)}</code>{/if}</li>
+								{/each}
+							</ul>
+							<p class="text-xs text-text-muted mt-1">{tf('bulk.start.context_explain', { provider: bulkJudgeProviderName(run.judgeServedBy.provider) })}</p>
+						</div>
+					{/if}
 					<div class="text-sm space-y-1">
 						<label class="flex flex-wrap items-center gap-2">
 							{t('bulk.start.cap_prefix')}

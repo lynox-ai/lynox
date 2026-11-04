@@ -89,15 +89,16 @@ function isToolUse(block: unknown): block is ToolUseBlock {
     && typeof (block as { name?: unknown }).name === 'string';
 }
 
-/** The save handler's success result starts with `Saved artifact "` or
- *  `Updated artifact "` — anything else (store unavailable, thrown error
+/** The save handler's success result starts with `Created a new artifact "` or
+ *  `Updated artifact "` (`Saved artifact "` in results written before it said
+ *  which) — anything else (store unavailable, thrown error
  *  formatted by the tool runner) means the body was never persisted and MUST
  *  stay in the conversation, or the content is simply gone. The coupling to
  *  the handler's exact format is pinned by a contract test that runs the REAL
  *  `artifact_save` handler — rewording the result there fails that test, not
  *  silently this check. Exported for exactly that test. */
 export function isSuccessfulSaveResult(result: string): boolean {
-  return result.startsWith('Saved artifact "') || result.startsWith('Updated artifact "');
+  return result.startsWith('Created a new artifact "') || result.startsWith('Updated artifact "') || result.startsWith('Saved artifact "');
 }
 
 /** Collect tool_use_id → result-text for every tool_result in the history.
