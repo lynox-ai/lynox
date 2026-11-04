@@ -69,7 +69,7 @@ import type { TierModelInfo } from './prompts.js';
 import { isFeatureEnabled } from './features.js';
 import { stripLoadedContext } from './chat-context.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
-import { setupHistorySubscriptions } from './engine-init.js';
+import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, capStopNote } from './eager-persist.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
@@ -566,9 +566,9 @@ export class Session {
     // Only on the default path, as before: a caller's own briefing never carried the listing.
     // `?.()` on the method: several suites hand Session a partial engine double.
     const rawSecrets = opts?.briefing === undefined ? engine.getSecretsBriefing?.() : undefined;
-    this.secretsBriefing = rawSecrets && rawSecrets.length > 8000
-      ? rawSecrets.slice(0, 8000) + '\n[...truncated]'
-      : rawSecrets;
+    // Bounded like the briefing, but on an entry boundary and with its closing tag kept: the wire
+    // capture redacts the listing only inside a whole `<secrets>` frame.
+    this.secretsBriefing = rawSecrets === undefined ? undefined : capSecretsListing(rawSecrets, 8000);
     this.onStream = opts?.onStream ?? null;
     this._promptUser = opts?.promptUser ?? null;
     this._promptTabs = opts?.promptTabs ?? null;

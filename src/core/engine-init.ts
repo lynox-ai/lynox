@@ -482,6 +482,27 @@ export function renderSecretsBriefing(
   return compose([renderFence('secrets', lines.join('\n'))]);
 }
 
+const SECRETS_CLOSER = '\n</secrets>';
+const SECRETS_CUT_NOTE = '\n[...truncated]';
+
+/**
+ * Bound a rendered `<secrets>` listing to `max` characters without losing its closing tag. The
+ * wire capture blanks names and masks only between `<secrets>` and `</secrets>`
+ * (`redactWireUserMessage`), so a plain slice that cut the closer off left every name in the
+ * capture. The cut falls on an entry boundary (`, ` or a line break), so no name is left half
+ * written; one entry longer than the whole bound leaves the frame empty.
+ */
+export function capSecretsListing(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const body = text.endsWith(SECRETS_CLOSER) ? text.slice(0, -SECRETS_CLOSER.length) : text;
+  const open = body.indexOf('>') + 1;
+  const budget = max - SECRETS_CLOSER.length - SECRETS_CUT_NOTE.length;
+  const head = body.slice(0, Math.max(open, budget));
+  const cut = Math.max(head.lastIndexOf(', '), head.lastIndexOf('\n'));
+  const kept = cut >= open ? body.slice(0, cut) : body.slice(0, open);
+  return `${kept}${SECRETS_CUT_NOTE}${SECRETS_CLOSER}`;
+}
+
 export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   const parts: Part[] = [];
   let secretsBriefing: string | undefined;

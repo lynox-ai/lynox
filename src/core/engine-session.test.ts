@@ -1552,6 +1552,21 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(agent.setSecretsBriefing).toHaveBeenCalledWith(undefined);
     });
 
+    // The session bounds a long listing; the wire capture redacts it only inside a whole frame.
+    it('hands the agent a long listing cut on an entry, with its closing tag', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const entries = Array.from({ length: 400 }, (_, i) => `secret:CUSTOMER_KEY_${String(i).padStart(4, '0')} (***wxyz)`);
+      vi.spyOn(engine, 'getSecretsBriefing').mockReturnValue(`<secrets>\n${entries.join(', ')}\n</secrets>`);
+      vi.mocked(Agent).mockClear();
+      engine.createSession();
+      const config = vi.mocked(Agent).mock.calls.at(-1)![0] as { secretsBriefing?: string };
+      expect(config.secretsBriefing!.length).toBeLessThanOrEqual(8000);
+      expect(config.secretsBriefing!.endsWith('\n[...truncated]\n</secrets>')).toBe(true);
+      // The last entry kept is whole.
+      expect(config.secretsBriefing!.slice(0, -'\n[...truncated]\n</secrets>'.length).endsWith(' (***wxyz)')).toBe(true);
+    });
+
     it('keeps the main agent on the configured tier — no per-turn auto-downgrade', async () => {
       // Regression: the removed _isSimpleTask heuristic downgraded the main
       // agent to Haiku for any task text < 25 chars. "gemini und search"

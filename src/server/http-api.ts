@@ -7040,8 +7040,10 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { names });
     }, ownerOnly('list the secrets'));
 
-    // Category-level booleans — available to all authenticated users
-    this.addStatic('user', 'GET /api/secrets/status', async (_req, res) => {
+    // Category-level booleans — available to all authenticated users. `count` is the owner's
+    // only: it is the size of the owner's vault, and a mandate stores nothing there.
+    this.addStatic('user', 'GET /api/secrets/status', async (req, res) => {
+      const ownerAsks = isOwnerPrincipal(this._principalOf(req));
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const names = new Set(store.listNames());
@@ -7116,7 +7118,7 @@ export class LynoxHTTPApi {
           google: engine.getGoogleClientSource() !== null,
           bugsink: names.has('LYNOX_BUGSINK_DSN'),
         },
-        count: names.size,
+        ...(ownerAsks ? { count: names.size } : {}),
         searxng_url: searxngUrl ?? null,
       });
     }, READS);
