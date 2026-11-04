@@ -107,8 +107,27 @@ export interface BackupManifest {
  */
 export type BackupProvenance = 'verified' | 'none' | 'mismatch' | 'no-key';
 
-/** A backup as `listBackups` (and `GET /api/backups`) shows it. */
-export type BackupListEntry = BackupManifest & { backup_id: string; provenance: BackupProvenance };
+/**
+ * A backup as `listBackups` (and `GET /api/backups`) shows it. `file_count` and `total_bytes` sum up
+ * the manifest's `files`, so a reader that needs only the totals does not have to walk the list.
+ */
+export type BackupListEntry = BackupManifest & {
+  backup_id: string;
+  provenance: BackupProvenance;
+  file_count: number;
+  total_bytes: number;
+};
+
+/** The totals of a manifest's `files`; an entry without a usable size counts as 0 bytes. */
+function fileTotals(files: unknown): { file_count: number; total_bytes: number } {
+  if (!Array.isArray(files)) return { file_count: 0, total_bytes: 0 };
+  let total = 0;
+  for (const f of files as unknown[]) {
+    const size = typeof f === 'object' && f !== null ? (f as { size_bytes?: unknown }).size_bytes : undefined;
+    if (typeof size === 'number' && Number.isFinite(size) && size > 0) total += size;
+  }
+  return { file_count: files.length, total_bytes: total };
+}
 
 export interface RestoreOptions {
   /**
@@ -1136,7 +1155,7 @@ export class BackupManager {
         const provenance = this.vaultKey
           ? this.listProvenance(entry.name, createHash('sha256').update(raw).digest('hex'), manifest)
           : this.provenanceOf(manifest);
-        manifests.push({ ...manifest, backup_id: entry.name, provenance });
+        manifests.push({ ...manifest, backup_id: entry.name, provenance, ...fileTotals(manifest.files) });
       } catch {
         // Skip corrupt manifests
       }
