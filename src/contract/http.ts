@@ -661,6 +661,30 @@ export interface OAuthClaimResponse {
   email?: string;
 }
 
+/**
+ * The scopes lynox's own Google client (the control plane's broker) asks for at
+ * consent, in the order it sends them.
+ *
+ * Contract because the engine judges a claimed grant against its standard set
+ * (`computeScopeMode` in `src/integrations/google/google-auth.ts`, called from
+ * `src/server/http-api.ts`): a scope the broker stops asking for turns every
+ * new brokered grant into `legacy` there, with no error at either end. The
+ * engine's `STANDARD_SCOPES` and the control plane's broker list are each
+ * held equal to this in their own repo's tests, and so is the scope list on
+ * the docs page a Workspace admin configures lynox from.
+ *
+ * ⚠ What it does NOT bind: a tenant with a `google_oauth_scopes` override.
+ * The engine then judges against the override instead, and nothing here
+ * keeps that override in step with what the broker asks for.
+ */
+export const GOOGLE_BROKER_SCOPES = [
+  'openid',
+  'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/calendar.events',
+  'https://www.googleapis.com/auth/calendar.freebusy',
+  'https://www.googleapis.com/auth/drive.file',
+] as const;
+
 // === OAuth claim preview — POST /internal/oauth/google/claim-preview (engine → CP) ===
 
 /**

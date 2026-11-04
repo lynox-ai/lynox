@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { GOOGLE_BROKER_SCOPES } from '../contract/http.js';
 
 /**
  * A company account whose Google Workspace admin restricts third-party apps cannot connect through
@@ -114,17 +115,23 @@ describe('the docs section the link leads to', () => {
 	});
 
 	it('names exactly the scopes lynox\'s client asks for', () => {
-		// The broker's list lives in the hosting repo (`DEFAULT_SCOPES`); this is the far side of it.
+		// The contract list is the one the control plane's broker sends; its own repo holds it equal.
 		const row = /^\| Scopes \| (.+) \|$/m.exec(section());
 		expect(row).not.toBeNull();
 		const scopes = [...row![1]!.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
-		expect(scopes).toEqual([
-			'openid',
-			'https://www.googleapis.com/auth/userinfo.email',
-			'https://www.googleapis.com/auth/calendar.events',
-			'https://www.googleapis.com/auth/calendar.freebusy',
-			'https://www.googleapis.com/auth/drive.file',
-		]);
+		expect(scopes).toEqual([...GOOGLE_BROKER_SCOPES]);
+	});
+
+	it('explains every data scope on the list, and its Gmail sentence still holds', () => {
+		// When the list changes, the paragraph under it changes in the same PR (legal, row 370).
+		const s = section();
+		const paragraph = s.slice(s.indexOf('`calendar.events` and'), s.indexOf('**Where to configure it**'));
+		const identity = new Set(['openid', 'https://www.googleapis.com/auth/userinfo.email']);
+		for (const scope of GOOGLE_BROKER_SCOPES.filter((x) => !identity.has(x))) {
+			expect(paragraph).toContain(`\`${scope.replace('https://www.googleapis.com/auth/', '')}\``);
+		}
+		expect(paragraph).toContain('lynox does not ask for Gmail with this client.');
+		expect(GOOGLE_BROKER_SCOPES.some((x) => x.includes('/auth/gmail') || x === 'https://mail.google.com/')).toBe(false);
 	});
 
 	it('says what drive.file reaches as Google defines it', () => {
