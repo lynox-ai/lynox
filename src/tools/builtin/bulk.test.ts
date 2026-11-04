@@ -493,6 +493,16 @@ describe('a previewed run in which nothing can be written', () => {
     expect(await bulkStatusTool.handler({ run_id: runId }, agent())).not.toContain(NOTHING_TO_APPROVE_NOTE);
   });
 
+  it('says it for an external plan with no valid target, without telling the model to wait for a start', async () => {
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'not a url', after: { price: '1' } }]));
+    const result = await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'src.json' }, agent());
+    expect(result).toContain('no target was valid, so there is nothing to read');
+    expect(result).toContain('invalid 1 (bad_url 1)');
+    expect(result).toContain(NOTHING_TO_APPROVE_NOTE);
+    expect(result).not.toContain('Only the user can start and approve it');
+    expect(result).not.toContain('Once the user has started it');
+  });
+
   it('waits for every verdict, for the whole list and for the preview', async () => {
     writeFileSync(join(dir, 'outside.txt'), 'x');
     const { runId } = await plan([{ target: '../outside.txt', after: 'y' }]);
@@ -501,6 +511,8 @@ describe('a previewed run in which nothing can be written', () => {
     expect(nothingToApprove({ ...s, judge: { tier: 'fast', unjudged: 1 } } as typeof s)).toBe(false);
     expect(nothingToApprove({ ...s, judge: { tier: 'fast', unjudged: 0 } } as typeof s)).toBe(true);
     expect(nothingToApprove({ ...s, list: { state: 'pending', pagesRead: 1 } } as typeof s)).toBe(false);
+    // A delete writes too: a run that only deletes has something to approve.
+    expect(nothingToApprove({ ...s, changes: { ...s.changes, delete: 1 } })).toBe(false);
     for (const phase of ['planned', 'approved', 'writing', 'done', 'aborted', 'undone'] as const) {
       expect(nothingToApprove({ ...s, phase }), phase).toBe(false);
       expect(formatStatus({ ...s, phase }), phase).not.toContain(NOTHING_TO_APPROVE_NOTE);
