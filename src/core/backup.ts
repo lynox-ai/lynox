@@ -108,8 +108,9 @@ export interface BackupManifest {
 export type BackupProvenance = 'verified' | 'none' | 'mismatch' | 'no-key';
 
 /**
- * A backup as `listBackups` (and `GET /api/backups`) shows it. `file_count` and `total_bytes` sum up
- * the manifest's `files`, so a reader that needs only the totals does not have to walk the list.
+ * A backup as `listBackups` shows it (`GET /api/backups` leaves `files` out unless `?files=1` asks).
+ * `file_count` and `total_bytes` sum up the manifest's `files`, so a reader that needs only the
+ * totals does not have to walk the list.
  */
 export type BackupListEntry = BackupManifest & {
   backup_id: string;

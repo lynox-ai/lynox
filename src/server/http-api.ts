@@ -7040,8 +7040,10 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { names });
     }, ownerOnly('list the secrets'));
 
-    // Category-level booleans — available to all authenticated users
-    this.addStatic('user', 'GET /api/secrets/status', async (_req, res) => {
+    // Category-level booleans — available to all authenticated users. `count` is the owner's
+    // only: it is the size of the owner's vault, and a mandate stores nothing there.
+    this.addStatic('user', 'GET /api/secrets/status', async (req, res) => {
+      const ownerAsks = isOwnerPrincipal(this._principalOf(req));
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const names = new Set(store.listNames());
@@ -7116,7 +7118,7 @@ export class LynoxHTTPApi {
           google: engine.getGoogleClientSource() !== null,
           bugsink: names.has('LYNOX_BUGSINK_DSN'),
         },
-        count: names.size,
+        ...(ownerAsks ? { count: names.size } : {}),
         searxng_url: searxngUrl ?? null,
       });
     }, READS);
@@ -12410,7 +12412,9 @@ export class LynoxHTTPApi {
       return null;
     };
 
-    // user scope: same mailbox-management surface as POST /api/mail/accounts.
+    // user scope. Free, unlike POST /api/mail/accounts beside it: it stores nothing, like
+    // POST /api/secrets/validate-key and POST /api/mail/autodiscover, and it spends nothing of the
+    // owner's: the login it tests is the one in the request. The rate limit above bounds the probe.
     this.addStatic('user', 'POST /api/mail/accounts/test', async (req, res, _params, body) => {
       const rateErr = mailTestRateCheck(req);
       if (rateErr) { errorResponse(res, 429, rateErr); return; }
@@ -12952,10 +12956,15 @@ export class LynoxHTTPApi {
 
     // ── Backups ──────────────────────────────────────────────────
 
-    this.addStatic('user', 'GET /api/backups', async (_req, res) => {
+    // Each backup's `files` (one entry per file) is left out unless `?files=1` asks for it:
+    // across many large backups it is the bulk of the answer, and `file_count`/`total_bytes` carry
+    // what the list shows.
+    this.addStatic('user', 'GET /api/backups', async (req, res) => {
       const bm = engine.getBackupManager();
       if (!bm) { jsonResponse(res, 200, { backups: [] }); return; }
-      const backups = bm.listBackups();
+      const withFiles = new URL(req.url ?? '', 'http://localhost').searchParams.get('files') === '1';
+      const listed = bm.listBackups();
+      const backups = withFiles ? listed : listed.map(({ files: _files, ...entry }) => entry);
       jsonResponse(res, 200, { backups });
     }, READS);
 

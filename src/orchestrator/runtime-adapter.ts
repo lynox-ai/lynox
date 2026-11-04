@@ -1,4 +1,5 @@
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
+import { NestedRunEndedError, heldSource, isAuthorStop, type RunSource } from './run-source.js';
 import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
@@ -1550,6 +1551,9 @@ export async function spawnPipeline(
   chatOrigin?: ChatOrigin | undefined,
   /** The review of the chat run that started the workflow, as its writer view; absent = none. */
   parentChangeset?: ChangesetWriter | undefined,
+  /** The source of the run that holds this step. Last, for the reason given above; absent = a run
+   *  of no saved workflow. */
+  parentSource?: RunSource | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -1609,8 +1613,9 @@ export async function spawnPipeline(
 
   const startTime = Date.now();
   const state = await runManifest(subManifest, config, {
-    // Part of the run that holds this step, whose source was checked when it started.
-    source: { kind: 'nested' },
+    // Part of the run that holds this step, whose source was checked when it started; its steps
+    // read the access of that run's saved workflow before each one, as the outer steps do (1184).
+    source: { kind: 'nested', within: heldSource(parentSource) },
     parentTools: pool,
     depth: depth + 1,
     parentPrompt,
@@ -1672,6 +1677,10 @@ export async function spawnPipeline(
   // nested run keeps a failed step out of `state.outputs`). A rejected nested run stays
   // rejected, since readers of the outer run's status tell the two apart.
   if (state.status === 'rejected') throw new GateRejectedError(step.id, state.error);
+  // A sub-run stopped for its makers' access: the outer run ends with the same cause (1184).
+  if (state.status === 'failed' && isAuthorStop(state.error)) {
+    throw new NestedRunEndedError(state.error, `Nested pipeline "${step.id}" failed: ${state.error}`);
+  }
   if (state.status !== 'completed') {
     throw new Error(`Nested pipeline "${step.id}" ${state.status}: ${state.error ?? 'no reason recorded'}`);
   }

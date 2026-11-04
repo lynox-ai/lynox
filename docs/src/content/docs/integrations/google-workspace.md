@@ -212,9 +212,8 @@ headers-only mailbox scope is *restricted*.
 | **Standard** (default) | Your identity and email address, calendar events, free/busy, and the Drive files lynox creates (`drive.file`) | App verification. **No CASA assessment** — nothing in this set is restricted. |
 | **Full** | Standard, plus Sheets, Docs, Calendar and Gmail-send, plus Gmail reading and full Drive | Verification **and** an annual CASA security assessment, because it includes restricted scopes. |
 
-**What Standard does not include, so nothing here is a surprise later:** no Gmail access of any kind, no
-access to spreadsheets or documents you did not create through lynox, and no access to Drive files lynox
-did not create. Asking lynox to read an existing spreadsheet on a Standard connection is refused with the
+**What Standard does not include, so nothing here is a surprise later:** no Gmail access of any kind, and no
+access to Drive files lynox did not create. Asking lynox to read an existing spreadsheet on a Standard connection is refused with the
 scope it would need, not attempted and failed.
 
 **Choosing Full changes where your mail comes from.** Full includes a Gmail read scope, and lynox then
