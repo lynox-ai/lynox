@@ -53,7 +53,7 @@ import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBud
 import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
-import { WORKFLOW_ENDED_MID_RUN } from '../orchestrator/run-source.js';
+import { WORKFLOW_ENDED_MID_RUN_ERROR } from '../orchestrator/run-source.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
@@ -3529,18 +3529,17 @@ export class WorkerLoop {
     }
 
     // The runner ended the run before a step because a mandate its workflow depends on ended
-    // since it started (1100, `WORKFLOW_ENDED_MID_RUN`): the same end the sweep gives the run
+    // since it started (1100, `WORKFLOW_ENDED_MID_RUN_ERROR`): the same end the sweep gives the run
     // (`stopEndedStarters`) when it comes first, so it is recorded as that stop, and with the pause
     // on the plan pauses. Keyed on the run's own error and on the plan having ended, so a step
     // whose error happens to read the same is still a failure.
     const endedEntry = this.activeTasks.get(task.id);
     // A liveness read that throws is no end found: the run is recorded as a failure and retried,
-    // and the plan is not paused for it. The runner stopped the run on its own read (a throw there
-    // counts as ended, `stopForEndedAuthor`), so no further step ran; its error, which the end
-    // event carries and, for a run without a webhook event, the escalation, still says that an
-    // access ended.
+    // and the plan is not paused for it. A throw in the runner's own read stops the run too
+    // (`stopForEndedAuthor`), with `WORKFLOW_END_CHECK_FAILED_ERROR`, which says the check failed and
+    // not that an access ended (1184), so it never reaches this branch.
     const planEnded = (entry: ActiveTask): boolean => { try { return this.#planHasEnded(entry); } catch { return false; } };
-    if (result.ok && result.error === WORKFLOW_ENDED_MID_RUN && endedEntry !== undefined && planEnded(endedEntry)) {
+    if (result.ok && result.error === WORKFLOW_ENDED_MID_RUN_ERROR && endedEntry !== undefined && planEnded(endedEntry)) {
       endedEntry.accessEnded = true;
       const stopped = this.#runSlotOf(task.id);
       if (!planPauseOn()) endEvent(stopped, { state: 'failed', reason: ACCESS_ENDED_RESULT, runId: result.runId });
