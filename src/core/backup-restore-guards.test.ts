@@ -193,6 +193,7 @@ describe('temps of a write in flight', () => {
     expect(result.success, String(result.error)).toBe(true);
     expect(existsSync(join(data, 'artifacts', temp))).toBe(false);
     expect(result.skipped).toEqual([]);
+    expect(existsSync(join(data, 'artifacts', live))).toBe(true);
     expect(readFileSync(join(data, 'artifacts', live), 'utf8')).toBe('in flight now');
   });
 });

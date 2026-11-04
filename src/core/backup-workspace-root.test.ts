@@ -267,6 +267,9 @@ describe('backup — the workspace root', () => {
     }
     expect(restored.success).toBe(false);
     expect(restored.error).toMatch(/EIO/);
+    // The rename ran through the folder's handle; the user reads this text, so no fd path is in it.
+    expect(restored.error).toContain("-> 'config.json'");
+    expect(restored.error).not.toContain('/proc/self/fd/');
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a-live');
     expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
   });
