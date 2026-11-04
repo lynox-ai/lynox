@@ -37,6 +37,7 @@ import {
   type BulkHaltReason, type BulkInvalidReason, type BulkJudgeRun, type BulkLedger,
 } from './bulk-ledger.js';
 import type { BulkPreviewOutcome } from './bulk-preview.js';
+import { shopifyNoneLeftSentence } from './bulk-shopify.js';
 import type { MeteredGateResult } from './metered-request.js';
 import { getProviderDescriptor, isMistralHost, modelCapability, type LLMProvider, type LynoxUserConfig, type ModelTier } from '../types/index.js';
 import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
@@ -781,7 +782,10 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   if (!ledger.finishJudge(runId)) {
     return { status: 'halted', summary: summarize(ledger, runId, say.judgeStopped, say) };
   }
-  return { status: 'done', summary: summarize(ledger, runId, say.judgeDone, say) };
+  // A filtered list whose every product fell out before the judge says that no product matched.
+  const list = ledger.getListRun(runId);
+  const noneLeft = list === null ? null : shopifyNoneLeftSentence(list.source.filters, ledger.getStatus(runId), say);
+  return { status: 'done', summary: summarize(ledger, runId, noneLeft ?? say.judgeDone, say) };
 
   function halt(reason: BulkHaltReason): BulkJudgeOutcome {
     // Only a run still planned and not halted: a run superseded or stopped meanwhile keeps its reason.

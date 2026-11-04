@@ -65,7 +65,8 @@ export const SHOPIFY_CONTEXT_FIELDS: readonly string[] = Object.freeze([
  *  bound them (a list that is not a store's: its elements' fields are the API's). A store form
  *  that takes no judge yet takes no context either. */
 export function contextFieldsOfListForm(form: unknown): readonly string[] | undefined {
-  if (form === 'shopify') return SHOPIFY_CONTEXT_FIELDS;
+  // A filtered product list (`shopify_filtered`) reads its products with the same document.
+  if (form === 'shopify' || form === 'shopify_filtered') return SHOPIFY_CONTEXT_FIELDS;
   if (form === 'shopify_media') return [];
   return undefined;
 }

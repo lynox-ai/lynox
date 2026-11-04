@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
-	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkInvalidText, bulkSkippedHead,
+	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -168,6 +168,18 @@ describe('a Shopify run\'s field names and note', () => {
 		expect(bulkFieldNamesText('shop.example.com', ['ti\u200btle'], label)).toBe('ti⟨U+200B⟩tle');
 	});
 
+	it('names a filtered list\'s group by its product type, vendor or both, with hidden characters shown', () => {
+		const t: BulkI18n = { t: (k) => k, tf: (k, vars) => `${k}${JSON.stringify(vars)}` };
+		expect(bulkListFilterText({ product_type: 'Tee' }, t)).toBe('bulk.list.filter_type{"type":"Tee"}');
+		expect(bulkListFilterText({ vendor: 'Acme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"Acme"}');
+		expect(bulkListFilterText({ product_type: 'Tee', vendor: 'Acme' }, t)).toBe('bulk.list.filter_both{"type":"Tee","vendor":"Acme"}');
+		expect(bulkListFilterText({ product_type: 'T\u200Bee', vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_both{"type":"T⟨U+200B⟩ee","vendor":"Ac⟨U+202E⟩me"}');
+		expect(bulkListFilterText({ product_type: 'T\u200Bee' }, t)).toBe('bulk.list.filter_type{"type":"T⟨U+200B⟩ee"}');
+		expect(bulkListFilterText({ vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"Ac⟨U+202E⟩me"}');
+		expect(bulkListFilterText(null, t)).toBeNull();
+		expect(bulkListFilterText({}, t)).toBeNull();
+	});
+
 	it('knows a store host exactly, not by a suffix', () => {
 		expect(bulkIsShopifyHost('acme.myshopify.com')).toBe(true);
 		for (const host of ['myshopify.com', 'a.b.myshopify.com', 'acme.myshopify.com.evil.io', 'admin.shopify.com', null]) expect(bulkIsShopifyHost(host), String(host)).toBe(false);
@@ -225,7 +237,7 @@ describe('the approved unchecked-change texts', () => {
 // site that forgets it fails here. Engine-authored text (halt reasons, the host from a parsed URL,
 // catalog labels) is not in the list.
 describe('the bulk pages show supplied text only through bulkVisibleText', () => {
-	const SUPPLIED = /target\.key|target\.error|target\.sentUnchanged|\bf\.field\b|\bline\b|\bfield\b|\bc\.key\b|run\.probe\.key|run\.probe\.fields|run\.listFirstPage|run\.judgeRule\.rule|merge\.dupName|merge\.canonicalName/g;
+	const SUPPLIED = /target\.key|target\.error|target\.sentUnchanged|\bf\.field\b|\bline\b|\bfield\b|\bc\.key\b|run\.probe\.key|run\.probe\.fields|run\.listFirstPage|run\.listFilters|run\.judgeRule\.rule|merge\.dupName|merge\.canonicalName/g;
 	const unwrapped = (svelte: string): string[] => {
 		const markup = svelte.split('</script>').slice(1).join('</script>');
 		// Every top-level {…} of the markup, braces counted, so an object literal inside a call
@@ -364,7 +376,7 @@ describe('going on from a run that halted', () => {
 	});
 
 	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded', 'listReadFailed', 'shopInactive'];
-	const NONE = ['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff'];
+	const NONE = ['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff'];
 	const base = { phase: 'planned' as const, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false };
 	const judged = { judge: { tier: 'fast', unjudged: 3 }, judgeServedBy: { provider: 'mistral', label: 'Mistral Medium' } } as unknown as Pick<BulkRunDetailData, 'judge' | 'judgeServedBy'>;
 
@@ -529,7 +541,7 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('places every halt the engine names for a write run', () => {
-		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
+		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listFilterWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
 		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete'];
 		const left = [...PLANNING_ONLY, ...NO_WRITE_ON];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
@@ -988,6 +1000,8 @@ describe('the context C the judge only reads (U-140)', () => {
 			"'bulk.invalid.secret_in_context': { de: 'Das Feld {field} dieses Produkts enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt das Produkt deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es in Shopify, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Feldern neu zu planen.', en: 'The field {field} of this product contains something that looks like a password or key. lynox does not judge this product and sends nothing of it to the AI model. Remove it in Shopify, or ask lynox in the chat to plan the run again without {field} among the fields it reads.' }",
 			"'bulk.invalid.secret_in_context_column': { de: 'Die Spalte {field} dieser Zeile enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt die Zeile deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es in der Tabelle, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Spalten neu zu planen.', en: 'The column {field} of this row contains something that looks like a password or key. lynox does not judge this row and sends nothing of it to the AI model. Remove it in the table, or ask lynox in the chat to plan the run again without {field} among the columns it reads.' }",
 			"'bulk.invalid.secret_in_context_field': { de: 'Das Feld {field} dieses Eintrags enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt den Eintrag deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es dort, wo du diesen Eintrag pflegst, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Feldern neu zu planen.', en: 'The field {field} of this entry contains something that looks like a password or key. lynox does not judge this entry and sends nothing of it to the AI model. Remove it where you keep this entry, or ask lynox in the chat to plan the run again without {field} among the fields it reads.' }",
+			// U-142: the way out holds in both directions, whichever spelling is the typo.
+			"'bulk.invalid.not_in_filter': { de: 'Die Shopify-Suche hat dieses Produkt mitgeliefert, aber sein Produkttyp oder Anbieter ist anders geschrieben als im Filter (etwa ü statt u). lynox ändert es nicht. Gehört es in die Gruppe, schreib den Wert in Shopify bei allen Produkten der Gruppe gleich und bitte lynox dann im Chat, den Lauf mit genau dieser Schreibweise neu zu planen.', en: 'Shopify\\'s search returned this product, but its product type or vendor is spelled differently from the filter (for example ü instead of u). lynox does not change it. If it belongs to the group, spell the value the same way on every product of the group in Shopify, then ask lynox in the chat to plan the run again with exactly that spelling.' }",
 		]) expect(source).toContain(line);
 	});
 });
