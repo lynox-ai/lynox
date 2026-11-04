@@ -6,7 +6,7 @@
  */
 
 import type { LLMProvider, ModelTier } from '../../types/models.js';
-import { toMistralEuBase } from '../../types/models.js';
+import { mistralEuPricing, toMistralEuBase } from '../../types/models.js';
 import type { TierSet } from '../../types/config.js';
 import type { ProviderKey } from '../../types/provider-registry.js';
 import {
@@ -296,33 +296,39 @@ const VERTEX_MODELS: ReadonlyArray<CatalogModel> = [
  * v4 (fair judge panel) showed it never beats mistral-large-2512 at 6× the
  * cost. ministral-3b stays listed as the cheapest opt-in orchestration model.
  */
+/** A Mistral list price per 1M tokens as the EU endpoint bills it (see `mistralEuPricing`). */
+function euHeadline(input: number, output: number): { input: number; output: number } {
+  const eu = mistralEuPricing({ input, output, cacheWrite: input, cacheRead: input });
+  return { input: eu.input, output: eu.output };
+}
+
 const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
   {
     id: 'mistral-medium-2604',
     tier: 'deep',
     label: 'Mistral Medium 3.5',
     context_window: 262_144,
-    pricing: { input: 1.50, output: 7.50 },
-    capabilities: ['tool_use'],
+    pricing: euHeadline(1.50, 7.50),
+    capabilities: ['vision', 'tool_use'],
     residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
-    notes: 'The Mistral deep tier — a newer, stronger generation than Large 3 for deep reasoning and analysis (Large is being deprecated to legacy). 262k context, native prompt-cache. Text-only (no vision). Note Mistral has no 1M-context deep.',
+    notes: 'The Mistral deep tier — a newer, stronger generation than Large 3 for deep reasoning and analysis. 256k context, native prompt-cache, vision. No registered Mistral model has a 1M context. Mistral retires it on 2027-04-30.',
   },
   {
     id: 'mistral-large-2512',
     tier: 'deep',
     label: 'Mistral Large 3',
-    context_window: 256_000,
-    pricing: { input: 0.50, output: 1.50 },
+    context_window: 262_144,
+    pricing: euHeadline(0.50, 1.50),
     capabilities: ['vision', 'tool_use'],
     residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
-    notes: 'Being deprecated to legacy — Medium 3.5 is the stronger deep now. Cheaper ($0.50/$1.50) and multimodal (vision), but weaker on deep analysis. 256k context, native prompt-cache.',
+    notes: 'Medium 3.5 is the stronger deep. Cheaper ($0.55/$1.65 on the EU endpoint) and multimodal (vision), but weaker on deep analysis. 256k context, native prompt-cache. Mistral retires it on 2027-04-30.',
   },
   {
     id: 'ministral-14b-2512',
     tier: 'balanced',
     label: 'Ministral 14B',
     context_window: 262_144,
-    pricing: { input: 0.20, output: 0.20 },
+    pricing: euHeadline(0.20, 0.20),
     capabilities: ['vision', 'tool_use'],
     residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'Gen-3 mid model, text+vision. Strong tool-ROUTER (100% Set-Bench) but below the R1/R3 orchestration floor as a main — the balanced tier now resolves to Medium 3.5 (WS2); 14B stays a catalog extra.',
@@ -332,7 +338,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     tier: 'fast',
     label: 'Ministral 3B',
     context_window: 131_072,
-    pricing: { input: 0.10, output: 0.10 },
+    pricing: euHeadline(0.10, 0.10),
     capabilities: ['vision', 'tool_use'],
     residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
     notes: 'Cheapest Mistral model. Orchestration, classification, routing. Gen-3 multimodal (text+vision).',
@@ -342,10 +348,10 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     tier: 'fast',
     label: 'Ministral 8B',
     context_window: 262_144,
-    pricing: { input: 0.15, output: 0.15 },
+    pricing: euHeadline(0.15, 0.15),
     capabilities: ['vision', 'tool_use'],
     residency: 'EU/EFTA inference (Mistral SAS, regional endpoint)',
-    notes: 'Recommended fast-tier default. Gen-3 multimodal (text+vision). 100% pass on all 8 bench axes at $0.00006–$0.00038 warm per loop.',
+    notes: 'Recommended fast-tier default. Gen-3 multimodal (text+vision). 100% pass on all 8 bench axes at $0.00006–$0.00038 warm per loop (measured at list price).',
   },
 ];
 

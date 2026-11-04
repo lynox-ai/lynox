@@ -463,7 +463,7 @@
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
 											{#if target.change === 'invalid' && target.error}
-												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n)}</p>
+												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store' })}</p>
 												{#if target.error === 'shortcode_changed' && target.refusedValues}
 													{#each target.refusedValues as { field, value } (field)}
 														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle">{bulkVisibleText(field)}:</div>{/if}
@@ -536,6 +536,18 @@
 							{/each}
 						</ul>
 					</div>
+					{#if run.judgeRule.context && run.judgeRule.context.length > 0}
+						<!-- The context C goes to the judge's provider too: shown before the start the hash binds (U-140). -->
+						<div data-testid="bulk-start-context">
+							<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.context_fields')}</h3>
+							<ul class="text-sm space-y-0.5">
+								{#each run.judgeRule.context as field (field)}
+									<li>{#if shopify}{bulkFieldNamesText(host, [field], t)}{:else}<code class="text-xs">{bulkVisibleText(field)}</code>{/if}</li>
+								{/each}
+							</ul>
+							<p class="text-xs text-text-muted mt-1">{tf('bulk.start.context_explain', { provider: bulkJudgeProviderName(run.judgeServedBy.provider) })}</p>
+						</div>
+					{/if}
 					<div class="text-sm space-y-1">
 						<label class="flex flex-wrap items-center gap-2">
 							{t('bulk.start.cap_prefix')}

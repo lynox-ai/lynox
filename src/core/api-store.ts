@@ -73,7 +73,7 @@ const BRIEFING_AUTH_TYPES: ReadonlySet<string> = new Set(['none', 'basic', 'bear
  *    the model as written, and an `&` cannot start a tag.
  * Not a string (a profile from a file is not type-checked) prints as a marker.
  */
-function oneLineInBriefing(value: unknown): string {
+export function oneLineInBriefing(value: unknown): string {
   if (typeof value !== 'string') return `[non-string: ${typeof value}]`;
   return value
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')

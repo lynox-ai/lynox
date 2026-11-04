@@ -37,7 +37,7 @@ export const SHOPIFY_MEDIA_PER_PRODUCT = 250;
  */
 export const SHOPIFY_READ_DOCUMENTS: Readonly<Record<ShopifyReadForm, string>> = Object.freeze({
   shopify_products_list: 'query($n: Int!, $q: String!) { products(first: $n, sortKey: ID, query: $q) { nodes { id } } }',
-  shopify_product_read: 'query($id: ID!) { product(id: $id) { id title descriptionHtml seo { title description } } }',
+  shopify_product_read: 'query($id: ID!) { product(id: $id) { id title descriptionHtml productType vendor tags seo { title description } } }',
   shopify_media_list: 'query($n: Int!, $q: String!, $m: Int!) { products(first: $n, sortKey: ID, query: $q) { nodes { id media(first: $m) { nodes { id mediaContentType } pageInfo { hasNextPage } } } } }',
   shopify_media_read: 'query($id: ID!) { node(id: $id) { ... on MediaImage { id alt } } }',
 });
