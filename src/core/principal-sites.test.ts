@@ -31,8 +31,12 @@
  * are believed by the type checker, and `satisfies` keeps a narrower type than the place may
  * assume, so the census asks for the plain value.
  *
+ * A binding whose initializer is `any` (`const pr: P = JSON.parse(…)`) names nothing either, one
+ * binding back as for a cast: its declared type is believed like one (1194).
+ *
  * What it still does not see: a principal removed after the place read its type, through a looser
- * alias (`delete`, `Object.assign`); a value of type `any` assigned into a typed binding earlier;
+ * alias (`delete`, `Object.assign`); a value of type `any` assigned into a typed binding by a later
+ * assignment, a parameter default or two bindings back;
  * a cast anywhere but on the value handed over or on the `const` initializer it names (a parameter
  * default, a destructured binding, a later assignment, two bindings back); a call that carries no
  * target's name and does not resolve to a target (an `any` receiver with a computed callee,
@@ -196,6 +200,24 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
     const init = initializerOf(e);
     return asserted(e) || principalAsserted(e) || (init !== undefined && (asserted(init) || principalAsserted(init)));
   };
+  /** A variable whose initializer is `any`: its declared type is believed, as a cast's is (1194). */
+  const anyInitialized = (sym: ts.Symbol | undefined): boolean => {
+    const d = resolve(sym)?.valueDeclaration;
+    return d !== undefined && ts.isVariableDeclaration(d) && d.initializer !== undefined && (checker.getTypeAtLocation(d.initializer).flags & ts.TypeFlags.Any) !== 0;
+  };
+  const anyBound = (e: ts.Expression): boolean => {
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    return ts.isIdentifier(e) && anyInitialized(checker.getSymbolAtLocation(e));
+  };
+  /** The same, for the `principal` of an object literal handed over, written out or short. */
+  const principalAnyBound = (e: ts.Expression | undefined): boolean => {
+    if (e === undefined) return false;
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    return ts.isObjectLiteralExpression(e) && e.properties.some((p) =>
+      (ts.isPropertyAssignment(p) && p.name.getText().replace(/['"[\]]/g, '') === 'principal' && anyBound(p.initializer))
+      || (ts.isShorthandPropertyAssignment(p) && p.name.text === 'principal' && anyInitialized(checker.getShorthandAssignmentValueSymbol(p))));
+  };
+  const anyAt = (e: ts.Expression): boolean => anyBound(e) || principalAnyBound(e) || principalAnyBound(initializerOf(e));
 
   const namesOf = (node: ts.CallExpression | ts.NewExpression, kind: Kind): Names | 'nothing' => {
     const args = node.arguments ?? ts.factory.createNodeArray<ts.Expression>();
@@ -203,12 +225,12 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
       const params = checker.getResolvedSignature(node)?.getParameters() ?? [];
       const at = params.findIndex((p) => p.getName() === 'principal');
       const arg = at >= 0 ? args[at] : undefined;
-      return arg && !castAt(arg) && holdsPrincipal(checker.getTypeAtLocation(arg)) ? 'principal' : 'nothing';
+      return arg && !castAt(arg) && !anyAt(arg) && holdsPrincipal(checker.getTypeAtLocation(arg)) ? 'principal' : 'nothing';
     }
     const opts = args[OPTIONS_AT[kind] ?? -1];
     if (!opts) return 'nothing';
     const t = checker.getTypeAtLocation(opts);
-    if (castAt(opts)) return 'nothing';
+    if (castAt(opts) || anyAt(opts)) return 'nothing';
     const principal = property(t, 'principal', opts);
     if (principal && !principal.optional && holdsPrincipal(principal.type)) return 'principal';
     const internal = property(t, 'internal', opts);
@@ -291,11 +313,11 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
         if (kind) sites.push({ file, kind, fn: enclosingFn(node), names: namesOf(node, kind) });
         // Called by a target's name but resolved elsewhere: a type, a module stand-in or a wrapper
         // made it compile, and the census would not see whom it runs for. `getOrCreate` of one
-        // argument is the rate limiter's.
+        // argument is the rate limiter's; a spread argument may carry any number (1194).
         const callee = node.expression;
         const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text
           : ts.isElementAccessExpression(callee) && ts.isStringLiteralLike(callee.argumentExpression) ? callee.argumentExpression.text : '';
-        if (!kind && GUARDED_NAMES.has(name) && !(name === 'getOrCreate' && (node.arguments?.length ?? 0) < 2)) {
+        if (!kind && GUARDED_NAMES.has(name) && !(name === 'getOrCreate' && (node.arguments?.length ?? 0) < 2 && !(node.arguments ?? []).some(ts.isSpreadElement))) {
           refused.push(`${at(node)} a call named ${name} that does not resolve to it`);
         }
       }
@@ -381,6 +403,9 @@ export function notInternal() { void s.run('t', { internal: false }); }
 export function cast() { e.createSession({ principal: maybe as P }); e.createSession({ principal: maybe! }); e.createSession({} as { principal: P }); spawnPipeline(1, maybe!); }
 export function castMore() { e.createSession({ principal: <P>maybe }); e.createSession({ principal: p } satisfies { principal: P }); e.createSession({ ...({} as { principal: P }) }); const o = { principal: maybe! }; e.createSession(o); }
 export function anyValue() { e.createSession({ principal: loose }); }
+export function anyBinding() { const pr: P = loose; e.createSession({ principal: pr }); const principal: P = loose; e.createSession({ principal }); const o: { principal: P } = loose; e.createSession(o); spawnPipeline(1, pr); const o2 = { principal: pr }; e.createSession(o2); const ok: P = p; e.createSession({ principal: ok }); }
+declare const limiter: { getOrCreate(key: string): number }; declare const keys: [string];
+export function spreadArgs() { limiter.getOrCreate(...keys); limiter.getOrCreate('k'); }
 export interface Deps { runManifest(m: unknown, c: unknown, o: { principal?: P | undefined }): void }
 declare const deps: Deps; declare const loose2: { ['createSession'](o?: unknown): Session };
 export function stand() { deps.runManifest(1, 2, { principal: p }); loose2.createSession(); }
@@ -440,6 +465,12 @@ export function harmless(x: unknown) { void Agent.MAX; return x instanceof Agent
       'createSession in castMore · nothing',
       'createSession in castMore · nothing',
       'createSession in anyValue · nothing',
+      'createSession in anyBinding · nothing',
+      'createSession in anyBinding · nothing',
+      'createSession in anyBinding · nothing',
+      'spawnPipeline in anyBinding · nothing',
+      'createSession in anyBinding · nothing',
+      'createSession in anyBinding · principal',
       'getOrCreate in handedOn · passes through',
       'spawnInline in position · nothing',
       'spawnViaAgent in position · principal',
@@ -455,6 +486,8 @@ export function harmless(x: unknown) { void Agent.MAX; return x instanceof Agent
     expect(refused.map((r) => r.replace(/^x\.ts:\d+ /, ''))).toEqual([
       // `ExtRunner` in a declaration file under src.
       'types/ext.d.ts:2 a type a target class satisfies: a call through it is not seen',
+      // A spread argument: the one-argument exception for the rate limiter does not hold.
+      'a call named getOrCreate that does not resolve to it',
       // `Deps`: a type with a member named like a target function.
       'a type with a member named like a target function: a call through it is not seen',
       // A bracketed member name is still the target's name.
