@@ -265,7 +265,10 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-preview.ts | const withdrawn = list.source.form === SHOPIFY_FILTERED_LIST',
     'core/bulk-preview.ts | if (isShopifyListForm(source.form)) throw new Error(\'a Shopi',
     // The product writer and the HTML fields of a product run: a filtered list writes products too.
-    'core/bulk-external-writer.ts | return (sent, back) => htmlFieldsOfListForm(\'shopify\').some(',
+    'core/bulk-external-writer.ts | const fields = htmlFieldsOfListForm(\'shopify\').filter((f) =>',
+    // The context a judge may read: a filtered list reads its products as every product list does.
+    'core/bulk-judge-rule.ts | if (form === \'shopify\' || form === \'shopify_filtered\') retur',
+    'core/bulk-judge-rule.ts | if (form === \'shopify_media\') return [];',
     'core/bulk-ledger.ts | if (this.shopifyFormOfRun(run) === \'shopify_product\') for (c',
     'server/http-api.ts | import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl, s',
     'server/http-api.ts | listFirstPage: listRun ? (isShopifyListSource(listRun.source',
