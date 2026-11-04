@@ -43,7 +43,7 @@ afterEach(() => {
 
 const signed = (): BackupManager => new BackupManager(data, { backupDir, retentionDays: 30, encrypt: false }, 'vault-key-list');
 
-/** Wait until the filesystem's coarse clock has moved on, so a later write gets a later ctime. */
+/** Wait until the filesystem's coarse clock has moved on, so a later write gets a later mtime. */
 async function tick(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 30));
 }
@@ -74,7 +74,8 @@ describe('the backup list', () => {
     expect(m.listBackups()[0]?.provenance).toBe('mismatch');
   });
 
-  it('checks a manifest again whose content changed while its size and mtime were put back', async () => {
+  // `touch` moves ctime, so this kills a key of size and mtime, not one that also holds ctime.
+  it('checks a manifest again whose size and mtime were put back after a change', async () => {
     const m = signed();
     const created = await m.createBackup();
     const path = join(created.path, 'manifest.json');
