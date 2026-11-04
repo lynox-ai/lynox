@@ -52,4 +52,9 @@ describe('capSecretsListing', () => {
     const long = renderSecretsBriefing(storeOf([`K${'X'.repeat(300)}`]))!;
     expect(capSecretsListing(long, 100)).toBe('<secrets>\n[...truncated]\n</secrets>');
   });
+
+  it('a frame on one line, with no break after the tag, is cut the same way', () => {
+    const oneLine = `<secrets>secret:K${'X'.repeat(300)} (***wxyz)</secrets>`;
+    expect(capSecretsListing(oneLine, 100)).toBe('<secrets>\n[...truncated]\n</secrets>');
+  });
 });
