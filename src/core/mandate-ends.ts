@@ -43,8 +43,8 @@ export class MandateEnds {
    * recorded end had already passed (`plan-pause.ts`). Unlike a revoke listener, one that throws
    * fails the login: the extension and what it must not undo commit together or not at all.
    */
-  private readonly extendListeners = new Set<(mandateId: string, before: { ends_at: number; revoked_at: number | null }, nowS: number) => void>();
-  private readonly recordTx: (mandateId: string, endsAt: number, issuedAtS: number) => void;
+  private readonly extendListeners = new Set<(mandateId: string, before: { ends_at: number; revoked_at: number | null }, nowS: number, email: string) => void>();
+  private readonly recordTx: (mandateId: string, endsAt: number, issuedAtS: number, email: string) => void;
 
   constructor(db: Database.Database) {
     this.upsert = db.prepare(
@@ -61,14 +61,14 @@ export class MandateEnds {
     this.select = db.prepare('SELECT ends_at, revoked_at FROM mandate_ends WHERE mandate_id = ?');
     // Immediate, so the row read before the upsert is the row the upsert changes: another process
     // on the same file cannot write between them.
-    const tx = db.transaction((mandateId: string, endsAt: number, issuedAtS: number): void => {
+    const tx = db.transaction((mandateId: string, endsAt: number, issuedAtS: number, email: string): void => {
       const before = this.row(mandateId);
       const changed = this.upsert.run(mandateId, endsAt, issuedAtS).changes > 0;
       const nowS = Math.floor(Date.now() / 1000);
       if (!changed || before === undefined || before.revoked_at !== null || before.ends_at > nowS) return;
-      for (const listener of this.extendListeners) listener(mandateId, before, nowS);
+      for (const listener of this.extendListeners) listener(mandateId, before, nowS, email);
     });
-    this.recordTx = (mandateId, endsAt, issuedAtS) => { tx.immediate(mandateId, endsAt, issuedAtS); };
+    this.recordTx = (mandateId, endsAt, issuedAtS, email) => { tx.immediate(mandateId, endsAt, issuedAtS, email); };
   }
 
   /**
@@ -81,7 +81,7 @@ export class MandateEnds {
     if (p.kind !== 'mandate' || p.mandateId === undefined || p.mandateExp === undefined) return;
     const seen = this.recorded.get(p.mandateId);
     if (seen !== undefined && (issuedAtS < seen.issuedAt || (issuedAtS === seen.issuedAt && p.mandateExp >= seen.endsAt))) return;
-    this.recordTx(p.mandateId, p.mandateExp, issuedAtS);
+    this.recordTx(p.mandateId, p.mandateExp, issuedAtS, p.email);
     // Only after the commit: a login whose transaction failed is tried again on its next request.
     this.recorded.set(p.mandateId, { issuedAt: issuedAtS, endsAt: p.mandateExp });
   }
@@ -114,9 +114,9 @@ export class MandateEnds {
   /**
    * Be told when a login moves the end of a mandate whose recorded end had passed, inside that
    * login's transaction and before it commits; `before` is the row as it was. Returns the call
-   * that stops it.
+   * that stops it. `email` is the address the login names, for a pause that has no other source of it.
    */
-  onExtendAfterEnd(listener: (mandateId: string, before: { ends_at: number; revoked_at: number | null }, nowS: number) => void): () => void {
+  onExtendAfterEnd(listener: (mandateId: string, before: { ends_at: number; revoked_at: number | null }, nowS: number, email: string) => void): () => void {
     this.extendListeners.add(listener);
     return () => { this.extendListeners.delete(listener); };
   }

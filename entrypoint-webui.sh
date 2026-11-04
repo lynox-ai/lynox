@@ -22,6 +22,15 @@ else
   echo "" >&2
 fi
 
+# Where the vault key comes from, for the engine to report (`LYNOX_VAULT_KEY_SOURCE`, read in
+# src/core/vault-key-source.ts): env | volume-env | minted | none. Set here whatever the
+# environment said, so a value from outside cannot claim a source.
+if [ -n "${LYNOX_VAULT_KEY:-}" ]; then
+  KEY_SOURCE=env
+else
+  KEY_SOURCE=none
+fi
+
 # Load vault key from .env if it exists
 ENV_FILE="$HOME/.lynox/.env"
 if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; then
@@ -31,6 +40,7 @@ if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; 
       VAULT_KEY=$(grep '^LYNOX_VAULT_KEY=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
       if [ -n "$VAULT_KEY" ]; then
         export LYNOX_VAULT_KEY="$VAULT_KEY"
+        KEY_SOURCE=volume-env
       fi
       ;;
   esac
@@ -128,6 +138,7 @@ elif [ -z "${LYNOX_VAULT_KEY:-}" ]; then
   fi
   LYNOX_VAULT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64'))")
   export LYNOX_VAULT_KEY
+  KEY_SOURCE=minted
   mkdir -p "$HOME/.lynox"
   # A new file is created with mode 600; an existing one is appended to only at mode 600.
   # The leading newline keeps the key off a last line that has none (`FOO=bar` would become
@@ -210,6 +221,8 @@ if [ -z "${ORIGIN:-}" ]; then
     export ORIGIN="http://localhost:${LYNOX_HTTP_PORT:-3000}"
   fi
 fi
+
+export LYNOX_VAULT_KEY_SOURCE="$KEY_SOURCE"
 
 # Single process: Engine auto-loads Web UI handler from /app/web-ui/handler.js
 echo "Starting lynox on port ${LYNOX_HTTP_PORT:-3000}..."

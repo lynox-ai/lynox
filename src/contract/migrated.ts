@@ -106,6 +106,8 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'readLoginPrincipal', contractFile: 'http.ts', twinPattern: valueTwin('readLoginPrincipal') },
   { name: 'OAuthClaimRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimRequest') },
   { name: 'OAuthClaimResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimResponse') },
+  { name: 'OAuthClaimPreviewRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimPreviewRequest') },
+  { name: 'OAuthClaimPreviewResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimPreviewResponse') },
   // Born in the contract rather than migrated into it (W5, PRD Stage 1 §3.4).
   // Listed anyway, and the reason is the sweep rather than the history: without a
   // row, a local re-declaration of one of these anywhere in `src/` or the web-ui
@@ -147,6 +149,8 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'MICROSOFT_OAUTH_ERROR_PARAM', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_ERROR_PARAM') },
   { name: 'AdminConsentStatusRequest', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusRequest') },
   { name: 'AdminConsentStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusResponse') },
+  // Born in the contract: the scopes lynox's Google client asks for.
+  { name: 'GOOGLE_BROKER_SCOPES', contractFile: 'http.ts', twinPattern: valueTwin('GOOGLE_BROKER_SCOPES') },
   // K-W3 — the guarded-capable boot marker. The literal existed twice by hand
   // across the repo boundary; a local re-declaration is that failure returning.
   { name: 'GUARDED_CAPABLE_MARKER', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_MARKER') },

@@ -33,6 +33,9 @@ import { sanitizeHeader, stripHtmlAndInvisibles } from './classifier/sanitize.js
 /** Sentinel used in single-user instances. Team-inbox lands in Phase 5+. */
 export const DEFAULT_TENANT_ID = 'default';
 
+/** No account left out — the default for the account filters below. */
+const NO_ACCOUNTS: ReadonlySet<string> = new Set<string>();
+
 // ── Input shapes ───────────────────────────────────────────────────────────
 
 export interface InboxItemInput {
@@ -150,6 +153,8 @@ export interface ThreadMessageInput {
   fetchedAt?: Date | undefined;
   /** FK into inbox_items.id when this message is the decision row's mail. */
   inboxItemId?: string | undefined;
+  /** Whether it is an automatic reply; absent = not checked (stored as NULL). */
+  autoReply?: boolean | undefined;
 }
 
 export interface ThreadMessage {
@@ -170,6 +175,8 @@ export interface ThreadMessage {
   direction: ThreadMessageDirection;
   fetchedAt: Date;
   inboxItemId: string | undefined;
+  /** true = automatic reply, false = checked and not one, undefined = not checked. */
+  autoReply: boolean | undefined;
 }
 
 export interface ListItemsOptions {
@@ -269,6 +276,7 @@ interface ThreadMessageRow {
   direction: string;
   fetched_at: number;
   inbox_item_id: string | null;
+  auto_reply: number | null;
 }
 
 // ── Row → domain mappers ───────────────────────────────────────────────────
@@ -337,6 +345,7 @@ function rowToThreadMessage(row: ThreadMessageRow): ThreadMessage {
     direction,
     fetchedAt: new Date(row.fetched_at),
     inboxItemId: row.inbox_item_id ?? undefined,
+    autoReply: row.auto_reply === null ? undefined : row.auto_reply === 1,
   };
 }
 
@@ -513,6 +522,55 @@ export class InboxStateDb {
       )
       .get(messageId);
     return row ? rowToItem(row) : null;
+  }
+
+  /**
+   * The item whose thread holds a message with this Message-ID — a later message of the thread,
+   * not the one the item was filed from (`findItemByMessageId` covers that). Keyed on the
+   * Message-ID alone, for the same reason: a reply can leave from another account.
+   */
+  findItemByThreadMessageId(messageId: string, preferAccountId?: string): InboxItem | null {
+    if (!messageId) return null;
+    // The same message can sit in two accounts' threads (a customer wrote to both). The account
+    // the reply leaves from is the likelier one, so it wins; otherwise the newest item.
+    const row = this.db
+      .prepare<[string, string], ItemRow>(
+        `SELECT i.* FROM inbox_thread_messages t
+           JOIN inbox_items i
+             ON i.tenant_id = t.tenant_id AND i.account_id = t.account_id AND i.thread_key = t.thread_key
+          WHERE t.message_id = ?
+          ORDER BY (i.account_id = ?) DESC, i.classified_at DESC LIMIT 1`,
+      )
+      .get(messageId, preferAccountId ?? '');
+    return row ? rowToItem(row) : null;
+  }
+
+  /** Whether the thread store already holds this message for this account. */
+  hasThreadMessage(tenantId: string, accountId: string, messageId: string): boolean {
+    const row = this.db
+      .prepare<[string, string, string], { n: number }>(
+        'SELECT 1 AS n FROM inbox_thread_messages WHERE tenant_id = ? AND account_id = ? AND message_id = ? LIMIT 1',
+      )
+      .get(tenantId, accountId, messageId);
+    return row !== undefined;
+  }
+
+  /**
+   * Open a `replied` item again (a new message came into its thread). Only a `replied` item: an
+   * archived one keeps the user's choice, and so does a snooze: whether a reply wakes it is the
+   * user's `unsnooze_on_reply`, which the hook applies before this. The item takes the new message's date and
+   * moves to the top of its list: lists sort by `classified_at`, and the row shows `mail_date`, so
+   * a reopened item with the first mail's dates would sit far down with an old date. Neither
+   * column is read as "when the classifier ran" anywhere else. Returns whether the row changed.
+   */
+  reopenReplied(id: string, tenantId: string, mailDate: Date, at: Date = new Date()): boolean {
+    const result = this.db
+      .prepare<[number, number, string, string], unknown>(
+        `UPDATE inbox_items SET user_action = NULL, user_action_at = NULL, mail_date = ?, classified_at = ?
+          WHERE id = ? AND tenant_id = ? AND user_action = 'replied'`,
+      )
+      .run(mailDate.getTime(), at.getTime(), id, tenantId) as { changes: number };
+    return result.changes > 0;
   }
 
   /**
@@ -733,7 +791,10 @@ export class InboxStateDb {
     return (row?.c ?? 0) > 0;
   }
 
-  countItemsByBucket(tenantId: string = DEFAULT_TENANT_ID): Record<InboxBucket, number> {
+  countItemsByBucket(
+    tenantId: string = DEFAULT_TENANT_ID,
+    excludeAccounts: ReadonlySet<string> = NO_ACCOUNTS,
+  ): Record<InboxBucket, number> {
     // Mirrors listItems' snooze filter AND the client-side `!userAction`
     // filter applied in InboxView.svelte. Without the user_action exclusion
     // the badge sticks at the pre-archive number because SQL counts every
@@ -741,14 +802,15 @@ export class InboxStateDb {
     // marked-unhandled it.
     const now = Date.now();
     const rows = this.db
-      .prepare<[string, number], { bucket: string; c: number }>(
+      .prepare<[string, number, string], { bucket: string; c: number }>(
         `SELECT bucket, COUNT(*) as c FROM inbox_items
          WHERE tenant_id = ?
            AND (snooze_until IS NULL OR snooze_until <= ?)
            AND user_action IS NULL
+           AND account_id NOT IN (SELECT value FROM json_each(?))
          GROUP BY bucket`,
       )
-      .all(tenantId, now);
+      .all(tenantId, now, JSON.stringify([...excludeAccounts]));
     const counts: Record<InboxBucket, number> = {
       requires_user: 0,
       draft_ready: 0,
@@ -760,6 +822,38 @@ export class InboxStateDb {
       }
     }
     return counts;
+  }
+
+  /**
+   * The open items of one bucket, the rows `countItemsByBucket` counts: not snoozed, no user
+   * action, outside `excludeAccounts`. Newest classification first, as `listItems` orders.
+   */
+  listOpenItems(opts: {
+    tenantId?: string | undefined;
+    bucket: InboxBucket;
+    limit: number;
+    offset: number;
+    excludeAccounts?: ReadonlySet<string> | undefined;
+  }): ReadonlyArray<InboxItem> {
+    const rows = this.db
+      .prepare<[string, string, number, string, number, number], ItemRow>(
+        `SELECT * FROM inbox_items
+         WHERE tenant_id = ? AND bucket = ?
+           AND (snooze_until IS NULL OR snooze_until <= ?)
+           AND user_action IS NULL
+           AND account_id NOT IN (SELECT value FROM json_each(?))
+         ORDER BY classified_at DESC, rowid DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(
+        opts.tenantId ?? DEFAULT_TENANT_ID,
+        opts.bucket,
+        Date.now(),
+        JSON.stringify([...(opts.excludeAccounts ?? NO_ACCOUNTS)]),
+        clampLimit(opts.limit),
+        Math.max(0, opts.offset),
+      );
+    return rows.map(rowToItem);
   }
 
   /**
@@ -1168,8 +1262,8 @@ export class InboxStateDb {
          message_id, in_reply_to,
          from_address, from_name, to_json, cc_json,
          subject, body_md, mail_date, snippet,
-         direction, fetched_at, inbox_item_id
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         direction, fetched_at, inbox_item_id, auto_reply
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (tenant_id, account_id, message_id) DO UPDATE SET
          body_md = CASE
            WHEN excluded.body_md IS NOT NULL
@@ -1179,7 +1273,8 @@ export class InboxStateDb {
          END,
          snippet = COALESCE(NULLIF(excluded.snippet, ''), inbox_thread_messages.snippet),
          mail_date = COALESCE(excluded.mail_date, inbox_thread_messages.mail_date),
-         inbox_item_id = COALESCE(excluded.inbox_item_id, inbox_thread_messages.inbox_item_id)`,
+         inbox_item_id = COALESCE(excluded.inbox_item_id, inbox_thread_messages.inbox_item_id),
+         auto_reply = COALESCE(excluded.auto_reply, inbox_thread_messages.auto_reply)`,
     );
     // ON CONFLICT DO UPDATE always reports `changes > 0` (insert or
     // update path), so we drop the result and query for the canonical
@@ -1203,6 +1298,7 @@ export class InboxStateDb {
       input.direction ?? 'inbound',
       (input.fetchedAt ?? new Date()).getTime(),
       input.inboxItemId ?? null,
+      input.autoReply === undefined ? null : input.autoReply ? 1 : 0,
     );
     this._selectThreadMessageIdByMsgIdStmt ??= this.db.prepare<[string, string, string], { id: string }>(
       `SELECT id FROM inbox_thread_messages

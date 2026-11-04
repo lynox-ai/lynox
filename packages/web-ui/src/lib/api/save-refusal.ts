@@ -12,8 +12,8 @@
 // provider check quotes the `api_base_url` it refused — so a URL loses its credentials, query
 // and fragment before the sentence reaches a toast. Nothing else is cut: what else the route
 // repeats are model ids and preset names, which the person needs to read, and it repeats no key
-// field (the schema's messages name no values). The server stripping the URL itself is its own
-// register row.
+// field (the schema's messages name no values). The server quotes such a URL as scheme, host and
+// path itself (`endpointForMessage`); this stays as a second line.
 
 import { tf } from '../i18n.svelte.js';
 

@@ -19,6 +19,7 @@ import type {
   UsageFlushRequest,
   UsageFlushResponse,
   UsageStatusResponse,
+  UsageStatusRequestHeaders,
   UsageSummaryResponse,
   HealthBody,
   MagicLinkVerifyRequest,
@@ -64,6 +65,13 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
     balance_cents: 2985,
     allowed: true,
   } satisfies UsageFlushResponse,
+  'usage-status-request-headers.json': {
+    'x-key-delivery': 'env',
+    'x-key-len64': '1',
+  } satisfies UsageStatusRequestHeaders,
+  'usage-status-request-headers.none.json': {
+    'x-key-delivery': 'none',
+  } satisfies UsageStatusRequestHeaders,
   'usage-status-response.managed.json': {
     balance_cents: 2985,
     included_budget_cents: 3000,

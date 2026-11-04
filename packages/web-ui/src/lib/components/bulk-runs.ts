@@ -45,6 +45,8 @@ export interface BulkRun {
 	sentUnknown: number;
 	/** Written targets the store kept with markup lynox did not send. Optional: an older engine sends none. */
 	shopAddedMarkup?: number | undefined;
+	/** Written targets whose store kept a description otherwise than sent, without outside markup: counted, not halted. */
+	hostRewrote?: number | undefined;
 	undone: number;
 	kind: 'apply' | 'undo';
 	atomic: boolean;
@@ -83,11 +85,13 @@ export interface BulkRunDetailData extends BulkRun {
 	undoable: number;
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
 	listFirstPage: string | null;
+	/** A Shopify list narrowed to a product type and/or vendor: the values as the planner gave them (supplied text). */
+	listFilters: Readonly<Record<string, string>> | null;
 	listStartChecksum: string | null;
 	/** The engine's note on a list read page by page (English). */
 	listNote: string | null;
 	/** A judged run's rule as the owner starts it (owner only), and its hash the start presents. */
-	judgeRule: { rule: string; schema: { properties: Record<string, unknown> }; tier: string } | null;
+	judgeRule: { rule: string; schema: { properties: Record<string, unknown> }; tier: string; context?: string[] | undefined } | null;
 	judgeRuleHash: string | null;
 	/** Who would judge the run now: the provider serving the call and the model's catalog name. */
 	judgeServedBy: { provider: string; label: string } | null;
@@ -128,7 +132,7 @@ const BULK_RESTART_AS_IS = new Set([
 	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap', 'unrecorded', 'listReadFailed', 'shopInactive',
 ]);
 /** Halts a restart would meet again on the same targets: the run has to be planned again. */
-const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff']);
+const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff']);
 
 /** How a planned run that halted on a failure goes on: read on, read its list on, judge on, judge
  *  on under a higher spend limit — or not at all (`none`, `no_judge`, `judge_own_key`). Null for a
@@ -387,6 +391,18 @@ export function bulkMergeAnswer(
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
 
+/** The line naming a filtered Shopify list's group, where the run is started and approved. The
+ *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter. */
+export function bulkListFilterText(filters: Readonly<Record<string, string>> | null, i18n: BulkI18n): string | null {
+	if (filters === null) return null;
+	const type = filters['product_type'];
+	const vendor = filters['vendor'];
+	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: bulkVisibleText(type), vendor: bulkVisibleText(vendor) });
+	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: bulkVisibleText(type) });
+	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: bulkVisibleText(vendor) });
+	return null;
+}
+
 /** The provider that serves a judge call, by name. */
 export function bulkJudgeProviderName(provider: string): string {
 	const names: Record<string, string> = { anthropic: 'Anthropic', vertex: 'Google Vertex', mistral: 'Mistral', fireworks: 'Fireworks' };
@@ -424,6 +440,26 @@ export interface BulkTarget {
 	/** Written, and the store kept it with markup lynox did not send: the target the halt
 	 *  `markupAddedByShop` is about. Set only where it holds. */
 	shopAddedMarkup?: true | undefined;
+	/** Written, and the store kept the description otherwise than sent, without outside markup. */
+	hostRewrote?: true | undefined;
+	/** Refused for `shortcode_changed`: each field the shortcode check refuses, with its whole
+	 *  planned value, for the owner to copy into the shop (1130). Set only where one holds. */
+	refusedValues?: { field: string; value: string }[] | undefined;
+	/** With `secret_in_context`: the field the judge only reads that held it, by its name. */
+	contextField?: string | undefined;
+}
+
+/** How much of a long value the preview shows before „show the whole text“ (ux U-103). */
+export const BULK_VALUE_SHOWN_CHARS = 1000;
+export const BULK_VALUE_SHOWN_LINES = 12;
+
+/** The part of a value the preview shows folded, and whether it was cut. The copy button never
+ *  takes this: it copies the whole value. */
+export function bulkFoldedValue(value: string): { shown: string; cut: boolean } {
+	let shown = value.slice(0, BULK_VALUE_SHOWN_CHARS);
+	const lines = shown.split('\n');
+	if (lines.length > BULK_VALUE_SHOWN_LINES) shown = lines.slice(0, BULK_VALUE_SHOWN_LINES).join('\n');
+	return { shown, cut: shown.length < value.length };
 }
 
 /** The external host of a run's target system, or null for a local run. */
@@ -439,12 +475,15 @@ export function bulkIsShopifyHost(host: string | null): boolean {
 	return host !== null && SHOPIFY_STORE_HOST.test(host);
 }
 
-/** The fields a Shopify run writes, each with the i18n key of its readable name. */
+/** The fields a Shopify run writes or its judge reads (U-140), each with the i18n key of its readable name. */
 const SHOPIFY_FIELD_KEYS: Readonly<Record<string, string>> = {
 	title: 'bulk.field.shopify.title',
 	descriptionHtml: 'bulk.field.shopify.descriptionHtml',
 	seo_title: 'bulk.field.shopify.seo_title',
 	seo_description: 'bulk.field.shopify.seo_description',
+	productType: 'bulk.field.shopify.productType',
+	vendor: 'bulk.field.shopify.vendor',
+	tags: 'bulk.field.shopify.tags',
 };
 
 /** The i18n key of a field's readable name on this host, or null: the field is then shown by its own name. */
@@ -635,6 +674,7 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	list_item_no_id: 'list_item', list_item_bad_id: 'list_item', list_item_not_object: 'list_item', list_item_outside_list: 'list_item',
 	list_item_mismatch: 'list_item_mismatch',
 	list_item_truncated: 'list_item_truncated',
+	not_in_filter: 'not_in_filter',
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
 	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused', shop_added_markup: 'shop_added_markup',
 };
@@ -642,6 +682,7 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
  *  of tags the page reads, whose way out differs from planning again (U-103). */
 const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
 	markup_dropped: 'markup_dropped', markup_dropped_before: 'markup_dropped_before',
+	shortcode_changed: 'shortcode_changed',
 };
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */
@@ -654,7 +695,22 @@ const BULK_INVALID_SUPPORT: Readonly<Record<string, string>> = {
 /** What the owner reads under a target lynox leaves out: on a Shopify run what is wrong, that
  *  lynox does not change it, and the next step; elsewhere the reason by its code and the step
  *  every run has. Unknown (not yet loaded) reads as managed, as the halt sentences do. */
-export function bulkInvalidText(reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n): string {
+export function bulkInvalidText(
+	reason: string, shopify: boolean, managed: boolean | null, i18n: BulkI18n,
+	/** With `secret_in_context`: the field that held it, and whether the run is a data-store run's. */
+	context?: { field: string | undefined; host: string | null; dataStore: boolean },
+): string {
+	// The field the judge only reads that held a credential, named so the owner knows which one to
+	// clean (U-140): on Shopify by its readable name, in the data store by the owner's column name,
+	// on any other list by the field's name as the list has it. The engine records the field with
+	// the reason, in one write; a target without it (none today) still reads as the sentence, with
+	// a dash where the name would be.
+	if (reason === 'secret_in_context') {
+		const name = context?.field;
+		const field = name === undefined ? '—' : shopify ? bulkFieldNamesText(context?.host ?? null, [name], (k) => i18n.t(k)) : bulkVisibleText(name);
+		const key = shopify ? 'secret_in_context' : context?.dataStore === true ? 'secret_in_context_column' : 'secret_in_context_field';
+		return i18n.tf(`bulk.invalid.${key}`, { field });
+	}
 	const anyForm = BULK_INVALID_ANY_FORM[reason];
 	if (anyForm !== undefined) {
 		return i18n.tf(`bulk.invalid.${anyForm}`, { where: i18n.t(shopify ? 'bulk.invalid.where_shopify' : 'bulk.invalid.where_other') });
