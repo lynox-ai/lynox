@@ -236,6 +236,14 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(notifyNewItem).not.toHaveBeenCalled();
   });
 
+  it('a snooze that has run out does not hold the push back', async () => {
+    const id = seedReplied();
+    inbox.setSnooze(id, new Date(Date.now() - 60_000), null, /* unsnoozeOnReply */ false);
+    await hook()(ACCOUNT.id, envelope());
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+  });
+
   it('a snooze that wakes on a reply wakes, and then the push goes out', async () => {
     const id = seedReplied();
     inbox.setSnooze(id, new Date(Date.now() + 86_400_000), null, /* unsnoozeOnReply */ true);
