@@ -260,9 +260,16 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
   ];
   const named = (p: Extract<RequestPrincipal, { kind: 'mandate' }>): void => {
     const key = grantKey(p.email, p.mandateId);
+    if (seen.has(key)) return;
     // A mark without a grant id (written before marks carried one) names the person, not an
-    // access: it adds nobody the list already has under that address.
-    if (seen.has(key) || (p.mandateId === undefined && [...seen].some((k) => k.startsWith(`${p.email}\u0000`)))) return;
+    // access: it adds nobody the list already has under that address, and its roles (read for the
+    // id-less mark only, `rolesOn`) go to that member instead of being lost.
+    const same = p.mandateId === undefined ? members.findIndex((m) => m.name === p.email) : -1;
+    if (same >= 0) {
+      const had = members[same]!;
+      members[same] = { ...had, roles: [...had.roles, ...roles(p).filter((r) => !had.roles.includes(r))] };
+      return;
+    }
     seen.add(key);
     members.push({ name: p.email, roles: roles(p), ended: principalHasEnded(p, isLive), reason: null });
   };
