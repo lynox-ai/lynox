@@ -125,6 +125,8 @@ describe('a link swapped into the data dir after the last check', () => {
     // Refused by the anchored write, not by the check before it (which the swap came after).
     expect(result.error).not.toMatch(/is a link on this machine/);
     expect(result.error).toMatch(/symlink|not a directory|ELOOP|ENOTDIR/i);
+    // The user reads this text: no fd path in it.
+    expect(result.error).not.toContain('/proc/self/fd/');
     expect(readdirSync(outside)).toEqual([]);
     expect(readFileSync(join(data, 'memory.real', 'x.md'), 'utf8')).toBe('live');
   });
@@ -138,6 +140,60 @@ describe('a link swapped into the data dir after the last check', () => {
     expect(result.success, String(result.error)).toBe(true);
     expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('backed up');
     expect(readdirSync(join(data, 'memory')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
+    // Every file of the backup is counted, the data-dir set's as well.
+    expect(result.files_restored).toBe(created.manifest.files.filter(f => f.type !== 'directory').length);
+    expect(result.files_restored).toBeGreaterThan(0);
+  });
+
+  it('set during the safety backup, is refused by the check before staging, word for word', async () => {
+    writeFileSync(join(data, 'memory', 'x.md'), 'backed up');
+    const m = manager();
+    const created = await m.createBackup();
+    const real = m.createBackup.bind(m);
+    vi.spyOn(m, 'createBackup').mockImplementation(async () => {
+      const safety = await real();
+      renameSync(join(data, 'memory'), join(data, 'memory.real'));
+      symlinkSync(outside, join(data, 'memory'));
+      return safety;
+    });
+    const result = await m.restoreBackup(created.path, { allowUnverified: true });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Refusing to restore: memory is a link on this machine; the restore does not write through it. Nothing was replaced.');
+    expect(readdirSync(outside)).toEqual([]);
+  });
+});
+
+describe('a folder of the backup that the live data dir does not have yet', () => {
+  it('is made, two levels deep, and the files land in it', async () => {
+    mkdirSync(join(data, 'memory', 'p1'));
+    writeFileSync(join(data, 'memory', 'p1', 'manifest.json'), '{"p":1}');
+    const m = manager();
+    const created = await m.createBackup();
+    rmSync(join(data, 'memory'), { recursive: true });
+    const result = await m.restoreBackup(created.path, { allowUnverified: true });
+    expect(result.success, String(result.error)).toBe(true);
+    expect(readFileSync(join(data, 'memory', 'p1', 'manifest.json'), 'utf8')).toBe('{"p":1}');
+  });
+});
+
+describe('temps of a write in flight', () => {
+  it('a stage temp the backup caught is neither written back nor named; a live one is left alone', async () => {
+    const temp = `.lynox-stage-${'a'.repeat(24)}`;
+    mkdirSync(join(data, 'artifacts'), { recursive: true });
+    writeFileSync(join(data, 'artifacts', temp), 'caught in flight');
+    writeFileSync(join(data, 'artifacts', 'index.json'), '[]');
+    const m = manager();
+    const created = await m.createBackup();
+    expect(created.manifest.files.map(f => f.path)).toContain(`artifacts/${temp}`);
+    rmSync(join(data, 'artifacts', temp));
+    // Another component's temp, written while the restore runs.
+    const live = `.lynox-stage-${'b'.repeat(24)}`;
+    writeFileSync(join(data, 'artifacts', live), 'in flight now');
+    const result = await m.restoreBackup(created.path, { allowUnverified: true });
+    expect(result.success, String(result.error)).toBe(true);
+    expect(existsSync(join(data, 'artifacts', temp))).toBe(false);
+    expect(result.skipped).toEqual([]);
+    expect(readFileSync(join(data, 'artifacts', live), 'utf8')).toBe('in flight now');
   });
 });
 
@@ -178,6 +234,32 @@ describe('the workspace set, where its filesystem folds names', () => {
     const result = await m.restoreBackup(path, { allowUnverified: true });
     expect(result.success).toBe(false);
     expect(result.error).toBe(unaskedText('workspace/http-api/A', 'workspace/http-api/a/b', 'ENOSPC'));
+    expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
+  });
+
+  it('asks in the nearest folder that exists, when the pair\'s own folder is not there yet', async () => {
+    mkdirSync(ws('http-api/new/deeper/a'), { recursive: true });
+    writeFileSync(ws('http-api/new/deeper/A'), 'a file');
+    writeFileSync(ws('http-api/new/deeper/a/b'), 'in a folder');
+    const m = manager();
+    const created = await m.createBackup();
+    rmSync(ws('http-api/new'), { recursive: true });
+    const folds = vi.spyOn(m as unknown as WorkspaceFoldSeam, 'workspaceNamesFold').mockReturnValue(false);
+    const result = await m.restoreBackup(created.path, { allowUnverified: true });
+    expect(result.success, String(result.error)).toBe(true);
+    expect(folds).toHaveBeenCalledTimes(1);
+    expect(folds.mock.calls[0]?.[1]).toBe('http-api');
+  });
+
+  it('is refused when the workspace root cannot be opened to ask, before any live file is replaced', async () => {
+    const { m, path } = await foldingBackup();
+    rmSync(join(data, 'workspace'), { recursive: true });
+    writeFileSync(join(data, 'workspace'), 'not a folder');
+    _resetWorkspaceAccess();
+    const result = await m.restoreBackup(path, { allowUnverified: true });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/^Could not check whether this machine's filesystem tells "workspace\/http-api\/A" and "workspace\/http-api\/a\/b" apart/);
+    expect(result.pre_restore_backup_path).toBe('');
     expect(readFileSync(join(data, 'memory', 'x.md'), 'utf8')).toBe('live');
   });
 

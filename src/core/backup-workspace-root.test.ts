@@ -222,6 +222,8 @@ describe('backup — the workspace root', () => {
     expect(restored.success).toBe(false);
     expect(JSON.parse(readFileSync(join(data, 'config.json'), 'utf8'))).toEqual({ default_tier: 'deep' });
     expect(readdirSync(data).filter(n => n.includes('.restore-staging'))).toEqual([]);
+    // The data-dir set was staged through its anchor: none of its temps stays behind either.
+    expect(readdirSync(data).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
     expect(readFileSync(ws('http-api/b.txt'), 'utf8')).toBe('ZZ-b-live');
   });
 

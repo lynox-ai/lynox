@@ -20,7 +20,7 @@ import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
 import { OMITTED_SIDECAR, restoreRefusal } from './sidecar-refusals.js';
 
 export { OMITTED_SIDECAR };
-import { closeAnchor, copyOut, FOLD_PROBE_NAME, isStageName, listDir, namesFoldAt, openAnchor, removeStaleStages, stageIn, statEntry, unlinkAt, type StageEntry, type StagedWrite, type WorkspaceAnchor } from './workspace-fd.js';
+import { closeAnchor, copyOut, FOLD_PROBE_NAME, isStageName, listDir, namesFoldAt, openAnchor, removeStaleStages, stageIn, statEntry, unlinkAt, WorkspaceAccessError, type StageEntry, type StagedWrite, type WorkspaceAnchor } from './workspace-fd.js';
 
 /**
  * The inventory row the workspace root serves. The root may live outside the data dir, so it is
@@ -197,6 +197,15 @@ const COPY_FILES = BACKUP_COPY_FILES;
 const STAGING_TEMP = /\.[0-9a-f]{16}\.restore-staging$/;
 
 /**
+ * A temp of a write in flight or a crashed one: the older restore temp, or the fd module's stage
+ * (`.lynox-stage-<24 hex>`, which the artifact store and the restore both write). A backup taken
+ * while one was in flight holds it; it is nobody's file, so it is neither written back nor named.
+ */
+function isTempName(path: string): boolean {
+  return STAGING_TEMP.test(path) || isStageName(path.slice(path.lastIndexOf('/') + 1));
+}
+
+/**
  * Whether a restore writes this entry: only where `createBackup` writes, a database or file of the
  * inventory under its own name, or a path inside one of its directories. A path that is plain but
  * lands anywhere else (`http-secret`, `vault.key`, `plugins/…`) is what the inventory keeps OUT of
@@ -206,7 +215,7 @@ const STAGING_TEMP = /\.[0-9a-f]{16}\.restore-staging$/;
  * the temp of its neighbour.
  */
 function isBackedUpEntryPath(path: string): boolean {
-  if (STAGING_TEMP.test(path)) return false;
+  if (isTempName(path)) return false;
   const slash = path.indexOf('/');
   if (slash === -1) return SQLITE_DBS.includes(path) || COPY_FILES.includes(path);
   return COPY_DIRS.includes(path.slice(0, slash));
@@ -287,16 +296,25 @@ export function filesystemFoldsNames(dir: string, exists: (path: string) => bool
  * backup has a file (the swap's rename would fail after earlier files were already replaced).
  */
 /**
- * Remove what a crashed restore left in the folder `relDir` below the anchor, without following a
- * link: files and links of exactly a staging temp's shape (`STAGING_TEMP`, the older by-name temps,
- * or the anchored stage's) or the fold probe's. Not recursive. A folder that is not there yet holds
- * nothing to remove.
+ * Remove what a crashed restore of an earlier version left in the folder `relDir` below the anchor,
+ * without following a link: files and links of exactly `STAGING_TEMP`'s or the fold probe's shape.
+ * Not recursive. Not the fd module's `.lynox-stage-` temps: the artifact store writes those in
+ * `artifacts/` while it runs, and a restore's own are removed by `stageIn` when it fails. A folder
+ * that is not there yet, or whose parent is not, holds nothing to remove.
  */
 function removeStagingTemps(anchor: WorkspaceAnchor, relDir: string): void {
-  if (relDir !== '' && statEntry(anchor, relDir)?.type !== 'dir') return;
+  if (relDir !== '') {
+    let type: string | undefined;
+    try {
+      type = statEntry(anchor, relDir)?.type;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    if (type !== 'dir') return;
+  }
   for (const e of listDir(anchor, relDir)) {
     if (e.type === 'dir') continue;
-    if (!STAGING_TEMP.test(e.name) && !FOLD_PROBE_NAME.test(e.name) && !isStageName(e.name)) continue;
+    if (!STAGING_TEMP.test(e.name) && !FOLD_PROBE_NAME.test(e.name)) continue;
     try {
       unlinkAt(anchor, relDir === '' ? e.name : `${relDir}/${e.name}`);
     } catch (err) {
@@ -344,6 +362,63 @@ function foldRefusal(pair: { a: string; b: string; code?: string | null }): stri
   return `This backup holds ${a} and ${b}, and this machine's filesystem takes them for one name: it does not tell upper from lower case, or two ways of writing the same letter, apart. ` +
     'Restoring would fail halfway, so the restore was refused; nothing was replaced. ' +
     'To restore this backup, use a machine whose filesystem tells these names apart (Linux usually does), or rename one of the two where the backup was made and back up again.';
+}
+
+/**
+ * Stage `source` below `root` by name, where the platform has no fd-relative open (Windows): what a
+ * restore did before it wrote through an anchor. Each file to a fresh temp beside its target
+ * (exclusive), renamed over it on commit. A link set after the checks is followed here.
+ */
+function stageByName(root: string, source: Iterable<StageEntry>): StagedWrite {
+  const staged: Array<{ tmp: string; dest: string }> = [];
+  const removeTemps = (from: number): void => {
+    for (const { tmp } of staged.slice(from)) { try { rmSync(tmp, { force: true }); } catch { /* best-effort */ } }
+  };
+  let bytes = 0;
+  try {
+    for (const entry of source) {
+      const dest = join(root, entry.rel);
+      mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+      for (const name of readdirSync(dirname(dest))) {
+        if (STAGING_TEMP.test(name) && !lstatSync(join(dirname(dest), name)).isDirectory()) rmSync(join(dirname(dest), name), { force: true });
+      }
+      const tmp = `${dest}.${randomBytes(8).toString('hex')}.restore-staging`;
+      writeFileSync(tmp, entry.data, { mode: 0o600, flag: 'wx' });
+      staged.push({ tmp, dest });
+      bytes += entry.data.length;
+    }
+  } catch (err) {
+    removeTemps(0);
+    throw err;
+  }
+  let settled = false;
+  return {
+    files: staged.length,
+    bytes,
+    commit(): void {
+      if (settled) throw new Error('staged write already committed or aborted');
+      settled = true;
+      for (let i = 0; i < staged.length; i++) {
+        const { tmp, dest } = staged[i] as { tmp: string; dest: string };
+        try {
+          renameSync(tmp, dest);
+        } catch (err) {
+          removeTemps(i);
+          throw err;
+        }
+      }
+    },
+    abort(): void {
+      if (settled) return;
+      settled = true;
+      removeTemps(0);
+    },
+  };
+}
+
+/** An error's text without the fd paths the anchored writes go through: the user reads it, and they name no file. */
+function withoutFdPaths(message: string): string {
+  return message.replace(/\/proc\/self\/fd\/\d+\//g, '');
 }
 
 /** The nearest folder below the anchor that exists, from `relDir` up; '' is the anchor itself. */
@@ -399,8 +474,10 @@ export class BackupManager {
   /** Backups and restores running now; read by the Art. 17 erasure, which refuses while one is. */
   private _running = 0;
   /**
-   * Whether a restore is running. A second one is refused, not queued: its sweep would remove the
-   * first one's temps, and the first one's swap would then fail halfway.
+   * Whether a restore is running. A second one is refused, not queued: it would take a second safety
+   * backup of a data dir the first is about to replace, then replace it again, and the first one's
+   * restart would cut it off. (Staging and swapping run without an await, so two restores in one
+   * process do not interleave there; another process is not covered.)
    */
   private _restoring = false;
 
@@ -768,7 +845,7 @@ export class BackupManager {
     const isWritten = (entry: BackupFileEntry): boolean => entry.type !== 'directory' && isBackedUpEntryPath(entry.path);
     const written = manifest.files.filter(isWritten);
     // A restore temp left in a backed-up directory is nobody's file: not written, not named.
-    const skipped = manifest.files.filter(entry => entry.type !== 'directory' && !isWritten(entry) && !STAGING_TEMP.test(entry.path)).map(entry => entry.path);
+    const skipped = manifest.files.filter(entry => entry.type !== 'directory' && !isWritten(entry) && !isTempName(entry.path)).map(entry => entry.path);
     const duplicate = duplicateEntry(written.map(entry => entry.path));
     if (duplicate !== null) {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path twice — refusing to restore: ${JSON.stringify(duplicate)}` };
@@ -912,7 +989,13 @@ export class BackupManager {
       // above is refused, not written through. The handle is the data dir as resolved now.
       let dataStaged: StagedWrite | null = null;
       let workspaceStaged: { staged: StagedWrite; release: () => void } | null = null;
-      const dataAnchor = openAnchor(realpathSync(this.lynoxDir));
+      let dataAnchor: WorkspaceAnchor | null;
+      try {
+        dataAnchor = openAnchor(realpathSync(this.lynoxDir));
+      } catch (err) {
+        if (!(err instanceof WorkspaceAccessError && err.code === 'UNSUPPORTED')) throw err;
+        dataAnchor = null;
+      }
       try {
         try {
           // Checked again here: the safety backup ran in between, and so may anything else.
@@ -923,7 +1006,7 @@ export class BackupManager {
           const swept = new Set<string>();
           for (const entry of dataDirEntries) {
             const relDir = dirname(entry.path) === '.' ? '' : dirname(entry.path);
-            if (!swept.has(relDir)) { removeStagingTemps(dataAnchor, relDir); swept.add(relDir); }
+            if (dataAnchor !== null && !swept.has(relDir)) { removeStagingTemps(dataAnchor, relDir); swept.add(relDir); }
           }
           const source = function* (): Iterable<StageEntry> {
             for (const entry of dataDirEntries) {
@@ -931,7 +1014,9 @@ export class BackupManager {
               yield { rel: entry.path, data: key !== null ? decryptBuffer(raw, key, entry.path) : raw };
             }
           };
-          dataStaged = stageIn(dataAnchor, '', source(), { fileMode: 0o600, dirMode: 0o700 });
+          dataStaged = dataAnchor !== null
+            ? stageIn(dataAnchor, '', source(), { fileMode: 0o600, dirMode: 0o700 })
+            : stageByName(this.lynoxDir, source());
           // Staged only once the data-dir set is, and committed only after it is swapped: a
           // failure in staging EITHER set leaves every live file as it was.
           if (workspaceEntries.length > 0) workspaceStaged = this.stageWorkspaceIn(backupPath, workspaceEntries, key);
@@ -954,7 +1039,7 @@ export class BackupManager {
           throw swapErr;
         }
       } finally {
-        closeAnchor(dataAnchor);
+        if (dataAnchor !== null) closeAnchor(dataAnchor);
       }
       if (workspaceStaged !== null) {
         try {
@@ -982,7 +1067,7 @@ export class BackupManager {
         pre_restore_backup_path: safetyPath,
         files_restored: 0,
         duration_ms: Date.now() - start,
-        error: err instanceof Error ? err.message : String(err),
+        error: withoutFdPaths(err instanceof Error ? err.message : String(err)),
       };
     }
   }
