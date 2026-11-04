@@ -676,6 +676,12 @@ describe('resolveChatContext (kind: mail) — the follow-up a reply answers', ()
     expect(out).toContain('mail_reply with uid: 41,');
   });
 
+  it('never takes the item\'s own mail as its follow-up, even when it is marked checked', () => {
+    const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([{ ...own, autoReply: false }]))!;
+    expect(out).toContain('[Loaded mail for reply — item: item-1]');
+    expect(out).not.toContain('follow-up');
+  });
+
   it('does not take our own sent copy', () => {
     const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ direction: 'outbound' }), own]))!;
     expect(out).toContain('mail_reply with uid: 41,');
