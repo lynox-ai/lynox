@@ -89,9 +89,10 @@ export interface InboxClassifierHookOptions {
   disabledAccounts?: ReadonlySet<string> | undefined;
   /**
    * Reads the full message of an account whose envelope cannot tell an automatic reply
-   * (`AUTO_REPLY_NOT_IN_ENVELOPE`) and answers whether it is one. Asked only before a follow-up
-   * would reopen a replied item. Missing, or throwing, the item reopens: losing a customer's
-   * message weighs more than one needless notification.
+   * (`AUTO_REPLY_NOT_IN_ENVELOPE`) and answers whether it is one. Asked once for every follow-up
+   * from someone else, so the stored message carries the answer for "Reply in chat". Missing, or
+   * throwing, the answer is unknown: a replied item reopens (losing a customer's message weighs
+   * more than one needless notification), and the chat does not take that message.
    */
   confirmAutoReply?: ((accountId: string, env: MailEnvelope) => Promise<boolean>) | undefined;
 }
@@ -151,6 +152,28 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       subject = masked.subject ?? '';
       snippet = masked.snippet;
     }
+    // Our own mail coming back into the thread (a copy of the reply) is no new customer message:
+    // it is stored as sent, so neither reopening nor "Reply in chat" takes it.
+    const own = (fields.fromAddress ?? '').toLowerCase() === account.address.toLowerCase();
+    // Whether it is an automatic reply, stored with the message for "Reply in chat": true, false
+    // (checked, not one), or undefined (not known). The envelope says it, except where it carries
+    // no headers; there the message is fetched once. That fetch throwing leaves it unknown.
+    let autoReply: boolean | undefined;
+    if (!own) {
+      if (env.isAutoReply) {
+        autoReply = true;
+      } else if (account.authType !== undefined && AUTO_REPLY_NOT_IN_ENVELOPE.has(account.authType)) {
+        if (opts.confirmAutoReply) {
+          try {
+            autoReply = await opts.confirmAutoReply(existing.accountId, env);
+          } catch {
+            // Unknown: stays undefined (see `confirmAutoReply`).
+          }
+        }
+      } else {
+        autoReply = false;
+      }
+    }
     const input: ThreadMessageInput = {
       tenantId: existing.tenantId,
       accountId: existing.accountId,
@@ -158,28 +181,22 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       messageId,
       fromAddress: fields.fromAddress ?? '',
       subject,
-      direction: 'inbound',
+      direction: own ? 'outbound' : 'inbound',
       inboxItemId: existing.id,
     };
+    if (autoReply !== undefined) input.autoReply = autoReply;
     if (fields.fromName !== undefined) input.fromName = fields.fromName;
     if (fields.inReplyTo !== undefined) input.inReplyTo = fields.inReplyTo;
     if (fields.mailDate !== undefined) input.mailDate = fields.mailDate;
     if (snippet !== undefined) input.snippet = snippet;
     // Only a `replied` item opens; `reopenReplied` checks that again in its UPDATE.
-    let opens = existing.userAction === 'replied'
-      && !env.isAutoReply
-      // Our own mail coming back into the thread (a copy of the reply) is no new customer message.
-      && (fields.fromAddress ?? '').toLowerCase() !== account.address.toLowerCase()
+    // An unknown answer reopens (see `confirmAutoReply`): only a known automatic reply does not.
+    const opens = existing.userAction === 'replied'
+      && autoReply !== true
+      && !own
       // A message older than the reply (a backfill or a redelivery) did not come after it.
       && !(fields.mailDate !== undefined && existing.userActionAt !== undefined
         && fields.mailDate.getTime() <= existing.userActionAt.getTime());
-    if (opens && opts.confirmAutoReply && account.authType !== undefined && AUTO_REPLY_NOT_IN_ENVELOPE.has(account.authType)) {
-      try {
-        if (await opts.confirmAutoReply(existing.accountId, env)) opens = false;
-      } catch {
-        // Unknown: reopen (see `confirmAutoReply`).
-      }
-    }
     const reopened = opts.state.runInTransaction(() => {
       opts.state.insertThreadMessage(input);
       if (!opens) return false;
