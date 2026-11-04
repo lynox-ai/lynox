@@ -489,8 +489,10 @@ const SECRETS_CUT_NOTE = '\n[...truncated]';
  * Bound a rendered `<secrets>` listing to `max` characters without losing its closing tag. The
  * wire capture blanks names and masks only between `<secrets>` and `</secrets>`
  * (`redactWireUserMessage`), so a plain slice that cut the closer off left every name in the
- * capture. The cut falls on an entry boundary (`, ` or a line break), so no name is left half
- * written; one entry longer than the whole bound leaves the frame empty.
+ * capture. The cut falls on an entry boundary, so no name is left half written: between two
+ * `secret:` references on the line of free names, else at a line break, which drops the cut line
+ * whole. The line of connection tokens is never cut inside, since a profile name it quotes may hold
+ * `, `. One entry longer than the whole bound leaves the frame empty.
  */
 export function capSecretsListing(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -498,7 +500,10 @@ export function capSecretsListing(text: string, max: number): string {
   const open = body.indexOf('>') + 1;
   const budget = max - SECRETS_CLOSER.length - SECRETS_CUT_NOTE.length;
   const head = body.slice(0, Math.max(open, budget));
-  const cut = Math.max(head.lastIndexOf(', '), head.lastIndexOf('\n'));
+  const lineStart = Math.max(head.lastIndexOf('\n'), open - 1);
+  const line = head.slice(lineStart + 1);
+  const entry = line.startsWith('secret:') ? line.lastIndexOf(', secret:') : -1;
+  const cut = entry >= 0 ? lineStart + 1 + entry : lineStart;
   const kept = body.slice(0, Math.max(cut, open));
   return `${kept}${SECRETS_CUT_NOTE}${SECRETS_CLOSER}`;
 }

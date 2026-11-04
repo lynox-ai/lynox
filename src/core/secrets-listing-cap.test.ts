@@ -53,6 +53,19 @@ describe('capSecretsListing', () => {
     expect(capSecretsListing(long, 100)).toBe('<secrets>\n[...truncated]\n</secrets>');
   });
 
+  it('never cuts inside the line of connection tokens, whose profile names may hold ", "', () => {
+    const holders = (n: string) => (n === 'T1' ? [{ id: 'p1', name: 'Acme, Inc' }] : n === 'T2' ? [{ id: 'p2', name: 'Zed, Ltd' }] : []);
+    const listing = renderSecretsBriefing(storeOf(['A_KEY', 'B_KEY', 'T1', 'T2']), holders)!;
+    const tokenLine = listing.split('\n').find(l => l.includes('Acme, Inc'))!;
+    // A bound that ends just after "Acme," in the token line.
+    const max = listing.indexOf('"Acme, Inc"') + '"Acme, '.length + '\n[...truncated]\n</secrets>'.length;
+    const capped = capSecretsListing(listing, max);
+    expect(capped).toBe(`<secrets>\nsecret:A_KEY (***wxyz), secret:B_KEY (***wxyz)\n[...truncated]\n</secrets>`);
+    expect(capped).not.toContain(tokenLine.slice(0, 10));
+    // control: with room for it, the token line stays whole
+    expect(capSecretsListing(listing, listing.length)).toContain(tokenLine);
+  });
+
   it('a frame on one line, with no break after the tag, is cut the same way', () => {
     const oneLine = `<secrets>secret:K${'X'.repeat(300)} (***wxyz)</secrets>`;
     expect(capSecretsListing(oneLine, 100)).toBe('<secrets>\n[...truncated]\n</secrets>');

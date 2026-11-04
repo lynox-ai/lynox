@@ -13725,6 +13725,7 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(200);
         const body = await res.json() as Record<string, unknown> & { configured: Record<string, boolean> };
         expect(body.configured.api_key).toBe(true);
+        expect(body.configured.search).toBe(false);
         expect('count' in body).toBe(false);
         expect(JSON.stringify(body)).not.toMatch(/"count"/);
       } finally {
