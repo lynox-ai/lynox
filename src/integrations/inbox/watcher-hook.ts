@@ -148,7 +148,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     if (snippet !== undefined) input.snippet = snippet;
     const reopened = opts.state.runInTransaction(() => {
       opts.state.insertThreadMessage(input);
-      if (existing.userAction !== 'replied' || env.isAutoReply) return false;
+      // Only a `replied` item opens; `reopenReplied` checks that in the same UPDATE.
+      if (env.isAutoReply) return false;
       if (!opts.state.reopenReplied(existing.id, existing.tenantId)) return false;
       opts.state.appendAudit({
         tenantId: existing.tenantId,

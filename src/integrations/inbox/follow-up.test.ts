@@ -116,6 +116,8 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(inbox.getItem(id)!.userAction).toBe('replied');
     await hook()(ACCOUNT.id, envelope({ messageId: undefined }));
     expect(inbox.getItem(id)!.userAction).toBe('replied');
+    await hook()(ACCOUNT.id, envelope({ messageId: '' }));
+    expect(inbox.getItem(id)!.userAction).toBe('replied');
     expect(messageIds()).toEqual(['<first@x>']);
     expect(inbox.listAuditForItem(id).map((a) => a.action)).not.toContain('reopened_on_reply');
   });
