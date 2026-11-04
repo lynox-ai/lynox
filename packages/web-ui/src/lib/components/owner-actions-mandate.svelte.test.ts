@@ -39,6 +39,16 @@ const WF = {
 };
 const AWAITING = { id: 't1', title: 'Wochenreport', status: 'open', effect: 'run_agent', source: 'cron', confirmed_at: null, enabled: 1, instruction: 'Write the report' };
 
+// A confirmed agent run whose stamp lists a connection: the owner reads the list beside "Check connections".
+const CONFIRMED = { id: 't2', title: 'Monatsmail', status: 'open', effect: 'run_agent', source: 'cron', confirmed_at: '2026-10-29 09:00:00', enabled: 1, instruction: 'Mail', stamp_listed: { lapsed: false, ended: false, entries: [{ provider: 'api.crm.example', account: 'eva@crm', state: 'listed' }] } };
+
+// What the owner's confirmation reads before it offers the button (`StampConfirm`): the engine's
+// preview of this schedule. A mandate's session never asks for it.
+const PREVIEW = {
+	expect: 'digest-1', by: null, workflow: null, connections: [],
+	subject: { id: 't1', effect: 'run_agent', source: 'cron', title: 'Wochenreport', description: null, schedule_cron: null, watch: null, pipeline_id: null, pipeline_params: null, model_tier: null, wf: null },
+};
+
 const json = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
 beforeEach(() => {
@@ -51,7 +61,8 @@ beforeEach(() => {
 		const viewer = listViewer ? { viewer: listViewer } : {};
 		// As the engine answers today: no `viewer` in the library's list.
 		if (u.endsWith('/workflows/library?limit=100')) return json(200, { workflows: [WF], grantEnabled: false });
-		if (u.endsWith('/triggers')) return json(200, { triggers: [AWAITING], ...viewer });
+		if (u.endsWith('/triggers')) return json(200, { triggers: [AWAITING, CONFIRMED], ...viewer });
+		if (u.endsWith('/tasks/t1/stamp-preview')) return json(200, PREVIEW);
 		if (u.endsWith('/config')) return json(200, configViewer ? { viewer: configViewer } : {});
 		if (u.endsWith('/secrets/status')) return json(200, {});
 		return json(200, {});
@@ -136,6 +147,20 @@ describe('the schedules page in a mandate\'s session', () => {
 		await open('triggers');
 		expect(target.querySelector('[data-trigger-awaits]')?.textContent?.trim()).toBe('Läuft erst, wenn der Inhaber diesen Plan bestätigt.');
 		expect(buttons()).not.toContain('Bestätigen');
+	});
+
+	it('shows the owner a confirmed plan\'s list and "Check connections" when only the store says it is the owner', async () => {
+		configViewer = 'owner';
+		await open('triggers');
+		expect(target.querySelector('[data-stamp-listed]')?.textContent).toContain('api.crm.example');
+		expect(buttons()).toContain('Verbindungen prüfen');
+	});
+
+	it('shows a mandate neither the list nor "Check connections"', async () => {
+		configViewer = 'mandate';
+		await open('triggers');
+		expect(target.querySelector('[data-stamp-listed]')).toBeNull();
+		expect(buttons()).not.toContain('Verbindungen prüfen');
 	});
 
 	it('offers the owner the confirmation when only the store says it is the owner', async () => {

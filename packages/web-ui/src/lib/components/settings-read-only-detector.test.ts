@@ -36,6 +36,7 @@ const EXEMPT: Record<string, string> = {
 	'ApprovalsView.svelte': 'A card without a checksum only reads, closing is offered at `viewer === \'owner\'` only, and a mandate is told the queue is read-only.',
 	'OnboardingBasics.svelte': 'Mounted only by ChatView, which never runs the owner\'s introduction in a mandate\'s session.',
 	'PersonErasurePanel.svelte': 'Mounted only by SubjectsView, behind a button shown in the owner\'s session only; a mandate is told where an erasure request goes.',
+	'StampConfirm.svelte': 'Mounted only by TriggersView, at a schedule a known owner stamps (`ownerStamps`) or checks (`offersCheck`); anyone else reads, in its place, that the owner confirms the plan.',
 	'TriggersView.svelte': 'Its one owner-only button (confirming a plan) shows only to a known owner (isOwnerSession); anyone else reads, in its place, that the owner confirms the plan.',
 };
 /**
@@ -257,7 +258,7 @@ describe('every page that writes through an owner-only route has a read-only vie
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
-		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'TriggersView.svelte']);
+		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'StampConfirm.svelte', 'TriggersView.svelte']);
 		for (const name of OUTSIDE_SETTINGS) expect(pages.map((p) => basename(p))).toContain(name);
 		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte', 'SecretsView.svelte', 'KeysView.svelte', 'CalendarSettings.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {

@@ -1172,7 +1172,7 @@ function heldFromReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string,
  * with only "Tell the owner", it sometimes told the member instead.
  */
 function planRefusalFinal(person: string): string {
-  return `${RUN_REFUSAL_FINAL} Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. ${RUN_REFUSAL_CLOSE}`;
+  return `${RUN_REFUSAL_FINAL} Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. ${OWNER_ALLOWS_AT} ${RUN_REFUSAL_CLOSE}`;
 }
 
 /**
@@ -1294,6 +1294,13 @@ function planMayUse(profile: ApiProfile): boolean {
   const state = planConnectionState(profile);
   return state === 'no-plan' || state === 'listed';
 }
+
+/**
+ * Where the owner lifts a plan's refusal of a connection it may not use (641 4b ii-c-min, ux U-058).
+ * The model reads it and passes it on, so it names the place in both languages the owner's screen
+ * may be in: what it says is what the owner finds.
+ */
+const OWNER_ALLOWS_AT = 'The owner can allow this connection under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
 
 export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
   const presetId = profile.auth?.oauth?.preset_id;
