@@ -222,4 +222,17 @@ describe('the other places on the page that say what the Standard set holds', ()
 			expect(list.filter((x) => scope.test(x)), sentence).toEqual([]);
 		}
 	});
+
+	it('the list of what Standard leaves out implies no Sheets or Docs access either', () => {
+		// It once said "no access to spreadsheets or documents you did not create through lynox",
+		// which reads as access to the ones lynox created; Standard has no Sheets or Docs scope.
+		const start = DOCS.indexOf('**What Standard does not include');
+		expect(start, 'the paragraph is gone').toBeGreaterThan(-1);
+		const paragraph = DOCS.slice(start, DOCS.indexOf('\n\n', start)).toLowerCase().replace(/\s+/g, ' ');
+		for (const word of ['spreadsheet', 'document', 'sheets', 'docs']) {
+			expect(paragraph.slice(0, paragraph.indexOf('asking lynox')), `names ${word}`).not.toContain(word);
+		}
+		expect(paragraph).toContain('no gmail access of any kind');
+		expect(paragraph).toContain('no access to drive files lynox did not create');
+	});
 });
