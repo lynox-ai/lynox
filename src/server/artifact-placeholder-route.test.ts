@@ -96,7 +96,7 @@ describe('POST /api/artifacts with the placeholder (real engine)', () => {
     expect(refused.status).toBe(409);
     expect(JSON.parse(refused.text)).toMatchObject({
       code: 'artifact_file_refused',
-      error: 'The artifact\'s file is a link or has a second name, so it was not written. Nothing was saved; save it as a new artifact.',
+      error: 'The artifact\'s file is a link or has more than one name (a hard link), so it was not written; nothing was saved. Send the save again without an id to keep the content as a new artifact.',
     });
     expect(readFileSync(target, 'utf-8')).toBe('kept');
   }, 60_000);

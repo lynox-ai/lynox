@@ -10015,7 +10015,7 @@ export class LynoxHTTPApi {
         });
       } catch (err) {
         if (err instanceof ArtifactFileRefusedError) {
-          errorResponse(res, 409, 'The artifact\'s file is a link or has a second name, so it was not written. Nothing was saved; save it as a new artifact.', 'artifact_file_refused');
+          errorResponse(res, 409, 'The artifact\'s file is a link or has more than one name (a hard link), so it was not written; nothing was saved. Send the save again without an id to keep the content as a new artifact.', 'artifact_file_refused');
           return;
         }
         if (!(err instanceof ArtifactPlaceholderError)) throw err;

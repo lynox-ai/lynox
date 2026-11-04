@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ArtifactFileRefusedError, ArtifactStore } from './artifact-store.js';
+import { ArtifactFileRefusedError, ArtifactStore, ArtifactVersionRefusedError } from './artifact-store.js';
 
 /**
  * The store reaches its files through an open handle on its directory: a link put into the
@@ -95,7 +95,7 @@ describe('a file with a second name outside is not read', () => {
     const a = store.save({ title: 't', content: 'first' });
     mkdirSync(join(dir, 'versions'));
     linkSync(join(outside, 'secret.txt'), join(dir, 'versions', `${a.id}.v3.html`));
-    expect(store.restore(a.id, 3)).toBeNull();
+    expect(() => store.restore(a.id, 3)).toThrow(ArtifactVersionRefusedError);
     expect(readFileSync(join(dir, `${a.id}.html`), 'utf-8')).toBe('first');
   });
 
@@ -168,7 +168,7 @@ describe('versions', () => {
     const a = store.save({ title: 't', content: 'first' });
     mkdirSync(join(dir, 'versions'));
     symlinkSync(join(outside, 'secret.txt'), join(dir, 'versions', `${a.id}.v3.html`));
-    expect(store.restore(a.id, 3)).toBeNull();
+    expect(() => store.restore(a.id, 3)).toThrow(ArtifactVersionRefusedError);
     expect(readFileSync(join(dir, `${a.id}.html`), 'utf-8')).toBe('first');
     expect(contents(dir).some(c => c.includes('SECRET'))).toBe(false);
   });
@@ -226,5 +226,114 @@ describe('a store directory that is itself a link', () => {
     symlinkSync(real, linked);
     const a = new ArtifactStore(linked).save({ title: 't', content: 'x' });
     expect(readFileSync(join(real, `${a.id}.html`), 'utf-8')).toBe('x');
+  });
+});
+
+describe('the held handle on the store directory', () => {
+  it('stays with the directory when a folder above it is swapped for a link', () => {
+    const base = join(dir, 'data');
+    mkdirSync(join(base, 'artifacts'), { recursive: true });
+    mkdirSync(join(outside, 'artifacts'));
+    const store = new ArtifactStore(join(base, 'artifacts'));
+    renameSync(base, join(dir, 'data.old'));
+    symlinkSync(outside, base);
+    const a = store.save({ title: 't', content: 'x' });
+    expect(readdirSync(join(outside, 'artifacts'))).toEqual([]);
+    expect(readFileSync(join(dir, 'data.old', 'artifacts', `${a.id}.html`), 'utf-8')).toBe('x');
+  });
+
+  it('deletes in the directory it holds, not through a folder above it swapped for a link', () => {
+    const base = join(dir, 'data');
+    mkdirSync(join(base, 'artifacts'), { recursive: true });
+    mkdirSync(join(outside, 'artifacts'));
+    const store = new ArtifactStore(join(base, 'artifacts'));
+    const a = store.save({ title: 't', content: 'x' });
+    writeFileSync(join(outside, 'artifacts', `${a.id}.html`), 'kept');
+    renameSync(base, join(dir, 'data.old'));
+    symlinkSync(outside, base);
+    expect(store.delete(a.id)).toBe(true);
+    expect(readFileSync(join(outside, 'artifacts', `${a.id}.html`), 'utf-8')).toBe('kept');
+    expect(existsSync(join(dir, 'data.old', 'artifacts', `${a.id}.html`))).toBe(false);
+  });
+
+  it('opens the directory again when it was deleted, and writes there', () => {
+    const store = new ArtifactStore(join(dir, 'artifacts'));
+    store.save({ title: 'before', content: 'x' });
+    rmSync(join(dir, 'artifacts'), { recursive: true, force: true });
+    const a = store.save({ title: 'after', content: 'y' });
+    expect(readFileSync(join(dir, 'artifacts', `${a.id}.html`), 'utf-8')).toBe('y');
+  });
+
+  it('after the erasure, forgetAll writes to the directory again', () => {
+    const store = new ArtifactStore(join(dir, 'artifacts'));
+    store.save({ title: 'before', content: 'x' });
+    rmSync(join(dir, 'artifacts'), { recursive: true, force: true });
+    store.forgetAll();
+    const a = store.save({ title: 'after', content: 'y' });
+    expect(readFileSync(join(dir, 'artifacts', `${a.id}.html`), 'utf-8')).toBe('y');
+    expect(new ArtifactStore(join(dir, 'artifacts')).list().map(m => m.title)).toEqual(['after']);
+  });
+});
+
+describe('an error from the kernel', () => {
+  it.skipIf(process.getuid?.() === 0)('names the file by its path below the store, not by the process handle', () => {
+    const store = new ArtifactStore(dir);
+    const a = store.save({ title: 't', content: 'x' });
+    chmodSync(join(dir, `${a.id}.html`), 0o444);
+    expect(() => store.save({ id: a.id, title: 't', content: 'y' })).toThrow(`EACCES: ${join(dir, `${a.id}.html`)}`);
+  });
+});
+
+describe('a refused update', () => {
+  it('leaves the version ring as it was', () => {
+    const store = new ArtifactStore(dir);
+    const a = store.save({ title: 't', content: 'v1' });
+    for (let n = 2; n <= 12; n++) store.save({ id: a.id, title: 't', content: `v${n}` });
+    const before = readdirSync(join(dir, 'versions')).sort();
+    expect(before).toHaveLength(10);
+    rmSync(join(dir, `${a.id}.html`));
+    symlinkSync(join(outside, 'secret.txt'), join(dir, `${a.id}.html`));
+    expect(refusalOf(() => store.save({ id: a.id, title: 't', content: 'v13' }))?.reason).toBe('link');
+    expect(readdirSync(join(dir, 'versions')).sort()).toEqual(before);
+  });
+
+  it('control: an update of a missing content file makes no empty version', () => {
+    const store = new ArtifactStore(dir);
+    const a = store.save({ title: 't', content: 'v1' });
+    rmSync(join(dir, `${a.id}.html`));
+    const b = store.save({ id: a.id, title: 't', content: 'v2' });
+    expect(b.overwrite?.backupPath).toBe('');
+    expect(existsSync(join(dir, 'versions'))).toBe(false);
+  });
+});
+
+describe('the index file', () => {
+  it('keeps the mode it has', () => {
+    const store = new ArtifactStore(dir);
+    store.save({ title: 't', content: 'x' });
+    chmodSync(join(dir, 'index.json'), 0o600);
+    store.save({ title: 'u', content: 'y' });
+    expect(statSync(join(dir, 'index.json')).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe('a store that is made', () => {
+  it('removes temp files a crash left behind', () => {
+    writeFileSync(join(dir, '.lynox-stage-0123456789abcdef01234567'), 'half');
+    mkdirSync(join(dir, 'versions'));
+    writeFileSync(join(dir, 'versions', '.lynox-stage-89abcdef0123456789abcdef'), 'half');
+    new ArtifactStore(dir);
+    expect(readdirSync(dir).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
+    expect(readdirSync(join(dir, 'versions'))).toEqual([]);
+  });
+
+  it('does not adopt a file with a second name as an artifact', () => {
+    linkSync(join(outside, 'secret.txt'), join(dir, 'abcdef12.html'));
+    expect(new ArtifactStore(dir).list()).toEqual([]);
+  });
+
+  it('control: adopts an ordinary file named like an artifact', () => {
+    writeFileSync(join(dir, 'abcdef12.html'), 'x');
+    expect(new ArtifactStore(dir).list().map(m => m.id)).toEqual(['abcdef12']);
   });
 });

@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ArtifactStore } from '../../core/artifact-store.js';
 import { artifactHistoryTool, artifactRestoreTool, artifactSaveTool } from './artifact.js';
+import { readFileTool } from './fs.js';
+import { clearTenantWorkspace, setTenantWorkspace } from '../../core/workspace.js';
 import type { IAgent } from '../../types/index.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { evictSavedArtifactBodies, EVICTION_MIN_CHARS } from '../../core/artifact-eviction.js';
@@ -146,7 +148,7 @@ describe('artifact_save refuses the eviction placeholder as content', () => {
     expect(updated).toMatch(/^Updated artifact "Pitch"/);
     expect(store.get(id)?.content).toBe(DOCUMENT + '\nThree options.');
     const created = await artifactSaveTool.handler({ title: 'Notes', content: 'short note' }, makeAgent(store));
-    expect(created).toMatch(/^Saved artifact "Notes"/);
+    expect(created).toMatch(/^Created a new artifact "Notes"/);
   });
 });
 
@@ -198,7 +200,7 @@ describe('artifact_save and artifact_restore at a link or a file with a second n
     rmSync(file);
     symlinkSync(join(outside, 'target.txt'), file);
     const message = await artifactRestoreTool.handler({ id: a.id, version: 1 }, makeAgent(store)).then(() => '', (err: Error) => err.message);
-    expect(message).toBe(`${file}: a link on the way to the file is not followed; nothing was written${wayOut(a.id)}`);
+    expect(message).toBe(`${file}: a link on the way to the file is not followed; ${restoreWayOut(a.id, 1, store.versionPathFor(a.id, 1))}`);
     expect(readFileSync(join(outside, 'target.txt'), 'utf-8')).toBe('kept');
   });
 
@@ -208,7 +210,96 @@ describe('artifact_save and artifact_restore at a link or a file with a second n
     const file = join(dir, `${a.id}.html`);
     linkSync(file, join(outside, 'second.html'));
     const message = await artifactRestoreTool.handler({ id: a.id, version: 1 }, makeAgent(store)).then(() => '', (err: Error) => err.message);
-    expect(message).toBe(`${file} has more than one name (a hard link); artifact_restore does not write such a file, so nothing was written${wayOut(a.id)}`);
+    expect(message).toBe(`${file} has more than one name (a hard link); artifact_restore does not write such a file, so ${restoreWayOut(a.id, 1, store.versionPathFor(a.id, 1))}`);
     expect(readFileSync(join(outside, 'second.html'), 'utf-8')).toBe('v2');
+  });
+
+  it.each([['a link'], ['a file with a second name']] as const)('artifact_restore says so when the version itself is %s, word for word', async (kind) => {
+    const a = store.save({ title: 'Deck', content: 'v1' });
+    store.save({ id: a.id, title: 'Deck', content: 'v2' });
+    const version = store.versionPathFor(a.id, 1);
+    rmSync(version);
+    if (kind === 'a link') symlinkSync(join(outside, 'target.txt'), version);
+    else linkSync(join(outside, 'target.txt'), version);
+    const out = await artifactRestoreTool.handler({ id: a.id, version: 1 }, makeAgent(store));
+    expect(out).toBe(`v1 of artifact ${a.id} is a link or has more than one name, so it was not read; nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`);
+    expect(store.get(a.id)?.content).toBe('v2');
+  });
+
+  it('control: a version that is missing is still not found', async () => {
+    const a = store.save({ title: 'Deck', content: 'v1' });
+    const out = await artifactRestoreTool.handler({ id: a.id, version: 7 }, makeAgent(store));
+    expect(out).toBe(`Could not restore — artifact ${a.id} or version 7 not found. Use artifact_history to see available versions.`);
+  });
+});
+
+const restoreWayOut = (id: string, n: number, versionPath: string): string =>
+  `nothing was restored, and artifact ${id} is unchanged. ` +
+  `Tell the user that artifact ${id} could not be restored to v${n}, and that you are keeping v${n} as a new artifact instead. ` +
+  `Read v${n} with read_file at ${versionPath}, then call artifact_save without an id, with that content: passing ${id} would write to the same file. ` +
+  `In your reply, name the new artifact as the one that holds v${n}.`;
+
+describe('artifact_save says what the store did', () => {
+  let dir: string;
+  let store: ArtifactStore;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'lynox-artifact-result-')); store = new ArtifactStore(dir); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('a new artifact without an id: created, word for word', async () => {
+    const out = await artifactSaveTool.handler({ title: 'Notes', content: 'n' }, makeAgent(store));
+    const id = store.list()[0]!.id;
+    expect(out.split('\n').slice(0, 2)).toEqual([`Created a new artifact "Notes" (id: ${id}, v1).`, `File: ${store.pathFor(id)}`]);
+  });
+
+  it('an id the index does not hold: created, and says that no artifact had it, word for word', async () => {
+    const out = await artifactSaveTool.handler({ id: 'abcdef12', title: 'Notes', content: 'n' }, makeAgent(store));
+    expect(out.split('\n').slice(0, 3)).toEqual([
+      'Created a new artifact "Notes" (id: abcdef12, v1).',
+      'No artifact with id abcdef12 existed, so this is a new one.',
+      `File: ${store.pathFor('abcdef12')}`,
+    ]);
+  });
+
+  it('an update: updated, word for word', async () => {
+    const a = store.save({ title: 'Notes', content: 'n' });
+    const out = await artifactSaveTool.handler({ id: a.id, title: 'Notes', content: 'm' }, makeAgent(store));
+    expect(out.split('\n')[0]).toBe(`Updated artifact "Notes" (id: ${a.id}, v2).`);
+  });
+});
+
+describe('the version path in the restore refusal is one read_file reads', () => {
+  let dataDir: string;
+  let prevDataDir: string | undefined;
+  beforeEach(() => {
+    dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-artifact-vread-')));
+    prevDataDir = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = dataDir;
+    clearTenantWorkspace();
+  });
+  afterEach(() => {
+    clearTenantWorkspace();
+    if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+    else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('without a workspace and with one', async () => {
+    const store = new ArtifactStore(join(dataDir, 'artifacts'));
+    const a = store.save({ title: 'Deck', content: 'first' });
+    store.save({ id: a.id, title: 'Deck', content: 'second' });
+    const path = store.versionPathFor(a.id, 1);
+    const plain = await readFileTool.handler({ path });
+    expect(plain).toContain('first');
+    expect(plain).not.toContain('second');
+    const ws = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-artifact-vread-ws-')));
+    try {
+      setTenantWorkspace(ws);
+      const inWorkspace = await readFileTool.handler({ path });
+      expect(inWorkspace).toContain('first');
+      expect(inWorkspace).not.toContain('second');
+    } finally {
+      clearTenantWorkspace();
+      rmSync(ws, { recursive: true, force: true });
+    }
   });
 });
