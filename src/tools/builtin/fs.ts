@@ -250,7 +250,7 @@ export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonl
   try {
     const st = fstatSync(fd);
     if (st.nlink > 1) {
-      throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not write such a file.`);
+      throw new Error(secondNameRefusal(target.shown));
     }
     // Only a file with content is cut, as O_TRUNC does: on ext4 a cut to zero makes the next close
     // flush the file synchronously, which a fresh file does not need.
@@ -355,16 +355,52 @@ function writeTargetOf(rawPath: string, tool: 'write_file' | 'edit_file'): strin
  * the text names that id and says why it does not fit; and the user hears first, or not at all.
  */
 function linkRefusal(path: string, rel: string): string {
+  return artifactRefusal(`${path}: a link on the way to the file is not followed; nothing was written`, rel);
+}
+
+/** The refusal for an artifact with a second name (a hard link): the same way out as for a link. */
+function artifactSecondNameRefusal(path: string, rel: string): string {
+  return artifactRefusal(`${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written`, rel);
+}
+
+function artifactRefusal(cause: string, rel: string): string {
   const id = rel.endsWith('.html') ? rel.slice(0, -'.html'.length) : '';
   if (isArtifactId(id)) {
-    return `${path}: a link on the way to the file is not followed; nothing was written, and artifact ${id} is unchanged. ` +
+    return `${cause}, and artifact ${id} is unchanged. ` +
       'Tell the user that this artifact could not be changed, and that you are saving the changed version as a new artifact. ' +
       `Then call artifact_save without an id: passing ${id} would write to the same file. ` +
       'In your reply, name the new artifact as the one that replaces it.';
   }
-  return `${path}: a link on the way to the file is not followed; nothing was written. ` +
+  return `${cause}. ` +
     'Tell the user that this file could not be changed, and that you are saving the changed version as a new artifact. ' +
     'Then call artifact_save without an id. In your reply, name the new artifact as the one that replaces it.';
+}
+
+/**
+ * The refusal for a file with a second name outside the artifacts directory. The way out is a new
+ * file: it has one name, so the refusal does not meet it, and the second name stays unchanged,
+ * which is what the refusal protects. Not `bash` on the link: that would go around the refusal.
+ */
+function secondNameRefusal(path: string): string {
+  return `${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written. ` +
+    'Write the changed content to a new file under another name instead, and tell the user which file now holds it.';
+}
+
+/**
+ * The refusal for a link on the way to a file written by its resolved path. A link set while the
+ * file was written is met once; a dead link is met every time (the check does not resolve a path
+ * whose target does not exist), so the text says what to do when the refusal comes back — and why
+ * not the shell: a model reads "link" as an obstacle and writes the path through bash, which
+ * follows the dead link and creates a file wherever it points.
+ */
+function resolvedLinkRefusal(path: string): string {
+  const name = basename(path) || 'this file';
+  return `${path}: a link on the way to the file is not followed here; nothing was written. ` +
+    'If the link was set while the file was being written, writing it once more checks the path anew. ' +
+    'If the same refusal comes back, the link leads to nothing that exists. ' +
+    'Do not write, remove or change anything at this path, with any tool, bash included: ' +
+    'bash would follow the link and create a file wherever it points. ' +
+    `Write the file under another file name instead, and tell the user where it is and that ${name} could not be written because of a link.`;
 }
 
 /**
@@ -380,6 +416,61 @@ export function writeArtifactFile(path: string, data: string, create: boolean): 
     throw new Error(`${path} is not in the artifacts directory.`);
   }
   if (create) mkdirSync(root, { recursive: true });
+  writeBelow(root, rel, path, data, create, { link: () => linkRefusal(path, rel), secondName: () => artifactSecondNameRefusal(path, rel) });
+}
+
+/**
+ * Write a file whose path was resolved when it was checked (every link in it followed then, and
+ * the target judged): each component is opened again from the root with O_NOFOLLOW, so a link
+ * that turns up on the way after the check is refused instead of followed. A link that was there
+ * at the check was followed by the resolution and is not on the path any more. A file with more
+ * than one name is refused, as in the workspace and the artifacts directory.
+ *
+ * The walk holds every folder open only on Linux (each step goes through /proc/self/fd, which
+ * Linux therefore needs mounted, as the workspace already does). Elsewhere each step is opened by
+ * the path joined so far: a link at the file is still refused, a folder swapped for a link after
+ * the check is not.
+ */
+export function writeResolvedFile(path: string, data: string, create: boolean): void {
+  if (!isAbsolute(path) || path === '/') throw new Error(`${path} is not a resolved file path.`);
+  writeBelow('/', path.slice(1), path, data, create, { link: () => resolvedLinkRefusal(path), secondName: () => secondNameRefusal(path) });
+}
+
+/**
+ * The umask a write by name would apply. `processUmask` reads it from /proc and assumes 077
+ * without /proc, which would make every new file private on macOS; there the process's own umask
+ * is read instead (in the main thread, where the file tools run). `writeInPlace` (the workspace's
+ * open directory) still takes `processUmask` as before, so without /proc its new files stay 0600.
+ */
+function creatingUmask(): number {
+  return existsSync('/proc/self/status') ? processUmask() : process.umask();
+}
+
+/**
+ * An open that failed for another reason than a link, said by the file's own path: the walk's
+ * errors name it by the process handle it went through (a path in the process's fd table), which
+ * the model would copy.
+ */
+function writeOpenError(path: string, err: unknown): Error {
+  if (err instanceof WorkspaceAccessError) {
+    if (err.code === 'NOT_FILE') return new Error(`${path} is not a regular file; nothing was written.`, { cause: err });
+    if (err.code === 'NOT_DIR') return new Error(`a folder on the way to ${path} is not a folder; nothing was written.`, { cause: err });
+    return err;
+  }
+  const code = (err as NodeJS.ErrnoException).code;
+  return typeof code === 'string' ? new Error(`${errnoText(code, err)}: ${path}`, { cause: err }) : err instanceof Error ? err : new Error(String(err));
+}
+
+/**
+ * Write `data` to `rel` below the directory `root`, opened once: every component below it with
+ * O_NOFOLLOW, a file with a second name refused, the file emptied and then written. With `create`,
+ * a missing file and missing directories get the modes a write by name gives them. A platform
+ * without O_NOFOLLOW (Windows) writes by name, as before.
+ */
+function writeBelow(
+  root: string, rel: string, path: string, data: string, create: boolean,
+  refusal: { readonly link: () => string; readonly secondName: () => string },
+): void {
   let anchor: WorkspaceAnchor;
   try {
     anchor = openAnchor(root);
@@ -402,20 +493,20 @@ export function writeArtifactFile(path: string, data: string, create: boolean): 
     throw err;
   }
   try {
-    const umask = create ? processUmask() : 0;
+    const umask = create ? creatingUmask() : 0;
     let fd: number;
     try {
       ({ fd } = openWrite(anchor, rel, create ? { createMode: 0o666 & ~umask, dirMode: 0o777 & ~umask } : {}));
     } catch (err) {
       if (err instanceof WorkspaceAccessError && err.code === 'SYMLINK') {
-        throw new Error(linkRefusal(path, rel), { cause: err });
+        throw new Error(refusal.link(), { cause: err });
       }
-      throw err;
+      throw writeOpenError(path, err);
     }
     try {
       const st = fstatSync(fd);
       if (st.nlink > 1) {
-        throw new Error(`${path} has more than one name (a hard link); the file tools do not write such a file.`);
+        throw new Error(refusal.secondName());
       }
       if (st.size > 0) ftruncateSync(fd, 0);
       writeFileSync(fd, data, 'utf-8');
@@ -565,16 +656,14 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
         if (isInArtifactsRoot(target.path)) {
           writeArtifactFile(target.path, input.content, true);
         } else {
-          mkdirSync(dirname(target.path), { recursive: true });
-          writeFileSync(target.path, input.content, 'utf-8');
+          writeResolvedFile(target.path, input.content, true);
         }
         agent.sessionCounters.writeBytes += contentBytes;
         return `Written to ${target.path}`;
       }
       const realPath = cliWriteTarget(input.path);
       refuseEvictionPlaceholder(input.content, realPath);
-      mkdirSync(dirname(realPath), { recursive: true });
-      writeFileSync(realPath, input.content, 'utf-8');
+      writeResolvedFile(realPath, input.content, true);
       agent.sessionCounters.writeBytes += contentBytes;
       return `Written to ${realPath}`;
     } catch (err: unknown) {
@@ -642,11 +731,16 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       try {
         const st = fstatSync(fd);
         // Before anything is compared: whether old_string matches would tell the content of a
-        // file read_file refuses.
-        if (target.kind === 'anchored' && st.nlink > 1) {
-          throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not edit such a file.`);
-        }
+        // file the write then refuses. A folder comes first: it has more than one link (`.`), and
+        // only a regular file can have a second name.
         if (!st.isFile()) throw new Error(`${realPath} is not a regular file; edit_file edits only regular files.`);
+        if (st.nlink > 1) {
+          throw new Error(
+            target.kind === 'path' && isInArtifactsRoot(realPath)
+              ? artifactSecondNameRefusal(realPath, relative(artifactsRoot(), realPath))
+              : secondNameRefusal(realPath),
+          );
+        }
         original = readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, realPath).toString('utf-8');
       } catch (err) {
         if (isReadLimit(err)) {
@@ -689,7 +783,7 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       } else if (isInArtifactsRoot(realPath)) {
         writeArtifactFile(realPath, updated, false);
       } else {
-        writeFileSync(realPath, updated, 'utf-8');
+        writeResolvedFile(realPath, updated, false);
       }
       agent.sessionCounters.writeBytes += delta;
       const n = replaceAll ? matches : 1;

@@ -17,7 +17,7 @@ vi.mock('../../core/workspace-fd.js', async (importOriginal) => {
   };
 });
 
-const { writeArtifactFile } = await import('./fs.js');
+const { writeArtifactFile, writeResolvedFile } = await import('./fs.js');
 
 let root: string;
 let prevDataDir: string | undefined;
@@ -64,5 +64,21 @@ describe('writeArtifactFile where handles are not available', () => {
 
   it('still refuses a path outside the artifacts directory', () => {
     expect(() => writeArtifactFile(join(root, 'elsewhere.txt'), 'x', true)).toThrow(/not in the artifacts directory/);
+  });
+});
+
+describe('writeResolvedFile where handles are not available', () => {
+  it('writes an existing file by name, replacing a longer content whole', async () => {
+    const path = join(root, 'workspace', 'a.txt');
+    await mkdir(join(root, 'workspace'), { recursive: true });
+    await writeFile(path, 'old and longer');
+    expect(() => writeResolvedFile(path, 'new', false)).not.toThrow();
+    expect(await readFile(path, 'utf-8')).toBe('new');
+  });
+
+  it('creates a missing file and its folders', async () => {
+    const path = join(root, 'workspace', 'd1', 'a.txt');
+    expect(() => writeResolvedFile(path, 'made', true)).not.toThrow();
+    expect(await readFile(path, 'utf-8')).toBe('made');
   });
 });
