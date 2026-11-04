@@ -472,13 +472,22 @@ describe('reading a store\'s product list narrowed by a filter', () => {
       expect(out.summary.startsWith('Bulk preview done.'), out.summary).toBe(true);
     });
 
+    it('fits web push\'s cut with the largest counts a run can have, in both languages and for every filter', () => {
+      for (const say of [BULK_NOTICES.en, BULK_NOTICES.de]) for (const kind of ['product_type', 'vendor', 'both'] as const) {
+        const counts = [say.previewCounts(BULK_MAX_TARGETS, BULK_MAX_TARGETS, BULK_MAX_TARGETS, BULK_MAX_TARGETS), say.judgeCounts(BULK_MAX_TARGETS, BULK_MAX_TARGETS, BULK_MAX_TARGETS, BULK_MAX_TARGETS)];
+        for (const c of counts) expect(`${say.listNoneLeft(kind)} ${c}`.length, `${kind} ${c}`).toBeLessThanOrEqual(REMINDER_BODY_MAX);
+      }
+    });
+
     it.each([
-      ['en', { product_type: 'Gemuse' }, 'List read: no product has the product type in the filter.'],
-      ['de', { vendor: 'Gemuse' }, 'Liste gelesen: Kein Produkt hat den Anbieter aus dem Filter.'],
-    ])('says in %s that no product matched %j when every listed one fell out as not_in_filter', async (lang, filters, text) => {
+      ['en', { product_type: 'Gemuse' }, 'Preview: products found, but none with the product type spelled as in the filter. Check the spelling in the store, then ask lynox in a chat to plan again.'],
+      ['de', { vendor: 'Gemuse' }, 'Vorschau: Produkte gefunden, aber bei keinem ist der Anbieter wie im Filter geschrieben. Prüf die Schreibweise im Shop und bitte lynox im Chat, neu zu planen.'],
+      ['en', { product_type: 'Gemuse', vendor: 'Gemuse' }, 'Preview: products found, but none with product type and vendor spelled as in the filter. Check the spelling in the store, then ask lynox in a chat to plan again.'],
+      ['de', { product_type: 'Gemuse', vendor: 'Gemuse' }, 'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter wie im Filter geschrieben. Prüf die Schreibweise im Shop und bitte lynox im Chat, neu zu planen.'],
+    ])('says in %s that the search listed products none of which is spelled as %j, when every listed one fell out as not_in_filter', async (lang, filters, text) => {
       fill(2);
-      const key = Object.keys(filters)[0]!;
-      s.groups = new Map([[10, { [key]: 'Gemüse' }], [20, { [key]: 'Gémuse' }]]);
+      const spelled = (v: string): Record<string, string> => Object.fromEntries(Object.keys(filters).map((k) => [k, v]));
+      s.groups = new Map([[10, spelled('Gemüse')], [20, spelled('Gémuse')]]);
       vi.stubEnv(FLAG, '1');
       const id = startedList(filtered(filters));
       await runBulkPreview(id, deps({ notices: BULK_NOTICES[lang as 'en' | 'de'] }));
@@ -486,7 +495,10 @@ describe('reading a store\'s product list narrowed by a filter', () => {
       expect(ledger.resumePreview(id).ok).toBe(true);
       const out = await runBulkPreview(id, deps({ notices: BULK_NOTICES[lang as 'en' | 'de'] }));
       expect(out.status).toBe('done');
-      expect(out.summary.startsWith(text), out.summary).toBe(true);
+      // Word for word, then the counts, within web push's cut; never the planner's value.
+      expect(out.summary.startsWith(`${text} `), out.summary).toBe(true);
+      expect(out.summary.slice(text.length + 1)).toBe(BULK_NOTICES[lang as 'en' | 'de'].previewCounts(0, 2, 0, 2));
+      expect(out.summary.length).toBeLessThanOrEqual(REMINDER_BODY_MAX);
       expect(out.summary).not.toContain('Gemuse');
     });
   });
@@ -1552,7 +1564,7 @@ describe('a judged Shopify run', () => {
       const out = await runBulkJudge(id, box.deps);
       expect(out.status).toBe('done');
       expect(box.calls).toBe(0);
-      expect(out.summary.startsWith('List read: no product has the product type in the filter.'), out.summary).toBe(true);
+      expect(out.summary.startsWith(`${BULK_NOTICES.en.listNoneLeft('product_type')} `), out.summary).toBe(true);
       expect(ledger.getPreview(id).map((t) => t.error)).toEqual(['not_in_filter', 'not_in_filter']);
     } finally {
       vi.unstubAllEnvs();

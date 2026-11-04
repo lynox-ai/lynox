@@ -140,6 +140,15 @@ export function shopifyInFilter(data: unknown, filters: Readonly<Record<string, 
   });
 }
 
+/** Which filters a Shopify list has, for the sentences below; null for a list without filters. */
+function filterKind(filters: Readonly<Record<string, string>>): 'product_type' | 'vendor' | 'both' | null {
+  const type = filters['product_type'] !== undefined;
+  const vendor = filters['vendor'] !== undefined;
+  if (!type && !vendor) return null;
+  // With both, each value may match products while the pair matches none: no value is to blame.
+  return type && vendor ? 'both' : type ? 'product_type' : 'vendor';
+}
+
 /**
  * What a filtered Shopify list that matched no product tells the model and the owner, by the
  * filters it has ({@link BulkNotices.listNoMatch}); null for a list without filters. The value is
@@ -147,24 +156,23 @@ export function shopifyInFilter(data: unknown, filters: Readonly<Record<string, 
  * own plan.
  */
 export function shopifyNoMatchSentence(filters: Readonly<Record<string, string>>, say: BulkNotices): string | null {
-  const type = filters['product_type'] !== undefined;
-  const vendor = filters['vendor'] !== undefined;
-  if (!type && !vendor) return null;
-  // With both, each value may match products while the pair matches none: no value is to blame.
-  return say.listNoMatch(type && vendor ? 'both' : type ? 'product_type' : 'vendor');
+  const kind = filterKind(filters);
+  return kind === null ? null : say.listNoMatch(kind);
 }
 
 /**
- * The no-match sentence of a filtered list whose every listed product fell out as `not_in_filter`
- * (PRD shopify-preset §22.2 item 7), null otherwise: then the filter kept nothing, as with a list
- * that listed none. Only when every target fell out so: a target left out for another reason (a
- * read that failed) may have matched, and the run does not say that none did.
+ * What a filtered list says when its search listed products and every one fell out as
+ * `not_in_filter` (PRD shopify-preset §22.2 item 7, §22.4): products were found, none spelled as
+ * the filter ({@link BulkNotices.listNoneLeft}), so neither the model nor the owner reads it as
+ * "the store has no such products". Null otherwise: a target left out for another reason (a read
+ * that failed) may have matched, and the run does not say that none did.
  */
 export function shopifyNoneLeftSentence(
   filters: Readonly<Record<string, string>>, status: Pick<BulkRunStatus, 'total' | 'invalidReasons'> | null, say: BulkNotices,
 ): string | null {
-  if (status === null || status.total === 0 || status.invalidReasons.not_in_filter !== status.total) return null;
-  return shopifyNoMatchSentence(filters, say);
+  if (status === null || status.invalidReasons.not_in_filter !== status.total) return null;
+  const kind = filterKind(filters);
+  return kind === null ? null : say.listNoneLeft(kind);
 }
 
 /**
