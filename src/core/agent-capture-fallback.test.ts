@@ -161,8 +161,11 @@ describe('turn-end capture — the chat a fact is stamped with', () => {
 });
 
 describe('turn-end capture — the two routes the owner asked for', () => {
-  it('a CLEAN turn writes the fact as trusted', async () => {
-    const { inner, write } = makeAgent();
+  it('a CLEAN turn writes an operator-stated fact as trusted', async () => {
+    const { inner, write } = makeAgent({ reply: vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: [{ ...FACTS[0], source: 'user_stated' }] } }],
+      usage: USAGE,
+    }) });
     await inner._captureFallback(ANSWER, false, 'none', OWNER_ACTOR);
     expect(write).toHaveBeenCalledTimes(1);
     expect(write.mock.calls[0]![0]).toMatchObject({ sourceUntrusted: false, sourceChannel: 'agent' });
@@ -288,8 +291,17 @@ describe('turn-end capture — per-fact routing on an untrusted turn', () => {
     expect(routingOf()).toBe('injection_suspected');
   });
 
-  it('a CLEAN turn ignores the attribution too — nothing to gate', async () => {
+  it('a CLEAN turn reads the attribution too: a fact only in the assistant half goes to review', async () => {
+    // Row 1103: a turn that read nothing external can still carry a draft the assistant was
+    // asked to write, and a fact taken from it is invented. Only the operator half is trusted.
     const { inner, write } = makeAgent({ reply: replyWith('external') });
+    await inner._captureFallback(ANSWER, false, 'none', OWNER_ACTOR);
+    expect(write.mock.calls[0]![0]).toMatchObject({ sourceUntrusted: true });
+    expect(routingOf()).toBe('turn_trusted_assistant');
+  });
+
+  it('a CLEAN turn writes an operator-half fact without review', async () => {
+    const { inner, write } = makeAgent({ reply: replyWith('user_stated') });
     await inner._captureFallback(ANSWER, false, 'none', OWNER_ACTOR);
     expect(write.mock.calls[0]![0]).toMatchObject({ sourceUntrusted: false });
     expect(routingOf()).toBe('turn_trusted');
