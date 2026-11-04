@@ -339,7 +339,12 @@ function shortcodeTagsOf(value: string): string[] {
 /** A character WordPress allows in a shortcode's name: no whitespace and none of `[ ] / = < > & " '`. */
 const SHORTCODE_NAME_CHAR = /[^\s[\]/=<>&"']/;
 
-interface NameTrie { next: Map<string, NameTrie>; name: string | null }
+/** The length of the name run after the `[` at `i`, in code units, up to `close`. */
+function nameRunAt(value: string, i: number, close: number): number {
+  let k = i + 1;
+  while (k < close && SHORTCODE_NAME_CHAR.test(value[k]!)) k++;
+  return k - i - 1;
+}
 
 /**
  * The text each paired shortcode encloses, as
@@ -347,37 +352,64 @@ interface NameTrie { next: Map<string, NameTrie>; name: string | null }
  * name runs on to the first `]`, then to the first `[/name]` after it, where `name` is that name or
  * any start of it (the pattern backtracks into the name), the longest that has one. A pair is read
  * on after its closing tag. The closing tags are indexed once, by a trie of their names, so each
- * opening tag reads its own name once.
+ * opening tag reads its own name once. The trie keeps its edges in one map of numbers, and holds
+ * no name longer than the longest opening one, which no opening tag could match: a value of one
+ * closing tag with a name of a million characters costs no memory for it.
  */
 function shortcodeEnclosedOf(value: string): string[] {
-  const closers = new Map<string, number[]>();
-  const root: NameTrie = { next: new Map(), name: null };
+  // Every `[` the pairs below may open at, with the run of its name.
+  const openAt: number[] = [];
+  const openClose: number[] = [];
+  const openRun: number[] = [];
+  let longest = 0;
   let from = 0;
   let close = -1;
+  for (;;) {
+    const i = value.indexOf('[', from);
+    if (i < 0) break;
+    if (close <= i) close = value.indexOf(']', i + 1);
+    if (close < 0) break;
+    from = i + 1;
+    if (isCdataBracket(value, i)) continue;
+    const run = nameRunAt(value, i, close);
+    if (run === 0) continue;
+    openAt.push(i);
+    openClose.push(close);
+    openRun.push(run);
+    if (run > longest) longest = run;
+  }
+  if (openAt.length === 0) return [];
+
+  const closers = new Map<string, number[]>();
+  // An edge from node n by code unit c is `n * 0x10000 + c`; a node that ends a name maps to it.
+  const edges = new Map<number, number>();
+  const ends = new Map<number, string>();
+  let nodes = 1;
+  from = 0;
+  close = -1;
   for (;;) {
     const i = value.indexOf('[/', from);
     if (i < 0) break;
     if (close <= i + 1) close = value.indexOf(']', i + 2);
     if (close < 0) break;
     from = i + 2;
-    const bracket = value.indexOf('[', i + 2);
-    // A name holds no `[`: one before the `]` ends it, so this is no closing tag.
-    if (bracket !== -1 && bracket < close) continue;
+    const length = close - i - 2;
+    // No opening name is this long, and a name holds no `[` — one before the `]` ends it.
+    if (length === 0 || length > longest) continue;
+    if (nameRunAt(value, i + 1, close) !== length) continue;
     const name = value.slice(i + 2, close);
-    // Read in UTF-16 code units, as the opening tags below are and as the pattern reads.
-    const units = name.split('');
-    if (name === '' || !units.every((c) => SHORTCODE_NAME_CHAR.test(c))) continue;
     let at = closers.get(name);
     if (at === undefined) {
       at = [];
       closers.set(name, at);
-      let node = root;
-      for (const c of units) {
-        let child = node.next.get(c);
-        if (child === undefined) { child = { next: new Map(), name: null }; node.next.set(c, child); }
+      let node = 0;
+      for (let x = 0; x < name.length; x++) {
+        const key = node * 0x10000 + name.charCodeAt(x);
+        let child = edges.get(key);
+        if (child === undefined) { child = nodes++; edges.set(key, child); }
         node = child;
       }
-      node.name = name;
+      ends.set(node, name);
     }
     at.push(i);
   }
@@ -392,30 +424,29 @@ function shortcodeEnclosedOf(value: string): string[] {
     return list[lo];
   };
   const out: string[] = [];
-  from = 0;
-  close = -1;
-  for (;;) {
-    const i = value.indexOf('[', from);
-    if (i < 0) break;
-    if (close <= i) close = value.indexOf(']', i + 1);
-    if (close < 0) break;
-    from = i + 1;
-    if (isCdataBracket(value, i)) continue;
+  let next = 0;
+  for (let o = 0; o < openAt.length; o++) {
+    const i = openAt[o]!;
+    const shut = openClose[o]!;
+    const run = openRun[o]!;
+    // An opening `[` inside a pair already read is read on after it, as the pattern does.
+    if (i < next) continue;
     // The starts of the name that are a closing tag's name, shortest first.
     const names: string[] = [];
-    let node = root;
-    for (let k = i + 1; k < close && SHORTCODE_NAME_CHAR.test(value[k]!); k++) {
-      const child = node.next.get(value[k]!);
+    let node = 0;
+    for (let k = i + 1; k <= i + run; k++) {
+      const child = edges.get(node * 0x10000 + value.charCodeAt(k));
       if (child === undefined) break;
       node = child;
-      if (node.name !== null) names.push(node.name);
+      const name = ends.get(node);
+      if (name !== undefined) names.push(name);
     }
     for (let n = names.length - 1; n >= 0; n--) {
       const name = names[n]!;
-      const end = firstAtOrAfter(closers.get(name)!, close + 1);
+      const end = firstAtOrAfter(closers.get(name)!, shut + 1);
       if (end === undefined) continue;
-      out.push(value.slice(close + 1, end));
-      from = end + name.length + 3;
+      out.push(value.slice(shut + 1, end));
+      next = end + name.length + 3;
       break;
     }
   }
