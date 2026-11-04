@@ -887,6 +887,15 @@ describe('rules endpoints', () => {
     expect(handleCreateRule(deps, { ...base, matcherValue: 'y'.repeat(120), name: '  ' }).status).toBe(201);
     expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.name)).toEqual(['Rechnung Nr', 'y'.repeat(80)]);
   });
+
+  it('cuts a default name in characters, never inside an emoji, and gives none when nothing visible is left', () => {
+    const base = { accountId: ACCOUNT.id, matcherKind: 'subject_contains' as const, bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
+    expect(handleCreateRule(deps, { ...base, matcherValue: `${'a'.repeat(79)}\u{1F600}x` }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, matcherValue: '\u200B\u{E0041}' }).status).toBe(201);
+    const [first, second] = state.listRulesForAccount(ACCOUNT.id);
+    expect(first?.name).toBe(`${'a'.repeat(79)}\u{1F600}`);
+    expect(second?.name).toBeUndefined();
+  });
 });
 
 describe('handleListItems ruleId=', () => {

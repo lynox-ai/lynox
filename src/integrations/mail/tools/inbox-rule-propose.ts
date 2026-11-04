@@ -12,6 +12,7 @@
 import type { IAgent, ToolEntry } from '../../../types/index.js';
 import type { MailHooks } from '../context.js';
 import type { MailRegistry } from './registry.js';
+import { ruleLine } from '../../inbox/rule-text.js';
 
 export const INBOX_RULE_NAME_MAX = 80;
 export const INBOX_RULE_VALUE_MAX = 200;
@@ -28,11 +29,10 @@ export interface InboxRuleProposeInput {
   name: string;
 }
 
-/** One line: control, separator, zero-width and direction characters become spaces (a name must
- *  read as it is stored when the owner confirms it), runs of space collapse. */
+/** One line, as the owner and the model read it (`inbox/rule-text.ts`). */
 function oneLine(raw: unknown): string {
   if (typeof raw !== 'string') return '';
-  return raw.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
+  return ruleLine(raw);
 }
 
 const INBOX_OFF = 'inbox_rule_propose: the inbox is not running on this instance, so there is nothing to propose a rule for.';
@@ -77,7 +77,7 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
       if (input.matcher_kind === 'from') {
         value = value.toLowerCase();
         // A bare address: brackets, a scheme or a list would never equal a sender and only hold a place.
-        if (!/^[^\s@<>()[\]{},;:"'`]+@[^\s@<>()[\]{},;:"'`]+$/.test(value)) {
+        if (!/^[^\s@<>()[\]{},;:"`]+@[^\s@<>()[\]{},;:"`]+$/.test(value)) {
           return Promise.resolve('inbox_rule_propose: for "from", matcher_value must be one sender address.');
         }
       } else if (value.length < INBOX_RULE_SUBJECT_MIN) {

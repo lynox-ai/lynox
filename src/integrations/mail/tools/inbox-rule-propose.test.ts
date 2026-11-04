@@ -150,6 +150,16 @@ describe('inbox_rule_propose — what it accepts', () => {
     });
   }
 
+  it("accepts a sender address with an apostrophe or a plus", async () => {
+    expect(await propose({ ...valid, matcher_value: "O'Brien+rechnung@example.ie" })).toMatch(/^Proposed/);
+    expect(inbox.listRulesForAccount(ACCOUNT.id)[0]?.matcherValue).toBe("o'brien+rechnung@example.ie");
+  });
+
+  it('removes the tag block, which a model reads and the owner does not see', async () => {
+    await propose({ ...valid, name: 'Kunde\u{E0049}\u{E0047}\u{E004E}' });
+    expect(inbox.listRulesForAccount(ACCOUNT.id)[0]?.name).toBe('Kunde');
+  });
+
   it('accepts exactly 80 characters of name and 3 of subject phrase', async () => {
     expect(await propose({ ...valid, name: 'n'.repeat(80) })).toMatch(/^Proposed/);
     expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: 'abc' })).toMatch(/^Proposed/);

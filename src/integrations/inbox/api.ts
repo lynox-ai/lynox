@@ -22,6 +22,7 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
+import { cutChars, ruleLine } from './rule-text.js';
 
 export interface InboxApiDeps {
   state: InboxStateDb;
@@ -937,6 +938,11 @@ export interface CreateRuleBody {
   name?: string | undefined;
 }
 
+function fallbackName(name: string, matcherValue: string): { name?: string } {
+  const chosen = name.length > 0 ? name : cutChars(ruleLine(matcherValue), MAX_RULE_NAME_CHARS);
+  return chosen.length > 0 ? { name: chosen } : {};
+}
+
 export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiResponse {
   if (!body.accountId) return bad('accountId is required');
   if (!VALID_MATCHER_KINDS.includes(body.matcherKind)) return bad('invalid matcherKind');
@@ -947,9 +953,7 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
   if (!VALID_RULE_ACTIONS.includes(body.action)) return bad('invalid action');
   if (!VALID_RULE_SOURCES.includes(body.source)) return bad('invalid source');
   // One line, as the agent's proposals are cut: the name lands in audit rows the model can read.
-  const oneLine = (v: string): string =>
-    v.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
-  const name = typeof body.name === 'string' ? oneLine(body.name) : '';
+  const name = typeof body.name === 'string' ? ruleLine(body.name) : '';
   if (name.length > MAX_RULE_NAME_CHARS) return bad(`name exceeds ${MAX_RULE_NAME_CHARS} chars`);
   const id = deps.state.insertRule({
     accountId: body.accountId,
@@ -959,8 +963,8 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
     action: body.action,
     source: body.source,
     tenantId: body.tenantId,
-    // Unnamed, a rule is called by what it matches (cut to the name's length).
-    name: name.length > 0 ? name : oneLine(body.matcherValue).slice(0, MAX_RULE_NAME_CHARS),
+    // Unnamed, a rule is called by what it matches (cut to the name's length); nothing left, no name.
+    ...(fallbackName(name, body.matcherValue)),
   });
   deps.rules?.invalidate(body.accountId, body.tenantId);
   return { status: 201, body: { id } };
