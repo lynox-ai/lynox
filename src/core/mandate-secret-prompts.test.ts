@@ -116,6 +116,39 @@ describe('ask_secret refuses a mandate before any dialog, and asks the owner', (
     expect(owner.content).toContain('"SHOPIFY_TOKEN"');
   });
 
+  // The checks a connection's token brought in (scope, stored names, the API profiles that hold a
+  // name) answer about the owner's vault too, so the refusal comes before every one of them.
+  it('refuses before the scope check, the stored names and the API profiles are read', async () => {
+    const ask = async (principal: RequestPrincipal | undefined) => {
+      const touched: string[] = [];
+      const apiStore = new Proxy({}, {
+        get: (_t, key) => { touched.push(`apiStore.${String(key)}`); return () => []; },
+      });
+      const store = {
+        findNameMatches: vi.fn(() => []),
+        explainUnresolved: vi.fn(() => 'out-of-scope'),
+        listAgentVisibleNames: vi.fn(() => ['SHOPIFY_TOKEN']),
+        extractSecretNames: () => [], maskSecrets: (s: string) => s,
+      };
+      const { agent, call } = promptingAgent(askSecretTool as ToolEntry, principal);
+      (agent as unknown as { secretStore: unknown }).secretStore = store;
+      (agent as unknown as { toolContext: { apiStore?: unknown } }).toolContext.apiStore = apiStore;
+      const r = await call('ask_secret', { name: 'SHOPIFY_TOKEN', prompt: 'Paste the Shopify token' });
+      return { content: String(r.content), store, touched };
+    };
+    const mandate = await ask(MANDATE);
+    expect(mandate.content).toBe(MANDATE_SECRET_REFUSAL);
+    expect(mandate.store.explainUnresolved).not.toHaveBeenCalled();
+    expect(mandate.store.listAgentVisibleNames).not.toHaveBeenCalled();
+    expect(mandate.store.findNameMatches).not.toHaveBeenCalled();
+    expect(mandate.touched).toEqual([]);
+    // control: the owner's same call reaches each of them
+    const owner = await ask(undefined);
+    expect(owner.store.explainUnresolved).toHaveBeenCalledWith('SHOPIFY_TOKEN');
+    expect(owner.store.listAgentVisibleNames).toHaveBeenCalled();
+    expect(owner.touched.length).toBeGreaterThan(0);
+  });
+
   it('control: the owner\'s same call opens the dialog and stores its row', async () => {
     const { promptSecret, rows, call } = promptingAgent(askSecretTool as ToolEntry, undefined);
     const r = await call('ask_secret', { name: 'SHOPIFY_TOKEN', prompt: 'Paste the Shopify token' });
