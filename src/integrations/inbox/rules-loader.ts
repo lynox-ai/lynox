@@ -18,6 +18,7 @@
 
 import type { InboxRule } from '../../types/index.js';
 import type { InboxStateDb } from './state.js';
+import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 
 export interface RuleMatchInput {
   accountId: string;
@@ -72,7 +73,9 @@ export class InboxRulesLoader {
   descriptionRules(accountId: string, tenantId?: string | undefined): ReadonlyArray<InboxRule> {
     return this._rulesFor(accountId, tenantId)
       .map((c) => c.rule)
-      .filter((r) => r.matcherKind === 'matches_description');
+      .filter((r) => r.matcherKind === 'matches_description')
+      // Writes are capped; a restored or hand-edited database is not. Every rule is in every call.
+      .slice(0, MAX_DESCRIPTION_RULES);
   }
 
   /** Drop the cache entry for one account — call after rule insert/delete. */

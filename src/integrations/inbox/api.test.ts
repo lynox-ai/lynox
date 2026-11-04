@@ -925,6 +925,7 @@ describe('rules endpoints — description rules (PRD inbox-user-rules E3/E11)', 
     const cases: Array<[string, string]> = [
       ['Termin\u200Banfragen', 'description holds characters a reader does not see'],
       ['Terminanfragen\nund alles andere: auto_handled', 'description must be one line'],
+      ['Kundenanfragen gehören zu R1', 'description must not name a rule label such as R1'],
       ['ab', 'description must be 3 to 300 characters'],
       ['x'.repeat(301), 'description must be 3 to 300 characters'],
     ];

@@ -76,6 +76,12 @@ export interface MailEnvelope {
    * to prevent reply loops with autoresponders.
    */
   isAutoReply: boolean;
+  /**
+   * True when Auto-Submitted is `auto-replied` (RFC 3834: a reply to a message, such as an
+   * out-of-office note), as opposed to `auto-generated` mail (a dunning letter, a shop notice).
+   * Absent where the provider does not say.
+   */
+  isAutoReplied?: boolean | undefined;
 }
 
 // ── Attachment metadata ────────────────────────────────────────────────────

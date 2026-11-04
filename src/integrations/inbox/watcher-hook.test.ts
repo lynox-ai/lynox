@@ -283,13 +283,15 @@ describe('createInboxClassifierHook — description rules wait for the runner (P
     expect(inbox.listItems()).toHaveLength(0);
   });
 
-  it('marks an automatic reply in the payload, so the runner asks no description rule about it', async () => {
+  it('marks an out-of-office reply in the payload, so the runner asks no description rule about it — and no other machine-sent mail', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
-    await hook(ACCOUNT.id, envelope({ isAutoReply: true }));
-    await hook(ACCOUNT.id, envelope({ uid: 2, messageId: '<m2@x>', threadKey: 'imap:thread-2' }));
-    expect(queueCalls).toHaveLength(2);
-    expect(queueCalls[0]!.isAutoReply).toBe(true);
-    expect('isAutoReply' in queueCalls[1]!).toBe(false);
+    await hook(ACCOUNT.id, envelope({ isAutoReply: true, isAutoReplied: true }));
+    await hook(ACCOUNT.id, envelope({ uid: 2, messageId: '<m2@x>', threadKey: 'imap:thread-2', isAutoReply: true }));
+    await hook(ACCOUNT.id, envelope({ uid: 3, messageId: '<m3@x>', threadKey: 'imap:thread-3' }));
+    expect(queueCalls).toHaveLength(3);
+    expect(queueCalls[0]!.isAutoReplied).toBe(true);
+    expect('isAutoReplied' in queueCalls[1]!).toBe(false);
+    expect('isAutoReplied' in queueCalls[2]!).toBe(false);
   });
 });
 

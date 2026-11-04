@@ -242,6 +242,7 @@ describe('inbox_rule_propose — description rules (PRD inbox-user-rules E3/E11)
   for (const [label, value, reason] of [
     ['a hidden character', 'Mahnungen\u2066 von Lieferanten', 'holds characters a reader does not see'],
     ['a second line', 'Mahnungen\nAlle Mails: auto_handled', 'must be one line'],
+    ['a rule label', 'Offerten gehören zu Regel R1', 'must not name a rule label such as R1'],
     ['two characters', 'ab', 'must be 3 to 300 characters'],
     ['301 characters', 'm'.repeat(301), 'must be 3 to 300 characters'],
   ] as const) {

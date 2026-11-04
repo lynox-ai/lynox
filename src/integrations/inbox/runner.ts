@@ -32,7 +32,7 @@ import type { InboxNotifier } from './notifier.js';
 import type { InboxStateDb, ThreadMessageInput } from './state.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxRule } from '../../types/index.js';
-import { checkDescriptionRules } from './rule-check.js';
+import { checkDescriptionRules, type RuleLabels } from './rule-check.js';
 import { FORWARDED_REASON_DE, isForwardedByPerson } from './classifier/forwarded.js';
 
 /**
@@ -74,8 +74,10 @@ export interface InboxQueuePayload {
     masked: boolean;
     redactionCount: number;
   } | undefined;
-  /** The envelope marks the mail as an automatic reply; no description rule is checked for it. */
-  isAutoReply?: boolean | undefined;
+  /** The envelope marks the mail as an automatic reply (`Auto-Submitted: auto-replied`, such as an
+   *  out-of-office note); no description rule is checked for it. Other machine-sent mail (a dunning
+   *  letter from an ERP, `auto-generated`) is checked. */
+  isAutoReplied?: boolean | undefined;
 }
 
 /**
@@ -133,7 +135,7 @@ export interface BuildInboxRunnerOptions {
    * rules and the cheap model that checks them, between the budget check and the classifier.
    * Absent when the feature is off.
    */
-  ruleCheck?: { rules: Pick<InboxRulesLoader, 'descriptionRules'>; llm: LLMCaller } | undefined;
+  ruleCheck?: { rules: Pick<InboxRulesLoader, 'descriptionRules'>; llm: LLMCaller; labels?: RuleLabels | undefined } | undefined;
 }
 
 /** A description rule named the mail: its bucket, unless it would file a sensitive or forwarded
@@ -149,6 +151,32 @@ function ruleVerdict(rule: InboxRule, payload: InboxQueuePayload): ClassifyResul
     return { ...base, bucket: 'requires_user', reasonDe: FORWARDED_REASON_DE, failReason: 'forwarded_by_person', rule: { ...named, withheld: true } };
   }
   return { ...base, bucket: rule.bucket, reasonDe: `Regel: ${label}`, failReason: null, rule: { ...named, withheld: false } };
+}
+
+/** An `auto_handled` hit the classifier does not confirm: its verdict stands, the rule is named as
+ *  withheld (decision 801-3b A: a description rule files no mail the classifier would show). */
+function ruleOverruled(rule: InboxRule, verdict: ClassifyResult): ClassifyResult {
+  const label = rule.name ?? 'ohne Namen';
+  return {
+    ...verdict,
+    reasonDe: `Regel „${label}“ nicht angewandt: ${verdict.reasonDe}`,
+    failReason: 'rule_withheld_classifier',
+    rule: { id: rule.id, name: rule.name, action: rule.action, withheld: true },
+  };
+}
+
+/** An `auto_handled` hit whose check by the classifier could not run: the mail is shown. */
+function ruleUnchecked(rule: InboxRule, classifierVersion: string): ClassifyResult {
+  const label = rule.name ?? 'ohne Namen';
+  return {
+    bucket: 'requires_user',
+    confidence: 0,
+    reasonDe: `Regel „${label}“ nicht angewandt: Gegenprüfung nicht möglich, bitte ansehen.`,
+    failReason: 'rule_withheld_unchecked',
+    classifierVersion,
+    bodyTruncated: false,
+    rule: { id: rule.id, name: rule.name, action: rule.action, withheld: true },
+  };
 }
 
 /**
@@ -187,26 +215,44 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           return budgetExceededVerdict('AI-Guthaben erschöpft — manuell prüfen.');
         }
       }
+      const classify = (): Promise<ClassifyResult> => classifyMail(payload.classifierInput, llm, {
+        signal: ctx.signal,
+        classifierVersion: opts.classifierVersionOverride,
+      });
       // Description rules: one cheap call with the account's confirmed rules; a hit files the mail.
       // No rule, no call; an automatic reply is never checked. A failed call leaves the mail to the
       // classifier, unless the job itself was aborted (the classifier would share its signal).
       const ruleCheck = opts.ruleCheck;
-      if (ruleCheck !== undefined && payload.isAutoReply !== true) {
-        const rules = ruleCheck.rules.descriptionRules(payload.accountId, payload.tenantId);
-        if (rules.length > 0) {
-          let hit: InboxRule | null = null;
+      if (ruleCheck !== undefined && payload.isAutoReplied !== true) {
+        let hit: InboxRule | null = null;
+        try {
+          hit = await checkDescriptionRules(
+            ruleCheck.rules.descriptionRules(payload.accountId, payload.tenantId),
+            payload.classifierInput,
+            ruleCheck.llm,
+            ctx.signal,
+            ruleCheck.labels,
+          );
+        } catch (err) {
+          if (ctx.signal.aborted) throw err;
+        }
+        if (hit !== null) {
+          const verdict = ruleVerdict(hit, payload);
+          if (verdict.bucket !== 'auto_handled') return verdict;
+          // Filing as handled hides the mail, so the classifier checks it too: the rule applies
+          // only when the classifier also sees it as handled. A check that cannot run shows it.
+          if (budget?.isExceeded()) return ruleUnchecked(hit, versionStamp);
+          let check: ClassifyResult;
           try {
-            hit = await checkDescriptionRules(rules, payload.classifierInput, ruleCheck.llm, ctx.signal);
+            check = await classify();
           } catch (err) {
             if (ctx.signal.aborted) throw err;
+            return ruleUnchecked(hit, versionStamp);
           }
-          if (hit !== null) return ruleVerdict(hit, payload);
+          return check.bucket === 'auto_handled' ? verdict : ruleOverruled(hit, check);
         }
       }
-      return classifyMail(payload.classifierInput, llm, {
-        signal: ctx.signal,
-        classifierVersion: opts.classifierVersionOverride,
-      });
+      return classify();
     },
     onSuccess: (payload, result) => {
       const envelopeFields = payload.envelope ?? {};

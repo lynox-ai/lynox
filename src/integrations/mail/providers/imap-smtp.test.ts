@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FetchMessageObject, SearchObject } from 'imapflow';
-import { sanitizeFilename, htmlToTextSnippet, isAutoSubmittedHeader } from './imap-smtp.js';
+import { sanitizeFilename, htmlToTextSnippet, isAutoRepliedHeader, isAutoSubmittedHeader } from './imap-smtp.js';
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 //
@@ -1081,6 +1081,15 @@ describe('htmlToTextSnippet — hidden-content stripping', () => {
     expect(out).not.toContain('noscript-payload');
     expect(out).not.toContain('template-payload');
     expect(out).not.toContain('title');
+  });
+});
+
+describe('isAutoRepliedHeader (an out-of-office reply, nothing else machine-sent)', () => {
+  it('is true for auto-replied, with case, spaces and parameters', () => {
+    for (const v of ['auto-replied', 'Auto-Replied', ' auto-replied ', 'auto-replied; owner-email="a@b"']) expect(isAutoRepliedHeader(v)).toBe(true);
+  });
+  it('is false for other machine-sent mail, for no, and when absent', () => {
+    for (const v of ['auto-generated', 'auto-notified', 'no', '', undefined, 'auto-repliedx']) expect(isAutoRepliedHeader(v)).toBe(false);
   });
 });
 

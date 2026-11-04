@@ -2,21 +2,24 @@
 //
 // PRD inbox-user-rules E3/E11. The runner calls this after the budget check and before the
 // classifier, with the account's confirmed `matches_description` rules. The rules go to the model
-// as labels R1..Rn (never their ids), each with its name and description, inside one untrusted-data
-// block; the mail goes in a second block, as the classifier sends it (masked in `mask` mode). The
-// model answers `{"rule_id": "R<n>"}` or `{"rule_id": null}`. Anything else — no JSON, an object
-// without the key, a label not in the list, a word like "none" — counts as no rule, and the mail
-// goes to the classifier. A rule's description and name may be text a model wrote after reading
-// foreign mail (an agent proposal the owner confirmed), so both are cut and wrapped like the mail.
+// as labels drawn at random for each call (never their ids), each with its name and description,
+// inside one untrusted-data block; the mail goes in a second block, as the classifier sends it
+// (masked in `mask` mode). Random labels mean neither a mail nor a rule text can name another rule's
+// label in advance. The model answers `{"rule_id": "R<n>"}` or `{"rule_id": null}`. Anything else —
+// no JSON, an object without the key, a label not in the list, a word like "none" — counts as no
+// rule, and the mail goes to the classifier. A rule's description and name may be text a model
+// wrote after reading foreign mail (an agent proposal the owner confirmed), so both are cut and
+// wrapped like the mail. An `auto_handled` hit still needs the classifier's agreement (runner).
 //
 // The prompt is the one measured before the build (505 fixtures, positive control by permuted
-// descriptions; engine 801 Teil 3 M1).
+// descriptions; engine 801 Teil 3 M1), with labels R1..Rn; the labels are now drawn at random.
 
 import type { InboxRule } from '../../types/index.js';
 import { wrapChannelMessage, wrapUntrustedData } from '../../core/data-boundary.js';
 import type { ClassifierPromptInput } from './classifier/prompt.js';
 import type { LLMCaller } from './classifier/index.js';
 import { sanitizeBody, sanitizeHeader } from './classifier/sanitize.js';
+import { randomInt } from 'node:crypto';
 
 /** Caps on what a rule puts into the call (E11). */
 export const RULE_NAME_PROMPT_MAX = 120;
@@ -33,6 +36,15 @@ export const RULE_CHECK_SYSTEM_PROMPT = [
   '  {"rule_id": "<id aus der Regelliste>"} oder {"rule_id": null}',
 ].join('\n');
 
+/** Labels for `count` rules: distinct, random, R10..R999. */
+export type RuleLabels = (count: number) => string[];
+
+export const randomRuleLabels: RuleLabels = (count) => {
+  const used = new Set<number>();
+  while (used.size < count) used.add(randomInt(10, 1000));
+  return [...used].map((n) => `R${String(n)}`);
+};
+
 export interface BuiltRuleCheck {
   system: string;
   user: string;
@@ -40,10 +52,15 @@ export interface BuiltRuleCheck {
   labels: ReadonlyMap<string, InboxRule>;
 }
 
-export function buildRuleCheckPrompt(rules: ReadonlyArray<InboxRule>, input: ClassifierPromptInput): BuiltRuleCheck {
+export function buildRuleCheckPrompt(
+  rules: ReadonlyArray<InboxRule>,
+  input: ClassifierPromptInput,
+  drawLabels: RuleLabels = randomRuleLabels,
+): BuiltRuleCheck {
   const labels = new Map<string, InboxRule>();
+  const drawn = drawLabels(rules.length);
   const lines = rules.map((rule, i) => {
-    const label = `R${String(i + 1)}`;
+    const label = drawn[i]!;
     labels.set(label, rule);
     const name = sanitizeHeader(rule.name ?? '', RULE_NAME_PROMPT_MAX);
     const description = sanitizeHeader(rule.matcherValue, RULE_DESCRIPTION_PROMPT_MAX);
@@ -86,9 +103,10 @@ export async function checkDescriptionRules(
   input: ClassifierPromptInput,
   llm: LLMCaller,
   signal?: AbortSignal,
+  drawLabels?: RuleLabels,
 ): Promise<InboxRule | null> {
   if (rules.length === 0) return null;
-  const built = buildRuleCheckPrompt(rules, input);
+  const built = buildRuleCheckPrompt(rules, input, drawLabels);
   const raw = await llm({ system: built.system, user: built.user, signal });
   return parseRuleCheckResponse(raw, built.labels);
 }

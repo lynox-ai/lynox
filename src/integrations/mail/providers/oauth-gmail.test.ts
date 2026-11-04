@@ -182,6 +182,18 @@ describe('OAuthGmailProvider — list', () => {
     const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
     const envs = await provider.list();
     expect(envs[0]?.isAutoReply).toBe(true);
+    expect(envs[0]?.isAutoReplied).toBe(true);
+  });
+
+  it('flags auto-generated mail as isAutoReply but not as an out-of-office reply (isAutoReplied)', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'm1', threadId: 't1' }] }));
+      if (url.includes('messages/m1')) return Promise.resolve(respondJson(metadataMessage('m1', { autoSubmitted: 'auto-generated' })));
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const envs = await new OAuthGmailProvider(makeAccount(), makeAuth()).list();
+    expect(envs[0]?.isAutoReply).toBe(true);
+    expect(envs[0]?.isAutoReplied).toBe(false);
   });
 
   it('UNREAD label maps to absent \\Seen flag', async () => {

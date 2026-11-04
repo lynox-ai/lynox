@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb } from './state.js';
 import { InboxRulesLoader, type RuleMatchInput } from './rules-loader.js';
+import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 import type { MailAccountConfig } from '../mail/provider.js';
 
 let mail: MailStateDb;
@@ -221,5 +222,11 @@ describe('InboxRulesLoader — description rules (PRD inbox-user-rules E3)', () 
     expect(ids).toEqual([b.id, a.id]);
     expect(ids).not.toContain(fixed);
     expect(ids).not.toContain(waiting.id);
+  });
+
+  it('descriptionRules() reads at most MAX_DESCRIPTION_RULES, the first confirmed, even when the database holds more', () => {
+    const ids = Array.from({ length: MAX_DESCRIPTION_RULES + 5 }, (_, i) =>
+      inbox.insertRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: `Beschreibung ${String(i)}`, bucket: 'requires_user', action: 'show', source: 'on_demand', createdAt: new Date(1_000 + i) }));
+    expect(loader.descriptionRules('acct-1').map((r) => r.id)).toEqual(ids.slice(0, MAX_DESCRIPTION_RULES));
   });
 });
