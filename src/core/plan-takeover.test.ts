@@ -255,6 +255,32 @@ describe('the workflow’s side', () => {
       .toEqual([true, [['h@x.ch', ['workflow-created']]]]);
   });
 
+  it('a login pause that knew only the plan’s own role gains the workflow role, when the takeover moves the workflow', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    // The login read the trigger's marks only: the creator's role on the plan, none on the workflow.
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['created'], closedPrompt: false }]);
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && [p.preview.workflow?.takenOver, p.preview.members.map((m) => [m.name, m.roles])])
+      .toEqual([true, [['h@x.ch', ['created', 'workflow-created']]]]);
+  });
+
+  it('a workflow the takeover leaves with its member adds no role to the pause', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: [], closedPrompt: false }]);
+    // A live member changes the workflow after the pause: the takeover leaves the workflow with it.
+    editor(b, 'workflows', 'w', 'm2@x.ch', 'g-m2@x.ch', null);
+    b.db.prepare("UPDATE workflows SET mandate_edited_at = datetime('now', '+1 minute') WHERE id = 'w'").run();
+    renewed(b, 'm2@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && [p.preview.workflow?.takenOver, p.preview.members.find((m) => m.name === 'h@x.ch')?.roles]).toEqual([false, []]);
+  });
+
   it('a pause that knew its roles keeps them, also when the workflow reads otherwise now', () => {
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' });

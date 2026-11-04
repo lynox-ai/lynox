@@ -39,6 +39,8 @@ import {
 import type { TriggerStore } from './trigger-store.js';
 import type { TriggerRecord } from '../types/index.js';
 
+const isWorkflowRole = (r: PauseRole): boolean => r === 'workflow-created' || r === 'workflow-edited';
+
 /** The digest's own domain, so a stamp digest (`stampExpect`) never passes for a takeover's. */
 export const TAKEOVER_DIGEST_PREFIX = 'lynox:plan-takeover:v1';
 
@@ -245,10 +247,13 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
   const members: TakeoverMember[] = pausedForOf(trigger.paused_for).entries.map((e) => {
     const principal = { kind: 'mandate' as const, email: e.email, mandateId: e.mandateId };
     const ended = principalHasEnded(principal, isLive);
-    // A login whose workflow read failed pauses for its mandate without knowing its roles
-    // (`pauseEndedPlans`): they are read here, where the workflow reads, so F2 and the role lines
-    // say what the takeover does. A pause that knew its roles keeps them.
-    return { name: e.email, roles: e.roles.length > 0 ? e.roles : roles(principal), ended, reason: ended ? e.reason : null };
+    // A login whose workflow read failed pauses for its mandate knowing only its roles on the plan
+    // itself (`pauseEndedPlans`). When the takeover moves the workflow, its workflow roles are read
+    // here, where the workflow reads, so F2 and the role lines say so. A pause that knew a workflow
+    // role keeps its roles.
+    const knewWorkflow = e.roles.some(isWorkflowRole);
+    const added = knewWorkflow || !coverWorkflow ? [] : roles(principal).filter(isWorkflowRole);
+    return { name: e.email, roles: [...e.roles, ...added], ended, reason: ended ? e.reason : null };
   });
   const coveredMarks: Array<{ tag: string | undefined; id: string | undefined }> = [
     { tag: trigger.created_by, id: trigger.created_mandate_id }, { tag: trigger.mandate_editor, id: trigger.mandate_editor_id },
