@@ -413,6 +413,13 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     expect(fakeMailContext.hooks.inboxLabelOf).toBe(euRuntime.inboxLabelOf);
     // inbox_read reads the fresh runtime's store, not the disposed one.
     expect(fakeMailContext.hooks.inboxReader).toBe(euRuntime.inboxReader);
+    // 801 part 1b: the fresh runtime also gets the lookup that reads a message through the registry.
+    const opts = mockBootstrapInbox.mock.calls.at(-1)![0] as { confirmAutoReply?: (id: string, env: unknown) => Promise<boolean> };
+    expect(opts.confirmAutoReply).toBeInstanceOf(Function);
+    const fetch = vi.fn(async () => ({ envelope: { isAutoReply: false }, text: '' }));
+    (handle._mailContext as unknown as { registry: unknown }).registry = { get: (id: string) => (id === 'acct-graph' ? { fetch } : null) };
+    await expect(opts.confirmAutoReply!('acct-graph', { uid: 3, folder: 'INBOX' })).resolves.toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   /**

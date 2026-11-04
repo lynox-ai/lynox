@@ -169,6 +169,18 @@ describe('LLM_CATALOG', () => {
     expect(checked).toBeGreaterThan(0); // the guard actually exercised the registry-backed entries
   });
 
+  it('a Mistral catalog model lists vision exactly when the registry gives it vision', () => {
+    // Medium 3.5 was listed text-only here while the registry (verified live) and Mistral's
+    // model list both give it vision.
+    const mistral = getCatalogEntryByKey('mistral')!;
+    expect(mistral.models.length).toBeGreaterThan(0);
+    for (const model of mistral.models) {
+      const cap = MODEL_CAPABILITIES[model.id];
+      expect(cap, model.id).toBeDefined();
+      expect(model.capabilities?.includes('vision') ?? false, `${model.id} vision`).toBe(cap!.features.vision);
+    }
+  });
+
   it('vertex models use Vertex-specific IDs (haiku drops date suffix)', () => {
     const entry = getCatalogForProvider('vertex')!;
     const byTier = Object.fromEntries(entry.models.map((m) => [m.tier, m]));
@@ -206,10 +218,11 @@ describe('LLM_CATALOG', () => {
     expect(byId['ministral-14b-2512']?.tier).toBe('balanced');
     // Deep default is now Medium 3.5 (Large 3 kept as legacy option, still deep-tier).
     expect(byId['mistral-medium-2604']?.tier).toBe('deep');
-    expect(byId['mistral-medium-2604']?.pricing).toEqual({ input: 1.50, output: 7.50 });
+    // Headline prices are the EU endpoint's: list × 1.1.
+    expect(byId['mistral-medium-2604']?.pricing).toEqual({ input: 1.65, output: 8.25 });
     expect(byId['mistral-large-2512']?.tier).toBe('deep');
-    // Mistral Large 3 pricing — 75% cut vs Large 2
-    expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.50, output: 1.50 });
+    // Mistral Large 3 pricing — 75% cut vs Large 2 ($0.50/$1.50 list)
+    expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.55, output: 1.65 });
   });
 
   it('generic OpenAI-compatible preset accepts free-text model + base URL', () => {

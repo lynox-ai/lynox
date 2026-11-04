@@ -55,9 +55,6 @@ function canonicalHtml(value: string): string {
  * what lies between them, never a prefix cut at a `>` inside a quoted value, nor a CDATA section of
  * foreign content, which is inert text. The text around them stays out, so editing it is no change.
  */
-/** A start tag in a dropped stretch whose name is followed by an attribute. */
-const DROPPED_WITH_ATTRIBUTES = /<[A-Za-z][^\s/>]*[\s/]+[^\s/>]/;
-
 /** Elements whose content the tokenizer reads as text, scripting on: a `<` there is a character. */
 const RAW_TEXT_PARENTS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext']);
 
@@ -111,6 +108,8 @@ const HTML_FIELDS: Readonly<Record<BulkListSourceForm, readonly string[]>> = Obj
   shopify: Object.freeze(['descriptionHtml']),
   // An image's `alt` is plain text.
   shopify_media: Object.freeze([]),
+  // The same store's products, narrowed to a group: the same fields.
+  shopify_filtered: Object.freeze(['descriptionHtml']),
   woocommerce: Object.freeze(['description', 'short_description']),
 });
 
@@ -282,7 +281,8 @@ export type MarkupRefusal =
   | 'hidden_char'
   | 'not_canonical'
   | 'markup_dropped'
-  | 'markup_dropped_before';
+  | 'markup_dropped_before'
+  | 'shortcode_changed';
 
 export interface MarkupCheckInput {
   /** The field's before-image; null where the target has none. */
@@ -303,6 +303,211 @@ function refused(reason: MarkupRefusal, detail: string): MarkupCheckResult {
   return { ok: false, reason, detail: detail.length > DETAIL_MAX ? `${detail.slice(0, DETAIL_MAX)}…` : detail };
 }
 
+/** A shortcode's own tag, opening or closing: `[name]`, `[name attr="…"]`, `[/name]`. Taken as any
+ *  text from a `[` to the next `]`, not by WordPress's grammar for a name: a store registers names
+ *  with digits, `_`, `:` or `.` first or inside (`[3d-gallery]`, `[ns:code]`), writes `=` right after
+ *  the name (`[x="…"]`) and allows `[` in an attribute, and a narrower pattern let those pass
+ *  unchecked. Bracketed prose that is no shortcode is read as one too, so it is refused rather than
+ *  rewritten when it changes. The two brackets of a CDATA opener (`<![CDATA[`) are not a shortcode's:
+ *  the shop would read one only under a shortcode named `CDATA`, and the tree checks below are what
+ *  judge the section's text.
+ *
+ *  Both readings below are scans, not regular expressions: `/\[[^\]]*\]/g` reads from every `[` to
+ *  the end of the value when no `]` follows, so a value of many `[` took quadratic time — seconds
+ *  for a description of some 10'000 brackets, on every preview, verdict and approval. Each scan
+ *  here reads every character a bounded number of times. */
+function isCdataBracket(value: string, i: number): boolean {
+  return (i >= 2 && value.slice(i - 2, i) === '<!') || (i >= 8 && value.slice(i - 8, i) === '<![CDATA');
+}
+
+/** Every shortcode tag, as `/(?<!<!|<!\[CDATA)\[[^\]]*\]/g` reads them: from a `[` to the first `]`. */
+function shortcodeTagsOf(value: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  let close = -1;
+  // run-group-starter: a scan of one string in memory; it starts no run, call or timer, and ends at the string's end.
+  for (;;) {
+    const i = value.indexOf('[', from);
+    if (i < 0) break;
+    if (close <= i) close = value.indexOf(']', i + 1);
+    // No `]` after this `[`, so none after a later one either.
+    if (close < 0) break;
+    if (isCdataBracket(value, i)) { from = i + 1; continue; }
+    out.push(value.slice(i, close + 1));
+    from = close + 1;
+  }
+  return out;
+}
+
+/** A character WordPress allows in a shortcode's name: no whitespace and none of `[ ] / = < > & " '`. */
+const SHORTCODE_NAME_CHAR = /[^\s[\]/=<>&"']/;
+
+/** The length of the name run after the `[` at `i`, in code units, up to `close`. */
+function nameRunAt(value: string, i: number, close: number): number {
+  let k = i + 1;
+  while (k < close && SHORTCODE_NAME_CHAR.test(value[k]!)) k++;
+  return k - i - 1;
+}
+
+/**
+ * The text each paired shortcode encloses, as
+ * `/(?<!<!|<!\[CDATA)\[([^\s[\]/=<>&"']+)[^\]]*\]([\s\S]*?)\[\/\1\]/g` reads it: from a `[` whose
+ * name runs on to the first `]`, then to the first `[/name]` after it, where `name` is that name or
+ * any start of it (the pattern backtracks into the name), the longest that has one. A pair is read
+ * on after its closing tag. The closing tags are indexed once, by a trie of their names, so each
+ * opening tag reads its own name once. The trie keeps its edges in one map of numbers, and holds
+ * no name longer than the longest opening one, which no opening tag could match: a value of one
+ * closing tag with a name of a million characters costs no memory for it.
+ */
+function shortcodeEnclosedOf(value: string): string[] {
+  // Every `[` the pairs below may open at, with the run of its name.
+  const openAt: number[] = [];
+  const openClose: number[] = [];
+  const openRun: number[] = [];
+  let longest = 0;
+  let from = 0;
+  let close = -1;
+  // run-group-starter: a scan of one string in memory; it starts no run, call or timer, and ends at the string's end.
+  for (;;) {
+    const i = value.indexOf('[', from);
+    if (i < 0) break;
+    if (close <= i) close = value.indexOf(']', i + 1);
+    if (close < 0) break;
+    from = i + 1;
+    if (isCdataBracket(value, i)) continue;
+    const run = nameRunAt(value, i, close);
+    if (run === 0) continue;
+    openAt.push(i);
+    openClose.push(close);
+    openRun.push(run);
+    if (run > longest) longest = run;
+  }
+  if (openAt.length === 0) return [];
+
+  const closers = new Map<string, number[]>();
+  // An edge from node n by code unit c is `n * 0x10000 + c`; a node that ends a name maps to it.
+  const edges = new Map<number, number>();
+  const ends = new Map<number, string>();
+  let nodes = 1;
+  from = 0;
+  close = -1;
+  // run-group-starter: a scan of one string in memory; it starts no run, call or timer, and ends at the string's end.
+  for (;;) {
+    const i = value.indexOf('[/', from);
+    if (i < 0) break;
+    if (close <= i + 1) close = value.indexOf(']', i + 2);
+    if (close < 0) break;
+    from = i + 2;
+    const length = close - i - 2;
+    // No opening name is this long, and a name holds no `[` — one before the `]` ends it.
+    if (length === 0 || length > longest) continue;
+    if (nameRunAt(value, i + 1, close) !== length) continue;
+    const name = value.slice(i + 2, close);
+    let at = closers.get(name);
+    if (at === undefined) {
+      at = [];
+      closers.set(name, at);
+      let node = 0;
+      for (let x = 0; x < name.length; x++) {
+        const key = node * 0x10000 + name.charCodeAt(x);
+        let child = edges.get(key);
+        if (child === undefined) { child = nodes++; edges.set(key, child); }
+        node = child;
+      }
+      ends.set(node, name);
+    }
+    at.push(i);
+  }
+  if (closers.size === 0) return [];
+  const firstAtOrAfter = (list: number[], x: number): number | undefined => {
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid]! < x) lo = mid + 1; else hi = mid;
+    }
+    return list[lo];
+  };
+  const out: string[] = [];
+  let next = 0;
+  for (let o = 0; o < openAt.length; o++) {
+    const i = openAt[o]!;
+    const shut = openClose[o]!;
+    const run = openRun[o]!;
+    // An opening `[` inside a pair already read is read on after it, as the pattern does.
+    if (i < next) continue;
+    // The starts of the name that are a closing tag's name, shortest first.
+    const names: string[] = [];
+    let node = 0;
+    for (let k = i + 1; k <= i + run; k++) {
+      const child = edges.get(node * 0x10000 + value.charCodeAt(k));
+      if (child === undefined) break;
+      node = child;
+      const name = ends.get(node);
+      if (name !== undefined) names.push(name);
+    }
+    for (let n = names.length - 1; n >= 0; n--) {
+      const name = names[n]!;
+      const end = firstAtOrAfter(closers.get(name)!, shut + 1);
+      if (end === undefined) continue;
+      out.push(value.slice(shut + 1, end));
+      next = end + name.length + 3;
+      break;
+    }
+  }
+  return out;
+}
+
+/** The text of every shortcode in a value: its tags, and the text it encloses without HTML tags
+ *  (a `<img/>` that becomes `<img>` reads the same; an `&` that becomes `&amp;` does not). */
+export function shortcodeTextOf(value: string): string[] {
+  const enclosed = shortcodeEnclosedOf(value).map((e) => e.replace(/<[^<>]*>/g, ''));
+  return [...shortcodeTagsOf(value), ...enclosed];
+}
+
+/** The first shortcode text the canonical form does not keep byte for byte, or null. */
+export function shortcodeChangedBy(value: string, canonical: string): string | null {
+  if (value === canonical) return null;
+  const was = shortcodeTextOf(value);
+  const now = shortcodeTextOf(canonical);
+  for (let i = 0; i < Math.max(was.length, now.length); i++) {
+    if (was[i] !== now[i]) return was[i] ?? now[i] ?? null;
+  }
+  return null;
+}
+
+/** A character reference: `&amp;`, `&#38;`, `&#x26;`, `&nbsp;`. */
+const CHAR_REFERENCE = /&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#[xX][0-9A-Fa-f]+);/;
+
+/**
+ * The first shortcode text of a value that spells a character as a reference and that the
+ * before-image does not hold as often, or null. The shop's server reads `&amp;` in a shortcode as
+ * the five characters, not as `&`: writing the reference by hand changes the shortcode as the
+ * canonical form would. A shortcode the field already holds, references and all, is the owner's own.
+ */
+export function shortcodeReferenceNotHeld(value: string, before: string): string | null {
+  const held = counts(shortcodeTextOf(before));
+  for (const text of shortcodeTextOf(value)) {
+    if (!CHAR_REFERENCE.test(text)) continue;
+    const n = held.get(text) ?? 0;
+    if (n === 0) return text;
+    held.set(text, n - 1);
+  }
+  return null;
+}
+
+/**
+ * Why writing this value of one HTML field would change a shortcode in it, or null: the
+ * `shortcode_changed` refusal of `checkMarkup`, for one field against that field's before-image.
+ * The preview asks it per field, so the value it shows the owner is the one refused (1130).
+ */
+export function shortcodeRefusalOf(after: string, before: string | null): string | null {
+  const changed = shortcodeChangedBy(after, canonicalHtml(after));
+  if (changed !== null) return `Writing would change the shortcode text: ${changed}`;
+  const spelled = shortcodeReferenceNotHeld(after, before ?? '');
+  return spelled === null ? null : `The shortcode spells a character as a reference the shop reads literally: ${spelled}`;
+}
+
 /** Whether a verdict's or a plan's value for an HTML field adds markup the owner does not read. */
 export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
   try {
@@ -315,23 +520,32 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     }
     const before = input.before ?? '';
     // What the fragment drops, a multiset against the before-image's own, byte for byte. A stretch
-    // with a start tag that carries attributes is never held: the same bytes are inert where the
-    // before-image has them (a `template`, a `select`) and land on the page's own element where the
-    // after-state puts them, and the place is not compared. Held is only what can move layout.
-    // Where the before-image carries the same attributed stretch, planning again never helps: the
-    // owner has to remove it in the shop, and the refusal says so (`markup_dropped_before`).
+    // the before-image does not hold as often is refused: it is the value's own, and the owner
+    // never reads it. One it holds is passed, attributed or not, because it never reaches the shop:
+    // the run stores and sends the canonical form (1130, `canonicalAfterOf`, the send's
+    // `rawHtmlField`), and serialising drops every such stretch. So the shop's own stray tag is
+    // cleaned by the write instead of refusing the value; `markup_dropped_before` is no longer
+    // returned (U-103: cleaned, not refused).
     const held = counts(droppedTagsOf(before));
     for (const tag of droppedTagsOf(input.after)) {
       const n = held.get(tag) ?? 0;
       const detail = `The value carries a tag the page reads but this check cannot place: ${tag}`;
-      if (DROPPED_WITH_ATTRIBUTES.test(tag)) return refused(n > 0 ? 'markup_dropped_before' : 'markup_dropped', detail);
       if (n === 0) return refused('markup_dropped', detail);
       held.set(tag, n - 1);
     }
     // Each tree of the after-state against the before-image's tree of the same kind.
     const raw = checkTrees(parseHtmlFragment(before), parseHtmlFragment(input.after), input);
     if (!raw.ok) return raw;
-    return checkTrees(parseHtmlFragment(canonicalHtml(before)), parseHtmlFragment(canonical), input);
+    const tree = checkTrees(parseHtmlFragment(canonicalHtml(before)), parseHtmlFragment(canonical), input);
+    if (!tree.ok) return tree;
+    // A shortcode (`[name attr="…"]…[/name]`) is read by the shop's server from the stored string,
+    // not by an HTML parser: the canonical form the run sends turns its `&`, `<` and `>` into
+    // entities or cuts it at a `<`, so the shop would read another shortcode. Refused, not
+    // rewritten (U-103). Asked LAST: the preview offers a value refused for this reason to the
+    // owner to paste into the shop by hand, so it must have passed every other check — an HTML
+    // link to another domain, a script or a hidden character is refused for its own reason first.
+    const shortcode = shortcodeRefusalOf(input.after, input.before);
+    return shortcode === null ? tree : refused('shortcode_changed', shortcode);
   } catch {
     // parse5 does not throw on any string; this is the fixed reason should it ever.
     return refused('not_canonical', 'The value could not be read as HTML.');
@@ -384,7 +598,7 @@ const OPEN_AT_END = new Set(['p', 'ul', 'ol', 'li', 'h2', 'h3', 'h4']);
  * So a mark is appended and must come out as the last node of the tree, below allowed blocks
  * only; and a form appended must come out as a form, which it does not while one is still open.
  */
-function endsClosed(value: string): boolean {
+export function endsClosed(value: string): boolean {
   const count = (tree: HtmlFragment, name: string): number => {
     let n = 0;
     for (const [c] of descendants(tree, false)) if (isElement(c) && c.tagName === name && c.attrs.length === 0) n++;

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { t } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // The approval of a preview: the owner sees every target, why lynox leaves one out, can take one
@@ -28,7 +28,7 @@ function makeRun(o: Partial<BulkRunDetailData> = {}): BulkRunDetailData {
 		kind: 'apply', atomic: false, sourceRunId: null, writeMethod: null, probeConfirmed: false, writeForm: 'measured', haltReason: null, haltKey: null,
 		costUsd: 0, costCapUsd: null, judge: null, maxTargets: null, failedOnce: null, failureLimit: 0, resumeOpen: 0, resumeTries: 0, deselected: 0,
 		checksum: 'c1', writeFormNote: null, writeFormConfirmation: null, judgeModel: null, resumesAt: null, probe: null, undoable: 0,
-		listFirstPage: null, listStartChecksum: null, listNote: null, judgeRule: null, judgeRuleHash: null, judgeServedBy: null, judgeOwnKey: false,
+		listFirstPage: null, listStartChecksum: null, listNote: null, listFilters: null, judgeRule: null, judgeRuleHash: null, judgeServedBy: null, judgeOwnKey: false,
 		...o,
 	};
 }
@@ -115,6 +115,30 @@ describe('approving a preview', () => {
 		buttonByText(t('bulk.preview.show_unchanged').replace('{n}', '1'))!.click();
 		await settle();
 		expect(target.textContent).toContain('Product/2');
+	});
+
+	it('shows a description lynox does not write for a shortcode, whole, under the reason (1130)', async () => {
+		const planned = '<p>Neu</p>[button url="https://shop.example.com/sale?cat=tee&size=m"]Zum Angebot[/button]';
+		// The fixture's third product, refused for the shortcode instead of not being found.
+		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'shortcode_changed', refusedValues: [{ field: 'descriptionHtml', value: planned }] } : x));
+		await render();
+		const blocks = target.querySelectorAll('[data-testid="bulk-refused-value-text"]');
+		expect(blocks, 'one block, for the shortcode target only').toHaveLength(1);
+		expect(target.textContent).toContain(t('bulk.invalid.shortcode_changed').slice(0, 40));
+		expect(blocks[0]!.textContent).toBe(planned);
+		// One field refused: no field name over the block, as ux released it.
+		expect(target.textContent).not.toContain('descriptionHtml:');
+	});
+
+	it('shows each refused field under its name when a product has more than one (1130)', async () => {
+		const a = '[box a="1&2"]x[/box]';
+		const b = '[pbutton url="/b?x=1&y=2"]Los[/pbutton]';
+		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'shortcode_changed', refusedValues: [{ field: 'description', value: a }, { field: 'short_description', value: b }] } : x));
+		await render();
+		const blocks = [...target.querySelectorAll('[data-testid="bulk-refused-value-text"]')].map((e) => e.textContent);
+		expect(blocks).toEqual([a, b]);
+		expect(target.textContent).toContain('description:');
+		expect(target.textContent).toContain('short_description:');
 	});
 
 	it('takes a product out against the checksum it showed, and then shuts an approval with nothing left', async () => {
@@ -240,6 +264,47 @@ describe('a run halted on markup its store added', () => {
 	});
 });
 
+// A run whose store kept descriptions otherwise than sent, without outside markup: counted and
+// named, not halted — one line on the run, a neutral mark on each product, wherever it sits.
+describe('a run whose store kept descriptions otherwise than sent', () => {
+	const rewritten = (marked: number[], extra: Partial<BulkTarget> = {}): void => {
+		run = makeRun({
+			phase: 'done', applied: 9, probeConfirmed: true, total: 9, hostRewrote: marked.length,
+			changes: { update: 9, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+		});
+		targets = Array.from({ length: 9 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null, deselected: false,
+			written: true, ...(marked.includes(i + 1) ? { hostRewrote: true as const, ...extra } : {}),
+		}));
+	};
+	const markedKeys = (): string[] => [...target.querySelectorAll('[data-testid="bulk-host-rewrote"]')]
+		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+
+	it('names one product in the singular, and marks it past the first page', async () => {
+		rewritten([8]);
+		await render();
+		expect(target.querySelector('[data-testid="bulk-host-rewrote-count"]')?.textContent).toBe(t('bulk.run.host_rewrote_one'));
+		expect(markedKeys()).toEqual(['gid://shopify/Product/8']);
+	});
+
+	it('names three products with their number, and marks each', async () => {
+		rewritten([2, 5, 9]);
+		await render();
+		expect(target.querySelector('[data-testid="bulk-host-rewrote-count"]')?.textContent).toBe(tf('bulk.run.host_rewrote', { n: '3' }));
+		expect(markedKeys()).toEqual(['gid://shopify/Product/2', 'gid://shopify/Product/5', 'gid://shopify/Product/9']);
+	});
+
+	it('shows no line on a run with none, and only the red mark on a product the store added markup to', async () => {
+		rewritten([]);
+		await render();
+		expect(target.querySelector('[data-testid="bulk-host-rewrote-count"]')).toBeNull();
+		rewritten([3], { shopAddedMarkup: true });
+		await render();
+		expect(target.querySelectorAll('[data-testid="bulk-host-rewrote"]')).toHaveLength(0);
+		expect(target.querySelectorAll('[data-testid="bulk-shop-added-markup"]')).toHaveLength(1);
+	});
+});
+
 // An atomic run that rolled back: the page says why in its own words, marks the targets the
 // rollback left, and offers neither writing on nor an undo the engine would refuse.
 describe('an atomic run that rolled back', () => {
@@ -340,6 +405,36 @@ describe('the sentence and the way on for a halt', () => {
 		await render();
 		expect(target.textContent).toContain(t('bulk.halt.wait_owner_only'));
 		expect(buttonByText(t('bulk.start.judge'))).toBeUndefined();
+	});
+
+	it('shows before the start the fields the judge only reads: readable on a store, the owner\'s column names elsewhere (U-140)', async () => {
+		const judged = (o: Partial<BulkRunDetailData>): BulkRunDetailData => makeRun({
+			phase: 'planned', haltKey: 'awaitingStart', haltReason: 'engine English', judge: {} as BulkRunDetailData['judge'],
+			judgeServedBy: { provider: 'anthropic', label: 'm' } as unknown as BulkRunDetailData['judgeServedBy'], ...o,
+		});
+		const rule = { rule: 'Write SEO texts.', schema: { properties: { seo_title: { type: 'string', maxLength: 70 } } }, tier: 'fast' };
+		run = judged({ judgeRule: { ...rule, context: ['vendor', 'tags'] } });
+		await render();
+		const list = target.querySelector('[data-testid="bulk-start-context"]');
+		expect(list).not.toBeNull();
+		expect(list!.textContent).toContain(t('bulk.start.context_fields'));
+		expect([...list!.querySelectorAll('li')].map((li) => li.textContent?.trim())).toEqual([t('bulk.field.shopify.vendor'), t('bulk.field.shopify.tags')]);
+		expect(list!.textContent).toContain(tf('bulk.start.context_explain', { provider: 'Anthropic' }).slice(0, 20));
+		unmount(component!);
+		component = undefined;
+
+		run = judged({ targetSystem: 'data_store', judgeRule: { ...rule, context: ['note'] } });
+		await render();
+		const rows = target.querySelector('[data-testid="bulk-start-context"]');
+		expect(rows!.querySelector('code')?.textContent).toBe('note');
+		unmount(component!);
+		component = undefined;
+
+		// Twin: a rule without a context shows no such list.
+		run = judged({ judgeRule: rule });
+		await render();
+		expect(target.querySelector('[data-testid="bulk-start-context"]')).toBeNull();
+		expect(target.textContent).toContain(t('bulk.start.fields'));
 	});
 
 	it('at a probe the server does not offer, says to plan again instead of naming a button', async () => {

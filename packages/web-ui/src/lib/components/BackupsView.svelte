@@ -3,7 +3,7 @@
 	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { pickBackupConfig, fetchBackupConfig, requestRestore, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
+	import { pickBackupConfig, fetchBackupConfig, requestRestore, restoreSkippedLines, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
 	import { backupCoverageNotice, type BackupCoverageFields } from '../backup-coverage.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
@@ -12,7 +12,7 @@
 	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
 	import { onOff, orNotSet } from './settings-readonly/values.js';
 
-	interface Backup extends BackupCoverageFields { backup_id: string; version: string; created_at: string; encrypted: boolean; files: { path: string; size_bytes: number }[]; checksum: string; }
+	interface Backup extends BackupCoverageFields { backup_id: string; version: string; created_at: string; encrypted: boolean; file_count?: number; total_bytes?: number; files?: { size_bytes?: number }[]; checksum: string; }
 
 	type Config = BackupConfigFields;
 
@@ -23,6 +23,8 @@
 	let confirmRestore = $state<string | null>(null);
 	/** A restore the engine refused for want of a proof of origin, with its reason, awaiting a second yes. */
 	let unverified = $state<{ id: string; reason: string; mismatch: boolean } | null>(null);
+	/** After a restore that left entries out: what was not written and where it still is (U-132). Stays until closed. */
+	let skippedNotice = $state<string[] | null>(null);
 	let error = $state('');
 
 	// Backup settings (loaded from config)
@@ -126,9 +128,17 @@
 			const outcome = await requestRestore(getApiBase(), backupId, allowUnverified);
 			unverified = null;
 			if (outcome.kind === 'restored') {
-				addToast(t('backups.restore_success'), 'success', 6000);
+				if (outcome.skipped.length > 0) {
+					// A list of paths is not read in a toast's six seconds: it stays in the view instead.
+					const encrypted = backups.find((b) => b.backup_id === backupId)?.encrypted === true;
+					skippedNotice = restoreSkippedLines(outcome.skipped, outcome.backupPath, encrypted, t, tf);
+				} else {
+					addToast(t('backups.restore_success'), 'success', 6000);
+				}
 			} else if (outcome.kind === 'ask') {
 				unverified = { id: backupId, reason: outcome.reason, mismatch: outcome.mismatch };
+			} else if (outcome.kind === 'running') {
+				addToast(t('backups.restore_running'), 'error', 12000);
 			} else {
 				addToast(outcome.error ?? t('backups.restore_failed'), 'error', 6000);
 			}
@@ -139,6 +149,10 @@
 		restoring = null;
 		confirmRestore = null;
 	}
+
+	// The engine sends the totals; an engine from before they existed sends only the `files` list.
+	function fileCount(b: Backup): number { return b.file_count ?? b.files?.length ?? 0; }
+	function totalBytes(b: Backup): number { return b.total_bytes ?? (b.files ?? []).reduce((s, f) => s + (f.size_bytes ?? 0), 0); }
 
 	function formatSize(bytes: number): string {
 		if (bytes < 1024) return `${bytes} B`;
@@ -176,6 +190,18 @@
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
 	{/if}
 
+	{#if skippedNotice}
+		<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm mb-4" role="status" data-testid="restore-skipped">
+			{#each skippedNotice as line}
+				<p class="break-words [overflow-wrap:anywhere] mb-1 last:mb-0">{line}</p>
+			{/each}
+			<button onclick={() => skippedNotice = null}
+				class="mt-2 rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs hover:bg-bg-subtle">
+				{t('common.dismiss')}
+			</button>
+		</div>
+	{/if}
+
 	<!-- Backup List -->
 	{#if loading}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
@@ -195,7 +221,7 @@
 							{#if coverage}
 								<span data-testid="backup-coverage-badge" class="text-xs rounded-[var(--radius-sm)] px-1.5 py-0.5 {coverage.tone === 'warning' ? 'bg-warning/15 text-warning' : 'bg-border text-text-muted'}">{t(coverage.badge)}</span>
 							{/if}
-							<span class="text-xs text-text-muted">{backup.files.length} {t('backups.files')}</span>
+							<span class="text-xs text-text-muted">{fileCount(backup)} {t('backups.files')}</span>
 						</div>
 					</div>
 					{#if coverage}
@@ -204,7 +230,7 @@
 					<div class="flex items-center justify-between mt-1.5">
 						<div class="flex gap-2 text-xs text-text-subtle">
 							<span>v{backup.version}</span>
-							<span>{formatSize(backup.files.reduce((s, f) => s + (f.size_bytes ?? 0), 0))}</span>
+							<span>{formatSize(totalBytes(backup))}</span>
 						</div>
 						{#if !isOwnerSession()}
 							<!-- no restore until the server said this is the owner's session -->

@@ -181,3 +181,97 @@ describe('the Google claim confirmation', () => {
 		expect([...target.querySelectorAll('button')].map((b) => b.textContent?.trim())).not.toContain('Cancel');
 	});
 });
+
+/**
+ * The nonce leaves the URL only when the claim ends: confirmed, cancelled, or dropped because the
+ * server named a session that is not the owner's. When `GET /api/config` never answers, the card
+ * cannot show (it needs the owner's session), and the page asks for a reload; the reload has to
+ * find the nonce again, or the waiting claim is lost with nothing on screen.
+ */
+describe('the Google claim nonce in the URL', () => {
+	const param = (): string | null => new URLSearchParams(window.location.search).get('google_oauth');
+	/** Whether the config answers; off, every try (the first and each retry) fails. */
+	let configAnswers: boolean;
+	/** While set, `GET /api/config` waits for it. */
+	let configHold: Promise<void> | null;
+
+	beforeEach(() => {
+		configAnswers = true;
+		configHold = null;
+		const inner = vi.mocked(fetch);
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			const u = String(url);
+			if (u.endsWith('/config') && configHold) await configHold;
+			if (u.endsWith('/config') && !configAnswers) throw new TypeError('Failed to fetch');
+			return inner(url, init);
+		}));
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('stays in the URL while the viewer never answers, and a reload brings the card back', async () => {
+		configAnswers = false;
+		vi.useFakeTimers();
+		const { default: GoogleSettings } = await import('./GoogleSettings.svelte');
+		component = mount(GoogleSettings, { target });
+		// The first try and all three retries (1 s, 3 s, 10 s) go unanswered.
+		await vi.advanceTimersByTimeAsync(20_000);
+		flushSync();
+		expect(target.querySelector('[data-testid="viewer-unavailable"]')).not.toBeNull();
+		expect(hasButton('Cancel')).toBe(false);
+		expect(param()).toBe('nonce-9');
+		vi.useRealTimers();
+
+		// The reload: a new page load reads the URL and asks for the viewer again.
+		unmount(component);
+		component = undefined;
+		resetSettingsViewer();
+		configAnswers = true;
+		posts = [];
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		expect(posts[0]).toEqual({ path: '/google/claim-managed/preview', body: { claim_nonce: 'nonce-9' } });
+		expect(target.querySelector('bdi')?.textContent).toBe('owner@example.com');
+		expect(hasButton('Connect')).toBe(true);
+		// Still in the URL: the owner has not decided yet, so a further reload finds it too.
+		expect(param()).toBe('nonce-9');
+	});
+
+	it('stays while the owner has not decided, and leaves on Connect', async () => {
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		expect(param()).toBe('nonce-9');
+		button('Connect').click();
+		await settle();
+		expect(param()).toBeNull();
+	});
+
+	it('leaves on Cancel', async () => {
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		expect(param()).toBe('nonce-9');
+		button('Cancel').click();
+		await settle();
+		expect(param()).toBeNull();
+	});
+
+	it('leaves once the server names a session that is not the owner\'s', async () => {
+		viewer = 'mandate';
+		let answerConfig: () => void = () => {};
+		configHold = new Promise<void>((r) => { answerConfig = r; });
+		await render();
+		// Parked, and not yet dropped: whose session it is has not been said.
+		expect(param()).toBe('nonce-9');
+		answerConfig();
+		await settle();
+		expect(target.querySelector('[data-testid="google-read-only"]')).not.toBeNull();
+		expect(param()).toBeNull();
+		expect(hasButton('Cancel')).toBe(false);
+	});
+});
+
