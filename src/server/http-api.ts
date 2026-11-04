@@ -9436,10 +9436,13 @@ export class LynoxHTTPApi {
       if (!loop) return null;
       return loop.resumesAt(bulkPreviewTriggerId(runId)) ?? loop.resumesAt(`bulk-${runId}`);
     };
-    /** The target a probe wrote and the fields it changed; null unless the run waits on its probe. */
-    const bulkProbeOf = (status: import('../core/bulk-ledger.js').BulkRunStatus, ledger: import('../core/bulk-ledger.js').BulkLedger): { key: string; fields: string[] } | null => {
+    /** The target a probe wrote and the fields it changed, and whether it was found so after a
+     *  send without a clear answer (`found`) rather than written; null unless the run waits on
+     *  its probe. */
+    const bulkProbeOf = (status: import('../core/bulk-ledger.js').BulkRunStatus, ledger: import('../core/bulk-ledger.js').BulkLedger): { key: string; fields: string[]; found: boolean } | null => {
       // Offered only where confirm-probe can succeed: a target found already holding its
-      // value was not written, and a run still writing has not stopped at its probe.
+      // value and never sent to by this run is no probe, and a run still writing has not
+      // stopped at its probe.
       if (status.probeConfirmed) return null;
       const key = ledger.probeKey(status.id);
       const written = key === null ? undefined : ledger.listAppliedDesc(status.id).find((t) => t.key === key);
@@ -9449,7 +9452,7 @@ export class LynoxHTTPApi {
       const before = fieldsOf(written.expected);
       const after = fieldsOf(written.after);
       const fields = Object.keys(after).filter((f) => !(f in before) || canonicalJson(after[f]) !== canonicalJson(before[f]));
-      return { key: written.key, fields };
+      return { key: written.key, fields, found: ledger.probeFound(status.id) };
     };
     /** Why an external run could not reach its host now, or null (a local run, or one it can). */
     const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
