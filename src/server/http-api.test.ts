@@ -12157,6 +12157,26 @@ describe('LynoxHTTPApi', () => {
       expect(asUndo).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', writeFormNote: null, writeFormConfirmation: null });
     });
 
+    it('says when the probe was found as planned after a send without a clear answer, not written', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2' } });
+      bulkLedger.finishPreview(id);
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      // Sent without a clear answer, then read back holding the planned value.
+      bulkLedger.markSent(id, 0);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'already');
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      const probe = ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown }).probe;
+      expect(probe).toEqual({ key: keys[0], fields: ['price'], found: true });
+    });
+
     it('names the one target a probe wrote and the fields it changed, until the probe is confirmed', async () => {
       const host = 'shop.example.com';
       const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
@@ -12178,7 +12198,7 @@ describe('LynoxHTTPApi', () => {
       expect(await probeOf()).toBeNull();
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
       // The written target, and only the fields the write changed — not the ones sent unchanged.
-      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'] });
+      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'], found: false });
       // Writing on wider before the confirmation is refused with the engine's reason: what the kind
       // of entry lacks, and that the one written target is the probe to confirm.
       const block = { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'confirm' };
@@ -13711,6 +13731,29 @@ describe('LynoxHTTPApi', () => {
       expect(body.configured.api_key).toBe(true);
       expect(body.configured.search).toBe(false);
       expect(body.count).toBe(1);
+    });
+
+    it('GET /api/secrets/status gives a mandate the booleans but not the size of the owner\'s vault', async () => {
+      repayRateWindow();
+      mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY', 'STRIPE_KEY', 'SHOPIFY_TOKEN']);
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-vault' : null));
+      type Resolver = Parameters<typeof api.setPrincipalResolverForTesting>[0];
+      const saved = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown> & { configured: Record<string, boolean> };
+        expect(body.configured.api_key).toBe(true);
+        expect(body.configured.search).toBe(false);
+        expect('count' in body).toBe(false);
+        expect(JSON.stringify(body)).not.toMatch(/"count"/);
+      } finally {
+        api.setPrincipalResolverForTesting(saved);
+      }
+      // The owner, on the same vault, still gets it.
+      const owner = await (await jsonFetch('/api/secrets/status')).json() as { count?: number };
+      expect(owner.count).toBe(3);
     });
 
     // Regression: HN-launch installer bug (2026-05-23). When the npx wizard

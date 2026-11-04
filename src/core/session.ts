@@ -67,9 +67,11 @@ import {
   withCurrentTimePrefix, languageOverrideSuffix } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
 import { isFeatureEnabled } from './features.js';
-import { stripLoadedContext } from './chat-context.js';
+import { opensLoadedApprovalDraft, stripLoadedContext } from './chat-context.js';
+import { approvalChatTitle } from './approval-chat-title.js';
+import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
-import { setupHistorySubscriptions } from './engine-init.js';
+import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, capStopNote } from './eager-persist.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
@@ -566,9 +568,9 @@ export class Session {
     // Only on the default path, as before: a caller's own briefing never carried the listing.
     // `?.()` on the method: several suites hand Session a partial engine double.
     const rawSecrets = opts?.briefing === undefined ? engine.getSecretsBriefing?.() : undefined;
-    this.secretsBriefing = rawSecrets && rawSecrets.length > 8000
-      ? rawSecrets.slice(0, 8000) + '\n[...truncated]'
-      : rawSecrets;
+    // Bounded like the briefing, but on an entry boundary and with its closing tag kept: the wire
+    // capture redacts the listing only inside a whole `<secrets>` frame.
+    this.secretsBriefing = rawSecrets === undefined ? undefined : capSecretsListing(rawSecrets, 8000);
     this.onStream = opts?.onStream ?? null;
     this._promptUser = opts?.promptUser ?? null;
     this._promptTabs = opts?.promptTabs ?? null;
@@ -1462,13 +1464,16 @@ export class Session {
             // web-ui strip can't reach). generateThreadTitle self-strips the
             // preamble; strip it for the LLM-title path too. Both are no-ops when
             // there is no preamble.
-            const title = generateThreadTitle(taskText);
+            // A chat on a loaded approval draft is titled by the engine alone ({@link firstThreadTitle}).
+            const { title, llmUpgrade } = firstThreadTitle(taskText, {
+              language: noticeLanguage(this.engine.config.language), at: new Date(), timeZone: this._userTimezone,
+            });
             threadStore.updateThread(this.sessionId, { title });
             // Upgrade to an LLM-written title on the `fast` tier (a cheap inline
             // background consumer, like memory extraction). Async + best-effort:
             // never blocks the run, skipped in private mode, and never clobbers a
             // manual rename (the method re-checks the title before writing).
-            if (taskText !== '[image]' && threadStore.getThread(this.sessionId)?.skip_extraction !== 1) {
+            if (llmUpgrade && taskText !== '[image]' && threadStore.getThread(this.sessionId)?.skip_extraction !== 1) {
               void this._generateLLMTitle(stripLoadedContext(taskText), title);
             }
           }
@@ -2997,6 +3002,24 @@ export class Session {
   async shutdown(): Promise<void> {
     await this.engine.shutdown();
   }
+}
+
+/**
+ * The title a thread gets from its first message, and whether the LLM may upgrade it. A chat
+ * opened on an approval entry whose draft loaded is titled by the engine alone
+ * (`approval-chat-title.ts`): its first line is the same for every entry, and the draft's
+ * subject must not become a title. No LLM upgrade there either — it would read that same first
+ * line and name every such chat alike again. Exported so the dictation test drives the same
+ * derivation the run does.
+ */
+export function firstThreadTitle(
+  taskText: string,
+  opts: { language: NoticeLanguage; at: Date; timeZone?: string | null | undefined },
+): { title: string; llmUpgrade: boolean } {
+  if (opensLoadedApprovalDraft(taskText)) {
+    return { title: approvalChatTitle(opts.language, opts.at, opts.timeZone), llmUpgrade: false };
+  }
+  return { title: generateThreadTitle(taskText), llmUpgrade: true };
 }
 
 /** Generate a short thread title from the first user message. Exported for
