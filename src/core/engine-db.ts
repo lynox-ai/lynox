@@ -1600,6 +1600,13 @@ const MIGRATIONS: string[] = [
   // target: none was compared.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (66);
    ALTER TABLE bulk_targets ADD COLUMN host_rewrote INTEGER NOT NULL DEFAULT 0;`,
+  // v67 (PRD shopify-preset §20.2 item 7): the context C a judged target was read with, encrypted
+  // like `before`, and which field of C held something shaped like a credential (its index in the
+  // rule's `context`), so the owner is told which one to clean. NULL for every existing target:
+  // none was read with a context.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (67);
+   ALTER TABLE bulk_targets ADD COLUMN context TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN context_secret_field INTEGER;`,
 ];
 
 export interface EngineDbOptions {
