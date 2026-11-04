@@ -1919,16 +1919,31 @@ describe('shopifySeoEntityFields', () => {
     expect(shopifySeoEntityFields({ seo_description: 'A' }, { seo_description: 'A > B' })).toEqual(['seo_description']);
     expect(shopifySeoEntityFields({ seo_title: 'A & B' }, { seo_title: 'A & B & C' })).toEqual(['seo_title']);
     expect(shopifySeoEntityFields({ seo_title: null, seo_description: null }, { seo_title: 'A & B', seo_description: 'C & D' })).toEqual(['seo_title', 'seo_description']);
-    expect(shopifySeoEntityFields(null, { seo_title: 'A & B' })).toEqual(['seo_title']);
+  });
+
+  it('compares the page title as the store shows it: the SEO title, or the product title where it is empty', () => {
+    // A new & in the title reaches the page title where the SEO title is empty.
+    expect(shopifySeoEntityFields({ title: 'A und B', seo_title: null }, { title: 'A & B' })).toEqual(['title']);
+    expect(shopifySeoEntityFields({ title: 'A und B', seo_title: 'Eigen' }, { title: 'A & B' })).toEqual([]);
+    // Emptying the SEO title shows the product title: its & is new on the page.
+    expect(shopifySeoEntityFields({ title: 'A & B', seo_title: 'A und B' }, { seo_title: '' })).toEqual(['title']);
+    // An SEO title set to the title the page already shows adds nothing.
+    expect(shopifySeoEntityFields({ title: 'A & B', seo_title: null }, { seo_title: 'A & B' })).toEqual([]);
+  });
+
+  it('does not name a product not read yet: there is nothing to compare with', () => {
+    expect(shopifySeoEntityFields(null, { seo_title: 'A & B' })).toEqual([]);
+    expect(shopifySeoEntityFields({}, { seo_title: 'A & B' })).toEqual(['seo_title']);
   });
 
   it('does not name a field whose before-image holds as many', () => {
     expect(shopifySeoEntityFields({ seo_title: 'Bio & Natur' }, { seo_title: 'Natur & Bio' })).toEqual([]);
     expect(shopifySeoEntityFields({ seo_title: 'A & B & C' }, { seo_title: 'A & B' })).toEqual([]);
+    expect(shopifySeoEntityFields({ seo_description: 'Bio & Natur' }, { seo_description: 'Natur & Bio' })).toEqual([]);
   });
 
   it('does not name a field that is not an SEO field, nor a value that is not text', () => {
-    expect(shopifySeoEntityFields({ title: 'A' }, { title: 'A & B' })).toEqual([]);
+    expect(shopifySeoEntityFields({ title: 'A', seo_title: 'S' }, { title: 'A & B' })).toEqual([]);
     expect(shopifySeoEntityFields({ descriptionHtml: '<p>A</p>' }, { descriptionHtml: '<p>A &amp; B</p>' })).toEqual([]);
     expect(shopifySeoEntityFields({ seo_title: 'A' }, { seo_title: null })).toEqual([]);
     expect(shopifySeoEntityFields({ seo_title: 'A' }, null)).toEqual([]);
@@ -1971,11 +1986,26 @@ describe('a Shopify preview naming SEO text a theme may show as an entity', () =
   });
 
   it('does not mark a target that is not an update', async () => {
-    // A new `>` is refused as markup in text: the target holds an & as well, and is not marked.
-    const id = await previewedWith({ seo_title: 'Bio & Natur > alles' });
+    const id = await previewedWith({ seo_title: 'Bio & Natur' });
+    expect(ledger.getPreview(id)[0]!.seoEntityFields).toEqual(['seo_title']);
+    // The same read target, before and after unchanged, as any other kind of change.
+    for (const change of ['invalid', 'unchanged']) {
+      engineDb.getDb().prepare('UPDATE bulk_targets SET change = ? WHERE run_id = ?').run(change, id);
+      const t = ledger.getPreview(id)[0]!;
+      expect(t.change).toBe(change);
+      expect(t).not.toHaveProperty('seoEntityFields');
+    }
+  });
+
+  it('does not mark a product before it is read', async () => {
+    vi.stubEnv(FLAG, '1');
+    fill(1);
+    const id = startedList(source({ seo_title: 'Bio & Natur' }));
+    // The first tick lists the product and halts for the owner: planned, not read.
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
     const t = ledger.getPreview(id)[0]!;
-    expect([t.change, t.error]).toEqual(['invalid', 'markup_in_text']);
-    expect(shopifySeoEntityFields(t.before?.absent === false ? t.before.value : null, t.after)).toEqual(['seo_title']);
+    expect([t.change, t.before]).toEqual(['update', null]);
+    expect(shopifySeoEntityFields({}, t.after)).toEqual(['seo_title']);
     expect(t).not.toHaveProperty('seoEntityFields');
   });
 

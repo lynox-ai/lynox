@@ -617,8 +617,8 @@ export interface PreviewTarget {
   /** Written, and the store kept an HTML field otherwise than sent, within what the run may write:
    *  counted and named, not halted. Set only where it holds. */
   hostRewrote?: true | undefined;
-  /** A Shopify product's `update` in a run that is not an undo: the SEO fields whose after-state
-   *  holds `&`, `<` or `>` more often than the before-image (`shopifySeoEntityFields`), which a
+  /** A read Shopify product's `update` in a run that is not an undo: the fields behind the page's
+   *  SEO title and description whose text gains `&`, `<` or `>` (`shopifySeoEntityFields`), which a
    *  theme may show as an entity. A note to the owner; nothing is refused. Set only where it holds. */
   seoEntityFields?: string[] | undefined;
   /** With `secret_in_context`: the field of the rule's context C that held it, by its name, so the
@@ -1587,8 +1587,9 @@ export class BulkLedger {
     const contextNames = judged ? this.judgeRuleOf(run!).context ?? [] : [];
     // An undo's list is what it restores: the HTML fields of the run its family started from.
     const htmlFields = this.htmlFieldsOf(runId);
-    // An undo writes back what the product held before, so what a theme shows of it is the
-    // owner's own earlier state, not a text lynox wrote.
+    // An undo writes back a state the product held before: the owner's, or for an undo of an undo
+    // the text the apply wrote, which its own preview already named. An undo is never approved
+    // from a preview, so the line that counts the marks would not show either.
     const seoNoted = run !== undefined && run.kind !== 'undo' && this.shopifyFormOfRun(run) === 'shopify_product';
     return rows.map((r) => {
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;

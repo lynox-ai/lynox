@@ -33,22 +33,31 @@ export const SHOPIFY_PRODUCT_FIELDS = ['title', 'descriptionHtml', 'seo_title', 
 const SEO_ENTITY_CHARS = ['&', '<', '>'] as const;
 
 /**
- * The SEO fields of a product's after-state that hold one of `&`, `<` or `>` more often than its
- * before-image holds it. A theme may escape `page_title` and `page_description` twice, and then the
- * browser tab and a search result show `&amp;`, `&lt;` or `&gt;` (measured on one theme, not on
- * every one). lynox cannot tell which theme does, so the preview names the target and refuses
- * nothing: "A & B" is a legitimate text.
+ * The fields behind a product page's SEO title and SEO description whose text, once the after-state
+ * is written, holds one of `&`, `<` or `>` more often than it does now. A theme may escape
+ * `page_title` and `page_description` twice, and then the browser tab and a search result show
+ * `&amp;`, `&lt;` or `&gt;` (measured on one theme, not on every one). lynox cannot tell which
+ * theme does, so the preview names the target and refuses nothing: "A & B" is a legitimate text.
+ *
+ * The page's title is the SEO title, or the product's title where the SEO title is empty (measured
+ * with M11), so it is that text which is compared, and the field it comes from which is named. The
+ * description's own fallback is not followed: a run does not write `descriptionHtml` yet.
+ * A product not read yet holds no before-image to compare with, and is not named.
  */
 export function shopifySeoEntityFields(prior: unknown, after: unknown): string[] {
-  if (!isPlainObject(after)) return [];
-  const held = isPlainObject(prior) ? prior : {};
-  const count = (text: string, c: string): number => text.split(c).length - 1;
-  return (['seo_title', 'seo_description'] as const).filter((field) => {
-    const next = after[field];
-    if (typeof next !== 'string') return false;
-    const was = typeof held[field] === 'string' ? held[field] as string : '';
-    return SEO_ENTITY_CHARS.some((c) => count(next, c) > count(was, c));
-  });
+  if (!isPlainObject(after) || !isPlainObject(prior)) return [];
+  const next: Record<string, unknown> = { ...prior, ...after };
+  const text = (image: Record<string, unknown>, field: string): string => {
+    const value = image[field];
+    return typeof value === 'string' ? value : '';
+  };
+  const titleField = (image: Record<string, unknown>): string => (text(image, 'seo_title') !== '' ? 'seo_title' : 'title');
+  const count = (value: string, c: string): number => value.split(c).length - 1;
+  const shown: [string, string, string][] = [
+    [titleField(next), text(next, titleField(next)), text(prior, titleField(prior))],
+    ['seo_description', text(next, 'seo_description'), text(prior, 'seo_description')],
+  ];
+  return shown.filter(([, now, was]) => SEO_ENTITY_CHARS.some((c) => count(now, c) > count(was, c))).map(([field]) => field);
 }
 
 /** The field of an image's before-image, and so of a media run's after-state. */

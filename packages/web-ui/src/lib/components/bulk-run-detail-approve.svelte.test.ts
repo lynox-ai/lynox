@@ -467,10 +467,12 @@ describe('a preview whose SEO text gains an &', () => {
 		expect(markedKeys()).toEqual(['gid://shopify/Product/1', 'gid://shopify/Product/3']);
 	});
 
-	it('names one product in the singular, and does not count one the owner took out', async () => {
+	it('names one product in the singular, and does not count one the owner took out, which keeps its mark', async () => {
 		gaining([1, 3], [3]);
 		await render();
 		expect(line()).toBe(t('bulk.preview.seo_entity_one'));
+		// The taken-out product keeps its mark, as the reason it was taken out.
+		expect(markedKeys()).toEqual(['gid://shopify/Product/1', 'gid://shopify/Product/3']);
 	});
 
 	it('shows no line where none gains one, nor on a run that is not awaiting approval', async () => {
