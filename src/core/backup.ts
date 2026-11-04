@@ -7,7 +7,7 @@
  * All operations are designed to be safe during concurrent lynox operation.
  */
 
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -488,11 +488,13 @@ export class BackupManager {
   private _restoring = false;
   /**
    * The list's provenance per backup, so `listBackups` does not canonicalize and MAC every manifest
-   * on every call. Keyed by the backup's folder name; valid while the manifest file's stamp
-   * (`manifestStamp`) is the one it was checked under. Only the list reads it: a restore checks
-   * the manifest it is about to act on afresh.
+   * on every call. Keyed by the backup's folder name; valid while the manifest's bytes hash to the
+   * digest they were checked under. Bound to the content, not to the file's times: a write through
+   * `mmap` into a page already dirty, or a write in the same tick of a coarse clock, changes
+   * neither mtime nor ctime. Only the list reads it: a restore checks the manifest it is about to
+   * act on afresh.
    */
-  private readonly _listProvenance = new Map<string, { stamp: string; provenance: BackupProvenance }>();
+  private readonly _listProvenance = new Map<string, { digest: string; provenance: BackupProvenance }>();
 
   constructor(lynoxDir: string, config: BackupConfig, vaultKey: string | null) {
     this.lynoxDir = lynoxDir;
@@ -1086,18 +1088,15 @@ export class BackupManager {
   }
 
   /**
-   * The provenance the list shows for one backup: from the cache while the manifest's stamp is the
-   * one it was checked under, checked afresh otherwise. `stamp` null (the file changed while it was
-   * read) is checked and not kept.
+   * The provenance the list shows for one backup: from the cache while the manifest's bytes hash to
+   * `digest`, the digest they were checked under; checked afresh and kept otherwise. The digest and
+   * the manifest come from the same read.
    */
-  private listProvenance(name: string, stamp: string | null, manifest: BackupManifest): BackupProvenance {
-    if (stamp !== null) {
-      const cached = this._listProvenance.get(name);
-      if (cached !== undefined && cached.stamp === stamp) return cached.provenance;
-    }
+  private listProvenance(name: string, digest: string, manifest: BackupManifest): BackupProvenance {
+    const cached = this._listProvenance.get(name);
+    if (cached !== undefined && cached.digest === digest) return cached.provenance;
     const provenance = this.provenanceOf(manifest);
-    if (stamp !== null) this._listProvenance.set(name, { stamp, provenance });
-    else this._listProvenance.delete(name);
+    this._listProvenance.set(name, { digest, provenance });
     return provenance;
   }
 
@@ -1130,10 +1129,11 @@ export class BackupManager {
       const manifestPath = join(this.backupDir, entry.name, 'manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const { text, stamp } = readManifestStamped(manifestPath);
-        const manifest = JSON.parse(text) as BackupManifest;
+        const raw = readFileSync(manifestPath);
+        const manifest = JSON.parse(raw.toString('utf-8')) as BackupManifest;
+        const digest = createHash('sha256').update(raw).digest('hex');
         seen.add(entry.name);
-        manifests.push({ ...manifest, backup_id: entry.name, provenance: this.listProvenance(entry.name, stamp, manifest) });
+        manifests.push({ ...manifest, backup_id: entry.name, provenance: this.listProvenance(entry.name, digest, manifest) });
       } catch {
         // Skip corrupt manifests
       }
@@ -1356,28 +1356,6 @@ export class BackupManager {
       checksum_sha256: computeFileChecksum(fullPath),
       type,
     };
-  }
-}
-
-/**
- * A manifest's text, read through one open file, with a stamp of that file: device, inode, size,
- * and the modification and change times in nanoseconds. Whoever can write the manifest can set its
- * mtime back and keep its size, but not its ctime, which any write or `utimes` moves (short of root
- * or the clock). The stamp is taken before and after the read; when they differ, the file changed
- * meanwhile and the stamp is null.
- */
-function readManifestStamped(path: string): { text: string; stamp: string | null } {
-  const fd = openSync(path, 'r');
-  try {
-    const stampOf = (): string => {
-      const st = fstatSync(fd, { bigint: true });
-      return `${String(st.dev)}:${String(st.ino)}:${String(st.size)}:${String(st.mtimeNs)}:${String(st.ctimeNs)}`;
-    };
-    const before = stampOf();
-    const text = readFileSync(fd, 'utf-8');
-    return { text, stamp: stampOf() === before ? before : null };
-  } finally {
-    closeSync(fd);
   }
 }
 

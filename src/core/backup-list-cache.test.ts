@@ -8,9 +8,9 @@ import { reloadConfig } from './config.js';
 import { _resetWorkspaceAccess } from './workspace-access.js';
 
 /**
- * `listBackups` keeps each backup's provenance while its manifest file is the one it checked: a
- * second list does not check again, and any change to the file (its content, or its content with
- * the old mtime and size put back) is checked afresh.
+ * `listBackups` keeps each backup's provenance while its manifest holds the bytes it checked: a
+ * second list does not check again, and changed content is checked afresh — also when the file's
+ * size and mtime were put back, since the cache is bound to the content, not to the file's times.
  */
 type ProvenanceSeam = { provenanceOf: (manifest: unknown) => string; _listProvenance: Map<string, unknown> };
 
@@ -95,7 +95,6 @@ describe('the backup list', () => {
     expect(after.size).toBe(before.size);
     expect(after.mtimeNs).toBe(before.mtimeNs);
     expect(after.ino).toBe(before.ino);
-    expect(after.ctimeNs).not.toBe(before.ctimeNs);
     expect(m.listBackups()[0]?.provenance).toBe('mismatch');
   });
 
