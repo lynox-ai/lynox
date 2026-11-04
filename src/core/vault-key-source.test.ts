@@ -98,7 +98,7 @@ describe('the source as a start settles the key', () => {
   it('takes the entrypoint\'s word for a key it put into the environment', () => {
     dataDir();
     vi.stubEnv('LYNOX_VAULT_KEY', KEY64);
-    for (const [said, recorded] of [['volume-env', 'volume-env'], ['minted', 'minted'], ['env', 'env'], ['none', 'unknown'], ['something', 'unknown'], ['', 'env']] as const) {
+    for (const [said, recorded] of [['volume-env', 'volume-env'], ['minted', 'minted'], ['env', 'env'], ['none', 'unknown'], ['something', 'unknown'], ['__proto__', 'unknown'], ['toString', 'unknown'], ['', 'env']] as const) {
       _resetVaultKeySource();
       vi.stubEnv('LYNOX_VAULT_KEY_SOURCE', said);
       ensureVaultKey();

@@ -38,12 +38,12 @@ export function recordVaultKeySource(source: VaultKeySource): void {
  * A key found in the environment: where it came from. The entrypoint sets `LYNOX_VAULT_KEY_SOURCE`
  * before the engine starts; without it (a start outside the container image) the key is the
  * environment's own. Where the entrypoint's word does not explain the key, the answer is
- * `unknown`, never `env`: `env` is the word a stricter start will accept.
+ * `unknown`, never `env`: `env` says the key in use is the one the environment delivered.
  */
 export function sourceOfEnvKey(): VaultKeySource {
   const word = process.env['LYNOX_VAULT_KEY_SOURCE'];
   if (word === undefined || word === '') return 'env';
-  const said = ENTRYPOINT_SOURCES[word];
+  const said = Object.hasOwn(ENTRYPOINT_SOURCES, word) ? ENTRYPOINT_SOURCES[word] : undefined;
   // The entrypoint said `none` but a key is there now: something after it set one, not the start.
   return said === undefined || said === 'none' ? 'unknown' : said;
 }
