@@ -482,6 +482,7 @@ import { MISTRAL_MODEL_MAP, setOpenAIModelResolver, getBetasForProvider } from '
 import { InputRequiredError } from './input-required.js';
 import { reportMeteredCost } from './metered-request.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from './chat-context.js';
+import { approvalChatTitle } from './approval-chat-title.js';
 import { ChangesetManager } from './changeset.js';
 import { setTenantWorkspace } from './workspace.js';
 import { mkdtempSync as mkdtempForWorkspace, rmSync as rmForWorkspace } from 'node:fs';
@@ -3763,9 +3764,14 @@ describe('Engine + Session (Orchestrator)', () => {
       );
       try {
         const chat = engine.createSession();
-        chat.userTimezone = 'Europe/Zurich';
+        // UTC+14 all year: no engine's own zone gives the same wall clock, so the user's zone
+        // is shown to reach the title. Read before and after, for a minute that turns mid-run.
+        chat.userTimezone = 'Pacific/Kiritimati';
         mockSend.mockResolvedValueOnce('ok');
+        const before = approvalChatTitle('de', new Date(), 'Pacific/Kiritimati');
         await chat.run(`${draft}${firstLine}`);
+        const after = approvalChatTitle('de', new Date(), 'Pacific/Kiritimati');
+        expect([before, after]).toContain(titleOf(chat.sessionId));
         expect(titleOf(chat.sessionId)).toMatch(/^Entwurf überarbeiten · \d{1,2}\. \S+, \d{2}:\d{2}$/);
         expect(String(titleOf(chat.sessionId))).not.toContain(MARK);
         expect(llmTitle).not.toHaveBeenCalled();
