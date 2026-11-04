@@ -879,15 +879,16 @@ function linkCandidatesOf(value: string): string[] {
 const DOMAIN_SHAPED = /^[^/?#:]+\.[A-Za-z][A-Za-z0-9-]*(?::\d+)?(?:[/?#]|$)/;
 
 /**
- * A value as the shop prints it into a link (`esc_url`) and a browser then reads it: tab, newline
- * and CR dropped and a backslash read as `/`, as the URL parser does; whitespace dropped, as
- * `esc_url` does; and a value without a scheme that starts with a domain gets `http://` in front,
- * as `esc_url` gives it — `evil.example/a.mp4` is `http://evil.example/a.mp4`, not a path on the
- * store. A value that does not start with a domain (`large`, `/sale`) stays relative.
+ * A value as the shop prints it into a link (`esc_url`) and a browser then reads it: whitespace
+ * dropped, as `esc_url` does (which takes the tab, newline and CR the URL parser drops with it);
+ * a backslash read as `/`, as the URL parser does; and a value without a scheme that starts with a
+ * domain gets `http://` in front, as `esc_url` gives it — `evil.example/a.mp4` is
+ * `http://evil.example/a.mp4`, not a path on the store. A value that does not start with a domain
+ * (`large`, `/sale`, `#top`; `DOMAIN_SHAPED` cannot start with `/`, `?` or `#`) stays relative.
  */
 function printedLink(value: string): string {
-  const v = value.replace(/[\t\n\r]/g, '').replace(/\\/g, '/').replace(/\s+/g, '');
-  if (v.includes(':') || /^[/#?]/.test(v) || /^[a-z0-9-]+?\.php/i.test(v)) return v;
+  const v = value.replace(/\\/g, '/').replace(/\s+/g, '');
+  if (v.includes(':') || /^[a-z0-9-]+?\.php/i.test(v)) return v;
   return DOMAIN_SHAPED.test(v) ? `http://${v}` : v;
 }
 

@@ -570,11 +570,16 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     // A zero-width space ends the name as WordPress reads it. Held once by the before-image, so the
     // hidden-character rule passes it and the link is what is read.
     expect(check('<p>[video\u200bsrc="https://evil.example/a.mp4"]</p>', '<p>[video\u200bsrc="/a.mp4"]</p>')).toEqual(foreign);
+    // Read on the raw tag, the name would run on through the domain to the `/`, leaving `/a.mp4`,
+    // a path on the store; WordPress reads `video` and a value `evil.example/a.mp4`.
+    expect(check('<p>[video\u200bevil.example/a.mp4]</p>', '<p>[video\u200b/a.mp4]</p>')).toEqual(foreign);
   });
 
   it('refuses a foreign domain in the text a pair encloses', () => {
     expect(check('[embed]https://evil.example/x[/embed]')).toEqual(foreign);
     expect(check('<p>[embed] <strong>//evil.example/x</strong> [/embed]</p>')).toEqual(foreign);
+    // A link-shaped token among words of the enclosed text, which no single-token read sees.
+    expect(check('[box]Mehr unter javascript:alert(1) hier[/box]')).toMatchObject({ ok: false, reason: 'url_scheme' });
   });
 
   it('refuses a scheme a link may not have, as written and as the page decodes it', () => {
