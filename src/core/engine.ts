@@ -1559,10 +1559,10 @@ export class Engine {
     // ended meanwhile is paused before anything can start it. And inside the login that extends an
     // ended grant, before that login commits: otherwise the extension would make the plan live again.
     this.pausePlansOfEndedMandates();
-    this._mandateEnds?.onExtendAfterEnd((mandateId, before, nowS) => {
+    this._mandateEnds?.onExtendAfterEnd((mandateId, before, nowS, email) => {
       const db = this.engineDb?.getDb();
       if (db === undefined) return;
-      pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+      pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, onlyMandateEmail: email, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
       // A run of a plan paused here would go on until the next sweep, up to 5 minutes, with its
       // member live again and its connections open to it. So the parts that end runs follow at
       // once, outside the login's transaction, as on a revoke. They read what was committed: when

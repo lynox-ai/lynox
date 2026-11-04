@@ -358,6 +358,29 @@ describe('Engine boot — mandate ends', () => {
       } finally { clock.mockRestore(); worker.mockRestore(); }
     });
 
+    it('pauses, in the login that extends an ended grant, a plan whose workflow cannot be read, for the address the login names', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-loginunreadable-'));
+      dirs.push(dir);
+      const engine = await boot(dir);
+      const now = Math.floor(Date.now() / 1000);
+      live(engine, now + 2);
+      const db = engine.getEngineDb()!.getDb();
+      // The owner's plan on a workflow the helper set up: a member only through the workflow.
+      db.prepare("INSERT INTO workflows (id, name, definition_json, created_by, created_mandate_id) VALUES ('wf', 'W', '{}', ?, ?)").run(`mandate:${GRANT.email}`, GRANT.mandateId);
+      engine.getRunHistory()!.insertTrigger({ id: 'p', title: 'P', source: 'cron', effect: 'run_workflow', scheduleCron: '0 9 * * 1', nextRunAt: '2099-01-01T00:00:00.000Z', pipelineId: 'wf', confirmedAt: '2027-01-01T00:00:00.000Z', confirmedBy: 'owner' });
+      db.exec('ALTER TABLE workflows RENAME COLUMN mandate_edited_at TO gone');
+      const worker = vi.spyOn(WorkerLoop.prototype, 'stopEndedStarters').mockReturnValue([]);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue((now + 3) * 1000);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        engine.getMandateEnds()!.record({ ...GRANT, mandateExp: now + 3_600 }, 200);
+      } finally { stderr.mockRestore(); clock.mockRestore(); worker.mockRestore(); }
+      db.exec('ALTER TABLE workflows RENAME COLUMN gone TO mandate_edited_at');
+      const row = db.prepare("SELECT paused_at, paused_for FROM triggers WHERE id = 'p'").get() as { paused_at: number | null; paused_for: string | null };
+      expect(row.paused_at).not.toBeNull();
+      expect((JSON.parse(row.paused_for ?? '[]') as Array<{ mandateId: string; email: string }>).map((e) => [e.mandateId, e.email])).toEqual([[GRANT.mandateId, GRANT.email]]);
+    });
+
     it('a login that extends a grant which had not ended asks for no stop', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'lynox-runextendlive-'));
       dirs.push(dir);
