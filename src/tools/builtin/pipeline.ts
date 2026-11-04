@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { isFilingResult } from '../../core/approval-filing.js';
-import { WORKFLOW_ENDED_MID_RUN, callerWorkflowRunAs, savedWorkflowSource } from '../../orchestrator/run-source.js';
+import { WORKFLOW_ENDED_MID_RUN, WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR, callerWorkflowRunAs, savedWorkflowSource } from '../../orchestrator/run-source.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
@@ -350,8 +350,10 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
     totalDurationMs: totalDuration,
     totalCostUsd: totalCost,
     // A fixed sentence, never stored text: the model is told why the run stopped, so it does not
-    // retry it or report a step's failure (1100).
-    ...(state.error === WORKFLOW_ENDED_MID_RUN ? { endedBecause: WORKFLOW_ENDED_MID_RUN } : {}),
+    // retry it or report a step's failure (1100). The stored error is the short one; only here
+    // does the model read what to tell the user (1184).
+    ...(state.error === WORKFLOW_ENDED_MID_RUN_ERROR ? { endedBecause: WORKFLOW_ENDED_MID_RUN }
+      : state.error === WORKFLOW_END_CHECK_FAILED_ERROR ? { endedBecause: WORKFLOW_END_CHECK_FAILED_ERROR } : {}),
   };
 
   // The name and the step ids are stored text, saved perhaps before the save refused characters

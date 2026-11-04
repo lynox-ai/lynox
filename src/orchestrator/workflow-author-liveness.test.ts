@@ -43,7 +43,7 @@ vi.mock('../core/stream.js', () => ({
 import { runWorkflowTool, runSavedWorkflow, _resetPipelineStore, storePipeline } from '../tools/builtin/pipeline.js';
 import { runManifest, retryManifest, stopForEndedAuthor } from './runner.js';
 import {
-  savedWorkflowSource, sourceRefusal, WORKFLOW_ENDED_REFUSAL, WORKFLOW_ENDED_MID_RUN, WORKFLOW_OF_ANOTHER_REFUSAL, WORKFLOW_UNREADABLE_REFUSAL, NESTED_AT_TOP_REFUSAL,
+  savedWorkflowSource, sourceRefusal, WORKFLOW_ENDED_REFUSAL, WORKFLOW_ENDED_MID_RUN, WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR, WORKFLOW_OF_ANOTHER_REFUSAL, WORKFLOW_UNREADABLE_REFUSAL, NESTED_AT_TOP_REFUSAL,
   type RunSource,
 } from './run-source.js';
 import { createToolContext } from '../core/tool-context.js';
@@ -67,6 +67,8 @@ let authorship: WorkflowAuthorship | undefined | 'throws';
 let live: Set<string> | null;
 /** Set mid-run by a test: the store of mandate ends throws from then on. */
 let liveThrows = false;
+/** What the run wrote as its run row's end (`pipeline_runs`), in order. */
+let runUpdates: Array<Record<string, unknown>> = [];
 
 function planned(): PlannedPipeline {
   return {
@@ -84,6 +86,7 @@ function engineContext(): ReturnType<typeof createToolContext> {
   } as unknown as ToolEntry];
   // Everything else the run asks of the store answers nothing.
   ctx.runHistory = new Proxy({
+    updatePipelineRun: (_id: string, u: Record<string, unknown>) => { runUpdates.push(u); },
     getWorkflowAuthorship: (id: string) => {
       if (authorship === 'throws') throw new Error('engine.db is gone');
       return id === WF ? authorship : undefined;
@@ -121,6 +124,7 @@ beforeEach(() => {
   authorship = OWNERS;
   live = new Set(['grant-b']);
   liveThrows = false;
+  runUpdates = [];
 });
 
 describe("a saved workflow a mandate shaped runs only while that mandate's grant is live", () => {
@@ -369,7 +373,28 @@ describe('an access that ends mid-run ends the run before its next step (1100)',
     // As the library's Run hands it: the mandate the workflow runs as (1055).
     const result = await runSavedWorkflow(WF, ctx.runHistory, config, undefined, { tools: ctx.tools, toolContext: ctx, principal: { kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' } });
     expect(mockProcess).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN });
+    expect(result).toMatchObject({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN_ERROR });
+  });
+
+  it("the run row's stored error says why the run stopped and holds no sentence to the model (1184)", async () => {
+    authorship = EDITED_BY_BEA;
+    twoSteps();
+    scriptFirst(true);
+    scriptStep();
+    const ctx = engineContext();
+    await runSavedWorkflow(WF, ctx.runHistory, config, undefined, { tools: ctx.tools, toolContext: ctx, principal: { kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' } });
+    const stored = runUpdates.map((u) => u['error']).filter((e) => e !== undefined);
+    expect(stored).toEqual([WORKFLOW_ENDED_MID_RUN_ERROR]);
+    expect(String(stored[0])).not.toMatch(/tell the user|do not start it again/i);
+  });
+
+  it("the owner's chat still reads what to tell the user, as the result's endedBecause (1184)", async () => {
+    authorship = BEAS;
+    twoSteps();
+    scriptFirst(true);
+    scriptStep();
+    const out = JSON.parse(await runWorkflowTool.handler({ workflow_id: WF }, chat()) as string) as Record<string, unknown>;
+    expect(out['endedBecause']).toBe(WORKFLOW_ENDED_MID_RUN);
   });
 
   it('a store of ends that throws mid-run ends the run before its next step too', async () => {
@@ -379,7 +404,9 @@ describe('an access that ends mid-run ends the run before its next step (1100)',
     scriptStep();
     const out = await runWorkflowTool.handler({ workflow_id: WF }, chat());
     expect(mockProcess).toHaveBeenCalledTimes(1);
-    expect(out).toContain(WORKFLOW_ENDED_MID_RUN);
+    // Stopped, but with its own cause: no end was found, so none is said (1184).
+    expect(out).toContain(WORKFLOW_END_CHECK_FAILED_ERROR);
+    expect(out).not.toContain(WORKFLOW_ENDED_MID_RUN_ERROR);
   });
 
   it("control: the owner's own workflow does not depend on B and runs both steps when B's grant ends", async () => {
@@ -406,6 +433,46 @@ describe('stopForEndedAuthor keeps a cause the run already ended on', () => {
   it('CONTROL: a running run halts with the mid-run end as its error', () => {
     const s = state('running');
     expect(stopForEndedAuthor({ source: ended } as Parameters<typeof stopForEndedAuthor>[0], s)).toBe(true);
-    expect([s.status, s.error]).toEqual(['failed', WORKFLOW_ENDED_MID_RUN]);
+    expect([s.status, s.error]).toEqual(['failed', WORKFLOW_ENDED_MID_RUN_ERROR]);
+  });
+
+  it('a check that throws halts the running run with an error that does not say an access ended (1184)', () => {
+    const s = state('running');
+    const broken: RunSource = { ...ended, ends: { isLive: () => { throw new Error('engine.db is gone'); } } } as RunSource;
+    expect(stopForEndedAuthor({ source: broken } as Parameters<typeof stopForEndedAuthor>[0], s)).toBe(true);
+    expect([s.status, s.error]).toEqual(['failed', WORKFLOW_END_CHECK_FAILED_ERROR]);
+  });
+});
+
+// 1184 (1): a `runtime: 'pipeline'` step's sub-run reads the access of the saved workflow that
+// holds it before each of ITS steps, not only the outer run before each outer step.
+describe('a sub-run stops before its next step when a maker\'s access ends during it (1184)', () => {
+  const nestedManifest = {
+    manifest_version: '1.1' as const, name: 'probe', triggered_by: 'test', context: {},
+    agents: [{
+      id: 'outer', agent: 'outer', runtime: 'pipeline' as const,
+      pipeline: [{ id: 'inner-write', task: 'Write the report.' }, { id: 'inner-send', task: 'Send the report.', input_from: ['inner-write'] }],
+    }],
+    gate_points: [], on_failure: 'stop' as const,
+  };
+  function beaSource(liveSet: Set<string>): RunSource {
+    return { kind: 'saved', workflowId: WF, authors: [{ kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' }], ends: { isLive: (id) => liveSet.has(id) } };
+  }
+
+  it("B's grant ends during the sub-run's first step: its second never reaches the provider, and the run says why", async () => {
+    const liveSet = new Set(['grant-b']);
+    mockProcess.mockImplementationOnce(() => { liveSet.delete('grant-b'); return Promise.resolve(endTurnResponse('Report written.')); });
+    mockProcess.mockImplementation(() => Promise.resolve(endTurnResponse('Report sent.')));
+    const state = await runManifest(nestedManifest, config, { source: beaSource(liveSet) });
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect([state.status, state.error]).toEqual(['failed', WORKFLOW_ENDED_MID_RUN_ERROR]);
+  });
+
+  it('control: the grant stays live, both sub-steps run', async () => {
+    const liveSet = new Set(['grant-b']);
+    mockProcess.mockImplementation(() => Promise.resolve(endTurnResponse('done')));
+    const state = await runManifest(nestedManifest, config, { source: beaSource(liveSet) });
+    expect(mockProcess).toHaveBeenCalledTimes(2);
+    expect(state.status).toBe('completed');
   });
 });
