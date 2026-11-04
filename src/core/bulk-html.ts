@@ -323,6 +323,7 @@ function shortcodeTagsOf(value: string): string[] {
   const out: string[] = [];
   let from = 0;
   let close = -1;
+  // run-group-starter: a scan of one string in memory; it starts no run, call or timer, and ends at the string's end.
   for (;;) {
     const i = value.indexOf('[', from);
     if (i < 0) break;
@@ -364,6 +365,7 @@ function shortcodeEnclosedOf(value: string): string[] {
   let longest = 0;
   let from = 0;
   let close = -1;
+  // run-group-starter: a scan of one string in memory; it starts no run, call or timer, and ends at the string's end.
   for (;;) {
     const i = value.indexOf('[', from);
     if (i < 0) break;
@@ -387,6 +389,7 @@ function shortcodeEnclosedOf(value: string): string[] {
   let nodes = 1;
   from = 0;
   close = -1;
+  // run-group-starter: a scan of one string in memory; it starts no run, call or timer, and ends at the string's end.
   for (;;) {
     const i = value.indexOf('[/', from);
     if (i < 0) break;
