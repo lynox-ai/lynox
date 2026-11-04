@@ -11,6 +11,7 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { isMandateSession, isOwnerSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
+	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
 		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
@@ -463,6 +464,12 @@
 											{/if}
 											{#if target.change === 'invalid' && target.error}
 												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store' })}</p>
+												{#if target.error === 'shortcode_changed' && target.refusedValues}
+													{#each target.refusedValues as { field, value } (field)}
+														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle">{bulkVisibleText(field)}:</div>{/if}
+														<BulkRefusedValue {value} />
+													{/each}
+												{/if}
 											{/if}
 											{#if approving && (target.deselected || writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">

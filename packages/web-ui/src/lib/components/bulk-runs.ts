@@ -428,8 +428,24 @@ export interface BulkTarget {
 	shopAddedMarkup?: true | undefined;
 	/** Written, and the store kept the description otherwise than sent, without outside markup. */
 	hostRewrote?: true | undefined;
+	/** Refused for `shortcode_changed`: each field the shortcode check refuses, with its whole
+	 *  planned value, for the owner to copy into the shop (1130). Set only where one holds. */
+	refusedValues?: { field: string; value: string }[] | undefined;
 	/** With `secret_in_context`: the field the judge only reads that held it, by its name. */
 	contextField?: string | undefined;
+}
+
+/** How much of a long value the preview shows before „show the whole text“ (ux U-103). */
+export const BULK_VALUE_SHOWN_CHARS = 1000;
+export const BULK_VALUE_SHOWN_LINES = 12;
+
+/** The part of a value the preview shows folded, and whether it was cut. The copy button never
+ *  takes this: it copies the whole value. */
+export function bulkFoldedValue(value: string): { shown: string; cut: boolean } {
+	let shown = value.slice(0, BULK_VALUE_SHOWN_CHARS);
+	const lines = shown.split('\n');
+	if (lines.length > BULK_VALUE_SHOWN_LINES) shown = lines.slice(0, BULK_VALUE_SHOWN_LINES).join('\n');
+	return { shown, cut: shown.length < value.length };
 }
 
 /** The external host of a run's target system, or null for a local run. */
@@ -651,6 +667,7 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
  *  of tags the page reads, whose way out differs from planning again (U-103). */
 const BULK_INVALID_ANY_FORM: Readonly<Record<string, string>> = {
 	markup_dropped: 'markup_dropped', markup_dropped_before: 'markup_dropped_before',
+	shortcode_changed: 'shortcode_changed',
 };
 /** The refusals of taking a target out or putting it back that the owner's page words by
  *  their code (`bulk.deselect.refused.<code>`), not by the engine's English. */

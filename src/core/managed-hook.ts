@@ -32,6 +32,7 @@ import type {
   EscalationNoticeRequest,
 } from '../contract/http.js';
 import { readExactHeld } from '../contract/http.js';
+import { keyDeliveryHeaders } from './vault-key-source.js';
 import type { ProviderBillingFailure } from './provider-failure.js';
 import type { DeliverySummary } from './notification-router.js';
 
@@ -286,7 +287,9 @@ export function createManagedHook(opts: {
     const url = `${controlPlaneUrl}/internal/usage/${instanceId}/status`;
     try {
       const res = await fetch(url, {
-        headers: { 'x-instance-secret': secret },
+        // Where the vault key came from, as a word (`keyDeliveryHeaders`), never the key: the
+        // control plane checks that the key it delivers is the one this engine runs on.
+        headers: { 'x-instance-secret': secret, ...keyDeliveryHeaders() },
         signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
       });
       if (res.ok) {
