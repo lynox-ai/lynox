@@ -243,8 +243,12 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
   // Everyone the owner is shown: who the plan was paused for, as they are now (a renewed grant is
   // live again), every other mandate whose mark the takeover covers, and the member that stays.
   const members: TakeoverMember[] = pausedForOf(trigger.paused_for).entries.map((e) => {
-    const ended = principalHasEnded({ kind: 'mandate', email: e.email, mandateId: e.mandateId }, isLive);
-    return { name: e.email, roles: e.roles, ended, reason: ended ? e.reason : null };
+    const principal = { kind: 'mandate' as const, email: e.email, mandateId: e.mandateId };
+    const ended = principalHasEnded(principal, isLive);
+    // A login whose workflow read failed pauses for its mandate without knowing its roles
+    // (`pauseEndedPlans`): they are read here, where the workflow reads, so F2 and the role lines
+    // say what the takeover does. A pause that knew its roles keeps them.
+    return { name: e.email, roles: e.roles.length > 0 ? e.roles : roles(principal), ended, reason: ended ? e.reason : null };
   });
   const coveredMarks: Array<{ tag: string | undefined; id: string | undefined }> = [
     { tag: trigger.created_by, id: trigger.created_mandate_id }, { tag: trigger.mandate_editor, id: trigger.mandate_editor_id },

@@ -243,6 +243,28 @@ describe('the workflow’s side', () => {
     expect(planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))).toBeUndefined();
   });
 
+  it('a pause from a login whose workflow read failed knows no roles: the preview reads them, so the owner is told the workflow moves', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    // As `pauseEndedPlans` writes it in the login when the workflow cannot be read: no roles.
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: [], closedPrompt: false }]);
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && [p.preview.workflow?.takenOver, p.preview.members.map((m) => [m.name, m.roles])])
+      .toEqual([true, [['h@x.ch', ['workflow-created']]]]);
+  });
+
+  it('a pause that knew its roles keeps them, also when the workflow reads otherwise now', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    writePause(b.db, 'p', [{ mandateId: 'g-h@x.ch', email: 'h@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['workflow-edited'], closedPrompt: false }]);
+    const p = takeoverPreview(deps(b), 'p');
+    expect(p.kind === 'preview' && p.preview.members.map((m) => [m.name, m.roles])).toEqual([['h@x.ch', ['workflow-edited']]]);
+  });
+
   it('a renewal: the member the plan was paused for is live again and is still covered', () => {
     const b = box();
     setup(b);
