@@ -83,6 +83,17 @@ const CASES: Case[] = [
       return listOf(input)['form'] === 'shopify' && keysOf(judge['schema']).includes('seo_title');
     },
   },
+  {
+    // The context C (PRD shopify-preset §20.2 item 7): fields the judge reads and never writes.
+    label: '(s4) SEO texts per product, decided from its description, which stays as it is',
+    message: `Schreib für jedes Produkt in meinem Shop ${STORE} einen neuen SEO-Titel und eine SEO-Beschreibung. Nimm dafür die Produktbeschreibung und den Hersteller als Grundlage, aber ändere die Beschreibung selbst nicht. Plan das als Massenlauf, ich gebe ihn dann frei.`,
+    right: (input) => {
+      const judge = typeof input['judge'] === 'object' && input['judge'] !== null ? input['judge'] as Record<string, unknown> : {};
+      const context = Array.isArray(judge['context']) ? judge['context'] as unknown[] : [];
+      return listOf(input)['form'] === 'shopify' && keysOf(judge['schema']).includes('seo_title')
+        && !keysOf(judge['schema']).includes('descriptionHtml') && context.includes('descriptionHtml');
+    },
+  },
 ];
 
 /** `bulk_plan` itself, on a ledger of its own per run; every call and answer is kept. */
