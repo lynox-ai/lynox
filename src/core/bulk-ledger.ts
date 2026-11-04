@@ -1978,8 +1978,9 @@ export class BulkLedger {
    * with that verb, over targets of that kind ({@link resourceKindOf}), may be approved or
    * resumed for more than one target. A probe written to an unmeasured target is kept apart
    * ({@link UNMEASURED_PROBE}): it widens only the run that wrote it, and never a measured run.
-   * A target found already holding its value was not written and proves nothing, so it does
-   * not count.
+   * A target found already holding its value counts only where this run's send to it is still
+   * unclear ({@link probeCandidate}): it may be that send that landed. Found so and never sent
+   * to, or after a send the host refused, it proves nothing and does not count.
    */
   confirmProbe(runId: string, params: { confirmedBy?: string | undefined; now?: number | undefined } = {}):
     { ok: true } | { ok: false; reason: 'not_found' | 'not_a_probe' } {
