@@ -35,8 +35,10 @@ vi.mock('@anthropic-ai/sdk', () => {
 const mockProcess = vi.fn();
 
 vi.mock('../core/stream.js', () => ({
-  StreamProcessor: vi.fn().mockImplementation(function (this: { process: typeof mockProcess }) {
-    this.process = mockProcess;
+  // The agent's name rides along (a step's agent is named after the step), so a test can tell
+  // which step a turn belongs to when steps run side by side.
+  StreamProcessor: vi.fn().mockImplementation(function (this: { process: (s: unknown) => unknown }, _handler: unknown, name: string) {
+    this.process = (s: unknown) => mockProcess(s, name);
   }),
 }));
 
@@ -489,7 +491,7 @@ describe('a sub-run stops before its next step when a maker\'s access ends durin
     expect(state.status).toBe('completed');
   });
 
-  it("the outer run takes the sub-run's cause word for word, without reading the access again", async () => {
+  it("the outer run ends with the sub-run's cause word for word, though a second read would succeed", async () => {
     // The read before the sub-run's second step throws once; a second read by the outer run
     // would succeed and could not tell what the sub-run stopped on.
     let throwOnce = false;
@@ -500,6 +502,43 @@ describe('a sub-run stops before its next step when a maker\'s access ends durin
     const state = await runManifest({ ...nestedManifest, on_failure: 'continue' as const }, config, { source });
     expect(mockProcess).toHaveBeenCalledTimes(1);
     expect([state.status, state.error]).toEqual(['failed', WORKFLOW_END_CHECK_FAILED_ERROR]);
+  });
+});
+
+// 1184, review r2: steps of one phase run side by side. A sibling that fails after a sub-run
+// stopped the run for its makers' access does not replace that cause.
+describe("a sibling's later failure keeps the access stop (1184)", () => {
+  it('sub-run stops for the end, then a sibling in the same phase fails under stop: the run keeps the end', async () => {
+    const liveSet = new Set(['grant-b']);
+    const source: RunSource = { kind: 'saved', workflowId: WF, authors: [{ kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' }], ends: { isLive: (id) => liveSet.has(id) } };
+    let siblingFailedAt = 0;
+    let stopSeenAt = 0;
+    // The sibling's turn is under way before the grant ends (so its own check before the step
+    // passed), and fails only after the sub-run has stopped the run.
+    let siblingStarted!: () => void;
+    const started = new Promise<void>((r) => { siblingStarted = r; });
+    mockProcess.mockImplementation(async (_s: unknown, name: string) => {
+      if (name === 'inner-write') { await started; liveSet.delete('grant-b'); return endTurnResponse('Report written.'); }
+      if (name === 'sibling') {
+        siblingStarted();
+        return new Promise((_r, reject) => setTimeout(() => { siblingFailedAt = Date.now(); reject(new Error('the API answered 500')); }, 300));
+      }
+      return endTurnResponse('done');
+    });
+    const manifest = {
+      manifest_version: '1.1' as const, name: 'probe', triggered_by: 'test', context: {}, execution: 'parallel' as const,
+      agents: [
+        { id: 'outer', agent: 'outer', runtime: 'pipeline' as const,
+          pipeline: [{ id: 'inner-write', task: 'Write the report.' }, { id: 'inner-send', task: 'Send the report.', input_from: ['inner-write'] }] },
+        { id: 'sibling', agent: 'sibling', runtime: 'inline' as const, task: 'Post the summary.' },
+      ],
+      gate_points: [], on_failure: 'stop' as const,
+    };
+    const state = await runManifest(manifest, config, { source, parentTools: [], hooks: { onError: (id: string) => { if (id === 'outer') stopSeenAt = Date.now(); } } });
+    // The order the test is about: the sub-run's stop was recorded before the sibling failed.
+    expect(stopSeenAt).toBeGreaterThan(0);
+    expect(siblingFailedAt).toBeGreaterThan(stopSeenAt);
+    expect([state.status, state.error]).toEqual(['failed', WORKFLOW_ENDED_MID_RUN_ERROR]);
   });
 });
 
@@ -516,7 +555,8 @@ describe("a step's own failure keeps its outcome (1184)", () => {
       manifest_version: '1.1' as const, name: 'probe', triggered_by: 'test', context: {},
       agents: [{ id: 'send', agent: 'send', runtime: 'inline' as const, task: 'Send the report.' }], gate_points: [], on_failure: 'continue' as const,
     };
-    const state = await runManifest(manifest, config, { source });
+    const state = await runManifest(manifest, config, { source, parentTools: [] });
+    expect(mockProcess, 'the step reached the provider and failed there').toHaveBeenCalled();
     expect(state.status).toBe('completed');
     expect(state.error).toBeUndefined();
   });
