@@ -1695,6 +1695,38 @@ describe('an unmeasured write form', () => {
     }
   });
 
+  it('a probe found as planned after a send without a clear answer is filed for its own run only', async () => {
+    const s = shop();
+    s.special.set('PATCH /products/1', { status: 303 });
+    const restore = serve(s);
+    try {
+      const c = client();
+      const first = await previewedRun([1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      const firstSum = ledger.computeChecksum(first)!;
+      expect(ledger.approve(first, { checksum: firstSum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      await runBulkEffect(first, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.getStatus(first)).toMatchObject({ applied: 0, sentUnknown: 1 });
+      s.special.delete('PATCH /products/1');
+      s.items.get('/products/1')!['price'] = '15';
+      expect(ledger.resume(first, { checksum: firstSum }).ok).toBe(true);
+      await runBulkEffect(first, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.probeKey(first)).toBe(url(1));
+      expect(ledger.probeFound(first)).toBe(true);
+      expect(ledger.confirmProbe(first)).toEqual({ ok: true });
+      expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
+        .get(HOST, 'PATCH', `unmeasured:${first}:/products/`)).toEqual({ run_id: first });
+      // Confirmed once, nothing is left to confirm.
+      expect(ledger.probeKey(first)).toBeNull();
+      expect(ledger.getStatus(first)!.probeConfirmed).toBe(true);
+
+      const second = await previewedRun([0, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
+      expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, maxTargets: 2, unmeasuredConfirmed: true }))
+        .toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'other_run' }], step: null } });
+    } finally {
+      restore();
+    }
+  });
+
   it('a measured form keeps the old rule: one probe on record widens any later run', async () => {
     formFixture.measured = true;
     const s = shop();
