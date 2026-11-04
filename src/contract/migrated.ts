@@ -149,6 +149,8 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'MICROSOFT_OAUTH_ERROR_PARAM', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_ERROR_PARAM') },
   { name: 'AdminConsentStatusRequest', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusRequest') },
   { name: 'AdminConsentStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusResponse') },
+  // Born in the contract: the scopes lynox's Google client asks for.
+  { name: 'GOOGLE_BROKER_SCOPES', contractFile: 'http.ts', twinPattern: valueTwin('GOOGLE_BROKER_SCOPES') },
   // K-W3 — the guarded-capable boot marker. The literal existed twice by hand
   // across the repo boundary; a local re-declaration is that failure returning.
   { name: 'GUARDED_CAPABLE_MARKER', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_MARKER') },

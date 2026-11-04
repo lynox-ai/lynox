@@ -857,6 +857,21 @@ export class Engine {
    * And the instance's language, for the reminder poller's title (`notice-language.ts`): set here
    * so the cold boot and the rebootstrap cannot hand the inbox different ones.
    */
+  /**
+   * What the inbox reads through the mail registry. `confirmAutoReply`: an envelope from Graph's
+   * watch carries no headers, so for every follow-up from someone else the hook asks for the full
+   * message, whose envelope reads Auto-Submitted. Looked up at call time, so a provider
+   * added or replaced later is the one asked. No provider: throw, and the hook reopens.
+   */
+  private _applyInboxMailLookups(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
+    bootOpts.confirmAutoReply = async (accountId, env) => {
+      const provider = this._mailContext?.registry.get(accountId);
+      if (!provider) throw new Error(`no mail provider for ${accountId}`);
+      const message = await provider.fetch({ uid: env.uid, folder: env.folder });
+      return message.envelope.isAutoReply;
+    };
+  }
+
   private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
     const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
     if (key !== undefined) bootOpts.mistralApiKey = key;
@@ -932,6 +947,7 @@ export class Engine {
       const runHistoryForInbox = this.getRunHistory();
       if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
       this._applyInboxKeyAndMeter(bootOpts);
+      this._applyInboxMailLookups(bootOpts);
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
         // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
@@ -1543,10 +1559,10 @@ export class Engine {
     // ended meanwhile is paused before anything can start it. And inside the login that extends an
     // ended grant, before that login commits: otherwise the extension would make the plan live again.
     this.pausePlansOfEndedMandates();
-    this._mandateEnds?.onExtendAfterEnd((mandateId, before, nowS) => {
+    this._mandateEnds?.onExtendAfterEnd((mandateId, before, nowS, email) => {
       const db = this.engineDb?.getDb();
       if (db === undefined) return;
-      pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+      pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, onlyMandateEmail: email, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
       // A run of a plan paused here would go on until the next sweep, up to 5 minutes, with its
       // member live again and its connections open to it. So the parts that end runs follow at
       // once, outside the login's transaction, as on a revoke. They read what was committed: when
@@ -2274,6 +2290,7 @@ export class Engine {
         const runHistoryForInbox = this.getRunHistory();
         if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
         this._applyInboxKeyAndMeter(bootOpts);
+        this._applyInboxMailLookups(bootOpts);
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured

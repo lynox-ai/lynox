@@ -4,6 +4,7 @@ import {
   type MarkupCheckInput, type MarkupRefusal,
 } from './bulk-html.js';
 import { parseFragment, defaultTreeAdapter, html as p5 } from 'parse5';
+import { canonicalHtml } from './html-tree.js';
 
 const STORE = 'shop.example.com';
 
@@ -376,11 +377,11 @@ describe('checkMarkup: tags the fragment drops', () => {
   });
 
   it('lets a text that swallowed a tag hold only the same tags, not a prefix of another tag', () => {
-    // A `>` inside a quoted value: a match cut there would be the same for both tags. With
-    // attributes, neither is held at all.
+    // A `>` inside a quoted value: a match cut there would be the same for both tags. The other tag
+    // is not held; the same one is, since the canonical form the run sends drops it (1130).
     const before = '<p>x<body title="a>b">y</p>';
     expect(reason(before, '<p>x<body title="a>" class="z">y</p>')).toBe('markup_dropped');
-    expect(reason(before, before)).toBe('markup_dropped_before');
+    expect(reason(before, before)).toBe('ok');
     // Without attributes, the same tags with what lies between them are held, a `>` in the text included.
     expect(reason('<p>x</div>y > z</p>', '<p>w</div>y > z.</p>')).toBe('ok');
     expect(reason('<p>x</div>y > z</p>', '<p>w</div>y</div> > z</p>')).toBe('markup_dropped');
@@ -403,17 +404,22 @@ describe('checkMarkup: tags the fragment drops', () => {
     expect(reason(before, '<p>b</p></section>')).toBe('markup_dropped');
   });
 
-  it('holds no dropped start tag with attributes, wherever the before-image has it', () => {
-    // Inert in a template or a select there, read by the page where the after-state puts it.
+  it('holds a dropped start tag with attributes only as often as the before-image carries it (1130)', () => {
+    // Read by the page where the after-state puts it. Held anyway: the run stores and sends the
+    // canonical form, which drops the stretch, so the shop's own stray tag is cleaned by the write
+    // (U-103), not refused. The send checks that the bytes are canonical (`rawHtmlField`).
     for (const before of ['<template><body class="z"></template>', '<select><option>a</option><body class="z"></select>', '<body class="z"><p>a</p>']) {
-      // The before-image carries it: planning again cannot help, the refusal says so.
-      expect(reason(before, '<p>a<body class="z">b</p>'), before).toBe('markup_dropped_before');
-      expect(reason(before, `${before}`), before).toBe('markup_dropped_before');
+      expect(reason(before, '<p>a<body class="z">b</p>'), before).toBe('ok');
+      expect(reason(before, `${before}`), before).toBe('ok');
+      // A second copy is the value's own.
+      expect(reason(before, `<p>a<body class="z">b</p>${before}`), before).toBe('markup_dropped');
     }
-    // Not carried: planning again can leave it out.
+    // Not carried: the value's own, refused.
     expect(reason('<p>a</p>', '<p>a<body class="z">b</p>')).toBe('markup_dropped');
-    // An attribute after a slash is an attribute too: held by the bytes, still refused.
-    expect(reason('<body/class=z><p>a</p>', '<body/class=z><p>b</p>')).toBe('markup_dropped_before');
+    // An attribute after a slash is an attribute too, held by the bytes like any other.
+    expect(reason('<body/class=z><p>a</p>', '<body/class=z><p>b</p>')).toBe('ok');
+    // What the page would receive from either value: neither carries the stretch once canonical.
+    expect(droppedTagsOf(canonicalHtml('<p>a<body class="z">b</p>'))).toEqual([]);
   });
 
   it('finds nothing in markup the fragment keeps, however it is written', () => {

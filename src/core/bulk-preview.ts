@@ -23,17 +23,17 @@
  */
 import { setTimeout as delay } from 'node:timers/promises';
 import {
-  BULK_HOST_BUDGET, beforeOverFields, mintBulkContract,
+  BULK_HOST_BUDGET, beforeOverFields, isPlainObject, mintBulkContract,
   type BulkHostBudget, type ExternalClient, type ExternalImage, type ExternalRead,
 } from './bulk-external.js';
 import {
-  BULK_LIST_FORMS, SHOPIFY_MEDIA_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
+  BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
 import { verdictTextRefusal } from './bulk-judge.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
-import { shopifyBulkReadEnabled, shopifyListPage, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
+import { shopifyBulkReadEnabled, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { productTitleOf } from './shopify-saved-form.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
@@ -171,8 +171,10 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // and says why. Before the client is built: building it reads the list's form, and a form
   // that is no longer offered has no spec to read.
   if (list !== null && !isOfferedListSource(list.source)) {
-    ledger.halt(runId, BULK_HALT_REASONS.listFormWithdrawn);
-    return { status: 'halted', summary: summarize(ledger, runId, say.halted('preview', BULK_HALT_REASONS.listFormWithdrawn), say) };
+    // A filtered Shopify list fails on its filters (a key or value the rule no longer takes), not on a path.
+    const withdrawn = list.source.form === SHOPIFY_FILTERED_LIST_FORM ? BULK_HALT_REASONS.listFilterWithdrawn : BULK_HALT_REASONS.listFormWithdrawn;
+    ledger.halt(runId, withdrawn);
+    return { status: 'halted', summary: summarize(ledger, runId, say.halted('preview', withdrawn), say) };
   }
   const shopify = list !== null && isShopifyListSource(list.source);
   // The form the run's targets are read and written with: a product's, or an image's.
@@ -193,6 +195,15 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   const unread = ledger.listUnread(runId);
   const deadline = now() + Math.max(MIN_PREVIEW_BUDGET_MS, unread.length * BULK_TARGET_BUDGET_MS);
   let consecutive = 0;
+  // The context C a judged run reads (PRD shopify-preset §20.2 item 7): taken from the same read
+  // as the before-image and stored beside it, never in it. None for a run without C.
+  const contextFields = ledger.judgeContextOf(runId);
+  const contextOf = (value: unknown): Record<string, unknown> | undefined => {
+    if (contextFields.length === 0) return undefined;
+    if (endpoint !== null) return shopifyContextOf(value, contextFields);
+    const record = isPlainObject(value) ? value : {};
+    return Object.fromEntries(contextFields.map((f) => [f, Object.hasOwn(record, f) ? record[f] : null]));
+  };
 
   for (const seq of unread) {
     if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk preview paused.');
@@ -241,13 +252,17 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       const image = shopifyTargetBeforeImage(shopifyForm ?? 'shopify_product', read.value, target.key);
       if ('invalid' in image) {
         ledger.recordRead(runId, seq, image);
+      } else if (!shopifyInFilter(read.value, list?.source.filters ?? {})) {
+        // Shopify's search lists a neighbour spelling too (diacritics folded, PRD shopify-preset
+        // §22.4): a product the filter does not name is left out before it is judged or written.
+        ledger.recordRead(runId, seq, { invalid: 'not_in_filter' });
       } else {
         // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
         const after = shopifyPairedAfter(target.after, image.value);
         const markup = planMarkupRefusal(after, image.value, list, host, ledger.startDomainsOf(runId));
         if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
         else ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after,
-          shopifyForm === 'shopify_media_alt' ? undefined : productTitleOf(image.value));
+          shopifyForm === 'shopify_media_alt' ? undefined : productTitleOf(image.value), contextOf(read.value));
       }
       consecutive = 0;
       continue;
@@ -263,7 +278,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       }
       const markup = planMarkupRefusal(target.after, read.value, list, host, ledger.startDomainsOf(runId));
       if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
-      else ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried());
+      else ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried(), undefined, undefined, contextOf(read.value));
       consecutive = 0;
       continue;
     }
@@ -283,14 +298,18 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
 
   if (ledger.listUnread(runId).length > 0) return pending(now() + DEFAULT_RETRY_MS, 'Bulk preview has targets left to read.');
   // A judged run is read for its judge, which goes on in the same effect (`bulk-judge.ts`): its
-  // targets have no after-state yet, so reading them does not make it previewed.
+  // targets have no after-state yet, so reading them does not make it previewed. The judge's own
+  // summary is the one the owner gets, so a filter that kept nothing is said there.
   if (ledger.getJudgeRun(runId) !== null) {
     return { status: 'done', summary: costed(summarize(ledger, runId, say.readDone, say)) };
   }
+  // A filtered list whose every listed product fell out as `not_in_filter` matched nothing either
+  // (PRD shopify-preset §22.2 item 7): it says so as a list that listed none does.
+  const noneLeft = list === null ? null : shopifyNoneLeftSentence(list.source.filters, ledger.getStatus(runId), say);
   if (!ledger.finishPreview(runId)) {
     return { status: 'halted', summary: summarize(ledger, runId, say.previewStopped, say) };
   }
-  return { status: 'done', summary: costed(summarize(ledger, runId, say.previewDone, say)) };
+  return { status: 'done', summary: costed(summarize(ledger, runId, noneLeft ?? say.previewDone, say)) };
 
   /**
    * Read the run's list, page by page from the one after the last recorded, until a short
@@ -413,7 +432,13 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       const cap = listPageCap(current.bytes);
       if (cap === 0) return halt(BULK_HALT_REASONS.listTooLarge);
       sentBefore += pageClient?.sent ?? 0;
-      pageClient = deps.clientFor(run!, undefined, { phase: 'list', afterId: current.lastId, form: media ? 'shopify_media_list' : 'shopify_products_list' });
+      // The grant and the body below take the filters from the same stored source: a page sent
+      // without them would be refused, and one granted without them would read the whole store.
+      // A media list has none.
+      const filters = current.source.filters;
+      pageClient = deps.clientFor(run!, undefined, media
+        ? { phase: 'list', afterId: current.lastId, form: 'shopify_media_list' }
+        : { phase: 'list', afterId: current.lastId, filters });
       if (!pageClient) return halt(BULK_HALT_REASONS.unavailable);
       const thisPage = pageClient;
 
@@ -432,7 +457,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
             ? halt(BULK_HALT_REASONS.listTooLarge)
             : { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
         }
-        const answer = await thisPage.graphqlRead(endpoint!, { form: media ? 'shopify_media_list' : 'shopify_products_list', afterId: current.lastId }, deps.signal, cap);
+        const answer = await thisPage.graphqlRead(endpoint!, media
+          ? { form: 'shopify_media_list', afterId: current.lastId }
+          : { form: 'shopify_products_list', afterId: current.lastId, filters }, deps.signal, cap);
         if (answer.kind === 'rate_limited') {
           ledger.returnListCall(runId);
           return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read waiting for the API rate limit.');
@@ -476,7 +503,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     }
     return {
       status: 'done',
-      summary: costed(summarize(ledger, runId, closed === 'empty' ? say.listEmpty : say.listWaiting, say)),
+      summary: costed(summarize(ledger, runId, closed === 'empty' ? (shopifyNoMatchSentence(source.filters, say) ?? say.listEmpty) : say.listWaiting, say)),
     };
   }
 

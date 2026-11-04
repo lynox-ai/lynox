@@ -27,6 +27,7 @@ import {
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
 import { processUmask } from './workspace-rel.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
+import { canonicalHtml } from './html-tree.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
@@ -146,6 +147,23 @@ function sameInSavedForm(cur: BeforeImage & { readonly titleNow?: string | null 
   if (cur.absent || planned.absent) return false;
   const titleNow = cur.titleNow ?? null;
   return sameValue(cur.value, shopifySavedForm(planned.value, titleNow), htmlFields);
+}
+
+/**
+ * The first HTML field of a target's after-state that would leave in other bytes than the
+ * canonical form the markup check read (1130), or null. A field equal to its before-image's value
+ * is the store's own and is not asked: the check skips it, and the ledger keeps it byte for byte.
+ */
+export function rawHtmlField(t: Pick<ApplyTarget, 'after' | 'expected'>, fields: readonly string[]): string | null {
+  if (fields.length === 0 || t.after.absent) return null;
+  const after = t.after.value;
+  if (typeof after !== 'object' || after === null || Array.isArray(after)) return null;
+  const was = !t.expected.absent && typeof t.expected.value === 'object' && t.expected.value !== null ? t.expected.value as Record<string, unknown> : {};
+  for (const f of fields) {
+    const v = (after as Record<string, unknown>)[f];
+    if (typeof v === 'string' && v !== was[f] && canonicalHtml(v) !== v) return f;
+  }
+  return null;
 }
 
 function summarize(ledger: BulkLedger, runId: string, lead: string, say: BulkNotices = BULK_NOTICES.en): string {
@@ -275,6 +293,9 @@ async function applyRunEffect(
   const htmlFields = ledger.comparedAsHtml(runId);
   // Compared also in the form the store saves a value in, on a Shopify product run only.
   const savedForm = ledger.comparedInSavedForm(runId);
+  // Sent only in the canonical bytes the markup check read (1130), a Shopify run's and any other
+  // run's alike. Not an undo: it restores a before-image, the store's own bytes.
+  const sentCanonical = run.kind === 'undo' ? [] : ledger.htmlFieldsOf(runId);
   const pending = ledger.listPending(runId);
   const deadline = now() + Math.max(MIN_RUN_BUDGET_MS, pending.length * BULK_TARGET_BUDGET_MS);
   let consecutive = 0;
@@ -439,6 +460,11 @@ async function applyRunEffect(
         };
       }
       if (cur === 'foreign' || !sameImage(cur, t.expected, htmlFields)) return { kind: 'conflict' };
+      // The belt of 1130: an HTML field leaves in the canonical bytes the check read, which the
+      // ledger stores (`canonicalAfterOf`). Raw bytes here (a row stored before that) may carry a
+      // tag the check never saw, so nothing is sent and the run halts, as a Shopify write the
+      // mint leaves out does.
+      if (rawHtmlField(t, sentCanonical) !== null) return { kind: 'halt', reason: BULK_HALT_REASONS.contract };
       // Still as expected, but an earlier send reached it without a clear answer: that write
       // may land later or not be visible yet, and sending it again could carry the change out
       // twice. A local writer's outcome is always known.
