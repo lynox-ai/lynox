@@ -383,6 +383,36 @@ describe('the sentence and the way on for a halt', () => {
 		expect(buttonByText(t('bulk.start.judge'))).toBeUndefined();
 	});
 
+	it('shows before the start the fields the judge only reads: readable on a store, the owner\'s column names elsewhere (U-140)', async () => {
+		const judged = (o: Partial<BulkRunDetailData>): BulkRunDetailData => makeRun({
+			phase: 'planned', haltKey: 'awaitingStart', haltReason: 'engine English', judge: {} as BulkRunDetailData['judge'],
+			judgeServedBy: { provider: 'anthropic', label: 'm' } as unknown as BulkRunDetailData['judgeServedBy'], ...o,
+		});
+		const rule = { rule: 'Write SEO texts.', schema: { properties: { seo_title: { type: 'string', maxLength: 70 } } }, tier: 'fast' };
+		run = judged({ judgeRule: { ...rule, context: ['vendor', 'tags'] } });
+		await render();
+		const list = target.querySelector('[data-testid="bulk-start-context"]');
+		expect(list).not.toBeNull();
+		expect(list!.textContent).toContain(t('bulk.start.context_fields'));
+		expect([...list!.querySelectorAll('li')].map((li) => li.textContent?.trim())).toEqual([t('bulk.field.shopify.vendor'), t('bulk.field.shopify.tags')]);
+		expect(list!.textContent).toContain(tf('bulk.start.context_explain', { provider: 'Anthropic' }).slice(0, 20));
+		unmount(component!);
+		component = undefined;
+
+		run = judged({ targetSystem: 'data_store', judgeRule: { ...rule, context: ['note'] } });
+		await render();
+		const rows = target.querySelector('[data-testid="bulk-start-context"]');
+		expect(rows!.querySelector('code')?.textContent).toBe('note');
+		unmount(component!);
+		component = undefined;
+
+		// Twin: a rule without a context shows no such list.
+		run = judged({ judgeRule: rule });
+		await render();
+		expect(target.querySelector('[data-testid="bulk-start-context"]')).toBeNull();
+		expect(target.textContent).toContain(t('bulk.start.fields'));
+	});
+
 	it('at a probe the server does not offer, says to plan again instead of naming a button', async () => {
 		run = makeRun({ phase: 'writing', haltKey: 'probeRequired', haltReason: 'engine English', applied: 1, probe: null });
 		await render();

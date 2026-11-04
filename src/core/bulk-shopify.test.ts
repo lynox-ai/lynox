@@ -25,8 +25,8 @@ import {
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
-import { shopifyBeforeImage, shopifyListPage, shopifyPairedAfter, shopifyTargetIo } from './bulk-shopify.js';
-import { shopifyProductWriteBody } from './shopify-graphql.js';
+import { shopifyBeforeImage, shopifyContextOf, shopifyListPage, shopifyPairedAfter, shopifyTargetIo } from './bulk-shopify.js';
+import { SHOPIFY_READ_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { ApiStore } from './api-store.js';
 import { SecretStore } from './secret-store.js';
@@ -36,7 +36,7 @@ import { withListQuery, withShopifyApply, withShopifyRead, type ListQueryConstra
 import { bulkPlanTool } from '../tools/builtin/bulk.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import { runBulkJudge, type BulkJudgeDeps } from './bulk-judge.js';
-import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
+import { SHOPIFY_CONTEXT_FIELDS, judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import type { callForStructuredJson } from './llm-helper.js';
 import ts from 'typescript';
 import { BULK_MAX_TARGETS } from './bulk-plan.js';
@@ -93,7 +93,8 @@ describe('shopifyListPage', () => {
 
 describe('shopifyBeforeImage', () => {
   it('makes the product\'s fields flat, taking only those the answer holds', () => {
-    const product = { id: gid(3), title: 'Mug', descriptionHtml: '<p>x</p>', seo: { title: 'T', description: null }, vendor: 'v' };
+    // The read also answers the context's fields (type, vendor, tags): never part of the before-image.
+    const product = { id: gid(3), title: 'Mug', descriptionHtml: '<p>x</p>', seo: { title: 'T', description: null }, vendor: 'v', productType: 'Cup', tags: ['a'] };
     expect(shopifyBeforeImage({ product }, gid(3))).toEqual({ value: { title: 'Mug', descriptionHtml: '<p>x</p>', seo_title: 'T', seo_description: null } });
     expect(shopifyBeforeImage({ product: { id: gid(3), seo: null } }, gid(3))).toEqual({ value: {} });
   });
@@ -1381,6 +1382,179 @@ describe('a judged Shopify run', () => {
       expect(box.calls).toBe(3);
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe('the context C of a judged Shopify run (PRD shopify-preset §20.2 item 7)', () => {
+  const F = { seo_title: { type: 'string', maxLength: 70 }, seo_description: { type: 'string', maxLength: 160 } };
+  const C = ['title', 'descriptionHtml', 'productType', 'vendor', 'tags'];
+
+  it('reads the product with a fixed document that also asks for type, vendor and tags, and grants it byte for byte', () => {
+    expect(SHOPIFY_READ_DOCUMENTS.shopify_product_read)
+      .toBe('query($id: ID!) { product(id: $id) { id title descriptionHtml productType vendor tags seo { title description } } }');
+    expect(JSON.parse(shopifyProductReadBody(gid(7))!))
+      .toEqual({ query: SHOPIFY_READ_DOCUMENTS.shopify_product_read, variables: { id: gid(7) } });
+  });
+
+  it('projects the context flat from the same answer, null where it holds none, tags only as texts', () => {
+    const data = { product: { id: gid(3), title: 'Mug', descriptionHtml: '<p>x</p>', productType: 'Cup', vendor: 'Acme', tags: ['a', 'b'], seo: { title: 'T', description: null } } };
+    expect(shopifyContextOf(data, SHOPIFY_CONTEXT_FIELDS)).toEqual({
+      title: 'Mug', descriptionHtml: '<p>x</p>', seo_title: 'T', seo_description: null, productType: 'Cup', vendor: 'Acme', tags: ['a', 'b'],
+    });
+    expect(shopifyContextOf({ product: { id: gid(3), tags: ['a', 1], vendor: { x: 1 } } }, ['tags', 'vendor', 'productType']))
+      .toEqual({ tags: null, vendor: null, productType: null });
+  });
+
+  async function contextRun(context: readonly string[]): Promise<string> {
+    const judge = normalizeJudgeRule({ rule: 'Write SEO texts from the product.', schema: F, context }, { contextFields: SHOPIFY_CONTEXT_FIELDS });
+    const src = parseListSource(HOST, { form: 'shopify', after: judgeTemplate(judge) }, 'PATCH', scan);
+    const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source: src, readContract: listReadContract(HOST, src), judge });
+    if (!out.ok) throw new Error(out.reason);
+    const id = out.status.id;
+    if (!ledger.resumePreview(id, Date.now(), { listChecksum: ledger.listStartChecksum(id)! }).ok) throw new Error('list start');
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    return id;
+  }
+
+  function judging(id: string, answer: Record<string, unknown>): { deps: BulkJudgeDeps; users: string[] } {
+    const users: string[] = [];
+    const call = (async (opts: { user: string }) => {
+      users.push(opts.user);
+      return { data: answer, inputTokens: 100, outputTokens: 10, costUsd: 0.01, modelId: 'claude-haiku-4-5' };
+    }) as unknown as typeof callForStructuredJson;
+    return {
+      users,
+      deps: {
+        ledger, readTargets: () => runBulkPreview(id, deps()),
+        resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as Anthropic }),
+        gate: async () => ({ runId: 'gate', blockedReason: null }), report: () => {}, bookSpend: () => {}, budgetAllows: () => true,
+        scanSecret: (t) => (t.includes('sk-live-') ? 'api_key' : null), maskVault: (t) => t, call,
+      },
+    };
+  }
+
+  const stores = (): void => {
+    fill(1);
+    s.products.set(10, { ...s.products.get(10)!, productType: 'Mug', vendor: 'Acme', tags: ['bio', 'cup'] });
+  };
+  const column = (id: string, col: 'before' | 'after_planned' | 'context'): unknown => {
+    const r = engineDb.getDb().prepare(`SELECT ${col} AS v FROM bulk_targets WHERE run_id = ?`).get(id) as { v: string | null };
+    return r.v === null ? null : JSON.parse(engineDb.dec(r.v)) as unknown;
+  };
+
+  it('sends the judge the context read with the product, and decides over F only', async () => {
+    stores();
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await contextRun(C);
+      ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
+      const j = judging(id, { keep: false, after: { seo_title: 'New', seo_description: 'Neu' } });
+      expect((await runBulkJudge(id, j.deps)).status).toBe('done');
+      expect(j.users).toHaveLength(1);
+      expect(j.users[0]).toContain('<context>');
+      const context = JSON.parse(j.users[0]!.slice(j.users[0]!.indexOf('<context>') + 9, j.users[0]!.indexOf('</context>'))) as unknown;
+      expect(context).toEqual({ title: 'T1', descriptionHtml: '<p>1</p>', productType: 'Mug', vendor: 'Acme', tags: ['bio', 'cup'] });
+      // Stored beside the image, never in it; never in the planned after-state, the diff or the change.
+      expect(column(id, 'context')).toEqual(context);
+      expect(column(id, 'before')).toEqual({ absent: false, value: { seo_title: null, seo_description: 'D1' } });
+      expect(column(id, 'after_planned')).toEqual({ seo_title: 'New', seo_description: 'Neu' });
+      const [t] = ledger.getPreview(id);
+      expect(t!.diff).toEqual({ kind: 'fields', fields: expect.arrayContaining([expect.objectContaining({ field: 'seo_title' })]) as unknown });
+      expect(JSON.stringify(t!.diff)).not.toMatch(/productType|vendor|tags|"title"/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps a kept product as its before-image: nothing of the context in its after-state', async () => {
+    stores();
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await contextRun(C);
+      ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
+      await runBulkJudge(id, judging(id, { keep: true }).deps);
+      expect(column(id, 'after_planned')).toEqual({ seo_title: null, seo_description: 'D1' });
+      expect(ledger.getPreview(id)[0]!.change).toBe('unchanged');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('makes a product whose tag holds a credential invalid, names the field, and sends nothing', async () => {
+    stores();
+    s.products.set(10, { ...s.products.get(10)!, tags: ['bio', 'sk-live-abcdef'] });
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await contextRun(C);
+      ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
+      const j = judging(id, { keep: true });
+      await runBulkJudge(id, j.deps);
+      expect(j.users).toEqual([]);
+      expect(ledger.getPreview(id)[0]).toMatchObject({ change: 'invalid', error: 'secret_in_context', contextField: 'tags' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('stores no context for a run without one', async () => {
+    stores();
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await contextRun([]);
+      expect(column(id, 'context')).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('refuses at planning a context name the form does not read, or one the rule decides', () => {
+    expect(() => normalizeJudgeRule({ rule: 'x', schema: F, context: ['note'] }, { contextFields: SHOPIFY_CONTEXT_FIELDS })).toThrow(/does not read/);
+    expect(() => normalizeJudgeRule({ rule: 'x', schema: F, context: ['seo_title'] }, { contextFields: SHOPIFY_CONTEXT_FIELDS })).toThrow(/decides/);
+  });
+
+  it('refuses at the start a stored context the list\'s form does not read, or naming the list\'s id field', async () => {
+    vi.stubEnv(FLAG, '1');
+    try {
+      stores();
+      const swap = (id: string, context: string[]): void => {
+        const [text, hash] = (ledger as unknown as { judgeColumns(j: unknown): [string, string] })
+          .judgeColumns({ ...normalizeJudgeRule({ rule: 'x', schema: F }), context });
+        engineDb.getDb().prepare('UPDATE bulk_runs SET judge_rule = ?, judge_rule_hash = ? WHERE id = ?').run(text, hash, id);
+      };
+      const begin = (id: string): ReturnType<BulkLedger['resumePreview']> =>
+        ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
+      const shop = await contextRun(['vendor']);
+      swap(shop, ['note']);
+      expect(begin(shop)).toMatchObject({ ok: false, reason: 'rule_refused' });
+      // Twin: the same run with a name the form reads starts.
+      swap(shop, ['vendor']);
+      expect(begin(shop).ok).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('refuses at the start a stored context naming the list\'s id field, on a list that is not a store\'s', () => {
+    const begin = (id: string): ReturnType<BulkLedger['resumePreview']> =>
+      ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
+    {
+      // A list that is not a store's bounds no names, but its id field is never context.
+      const woo = parseListSource('shop.example.com', { form: 'woocommerce', path: '/wp-json/wc/v3/products', after: judgeTemplate(normalizeJudgeRule({ rule: 'x', schema: { name: { type: 'string', maxLength: 9 } } })) }, 'PATCH', scan);
+      const planned = ledger.recordExternalListPlan({
+        createdBy: 't', principal: OWNER_PRINCIPAL, host: 'shop.example.com', source: woo, readContract: listReadContract('shop.example.com', woo),
+        judge: normalizeJudgeRule({ rule: 'x', schema: { name: { type: 'string', maxLength: 9 } } }),
+      });
+      if (!planned.ok) throw new Error(planned.reason);
+      const [text, hash] = (ledger as unknown as { judgeColumns(j: unknown): [string, string] })
+        .judgeColumns({ ...normalizeJudgeRule({ rule: 'x', schema: { name: { type: 'string', maxLength: 9 } } }), context: [woo.idField] });
+      engineDb.getDb().prepare('UPDATE bulk_runs SET judge_rule = ?, judge_rule_hash = ?, list_state = ? WHERE id = ?').run(text, hash, 'done', planned.status.id);
+      expect(begin(planned.status.id)).toMatchObject({ ok: false, reason: 'rule_refused' });
+      // Twin: another name of its elements starts.
+      const [text2, hash2] = (ledger as unknown as { judgeColumns(j: unknown): [string, string] })
+        .judgeColumns({ ...normalizeJudgeRule({ rule: 'x', schema: { name: { type: 'string', maxLength: 9 } } }), context: ['sku'] });
+      engineDb.getDb().prepare('UPDATE bulk_runs SET judge_rule = ?, judge_rule_hash = ? WHERE id = ?').run(text2, hash2, planned.status.id);
+      expect(begin(planned.status.id).ok).toBe(true);
     }
   });
 });

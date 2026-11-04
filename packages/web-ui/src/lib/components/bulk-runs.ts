@@ -670,8 +670,11 @@ export function bulkInvalidText(
 ): string {
 	// The field the judge only reads that held a credential, named so the owner knows which one to
 	// clean (U-140): on Shopify by its readable name, in the data store by the owner's column name.
-	if (reason === 'secret_in_context' && context?.field !== undefined && (shopify || context.dataStore)) {
-		const field = shopify ? bulkFieldNamesText(context.host, [context.field], (k) => i18n.t(k)) : bulkVisibleText(context.field);
+	// The engine records the field with the reason, in one write; a target without it (none today)
+	// still reads as the sentence, with a dash where the name would be.
+	if (reason === 'secret_in_context' && (shopify || context?.dataStore === true)) {
+		const name = context?.field;
+		const field = name === undefined ? '—' : shopify ? bulkFieldNamesText(context?.host ?? null, [name], (k) => i18n.t(k)) : bulkVisibleText(name);
 		return i18n.tf(shopify ? 'bulk.invalid.secret_in_context' : 'bulk.invalid.secret_in_context_column', { field });
 	}
 	const anyForm = BULK_INVALID_ANY_FORM[reason];

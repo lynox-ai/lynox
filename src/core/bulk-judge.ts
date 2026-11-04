@@ -29,6 +29,7 @@ import { checkMarkup, htmlFieldsOfListForm, plainTextMarkupOf } from './bulk-htm
 import type { BulkListSourceForm } from './bulk-list.js';
 import { checkSeoAfter } from './seo-text.js';
 import { hiddenCharIndexes } from './hidden-chars.js';
+import { parseHtmlFragment, walkHtml } from './html-tree.js';
 import { BULK_MAX_TARGET_BYTES, mapToColumns, type dataStoreColumns } from './bulk-plan.js';
 import { judgeCallSchema, judgeFields, judgeMaxOutputTokens, judgedTargets, type JudgeRule } from './bulk-judge-rule.js';
 import {
@@ -273,6 +274,20 @@ export const JUDGE_CONTEXT_MAX_TOTAL = 8_000;
 /** What marks a text the context sends shorter than it is. */
 export const JUDGE_CONTEXT_CUT = '[…]';
 
+/**
+ * What a text that may hold markup reads as, for the credential check only: its text nodes joined
+ * as they stand (entities decoded, tags gone, so `sk-<b></b>live` reads whole), then every
+ * attribute value and comment, each on its own line. Null for a text with no `<` and no `&`: it
+ * reads as written.
+ */
+function htmlTextOf(text: string): string | null {
+  if (!text.includes('<') && !text.includes('&')) return null;
+  const nodes = walkHtml(parseHtmlFragment(text));
+  const body = nodes.map((n) => n.kind === 'text' ? n.value : '').join('');
+  const rest = nodes.flatMap((n) => n.kind === 'element' ? n.attrs.map((a) => a.value) : n.kind === 'comment' ? [n.data] : []);
+  return [body, ...rest].join('\n');
+}
+
 /** `text` without its hidden characters ({@link hiddenCharIndexes}), counted in code points. */
 function withoutHidden(text: string): string {
   const drop = new Set(hiddenCharIndexes(text));
@@ -314,9 +329,16 @@ export function judgeContext(
   check: { scanSecret: (text: string) => string | null; maskVault: (text: string) => string },
 ): { context: Record<string, unknown> } | { secretField: number } {
   const holdsSecret = (text: string): boolean => check.maskVault(text) !== text || check.scanSecret(text) !== null;
+  // A text as written and, where it can hold markup, as it reads: an entity or a tag can split a
+  // credential the written bytes do not show whole.
+  const textHolds = (text: string): boolean => {
+    if (holdsSecret(text)) return true;
+    const read = htmlTextOf(text);
+    return read !== null && holdsSecret(read);
+  };
   for (let i = 0; i < fields.length; i++) {
     const value = Object.hasOwn(read, fields[i]!) ? read[fields[i]!] : null;
-    if (stringsIn(value)?.some(holdsSecret) ?? true) return { secretField: i };
+    if (stringsIn(value)?.some(textHolds) ?? true) return { secretField: i };
   }
   const context: Record<string, unknown> = Object.fromEntries(fields.map((f) => [f, shapeContextValue(Object.hasOwn(read, f) ? read[f] : null)]));
   for (let i = fields.length - 1; i >= 0 && contextLength(context) > JUDGE_CONTEXT_MAX_TOTAL; i--) {
