@@ -167,6 +167,8 @@ export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => s
 	// One person can be listed once per access, and the roles an ended access was paused with are
 	// a copy from the pause: the same role under two accesses is one sentence, said once.
 	const said = new Set<string>();
+	// The workflow role F2 says for its member counts as said, also for the same person's other access.
+	if (f2 !== null) for (const line of roleLines({ ...f2.by, roles: [f2.role] }, p.workflow?.name ?? null, null)) said.add(line.text);
 	for (const m of p.members) {
 		for (const line of roleLines(m, p.workflow?.name ?? null, f2 !== null && f2.by === m ? f2.role : null)) {
 			if (said.has(line.text)) continue;

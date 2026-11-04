@@ -58,6 +58,11 @@ describe('F2: the workflow is taken over with the plan', () => {
 			'Dieser Plan nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow. Dann laufen auch diese Pläne wieder: A, B.',
 		);
 	});
+	it('the role F2 says is not said again for the same person\'s other access', () => {
+		// Paused for two accesses of one person, the second renewed: both entries carry the copy of the role.
+		const p = preview({ members: [wfMember(['workflow-edited']), { name: 'ida@x.ch', roles: ['workflow-edited'], ended: false, reason: null }], workflow: wf });
+		expect(kinds(p).filter((k) => k === 'role' || k === 'f2')).toEqual(['f2']);
+	});
 	it('with two members, it names the one who changed the workflow, not the one who created it', () => {
 		const p = preview({ members: [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')], workflow: wf });
 		expect(takeoverLines(p, fmt).find((l) => l.kind === 'f2')?.text).toBe(
