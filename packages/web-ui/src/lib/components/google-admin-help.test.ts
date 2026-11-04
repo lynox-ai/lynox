@@ -150,3 +150,43 @@ describe('the docs section the link leads to', () => {
 		expect(s).toContain('**Manage App Access** → **Configure new app**');
 	});
 });
+
+describe('the other places on the page that repeat lynox\'s consent set in words', () => {
+	// Row 370: besides the admin table, two passages say in prose what the standard consent asks
+	// for. They move with the contract list, or a scope change leaves them describing the old set.
+	const PHRASES: Record<string, string> = {
+		'calendar.events': 'calendar events',
+		'calendar.freebusy': 'free/busy',
+		'drive.file': 'Drive files lynox',
+	};
+	const NOT_IN_THE_SET = ['Gmail', 'Sheets', 'Docs', 'spreadsheet', 'full Drive'];
+
+	const between = (from: string, to: string): string => {
+		const start = DOCS.indexOf(from);
+		expect(start, `the passage opening with ${from} is gone`).toBeGreaterThan(-1);
+		const end = DOCS.indexOf(to, start + from.length);
+		expect(end, `the end of the passage opening with ${from} is gone`).toBeGreaterThan(start);
+		return DOCS.slice(start, end);
+	};
+	// The managed tip, up to the sentence that names what the set does NOT include.
+	const tip = (): string => between(':::tip[On lynox.cloud you can skip all of it]', 'If you need more than that');
+	const standardRow = (): string => between('| **Standard** (default) |', '\n');
+
+	it('has a phrase for exactly the data scopes on the contract list', () => {
+		const identity = new Set(['openid', 'https://www.googleapis.com/auth/userinfo.email']);
+		const data = GOOGLE_BROKER_SCOPES.filter((x) => !identity.has(x)).map((x) => x.replace('https://www.googleapis.com/auth/', ''));
+		expect(Object.keys(PHRASES).sort()).toEqual([...data].sort());
+	});
+
+	it('the managed tip names every one of them, and nothing outside the set', () => {
+		const t = tip();
+		for (const phrase of Object.values(PHRASES)) expect(t).toContain(phrase);
+		for (const word of NOT_IN_THE_SET) expect(t).not.toContain(word);
+	});
+
+	it('the Standard row of the access-level table names every one of them, and nothing outside the set', () => {
+		const r = standardRow();
+		for (const phrase of Object.values(PHRASES)) expect(r).toContain(phrase);
+		for (const word of NOT_IN_THE_SET) expect(r).not.toContain(word);
+	});
+});
