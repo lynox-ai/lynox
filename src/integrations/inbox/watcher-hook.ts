@@ -280,8 +280,12 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // without it, so the rule's audit records it too: the store keeps 200 characters of what
     // the check read, and a reader of the item (`inbox_read`) withholds the mail by this.
     const sensitive = analyzeSensitiveContent({ subject, body: env.snippet });
+    // A rule that would file a sensitive mail as handled does not apply (PRD inbox-user-rules F1):
+    // the mail goes to "requires you" as a sensitive skip, whatever the mode, so neither a rule nor
+    // the classifier silences it. The owner's own rules included.
+    const withheldRule = rule && rule.bucket === 'auto_handled' && sensitive.isSensitive ? rule : null;
 
-    if (rule) {
+    if (rule && !withheldRule) {
       const itemId = opts.state.insertItemWithAudit(
         {
           tenantId: opts.tenantId,
@@ -293,6 +297,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           reasonDe: `Regel: ${rule.matcherKind} = ${rule.matcherValue}`,
           classifiedAt: new Date(),
           classifierVersion: `rule:${rule.id}`,
+          matchedRuleId: rule.id,
           ...envelopeFields,
         },
         {
@@ -301,6 +306,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           actor: 'rule_engine',
           payloadJson: JSON.stringify({
             rule_id: rule.id,
+            // The name stays here when the rule is deleted and the item's rule id is cleared.
+            ...(rule.name !== undefined ? { rule_name: rule.name } : {}),
             matcher_kind: rule.matcherKind,
             matcher_value: rule.matcherValue,
             action: rule.action,
@@ -328,7 +335,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //    skip  → block, audit categories, no LLM
     //    mask  → redact matched substrings, classify the masked version
     //    allow → send raw, audit that user opted in
-    if (sensitive.isSensitive && sensitiveMode === 'skip') {
+    if (sensitive.isSensitive && (sensitiveMode === 'skip' || withheldRule)) {
       const itemId = opts.state.insertItemWithAudit(
         {
           tenantId: opts.tenantId,
@@ -348,8 +355,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           actor: 'rule_engine',
           payloadJson: JSON.stringify({
             sensitive_categories: sensitive.categories,
-            sensitive_mode: 'skip',
+            sensitive_mode: withheldRule ? sensitiveMode : 'skip',
             skipped_llm: true,
+            ...(withheldRule ? { rule_withheld: withheldRule.id } : {}),
           }),
         },
       );

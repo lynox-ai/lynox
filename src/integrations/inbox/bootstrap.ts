@@ -52,9 +52,16 @@ import {
   type OnInboundMailHook,
 } from './watcher-hook.js';
 import type { MailStateDb } from '../mail/state.js';
-import type { InboxReader } from '../mail/context.js';
+import type { InboxReader, InboxRuleProposer } from '../mail/context.js';
 import { PROVIDER_NOT_ON_LIST_REFUSAL, providerListApplies } from '../../core/contained-providers.js';
 import { FixedTextError } from '../../core/error-egress.js';
+
+/**
+ * Waiting rule proposals per account (PRD inbox-user-rules E7), as `MAX_PENDING_PER_TRIGGER` caps
+ * the approval queue (`core/approval-filing.ts`): a run that reads hostile mail cannot fill the
+ * owner's rule view.
+ */
+export const MAX_PENDING_RULE_PROPOSALS = 10;
 
 /** Bundle the Engine retains. `shutdown()` drains the queue. */
 export interface InboxRuntime {
@@ -75,6 +82,8 @@ export interface InboxRuntime {
   inboxLabelOf: NonNullable<import('../mail/context.js').MailHooks['inboxLabelOf']>;
   /** Wire as `MailHooks.inboxReader` — the store as `inbox_read` reads it. */
   inboxReader: InboxReader;
+  /** Wire as `MailHooks.inboxRuleProposer` — waiting rules for `inbox_rule_propose`. */
+  inboxRuleProposer: InboxRuleProposer;
   /**
    * Operator-driven cold-start re-run. The HTTP layer resolves the
    * `MailProvider` from its registry and hands it in; runtime closes over
@@ -404,6 +413,13 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     disabledAccounts: disabledAccounts ?? new Set<string>(),
   };
 
+  // A proposal waits for the owner and does not apply, so the rule cache is not touched here; the
+  // confirm route invalidates it.
+  const inboxRuleProposer: InboxRuleProposer = {
+    maxPending: MAX_PENDING_RULE_PROPOSALS,
+    propose: (input) => state.proposeRule({ ...input, tenantId: opts.tenantId }, MAX_PENDING_RULE_PROPOSALS),
+  };
+
   const onOutboundReconcile: NonNullable<import('../mail/context.js').MailHooks['onOutboundSent']> =
     (accountId, outboundCtx) => {
       // Message-ID match is account-agnostic; the account scopes only the
@@ -454,6 +470,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     onOutboundReconcile,
     inboxLabelOf,
     inboxReader,
+    inboxRuleProposer,
     runColdStart,
     sensitiveMode: opts.sensitiveMode ?? 'skip',
     shutdown: async (shutdownOpts) => {

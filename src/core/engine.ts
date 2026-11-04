@@ -967,6 +967,8 @@ export class Engine {
         this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
         // The store as the inbox view reads it, for inbox_read.
         this._mailContext.hooks.inboxReader = runtime.inboxReader;
+        // Waiting rules for inbox_rule_propose.
+        this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -2317,6 +2319,8 @@ export class Engine {
           this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
           // The store as the inbox view reads it, for inbox_read.
           this._mailContext.hooks.inboxReader = runtime.inboxReader;
+          // Waiting rules for inbox_rule_propose.
+          this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —

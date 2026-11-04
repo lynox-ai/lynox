@@ -127,6 +127,17 @@ describe('InboxRulesLoader — ordering and isolation', () => {
   });
 });
 
+describe('InboxRulesLoader — only confirmed rules apply (PRD inbox-user-rules E7)', () => {
+  it('a rule the agent proposed matches nothing until the owner confirms it', () => {
+    const p = inbox.proposeRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'waits@x', name: 'W' }, 10);
+    const id = p.ok ? p.id : '';
+    expect(loader.match(input({ accountId: 'acct-1', from: 'waits@x' }))).toBeNull();
+    expect(inbox.confirmRule(id)).toBe(true);
+    loader.invalidateAll();
+    expect(loader.match(input({ accountId: 'acct-1', from: 'waits@x' }))?.id).toBe(id);
+  });
+});
+
 describe('InboxRulesLoader — cache', () => {
   it('reads rules from the DB on first match and serves later matches from cache', () => {
     inbox.insertRule({
@@ -137,7 +148,7 @@ describe('InboxRulesLoader — cache', () => {
       action: 'archive',
       source: 'on_demand',
     });
-    const spy = vi.spyOn(inbox, 'listRulesForAccount');
+    const spy = vi.spyOn(inbox, 'listConfirmedRulesForAccount');
     expect(loader.match(input({ from: 'a@x' }))).not.toBeNull();
     expect(loader.match(input({ from: 'a@x' }))).not.toBeNull();
     expect(loader.match(input({ from: 'a@x' }))).not.toBeNull();
@@ -163,7 +174,7 @@ describe('InboxRulesLoader — cache', () => {
     });
     loader.match(input({ accountId: 'acct-1', from: 'a@x' }));
     loader.match(input({ accountId: 'acct-2', from: 'b@x' }));
-    const spy = vi.spyOn(inbox, 'listRulesForAccount');
+    const spy = vi.spyOn(inbox, 'listConfirmedRulesForAccount');
     loader.invalidate('acct-1');
     loader.match(input({ accountId: 'acct-1', from: 'a@x' }));
     loader.match(input({ accountId: 'acct-2', from: 'b@x' }));
@@ -181,7 +192,7 @@ describe('InboxRulesLoader — cache', () => {
       source: 'on_demand',
     });
     loader.match(input({ from: 'a@x' }));
-    const spy = vi.spyOn(inbox, 'listRulesForAccount');
+    const spy = vi.spyOn(inbox, 'listConfirmedRulesForAccount');
     loader.invalidateAll();
     loader.match(input({ from: 'a@x' }));
     expect(spy).toHaveBeenCalledTimes(1);

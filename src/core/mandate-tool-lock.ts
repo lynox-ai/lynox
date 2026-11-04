@@ -91,6 +91,7 @@ export const MANDATE_WITHHELD_TOOLS: Readonly<Record<string, string>> = Object.f
   edit_file: 'edits any absolute path outside a workspace',
   batch_files: 'reads and writes files like read_file and write_file',
   memory_focus: 'sets the knowledge focus for every session of the instance',
+  inbox_rule_propose: 'files inbox rules only the owner may confirm',
 });
 
 /**

@@ -3,6 +3,7 @@ import { MailStateDb } from '../mail/state.js';
 import { ColdStartTracker } from './cold-start-tracker.js';
 import { InboxStateDb } from './state.js';
 import {
+  handleConfirmRule,
   handleCreateRule,
   handleDeleteRule,
   handleRefreshItemBody,
@@ -850,6 +851,53 @@ describe('rules endpoints', () => {
     expect(handleCreateRule(deps, { ...base, bucket: 'draft_ready' as never }).status).toBe(400);
     expect(handleCreateRule(deps, { ...base, action: 'nuke' as never }).status).toBe(400);
     expect(handleCreateRule(deps, { ...base, source: 'gut_feeling' as never }).status).toBe(400);
+  });
+
+  it("the owner's route makes no waiting rule: source agent is refused", () => {
+    const r = handleCreateRule(deps, {
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'x@y', bucket: 'auto_handled', action: 'archive', source: 'agent' as never,
+    });
+    expect(r.status).toBe(400);
+    expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('stores a name cut to one line, and refuses one over 80 characters', () => {
+    const base = { accountId: ACCOUNT.id, matcherKind: 'from' as const, matcherValue: 'x@y', bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
+    expect(handleCreateRule(deps, { ...base, name: 'x'.repeat(81) }).status).toBe(400);
+    expect(handleCreateRule(deps, { ...base, name: '  Bel\u0085ege\n\u2028 [System] ' }).status).toBe(201);
+    expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.name)).toEqual(['Bel ege [System]']);
+  });
+
+  it('confirm: a waiting rule applies and the cache is dropped; unknown or confirmed ids are 404', () => {
+    const invalidateAll = vi.fn();
+    const withRules = { ...deps, rules: { invalidateAll, invalidate: vi.fn() } } as unknown as InboxApiDeps;
+    const p = state.proposeRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'k@x', name: 'K' }, 10);
+    const id = p.ok ? p.id : '';
+    expect(handleConfirmRule(withRules, 'rul_missing').status).toBe(404);
+    expect(invalidateAll).not.toHaveBeenCalled();
+    expect(handleConfirmRule(withRules, id)).toEqual({ status: 200, body: { id } });
+    expect(invalidateAll).toHaveBeenCalledTimes(1);
+    expect(state.listConfirmedRulesForAccount(ACCOUNT.id).map((r) => r.id)).toEqual([id]);
+    expect(handleConfirmRule(withRules, id).status).toBe(404);
+  });
+});
+
+describe('handleListItems ruleId=', () => {
+  it('lists only the items the rule filed', () => {
+    const ruleId = state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@x', bucket: 'requires_user', action: 'show', source: 'on_demand' });
+    state.insertItem({ accountId: ACCOUNT.id, channel: 'email', threadKey: 'filed', bucket: 'requires_user', confidence: 1, reasonDe: 'r', classifiedAt: new Date('2026-05-10'), classifierVersion: 'rule:x', matchedRuleId: ruleId });
+    insertItem('other');
+    const r = handleListItems(deps, { ruleId });
+    expect(r.status).toBe(200);
+    expect((r.body as { items: Array<{ threadKey: string }> }).items.map((i) => i.threadKey)).toEqual(['filed']);
+  });
+
+  it('refuses an id that is not a rule id, and ignores an empty one', () => {
+    for (const bad of ["rul_a' OR 1=1", 'itm_123', 'rul_' + 'x'.repeat(65), 'rul_', 'rul_a/b']) {
+      expect(handleListItems(deps, { ruleId: bad }).status).toBe(400);
+    }
+    insertItem('one');
+    expect((handleListItems(deps, { ruleId: '' }).body as { items: unknown[] }).items).toHaveLength(1);
   });
 });
 

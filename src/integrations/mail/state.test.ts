@@ -308,7 +308,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(19);
+    expect(row.v).toBe(20);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -521,7 +521,7 @@ describe('MailStateDb — migration v17 (claim a scheduled send)', () => {
     });
     fresh.close();
     const raw = new BetterSqlite3(path);
-    raw.exec('ALTER TABLE inbox_thread_messages DROP COLUMN auto_reply; DELETE FROM schema_version WHERE version = 19; DROP TABLE mail_delta_cursors; DELETE FROM schema_version WHERE version = 18; ALTER TABLE mail_scheduled DROP COLUMN sending_at; DELETE FROM schema_version WHERE version = 17;');
+    raw.exec('DROP INDEX IF EXISTS idx_inbox_items_matched_rule; ALTER TABLE inbox_items DROP COLUMN matched_rule_id; ALTER TABLE inbox_rules DROP COLUMN name; ALTER TABLE inbox_rules DROP COLUMN confirmed_at; ALTER TABLE inbox_rules DROP COLUMN run_id; DELETE FROM schema_version WHERE version = 20; ALTER TABLE inbox_thread_messages DROP COLUMN auto_reply; DELETE FROM schema_version WHERE version = 19; DROP TABLE mail_delta_cursors; DELETE FROM schema_version WHERE version = 18; ALTER TABLE mail_scheduled DROP COLUMN sending_at; DELETE FROM schema_version WHERE version = 17;');
     raw.close();
     return id;
   }
@@ -531,7 +531,7 @@ describe('MailStateDb — migration v17 (claim a scheduled send)', () => {
     const db = new MailStateDb({ path });
     try {
       const raw = (db as unknown as { db: BetterSqlite3.Database }).db;
-      expect((raw.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(19);
+      expect((raw.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(20);
       expect((raw.prepare("PRAGMA table_info('mail_scheduled')").all() as { name: string }[]).map((c) => c.name)).toContain('sending_at');
       expect(db.listDueScheduledSends().map((r) => r.id)).toEqual([id]);
     } finally {
@@ -584,7 +584,7 @@ describe('MailStateDb — migration v16 (retire inbox_drafts)', () => {
     raw.exec(`
       CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
       INSERT INTO schema_version (version) VALUES (15);
-      CREATE TABLE inbox_items (id TEXT PRIMARY KEY, draft_id TEXT);
+      CREATE TABLE inbox_items (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL DEFAULT 'default', draft_id TEXT);
       CREATE TABLE inbox_drafts (
         id TEXT PRIMARY KEY,
         item_id TEXT NOT NULL,
@@ -598,6 +598,8 @@ describe('MailStateDb — migration v16 (retire inbox_drafts)', () => {
       CREATE TABLE mail_scheduled (id TEXT PRIMARY KEY, sent_at INTEGER, failed_at INTEGER);
       -- And inbox_thread_messages (v12); v19 alters it.
       CREATE TABLE inbox_thread_messages (id TEXT PRIMARY KEY);
+      -- And inbox_rules (v7); v20 alters it and backfills confirmed_at from created_at.
+      CREATE TABLE inbox_rules (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
     `);
     raw.close();
   });
@@ -612,7 +614,7 @@ describe('MailStateDb — migration v16 (retire inbox_drafts)', () => {
       const raw = (migrated as unknown as { db: BetterSqlite3.Database }).db;
       // Migration ran to the new head.
       const version = raw.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-      expect(version.v).toBe(19);
+      expect(version.v).toBe(20);
       // The table is gone.
       const drafts = raw
         .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name = 'inbox_drafts'`)
@@ -767,15 +769,45 @@ describe('MailStateDb — migration v19 (auto-reply mark on thread messages)', (
       const path = join(dir, 'mail-state.db');
       new MailStateDb({ path }).close();
       const raw = new BetterSqlite3(path);
-      raw.exec('ALTER TABLE inbox_thread_messages DROP COLUMN auto_reply; DELETE FROM schema_version WHERE version = 19;');
+      raw.exec('DROP INDEX IF EXISTS idx_inbox_items_matched_rule; ALTER TABLE inbox_items DROP COLUMN matched_rule_id; ALTER TABLE inbox_rules DROP COLUMN name; ALTER TABLE inbox_rules DROP COLUMN confirmed_at; ALTER TABLE inbox_rules DROP COLUMN run_id; DELETE FROM schema_version WHERE version = 20; ALTER TABLE inbox_thread_messages DROP COLUMN auto_reply; DELETE FROM schema_version WHERE version = 19;');
       raw.prepare(`INSERT INTO inbox_thread_messages (id, account_id, thread_key, message_id, from_address, subject, fetched_at)
         VALUES ('t1', 'acct', 'gmail:th', '<old@x>', 'a@x', 's', 1)`).run();
       raw.close();
       const migrated = new MailStateDb({ path });
       try {
         const conn = (migrated as unknown as { db: BetterSqlite3.Database }).db;
-        expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(19);
+        expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(20);
         expect(conn.prepare("SELECT auto_reply FROM inbox_thread_messages WHERE id = 't1'").get()).toEqual({ auto_reply: null });
+      } finally {
+        migrated.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('MailStateDb — migration v20 (named, confirmable rules; the rule an item was filed by)', () => {
+  it('a database at v19 gains the columns, and a rule stored before counts as confirmed at its creation', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mail-rules-v19-'));
+    try {
+      const path = join(dir, 'mail-state.db');
+      new MailStateDb({ path }).close();
+      const raw = new BetterSqlite3(path);
+      raw.exec('DROP INDEX IF EXISTS idx_inbox_items_matched_rule; ALTER TABLE inbox_items DROP COLUMN matched_rule_id; ALTER TABLE inbox_rules DROP COLUMN name; ALTER TABLE inbox_rules DROP COLUMN confirmed_at; ALTER TABLE inbox_rules DROP COLUMN run_id; DELETE FROM schema_version WHERE version = 20;');
+      raw.prepare(`INSERT INTO inbox_rules (id, tenant_id, account_id, matcher_kind, matcher_value, bucket, action, created_at, source)
+        VALUES ('rul_old', 'default', 'acct', 'from', 'a@x', 'auto_handled', 'archive', 1234, 'on_demand')`).run();
+      raw.close();
+      const migrated = new MailStateDb({ path });
+      try {
+        const conn = (migrated as unknown as { db: BetterSqlite3.Database }).db;
+        expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(20);
+        expect(conn.prepare("SELECT name, confirmed_at, run_id FROM inbox_rules WHERE id = 'rul_old'").get())
+          .toEqual({ name: null, confirmed_at: 1234, run_id: null });
+        const cols = (conn.prepare('PRAGMA table_info(inbox_items)').all() as { name: string }[]).map((c) => c.name);
+        expect(cols).toContain('matched_rule_id');
+        const idx = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inbox_items_matched_rule'").get();
+        expect(idx).toEqual({ name: 'idx_inbox_items_matched_rule' });
       } finally {
         migrated.close();
       }
@@ -1033,12 +1065,12 @@ describe('MailStateDb — delta cursors (v18)', () => {
       const path = join(dir, 'mail-state.db');
       new MailStateDb({ path }).close();
       const raw = new BetterSqlite3(path);
-      raw.exec('ALTER TABLE inbox_thread_messages DROP COLUMN auto_reply; DELETE FROM schema_version WHERE version = 19; DELETE FROM schema_version WHERE version = 18;');
+      raw.exec('DROP INDEX IF EXISTS idx_inbox_items_matched_rule; ALTER TABLE inbox_items DROP COLUMN matched_rule_id; ALTER TABLE inbox_rules DROP COLUMN name; ALTER TABLE inbox_rules DROP COLUMN confirmed_at; ALTER TABLE inbox_rules DROP COLUMN run_id; DELETE FROM schema_version WHERE version = 20; ALTER TABLE inbox_thread_messages DROP COLUMN auto_reply; DELETE FROM schema_version WHERE version = 19; DELETE FROM schema_version WHERE version = 18;');
       raw.close();
       const reopened = new MailStateDb({ path });
       try {
         const conn = (reopened as unknown as { db: BetterSqlite3.Database }).db;
-        expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(19);
+        expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(20);
       } finally {
         reopened.close();
       }
@@ -1055,7 +1087,7 @@ describe('MailStateDb — delta cursors (v18)', () => {
       fresh.upsertAccount(ACCOUNT);
       fresh.close();
       const raw = new BetterSqlite3(path);
-      raw.exec('ALTER TABLE inbox_thread_messages DROP COLUMN auto_reply; DELETE FROM schema_version WHERE version = 19; DROP TABLE mail_delta_cursors; DELETE FROM schema_version WHERE version = 18;');
+      raw.exec('DROP INDEX IF EXISTS idx_inbox_items_matched_rule; ALTER TABLE inbox_items DROP COLUMN matched_rule_id; ALTER TABLE inbox_rules DROP COLUMN name; ALTER TABLE inbox_rules DROP COLUMN confirmed_at; ALTER TABLE inbox_rules DROP COLUMN run_id; DELETE FROM schema_version WHERE version = 20; ALTER TABLE inbox_thread_messages DROP COLUMN auto_reply; DELETE FROM schema_version WHERE version = 19; DROP TABLE mail_delta_cursors; DELETE FROM schema_version WHERE version = 18;');
       raw.close();
       const migrated = new MailStateDb({ path });
       try {

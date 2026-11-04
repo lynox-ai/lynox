@@ -60,6 +60,13 @@ describe('toolLockFor', () => {
 
   // The focus override holds for every session of the instance, the owner's included,
   // so a mandate does not get the tool; the owner keeps it (no lock).
+  // A mandate can neither propose an inbox rule nor confirm one (the confirm route is owner-only).
+  it('withholds inbox_rule_propose from a mandate, with its reason, and leaves it to the owner', () => {
+    expect(MANDATE_TOOL_SURFACE.has('inbox_rule_propose')).toBe(false);
+    expect(toolLockFor({ kind: 'mandate', email: 'setup@example.org' })?.has('inbox_rule_propose')).toBe(false);
+    expect(MANDATE_WITHHELD_TOOLS['inbox_rule_propose']).toBe('files inbox rules only the owner may confirm');
+  });
+
   it('withholds memory_focus from a mandate, with its reason, and leaves it to the owner', () => {
     expect(MANDATE_TOOL_SURFACE.has('memory_focus')).toBe(false);
     expect(toolLockFor({ kind: 'mandate', email: 'setup@example.org' })?.has('memory_focus')).toBe(false);

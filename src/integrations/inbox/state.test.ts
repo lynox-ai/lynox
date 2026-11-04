@@ -433,6 +433,78 @@ describe('InboxStateDb — rules', () => {
   });
 });
 
+describe('InboxStateDb — rules the agent proposes (PRD inbox-user-rules E7)', () => {
+  const proposal = (over: Partial<Parameters<InboxStateDb['proposeRule']>[0]> = {}) => ({
+    accountId: TEST_ACCOUNT.id, matcherKind: 'from' as const, matcherValue: 'kunde@example.com', name: 'Kunde', ...over,
+  });
+
+  it('a proposal waits: requires_user, show, source agent, unconfirmed, with its run — and it is not a rule that applies', () => {
+    const r = inbox.proposeRule(proposal({ runId: 'run-7' }), 10, new Date(5000));
+    expect(r.ok).toBe(true);
+    const id = r.ok ? r.id : '';
+    const all = inbox.listRulesForAccount(TEST_ACCOUNT.id);
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({ id, bucket: 'requires_user', action: 'show', source: 'agent', name: 'Kunde', runId: 'run-7' });
+    expect(all[0]?.confirmedAt).toBeUndefined();
+    expect(inbox.listConfirmedRulesForAccount(TEST_ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('confirming makes it apply, once; an unknown or other-tenant id confirms nothing', () => {
+    const r = inbox.proposeRule(proposal(), 10);
+    const id = r.ok ? r.id : '';
+    expect(inbox.confirmRule(id, 'other-tenant')).toBe(false);
+    expect(inbox.listConfirmedRulesForAccount(TEST_ACCOUNT.id)).toHaveLength(0);
+    expect(inbox.confirmRule('rul_missing')).toBe(false);
+    expect(inbox.confirmRule(id, DEFAULT_TENANT_ID, new Date(9000))).toBe(true);
+    expect(inbox.confirmRule(id)).toBe(false);
+    const applied = inbox.listConfirmedRulesForAccount(TEST_ACCOUNT.id);
+    expect(applied.map((x) => x.id)).toEqual([id]);
+    expect(applied[0]?.confirmedAt?.getTime()).toBe(9000);
+  });
+
+  it('the eleventh waiting proposal of an account is refused; confirming one frees a place; another account counts apart', () => {
+    for (let i = 0; i < 10; i++) {
+      expect(inbox.proposeRule(proposal({ matcherValue: `k${String(i)}@example.com` }), 10).ok).toBe(true);
+    }
+    const eleventh = inbox.proposeRule(proposal({ matcherValue: 'k10@example.com' }), 10);
+    expect(eleventh).toEqual({ ok: false, reason: 'limit', pending: 10 });
+    expect(inbox.listRulesForAccount(TEST_ACCOUNT.id)).toHaveLength(10);
+    mail.upsertAccount({ ...TEST_ACCOUNT, id: 'acct-2', address: 'second@example.com' });
+    expect(inbox.proposeRule(proposal({ accountId: 'acct-2' }), 10).ok).toBe(true);
+    const first = inbox.listRulesForAccount(TEST_ACCOUNT.id)[0]!;
+    expect(inbox.confirmRule(first.id)).toBe(true);
+    expect(inbox.proposeRule(proposal({ matcherValue: 'k10@example.com' }), 10).ok).toBe(true);
+  });
+
+  it("an owner's rule is confirmed when it is made, and keeps its name", () => {
+    const id = inbox.insertRule({
+      accountId: TEST_ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@x', bucket: 'auto_handled',
+      action: 'archive', source: 'on_demand', name: 'Belege', createdAt: new Date(4000),
+    });
+    const [rule] = inbox.listConfirmedRulesForAccount(TEST_ACCOUNT.id);
+    expect(rule).toMatchObject({ id, name: 'Belege' });
+    expect(rule?.confirmedAt?.getTime()).toBe(4000);
+  });
+
+  it('lists the items one rule filed, and deleting the rule clears the mark but not the items', () => {
+    const ruleId = inbox.insertRule({
+      accountId: TEST_ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@x', bucket: 'requires_user', action: 'show', source: 'on_demand',
+    });
+    const filed = insertSampleItem({ threadKey: 't-a', matchedRuleId: ruleId, subject: 'Rechnung 4711' });
+    insertSampleItem({ threadKey: 't-b', matchedRuleId: ruleId, subject: 'Mahnung', bucket: 'draft_ready' });
+    insertSampleItem({ threadKey: 't-c' });
+    expect(inbox.getItem(filed)?.matchedRuleId).toBe(ruleId);
+    expect(inbox.listItems({ ruleId }).map((i) => i.threadKey).sort()).toEqual(['t-a', 't-b']);
+    expect(inbox.listItems({ ruleId, bucket: 'draft_ready' }).map((i) => i.threadKey)).toEqual(['t-b']);
+    expect(inbox.listItems({ ruleId, q: '4711' }).map((i) => i.threadKey)).toEqual(['t-a']);
+    expect(inbox.listItems({ ruleId, tenantId: 'other-tenant' })).toHaveLength(0);
+    expect(inbox.deleteRule(ruleId)).toBe(true);
+    expect(inbox.listItems({ ruleId })).toHaveLength(0);
+    expect(inbox.getItem(filed)?.matchedRuleId).toBeUndefined();
+    expect(inbox.listItems()).toHaveLength(3);
+  });
+});
+
 describe('InboxStateDb — v11 envelope metadata', () => {
   it('round-trips envelope columns on insert', () => {
     const id = inbox.insertItem({

@@ -12570,6 +12570,9 @@ export class LynoxHTTPApi {
       if (q !== null) query.q = q;
       const snoozedOnly = url.searchParams.get('snoozedOnly');
       if (snoozedOnly !== null) query.snoozedOnly = snoozedOnly;
+      // A filter like `bucket`, not an identifier of what is read (READ_IDENTIFIERS).
+      const ruleId = url.searchParams.get('ruleId');
+      if (ruleId !== null) query.ruleId = ruleId;
       sendInbox(res, handleListItems(deps!, query));
     }, READS);
 
@@ -12797,6 +12800,15 @@ export class LynoxHTTPApi {
       const { handleDeleteRule } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleDeleteRule(deps!, params['id']!));
     }, ownerOnly('change inbox rules')));
+
+    // A rule the agent proposed applies only once the owner confirms it here (PRD inbox-user-rules
+    // E7). Owner-only: a mandate can neither propose (the tool is withheld) nor confirm.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/rules/:id/confirm', async (_req, res, params) => {
+      const deps = inboxDeps();
+      if (!requireService(res, deps, 'Inbox')) return;
+      const { handleConfirmRule } = await import('../integrations/inbox/api.js');
+      sendInbox(res, handleConfirmRule(deps!, params['id']!));
+    }, ownerOnly('confirm an inbox rule')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/entities', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
