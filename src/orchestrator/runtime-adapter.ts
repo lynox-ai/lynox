@@ -1,5 +1,5 @@
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
-import { heldSource, type RunSource } from './run-source.js';
+import { NestedRunEndedError, heldSource, isAuthorStop, type RunSource } from './run-source.js';
 import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
@@ -1677,6 +1677,10 @@ export async function spawnPipeline(
   // nested run keeps a failed step out of `state.outputs`). A rejected nested run stays
   // rejected, since readers of the outer run's status tell the two apart.
   if (state.status === 'rejected') throw new GateRejectedError(step.id, state.error);
+  // A sub-run stopped for its makers' access: the outer run ends with the same cause (1184).
+  if (state.status === 'failed' && isAuthorStop(state.error)) {
+    throw new NestedRunEndedError(state.error, `Nested pipeline "${step.id}" failed: ${state.error}`);
+  }
   if (state.status !== 'completed') {
     throw new Error(`Nested pipeline "${step.id}" ${state.status}: ${state.error ?? 'no reason recorded'}`);
   }

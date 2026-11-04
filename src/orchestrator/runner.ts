@@ -24,7 +24,7 @@ import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
-import { WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR, heldSource, sourceRefusal, type RunSource } from './run-source.js';
+import { NestedRunEndedError, WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR, heldSource, sourceRefusal, type RunSource } from './run-source.js';
 import { childFilingContext } from '../core/approval-filing.js';
 import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 
@@ -1338,9 +1338,17 @@ async function executeStep(
     // aborted) or ends the run anyway: a stopped run does not carry on to the next step.
     if (stoppedByOwner(options, state)) return 'halt';
     if (questionUnanswered(options, state)) return 'halt';
-    // …and so does a step that failed after a maker's access ended: a sub-run stopped for it ends
-    // its step with that error, and the run that holds it says the same, not the step's failure.
-    if (stopForEndedAuthor(options, state)) return 'halt';
+    // …and so does a sub-run that stopped for its makers' access: the run that holds it ends with
+    // that cause as the sub-run read it, whatever `on_failure` says. Only that error: a step that
+    // failed on its own keeps its outcome, and the next step's check reads the access again.
+    if (err instanceof NestedRunEndedError) {
+      if (state.status === 'running') {
+        state.status = 'failed';
+        state.error = err.runError;
+        state.completedAt = new Date().toISOString();
+      }
+      return 'halt';
+    }
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
       state.status = 'rejected';

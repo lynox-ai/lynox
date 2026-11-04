@@ -488,4 +488,36 @@ describe('a sub-run stops before its next step when a maker\'s access ends durin
     expect(mockProcess).toHaveBeenCalledTimes(2);
     expect(state.status).toBe('completed');
   });
+
+  it("the outer run takes the sub-run's cause word for word, without reading the access again", async () => {
+    // The read before the sub-run's second step throws once; a second read by the outer run
+    // would succeed and could not tell what the sub-run stopped on.
+    let throwOnce = false;
+    const source: RunSource = { kind: 'saved', workflowId: WF, authors: [{ kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' }],
+      ends: { isLive: () => { if (throwOnce) { throwOnce = false; throw new Error('engine.db busy'); } return true; } } };
+    mockProcess.mockImplementationOnce(() => { throwOnce = true; return Promise.resolve(endTurnResponse('Report written.')); });
+    mockProcess.mockImplementation(() => Promise.resolve(endTurnResponse('Report sent.')));
+    const state = await runManifest({ ...nestedManifest, on_failure: 'continue' as const }, config, { source });
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect([state.status, state.error]).toEqual(['failed', WORKFLOW_END_CHECK_FAILED_ERROR]);
+  });
+});
+
+// 1184, review r1 L1: the check before a step is not repeated when a step fails. A step that fails
+// on its own, under `on_failure: 'continue'`, leaves the run to finish as it did before.
+describe("a step's own failure keeps its outcome (1184)", () => {
+  it('the last step fails under continue while the read of the access would throw: the run completes', async () => {
+    let reads = 0;
+    const source: RunSource = { kind: 'saved', workflowId: WF, authors: [{ kind: 'mandate', email: 'bea@example.test', mandateId: 'grant-b' }],
+      // Live for the start and the check before the step; any read after it throws.
+      ends: { isLive: () => { reads++; if (reads > 2) throw new Error('engine.db busy'); return true; } } };
+    mockProcess.mockImplementation(() => Promise.reject(new Error('the API answered 500')));
+    const manifest = {
+      manifest_version: '1.1' as const, name: 'probe', triggered_by: 'test', context: {},
+      agents: [{ id: 'send', agent: 'send', runtime: 'inline' as const, task: 'Send the report.' }], gate_points: [], on_failure: 'continue' as const,
+    };
+    const state = await runManifest(manifest, config, { source });
+    expect(state.status).toBe('completed');
+    expect(state.error).toBeUndefined();
+  });
 });

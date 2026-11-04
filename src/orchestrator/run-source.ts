@@ -66,6 +66,24 @@ export const WORKFLOW_END_CHECK_FAILED_ERROR = `${END_CHECK_FAILED_CAUSE} `
 export const WORKFLOW_END_CHECK_FAILED = `${END_CHECK_FAILED_CAUSE} `
   + "The steps listed in this result ran; the others did not. Do not say that anyone's access ended or name another cause. "
   + 'Tell the user they can start it again, and that the steps that already ran would then run again. Do not start it yourself unless they ask.';
+/**
+ * A sub-run stopped because a maker's access ended, or because that read threw: thrown from the
+ * `runtime: 'pipeline'` step so the run that holds it takes `runError` as its own cause, word for
+ * word, instead of reading the access again (a second read can disagree with the first) or
+ * recording the step's failure (1184).
+ */
+export class NestedRunEndedError extends Error {
+  constructor(readonly runError: string, message: string) {
+    super(message);
+    this.name = 'NestedRunEndedError';
+  }
+}
+
+/** Whether a run's error is one of the two that stop a run before a step for its makers' access. */
+export function isAuthorStop(error: string | undefined): error is string {
+  return error === WORKFLOW_ENDED_MID_RUN_ERROR || error === WORKFLOW_END_CHECK_FAILED_ERROR;
+}
+
 export const WORKFLOW_UNREADABLE_REFUSAL = 'Could not read who set up this workflow, so it did not run.';
 export const NESTED_AT_TOP_REFUSAL = 'A nested run was started on its own, outside the run it belongs to, so it did not run.';
 
