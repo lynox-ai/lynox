@@ -89,10 +89,12 @@ interface Internals {
 const USAGE = { input_tokens: 900, output_tokens: 120, cache_creation_input_tokens: null, cache_read_input_tokens: null };
 const ANSWER = 'Habe die Offerte an Veltamare geschickt. Petra ist dort die Ansprechperson für Bestellungen.';
 const FACTS = [{ text: 'Petra Meier ist bei Veltamare die Ansprechperson für Bestellungen.', subject: 'Veltamare' }];
+// The same fact attributed to the operator: on a clean turn only this one is written as trusted (row 1103).
+const FACTS_STATED = [{ ...FACTS[0]!, source: 'user_stated' }];
 
-function makeAgent(opts: { reply?: ReturnType<typeof vi.fn>; writeResult?: unknown; modelPinnedByProfile?: boolean; currentMessage?: unknown } = {}) {
+function makeAgent(opts: { reply?: ReturnType<typeof vi.fn>; writeResult?: unknown; modelPinnedByProfile?: boolean; currentMessage?: unknown; facts?: unknown[] } = {}) {
   const reply = opts.reply ?? vi.fn().mockResolvedValue({
-    content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: FACTS } }],
+    content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: opts.facts ?? FACTS } }],
     usage: USAGE,
   });
   const write = vi.fn().mockReturnValue(opts.writeResult ?? { id: 'k1', status: 'active', deduped: false });
@@ -161,8 +163,11 @@ describe('turn-end capture — the chat a fact is stamped with', () => {
 });
 
 describe('turn-end capture — the two routes the owner asked for', () => {
-  it('a CLEAN turn writes the fact as trusted', async () => {
-    const { inner, write } = makeAgent();
+  it('a CLEAN turn writes an operator-stated fact as trusted', async () => {
+    const { inner, write } = makeAgent({ reply: vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: [{ ...FACTS[0], source: 'user_stated' }] } }],
+      usage: USAGE,
+    }) });
     await inner._captureFallback(ANSWER, false, 'none', OWNER_ACTOR);
     expect(write).toHaveBeenCalledTimes(1);
     expect(write.mock.calls[0]![0]).toMatchObject({ sourceUntrusted: false, sourceChannel: 'agent' });
@@ -288,8 +293,17 @@ describe('turn-end capture — per-fact routing on an untrusted turn', () => {
     expect(routingOf()).toBe('injection_suspected');
   });
 
-  it('a CLEAN turn ignores the attribution too — nothing to gate', async () => {
+  it('a CLEAN turn reads the attribution too: a fact only in the assistant half goes to review', async () => {
+    // Row 1103: a turn that read nothing external can still carry a draft the assistant was
+    // asked to write, and a fact taken from it is invented. Only the operator half is trusted.
     const { inner, write } = makeAgent({ reply: replyWith('external') });
+    await inner._captureFallback(ANSWER, false, 'none', OWNER_ACTOR);
+    expect(write.mock.calls[0]![0]).toMatchObject({ sourceUntrusted: true });
+    expect(routingOf()).toBe('turn_trusted_assistant');
+  });
+
+  it('a CLEAN turn writes an operator-half fact without review', async () => {
+    const { inner, write } = makeAgent({ reply: replyWith('user_stated') });
     await inner._captureFallback(ANSWER, false, 'none', OWNER_ACTOR);
     expect(write.mock.calls[0]![0]).toMatchObject({ sourceUntrusted: false });
     expect(routingOf()).toBe('turn_trusted');
@@ -587,15 +601,16 @@ describe('turn-end capture — what an adversarial round found missing', () => {
     // narrowed to `status === 'pending_review'` therefore fails in the direction that
     // is invisible: the fact is written and the user is never told. Both routes, or
     // the silent one is the one that breaks.
-    const { inner, events } = makeAgent();
+    const { inner, events, write } = makeAgent({ facts: FACTS_STATED });
     await inner._captureFallback(ANSWER, false, 'none', OWNER_ACTOR);
+    expect(write.mock.calls[0]![0]).toMatchObject({ sourceUntrusted: false });
     const chip = events.find((e) => e.type === 'knowledge_write');
     expect(chip, 'a trusted capture wrote silently').toBeDefined();
     expect(chip).toMatchObject({ status: 'active' });
   });
 
   it('records the fact with the run id — the join key the fire rate needs', async () => {
-    const { inner, write } = makeAgent();
+    const { inner, write } = makeAgent({ facts: FACTS_STATED });
     inner.currentRunId = 'run-77';
     await inner._captureFallback(ANSWER, false, 'none', OWNER_ACTOR);
     // Named fields, not `toMatchObject` on two of them: the earlier version passed
@@ -615,7 +630,7 @@ describe('turn-end capture — what an adversarial round found missing', () => {
     // Both routes in one test, because `propose_shown` fires only where a proposal is
     // actually shown — a trusted write emits `remember_invoked` alone. Asserting the
     // pair on a clean turn would have pinned a sequence the code never produces.
-    const clean = makeAgent();
+    const clean = makeAgent({ facts: FACTS_STATED });
     await clean.inner._captureFallback(ANSWER, false, 'none', OWNER_ACTOR);
     const cleanEvents = vi.mocked(appendCaptureTelemetry).mock.calls
       .map((c) => c[1] as unknown as Record<string, unknown>);
