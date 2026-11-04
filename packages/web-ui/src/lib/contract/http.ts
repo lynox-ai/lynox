@@ -669,9 +669,11 @@ export interface OAuthClaimResponse {
  * (`computeScopeMode` in `src/integrations/google/google-auth.ts`, called from
  * `src/server/http-api.ts`): a scope the broker stops asking for turns every
  * new brokered grant into `legacy` there, with no error at either end. The
- * engine's `STANDARD_SCOPES` and the control plane's broker list are each
- * held equal to this in their own repo's tests, and so is the scope list on
- * the docs page a Workspace admin configures lynox from.
+ * engine's `STANDARD_SCOPES` and the scope list on the docs page a Workspace
+ * admin configures lynox from are held equal to this in this repo's tests.
+ * The control plane's broker list still is its own literal; it switches over
+ * to its vendored copy of this symbol in its own change, once this file has
+ * reached that copy. Until then the binding runs one way only.
  *
  * ⚠ What it does NOT bind: a tenant with a `google_oauth_scopes` override.
  * The engine then judges against the override instead, and nothing here

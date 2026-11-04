@@ -115,7 +115,7 @@ describe('the docs section the link leads to', () => {
 	});
 
 	it('names exactly the scopes lynox\'s client asks for', () => {
-		// The contract list is the one the control plane's broker sends; its own repo holds it equal.
+		// The contract list is the one the control plane's broker is to send (bound on its side separately).
 		const row = /^\| Scopes \| (.+) \|$/m.exec(section());
 		expect(row).not.toBeNull();
 		const scopes = [...row![1]!.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
@@ -125,11 +125,16 @@ describe('the docs section the link leads to', () => {
 	it('explains every data scope on the list, and its Gmail sentence still holds', () => {
 		// When the list changes, the paragraph under it changes in the same PR (legal, row 370).
 		const s = section();
-		const paragraph = s.slice(s.indexOf('`calendar.events` and'), s.indexOf('**Where to configure it**'));
+		const start = s.indexOf('`calendar.events` and');
+		const end = s.indexOf('**Where to configure it**');
+		expect(start, 'the paragraph under the table is gone').toBeGreaterThan(-1);
+		expect(end, 'the heading after the paragraph is gone').toBeGreaterThan(start);
+		const paragraph = s.slice(start, end);
 		const identity = new Set(['openid', 'https://www.googleapis.com/auth/userinfo.email']);
-		for (const scope of GOOGLE_BROKER_SCOPES.filter((x) => !identity.has(x))) {
-			expect(paragraph).toContain(`\`${scope.replace('https://www.googleapis.com/auth/', '')}\``);
-		}
+		const named = GOOGLE_BROKER_SCOPES.filter((x) => !identity.has(x)).map((x) => x.replace('https://www.googleapis.com/auth/', ''));
+		// Both directions: every data scope is explained, and nothing it explains has left the list.
+		const mentioned = new Set([...paragraph.matchAll(/`([^`]+)`/g)].map((m) => m[1]!));
+		expect([...mentioned].sort()).toEqual([...named].sort());
 		expect(paragraph).toContain('lynox does not ask for Gmail with this client.');
 		expect(GOOGLE_BROKER_SCOPES.some((x) => x.includes('/auth/gmail') || x === 'https://mail.google.com/')).toBe(false);
 	});

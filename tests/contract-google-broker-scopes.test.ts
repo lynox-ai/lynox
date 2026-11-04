@@ -2,9 +2,9 @@
  * The scopes lynox's Google client asks for (`GOOGLE_BROKER_SCOPES`,
  * `src/contract/http.ts`) and the engine's standard set it is judged against.
  *
- * The control plane holds its broker list equal to the vendored copy in its own
- * repo; this side holds `STANDARD_SCOPES` to it, so a change on either side
- * fails a test instead of turning new brokered grants into `legacy`.
+ * This side holds `STANDARD_SCOPES` to it, so a change to either fails a test
+ * instead of turning new brokered grants into `legacy`. The control plane binds
+ * its broker list to its vendored copy in its own change, after this one.
  */
 import { describe, it, expect } from 'vitest';
 import { GOOGLE_BROKER_SCOPES } from '../src/contract/http.js';
