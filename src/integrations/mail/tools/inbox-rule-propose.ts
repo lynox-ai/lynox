@@ -12,7 +12,7 @@
 import type { IAgent, ToolEntry } from '../../../types/index.js';
 import type { MailHooks } from '../context.js';
 import type { MailRegistry } from './registry.js';
-import { ruleLine } from '../../inbox/rule-text.js';
+import { charCount, ruleLine, ruleValue } from '../../inbox/rule-text.js';
 
 export const INBOX_RULE_NAME_MAX = 80;
 export const INBOX_RULE_VALUE_MAX = 200;
@@ -67,11 +67,15 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
         return Promise.resolve('inbox_rule_propose: matcher_kind must be "from" or "subject_contains".');
       }
       const name = oneLine(input.name);
-      if (name.length === 0 || name.length > INBOX_RULE_NAME_MAX) {
+      if (name.length === 0 || charCount(name) > INBOX_RULE_NAME_MAX) {
         return Promise.resolve(`inbox_rule_propose: name must be 1 to ${String(INBOX_RULE_NAME_MAX)} characters.`);
       }
-      let value = oneLine(input.matcher_value);
-      if (value.length > INBOX_RULE_VALUE_MAX) {
+      const checked = ruleValue(typeof input.matcher_value === 'string' ? input.matcher_value : '');
+      if (checked.hidden) {
+        return Promise.resolve('inbox_rule_propose: matcher_value holds characters a reader does not see. Give the sender or the phrase as it reads.');
+      }
+      let value = checked.value;
+      if (charCount(value) > INBOX_RULE_VALUE_MAX) {
         return Promise.resolve(`inbox_rule_propose: matcher_value is longer than ${String(INBOX_RULE_VALUE_MAX)} characters.`);
       }
       if (input.matcher_kind === 'from') {

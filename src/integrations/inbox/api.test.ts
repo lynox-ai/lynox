@@ -864,8 +864,10 @@ describe('rules endpoints', () => {
   it('stores a name cut to one line, and refuses one over 80 characters', () => {
     const base = { accountId: ACCOUNT.id, matcherKind: 'from' as const, matcherValue: 'x@y', bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
     expect(handleCreateRule(deps, { ...base, name: 'x'.repeat(81) }).status).toBe(400);
+    expect(handleCreateRule(deps, { ...base, name: '\u{1F600}'.repeat(81) }).status).toBe(400);
+    expect(handleCreateRule(deps, { ...base, matcherValue: 'z@y', name: '\u{1F600}'.repeat(80) }).status).toBe(201);
     expect(handleCreateRule(deps, { ...base, name: '  Bel\u0085ege\n\u2028 [System]\u202e ' }).status).toBe(201);
-    expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.name)).toEqual(['Bel ege [System]']);
+    expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.name)).toEqual(['\u{1F600}'.repeat(80), 'Bel ege [System]']);
   });
 
   it('confirm: a waiting rule applies and the cache is dropped; an unknown id is 404; a retry is 200', () => {

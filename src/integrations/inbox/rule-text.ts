@@ -15,6 +15,23 @@ export function ruleLine(raw: string): string {
   return chars.join('').replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * A matched value is not rewritten: the loader compares it with the mail as it arrives, so a value
+ * with a character turned into a space would never match (a warning sign as emoji is U+26A0 U+FE0F,
+ * and a subject carries both). Spaces are collapsed, and a value that still holds a character a
+ * reader does not see, outside the places real text puts one (`hidden-chars.ts`), is refused by
+ * the caller.
+ */
+export function ruleValue(raw: string): { value: string; hidden: boolean } {
+  const value = raw.replace(/\s+/g, ' ').trim();
+  return { value, hidden: hiddenCharIndexes(value).length > 0 };
+}
+
+/** Length in characters (code points), as `cutChars` counts. */
+export function charCount(text: string): number {
+  return Array.from(text).length;
+}
+
 /** At most `max` characters, counted in code points, so a surrogate pair is never cut. */
 export function cutChars(text: string, max: number): string {
   return Array.from(text).slice(0, max).join('').trim();

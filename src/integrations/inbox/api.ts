@@ -22,7 +22,7 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
-import { cutChars, ruleLine } from './rule-text.js';
+import { charCount, cutChars, ruleLine } from './rule-text.js';
 
 export interface InboxApiDeps {
   state: InboxStateDb;
@@ -954,7 +954,7 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
   if (!VALID_RULE_SOURCES.includes(body.source)) return bad('invalid source');
   // One line, as the agent's proposals are cut: the name lands in audit rows the model can read.
   const name = typeof body.name === 'string' ? ruleLine(body.name) : '';
-  if (name.length > MAX_RULE_NAME_CHARS) return bad(`name exceeds ${MAX_RULE_NAME_CHARS} chars`);
+  if (charCount(name) > MAX_RULE_NAME_CHARS) return bad(`name exceeds ${MAX_RULE_NAME_CHARS} chars`);
   const id = deps.state.insertRule({
     accountId: body.accountId,
     matcherKind: body.matcherKind,

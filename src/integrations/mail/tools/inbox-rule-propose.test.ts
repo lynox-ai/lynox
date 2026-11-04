@@ -173,10 +173,31 @@ describe('inbox_rule_propose — what it accepts', () => {
     expect(rule?.matcherValue).not.toMatch(/[\n\u2028\u0085]/);
   });
 
-  it('removes zero-width and direction characters, so the owner reads what is stored', async () => {
-    await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: 'Re\u200b:\u202e x', name: 'Kun\u2066de\ufeff\u200f' });
+  it('removes zero-width and direction characters from the name, so the owner reads what is stored', async () => {
+    await propose({ ...valid, name: 'Kun\u2066de\ufeff\u200f' });
+    expect(inbox.listRulesForAccount(ACCOUNT.id)[0]?.name).toBe('Kun de');
+  });
+
+  it('refuses a matched value with a character a reader does not see, rather than storing one that never matches', async () => {
+    for (const v of ['Re\u200b: Angebot', 'Mahnung\u202e', 'Rech\u{E0041}nung']) {
+      expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: v })).toMatch(/characters a reader does not see/);
+    }
+    expect(inbox.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('keeps a matched value as the mail carries it, emoji presentation included, so the rule fires', async () => {
+    expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: '\u26A0\uFE0F Mahnung' })).toMatch(/^Proposed/);
     const [rule] = inbox.listRulesForAccount(ACCOUNT.id);
-    expect(rule?.name).toBe('Kun de');
-    expect(rule?.matcherValue).toBe('Re : x');
+    expect(rule?.matcherValue).toBe('\u26A0\uFE0F Mahnung');
+    rules.invalidateAll();
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts: { resolve: () => ({ address: ACCOUNT.address, displayName: 'Me' }) } });
+    inbox.confirmRule(rule!.id);
+    rules.invalidateAll();
+    expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'x@y.example', name: 'X' }], subject: '\u26A0\uFE0F Mahnung 4711' }))).toBe('rule_applied');
+  });
+
+  it('counts a name in characters: 80 emoji are accepted, 81 are not', async () => {
+    expect(await propose({ ...valid, name: '\u{1F600}'.repeat(80) })).toMatch(/^Proposed/);
+    expect(await propose({ ...valid, matcher_value: 'other@example.com', name: '\u{1F600}'.repeat(81) })).toMatch(/name must be 1 to 80/);
   });
 });
