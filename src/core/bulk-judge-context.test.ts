@@ -216,7 +216,9 @@ describe('judgeContext: the two credential checks', () => {
     expect(judgeContext({ d: long }, ['d'], check)).toEqual({ secretField: 0 });
   });
 
-  it('finds one a hidden character splits: the second check reads the context as it is sent', () => {
+  // The second check's own witness is the credential spread over two fields' JSON, below: every
+  // case here the first check already finds.
+  it('finds one a hidden character splits, which no reading as written shows whole', () => {
     const split = 'key sk-​live-abc';
     expect(hiddenCharIndexes(split).length).toBeGreaterThan(0);
     expect(scan(split)).toBeNull();
@@ -230,6 +232,14 @@ describe('judgeContext: the two credential checks', () => {
     expect(scan(soft)).toBeNull();
     expect(judgeContext({ d: soft }, ['d'], check)).toEqual({ secretField: 0 });
     expect(judgeContext({ d: 'key sk-de\u00ADad-abc' }, ['d'], check)).toHaveProperty('context');
+  });
+
+  it('finds one an entity splits where the parser keeps text raw: in xmp, script or a comment', () => {
+    expect(judgeContext({ d: '<xmp>key sk&#x2d;live-abc</xmp>' }, ['d'], check)).toEqual({ secretField: 0 });
+    expect(judgeContext({ d: '<p>x</p><!-- sk&#x2d;live-abc -->' }, ['d'], check)).toEqual({ secretField: 0 });
+    expect(judgeContext({ d: '<script>var k = "sk&#45;live-abc"</script>' }, ['d'], check)).toEqual({ secretField: 0 });
+    // Twin: the same raw places without a credential are sent.
+    expect(judgeContext({ d: '<xmp>key sk&#x2d;dead-abc</xmp><!-- a &amp; b -->' }, ['d'], check)).toHaveProperty('context');
   });
 
   it('finds one an entity spells a hidden character into, and one in a record nested in the value', () => {

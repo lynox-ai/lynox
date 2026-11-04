@@ -288,6 +288,17 @@ function htmlTextOf(text: string): string | null {
   return [body, ...rest].join('\n');
 }
 
+/**
+ * `text` with every character reference decoded as running text would decode it, wherever it
+ * stands: in an element whose text the parser keeps raw (`xmp`, `style`, `script`, …), in a
+ * comment, in CDATA. With every `<` escaped the whole value is one text node, so the parser's own
+ * decoder reads it and no markup is in the way. Null for a text with no `&`.
+ */
+function entitiesDecoded(text: string): string | null {
+  if (!text.includes('&')) return null;
+  return walkHtml(parseHtmlFragment(text.replaceAll('<', '&lt;'))).map((n) => n.kind === 'text' ? n.value : '').join('');
+}
+
 /** `text` without its hidden characters ({@link hiddenCharIndexes}), counted in code points;
  *  `inPlace: false` drops those that stand where real text puts them too. */
 function withoutHidden(text: string, opts: { inPlace?: boolean } = {}): string {
@@ -342,9 +353,11 @@ export function judgeContext(
   // A text as written and, where it can hold markup, as it reads: an entity or a tag can split a
   // credential the written bytes do not show whole. Each also without any hidden character, those
   // a text may carry in place included: a soft hyphen between two letters splits a key as well.
+  // And with every entity decoded where it stands: the parser leaves one raw in a comment or in
+  // `<xmp>`, which the model reads as easily as one it decodes.
   const textHolds = (text: string): boolean => {
-    const read = htmlTextOf(text);
-    return [text, ...(read === null ? [] : [read])]
+    const readings = [text, htmlTextOf(text), entitiesDecoded(text)].filter((t): t is string => t !== null);
+    return readings
       .some((t) => holdsSecret(t) || holdsSecret(withoutHidden(t, { inPlace: false })));
   };
   for (let i = 0; i < fields.length; i++) {
