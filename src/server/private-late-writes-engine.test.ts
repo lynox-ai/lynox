@@ -33,6 +33,12 @@ describe('memory:store subscriber on a real engine respects private threads', ()
     reloadConfig();
     api = new LynoxHTTPApi();
     await api.init();
+    // The local embedding model loads on its first `embed` (10-13 s warm, 27 s cold, more under
+    // a full suite). Load it here, inside this hook's budget, so the poll below waits for the
+    // write and the private-thread check, not for the model.
+    const embedder = engineOf().getEmbeddingProvider();
+    if (embedder === null) throw new Error('fixture: the engine booted without an embedding provider');
+    await embedder.embed('warm-up');
   }, 120_000);
 
   afterAll(async () => {
@@ -46,7 +52,7 @@ describe('memory:store subscriber on a real engine respects private threads', ()
       if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
       reloadConfig();
     }
-  });
+  }, 60_000);
 
   it('stores a publish from a public thread and drops one from a private thread', async () => {
     const engine = engineOf();
