@@ -54,9 +54,18 @@ export const WORKFLOW_ENDED_MID_RUN_ERROR = `${ENDED_MID_RUN_CAUSE} `
 export const WORKFLOW_ENDED_MID_RUN = `${ENDED_MID_RUN_CAUSE} `
   + 'The steps listed in this result ran; the others did not. Starting this workflow again is refused for the same reason, so do not start it again. '
   + 'If the remaining steps are still needed, tell the user they can describe them in chat and ask lynox to do them or to write a new workflow for them.';
-/** The run's stored error, and its `endedBecause`, when the read of the makers' access threw
- *  before a step: the run stops (fail-closed), but no end was found, so it is not said to be one. */
-export const WORKFLOW_END_CHECK_FAILED_ERROR = 'Could not check whether the access of the people who set up or changed this workflow is still live, so it stopped before its next step.';
+/** Why a run stopped when the read of its makers' access threw before a step: it stops
+ *  (fail-closed), but no end was found, so none is said (1184, U-145). */
+const END_CHECK_FAILED_CAUSE = 'Could not check whether the access of everyone who set up or changed this workflow is still active, so it stopped before its next step. '
+  + "No one's access is known to have ended.";
+/** The run's stored error for that stop, to the person. A new start runs the finished steps again:
+ *  only a chat's run can be retried from its results, and only while the engine keeps them. */
+export const WORKFLOW_END_CHECK_FAILED_ERROR = `${END_CHECK_FAILED_CAUSE} `
+  + 'You can start it again, but the steps that already ran will run again, so first check that this does no harm.';
+/** What the model is told, as the result's `endedBecause`, for that stop. */
+export const WORKFLOW_END_CHECK_FAILED = `${END_CHECK_FAILED_CAUSE} `
+  + "The steps listed in this result ran; the others did not. Do not say that anyone's access ended or name another cause. "
+  + 'Tell the user they can start it again, and that the steps that already ran would then run again. Do not start it yourself unless they ask.';
 export const WORKFLOW_UNREADABLE_REFUSAL = 'Could not read who set up this workflow, so it did not run.';
 export const NESTED_AT_TOP_REFUSAL = 'A nested run was started on its own, outside the run it belongs to, so it did not run.';
 

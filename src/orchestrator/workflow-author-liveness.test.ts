@@ -43,7 +43,7 @@ vi.mock('../core/stream.js', () => ({
 import { runWorkflowTool, runSavedWorkflow, _resetPipelineStore, storePipeline } from '../tools/builtin/pipeline.js';
 import { runManifest, retryManifest, stopForEndedAuthor } from './runner.js';
 import {
-  savedWorkflowSource, sourceRefusal, WORKFLOW_ENDED_REFUSAL, WORKFLOW_ENDED_MID_RUN, WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR, WORKFLOW_OF_ANOTHER_REFUSAL, WORKFLOW_UNREADABLE_REFUSAL, NESTED_AT_TOP_REFUSAL,
+  savedWorkflowSource, sourceRefusal, WORKFLOW_ENDED_REFUSAL, WORKFLOW_ENDED_MID_RUN, WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED, WORKFLOW_END_CHECK_FAILED_ERROR, WORKFLOW_OF_ANOTHER_REFUSAL, WORKFLOW_UNREADABLE_REFUSAL, NESTED_AT_TOP_REFUSAL,
   type RunSource,
 } from './run-source.js';
 import { createToolContext } from '../core/tool-context.js';
@@ -394,6 +394,11 @@ describe('an access that ends mid-run ends the run before its next step (1100)',
     expect(WORKFLOW_ENDED_MID_RUN).toBe('The access of someone who set up or changed this workflow ended while it ran, so it stopped before its next step. '
       + 'The steps listed in this result ran; the others did not. Starting this workflow again is refused for the same reason, so do not start it again. '
       + 'If the remaining steps are still needed, tell the user they can describe them in chat and ask lynox to do them or to write a new workflow for them.');
+    expect(WORKFLOW_END_CHECK_FAILED_ERROR).toBe('Could not check whether the access of everyone who set up or changed this workflow is still active, so it stopped before its next step. '
+      + "No one's access is known to have ended. You can start it again, but the steps that already ran will run again, so first check that this does no harm.");
+    expect(WORKFLOW_END_CHECK_FAILED).toBe('Could not check whether the access of everyone who set up or changed this workflow is still active, so it stopped before its next step. '
+      + "No one's access is known to have ended. The steps listed in this result ran; the others did not. Do not say that anyone's access ended or name another cause. "
+      + 'Tell the user they can start it again, and that the steps that already ran would then run again. Do not start it yourself unless they ask.');
   });
 
   it("the owner's chat still reads what to tell the user, as the result's endedBecause (1184)", async () => {
@@ -413,8 +418,8 @@ describe('an access that ends mid-run ends the run before its next step (1100)',
     const out = await runWorkflowTool.handler({ workflow_id: WF }, chat());
     expect(mockProcess).toHaveBeenCalledTimes(1);
     // Stopped, but with its own cause: no end was found, so none is said (1184).
-    expect(out).toContain(WORKFLOW_END_CHECK_FAILED_ERROR);
-    expect(out).not.toContain(WORKFLOW_ENDED_MID_RUN_ERROR);
+    expect((JSON.parse(out as string) as Record<string, unknown>)['endedBecause']).toBe(WORKFLOW_END_CHECK_FAILED);
+    expect(out).not.toContain('ended while it ran');
   });
 
   it("control: the owner's own workflow does not depend on B and runs both steps when B's grant ends", async () => {
