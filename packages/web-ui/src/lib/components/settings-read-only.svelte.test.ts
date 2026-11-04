@@ -1,0 +1,680 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { t, setLocale, getLocale } from '../i18n.svelte.js';
+import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
+
+// ux U-104: in a mandate's session every settings page shows its values as text under a fixed
+// notice, instead of fields whose save the server refuses (PUT /api/config is the owner's). In the
+// owner's session the page keeps its fields. Each page is mounted twice, once per viewer.
+
+// `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
+// for the client, so it is mounted with the client entry, loaded by path.
+const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
+type SvelteClient = {
+	mount: (c: unknown, o: { target: Element; props?: Record<string, unknown> }) => Record<string, unknown>;
+	unmount: (c: Record<string, unknown>) => void;
+	flushSync: () => void;
+	tick: () => Promise<void>;
+};
+const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
+
+type Viewer = 'mandate' | 'owner';
+/** What each GET answers, by the end of its path; a function answers with its own Response. */
+type Routes = Record<string, unknown>;
+
+let target: HTMLElement;
+let component: Record<string, unknown> | undefined;
+const localeBefore = getLocale();
+/** Every request a page sent other than a GET. */
+let writes: string[];
+
+beforeEach(() => {
+	setLocale('de');
+	resetSettingsViewer();
+	writes = [];
+	target = document.createElement('div');
+	document.body.appendChild(target);
+});
+
+afterEach(() => {
+	if (component) unmount(component);
+	component = undefined;
+	target.remove();
+	vi.unstubAllGlobals();
+	setLocale(localeBefore);
+});
+
+async function settle(): Promise<void> {
+	for (let i = 0; i < 10; i++) {
+		await new Promise((r) => setTimeout(r, 0));
+		await tick();
+		flushSync();
+	}
+}
+
+function stubFetch(routes: Routes): void {
+	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+		const path = String(url).split('?')[0]!;
+		if (init?.method !== undefined && init.method !== 'GET') {
+			writes.push(`${init.method} ${path}`);
+			return Response.json({ error: 'Only the owner of this instance can change the configuration.' }, { status: 403 });
+		}
+		const key = Object.keys(routes).find((k) => path.endsWith(k));
+		if (key === undefined) return Response.json({ error: 'not found' }, { status: 404 });
+		const answer = routes[key];
+		return typeof answer === 'function' ? (answer as () => Response)() : Response.json(answer);
+	}));
+}
+
+async function render(load: () => Promise<{ default: unknown }>, routes: Routes, props?: Record<string, unknown>): Promise<void> {
+	stubFetch(routes);
+	const { default: Page } = await load();
+	component = mount(Page, { target, ...(props ? { props } : {}) });
+	await settle();
+}
+
+/** The read-only rows as "Label: value" lines. */
+function rows(): string[] {
+	return [...target.querySelectorAll('[data-testid="read-only-rows"] > div')].map((row) =>
+		`${row.querySelector('dt')?.textContent?.trim() ?? ''} ${row.querySelector('dd')?.textContent?.trim() ?? ''}`);
+}
+function line(label: string, value: string): string {
+	return `${label}: ${value}`;
+}
+function notice(): Element | null {
+	return target.querySelector('[data-testid="owner-only-notice"]');
+}
+function fields(): number {
+	return target.querySelectorAll('input, select, textarea').length;
+}
+function buttonTexts(): string[] {
+	return [...target.querySelectorAll('button')].map((b) => b.textContent?.trim() ?? '');
+}
+
+/** What a mandate's page must show: the notice above rows, and nothing to type into or save. */
+function expectMandateView(saveText: string): void {
+	const shown = notice();
+	expect(shown?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+	const rowsEl = target.querySelector('[data-testid="read-only-rows"]');
+	expect(rowsEl).not.toBeNull();
+	// The notice comes first.
+	expect(shown!.compareDocumentPosition(rowsEl!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	expect(fields()).toBe(0);
+	expect(buttonTexts()).not.toContain(saveText);
+	expect(target.querySelectorAll('[role="switch"]').length).toBe(0);
+	expect(writes).toEqual([]);
+}
+
+/** What an owner's page must show: no notice, no rows, and its fields. */
+function expectOwnerView(): void {
+	expect(notice()).toBeNull();
+	expect(target.querySelector('[data-testid="read-only-rows"]')).toBeNull();
+	expect(fields() + target.querySelectorAll('[role="switch"]').length).toBeGreaterThan(0);
+}
+
+const SELF_HOST = 'self-host';
+
+describe('LLMMemoryView', () => {
+	const load = () => import('./LLMMemoryView.svelte');
+	const config = (viewer: Viewer) => ({ '/config': { memory_extraction: true, memory_half_life_days: 45, viewer } });
+
+	it('shows a mandate the two dials as text', async () => {
+		await render(load, config('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('llm.save'));
+		expect(rows()).toEqual([line(t('config.memory_extraction'), t('settings.value_on')), line(t('config.memory_half_life'), '45')]);
+	});
+
+	it('keeps the owner\'s fields', async () => {
+		await render(load, config('owner'));
+		expectOwnerView();
+		expect(buttonTexts()).toContain(t('llm.save'));
+	});
+});
+
+describe('WorkspaceUpdatesView', () => {
+	const load = () => import('./WorkspaceUpdatesView.svelte');
+	const config = (viewer: Viewer) => ({ '/config': { update_check: true, managed: SELF_HOST, viewer } });
+
+	it('shows a mandate the update check as text', async () => {
+		await render(load, config('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('settings.save'));
+		expect(rows()).toEqual([line(t('system.update_label'), t('settings.value_on'))]);
+	});
+
+	it('keeps the owner\'s checkbox', async () => {
+		await render(load, config('owner'));
+		expectOwnerView();
+	});
+});
+
+describe('SystemSettings', () => {
+	const load = () => import('./SystemSettings.svelte');
+	const routes = (viewer: Viewer) => ({ '/config': { update_check: false, managed: SELF_HOST, viewer }, '/vault/key': { configured: true } });
+
+	it('shows a mandate the update check as text, and no way to reveal the vault key or the token', async () => {
+		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('settings.save'));
+		expect(rows()).toEqual([line(t('system.update_label'), t('settings.value_off'))]);
+		expect(buttonTexts()).not.toContain(t('system.vault_reveal'));
+		expect(buttonTexts()).not.toContain(t('system.token_reveal'));
+	});
+
+	it('keeps the owner\'s checkbox and reveal buttons', async () => {
+		await render(load, routes('owner'));
+		expectOwnerView();
+		expect(buttonTexts()).toContain(t('system.vault_reveal'));
+	});
+});
+
+describe('WorkspaceLimitsView', () => {
+	const load = () => import('./WorkspaceLimitsView.svelte');
+	const config = (viewer: Viewer) => ({
+		'/config': { max_monthly_cost_usd: 50, max_daily_cost_usd: 5, max_http_requests_per_hour: 300, managed: SELF_HOST, viewer },
+	});
+
+	it('shows a mandate the limits as text, and an empty one as not set', async () => {
+		await render(load, config('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('cost_limits.save'));
+		expect(rows()).toEqual([
+			line(t('config.monthly_limit'), '50'),
+			line(t('config.daily_limit'), '5'),
+			line(t('config.session_limit'), t('settings.value_not_set')),
+			line(t('config.http_rate_limit'), '300'),
+		]);
+	});
+
+	it('keeps the owner\'s fields and save', async () => {
+		await render(load, config('owner'));
+		expectOwnerView();
+		expect(buttonTexts()).toContain(t('cost_limits.save'));
+	});
+});
+
+describe('PrivacyDataSettings', () => {
+	const load = () => import('./PrivacyDataSettings.svelte');
+	const config = (viewer: Viewer) => ({
+		'/config': { managed: SELF_HOST, bugsink_enabled: false, bugsink_dsn_configured: true, debug_wire_capture: true, viewer },
+	});
+
+	it('shows a mandate the two switches as text, and no delete request', async () => {
+		await render(load, config('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('settings.save'));
+		expect(rows()).toEqual([line(t('privacy.bugsink_label'), t('settings.value_off')), line(t('privacy.wire_capture_label'), t('settings.value_on'))]);
+		expect(buttonTexts()).not.toContain(t('privacy.delete_button'));
+	});
+
+	it('keeps the owner\'s checkboxes', async () => {
+		await render(load, config('owner'));
+		expectOwnerView();
+		expect(buttonTexts()).toContain(t('privacy.delete_button'));
+	});
+});
+
+describe('ToolToggles', () => {
+	const load = () => import('./ToolToggles.svelte');
+	const routes = (viewer: Viewer) => ({
+		'/tools/available': { tools: [{ name: 'web_research', description: 'Search the web.' }, { name: 'bash', description: 'Run a shell command.' }] },
+		'/config': { disabled_tools: ['bash'], viewer },
+	});
+
+	it('shows a mandate each tool as on or off', async () => {
+		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('settings.save'));
+		expect(rows()).toEqual([line('web_research', t('settings.value_on')), line('bash', t('settings.value_off'))]);
+	});
+
+	it('keeps the owner\'s switches', async () => {
+		await render(load, routes('owner'));
+		expectOwnerView();
+		expect(target.querySelectorAll('[role="switch"]').length).toBe(2);
+	});
+});
+
+describe('VoiceSettings', () => {
+	const load = () => import('./VoiceSettings.svelte');
+	const mistral = { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: true };
+	const routes = (viewer: Viewer) => ({
+		'/voice/info': {
+			speech_service_off: false,
+			stt: { available: true, provider: 'mistral', config_value: 'mistral', env_override: null, providers: [{ id: 'auto', name: 'Auto', available: true }, mistral] },
+			tts: { available: true, provider: 'mistral', config_value: null, config_voice: 'paul', env_override: null, voices: [{ id: 'paul', language: 'de' }], providers: [{ id: 'auto', name: 'Auto', available: true }, mistral] },
+		},
+		'/config': { transcription_provider: 'mistral', tts_provider: 'auto', tts_voice: 'paul', viewer },
+	});
+
+	it('shows a mandate the chosen providers by their visible names, not their codes', async () => {
+		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('voice.save'));
+		expect(rows()).toEqual([
+			// The server names Mistral in English; the page shows it in the UI language (de here).
+			line(t('voice.stt_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
+			line(t('voice.tts_heading'), 'Auto'),
+			line(t('voice.tts_voice'), 'paul (de)'),
+		]);
+	});
+
+	it('keeps the owner\'s pickers', async () => {
+		await render(load, routes('owner'));
+		expectOwnerView();
+		expect(buttonTexts()).toContain(t('voice.save'));
+	});
+
+	// ux U-134: on a managed instance both pickers are locked and the server names the provider in
+	// use by the engine's id. The mandate's rows name it as the owner's locked picker does.
+	it('shows a mandate the locked providers of a managed instance by their visible names, not the engine ids', async () => {
+		const r = routes('mandate');
+		r['/voice/info'].stt = { ...r['/voice/info'].stt, locked: true, provider: 'mistral-voxtral' } as typeof r['/voice/info']['stt'];
+		r['/voice/info'].tts = { ...r['/voice/info'].tts, locked: true, provider: 'mistral-voxtral-tts' } as typeof r['/voice/info']['tts'];
+		await render(load, r);
+		expectMandateView(t('voice.save'));
+		expect(rows()).toEqual([
+			line(t('voice.stt_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
+			line(t('voice.tts_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
+			line(t('voice.tts_voice'), 'paul (de)'),
+		]);
+	});
+
+	// The owner's page checks a pin by the environment before the lock, and shows that provider as
+	// sent; a locked side without a provider has nothing to name.
+	it('keeps an environment pin as sent and a locked side without a provider as not set', async () => {
+		const r = routes('mandate');
+		r['/voice/info'].stt = { ...r['/voice/info'].stt, locked: true, env_override: 'mistral-voxtral', provider: 'mistral-voxtral' } as unknown as typeof r['/voice/info']['stt'];
+		r['/voice/info'].tts = { ...r['/voice/info'].tts, locked: true, provider: null } as unknown as typeof r['/voice/info']['tts'];
+		await render(load, r);
+		expect(rows().slice(0, 2)).toEqual([
+			line(t('voice.stt_heading'), 'mistral-voxtral'),
+			line(t('voice.tts_heading'), t('settings.value_not_set')),
+		]);
+	});
+});
+
+describe('BackupsView', () => {
+	const load = () => import('./BackupsView.svelte');
+	const backup = { backup_id: 'b1', version: '2.17.0', created_at: '2026-10-30T08:00:00Z', encrypted: true, files: [{ path: 'history.db', size_bytes: 2048 }], checksum: 'x' };
+	const routes = (viewer: Viewer) => ({
+		'/backups': { backups: [backup] },
+		'/config': { backup_retention_days: 14, backup_encrypt: true, managed: SELF_HOST, viewer },
+	});
+
+	it('shows a mandate the list and the settings as text, without create, restore or save', async () => {
+		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('settings.save'));
+		expect(rows()).toEqual([line(t('config.backup_retention'), '14'), line(t('config.backup_encrypt'), t('settings.value_on'))]);
+		expect(buttonTexts()).toEqual([]);
+		// The list is a read and stays.
+		expect(target.textContent).toContain('v2.17.0');
+	});
+
+	it('offers no create or restore until the server said it is the owner\'s session', async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => { release = r; });
+		await render(load, { ...routes('owner'), '/config': async () => { await gate; return Response.json({ backup_retention_days: 14, backup_encrypt: true, managed: SELF_HOST, viewer: 'owner' }); } });
+		expect(target.textContent).toContain('v2.17.0');
+		expect(buttonTexts()).not.toContain(t('backups.create'));
+		expect(buttonTexts()).not.toContain(t('backups.restore'));
+		release();
+		await settle();
+		expect(buttonTexts()).toEqual(expect.arrayContaining([t('backups.create'), t('backups.restore')]));
+	});
+
+	it('keeps the owner\'s fields, create and restore', async () => {
+		await render(load, routes('owner'));
+		expectOwnerView();
+		expect(buttonTexts()).toEqual(expect.arrayContaining([t('backups.create'), t('backups.restore'), t('settings.save')]));
+	});
+});
+
+describe('NotificationsSettings', () => {
+	const load = () => import('./NotificationsSettings.svelte');
+	const routes = (viewer: Viewer) => ({
+		'/inbox/notification-prefs': {
+			inboxPushEnabled: true,
+			quietHours: { enabled: true, start: '22:00', end: '07:00', tz: 'Europe/Zurich' },
+			perMinute: 2,
+			perHour: 20,
+			accounts: [],
+		},
+		'/config': { managed: 'hosted', escalation_mail: false, viewer },
+	});
+	// The push store asks whether the app runs installed; jsdom has no `matchMedia`.
+	beforeEach(() => {
+		Object.defineProperty(window, 'matchMedia', {
+			configurable: true,
+			value: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
+		});
+	});
+	afterEach(() => {
+		Reflect.deleteProperty(window, 'matchMedia');
+	});
+
+	it('shows a mandate the push settings and the escalation mail as text', async () => {
+		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('settings.save'));
+		expect(rows()).toEqual([
+			line(t('integrations.push_inbox_toggle'), t('settings.value_on')),
+			line(t('integrations.push_quiet_hours_toggle'), `${t('settings.value_on')} (${t('integrations.push_quiet_hours_from')} 22:00 ${t('integrations.push_quiet_hours_to')} 07:00, Europe/Zurich)`),
+			line(t('integrations.push_throttle_title'), `2 ${t('integrations.push_throttle_per_minute')}, 20 ${t('integrations.push_throttle_per_hour')}`),
+			line(t('notifications.escalation_mail_heading'), t('settings.value_off')),
+		]);
+	});
+
+	it('leaves a mandate its own push on this device, with the owner\'s part below the notice', async () => {
+		// Push on this device is the mandate's own: /push/subscribe is not owner-only, and the
+		// subscription ends with the grant. The page is mixed, so the notice covers only the rest.
+		vi.stubGlobal('PushManager', function PushManager() {});
+		vi.stubGlobal('Notification', { permission: 'default' });
+		Object.defineProperty(navigator, 'serviceWorker', {
+			configurable: true,
+			value: { ready: Promise.resolve({ pushManager: { getSubscription: async () => null } }) },
+		});
+		try {
+			await render(load, routes('mandate'));
+			const enable = [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === t('integrations.push_enable'));
+			expect(enable).toBeDefined();
+			expect(enable!.disabled).toBe(false);
+			const shown = notice();
+			expect(shown).not.toBeNull();
+			// The notice sits below the mandate's own part, above the owner's.
+			expect(enable!.compareDocumentPosition(shown!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+			expect(rows()).toContain(line(t('notifications.escalation_mail_heading'), t('settings.value_off')));
+		} finally {
+			Reflect.deleteProperty(navigator, 'serviceWorker');
+		}
+	});
+
+	it('keeps the owner\'s escalation mail checkbox', async () => {
+		await render(load, routes('owner'));
+		expectOwnerView();
+		expect(target.querySelector('[data-escalation-mail] input[type="checkbox"]')).not.toBeNull();
+	});
+});
+
+describe('SearchSettings', () => {
+	const load = () => import('./SearchSettings.svelte');
+	const routes = (viewer: Viewer) => ({
+		// Set only by the environment: the config file has no URL, the status read names it.
+		'/config': { managed: SELF_HOST, viewer },
+		// A mandate may read the status too (`READS`), as the owner's card does.
+		'/secrets/status': viewer === 'owner'
+			? { configured: { search: false, api_key: true, searxng: false }, searxng_url: null }
+			: { configured: { search: false, api_key: true, searxng: true }, searxng_url: 'http://u:pw@searx.internal:8888/?token=abc' },
+	});
+
+	it('shows a mandate the SearXNG URL as text, without save, removal or check', async () => {
+		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('settings.save'));
+		// The owner entered the URL; a mandate reads where it points, not its credentials or query.
+		expect(rows()).toEqual([line(t('integrations.searxng_label'), 'http://searx.internal:8888')]);
+		expect(target.textContent).not.toContain('pw@');
+		expect(target.textContent).not.toContain('token=abc');
+		expect(buttonTexts()).toEqual([]);
+	});
+
+	it('keeps the owner\'s URL field', async () => {
+		await render(load, routes('owner'));
+		expectOwnerView();
+		expect(target.querySelector('#searxng-url')).not.toBeNull();
+	});
+});
+
+describe('LLMAdvancedView', () => {
+	const load = () => import('./LLMAdvancedView.svelte');
+	const activeModel = {
+		id: 'claude-sonnet-4-6', tier: 'sonnet', provider: 'anthropic', contextWindow: 1_000_000, defaultMaxOutput: 64_000, maxContinuations: 3,
+		features: { vision: true, extendedThinking: true, toolUse: true, promptCaching: true, pdfInput: true }, uiLabel: 'Claude Sonnet 4.6',
+	};
+	const config = (viewer: Viewer) => ({ '/config': { effort_level: 'medium', thinking_mode: 'disabled', managed: SELF_HOST, active_model: activeModel, viewer } });
+
+	it('shows a mandate each choice by its visible option text, not its code', async () => {
+		await render(load, config('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('llm.save'));
+		expect(rows()).toEqual([
+			line(t('config.effort'), t('config.effort_medium')),
+			line(t('config.thinking'), t('config.thinking_disabled')),
+			line(t('config.embedding_provider'), t('config.embedding_onnx')),
+		]);
+	});
+
+	it('leaves the notice to the page it is embedded in', async () => {
+		await render(load, config('mandate'), { embedded: true });
+		expect(notice()).toBeNull();
+		expect(rows().length).toBe(3);
+		expect(fields()).toBe(0);
+	});
+
+	it('keeps the owner\'s selects', async () => {
+		await render(load, config('owner'));
+		expectOwnerView();
+		expect(buttonTexts()).toContain(t('llm.save'));
+	});
+});
+
+describe('LLMSettings', () => {
+	const load = () => import('./LLMSettings.svelte');
+	// A key-shaped marker, built at run time so no key-shaped literal sits in the source.
+	const KEY_MARKER = ['sk', 'ant', 'api03', 'readonly', 'marker'].join('-');
+	const anthropic = {
+		provider: 'anthropic', display_name: 'Anthropic (Claude)', requires_base_url: false, requires_region: false,
+		default_residency: 'US (Anthropic)', vault_slot: 'ANTHROPIC_API_KEY',
+		models: [
+			{ id: 'claude-sonnet-4-6', tier: 'sonnet', label: 'Claude Sonnet 4.6', context_window: 1_000_000, pricing: { input: 3, output: 15 }, residency: 'US' },
+			{ id: 'claude-opus-4-7', tier: 'opus', label: 'Claude Opus 4.7', context_window: 1_000_000, pricing: { input: 5, output: 25 }, residency: 'US' },
+		],
+		main_chat_models: [{ id: 'claude-sonnet-4-6', tier: 'balanced' }, { id: 'claude-opus-4-7', tier: 'deep' }],
+	};
+	const routes = (viewer: Viewer) => ({
+		'/llm/catalog': { providers: [anthropic] },
+		// A body that carries a key where none belongs: the read-only view must not show it.
+		'/config': {
+			provider: 'anthropic', default_tier: 'deep', routing_mode: 'standard', tier_preset: null, available_tier_presets: {},
+			managed: SELF_HOST, api_key: KEY_MARKER, tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-4-7', api_key: KEY_MARKER } }, viewer,
+		},
+		'/secrets/status': viewer === 'owner' ? { configured: { api_key: true } } : () => Response.json({ error: 'owner only' }, { status: 403 }),
+	});
+
+	it('shows a mandate strategy, provider and model by their visible names', async () => {
+		await render(load, routes('mandate'));
+		// Here, in the test body: the notice is what a mandate's page shows first.
+		expect(notice()?.textContent?.trim()).toBe(t('settings.owner_only_notice'));
+		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
+		expectMandateView(t('llm.save'));
+		expect(rows()).toEqual([
+			line(t('llm.preset.heading'), t('llm.preset.standard')),
+			line(t('llm.provider_heading'), 'Anthropic (Claude)'),
+			line(t('llm.main_model.heading'), 'Claude Opus 4.7'),
+			line(t('llm.residency'), 'US (Anthropic)'),
+		]);
+	});
+
+	it('never shows a mandate a key, and offers no connection test (it calls a model)', async () => {
+		await render(load, routes('mandate'));
+		expect(target.textContent).not.toContain(KEY_MARKER);
+		expect(target.textContent).not.toContain(t('llm.api_key'));
+		expect(buttonTexts()).not.toContain(t('llm.test_connection'));
+		expect(target.querySelector('input[type="password"]')).toBeNull();
+	});
+
+	it('keeps the owner\'s key field, tiles and connection test', async () => {
+		await render(load, routes('owner'));
+		expectOwnerView();
+		expect(target.querySelector('input[type="password"]')).not.toBeNull();
+		expect(buttonTexts()).toContain(t('llm.test_connection'));
+	});
+
+	// The Mistral preset now names the EU regional endpoint. A config saved before the move names
+	// the global one, and still reads as the Mistral preset, not as an unknown endpoint.
+	describe('a config saved on Mistral\'s global endpoint', () => {
+		const mistral = {
+			provider: 'openai', preset_id: 'mistral', display_name: 'Mistral', requires_base_url: false, requires_region: false,
+			base_url_default: 'https://api.eu.mistral.ai/v1', default_residency: 'EU/EFTA inference', vault_slot: 'MISTRAL_API_KEY',
+			models: [{ id: 'mistral-medium-2604', tier: 'sonnet', label: 'Mistral Medium 3.5', context_window: 128_000, pricing: { input: 1.5, output: 7.5 }, residency: 'EU' }],
+		};
+		const compat = {
+			provider: 'openai', preset_id: 'openai-compat', display_name: 'OpenAI-compatible', requires_base_url: true, requires_region: false,
+			default_residency: 'depends on endpoint', vault_slot: 'OPENAI_API_KEY', models: [],
+		};
+		const routesAt = (apiBaseUrl: string) => ({
+			'/llm/catalog': { providers: [anthropic, mistral, compat] },
+			'/config': {
+				provider: 'openai', api_base_url: apiBaseUrl, openai_model_id: 'mistral-medium-2604', default_tier: 'deep',
+				routing_mode: 'standard', tier_preset: null, available_tier_presets: {}, managed: SELF_HOST, viewer: 'mandate',
+			},
+			'/secrets/status': () => Response.json({ error: 'owner only' }, { status: 403 }),
+		});
+		const providerRow = (): string | undefined =>
+			rows().find((r) => r.startsWith(t('llm.provider_heading')));
+
+		it.each(['https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'])('reads %s as the Mistral preset', async (url) => {
+			await render(load, routesAt(url));
+			expect(providerRow()).toBe(line(t('llm.provider_heading'), 'Mistral'));
+		});
+
+		it('twin: another endpoint reads as the generic one', async () => {
+			await render(load, routesAt('https://api.groq.com/openai/v1'));
+			expect(providerRow()).toBe(line(t('llm.provider_heading'), 'OpenAI-compatible'));
+		});
+
+		// The owner switches from the Mistral preset to the OpenAI-compatible tile: the endpoint the
+		// preset stamped is cleared, the global one written before the move as well as the EU one.
+		it.each(['https://api.mistral.ai/v1', 'https://api.eu.mistral.ai/v1'])('clears %s when the owner picks the OpenAI-compatible tile', async (url) => {
+			const owner = { ...routesAt(url), '/config': { ...routesAt(url)['/config'], viewer: 'owner' }, '/secrets/status': { configured: { api_key: true } } };
+			await render(load, owner);
+			const tile = [...target.querySelectorAll('button')].find((b) => b.textContent?.includes('OpenAI-compatible'));
+			expect(tile).toBeDefined();
+			tile!.click();
+			flushSync();
+			await tick();
+			const values = [...target.querySelectorAll('input')].map((i) => (i as HTMLInputElement).value);
+			expect(values).not.toContain(url);
+		});
+	});
+});
+
+describe('endpointText — an endpoint the owner entered, as a mandate reads it', () => {
+	it('keeps scheme, host and path, and drops credentials, a query and a fragment', async () => {
+		const { endpointText } = await import('./settings-readonly/values.js');
+		expect(endpointText('https://user:secret@api.example.com/v1?key=abc#x')).toBe('https://api.example.com/v1');
+		expect(endpointText('http://localhost:11434')).toBe('http://localhost:11434');
+		// Not a URL the browser parses: the same parts go by the last `@` and the first `?` or `#`.
+		expect(endpointText('u:p@ss@h.example.com/v1?k=1')).toBe('h.example.com/v1');
+		expect(endpointText('')).toBe(t('settings.value_not_set'));
+		expect(endpointText(null)).toBe(t('settings.value_not_set'));
+	});
+});
+
+describe('SetupBanner', () => {
+	const load = () => import('./SetupBanner.svelte');
+	// No key on this instance. A mandate may read the status (`READS`), so the banner has to ask
+	// whose session it is: setting up the provider is the owner's.
+	const routes = (viewer: Viewer) => ({
+		'/secrets/status': { provider: 'anthropic', managed: null, configured: { api_key: false } },
+		'/config': { managed: SELF_HOST, viewer },
+	});
+
+	it('shows a mandate no banner and no key wizard when no key is set', async () => {
+		await render(load, routes('mandate'));
+		expect(document.body.innerHTML).not.toContain('Claude (Anthropic)');
+		expect(target.textContent).not.toContain(t('banner.api_key_missing'));
+		expect(fields()).toBe(0);
+		expect(writes).toEqual([]);
+	});
+
+	it('opens no wizard and no banner when the server has not said whose session it is', async () => {
+		await render(load, { ...routes('owner'), '/config': () => Response.json({ error: 'unavailable' }, { status: 503 }) });
+		expect(document.body.innerHTML).not.toContain('Claude (Anthropic)');
+		expect(target.textContent).not.toContain(t('banner.api_key_missing'));
+	});
+
+	it('opens the owner the key wizard when no key is set', async () => {
+		// Not dismissed before: the wizard opens straight away, at the provider choice.
+		await render(load, routes('owner'));
+		expect(document.body.innerHTML).toContain('Claude (Anthropic)');
+	});
+});
+
+describe('WorkspaceSecurityView', () => {
+	const load = () => import('./WorkspaceSecurityView.svelte');
+	const routes = (viewer: Viewer) => ({
+		'/config': { managed: SELF_HOST, viewer },
+		'/vault/key': { configured: true },
+	});
+
+	it('shows a mandate nothing: both values are secrets, so no notice, no row and no reveal button', async () => {
+		await render(load, routes('mandate'));
+		expect(target.textContent).toContain(t('settings.workspace.security'));
+		expect(notice()).toBeNull();
+		// No section: the vault key's and the access token's headings are not there.
+		expect(target.querySelectorAll('h2').length).toBe(0);
+		expect(buttonTexts()).toEqual([]);
+		expect(writes).toEqual([]);
+	});
+
+	it('keeps the owner\'s reveal buttons', async () => {
+		await render(load, routes('owner'));
+		expect(notice()).toBeNull();
+		expect(buttonTexts().length).toBeGreaterThan(0);
+	});
+});
+
+describe('SettingsIndex', () => {
+	const routes = (viewer: Viewer) => ({
+		'/config': { managed: null, viewer },
+		'/health': { version: '0.0.0-test' },
+	});
+	// The index asks whether it runs as an installed app; jsdom has no `matchMedia`.
+	beforeEach(() => {
+		Object.defineProperty(window, 'matchMedia', {
+			configurable: true,
+			value: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
+		});
+	});
+	afterEach(() => {
+		Reflect.deleteProperty(window, 'matchMedia');
+	});
+
+	it('leave the security page out of a mandate\'s settings index', async () => {
+		await render(() => import('./SettingsIndex.svelte'), routes('mandate'));
+		expect(target.querySelector('a[href="/app/settings/workspace/security"]')).toBeNull();
+		// Twin within the same session: an owner-held page with values stays.
+		expect(target.querySelector('a[href="/app/settings/workspace/updates"]')).not.toBeNull();
+	});
+
+	it('keep it in the owner\'s', async () => {
+		await render(() => import('./SettingsIndex.svelte'), routes('owner'));
+		expect(target.querySelector('a[href="/app/settings/workspace/security"]')).not.toBeNull();
+	});
+});

@@ -809,6 +809,49 @@ describe('api_setup tool', () => {
     });
   });
 
+  // A profile with a pasted token on a store: while the store exchange is off it is saved (and
+  // every request through it gets the closed text); once it is on, it is pointed at the preset.
+  describe('a profile of its own on a Shopify store', () => {
+    const pasted: ApiProfile = {
+      ...SAMPLE_PROFILE,
+      id: 'shop-pasted', name: 'Shop', base_url: 'https://acme.myshopify.com/admin/api/2026-04', description: 'The admin API of one store',
+      auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+    };
+    const save = (store: ApiStore): Promise<string> =>
+      apiSetupTool.handler({ action: 'create', profile: pasted }, createMockAgent(store, undefined, async () => 'Allow')) as Promise<string>;
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it('is refused and pointed at the preset while the store exchange is on', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+      const store = new ApiStore();
+      expect(await save(store)).toBe('Validation error: Invalid profile: the API of Shopify is connected only through this engine\'s built-in "shopify" provider, which shows the user what lynox may do there before a write access and asks every write with what it sends. '
+        + 'A profile with another sign-in, a pasted token included, would reach the same account past both. Use auth.type "oauth2" with auth.oauth.preset_id "shopify" and auth.oauth.preset_params '
+        + '{"shop": "<shop>"} (shop: the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case), then api_setup action "connect".');
+      expect(store.get('shop-pasted')).toBeUndefined();
+    });
+
+    it('is saved as before while the store exchange is off', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '0');
+      const store = new ApiStore();
+      const result = await save(store);
+      expect(result).not.toContain('built-in "shopify" provider');
+      expect(store.get('shop-pasted')?.auth?.type).toBe('bearer');
+    });
+
+    // Saved while the exchange was off, refined once it is on: it is pointed at the preset, and
+    // told that nothing goes through it, since every request to a store needs the connection.
+    it('is not refined once the store exchange is on, and is told that no request goes through it', async () => {
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '0');
+      const store = new ApiStore();
+      await save(store);
+      expect(store.get('shop-pasted')).toBeDefined();
+      vi.stubEnv('LYNOX_SHOPIFY_EXCHANGE', '1');
+      const out = await apiSetupTool.handler({ action: 'refine', id: 'shop-pasted', refine: { addNotes: ['x'] } }, createMockAgent(store, undefined, async () => 'Allow')) as string;
+      expect(out).toContain('Error: the stored profile "shop-pasted" cannot be refined: the API of Shopify is connected only through this engine\'s built-in "shopify" provider');
+      expect(out).toContain('Change this profile with api_setup action="update"; every request through it is refused until then.');
+    });
+  });
+
   // A built-in provider's app lives under the names its id derives, and the owner enters it in
   // the profile's connection form, which writes only those. A save fills them in or refuses others.
   describe('the app names of a built-in provider', () => {
@@ -1709,6 +1752,18 @@ describe('api_setup tool', () => {
         agent,
       );
       expect(result).toContain('cost.output_ratio');
+    });
+
+    it('takes a cost.response_field that is a dot path, and rejects any other', async () => {
+      for (const field of ['cost', 'tasks.0.cost', 'data.billing.total_usd']) {
+        const store = new ApiStore();
+        const result = await apiSetupTool.handler({ action: 'create', profile: withV2({ cost: { model: 'per_call', rate_usd: 0.001, response_field: field } }) }, createMockAgent(store));
+        expect(result).not.toContain('cost.response_field');
+      }
+      for (const field of ['', 'cost.', '.cost', 'a..b', 'tasks[0].cost', '$.cost', 'a b', 7, 'a.b.c.d.e.f.g.h.i']) {
+        const result = await apiSetupTool.handler({ action: 'create', profile: withV2({ cost: { model: 'per_call', rate_usd: 0.001, response_field: field as never } }) }, createMockAgent(new ApiStore()));
+        expect(result).toContain('Invalid cost.response_field');
+      }
     });
 
     it('rejects unknown provenance.source', async () => {

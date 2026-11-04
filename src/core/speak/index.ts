@@ -29,6 +29,7 @@ import type {
   SpeakStreamMeta,
 } from './types.js';
 import { mistralVoxtralTtsProvider, hasMistralVoxtralTts } from './mistral-voxtral-tts.js';
+import { providerListApplies } from '../contained-providers.js';
 import { prepareForSpeech } from './text-prep.js';
 import { isVoiceLanguageTag, pickVoiceForLanguage } from './voice-for-language.js';
 import type { VoiceChoice } from './voice-for-language.js';
@@ -78,6 +79,9 @@ function readConfigProvider(): ProviderChoice {
 }
 
 function resolveProvider(): SpeakProvider | null {
+  // On an instance connected to a Shopify store no text goes to a speech service, and the only
+  // provider is one (`contained-providers.ts`): reading aloud is off there.
+  if (providerListApplies()) return null;
   const choice = readEnvProvider() ?? readConfigProvider();
   if (choice === 'mistral') {
     return mistralVoxtralTtsProvider.isAvailable ? mistralVoxtralTtsProvider : null;
@@ -91,6 +95,7 @@ export function getActiveSpeakProvider(): SpeakProvider | null {
 }
 
 export function hasSpeakProvider(): boolean {
+  if (providerListApplies()) return false;
   return hasMistralVoxtralTts();
 }
 

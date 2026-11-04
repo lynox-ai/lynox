@@ -6,7 +6,7 @@ import type { IAgent, ProviderConfigSnapshot } from './agent.js';
 import type { AutonomyLevel, CostSnapshot } from './modes.js';
 import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
-import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { ContainedRefusalReason } from '../core/containment.js';
 
 export type ToolHandler<TInput = unknown> =
@@ -86,6 +86,15 @@ export interface ToolEntry<TInput = unknown> {
    */
   redactInputForAudit?: ((input: TInput) => unknown) | undefined;
   /**
+   * For a tool that writes a file named by its `path` field: the file it would write for that
+   * path, resolved as its handler resolves it (the workspace, a link in it, the artifacts
+   * directory), or `null` when the handler would refuse the path. The Permission Guard reads its
+   * sensitive-path rules against this as well as against the path as written, so a link or a
+   * confinement cannot put the file written out of the rules' sight. Declared here, next to the
+   * handler that resolves the same way, so the guard needs no import of the tool.
+   */
+  writeTarget?: ((path: string) => string | null) | undefined;
+  /**
    * Declares this tool as destructive. The Permission Guard warns in
    * interactive mode and BLOCKS in autonomous mode based on this flag.
    *
@@ -139,6 +148,15 @@ export interface ToolEntry<TInput = unknown> {
    * exactly when it is on `MANDATE_OUTWARD_READERS` (`mandate-tool-lock.ts`).
    */
   outwardRead?: ((input: TInput) => string | null) | undefined;
+  /**
+   * What a call reads of MAIL THE INSTANCE STORES — the inbox store, a copy of mail from
+   * outside — as the target it reads (an action, an item id), or `null` for a call that reads
+   * none. Never content. A mandate's call that returns a target leaves a `read` row before it
+   * runs and does not run without it, as for `outwardRead` (`Agent._recordOutwardRead`): mail
+   * is in the trail on every way it is read, the stored copy included (sec-core 2026-11-03).
+   * A tool a mandate may use declares this exactly when it is on `MANDATE_STORED_MAIL_READERS`.
+   */
+  storedMailRead?: ((input: TInput) => string | null) | undefined;
   /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
@@ -234,7 +252,7 @@ export type StreamEvent =
   | { type: 'tool_call';   name: string; input: unknown;           agent: string; toolUseId?: string | undefined; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'tool_progress'; tool: string; phase: string;          agent: string; subAgent?: string | undefined }
   | { type: 'api_cost'; tool: string; profileId: string; profileName: string;
-      endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
+      endpoint: string; costUsd: number; source: 'response' | 'profile'; agent: string; subAgent?: string | undefined }
   /** `grant`: the write grant that let this call's write through (`GrantLift` says what the mark means and does not).
    *  `connection`: the connection and grant the call resolved its URL to (`CallConnection` says what the stamp means
    *  and does not); absent when nothing was resolved. Every agent's result carries it. The step recorder writes it
@@ -245,7 +263,7 @@ export type StreamEvent =
    *  stays unset, as in the model's own view and in a reloaded thread. The step recorder writes it as an error.
    *  `contained`: the call was refused because the chat read data through a store connection
    *  (`ContainedRefusal.reason`); the chat's view keys its "plan in a new chat" button on it. */
-  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; softFailure?: true | undefined; contained?: ContainedRefusalReason | undefined }
+  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; apiCost?: CallApiCost | undefined; softFailure?: true | undefined; contained?: ContainedRefusalReason | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`

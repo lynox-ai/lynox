@@ -236,7 +236,7 @@ describe('Mistral tier-set', () => {
     expect(MISTRAL_MODEL_MAP.fast).toBe('ministral-8b-2512');
     expect(MISTRAL_MODEL_MAP.balanced).toBe('mistral-medium-2604');
     expect(MISTRAL_MODEL_MAP.deep).toBe('mistral-medium-2604');
-    expect(MISTRAL_API_BASE).toBe('https://api.mistral.ai/v1');
+    expect(MISTRAL_API_BASE).toBe('https://api.eu.mistral.ai/v1');
   });
 
   it('getOpenAIModelMap detects the mistral base URL', () => {
@@ -276,7 +276,7 @@ describe('Mistral tier-set', () => {
     // mistral-small-2603 is Small 4 and active: /v1/models gives 262 144 (2026-10-13)
     expect(getContextWindow('mistral-small-2603')).toBe(262_144);
     // Mistral Large 3 (Dec 2025) has 256k ctx (was 131k as Large 2)
-    expect(getContextWindow('mistral-large-2512')).toBe(256_000);
+    expect(getContextWindow('mistral-large-2512')).toBe(262_144);
     // Gen-3 ministrals replace -2410. /v1/models (2026-10-13): 8B 262 144, 3B only 131 072.
     expect(getContextWindow('ministral-3b-2512')).toBe(131_072);
     expect(getContextWindow('ministral-8b-2512')).toBe(262_144);
@@ -459,7 +459,7 @@ describe('resolveNativeContextWindow', () => {
   it('returns the registry window for a known id (managed Mistral, direct Anthropic)', () => {
     // managed: getModelId(balanced, openai) → ministral-14b-2512 (provider openai), 262k.
     expect(resolveNativeContextWindow('ministral-14b-2512', 'openai', undefined)).toBe(262_144);
-    expect(resolveNativeContextWindow('mistral-large-2512', 'openai', undefined)).toBe(256_000);
+    expect(resolveNativeContextWindow('mistral-large-2512', 'openai', undefined)).toBe(262_144);
     expect(resolveNativeContextWindow('claude-opus-4-6', 'anthropic', undefined)).toBe(1_000_000);
   });
 
@@ -794,6 +794,42 @@ describe('MISTRAL_SERVED_AS — a remapped legacy id bills as the model that ans
     const { MODEL_CAPABILITIES } = await import('./models.js');
     expect(MODEL_CAPABILITIES['magistral-medium-2509']).toBeUndefined();
     expect(MODEL_CAPABILITIES['magistral-small-2509']).toBeUndefined();
+  });
+});
+
+describe('Mistral prices are the EU endpoint\'s: list price × 1.1', () => {
+  // The list prices per million tokens as the model cards publish them [input, output, cacheRead];
+  // cacheWrite is the input rate for every Mistral entry. An entry Mistral serves as another
+  // model carries that model's list price (MISTRAL_SERVED_AS).
+  const LIST: Readonly<Record<string, readonly [number, number, number]>> = {
+    'ministral-3b-2512': [0.10, 0.10, 0.010],
+    'ministral-8b-2512': [0.15, 0.15, 0.015],
+    'ministral-14b-2512': [0.20, 0.20, 0.02],
+    'mistral-large-2512': [0.50, 1.50, 0.05],
+    'mistral-small-2603': [0.15, 0.60, 0.15],
+    'ministral-8b-2410': [0.15, 0.15, 0.015],
+    'ministral-3b-2410': [0.10, 0.10, 0.010],
+    'open-mistral-nemo': [0.15, 0.15, 0.015],
+    'mistral-medium-2508': [1.50, 7.50, 0.15],
+    'mistral-medium-2604': [1.50, 7.50, 0.15],
+    'mistral-medium-latest': [1.50, 7.50, 0.15],
+    'codestral-2508': [0.30, 0.90, 0.30],
+    'codestral-latest': [0.30, 0.90, 0.30],
+    'magistral-small-latest': [0.15, 0.60, 0.15],
+  };
+
+  it('every Mistral model in the registry is priced at its list price × 1.1, and none is missing here', async () => {
+    const { MODEL_CAPABILITIES, MISTRAL_EU_PRICE_FACTOR } = await import('./models.js');
+    expect(MISTRAL_EU_PRICE_FACTOR).toBe(1.1);
+    // By name, so a Mistral model added later without the factor (or without a row here) fails.
+    const mistralIds = Object.keys(MODEL_CAPABILITIES).filter((id) => /stral|^open-mistral|^mixtral/.test(id)).sort();
+    expect(mistralIds).toEqual(Object.keys(LIST).sort());
+    const priced = mistralIds.map((id) => [id, MODEL_CAPABILITIES[id]!.pricing]);
+    const expected = mistralIds.map((id) => {
+      const [input, output, cacheRead] = LIST[id]!;
+      return [id, { input: +(input * 1.1).toFixed(6), output: +(output * 1.1).toFixed(6), cacheWrite: +(input * 1.1).toFixed(6), cacheRead: +(cacheRead * 1.1).toFixed(6) }];
+    });
+    expect(priced).toEqual(expected);
   });
 });
 

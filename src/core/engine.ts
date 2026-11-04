@@ -15,7 +15,7 @@ import type {
   ModelTier,
   ContextSource,
 } from '../types/index.js';
-import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier } from '../types/index.js';
+import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier, mistralCommitsEuInference } from '../types/index.js';
 import { setTierSetResolver, resolveDefaultChatTier, resolveAgentModel } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
@@ -39,7 +39,7 @@ import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
-import { connectionTokenAllowed } from './profile-secret-view.js';
+import { connectionTokenAllowed, connectionTokenHolders } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
@@ -55,7 +55,7 @@ import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import { legacyMemoryReason, type LegacyMemoryReason } from './memory-tool-set.js';
-import { compose, engineText, renderFence } from '../core/data-boundary.js';
+import { collectOwnBlocks, compose, engineText, renderFence } from '../core/data-boundary.js';
 
 import {
   bashTool,
@@ -122,6 +122,7 @@ import {
   applyEgressSettings,
   generateInitBriefing,
   initSecrets,
+  renderSecretsBriefing,
   ensureVaultKey,
   initScopes,
   initMemoryInstance,
@@ -146,6 +147,7 @@ import type { SessionOptions } from './session.js';
 import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
 import { DEFAULT_PER_JOB_TIMEOUT_MS } from '../integrations/inbox/classifier/queue.js';
+import { inboxDisabledAccounts } from '../integrations/inbox/disabled-accounts.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -244,14 +246,16 @@ async function settleWithin(work: Promise<void>, ms: number, what: string): Prom
  * Default the inbox classifier's LLM region from the user's main provider
  * choice. Env override `LYNOX_INBOX_LLM_REGION` always wins (explicit
  * override path for managed-EU tenants who want hard-pinning regardless
- * of UI). When the user picked Mistral in Settings (api.mistral.ai), the
+ * of UI). When the user picked Mistral in Settings (api.eu.mistral.ai), the
  * classifier inherits 'eu' automatically — pre-this-fix the classifier
  * always defaulted to 'us' (Anthropic) regardless of the UI choice,
  * leaking mail snippets + reply-draft bodies to Anthropic-US.
  *
- * Hostname-strict match (URL().hostname === 'api.mistral.ai') — a naive
- * substring would let an attacker-controlled `api.mistral.ai.evil.com`
- * misclassify as EU residency.
+ * 'eu' only for the endpoint Mistral commits to EU/EFTA inference for
+ * (`mistralCommitsEuInference`, exact hostname `api.eu.mistral.ai`). The global
+ * `api.mistral.ai` commits to no location, so it counts as 'us': the warning and
+ * the production gate stay on. A substring match would also let
+ * `api.eu.mistral.ai.evil.com` pass as EU.
  */
 export function resolveInboxLlmRegion(opts: {
   envOverride: string | undefined;
@@ -261,13 +265,7 @@ export function resolveInboxLlmRegion(opts: {
   if (opts.envOverride === 'eu') return 'eu';
   if (opts.envOverride === 'us') return 'us';
   if (opts.provider !== 'openai' || !opts.apiBaseURL) return 'us';
-  let hostname: string;
-  try {
-    hostname = new URL(opts.apiBaseURL).hostname.toLowerCase();
-  } catch {
-    return 'us';
-  }
-  return hostname === 'api.mistral.ai' ? 'eu' : 'us';
+  return mistralCommitsEuInference(opts.apiBaseURL) ? 'eu' : 'us';
 }
 
 /**
@@ -317,6 +315,8 @@ export class Engine {
   private securityAudit: import('./security-audit.js').SecurityAudit | null = null;
   private context: LynoxContext | null = null;
   private briefing: string | undefined = undefined;
+  /** The blocks wrapped into {@link briefing} as it was built; see `collectOwnBlocks`. */
+  private readonly briefingOwnBlocks: string[] = [];
   /** The vault's `<secrets>` listing at boot, apart from the briefing: an owner's turn only. */
   private secretsBriefing: string | undefined = undefined;
   private currentManifest: Map<string, number> | null = null;
@@ -853,11 +853,15 @@ export class Engine {
    * pool's spend only: on a pool tier, the US classifier (the pool's Anthropic client) and the
    * EU one on the pool's Mistral key. A classifier on the user's own key is not debited, as the
    * user already pays the provider for it and would pay twice.
+   *
+   * And the instance's language, for the reminder poller's title (`notice-language.ts`): set here
+   * so the cold boot and the rebootstrap cannot hand the inbox different ones.
    */
   private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
     const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
     if (key !== undefined) bootOpts.mistralApiKey = key;
     if (poolSuppliesLLMKeys() && (bootOpts.llmRegion !== 'eu' || poolPays)) bootOpts.meteredHost = this;
+    bootOpts.language = () => this.config.language;
   }
 
   /**
@@ -912,10 +916,7 @@ export class Engine {
       const folderBlacklist = new Set(
         folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
       );
-      const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-      const disabledAccounts = new Set(
-        disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-      );
+      const disabledAccounts = inboxDisabledAccounts();
       const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
         mailStateDb: this._mailStateDb,
         anthropicClient: this.client,
@@ -946,6 +947,10 @@ export class Engine {
         this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
         // Mark an inbox item `replied` when the user answers it in chat.
         this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+        // What the classifier made of each mail, for mail_triage.
+        this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
+        // The store as the inbox view reads it, for inbox_read.
+        this._mailContext.hooks.inboxReader = runtime.inboxReader;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -1542,6 +1547,12 @@ export class Engine {
       const db = this.engineDb?.getDb();
       if (db === undefined) return;
       pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+      // A run of a plan paused here would go on until the next sweep, up to 5 minutes, with its
+      // member live again and its connections open to it. So the parts that end runs follow at
+      // once, outside the login's transaction, as on a revoke. They read what was committed: when
+      // the login's transaction fails, the pause is gone with it and so is the reason to stop.
+      // Outside any run group, as the sweeps are: ending runs belongs to no run.
+      runOutsideGroup(() => queueMicrotask(() => this.endEndedMandateRuns()));
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
@@ -1794,6 +1805,12 @@ export class Engine {
       // memory, and GET /api/api-profiles keeps returning [] until the next
       // engine restart re-projects it.
       this._toolContext.apiStore = this._apiStore;
+      // The `<secrets>` briefing was rendered before any profile was known; now that they are,
+      // the names that hold a connection's token are listed apart, as used through their profile.
+      if (this.secretStore && this.secretsBriefing !== undefined) {
+        const apiStore = this._apiStore;
+        this.secretsBriefing = renderSecretsBriefing(this.secretStore, (n) => connectionTokenHolders(apiStore, n));
+      }
       // Once per database, after every stored profile is known: each vault secret whose profiles
       // agree on where it goes is bound there. A failure leaves the names unbound, which refuses
       // their sends rather than letting them go anywhere, and the next boot tries again.
@@ -1808,7 +1825,8 @@ export class Engine {
       // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
       this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
       if (loaded > 0) {
-        const apiContext = this._apiStore.formatForSystemPrompt();
+        const store = this._apiStore;
+        const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
         this.briefing = this.briefing ? `${this.briefing}\n\n${apiContext}` : apiContext;
       }
       // Inject the curated "bootstrap-suggestion" catalog regardless of how
@@ -2204,8 +2222,8 @@ export class Engine {
         // EU residency: default the inbox classifier provider from the
         // user's chosen main provider. When the user picked Mistral in
         // Settings (`userConfig.provider === 'openai'` against
-        // api.mistral.ai), the classifier inherits that choice and uses
-        // Mistral (EU-resident) automatically — no env var required.
+        // api.eu.mistral.ai), the classifier inherits that choice and uses
+        // Mistral's EU endpoint automatically — no env var required.
         //
         // `LYNOX_INBOX_LLM_REGION` remains an explicit override (e.g.
         // managed-EU tenants who want hard-pinning regardless of the UI
@@ -2235,10 +2253,7 @@ export class Engine {
           folderBlacklistRaw.split(',').map((s) => s.trim()).filter(Boolean),
         );
         // Per-account opt-out: comma-separated mail_account ids.
-        const disabledAccountsRaw = process.env['LYNOX_INBOX_DISABLED_ACCOUNTS'] ?? '';
-        const disabledAccounts = new Set(
-          disabledAccountsRaw.split(',').map((s) => s.trim()).filter(Boolean),
-        );
+        const disabledAccounts = inboxDisabledAccounts();
         const bootOpts: Parameters<typeof bootstrapInbox>[0] = {
           mailStateDb,
           anthropicClient: this.client,
@@ -2281,6 +2296,10 @@ export class Engine {
           this._mailContext.hooks.onAccountAdded = runtime.onAccountAdded;
           // Mark an inbox item `replied` when the user answers it in chat.
           this._mailContext.hooks.onOutboundSent = runtime.onOutboundReconcile;
+          // What the classifier made of each mail, for mail_triage.
+          this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
+          // The store as the inbox view reads it, for inbox_read.
+          this._mailContext.hooks.inboxReader = runtime.inboxReader;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —
@@ -2781,7 +2800,7 @@ export class Engine {
     try {
       pauseEndedPlans({
         db, endOf: (id) => ends.endRow(id), closedPromptOf: (id) => this.closedPromptOf(id),
-        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id); } } : {}),
+        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id, 'plan_paused'); } } : {}),
       });
     } catch (err: unknown) {
       process.stderr.write(`[lynox] pausing plans of ended mandates failed: ${processErrorText(err)}\n`);
@@ -2813,6 +2832,7 @@ export class Engine {
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
+  getBriefingOwnBlocks(): readonly string[] { return [...this.briefingOwnBlocks]; }
   getSecretsBriefing(): string | undefined { return this.secretsBriefing; }
   /** Freshly compute the first-turn task overview (overdue / due tasks) — pure SQL,
    *  no LLM. Called per-Session so the overview is current, not frozen at engine boot.

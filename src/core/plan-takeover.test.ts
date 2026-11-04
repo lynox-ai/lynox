@@ -11,7 +11,7 @@ import { WorkflowStore } from './workflow-store.js';
 import {
   ACCESS_ENDED_PAUSED_RESULT, PLAN_ENDED_RESULT, pauseEndedPlans, setPlanPauseForTests, writePause, type PausedFor,
 } from './plan-pause.js';
-import { TAKEOVER_DIGEST_PREFIX, takeOver, takeoverPreview, type TakeoverDeps, type TakeoverPrompts } from './plan-takeover.js';
+import { TAKEOVER_DIGEST_PREFIX, takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverPrompts } from './plan-takeover.js';
 import { stampExpect } from './plan-stamp.js';
 import { creatorCovered, editorCovered, planAuthorshipOf, planAuthorshipOfWorkflow, planMandate } from './request-principal.js';
 import { savedWorkflowSource } from '../orchestrator/run-source.js';
@@ -48,7 +48,7 @@ interface Box {
   workflows: WorkflowStore;
   ends: MandateEnds;
   audit: AuditLog;
-  prompts: TakeoverPrompts & { calls: string[]; answered: Map<string, string[]> };
+  prompts: TakeoverPrompts & { calls: string[]; reasons: string[]; answered: Map<string, string[]> };
 }
 
 function box(): Box {
@@ -61,9 +61,10 @@ function box(): Box {
   closers.push(() => { try { engineDb.close(); } catch { /* twice is fine */ } });
   const answered = new Map<string, string[]>();
   const calls: string[] = [];
+  const reasons: string[] = [];
   const prompts = {
-    calls, answered,
-    expirePendingForTrigger: (id: string): number => { calls.push(`expire ${id}`); return 0; },
+    calls, reasons, answered,
+    expirePendingForTrigger: (id: string, reason: string): number => { calls.push(`expire ${id}`); reasons.push(reason); return 0; },
     getAnsweredForTrigger: (id: string): { id: string } | undefined => {
       const list = answered.get(id) ?? [];
       return list.length > 0 ? { id: list[0]! } : undefined;
@@ -413,6 +414,89 @@ describe('the workflow’s side', () => {
   });
 });
 
+// The library card's sentence about taking a plan over (UX-053, ux U-079 (b), U-119) counts these.
+describe('which workflows a takeover would move to the owner, and through how many paused plans', () => {
+  it('counts each paused plan whose takeover covers the workflow, and only those', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p1', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    plan(b, 'p2', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    plan(b, 'live', { effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p1', 'h@x.ch');
+    expect([...workflowsCoveredByTakeover(deps(b))]).toEqual([['w', 1]]);
+    pause(b, 'p2', 'h@x.ch');
+    // A plan that is not paused offers nothing to take over, and is not counted.
+    expect([...workflowsCoveredByTakeover(deps(b))]).toEqual([['w', 2]]);
+    // The same decision the takeover shows: each counted plan's preview says the workflow is taken over.
+    for (const id of ['p1', 'p2']) {
+      const pv = takeoverPreview(deps(b), id);
+      expect(pv.kind === 'preview' && pv.preview.workflow?.takenOver).toBe(true);
+    }
+  });
+
+  it('opens only the paused plans, not every plan that runs a workflow', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    // Plans of another workflow: the paused plan's own read does not reach them, only the scan could.
+    workflow(b, 'w2', { email: 'h@x.ch' });
+    for (const id of ['live-1', 'live-2', 'live-3']) plan(b, id, { effect: 'run_workflow', workflow: 'w2' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const opened: string[] = [];
+    const t = b.triggers;
+    const triggers: TakeoverDeps['triggers'] = {
+      getById: (id, opts) => { opened.push(id); return t.getById(id, opts); },
+      endWait: t.endWait.bind(t), setConfirmedAt: t.setConfirmedAt.bind(t), getStampConnections: t.getStampConnections.bind(t),
+    };
+    expect(workflowsCoveredByTakeover(deps(b, { triggers })).get('w')).toBe(1);
+    // A list read for every ended workflow on the page must not open each live plan as well.
+    expect(opened).toEqual(['p']);
+  });
+
+  it('a paused plan whose takeover leaves the workflow with a live member is not counted', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    expect(workflowsCoveredByTakeover(deps(b)).get('w')).toBe(1);
+    // Twin: a live member changes the workflow after the pause; the takeover then leaves it to that member.
+    editor(b, 'workflows', 'w', 'm2@x.ch');
+    renewed(b, 'm2@x.ch');
+    const pv = takeoverPreview(deps(b), 'p');
+    expect(pv.kind === 'preview' && pv.preview.workflow?.takenOver).toBe(false);
+    expect(workflowsCoveredByTakeover(deps(b)).has('w')).toBe(false);
+  });
+
+  it('a paused plan the takeover refuses (its run holds the lease) is not counted', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    expect(workflowsCoveredByTakeover(deps(b)).get('w')).toBe(1);
+    b.db.prepare("UPDATE triggers SET lease_holder = 'other', lease_until = ? WHERE id = 'p'").run(new Date(Date.now() + 60_000).toISOString());
+    expect(takeoverPreview(deps(b), 'p')).toEqual({ kind: 'refused', refusal: 'running' });
+    expect(workflowsCoveredByTakeover(deps(b)).size).toBe(0);
+  });
+
+  it('with plan pausing off there is nothing to take over, so nothing is counted', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    expect(workflowsCoveredByTakeover(deps(b)).get('w')).toBe(1);
+    const back = setPlanPauseForTests(false);
+    try {
+      expect(takeoverPreview(deps(b), 'p')).toEqual({ kind: 'refused', refusal: 'not_available' });
+      expect(workflowsCoveredByTakeover(deps(b)).size).toBe(0);
+    } finally { back(); }
+  });
+});
+
 describe('the other plans on the workflow', () => {
   it('lists every plan whose members change, releases a paused one no member holds, and leaves the mandate’s own paused', () => {
     const b = box();
@@ -514,9 +598,9 @@ describe('what the takeover is held to', () => {
   it('a change that lands while the questions are closed is caught inside the transaction', () => {
     const b = box();
     const expect0 = ready(b);
-    const racing = { ...b.prompts, expirePendingForTrigger: (id: string): number => {
+    const racing = { ...b.prompts, expirePendingForTrigger: (id: string, reason: 'plan_taken_over'): number => {
       b.db.prepare("UPDATE workflows SET definition_json = '{\"steps\":[9]}' WHERE id = 'w'").run();
-      return b.prompts.expirePendingForTrigger(id);
+      return b.prompts.expirePendingForTrigger(id, reason);
     } };
     expect(takeOver(deps(b, { prompts: racing }), 'p', expect0)).toEqual({ kind: 'refused', refusal: 'changed' });
     expect(row(b, 'p')['paused_at']).not.toBeNull();
@@ -636,6 +720,8 @@ describe('its questions, its status and its next run', () => {
     b.prompts.answered.set('o', ['q3']);
     take(b, 'p');
     expect(b.prompts.calls).toEqual(['expire p', 'release q1', 'release q2', 'expire o', 'release q3']);
+    // A late answer to a question closed here hears that the plan was taken over.
+    expect(b.prompts.reasons).toEqual(['plan_taken_over', 'plan_taken_over']);
   });
 
   it('a plan still waiting ends its wait once, through the store’s own end of a wait', () => {

@@ -1,10 +1,16 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { saveFailedText, throwIfRefused } from '../api/save-refusal.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { pickBackupConfig, fetchBackupConfig, requestRestore, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
+	import { pickBackupConfig, fetchBackupConfig, requestRestore, restoreSkippedLines, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
 	import { backupCoverageNotice, type BackupCoverageFields } from '../backup-coverage.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
+	import ReadOnlyRows from './settings-readonly/ReadOnlyRows.svelte';
+	import { onOff, orNotSet } from './settings-readonly/values.js';
 
 	interface Backup extends BackupCoverageFields { backup_id: string; version: string; created_at: string; encrypted: boolean; files: { path: string; size_bytes: number }[]; checksum: string; }
 
@@ -17,6 +23,8 @@
 	let confirmRestore = $state<string | null>(null);
 	/** A restore the engine refused for want of a proof of origin, with its reason, awaiting a second yes. */
 	let unverified = $state<{ id: string; reason: string; mismatch: boolean } | null>(null);
+	/** After a restore that left entries out: what was not written and where it still is (U-132). Stays until closed. */
+	let skippedNotice = $state<string[] | null>(null);
 	let error = $state('');
 
 	// Backup settings (loaded from config)
@@ -70,12 +78,12 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(payload)
 			});
-			if (!res.ok) throw new Error();
+			await throwIfRefused(res);
 			ok = true;
 			saved = true;
 			setTimeout(() => (saved = false), 2000);
-		} catch {
-			addToast(t('common.save_failed'), 'error');
+		} catch (e) {
+			addToast(saveFailedText(e, t('common.save_failed')), 'error');
 		}
 		saving = false;
 		return ok;
@@ -120,9 +128,17 @@
 			const outcome = await requestRestore(getApiBase(), backupId, allowUnverified);
 			unverified = null;
 			if (outcome.kind === 'restored') {
-				addToast(t('backups.restore_success'), 'success', 6000);
+				if (outcome.skipped.length > 0) {
+					// A list of paths is not read in a toast's six seconds: it stays in the view instead.
+					const encrypted = backups.find((b) => b.backup_id === backupId)?.encrypted === true;
+					skippedNotice = restoreSkippedLines(outcome.skipped, outcome.backupPath, encrypted, t, tf);
+				} else {
+					addToast(t('backups.restore_success'), 'success', 6000);
+				}
 			} else if (outcome.kind === 'ask') {
 				unverified = { id: backupId, reason: outcome.reason, mismatch: outcome.mismatch };
+			} else if (outcome.kind === 'running') {
+				addToast(t('backups.restore_running'), 'error', 12000);
 			} else {
 				addToast(outcome.error ?? t('backups.restore_failed'), 'error', 6000);
 			}
@@ -140,7 +156,7 @@
 		return `${(bytes / 1048576).toFixed(1)} MB`;
 	}
 
-	$effect(() => { void loadBackups(); /* catches and sets its error */ void loadConfig(); /* never rejects; a failed read hides the settings and shows an error */ void loadManagedStatus(); /* never rejects; picks the way out a coverage notice names */ });
+	$effect(() => { void loadBackups(); /* catches and sets its error */ void loadConfig(); /* never rejects; a failed read hides the settings and shows an error */ void loadManagedStatus(); /* never rejects; picks the way out a coverage notice names */ void loadSettingsViewer(); /* never rejects; a mandate gets the settings as text */ });
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
 	const cardClass = 'rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4';
@@ -148,16 +164,38 @@
 
 <div class="p-6 max-w-4xl mx-auto">
 	<a href="/app/settings" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.back')}</a>
+	<ViewerUnavailableNotice />
 	<div class="flex items-center justify-between mb-4 mt-2">
 		<h1 class="text-xl font-light tracking-tight">{t('backups.title')}</h1>
+		<!-- Creating a backup and restoring one are the owner's (POST /api/backups is owner-only, a restore
+		     admin-only): a mandate sees the list and the settings as text, and the owner gets them once
+		     the server said whose session it is. -->
+		{#if isOwnerSession()}
 		<button onclick={createBackup} disabled={creating}
 			class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50">
 			{creating ? t('backups.creating') : t('backups.create')}
 		</button>
+		{/if}
 	</div>
+
+	{#if isMandateSession()}
+		<div class="mb-4"><OwnerOnlyNotice /></div>
+	{/if}
 
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{/if}
+
+	{#if skippedNotice}
+		<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm mb-4" role="status" data-testid="restore-skipped">
+			{#each skippedNotice as line}
+				<p class="break-words [overflow-wrap:anywhere] mb-1 last:mb-0">{line}</p>
+			{/each}
+			<button onclick={() => skippedNotice = null}
+				class="mt-2 rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs hover:bg-bg-subtle">
+				{t('common.dismiss')}
+			</button>
+		</div>
 	{/if}
 
 	<!-- Backup List -->
@@ -190,7 +228,9 @@
 							<span>v{backup.version}</span>
 							<span>{formatSize(backup.files.reduce((s, f) => s + (f.size_bytes ?? 0), 0))}</span>
 						</div>
-						{#if unverified?.id === backup.backup_id}
+						{#if !isOwnerSession()}
+							<!-- no restore until the server said this is the owner's session -->
+						{:else if unverified?.id === backup.backup_id}
 							<div class="flex flex-col items-end gap-1.5">
 								<span class="text-xs text-warning">{t(unverified.mismatch ? 'backups.restore_mismatch' : 'backups.restore_unverified')}</span>
 								<div class="flex items-center gap-2">
@@ -247,6 +287,12 @@
 	{:else if !configLoading}
 		<h2 class="text-xs font-mono uppercase tracking-widest text-text-subtle mt-8 mb-3">{t('backups.settings')}</h2>
 
+		{#if isMandateSession()}
+			<ReadOnlyRows rows={[
+				{ label: t('config.backup_retention'), value: neverDelete ? t('backups.retention_never_value') : orNotSet(config.backup_retention_days) },
+				{ label: t('config.backup_encrypt'), value: onOff(config.backup_encrypt) },
+			]} />
+		{:else}
 		<div class="space-y-4">
 
 			<div class={cardClass}>
@@ -304,5 +350,6 @@
 				{/if}
 			</div>
 		</div>
+		{/if}
 	{/if}
 </div>

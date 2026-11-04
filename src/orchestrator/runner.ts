@@ -24,8 +24,9 @@ import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
-import { sourceRefusal, type RunSource } from './run-source.js';
+import { WORKFLOW_ENDED_MID_RUN, sourceRefusal, type RunSource } from './run-source.js';
 import { childFilingContext } from '../core/approval-filing.js';
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -54,7 +55,9 @@ export interface RunManifestOptions {
    * Who started the run. Every step agent is built for it, so a mandate's step runs under
    * the mandate's lock — its tool list is the parent's filtered one already, and the
    * principal is what also refuses the protected secrets and stamps the step's writes
-   * (PRD customer-granted-operator-access D1, §3.13 E5). Absent = the owner.
+   * (PRD customer-granted-operator-access D1, §3.13 E5). Absent = the owner: this is the
+   * public `runManifest` API, and its one default. Every engine entrypoint goes through
+   * `buildRunCtx`, which requires it.
    */
   principal?: import('../core/request-principal.js').RequestPrincipal | undefined;
   cachedOutputs?: Map<string, AgentOutput> | undefined;
@@ -233,6 +236,14 @@ export interface RunManifestOptions {
 }
 
 /**
+ * The options a run carries once it has started: the public default of `principal` (absent = the
+ * owner) is resolved once, where the run is entered (`runManifest`), so no step inside it can read
+ * an absent one and fall back somewhere else (register 1173). Every step spawner is handed this
+ * principal, and the census (`principal-sites.test.ts`) checks by type that it is never undefined.
+ */
+export type StartedRunOptions = RunManifestOptions & { principal: import('../core/request-principal.js').RequestPrincipal };
+
+/**
  * Inputs to {@link buildRunCtx}. `autonomy` is a **required key** (value may be
  * `undefined`) so every call site must consciously decide the run's permission
  * posture — the headless saved-workflow path passes `'autonomous'`, in-session
@@ -247,8 +258,9 @@ export interface RunCtxInput {
   parentTools?: ToolEntry[] | undefined;
   parentToolContext?: import('../types/index.js').ToolContext | undefined;
   parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined;
-  /** See `RunManifestOptions.principal`. */
-  principal?: import('../core/request-principal.js').RequestPrincipal | undefined;
+  /** See `RunManifestOptions.principal`. Required here, unlike there: every entrypoint of the
+   *  engine names whom its run is for, the owner included (1055). */
+  principal: import('../core/request-principal.js').RequestPrincipal;
   parentMemory?: IMemory | null | undefined;
   userTimezone?: string | undefined;
   parentPrompt?: SubAgentPromptHandles | undefined;
@@ -310,7 +322,7 @@ export interface RunCtxInput {
  * `runGuardedSavedWorkflow`, so adding a wrapper here would double-bill
  * (prd-review A3).
  */
-export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
+export function buildRunCtx(input: RunCtxInput): StartedRunOptions {
   return {
     source: input.source,
     autonomy: input.autonomy,
@@ -530,15 +542,18 @@ export function runManifest(
     return Promise.reject(err instanceof Error ? err : new Error(String(err)));
   }
   if (refused !== undefined) return Promise.reject(new Error(refused));
-  if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, options);
-  const runId = options.runId ?? randomUUID();
-  return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...options, runId }));
+  // The public API's default, resolved once for the whole run (see `StartedRunOptions`). The
+  // step spawners resolve their own the same way (`spawnInline` and `spawnPipeline` are public API).
+  const started: StartedRunOptions = { ...options, principal: options.principal ?? OWNER_PRINCIPAL };
+  if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, started);
+  const runId = started.runId ?? randomUUID();
+  return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...started, runId }));
 }
 
 async function runManifestInGroup(
   manifest: Manifest,
   config: LynoxUserConfig,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
 ): Promise<RunState> {
   const depth = options.depth ?? 0;
   if (depth > MAX_PIPELINE_DEPTH) {
@@ -705,6 +720,7 @@ async function runManifestInGroup(
           startedVia: options.parentRunId !== undefined ? `nested:${options.parentRunId}` : options.startedVia,
         } : {}),
         ...(originThreadId !== undefined && originThreadId !== '' ? { originThreadId } : {}),
+        ...(options.chatOrigin?.runId !== undefined ? { startedByRunId: options.chatOrigin.runId } : {}),
       });
       grantRecorded = true;
     } catch { insertFailed = true; /* fire-and-forget — but see the two checks below */ }
@@ -732,10 +748,10 @@ async function runManifestInGroup(
   // Effective options carry the (possibly-augmented) parentPrompt so
   // executeStep / spawners pick up the per-run budget without mutating the
   // caller's options.
-  const withPrompt: RunManifestOptions = parentPrompt === options.parentPrompt
+  const withPrompt: StartedRunOptions = parentPrompt === options.parentPrompt
     ? options
     : { ...options, parentPrompt };
-  const effectiveOptions: RunManifestOptions = dropGrant
+  const effectiveOptions: StartedRunOptions = dropGrant
     ? { ...withPrompt, capabilityContract: undefined, isAcceptedParam: undefined }
     : withPrompt;
 
@@ -823,6 +839,30 @@ export async function retryManifest(
   });
 }
 
+/**
+ * Before each step (1100), read where the owner's stop is: a saved workflow whose maker's access
+ * has ended since the run started ends here, before its next step, as `sourceRefusal` refuses it
+ * at the start. A worker's plan run is also stopped by its sweep (`stopEndedStarters`); this is the
+ * same end for a run nothing else watches — the library's Run, a chat's `run_workflow` — and the
+ * worker records it as that sweep's stop. A check that throws ends the run too. A run that already
+ * ended on a cause of its own keeps it, as with the stop. True when the run must halt.
+ */
+export function stopForEndedAuthor(options: RunManifestOptions, state: RunState): boolean {
+  if (options.source.kind !== 'saved') return false;
+  let ended: boolean;
+  try {
+    ended = sourceRefusal(options.source, options.depth ?? 0) !== undefined;
+  } catch {
+    ended = true;
+  }
+  if (!ended) return false;
+  if (state.status !== 'running') return true;
+  state.status = 'failed';
+  state.error = WORKFLOW_ENDED_MID_RUN;
+  state.completedAt = new Date().toISOString();
+  return true;
+}
+
 // --- Sequential execution (v1.0 behavior, zero behavior change) ---
 
 async function runSequential(
@@ -830,7 +870,7 @@ async function runSequential(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
@@ -897,7 +937,7 @@ async function runParallel(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
@@ -1042,7 +1082,7 @@ async function executeStep(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<StepResult> {
@@ -1060,6 +1100,7 @@ async function executeStep(
   // pool hands out after the stop (the scope can only abort agents that already exist).
   if (stoppedByOwner(options, state)) return 'halt';
   if (questionUnanswered(options, state)) return 'halt';
+  if (stopForEndedAuthor(options, state)) return 'halt';
 
   const stepStart = new Date().toISOString();
   // A2: the step's `pipeline_step` run id (declared before the try so the catch
@@ -1144,6 +1185,7 @@ async function executeStep(
                 contract: call.contract,
                 lift: call.grant,
                 filed: call.filed,
+                apiCost: call.apiCost,
               });
             } catch { /* best-effort: observability must never break the run */ }
           }

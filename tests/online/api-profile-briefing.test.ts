@@ -122,11 +122,11 @@ function agentConfig(s: ReturnType<typeof setup>, name: string) {
     name, systemPrompt: SYSTEM_PROMPT, briefing: s.briefing, maxIterations: 4,
     tools: [apiSetupTool as ToolEntry, s.http],
     toolContext: { ...createToolContext({}), apiStore: s.store },
-    promptUser: async () => 'yes', promptSecret: async () => ({ status: 'canceled' as const }),
+    promptUser: async () => 'yes', promptSecret: async () => 'canceled' as const,
   };
 }
 
-const CELLS: ReadonlyArray<[Kind, Variant]> = ([['positive', 'new'], ['positive', 'legacy'], ['negative', 'new'], ['negative', 'legacy'], ['rules', 'new'], ['rules', 'legacy']] as const)
+const CELLS: ReadonlyArray<readonly [Kind, Variant]> = ([['positive', 'new'], ['positive', 'legacy'], ['negative', 'new'], ['negative', 'legacy'], ['rules', 'new'], ['rules', 'legacy']] as const)
   .filter(([kind]) => ONLY_KIND === undefined || kind === ONLY_KIND);
 
 afterAll(() => {
