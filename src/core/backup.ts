@@ -1131,9 +1131,12 @@ export class BackupManager {
       try {
         const raw = readFileSync(manifestPath);
         const manifest = JSON.parse(raw.toString('utf-8')) as BackupManifest;
-        const digest = createHash('sha256').update(raw).digest('hex');
         seen.add(entry.name);
-        manifests.push({ ...manifest, backup_id: entry.name, provenance: this.listProvenance(entry.name, digest, manifest) });
+        // Without a vault key there is no MAC to check (`no-key`), so nothing to keep or to hash.
+        const provenance = this.vaultKey
+          ? this.listProvenance(entry.name, createHash('sha256').update(raw).digest('hex'), manifest)
+          : this.provenanceOf(manifest);
+        manifests.push({ ...manifest, backup_id: entry.name, provenance });
       } catch {
         // Skip corrupt manifests
       }

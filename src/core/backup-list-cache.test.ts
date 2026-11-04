@@ -109,6 +109,13 @@ describe('the backup list', () => {
     expect(cache.size).toBe(0);
   });
 
+  it('without a vault key, shows no-key and keeps nothing', async () => {
+    const m = new BackupManager(data, { backupDir, retentionDays: 30, encrypt: false }, null);
+    await m.createBackup();
+    expect(m.listBackups().map(b => b.provenance)).toEqual(['no-key']);
+    expect((m as unknown as ProvenanceSeam)._listProvenance.size).toBe(0);
+  });
+
   it('does not answer a restore from the list\'s cache', async () => {
     const m = signed();
     const created = await m.createBackup();
