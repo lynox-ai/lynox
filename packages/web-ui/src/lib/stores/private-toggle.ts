@@ -1,3 +1,5 @@
+import { readContainedUnknown, type ContainedUnknown } from './contained-text.js';
+
 /**
  * What the page shows after a private-mode toggle the server did not answer with 2xx.
  *
@@ -15,6 +17,8 @@ export function privateToggleFailure(
 	skip: boolean;
 	messageKey: 'threads.private_purge_incomplete' | 'threads.error_extraction' | 'threads.error_contained';
 	contained?: true;
+	/** The engine could not read whether the chat read store data (`contained-text.ts`). */
+	unknown?: ContainedUnknown;
 } {
 	const stored =
 		typeof body === 'object' && body !== null
@@ -24,7 +28,8 @@ export function privateToggleFailure(
 	// The chat read data through a store connection: private mode stays on for its life, and the
 	// page says why instead of a generic failure.
 	if (typeof body === 'object' && body !== null && (body as { code?: unknown }).code === 'contained') {
-		return { skip: true, messageKey: 'threads.error_contained', contained: true };
+		const unknown = readContainedUnknown((body as { contained_unknown?: unknown }).contained_unknown);
+		return { skip: true, messageKey: 'threads.error_contained', contained: true, ...(unknown !== null ? { unknown } : {}) };
 	}
 	return { skip: typeof stored === 'boolean' ? stored : previous, messageKey: 'threads.error_extraction' };
 }

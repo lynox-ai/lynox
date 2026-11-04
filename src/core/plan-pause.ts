@@ -17,6 +17,7 @@
  */
 import type Database from 'better-sqlite3';
 import type { NotificationMessage } from './notification-router.js';
+import type { NoticeLanguage } from './notice-language.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { MANDATE_TAG_PREFIX, planMandate, planMembers } from './request-principal.js';
 import { processErrorText } from './error-egress.js';
@@ -223,11 +224,15 @@ export function pausedForOf(raw: string | null | undefined): { entries: PausedFo
   }
 }
 
-/** The entries for the proven ended members of a plan. */
+/**
+ * The entries for the proven ended members of a plan. `warned` is read per member and end from
+ * {@link deliveredWarning}: every pause writes its entries here, so no way of pausing can leave it out.
+ */
 export function pausedForEntries(
   membership: PlanMembership,
   ended: ReturnType<typeof planEndedMembers>,
   closedPrompt: boolean,
+  warned: (mandateId: string, endsAt: number) => boolean,
 ): PausedFor[] {
   return ended.map(({ member, row }) => ({
     mandateId: member.mandateId!,
@@ -236,7 +241,19 @@ export function pausedForEntries(
     endsAt: row.ends_at,
     roles: membership.roles(member),
     closedPrompt,
+    warned: warned(member.mandateId!, row.ends_at),
   }));
+}
+
+/**
+ * Whether an advance warning naming this plan, mandate and end was delivered: accepted by at least
+ * one of the owner's channels before that end, which says nothing of whether the owner saw it. A
+ * warning claimed but not delivered, one delivered only once the end had passed, or one for an
+ * earlier end that was since extended, is not one.
+ */
+export function deliveredWarning(db: Database.Database, triggerId: string): (mandateId: string, endsAt: number) => boolean {
+  const stmt = db.prepare('SELECT 1 FROM plan_advance_warnings WHERE trigger_id = ? AND mandate_id = ? AND ends_at = ? AND delivered_at IS NOT NULL AND delivered_at < ends_at');
+  return (mandateId, endsAt) => stmt.get(triggerId, mandateId, endsAt) !== undefined;
 }
 
 /**
@@ -361,7 +378,7 @@ export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
     const ended = planEndedMembers(members, deps.endOf, nowS);
     if (ended.length === 0) continue;
     try {
-      writePause(db, row.id, pausedForEntries(membership, ended, deps.closedPromptOf?.(row.id) ?? false), nowS);
+      writePause(db, row.id, pausedForEntries(membership, ended, deps.closedPromptOf?.(row.id) ?? false, deliveredWarning(db, row.id)), nowS);
       paused.push(row.id);
     } catch (err: unknown) {
       if (deps.onlyMandate !== undefined) throw new Error(`plan ${row.id}: pausing it failed, the login is refused: ${processErrorText(err)}`);
@@ -393,7 +410,7 @@ export function pausePlanNow(db: Database.Database, id: string, endOf: EndOf, cl
   const membership = rowPlanMembers(row, (wid) => workflowAuthorOf(db, wid));
   const ended = planEndedMembers(membership.members, endOf, nowS);
   if (ended.length === 0) return undefined;
-  writePause(db, id, pausedForEntries(membership, ended, closedPrompt), nowS);
+  writePause(db, id, pausedForEntries(membership, ended, closedPrompt, deliveredWarning(db, id)), nowS);
   return true;
 }
 
@@ -415,22 +432,27 @@ interface PendingNotice {
  * to `paused_for` and not told again. If that plan was the member's only one, there is no notice
  * about it.
  */
-export function claimPauseNotices(db: Database.Database, nowS: number = nowSeconds()): NotificationMessage[] {
+export function claimPauseNotices(db: Database.Database, nowS: number = nowSeconds(), lang: NoticeLanguage = 'en'): NotificationMessage[] {
   if (!planPauseOn()) return [];
   const pending = db.prepare(
     "SELECT id, title, paused_for FROM triggers WHERE paused_at IS NOT NULL AND pause_noticed_at IS NULL AND status != 'completed'",
   ).all() as PendingNotice[];
   const claim = db.prepare('UPDATE triggers SET pause_noticed_at = ? WHERE id = ? AND pause_noticed_at IS NULL');
-  const byMandate = new Map<string, { entry: PausedFor; plans: number }>();
+  // By mandate, end and reason: entries of one mandate with two ends (an end, an extension, a later
+  // end) are two notices, each with its own date, and an expiry is not told in a revocation's
+  // wording, which has no sentence about advance notice.
+  const byEnd = new Map<string, { entry: PausedFor; plans: number; unwarned: number }>();
   for (const p of pending) {
     if (claim.run(nowS, p.id).changes === 0) continue;
     for (const entry of pausedForOf(p.paused_for).entries) {
-      const seen = byMandate.get(entry.mandateId);
-      if (seen === undefined) byMandate.set(entry.mandateId, { entry, plans: 1 });
-      else seen.plans += 1;
+      const key = `${entry.mandateId}\u0000${String(entry.endsAt)}\u0000${entry.reason}`;
+      const unwarned = entry.warned === true ? 0 : 1;
+      const seen = byEnd.get(key);
+      if (seen === undefined) byEnd.set(key, { entry, plans: 1, unwarned });
+      else { seen.plans += 1; seen.unwarned += unwarned; }
     }
   }
-  return [...byMandate.values()].map(({ entry, plans }) => pauseNotice(entry, plans));
+  return [...byEnd.values()].map(({ entry, plans, unwarned }) => pauseNotice(entry, plans, unwarned === 0 ? 'all' : unwarned === plans ? 'none' : 'some', lang));
 }
 
 /** `YYYY-MM-DD` of a unix-seconds instant, in UTC. */
@@ -438,16 +460,28 @@ function dateOf(s: number): string {
   return new Date(s * 1000).toISOString().slice(0, 10);
 }
 
+/** The same UTC day as {@link dateOf}, written the way the notice's language writes a date. */
+function dateIn(s: number, lang: NoticeLanguage): string {
+  const iso = dateOf(s);
+  return lang === 'de' ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : iso;
+}
+
 /**
- * The owner's notice for one ended mandate (the approved wording, verbatim). Notices are
- * sent in English, like every other notice of the worker. "Had access until", not "ended": a grant
- * extended before its old end, by someone who has not signed in since, pauses too. "In which they
- * created or changed something" counts a plan through its workflow as well.
+ * The owner's notice for one ended mandate (the approved wording, verbatim), in the language of the
+ * engine's notices (`noticeLanguage`). "Had access until", not "ended": a grant extended before its
+ * old end, by someone who has not signed in since, pauses too. "In which they created or changed
+ * something" counts a plan through its workflow as well.
+ *
+ * German puts the name in the title: with it in the body, both clauses and the date do not fit in
+ * {@link PAUSE_NOTICE_BODY_MAX} for an ordinary address. The date there is the end the owner set,
+ * named as such ("Eingetragenes Ende"): in the present tense it would read as today's end after an
+ * extension (legal, 2026-11-01).
  */
-export function pauseNotice(entry: PausedFor, count: number): NotificationMessage {
-  // Until the advance notice exists, an expiry says that there was none: without it the notice
-  // would read as if one had come. A revocation never has one, so it is not said there.
-  const noAdvance = ADVANCE_NOTICE_ON ? '' : ' There was no advance notice.';
+export function pauseNotice(entry: PausedFor, count: number, warned: 'all' | 'some' | 'none', lang: NoticeLanguage = 'en'): NotificationMessage {
+  if (lang === 'de') return pauseNoticeDe(entry, count, warned);
+  // An expiry says when no advance warning was delivered for its plans, so the notice never reads
+  // as if one had come (legal, POS-069 Nachtrag 5). A revocation never has one, so it is not said there.
+  const noAdvance = warned === 'all' ? '' : warned === 'some' ? ' Not all had advance notice.' : ' There was no advance notice.';
   const body = (name: string): string => entry.reason === 'revoked'
     ? (count === 1
       ? `${name}'s access was revoked. A plan in which they created or changed something is paused. It runs again only once you take it over.`
@@ -468,21 +502,200 @@ export function pauseNotice(entry: PausedFor, count: number): NotificationMessag
 }
 
 /**
- * Whether the owner is warned before a grant's known end (641c-2b). Off until that warning is
- * built; while it is off, the expiry notice says there was no advance notice.
- */
-export const ADVANCE_NOTICE_ON = false;
-
-/**
  * The longest body a push carries: `web-push-channel.ts` cuts there, as `REMINDER_BODY_MAX` says.
  * A cut would take the sentence that says an extension does not end the pause, so the name gives
  * way instead, with "…", and no sentence is cut.
  */
 export const PAUSE_NOTICE_BODY_MAX = 240;
 
-function fitName(name: string, body: (name: string) => string): string {
+/** The longest title a push carries: `web-push-channel.ts` cuts there too. */
+export const PAUSE_NOTICE_TITLE_MAX = 64;
+
+function fitName(name: string, body: (name: string) => string, max: number = PAUSE_NOTICE_BODY_MAX): string {
   const full = body(name);
-  if (full.length <= PAUSE_NOTICE_BODY_MAX) return full;
-  const keep = Math.max(1, name.length - (full.length - PAUSE_NOTICE_BODY_MAX) - 1);
+  if (full.length <= max) return full;
+  const keep = Math.max(1, name.length - (full.length - max) - 1);
   return body(`${name.slice(0, keep)}…`);
+}
+
+const ownerOnly = { priority: 'high', audience: 'owner' } as const;
+
+function pauseNoticeDe(entry: PausedFor, count: number, warned: 'all' | 'some' | 'none'): NotificationMessage {
+  const noAdvance = warned === 'all' ? '' : warned === 'some' ? ' Nicht alle hatten eine Vorwarnung.' : ' Eine Vorwarnung gab es nicht.';
+  const n = String(count);
+  const body = entry.reason === 'revoked'
+    ? (count === 1
+      ? 'Der Zugang wurde widerrufen. Ein Plan, in dem über diesen Zugang etwas angelegt oder geändert wurde, ist pausiert. Er läuft erst wieder, wenn du ihn übernimmst.'
+      : `Der Zugang wurde widerrufen. ${n} Pläne, in denen über diesen Zugang etwas angelegt oder geändert wurde, sind pausiert. Sie laufen erst wieder, wenn du sie übernimmst.`)
+    : (count === 1
+      ? `Eingetragenes Ende: ${dateIn(entry.endsAt, 'de')}. Ein Plan, in dem die Person etwas angelegt oder geändert hat, ist pausiert. Er läuft erst nach deiner Übernahme wieder, auch wenn der Zugang verlängert wurde.${noAdvance}`
+      : `Eingetragenes Ende: ${dateIn(entry.endsAt, 'de')}. ${n} Pläne, in denen die Person etwas angelegt oder geändert hat, sind pausiert. Sie laufen erst nach deiner Übernahme wieder, auch wenn der Zugang verlängert wurde.${noAdvance}`);
+  return {
+    title: fitName(entry.email, (name) => (count === 1 ? `⏸ Plan pausiert: Zugang von ${name}` : `⏸ ${n} Pläne pausiert: Zugang von ${name}`), PAUSE_NOTICE_TITLE_MAX),
+    body,
+    ...ownerOnly,
+    data: Object.freeze({ pausedPlans: '1' }),
+  };
+}
+
+/** How long before a mandate's known end the owner is warned: once it is less than this away. */
+export const ADVANCE_WARNING_S = 24 * 60 * 60;
+
+/** One plan, mandate and end an advance warning names. */
+export interface WarningKey {
+  readonly triggerId: string;
+  readonly mandateId: string;
+  readonly endsAt: number;
+}
+
+/** An advance warning to send, and the rows to mark delivered once a channel accepted it. */
+export interface AdvanceWarning {
+  readonly message: NotificationMessage;
+  readonly keys: readonly WarningKey[];
+}
+
+/** The columns of a plan a warning reads to decide whether the end would pause it. */
+interface WarnPlanState {
+  readonly paused_at: number | null;
+  readonly status: string;
+  readonly enabled: number;
+  readonly source: string;
+  readonly next_run_at: string | null;
+}
+
+/** Plans whose workflow could not be read, said once per process, not on every tick. */
+const unreadableSaid = new Set<string>();
+
+/**
+ * Whether this plan would still run at a mandate's end, so that the end would pause it: not
+ * paused already, not disabled, completed or stopped, and not a one-off whose run comes before the
+ * end (it is done by then). A failed scheduled plan keeps running (`task-manager.ts`,
+ * `recordTaskRun`), a failed one-off does not.
+ */
+function wouldRunAt(row: WarnPlanState, endsAt: number): boolean {
+  if (row.enabled !== 1 || row.paused_at !== null || row.status === 'completed' || row.status === 'stopped') return false;
+  if (row.source !== 'manual') return true;
+  if (row.status === 'failed') return false;
+  if (row.next_run_at === null) return true;
+  const next = Date.parse(row.next_run_at);
+  return Number.isNaN(next) || next / 1000 >= endsAt;
+}
+
+/**
+ * The owner's advance warnings: for every mandate whose recorded end is less than
+ * {@link ADVANCE_WARNING_S} away and not revoked, one warning per mandate and end naming the plans
+ * that end would pause and that no warning named yet. Claimed before they are sent, like
+ * {@link claimPauseNotices}, and called only while a channel is registered.
+ *
+ * The keys already claimed are read first, outside any transaction, so a tick with nothing new
+ * writes nothing. What is new is claimed in one immediate transaction that reads each plan and end
+ * again: two processes on one file claim each plan once, and neither warns of a plan another
+ * paused, or of an end a login moved, in between. A plan that joins after a warning gets its own
+ * warning; one named before is not named again. A plan whose workflow cannot be read is skipped and
+ * tried again on the next tick.
+ */
+export function claimAdvanceWarnings(db: Database.Database, nowS: number = nowSeconds(), lang: NoticeLanguage = 'en'): AdvanceWarning[] {
+  if (!planPauseOn()) return [];
+  const ending = db.prepare(
+    'SELECT mandate_id, ends_at FROM mandate_ends WHERE revoked_at IS NULL AND ends_at > ? AND ends_at - ? <= ?',
+  ).all(nowS, ADVANCE_WARNING_S, nowS) as Array<{ mandate_id: string; ends_at: number }>;
+  if (ending.length === 0) return [];
+  const endOf = new Map(ending.map((e) => [e.mandate_id, e.ends_at]));
+  const keyOf = (k: WarningKey): string => `${k.triggerId}\u0000${k.mandateId}\u0000${String(k.endsAt)}`;
+  const claimed = new Set((db.prepare('SELECT trigger_id, mandate_id, ends_at FROM plan_advance_warnings WHERE ends_at > ?')
+    .all(nowS) as Array<{ trigger_id: string; mandate_id: string; ends_at: number }>)
+    .map((r) => keyOf({ triggerId: r.trigger_id, mandateId: r.mandate_id, endsAt: r.ends_at })));
+  const candidates = db.prepare(
+    `SELECT ${PAUSE_PLAN_COLS}, source, enabled, next_run_at FROM triggers
+     WHERE paused_at IS NULL AND status NOT IN ('completed', 'stopped') AND enabled = 1
+       AND (created_mandate_id IS NOT NULL OR mandate_editor_id IS NOT NULL
+            OR target_workflow_id IN (SELECT id FROM workflows WHERE created_mandate_id IS NOT NULL OR mandate_editor_id IS NOT NULL))`,
+  ).all() as Array<PausePlanRow & WarnPlanState>;
+  const wanted: Array<WarningKey & { email: string }> = [];
+  const seen = new Set<string>();
+  for (const row of candidates) {
+    if (!consentLetsThrough(row)) continue;
+    let members: readonly RequestPrincipal[];
+    try {
+      members = rowPlanMembers(row, (id) => workflowAuthorOf(db, id)).members;
+    } catch (err: unknown) {
+      if (!unreadableSaid.has(row.id)) {
+        unreadableSaid.add(row.id);
+        process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, no advance warning for it yet: ${processErrorText(err)}\n`);
+      }
+      continue;
+    }
+    for (const m of members) {
+      if (m.kind !== 'mandate' || m.mandateId === undefined) continue;
+      const endsAt = endOf.get(m.mandateId);
+      if (endsAt === undefined || !wouldRunAt(row, endsAt)) continue;
+      const key = { triggerId: row.id, mandateId: m.mandateId, endsAt };
+      if (claimed.has(keyOf(key)) || seen.has(keyOf(key))) continue;
+      seen.add(keyOf(key));
+      wanted.push({ ...key, email: m.email });
+    }
+  }
+  if (wanted.length === 0) return [];
+
+  const planNow = db.prepare('SELECT paused_at, status, enabled, source, next_run_at FROM triggers WHERE id = ?');
+  const endNow = db.prepare('SELECT ends_at, revoked_at FROM mandate_ends WHERE mandate_id = ?');
+  const earlier = db.prepare('SELECT 1 FROM plan_advance_warnings WHERE mandate_id = ? AND ends_at = ? AND delivered_at IS NOT NULL LIMIT 1');
+  const insert = db.prepare('INSERT OR IGNORE INTO plan_advance_warnings (trigger_id, mandate_id, ends_at, claimed_at) VALUES (?, ?, ?, ?)');
+  const groups = new Map<string, { email: string; endsAt: number; keys: WarningKey[]; more: boolean }>();
+  db.transaction((): void => {
+    for (const w of wanted) {
+      const plan = planNow.get(w.triggerId) as WarnPlanState | undefined;
+      const end = endNow.get(w.mandateId) as EndRow | undefined;
+      if (plan === undefined || end === undefined || end.revoked_at !== null || end.ends_at !== w.endsAt) continue;
+      if (!wouldRunAt(plan, w.endsAt)) continue;
+      const group = `${w.mandateId}\u0000${String(w.endsAt)}`;
+      // Read before this group's first claim: whether an earlier warning of this end was delivered.
+      // One that was claimed but not delivered is not one, so this message does not say "more".
+      const more = groups.get(group)?.more ?? earlier.get(w.mandateId, w.endsAt) !== undefined;
+      if (insert.run(w.triggerId, w.mandateId, w.endsAt, nowS).changes === 0) continue;
+      const g = groups.get(group);
+      if (g === undefined) groups.set(group, { email: w.email, endsAt: w.endsAt, keys: [{ triggerId: w.triggerId, mandateId: w.mandateId, endsAt: w.endsAt }], more });
+      else g.keys.push({ triggerId: w.triggerId, mandateId: w.mandateId, endsAt: w.endsAt });
+    }
+  }).immediate();
+  return [...groups.values()].map((g) => ({ message: advanceWarning(g.email, g.endsAt, g.keys.length, g.more, lang), keys: g.keys }));
+}
+
+/** Marks the rows of a warning delivered, once a channel of the owner accepted it. */
+export function markWarningsDelivered(db: Database.Database, keys: readonly WarningKey[], nowS: number = nowSeconds()): void {
+  const mark = db.prepare('UPDATE plan_advance_warnings SET delivered_at = ? WHERE trigger_id = ? AND mandate_id = ? AND ends_at = ? AND delivered_at IS NULL');
+  db.transaction((): void => {
+    for (const k of keys) mark.run(nowS, k.triggerId, k.mandateId, k.endsAt);
+  })();
+}
+
+/**
+ * The owner's advance warning for one mandate and end (ux U-065), in the language of the engine's
+ * notices. `more`: an earlier warning of this end, delivered, named other plans, and this one
+ * names one that joined since. It promises no lead time: it goes out once the end is less than a day away, if a
+ * channel is registered then (legal, POS-069 Nachtrag 8). German puts the name in the title, as the
+ * pause notice does.
+ */
+export function advanceWarning(email: string, endsAt: number, count: number, more: boolean, lang: NoticeLanguage = 'en'): NotificationMessage {
+  if (lang === 'de') {
+    const n = String(count);
+    const plans = count === 1 ? (more ? 'pausiert noch ein Plan, in dem' : 'pausiert ein Plan, in dem') : `pausieren ${n} Pläne, in denen`;
+    const after = count === 1 ? 'Pausiert er, kannst du ihn übernehmen.' : 'Pausieren sie, kannst du sie übernehmen.';
+    return {
+      title: fitName(email, (name) => (count === 1 ? `Plan pausiert bald: Zugang von ${name}` : `${n} Pläne pausieren bald: Zugang von ${name}`), PAUSE_NOTICE_TITLE_MAX),
+      body: `Zugang bis ${dateIn(endsAt, 'de')}. Dann ${plans} die Person etwas angelegt oder geändert hat, auch wenn du den Zugang verlängert hast, es sei denn, die Person meldet sich vorher einmal an. ${after}`,
+      ...ownerOnly,
+    };
+  }
+  const plans = count === 1 ? (more ? 'one more plan' : 'a plan') : `${String(count)} plans`;
+  const them = count === 1 ? 'it' : 'them';
+  const body = (name: string): string =>
+    `${name} has access until ${dateOf(endsAt)}. Then ${plans} in which they created or changed something will pause, even if you extended the access, unless they sign in once before then. Once paused, you can take ${them} over.`;
+  return {
+    title: count === 1 ? 'A plan will pause soon' : 'Plans will pause soon',
+    body: fitName(email, body),
+    priority: 'high',
+    // The owner's devices only, like the pause notice: it names a helper and when their access ends.
+    audience: 'owner',
+  };
 }

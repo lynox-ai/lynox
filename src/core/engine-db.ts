@@ -1577,6 +1577,29 @@ const MIGRATIONS: string[] = [
    ALTER TABLE connections ADD COLUMN trail_id TEXT;
    UPDATE connections SET trail_id = 'apf_' || lower(hex(randomblob(8))) WHERE trail_id IS NULL AND kind = 'api';
    CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_trail_id ON connections(trail_id);`,
+  // v64: the owner's advance warning before a mandate's known end (`plan-pause.ts`). One row per
+  // plan, mandate and end: a plan the mandate joins after the warning gets its own, and an
+  // extension (a new end) warns again. `claimed_at` is when a process took it, `delivered_at` when
+  // a channel of the owner accepted the warning; only a delivered row makes a pause say "warned".
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (64);
+   CREATE TABLE IF NOT EXISTS plan_advance_warnings (
+     trigger_id TEXT NOT NULL REFERENCES triggers(id) ON DELETE CASCADE,
+     mandate_id TEXT NOT NULL,
+     ends_at INTEGER NOT NULL,
+     claimed_at INTEGER NOT NULL,
+     delivered_at INTEGER,
+     PRIMARY KEY (trigger_id, mandate_id, ends_at)
+   );`,
+  // v65 (PRD shopify-preset §21.2 item 6): a written target whose read-back held markup the write
+  // never sent. Set with the applied record, never cleared; an undo does not write that `actual`
+  // back (§21.2 item 7 (b)). 0 for every existing target: none was checked.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (65);
+   ALTER TABLE bulk_targets ADD COLUMN shop_added_markup INTEGER NOT NULL DEFAULT 0;`,
+  // v66 (PRD shopify-preset §21.2 item 6): a written target whose store kept an HTML field otherwise
+  // than sent, within what the run may write — counted and named, not halted. 0 for every existing
+  // target: none was compared.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (66);
+   ALTER TABLE bulk_targets ADD COLUMN host_rewrote INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export interface EngineDbOptions {

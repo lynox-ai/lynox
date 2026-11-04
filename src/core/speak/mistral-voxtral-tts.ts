@@ -1,7 +1,7 @@
 /**
  * Mistral Voxtral TTS provider.
  *
- * POST https://api.mistral.ai/v1/audio/speech (JSON):
+ * POST https://api.eu.mistral.ai/v1/audio/speech (JSON):
  *   { model, input, voice, stream?: boolean }
  * Auth: Authorization: Bearer <MISTRAL_API_KEY>
  *
@@ -28,7 +28,7 @@
  * catalog — or a non-Voxtral path for non-English text.
  *
  * No usage or rate-limit headers are exposed. Character counting for per-tenant
- * cost attribution happens facade-side. EU-hosted (Mistral La Plateforme, Paris).
+ * cost attribution happens facade-side. Calls Mistral's EU regional endpoint (api.eu.mistral.ai).
  */
 
 import { getErrorMessage } from '../utils.js';
@@ -61,11 +61,11 @@ export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-2603';
  */
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
-const API_URL = 'https://api.mistral.ai/v1/audio/speech';
+const API_URL = 'https://api.eu.mistral.ai/v1/audio/speech';
 // The endpoint pages by `offset`/`limit`. It ignores `page`/`page_size`: with
 // those it returns the same first 10 voices for every page (measured 2026-08-02),
 // which hid 20 of the 30, including the six `fr_marie_*` voices.
-const VOICES_BASE_URL = 'https://api.mistral.ai/v1/audio/voices';
+const VOICES_BASE_URL = 'https://api.eu.mistral.ai/v1/audio/voices';
 // Hard page ceiling so a buggy `total_pages` response can't spin forever.
 // 30 voices × 10/page = 3 pages today; 100 pages would be 1000 voices.
 const VOICES_MAX_PAGES = 100;

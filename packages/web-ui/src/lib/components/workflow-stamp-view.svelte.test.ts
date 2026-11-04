@@ -307,6 +307,26 @@ describe('what the refuter of the fixes found', () => {
 		expect(target.textContent).toContain('Öffne „Planen“ noch einmal');
 	});
 
+	// UX-053/058: the reloaded list says the workflow's access ended, or that it is not this reader's to schedule.
+	it.each([
+		['its access ended', { ...WF, runs_as: { person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 } }, 'ended'],
+		['it is not the reader\'s to schedule', { ...WF, schedule_refusal: 'foreign' }, 'foreign'],
+	])('a workflow that may no longer be scheduled after the stamp (%s) does not get the dialog back, and its card says why', async (_why, blocked, note) => {
+		await open('owner', WF, {
+			'GET /workflows/library': [{ status: 200, body: { workflows: [WF], viewer: 'owner' } }, { status: 200, body: { workflows: [blocked], viewer: 'owner' } }],
+			'POST /tasks': [{ status: 409, body: { code: 'workflow_awaits_stamp', pipelineId: 'wf-1' } }],
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: preview('d1') }],
+			'POST /workflows/wf-1/confirm': [{ status: 200, body: {} }],
+			});
+			await click(byText('Planen'));
+			await click(byText('Bestätigen & planen'));
+			await click(q('stamp-confirm'));
+			expect(byText('Bestätigen & planen')).toBeNull();
+			// The note that names this case, not just any note.
+			expect([...target.querySelectorAll('[data-library-note]')].map((n) => n.getAttribute('data-library-note'))).toEqual([note]);
+			expect(target.textContent).not.toContain('Öffne „Planen“ noch einmal');
+	});
+
 
 	it('a view opened while the stamped list reloads keeps the screen, and the schedule dialog stays shut', async () => {
 		let releasePatch!: () => void;
@@ -526,5 +546,30 @@ describe('contract r3: what the view adds', () => {
 		await click(q('stamp-review'));
 		expect(q('stamp-role-unknown')).not.toBeNull();
 		expect(q('stamp-model-default')).toBeNull();
+	});
+});
+
+describe('renaming a workflow (ux U-077)', () => {
+	const renameWith = async (answer: Answer): Promise<void> => {
+		await open('owner', WF, { 'PATCH /workflows/wf-1': [answer] });
+		await click(byText('Umbenennen'));
+		const input = target.querySelector<HTMLInputElement>('input[aria-label="Umbenennen"]');
+		expect(input, 'the rename field').not.toBeNull();
+		input!.value = 'Monthly report\u200B';
+		input!.dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+		await click(byText('Speichern'));
+	};
+
+	it('a name refused for a character that does not show says so, and the field stays open to type it again', async () => {
+		await renameWith({ status: 400, body: { error: 'The name holds a character that does not show as text (U+200B). Nothing was saved.', code: 'hidden_char' } });
+		expect(target.textContent).toContain('Der Name enthält ein Zeichen, das nicht als Text erscheint. Gespeichert ist nichts. Lösch den Namen und tipp ihn neu ein, statt ihn einzufügen.');
+		expect(target.querySelector('input[aria-label="Umbenennen"]')).not.toBeNull();
+	});
+
+	it('any other refusal stays the plain save failure', async () => {
+		await renameWith({ status: 400, body: { error: 'name too long (max 200 characters)' } });
+		expect(target.textContent).toContain('Speichern fehlgeschlagen');
+		expect(target.textContent).not.toContain('nicht als Text erscheint');
 	});
 });

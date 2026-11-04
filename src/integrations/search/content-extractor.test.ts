@@ -462,6 +462,40 @@ describe('extractContent', () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
+  // A GraphQL endpoint runs a mutation it finds in the URL's `query`, for a GET as well, so a
+  // page read refuses one before anything is sent: the URL asked for, and a hop.
+  it('does not request a GraphQL URL that carries a mutation, asked for or redirected to', async () => {
+    await expect(extractContent('https://api.example.com/graphql?query=mutation%7BdeleteAll%7D'))
+      .rejects.toThrow('Blocked: https://api.example.com/graphql carries a GraphQL mutation in its URL');
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 302, headers: new Headers({ location: 'https://api.example.com/graphql?x=1;query=mutation%7BdeleteAll%7D' }) });
+    const hops: string[] = [];
+    await expect(extractContent('https://example.com/old', undefined, undefined, (next) => { hops.push(next); }))
+      .rejects.toThrow('Blocked: redirect to https://api.example.com/graphql carries a GraphQL mutation in its URL');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(hops).toEqual([]);
+  });
+
+  // The refusal names the URL without the mutation, also where the path carries it.
+  it('does not repeat a mutation carried in the path', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 302, headers: new Headers({ location: 'https://api.example.com/graphql%3Fquery=mutation%7BdeleteAll%7D' }) });
+    const refused = await extractContent('https://example.com/old').then(() => null, (err: unknown) => String(err));
+    expect(refused).toContain('Blocked: redirect to https://api.example.com/graphql carries a GraphQL mutation in its URL');
+    expect(refused).not.toContain('deleteAll');
+  });
+
+  it('CONTROL: a GraphQL read in the URL and a REST query naming a mutation are fetched', async () => {
+    const page = (): unknown => ({
+      ok: true, status: 200, headers: new Headers({ 'content-type': 'text/html' }),
+      body: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('<html><body>Page</body></html>')); c.close(); } }),
+    });
+    mockFetch.mockResolvedValueOnce(page()).mockResolvedValueOnce(page());
+    await extractContent('https://api.example.com/graphql?query=%7Bviewer%7Bid%7D%7D');
+    await extractContent('https://docs.example.com/search?query=mutation');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
   it('throws on too many redirects', async () => {
     // 6 redirects → exceeds MAX_REDIRECTS (5)
     for (let i = 0; i < 7; i++) {

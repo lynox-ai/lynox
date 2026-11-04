@@ -72,6 +72,46 @@
         "Rechne mir kurz aus: wenn 47 Eintraege in 11 Tagen entstehen, wie viele pro Tag sind das?",
         "Lies {FILE} und sag mir nur ob das Wort Preisliste vorkommt."
       ]
+    },
+    {
+      "id": "N4-run-instruction",
+      "expect": "silent",
+      "why": "Instructions for the job being done now: required sentences, a length limit, keywords, even phrased as binding. They describe the task, not the business; stored as a fact, a later chat applies them where they do not belong. Measured on a live probe (2026-10-27): the turn-end capture stored such a brief as 'the operator requires three legally binding sentences … in all product texts'. Written with real umlauts: quoted sentences in ASCII transliteration were read as a writing preference ('the operator writes without umlauts') and captured, which is a fixture artefact, not this failure. A write here can still be a genuine fact about the business (a product the shop carries), so read the written texts before scoring a MISS.",
+      "cases": [
+        "Schreib mir eine Produktbeschreibung für die Teekanne Lumen{N}. Vorgaben für diesen Text: höchstens 600 Zeichen, das Keyword «Glasteekanne» in den ersten 100 Zeichen, und diese zwei Sätze müssen wörtlich drin stehen: «Spülmaschinenfest.» und «Lieferung in 2 Werktagen.» Gib mir nur den Text zurück.",
+        "Überarbeite die Texte aller Gärgläser von Nordhain{N}. Verbindlich für diesen Lauf: keine Heilversprechen, keine fremden Marken, höchstens 4000 Zeichen pro Text, die Keywords «Fermentierglas» und «Gärglas» gehören in den Titel. Fang mit einem Beispieltext für ein 1-Liter-Fermentierglas an.",
+        "Mach mir einen Newsletter-Entwurf für Kaltwerk{N}: Betreff unter 50 Zeichen, drei Absätze, am Schluss zwingend der Satz «Abmelden jederzeit möglich.» und kein Ausrufezeichen im ganzen Text."
+      ]
+    },
+    {
+      "id": "S5-standing-rule",
+      "expect": "capture",
+      "why": "The control for N4: the same kind of rule, but the operator says it applies from now on. A change that silences N4 by suppressing every rule fails here. Written with real umlauts like N4, and with entity names of its own, so a rule stored here cannot be recalled into an N4 case of the same run.",
+      "cases": [
+        "Ab jetzt gilt für alle Produkttexte von Brava{N} dauerhaft: keine Heilversprechen und keine fremden Markennamen. Halte dich bitte auch in künftigen Chats daran.",
+        "Grundsätzlich und ab sofort: Rechnungen an Feldmark{N} gehen nur noch per Post, nie per E-Mail.",
+        "Eine feste Regel für die Zukunft: Kunden von Silvan{N} schreiben wir immer mit Sie an, nie mit Du."
+      ]
+    },
+    {
+      "id": "S6-standing-practice",
+      "expect": "capture",
+      "why": "The second control for N4, and the one S5 cannot be: a standing practice stated on its own, with no request attached and none of the words that mark a rule as lasting ('ab jetzt', 'immer', 'künftig'). A change that keeps only rules carrying those words passes S5 and fails here.",
+      "cases": [
+        "Zur Info: Bei Tannberg{N} siezen wir die Kunden.",
+        "Rechnungen an Quellhof{N} schicken wir per Post, die wollen keine PDFs.",
+        "Morgenrot{N} beliefern wir nur innerhalb der Schweiz."
+      ]
+    },
+    {
+      "id": "N6-verbless-briefing",
+      "expect": "silent",
+      "why": "N4 without a request verb: the operator lists requirements for texts as a briefing and names the first text, but never says 'schreib' or 'mach'. Every N4 case carries a verb, so a fix that keys on the verb would pass N4 and fail here. Read the written texts before scoring a MISS.",
+      "cases": [
+        "Vorgaben für die Texte zu Halde{N}: höchstens 500 Zeichen, keine Heilversprechen, das Keyword «Keramikfilter» im ersten Satz. Erster Text: der Wasserfilter Halde Mini.",
+        "Briefing Newsletter Sonnrain{N} — Betreff unter 40 Zeichen, zwei Absätze, Schlusssatz «Bis bald.», kein Ausrufezeichen. Thema: die neuen Kräutertees.",
+        "Kategorie Gärtöpfe bei Brunnmatt{N}, Titel maximal 60 Zeichen, Keyword «Gärtopf» vorne, keine Wirkversprechen. Zuerst der 5-Liter-Topf."
+      ]
     }
   ]
 }

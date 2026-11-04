@@ -32,6 +32,7 @@ import type {
   TranscribeSessionContext,
 } from './types.js';
 import { mistralVoxtralProvider, hasMistralVoxtral } from './mistral-voxtral.js';
+import { providerListApplies } from '../contained-providers.js';
 import { whisperCppProvider, hasWhisperCpp } from './whisper-cpp.js';
 import { CORE_GLOSSARY } from './glossary/core-terms.js';
 import { applyGlossary, applySessionGlossary } from './glossary/apply.js';
@@ -76,6 +77,9 @@ function readConfigProvider(): ProviderChoice {
 }
 
 function resolveProvider(): TranscribeProvider | null {
+  // On an instance connected to a Shopify store no audio goes to a speech service: only the
+  // local whisper.cpp transcribes there, whatever is chosen (`contained-providers.ts`).
+  if (providerListApplies()) return whisperCppProvider.isAvailable ? whisperCppProvider : null;
   const choice = readEnvProvider() ?? readConfigProvider();
   if (choice === 'mistral') {
     return mistralVoxtralProvider.isAvailable ? mistralVoxtralProvider : null;
@@ -100,6 +104,7 @@ export function getActiveTranscribeProvider(): TranscribeProvider | null {
  * the whisper-specific name — new code should prefer `hasTranscribeProvider()`.
  */
 export function hasTranscribeProvider(): boolean {
+  if (providerListApplies()) return hasWhisperCpp();
   return hasMistralVoxtral() || hasWhisperCpp();
 }
 

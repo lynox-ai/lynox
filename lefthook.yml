@@ -19,6 +19,11 @@ pre-push:
   # already-pushed branch, a fresh branch carrying only an empty commit, a push of a branch you are
   # not standing on. The commands below have CI twins, so for them that is latency. The scripts
   # here do not, and a script ran in every measured case.
+  # No `skip` or `only` on a script that reads pushed-ranges.sh: it takes its range from the pushed
+  # refs, not the checkout, so a merge or rebase in progress does not change what it checks, and a
+  # push made while a rebase is paused publishes like any other. (Its own code is read from the
+  # checkout; a conflict in one of these files makes the hook fail and the push is refused.)
+  # tests/pre-push-scripts.test.ts derives the set from this file and holds it.
   scripts:
     "push-lands-guard.sh":
       # A push to a branch whose pull request is already merged or closed lands nowhere, and git
@@ -58,9 +63,6 @@ pre-push:
       # The invocation lives in .lefthook/pre-push/public-repo-guard-meta.sh.
       runner: bash
       use_stdin: true
-      skip:
-        - merge
-        - rebase
     "public-repo-guard-files.sh":
       # The same class over the other surface: the PATHS and CONTENT of the files
       # this push adds. The message half above cannot see them, so a file named
@@ -78,9 +80,6 @@ pre-push:
       # The invocation lives in .lefthook/pre-push/public-repo-guard-files.sh.
       runner: bash
       use_stdin: true
-      skip:
-        - merge
-        - rebase
     "lint-changed.sh":
       # eslint over the .ts/.svelte source each pushed ref changes, linted in a temporary checkout
       # of the pushed commit (scripts/lint-changed.mjs). Until this hook, eslint ran only in CI, so
@@ -90,9 +89,6 @@ pre-push:
       # it could not check. Its CI twin is the `lint` job in ci.yml.
       runner: bash
       use_stdin: true
-      skip:
-        - merge
-        - rebase
     "public-repo-guard-commits.sh":
       # The lines each commit this push ADDS, for an internal register id or wording that marks a
       # security finding as open. The tree scan in `commands` sees only HEAD; an id one commit adds
@@ -103,9 +99,17 @@ pre-push:
       # The invocation lives in .lefthook/pre-push/public-repo-guard-commits.sh.
       runner: bash
       use_stdin: true
-      skip:
-        - merge
-        - rebase
+    "corpus-structure-guard-commits.sh":
+      # The files each commit this push ADDS OR CHANGES, read for the shape of an eval corpus (an
+      # object with a `turns` or `gold` array), whatever the file is called. The pre-commit command
+      # below reads the index; this hook reads every pushed commit, so a commit made without that
+      # hook is still read before it is published. Its CI twin is a step in the required public-repo-guard job, which
+      # prevents the merge. Ranges from pushed-ranges.sh; exit 2 when it could not check.
+      # The invocation lives in .lefthook/pre-push/corpus-structure-guard-commits.sh.
+      # No `skip` for merge or rebase: the range comes from the pushed refs, not the checkout, and
+      # a push made while a rebase is paused publishes like any other.
+      runner: bash
+      use_stdin: true
   commands:
     security-scan:
       run: sh scripts/security-scan.sh
@@ -167,6 +171,16 @@ pre-commit:
       # `DEF-` register id, and a short list of phrases about security findings) at push
       # time and in CI.
       run: node scripts/disclosure-vocabulary-scan.mjs
+      skip:
+        - merge
+        - rebase
+    corpus-structure-guard:
+      # Refuses a file this commit ADDS OR CHANGES whose content has the shape of an eval corpus — an object
+      # with a `turns` or `gold` array — whatever it is called: `.gitignore` can only match names,
+      # and a corpus built from real threads must not reach this public repo. A file named as JSON
+      # that does not parse is refused too. Exit 1 = refused, 2 = the index could not be read.
+      # Twins: the pre-push script above and a step in the public-repo-guard CI job.
+      run: node scripts/corpus-structure-guard.mjs --staged
       skip:
         - merge
         - rebase
