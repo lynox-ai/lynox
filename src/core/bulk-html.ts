@@ -539,8 +539,6 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     // rewritten (U-103). Asked LAST: the preview offers a value refused for this reason to the
     // owner to paste into the shop by hand, so it must have passed every other check — an HTML
     // link to another domain, a script or a hidden character is refused for its own reason first.
-    // A URL inside a shortcode's attributes is text to this check, not a link, and is not
-    // checked against the domains here, whether the value is refused or written.
     const shortcode = shortcodeRefusalOf(input.after, input.before);
     return shortcode === null ? tree : refused('shortcode_changed', shortcode);
   } catch {
