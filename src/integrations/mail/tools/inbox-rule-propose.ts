@@ -74,6 +74,9 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
       if (checked.hidden) {
         return Promise.resolve('inbox_rule_propose: matcher_value holds characters a reader does not see. Give the sender or the phrase as it reads.');
       }
+      if (checked.multiline) {
+        return Promise.resolve('inbox_rule_propose: matcher_value must be one line, as the sender or the subject reads.');
+      }
       let value = checked.value;
       if (charCount(value) > INBOX_RULE_VALUE_MAX) {
         return Promise.resolve(`inbox_rule_propose: matcher_value is longer than ${String(INBOX_RULE_VALUE_MAX)} characters.`);

@@ -18,13 +18,13 @@ export function ruleLine(raw: string): string {
 /**
  * A matched value is not rewritten: the loader compares it with the mail as it arrives, so a value
  * with a character turned into a space would never match (a warning sign as emoji is U+26A0 U+FE0F,
- * and a subject carries both). Spaces are collapsed, and a value that still holds a character a
- * reader does not see, outside the places real text puts one (`hidden-chars.ts`), is refused by
- * the caller.
+ * and a subject carries both), and neither would one with its spaces collapsed (a subject may hold
+ * two, or a non-breaking one). So the value is only trimmed. The caller refuses one that holds a
+ * character a reader does not see, outside the places real text puts one (`hidden-chars.ts`,
+ * checked on the raw input), or a line break or tab, which no subject or address carries.
  */
-export function ruleValue(raw: string): { value: string; hidden: boolean } {
-  const value = raw.replace(/\s+/g, ' ').trim();
-  return { value, hidden: hiddenCharIndexes(value).length > 0 };
+export function ruleValue(raw: string): { value: string; hidden: boolean; multiline: boolean } {
+  return { value: raw.trim(), hidden: hiddenCharIndexes(raw).length > 0, multiline: /[\t\n\r]/.test(raw.trim()) };
 }
 
 /** Length in characters (code points), as `cutChars` counts. */
