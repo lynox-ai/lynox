@@ -29,6 +29,7 @@ import type {
   InboxUserAction,
 } from '../../types/index.js';
 import { sanitizeHeader, stripHtmlAndInvisibles } from './classifier/sanitize.js';
+import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 
 /** Sentinel used in single-user instances. Team-inbox lands in Phase 5+. */
 export const DEFAULT_TENANT_ID = 'default';
@@ -148,7 +149,8 @@ export interface InboxRuleProposal {
 
 export type ProposeRuleResult =
   | { ok: true; id: string }
-  | { ok: false; reason: 'limit'; pending: number };
+  | { ok: false; reason: 'limit'; pending: number }
+  | { ok: false; reason: 'description_limit'; descriptions: number };
 
 export type ThreadMessageDirection = 'inbound' | 'outbound' | 'unknown';
 
@@ -1514,6 +1516,10 @@ export class InboxStateDb {
         )
         .get(tenantId, input.accountId) as { n: number };
       if (n >= maxPending) return { ok: false, reason: 'limit', pending: n };
+      if (input.matcherKind === 'matches_description') {
+        const descriptions = this.countRulesOfKind(input.accountId, 'matches_description', tenantId);
+        if (descriptions >= MAX_DESCRIPTION_RULES) return { ok: false, reason: 'description_limit', descriptions };
+      }
       const id = nextId('rul');
       this.db
         .prepare(
@@ -1523,6 +1529,16 @@ export class InboxStateDb {
         .run(id, tenantId, input.accountId, input.matcherKind, input.matcherValue, at.getTime(), input.name, input.runId ?? null);
       return { ok: true, id };
     }).immediate();
+  }
+
+  /** How many rules of one kind an account has, waiting ones included. */
+  countRulesOfKind(accountId: string, kind: InboxRuleMatcherKind, tenantId: string = DEFAULT_TENANT_ID): number {
+    const { n } = this.db
+      .prepare<[string, string, string], { n: number }>(
+        'SELECT COUNT(*) AS n FROM inbox_rules WHERE tenant_id = ? AND account_id = ? AND matcher_kind = ?',
+      )
+      .get(tenantId, accountId, kind) as { n: number };
+    return n;
   }
 
   /** The owner confirms a waiting rule. True when the rule exists; confirming it again keeps the

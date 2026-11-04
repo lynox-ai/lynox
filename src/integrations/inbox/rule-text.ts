@@ -27,6 +27,30 @@ export function ruleValue(raw: string): { value: string; hidden: boolean; multil
   return { value: raw.trim(), hidden: hiddenCharIndexes(raw).length > 0, multiline: /[\t\n\r]/.test(raw.trim()) };
 }
 
+/** A rule description: one line a reader sees whole, 3 to 300 characters. */
+export const DESCRIPTION_MIN = 3;
+export const DESCRIPTION_MAX = 300;
+/** At most this many description rules per account, in any state: each is in every model call
+ *  of its account, so the list must stay short (PRD inbox-user-rules E3, E11). */
+export const MAX_DESCRIPTION_RULES = 20;
+
+/** Why a description cannot be stored, or null. Checked on the raw input, as `ruleValue` does. */
+export function descriptionProblem(raw: string): string | null {
+  const v = ruleValue(raw);
+  if (v.hidden) return 'holds characters a reader does not see';
+  if (v.multiline) return 'must be one line';
+  if (namesRuleLabel(v.value)) return 'must not name a rule label such as R1';
+  const n = charCount(v.value);
+  if (n < DESCRIPTION_MIN || n > DESCRIPTION_MAX) return `must be ${String(DESCRIPTION_MIN)} to ${String(DESCRIPTION_MAX)} characters`;
+  return null;
+}
+
+/** True when the text names a label the rule check uses (`R1`, `r 12`): a rule text that names
+ *  one could steer the check towards another rule. */
+export function namesRuleLabel(text: string): boolean {
+  return /(^|[^\p{L}\p{N}])r\s?\d{1,3}(?![\p{N}])/iu.test(text);
+}
+
 /** Length in characters (code points), as `cutChars` counts. */
 export function charCount(text: string): number {
   return Array.from(text).length;

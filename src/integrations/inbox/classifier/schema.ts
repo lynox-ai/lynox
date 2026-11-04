@@ -27,7 +27,15 @@ export type FailReason =
   /** Daily classifier budget (InboxCostBudget) was exhausted — no LLM call. */
   | 'budget_exceeded'
   /** The model archived a mail a person forwarded (`forwarded.ts`); it is shown instead. */
-  | 'forwarded_by_person';
+  | 'forwarded_by_person'
+  /** A description rule would have filed a sensitive mail as handled; it is shown instead (F1). */
+  | 'rule_withheld_sensitive'
+  /** A description rule would have filed the mail as handled, but the classifier does not see it
+   *  as handled; the classifier's verdict stands (PRD inbox-user-rules E3, decision 801-3b A). */
+  | 'rule_withheld_classifier'
+  /** A description rule would have filed the mail as handled, and the classifier's check could not
+   *  run (no budget, a failed call); the mail is shown. */
+  | 'rule_withheld_unchecked';
 
 export interface ClassifierVerdict {
   bucket: InboxBucket;

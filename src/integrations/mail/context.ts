@@ -215,11 +215,14 @@ export interface MailHooks {
 export interface InboxRuleProposer {
   propose(input: {
     accountId: string;
-    matcherKind: 'from' | 'subject_contains';
+    matcherKind: 'from' | 'subject_contains' | 'matches_description';
     matcherValue: string;
     name: string;
     runId?: string | undefined;
-  }): { ok: true; id: string } | { ok: false; reason: 'limit'; pending: number };
+  }):
+    | { ok: true; id: string }
+    | { ok: false; reason: 'limit'; pending: number }
+    | { ok: false; reason: 'description_limit'; descriptions: number };
   /** At most this many waiting proposals per account. */
   readonly maxPending: number;
 }

@@ -265,6 +265,36 @@ describe('createInboxClassifierHook — rule short-circuit', () => {
   });
 });
 
+describe('createInboxClassifierHook — description rules wait for the runner (PRD inbox-user-rules E3)', () => {
+  it('a fixed rule files the mail before any description rule is asked, even one created earlier', async () => {
+    inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'auto_handled', action: 'mark_read', source: 'on_demand', createdAt: new Date(1_000) });
+    const fixed = inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com', bucket: 'requires_user', action: 'show', source: 'on_demand', createdAt: new Date(2_000) });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope());
+    expect(queueCalls).toHaveLength(0);
+    expect(inbox.listItems()[0]).toMatchObject({ bucket: 'requires_user', matchedRuleId: fixed });
+  });
+
+  it('with only a description rule, the mail goes to the queue: the hook applies none itself', async () => {
+    inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Termin', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope());
+    expect(queueCalls).toHaveLength(1);
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  it('marks an out-of-office reply in the payload, so the runner asks no description rule about it — and no other machine-sent mail', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope({ isAutoReply: true, isAutoReplied: true }));
+    await hook(ACCOUNT.id, envelope({ uid: 2, messageId: '<m2@x>', threadKey: 'imap:thread-2', isAutoReply: true }));
+    await hook(ACCOUNT.id, envelope({ uid: 3, messageId: '<m3@x>', threadKey: 'imap:thread-3' }));
+    expect(queueCalls).toHaveLength(3);
+    expect(queueCalls[0]!.isAutoReplied).toBe(true);
+    expect('isAutoReplied' in queueCalls[1]!).toBe(false);
+    expect('isAutoReplied' in queueCalls[2]!).toBe(false);
+  });
+});
+
 describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
   it('detects an OTP-shaped mail and skips the LLM, audit records the category', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });

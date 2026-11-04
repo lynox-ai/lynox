@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MailStateDb } from '../mail/state.js';
 import { DEFAULT_TENANT_ID, InboxStateDb } from './state.js';
+import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 import type { MailAccountConfig } from '../mail/provider.js';
 
 let mail: MailStateDb;
@@ -525,6 +526,32 @@ describe('InboxStateDb — rules the agent proposes (PRD inbox-user-rules E7)', 
     expect(inbox.listItems({ ruleId })).toHaveLength(0);
     expect(inbox.getItem(filed)?.matchedRuleId).toBeUndefined();
     expect(inbox.listItems()).toHaveLength(3);
+  });
+});
+
+describe('InboxStateDb — description rules are capped per account (PRD inbox-user-rules E11)', () => {
+  const desc = (i: number, accountId = TEST_ACCOUNT.id) => ({ accountId, matcherKind: 'matches_description' as const, matcherValue: `Beschreibung ${String(i)}`, name: `D${String(i)}` });
+
+  it('refuses the proposal past MAX_DESCRIPTION_RULES, counting confirmed and waiting rules alike', () => {
+    for (let i = 0; i < 15; i++) {
+      inbox.insertRule({ ...desc(i), bucket: 'requires_user', action: 'show', source: 'on_demand' });
+    }
+    for (let i = 15; i < MAX_DESCRIPTION_RULES; i++) {
+      expect(inbox.proposeRule(desc(i), 100).ok).toBe(true);
+    }
+    expect(inbox.countRulesOfKind(TEST_ACCOUNT.id, 'matches_description')).toBe(MAX_DESCRIPTION_RULES);
+    expect(inbox.proposeRule(desc(99), 100)).toEqual({ ok: false, reason: 'description_limit', descriptions: MAX_DESCRIPTION_RULES });
+    expect(inbox.countRulesOfKind(TEST_ACCOUNT.id, 'matches_description')).toBe(MAX_DESCRIPTION_RULES);
+  });
+
+  it('the cap is per account and per kind: other kinds and other accounts still propose', () => {
+    mail.upsertAccount({ ...TEST_ACCOUNT, id: 'acct-2', address: 'second@example.com' });
+    for (let i = 0; i < MAX_DESCRIPTION_RULES; i++) {
+      inbox.insertRule({ ...desc(i), bucket: 'requires_user', action: 'show', source: 'on_demand' });
+    }
+    expect(inbox.proposeRule({ accountId: TEST_ACCOUNT.id, matcherKind: 'from', matcherValue: 'k@example.com', name: 'K' }, 100).ok).toBe(true);
+    expect(inbox.proposeRule(desc(0, 'acct-2'), 100).ok).toBe(true);
+    expect(inbox.countRulesOfKind(TEST_ACCOUNT.id, 'from')).toBe(1);
   });
 });
 

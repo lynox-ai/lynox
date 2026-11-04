@@ -8,6 +8,7 @@ import { InboxRulesLoader } from './rules-loader.js';
 import { InboxStateDb } from './state.js';
 import type { CRM } from '../../core/crm.js';
 import type { MailAccountConfig, MailEnvelope } from '../mail/provider.js';
+import { getModelId, MODEL_CAPABILITIES } from '../../types/index.js';
 
 const ACCOUNT: MailAccountConfig = {
   id: 'acct-1',
@@ -302,6 +303,95 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.state.listItems()[0]?.bucket).toBe('requires_user');
     expect(runtime.budget.snapshot().spentUSD).toBeGreaterThan(0);
     fetchSpy.mockRestore();
+  });
+
+  describe('description rules (PRD inbox-user-rules E3)', () => {
+    afterEach(() => { vi.unstubAllEnvs(); });
+    const mistralReply = (content: string, tokens = 1_000_000) => ({
+      ok: true, status: 200, statusText: '',
+      json: async () => ({ choices: [{ message: { content } }], usage: { prompt_tokens: tokens, completion_tokens: tokens } }),
+      text: async () => '',
+    }) as unknown as Response;
+    /** The label the rule check gave the rule named `name`, read from the prompt. */
+    const labelOf = (user: string, name: string): string => {
+      const m = new RegExp(`Regel (R\\d+) \\| Name: ${name} \\|`).exec(user);
+      if (!m) throw new Error(`no label for ${name}`);
+      return m[1]!;
+    };
+    const runHistory = () => {
+      const inserted: Array<Record<string, unknown>> = [];
+      const updated: Array<Record<string, unknown>> = [];
+      return { inserted, updated, rh: { insertRun: (r: Record<string, unknown>) => { inserted.push(r); return `run-${String(inserted.length)}`; }, updateRun: (_id: string, u: Record<string, unknown>) => { updated.push(u); } } };
+    };
+
+    it('EU: checks them with ministral-8b, priced at its own rates, recorded as its own run; an auto_handled hit the classifier confirms files the mail', async () => {
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '1');
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        const req = JSON.parse(String((init as RequestInit).body)) as { model: string; messages: Array<{ content: string }> };
+        if (req.model === 'ministral-8b-2512') return mistralReply(JSON.stringify({ rule_id: labelOf(req.messages[1]!.content, 'Termine') }));
+        return mistralReply(JSON.stringify({ bucket: 'auto_handled', confidence: 0.95, one_line_why_de: 'Termin bestätigt' }), 0);
+      });
+      const h = runHistory();
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: makeClient({ content: [] }), llmRegion: 'eu', mistralApiKey: 'eu-key', runHistory: h.rh as never });
+      try {
+        const ruleId = runtime.state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'auto_handled', action: 'mark_read', source: 'on_demand', name: 'Termine' });
+        await runtime.hook(ACCOUNT.id, envelope());
+        await runtime.queue.drain();
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        const models = fetchSpy.mock.calls.map((c) => (JSON.parse(String((c[1] as RequestInit).body)) as { model: string }).model);
+        expect(models[0]).toBe('ministral-8b-2512');
+        expect(models[1]).not.toBe('ministral-8b-2512');
+        expect(runtime.state.listItems()[0]).toMatchObject({ bucket: 'auto_handled', matchedRuleId: ruleId });
+        const pricing = MODEL_CAPABILITIES['ministral-8b-2512']!.pricing;
+        expect(runtime.budget.snapshot().spentUSD).toBeCloseTo(pricing.input + pricing.output, 6);
+        expect(h.inserted[0]).toMatchObject({ taskText: 'inbox rule check', modelId: 'ministral-8b-2512', modelTier: 'fast' });
+        expect(h.updated[0]?.['costUsd']).toBeCloseTo(pricing.input + pricing.output, 6);
+      } finally {
+        fetchSpy.mockRestore();
+        await runtime.shutdown();
+      }
+    });
+
+    it('US: checks them with the fast Anthropic model, charged to the budget and recorded as its own run', async () => {
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '1');
+      const create = vi.fn(async (req: { model: string; messages: Array<{ content: string }> }) => ({
+        content: [{ type: 'text', text: JSON.stringify({ rule_id: labelOf(req.messages[0]!.content, 'Termine') }) }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }));
+      const client = { messages: { create } } as unknown as Anthropic;
+      const h = runHistory();
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, privacyAck: true, runHistory: h.rh as never });
+      try {
+        runtime.state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Termine' });
+        await runtime.hook(ACCOUNT.id, envelope());
+        await runtime.queue.drain();
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(create.mock.calls[0]![0].model).toBe(getModelId('fast'));
+        expect(runtime.state.listItems()[0]?.matchedRuleId).toBeDefined();
+        expect(runtime.budget.snapshot().spentUSD).toBeCloseTo((10 * 1 + 5 * 5) / 1_000_000, 9); // Haiku $1 / $5 per MTok
+        expect(h.inserted[0]).toMatchObject({ taskText: 'inbox rule check', modelId: getModelId('fast'), modelTier: 'fast' });
+      } finally {
+        await runtime.shutdown();
+      }
+    });
+
+    it('with the flag off, checks no description rule: the classifier alone decides', async () => {
+      vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '');
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(mistralReply(JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'x' }), 10));
+      const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: makeClient({ content: [] }), llmRegion: 'eu', mistralApiKey: 'eu-key' });
+      try {
+        runtime.state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'auto_handled', action: 'mark_read', source: 'on_demand' });
+        await runtime.hook(ACCOUNT.id, envelope());
+        await runtime.queue.drain();
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const body = JSON.parse(String((fetchSpy.mock.calls[0]![1] as RequestInit).body)) as { model: string };
+        expect(body.model).not.toBe('ministral-8b-2512');
+        expect(runtime.state.listItems()[0]?.matchedRuleId).toBeUndefined();
+      } finally {
+        fetchSpy.mockRestore();
+        await runtime.shutdown();
+      }
+    });
   });
 
   it('prices classifier spend per region — Mistral for EU, Haiku for US', async () => {

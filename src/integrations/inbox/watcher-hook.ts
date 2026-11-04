@@ -413,6 +413,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       },
     };
     if (opts.tenantId !== undefined) payload.tenantId = opts.tenantId;
+    // No description rule is checked for an automatic reply such as an out-of-office note (runner).
+    // On Microsoft 365 the watch envelope carries no headers, so this is false there.
+    if (env.isAutoReplied === true) payload.isAutoReplied = true;
     if (sensitive.isSensitive) {
       payload.sensitive = {
         categories: sensitive.categories,

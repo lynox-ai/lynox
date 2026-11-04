@@ -319,6 +319,13 @@ export function isAutoSubmittedHeader(rawHeader: string | undefined): boolean {
   return true;
 }
 
+/** RFC 3834 `Auto-Submitted: auto-replied` — a reply sent automatically to a message, such as an
+ *  out-of-office note. Narrower than {@link isAutoSubmittedHeader}. */
+export function isAutoRepliedHeader(rawHeader: string | undefined): boolean {
+  if (!rawHeader) return false;
+  return /^auto-replied\b/.test(rawHeader.toLowerCase().trim());
+}
+
 function isAuthError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (err.name === 'AuthenticationFailure') return true;
@@ -721,6 +728,8 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
+            // The watcher lists new mail; without this header no listed mail is ever automatic.
+            headers: ['auto-submitted'],
           },
           { uid: true },
         )) {
@@ -886,6 +895,8 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
+            // The watcher lists new mail; without this header no listed mail is ever automatic.
+            headers: ['auto-submitted'],
           },
           { uid: true },
         )) {
@@ -1137,6 +1148,7 @@ export class ImapSmtpProvider implements MailProvider {
     // Auto-Submitted header detection — must never auto-reply to these
     const headers = msg.headers ? parseHeaders(msg.headers.toString('utf-8')) : new Map<string, string>();
     const isAutoReply = isAutoSubmittedHeader(headers.get('auto-submitted'));
+    const isAutoReplied = isAutoRepliedHeader(headers.get('auto-submitted'));
 
     return {
       uid: msg.uid,
@@ -1156,6 +1168,7 @@ export class ImapSmtpProvider implements MailProvider {
       attachmentCount: countAttachments(msg.bodyStructure),
       sizeBytes: msg.size,
       isAutoReply,
+      isAutoReplied,
     };
   }
 }
