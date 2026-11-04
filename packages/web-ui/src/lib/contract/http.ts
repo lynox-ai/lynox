@@ -176,6 +176,44 @@ export interface UsageStatusResponse {
   exact_held?: boolean | undefined;
 }
 
+// === Usage status — request headers of GET /internal/usage/:instanceId/status (engine → CP) ===
+
+/**
+ * Where a managed engine's vault key came from, stated on every status poll so the control plane
+ * can see, per instance, whether the key it delivers is the one the engine runs on. The poll runs
+ * at start and on a fixed cadence whether or not the instance is used, which a usage flush does not.
+ *
+ *  - `'env'`       — `LYNOX_VAULT_KEY` came in the container's environment and has the key's form.
+ *  - `'malformed'` — it came in the environment but does not have the key's form.
+ *  - `'fallback'`  — the engine runs on a key from somewhere else: the volume's `.env`, the data
+ *    dir's `vault.key`, or one generated at this start.
+ *  - `'none'`      — the engine started without a key.
+ *
+ * A word, never the key or any part of it. The control plane stores a word from this list and
+ * ignores anything else.
+ */
+export const KEY_DELIVERY_WORDS = ['env', 'malformed', 'fallback', 'none'] as const;
+export type KeyDelivery = typeof KEY_DELIVERY_WORDS[number];
+
+/** Whether a header value is a word of {@link KEY_DELIVERY_WORDS}. */
+export function isKeyDelivery(value: unknown): value is KeyDelivery {
+  return typeof value === 'string' && (KEY_DELIVERY_WORDS as readonly string[]).includes(value);
+}
+
+/** The header names the status poll carries the statement in (lower case, as both sides read them). */
+export const KEY_DELIVERY_HEADER = 'x-key-delivery';
+export const KEY_LEN64_HEADER = 'x-key-len64';
+
+/**
+ * The statement as headers. `key_len64`: `'1'` when the key is 64 characters long (the length the
+ * control plane generates), `'0'` when it has another length, absent when there is no key. Both
+ * headers are absent on an engine that predates them; the control plane then keeps what it had.
+ */
+export interface UsageStatusRequestHeaders {
+  'x-key-delivery'?: KeyDelivery | undefined;
+  'x-key-len64'?: '0' | '1' | undefined;
+}
+
 // === Exact attach — POST /internal/instances/:instanceId/exact-attach (engine → CP) ===
 
 /**
