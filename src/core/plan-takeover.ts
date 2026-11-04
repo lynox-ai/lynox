@@ -266,11 +266,14 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
     seen.add(key);
     members.push({ name: p.email, roles: roles(p), ended: principalHasEnded(p, isLive), reason: null });
   };
+  const candidates: Array<Extract<RequestPrincipal, { kind: 'mandate' }>> = [];
   for (const m of coveredMarks) {
     if (!isMandateTag(m.tag)) continue;
-    named({ kind: 'mandate', email: m.tag!.slice(MANDATE_TAG_PREFIX.length), ...(m.id ? { mandateId: m.id } : {}) });
+    candidates.push({ kind: 'mandate', email: m.tag!.slice(MANDATE_TAG_PREFIX.length), ...(m.id ? { mandateId: m.id } : {}) });
   }
-  if (runsAs.kind === 'mandate') named(runsAs);
+  if (runsAs.kind === 'mandate') candidates.push(runsAs);
+  // Marks with a grant id first, so the rule for one without holds in either order of the columns.
+  for (const p of [...candidates.filter((c) => c.mandateId !== undefined), ...candidates.filter((c) => c.mandateId === undefined)]) named(p);
 
   // The grant ids the audit row names: every mark the takeover covers, no address.
   const coveredMandates = new Set<string>();

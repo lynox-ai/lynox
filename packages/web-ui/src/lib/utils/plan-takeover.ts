@@ -164,7 +164,16 @@ function scheduleLines(p: TakeoverPreview, formatDate: (iso: string) => string):
 export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => string): TakeoverLine[] {
 	const lines: TakeoverLine[] = [];
 	const f2 = f2Line(p);
-	for (const m of p.members) lines.push(...roleLines(m, p.workflow?.name ?? null, f2 !== null && f2.by === m ? f2.role : null));
+	// One person can be listed once per access, and the roles an ended access was paused with are
+	// a copy from the pause: the same role under two accesses is one sentence, said once.
+	const said = new Set<string>();
+	for (const m of p.members) {
+		for (const line of roleLines(m, p.workflow?.name ?? null, f2 !== null && f2.by === m ? f2.role : null)) {
+			if (said.has(line.text)) continue;
+			said.add(line.text);
+			lines.push(line);
+		}
+	}
 	if (f2 !== null) lines.push(f2.line);
 	lines.push(...memberChangeLines(p));
 	lines.push(...connectionLines(p));

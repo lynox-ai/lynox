@@ -193,6 +193,23 @@ describe('one person under two grants (1029)', () => {
 		);
 		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'role').map((l) => l.text)).toEqual(['Angelegt von ida@x.ch', 'Nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat']);
 	});
+	it('T-5 reads the live grant also when it is listed first, before an ended one that changed the workflow', () => {
+		const p = preview({
+			members: [{ name: 'ida@x.ch', roles: ['workflow-created'], ended: false, reason: null }, { name: 'ida@x.ch', roles: ['workflow-edited'], ended: true, reason: 'expired' }],
+			runsAs: 'mandate:ida@x.ch',
+			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
+		});
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'runs_as_member')?.text.startsWith('Den Workflow „Rechnungen“ hat ida@x.ch angelegt,')).toBe(true);
+	});
+	it('the same role under both grants is said once', () => {
+		// The ended grant's roles are the copy the pause took; the live grant changed the workflow again.
+		const p = preview({
+			members: [{ name: 'ida@x.ch', roles: ['workflow-edited'], ended: true, reason: 'expired' }, { name: 'ida@x.ch', roles: ['workflow-edited'], ended: false, reason: null }],
+			runsAs: 'mandate:ida@x.ch',
+			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
+		});
+		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'role').map((l) => l.text)).toEqual(['Nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat']);
+	});
 });
 
 describe('T-6: a one-shot that runs only on "Run now"', () => {

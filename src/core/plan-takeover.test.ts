@@ -380,6 +380,19 @@ describe('the workflow’s side', () => {
     expect(p.preview.members.map((m) => m.name)).toEqual(['h@x.ch']);
   });
 
+  it('a mark without a grant id listed before one with an id for the same address still adds nobody', () => {
+    const b = box();
+    // Created before marks carried a grant id; edited later under a live grant of the same person.
+    plan(b, 'p', { by: 'h@x.ch', grant: null });
+    editor(b, 'triggers', 'p', 'h@x.ch', 'g2-h@x.ch');
+    renewed(b, 'h@x.ch', 'g2-h@x.ch');
+    ended(b, 'z@x.ch');
+    pause(b, 'p', 'z@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    if (p.kind !== 'preview') throw new Error(`no preview: ${p.kind}`);
+    expect(p.preview.members.map((m) => [m.name, m.ended])).toEqual([['z@x.ch', true], ['h@x.ch', false]]);
+  });
+
   it('the member that stays is named, as live', () => {
     const b = box();
     workflow(b, 'w', { email: 'z@x.ch' });
