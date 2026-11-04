@@ -6,7 +6,7 @@
  * individual content files in ~/.lynox/artifacts/.
  */
 import { dirname, join, resolve } from 'node:path';
-import { closeSync, fstatSync, ftruncateSync, mkdirSync, readFileSync, realpathSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync } from 'node:fs';
+import { closeSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { containsEvictionMarker } from './artifact-eviction.js';
@@ -261,7 +261,10 @@ export class ArtifactStore {
       if (!f.endsWith('.html')) continue;
       const id = f.slice(0, -'.html'.length);
       if (!SAFE_ID.test(id) || this.index.some(a => a.id === id)) continue;
-      const st = statSync(join(this.dir, f));
+      // A regular file only: a link named like an artifact is not adopted as one.
+      let st: ReturnType<typeof lstatSync>;
+      try { st = lstatSync(join(this.dir, f)); } catch { continue; }
+      if (!st.isFile()) continue;
       const iso = new Date(st.mtimeMs).toISOString();
       this.index.push({
         id, title: id, description: '', type: 'html',

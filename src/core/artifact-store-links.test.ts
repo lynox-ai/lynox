@@ -197,6 +197,18 @@ describe('reading an artifact', () => {
   });
 });
 
+describe('a new artifact under an id the index does not hold', () => {
+  it('refuses a link at its file and adds no entry', () => {
+    symlinkSync(join(outside, 'secret.txt'), join(dir, 'abcdef12.html'));
+    const store = new ArtifactStore(dir);
+    expect(refusalOf(() => store.save({ id: 'abcdef12', title: 't', content: 'x' }))?.reason).toBe('link');
+    expect(readFileSync(join(outside, 'secret.txt'), 'utf-8')).toBe('SECRET\n');
+    expect(store.list().some(m => m.id === 'abcdef12')).toBe(false);
+    store.save({ title: 'other', content: 'y' }); // writes the index
+    expect(new ArtifactStore(dir).list().map(m => m.title)).toEqual(['other']);
+  });
+});
+
 describe('a new artifact', () => {
   it('is created with the mode a write by name gives it', () => {
     const umask = process.umask();
