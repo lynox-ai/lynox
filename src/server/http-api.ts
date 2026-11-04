@@ -12410,7 +12410,9 @@ export class LynoxHTTPApi {
       return null;
     };
 
-    // user scope: same mailbox-management surface as POST /api/mail/accounts.
+    // user scope. Free, unlike POST /api/mail/accounts beside it: it stores nothing, like
+    // POST /api/secrets/validate-key and POST /api/mail/autodiscover, and it spends nothing of the
+    // owner's: the login it tests is the one in the request. The rate limit above bounds the probe.
     this.addStatic('user', 'POST /api/mail/accounts/test', async (req, res, _params, body) => {
       const rateErr = mailTestRateCheck(req);
       if (rateErr) { errorResponse(res, 429, rateErr); return; }
