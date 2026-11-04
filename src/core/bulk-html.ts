@@ -839,9 +839,19 @@ const SHORTCODE_ATTRIBUTE = /([\w-]+)\s*=\s*"([^"]*)"(?:\s|$)|([\w-]+)\s*=\s*'([
  *  colon (`https://…`, `javascript:…`), or a protocol-relative `//…`. "Hinweis: neu" is prose. */
 const ENCLOSED_LINK = /(?:^|[\s>"'(])((?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)[^\s<>"'[\]]+)/g;
 
-/** The values a shortcode in this text may turn into a link: every attribute value of an opening
- *  tag, and every link-shaped token of the text a pair encloses. */
-function shortcodeLinksOf(value: string): string[] {
+/** A token anywhere in a value that the shop or a page reads as an absolute link: `http(s)://…`,
+ *  a protocol-relative `//…`, or `www.…`. WordPress embeds such a URL standing on its own line,
+ *  and in an `[embed]` at any depth, whatever wraps it. */
+const ABSOLUTE_LINK = /(?:^|[\s>"'(=[\]])((?:https?:)?\/\/[^\s<>"'[\]]+|www\.[^\s<>"'[\]]+)/gi;
+
+/** The text right before a closing tag, after the tag before it: what a pair such as
+ *  `[embed]…[/embed]` hands its handler, at whatever depth it sits. */
+const BEFORE_CLOSER = /\]([^[\]]*)\[\//g;
+
+/** The values a shortcode or a page may turn into a link: every attribute value of an opening
+ *  shortcode tag, a single token a pair encloses, every link-shaped token a pair encloses, and every
+ *  absolute link anywhere in the value. */
+function linkCandidatesOf(value: string): string[] {
   const out: string[] = [];
   for (const tag of shortcodeTagsOf(value)) {
     // WordPress reads a no-break and a zero-width space as a space, the name included: in
@@ -854,18 +864,47 @@ function shortcodeLinksOf(value: string): string[] {
       if (v !== undefined && v.trim() !== '') out.push(v);
     }
   }
+  for (const m of value.matchAll(BEFORE_CLOSER)) {
+    const token = m[1]!.replace(/<[^<>]*>/g, '').trim();
+    if (token !== '' && !/\s/.test(token)) out.push(token);
+  }
   for (const enclosed of shortcodeEnclosedOf(value)) {
     for (const m of enclosed.matchAll(ENCLOSED_LINK)) out.push(m[1]!);
   }
+  for (const m of value.matchAll(ABSOLUTE_LINK)) out.push(m[1]!);
   return out;
 }
 
+/** A host as the end of a domain: labels separated by dots, the last one starting with a letter. */
+const DOMAIN_SHAPED = /^[^/?#:]+\.[A-Za-z][A-Za-z0-9-]*(?::\d+)?(?:[/?#]|$)/;
+
+/**
+ * A value as the shop prints it into a link (`esc_url`) and a browser then reads it: tab, newline
+ * and CR dropped and a backslash read as `/`, as the URL parser does; whitespace dropped, as
+ * `esc_url` does; and a value without a scheme that starts with a domain gets `http://` in front,
+ * as `esc_url` gives it — `evil.example/a.mp4` is `http://evil.example/a.mp4`, not a path on the
+ * store. A value that does not start with a domain (`large`, `/sale`) stays relative.
+ */
+function printedLink(value: string): string {
+  const v = value.replace(/[\t\n\r]/g, '').replace(/\\/g, '/').replace(/\s+/g, '');
+  if (v.includes(':') || /^[/#?]/.test(v) || /^[a-z0-9-]+?\.php/i.test(v)) return v;
+  return DOMAIN_SHAPED.test(v) ? `http://${v}` : v;
+}
+
 /** A value as written and as a browser reads it once the shop prints it into an attribute: with
- *  its character references decoded (`&#x6a;avascript:` is `javascript:`). Leading and trailing
- *  spaces need no trim here: `new URL` drops them, as a browser does. */
+ *  its character references decoded (`&#x6a;avascript:` is `javascript:`), each as printed. */
 function linkForms(value: string): string[] {
   const decoded = value.includes('&') ? textBelow(parseHtmlFragment(value.replace(/</g, '&lt;'))) : value;
-  return [...new Set([value, decoded])];
+  return [...new Set([printedLink(value), printedLink(decoded)])];
+}
+
+/** The candidates of a value and of its text as a browser decodes it: `&#104;ttps://` is a link. */
+function candidatesWithDecoded(value: string): string[] {
+  const out = linkCandidatesOf(value);
+  if (!value.includes('&')) return out;
+  const decoded = textBelow(parseHtmlFragment(value.replace(/</g, '&lt;')));
+  for (const m of decoded.matchAll(ABSOLUTE_LINK)) out.push(m[1]!);
+  return out;
 }
 
 /**
@@ -875,7 +914,7 @@ function linkForms(value: string): string[] {
  */
 function checkShortcodeLinks(input: MarkupCheckInput): MarkupCheckResult {
   const before = input.before ?? '';
-  const held = counts(shortcodeLinksOf(before));
+  const held = counts(candidatesWithDecoded(before));
   const linked = linkedDomains(markupOf(parseHtmlFragment(before)).triples, input.storeHost);
   for (const v of held.keys()) {
     for (const form of linkForms(v)) {
@@ -883,7 +922,7 @@ function checkShortcodeLinks(input: MarkupCheckInput): MarkupCheckResult {
       if (target.ok) linked.add(`${target.kind}:${target.domain}`);
     }
   }
-  for (const v of shortcodeLinksOf(input.after)) {
+  for (const v of candidatesWithDecoded(input.after)) {
     const n = held.get(v) ?? 0;
     if (n > 0) { held.set(v, n - 1); continue; }
     for (const form of linkForms(v)) {

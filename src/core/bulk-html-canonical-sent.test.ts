@@ -582,7 +582,44 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     expect(check('[button url="  javascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
     expect(check('[button url="&#x6a;avascript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
     expect(check('[link]javascript:alert(1)[/link]')).toMatchObject({ ok: false, reason: 'url_scheme' });
-    expect(check('[button url="java\tscript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_control_char' });
+    // A tab is dropped as the URL parser drops it, so this is `javascript:`.
+    expect(check('[button url="java\tscript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // A control character is refused as hidden first; the replacement character is visible, and
+    // the link check refuses it.
+    expect(check('[button url="java\ufffdscript:alert(1)"]Go[/button]')).toMatchObject({ ok: false, reason: 'url_control_char' });
+  });
+
+  it('reads a value without a scheme that starts with a domain as the shop prints it, with http:// in front', () => {
+    for (const after of [
+      '[video src="evil.example/a.mp4"]',
+      '[audio mp3=evil.example/a.mp3]',
+      '[button link="www.evil.example"]',
+      '[button link="evil .example"]',
+      '[button link="evil.example\\x"]',
+    ]) expect(check(after), after).toMatchObject({ ok: false, reason: 'new_link_domain' });
+    // A file name is a domain to `esc_url` as well.
+    expect(check('[video src="a.mp4"]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'a.mp4' });
+    // Twin: a value that does not start with a domain stays a path on the store.
+    for (const after of ['[video src="/media/a.mp4"]', '[button size=large]Go[/button]', '[x version=3.5]', '[x file=index.php?a=b.example]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('reads the text a pair encloses at any depth, and a single token as a link', () => {
+    expect(check('[foo][embed]https://evil.example/x[/embed][/foo]')).toEqual(foreign);
+    expect(check('[row][column][video]https://evil.example/a.mp4[/video][/column][/row]')).toEqual(foreign);
+    expect(check('[embed]evil.example/x[/embed]')).toEqual(foreign);
+    expect(check('[embed] <em>www.evil.example</em> [/embed]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'www.evil.example' });
+    expect(check('[link]javascript:alert(1)[/link]')).toMatchObject({ ok: false, reason: 'url_scheme' });
+  });
+
+  it('reads an absolute link anywhere in the value, the way WordPress embeds a URL on its own line', () => {
+    expect(check('<p>https://evil.example/x</p>')).toEqual(foreign);
+    expect(check('<p>Mehr auf www.evil.example</p>')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'www.evil.example' });
+    expect(check('<p>&#104;ttps://evil.example/x</p>')).toEqual(foreign);
+    // Twin: the store's own address in the text, and a URL the before-image already holds, pass.
+    expect(check(`<p>https://${HOST}/sale</p>`)).toEqual({ ok: true });
+    expect(check('<p>Neu: https://evil.example/x</p>', '<p>https://evil.example/x</p>')).toEqual({ ok: true });
   });
 
   it('asks before shortcode_changed, so a value offered to copy carries no foreign link', () => {
