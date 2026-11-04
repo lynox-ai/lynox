@@ -32,7 +32,7 @@ import type { InboxNotifier } from './notifier.js';
 import type { InboxStateDb, ThreadMessageInput } from './state.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxRule } from '../../types/index.js';
-import { checkDescriptionRules, type RuleLabels } from './rule-check.js';
+import { checkDescriptionRules } from './rule-check.js';
 import { FORWARDED_REASON_DE, isForwardedByPerson } from './classifier/forwarded.js';
 
 /**
@@ -135,7 +135,7 @@ export interface BuildInboxRunnerOptions {
    * rules and the cheap model that checks them, between the budget check and the classifier.
    * Absent when the feature is off.
    */
-  ruleCheck?: { rules: Pick<InboxRulesLoader, 'descriptionRules'>; llm: LLMCaller; labels?: RuleLabels | undefined } | undefined;
+  ruleCheck?: { rules: Pick<InboxRulesLoader, 'descriptionRules'>; llm: LLMCaller } | undefined;
 }
 
 /** A description rule named the mail: its bucket, unless it would file a sensitive or forwarded
@@ -159,6 +159,7 @@ function ruleOverruled(rule: InboxRule, verdict: ClassifyResult): ClassifyResult
   const label = rule.name ?? 'ohne Namen';
   return {
     ...verdict,
+    classifierFailReason: verdict.failReason,
     reasonDe: `Regel „${label}“ nicht angewandt: ${verdict.reasonDe}`,
     failReason: 'rule_withheld_classifier',
     rule: { id: rule.id, name: rule.name, action: rule.action, withheld: true },
@@ -231,7 +232,6 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
             payload.classifierInput,
             ruleCheck.llm,
             ctx.signal,
-            ruleCheck.labels,
           );
         } catch (err) {
           if (ctx.signal.aborted) throw err;
@@ -242,6 +242,9 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           // Filing as handled hides the mail, so the classifier checks it too: the rule applies
           // only when the classifier also sees it as handled. A check that cannot run shows it.
           if (budget?.isExceeded()) return ruleUnchecked(hit, versionStamp);
+          if (meteredHost && (await fireBeforeRunGate(meteredHost, 'fast')).blockedReason !== null) {
+            return ruleUnchecked(hit, versionStamp);
+          }
           let check: ClassifyResult;
           try {
             check = await classify();
@@ -292,6 +295,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
               actor: 'rule_engine',
               payloadJson: JSON.stringify({
                 ...(rule.withheld ? { rule_withheld: rule.id, fail_reason: result.failReason } : { rule_id: rule.id }),
+                ...(result.classifierFailReason !== undefined ? { classifier_fail_reason: result.classifierFailReason } : {}),
                 ...(rule.name !== undefined ? { rule_name: rule.name } : {}),
                 matcher_kind: 'matches_description',
                 stage: 'description',

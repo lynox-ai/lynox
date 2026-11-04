@@ -298,6 +298,21 @@ describe('ImapSmtpProvider — LYNOX_MAIL_INSECURE_TLS opt-in', () => {
   });
 });
 
+describe('ImapSmtpProvider — list: automatic mail', () => {
+  it('marks an out-of-office reply as isAutoReplied, other automatic mail only as isAutoReply', async () => {
+    probe.search.mockResolvedValue([1, 2, 3]);
+    const msg = (uid: number, header: string | undefined) => ({
+      ...makeFetchMessage({ uid, envelope: { date: new Date(`2026-04-1${String(uid)}T08:00:00Z`), subject: `m${String(uid)}`, messageId: `<m${String(uid)}@example.com>`, from: [{ address: 'a@example.com' }], to: [{ address: 'me@example.com' }], cc: [] } }),
+      ...(header !== undefined ? { headers: Buffer.from(`Auto-Submitted: ${header}\r\n\r\n`) } : {}),
+    });
+    probe.fetch.mockImplementation(() => asyncIterFrom([msg(1, 'auto-replied'), msg(2, 'auto-generated'), msg(3, undefined)]));
+    const byUid = new Map((await new ImapSmtpProvider(ACCOUNT, credResolver).list({ folder: 'INBOX', limit: 10 })).map((e) => [e.uid, e]));
+    expect(byUid.get(1)).toMatchObject({ isAutoReply: true, isAutoReplied: true });
+    expect(byUid.get(2)).toMatchObject({ isAutoReply: true, isAutoReplied: false });
+    expect(byUid.get(3)).toMatchObject({ isAutoReply: false, isAutoReplied: false });
+  });
+});
+
 describe('ImapSmtpProvider — list', () => {
   it('returns envelopes most-recent-first with snippet, attachments, flags', async () => {
     probe.search.mockResolvedValue([1, 2]);

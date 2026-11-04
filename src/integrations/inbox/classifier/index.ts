@@ -8,7 +8,7 @@
 // the queue can wrap it with a per-job AbortController + timeout.
 
 import { buildClassifierPrompt, type ClassifierPromptInput, type ClassifierProvider } from './prompt.js';
-import { parseClassifierResponse, type ClassifierVerdict } from './schema.js';
+import { parseClassifierResponse, type ClassifierVerdict, type FailReason } from './schema.js';
 import { FORWARDED_REASON_DE, isForwardedByPerson } from './forwarded.js';
 
 /**
@@ -52,6 +52,8 @@ export interface ClassifyResult extends ClassifierVerdict {
    * and the item does not count as filed by the rule.
    */
   rule?: { id: string; name: string | undefined; action: string; withheld: boolean } | undefined;
+  /** When the classifier overruled a description rule: its own fail reason (null = clean verdict). */
+  classifierFailReason?: FailReason | null | undefined;
 }
 
 /**

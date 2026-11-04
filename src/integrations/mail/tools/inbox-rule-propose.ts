@@ -12,7 +12,7 @@
 import type { IAgent, ToolEntry } from '../../../types/index.js';
 import type { MailHooks } from '../context.js';
 import type { MailRegistry } from './registry.js';
-import { charCount, DESCRIPTION_MAX, DESCRIPTION_MIN, descriptionProblem, MAX_DESCRIPTION_RULES, ruleLine, ruleValue } from '../../inbox/rule-text.js';
+import { charCount, DESCRIPTION_MAX, DESCRIPTION_MIN, descriptionProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine, ruleValue } from '../../inbox/rule-text.js';
 
 export const INBOX_RULE_NAME_MAX = 80;
 export const INBOX_RULE_VALUE_MAX = 200;
@@ -69,6 +69,10 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
       const name = oneLine(input.name);
       if (name.length === 0 || charCount(name) > INBOX_RULE_NAME_MAX) {
         return Promise.resolve(`inbox_rule_propose: name must be 1 to ${String(INBOX_RULE_NAME_MAX)} characters.`);
+      }
+      // The name sits next to the description in the rule check's prompt.
+      if (input.matcher_kind === 'matches_description' && namesRuleLabel(name)) {
+        return Promise.resolve('inbox_rule_propose: the name must not name a rule label such as R1.');
       }
       const rawValue = typeof input.matcher_value === 'string' ? input.matcher_value : '';
       let value: string;

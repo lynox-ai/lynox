@@ -252,6 +252,12 @@ describe('inbox_rule_propose — description rules (PRD inbox-user-rules E3/E11)
     });
   }
 
+  it('refuses a description rule whose name names a rule label, and keeps such a name for the other kinds', async () => {
+    expect(await propose({ ...desc, name: 'Wie R1' })).toBe('inbox_rule_propose: the name must not name a rule label such as R1.');
+    expect(inbox.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+    expect(await propose({ ...valid, name: 'Wie R1' })).toMatch(/^Proposed/);
+  });
+
   it('accepts a description longer than a subject phrase may be', async () => {
     expect(await propose({ ...desc, matcher_value: 'm'.repeat(300) })).toMatch(/^Proposed/);
     expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: 'm'.repeat(201) })).toMatch(/longer than 200/);
