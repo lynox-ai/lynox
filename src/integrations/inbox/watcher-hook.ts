@@ -150,7 +150,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       opts.state.insertThreadMessage(input);
       // Only a `replied` item opens; `reopenReplied` checks that in the same UPDATE.
       if (env.isAutoReply) return false;
-      if (!opts.state.reopenReplied(existing.id, existing.tenantId)) return false;
+      if (!opts.state.reopenReplied(existing.id, existing.tenantId, fields.mailDate ?? new Date())) return false;
       opts.state.appendAudit({
         tenantId: existing.tenantId,
         itemId: existing.id,

@@ -92,6 +92,35 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(inbox.listAuditForItem(id).map((a) => a.action)).toContain('reopened_on_reply');
   });
 
+  it('a reopened item takes the date of the new message and moves to the top of its list', async () => {
+    const id = seedReplied();
+    const newer = inbox.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: 'gmail:thread-2', bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'andere Mail', classifiedAt: new Date('2026-11-03T12:00:00Z'), classifierVersion: 'v1',
+      mailDate: new Date('2026-11-03T12:00:00Z'),
+    });
+    expect(inbox.listItems({ bucket: 'requires_user' }).map((i) => i.id)).toEqual([newer, id]);
+
+    await hook()(ACCOUNT.id, envelope({ date: new Date('2026-11-04T09:00:00Z') }));
+
+    expect(inbox.getItem(id)!.mailDate?.toISOString()).toBe('2026-11-04T09:00:00.000Z');
+    expect(inbox.listItems({ bucket: 'requires_user' }).map((i) => i.id)).toEqual([id, newer]);
+  });
+
+  it('a follow-up without a date reopens the item with the time it arrived', async () => {
+    const id = seedReplied();
+    const before = Date.now();
+    await hook()(ACCOUNT.id, envelope({ date: undefined as unknown as Date }));
+    expect(inbox.getItem(id)!.mailDate!.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it('an archived item keeps its dates', async () => {
+    const id = seedReplied('requires_user', 'archived');
+    await hook()(ACCOUNT.id, envelope({ date: new Date('2026-11-04T09:00:00Z') }));
+    expect(inbox.getItem(id)!.mailDate).toBeUndefined();
+    expect(inbox.getItem(id)!.classifiedAt.toISOString()).toBe('2026-11-03T08:00:00.000Z');
+  });
+
   it('keeps the bucket and runs neither a rule nor the classifier', async () => {
     const id = seedReplied('draft_ready');
     inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'kunde@example.com', bucket: 'auto_handled', action: 'show', source: 'on_demand' });
@@ -175,7 +204,7 @@ describe('follow-up mails in a known thread (part 1b)', () => {
 
   it('the store reopens only a replied item', () => {
     const archived = seedReplied('requires_user', 'archived');
-    expect(inbox.reopenReplied(archived, 'default')).toBe(false);
+    expect(inbox.reopenReplied(archived, 'default', new Date())).toBe(false);
     expect(inbox.getItem(archived)!.userAction).toBe('archived');
   });
 
