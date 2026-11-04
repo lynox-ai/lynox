@@ -428,6 +428,22 @@ export interface BulkTarget {
 	shopAddedMarkup?: true | undefined;
 	/** Written, and the store kept the description otherwise than sent, without outside markup. */
 	hostRewrote?: true | undefined;
+	/** Refused for `shortcode_changed`: the field and its whole planned value, for the owner to copy
+	 *  into the shop (1130). Set only where it holds. */
+	refusedValue?: { field: string; value: string } | undefined;
+}
+
+/** How much of a long value the preview shows before „show the whole text“ (ux U-103). */
+export const BULK_VALUE_SHOWN_CHARS = 1000;
+export const BULK_VALUE_SHOWN_LINES = 12;
+
+/** The part of a value the preview shows folded, and whether it was cut. The copy button never
+ *  takes this: it copies the whole value. */
+export function bulkFoldedValue(value: string): { shown: string; cut: boolean } {
+	let shown = value.slice(0, BULK_VALUE_SHOWN_CHARS);
+	const lines = shown.split('\n');
+	if (lines.length > BULK_VALUE_SHOWN_LINES) shown = lines.slice(0, BULK_VALUE_SHOWN_LINES).join('\n');
+	return { shown, cut: shown.length < value.length };
 }
 
 /** The external host of a run's target system, or null for a local run. */

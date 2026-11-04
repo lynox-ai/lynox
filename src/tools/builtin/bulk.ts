@@ -51,15 +51,13 @@ function formatUsd(usd: number, round: 'down' | 'nearest' = 'nearest'): string {
 }
 
 /** What the model reads when a target is left out for `shortcode_changed` (1130, U-103): the way
- *  out, not only the diagnosis. */
-export const SHORTCODE_CHANGED_NOTE = 'shortcode_changed: the new text has a [shortcode] whose attributes or content contain &, < or >, ' +
-  'written as such or as references like &amp;. lynox cannot write it: either form changes what the shop reads. ' +
-  'If these characters came from the owner (a link or a value they gave, or already in the shop\'s current text), ' +
-  'do not change, drop or encode them to make the plan pass: tell the owner that lynox cannot write this shortcode ' +
-  'and leave the field to them to change in the shop. ' +
-  'Do not suggest a changed, shortened or encoded version to the owner either (for example &amp; for &): ' +
-  'the shop would read another link or another shortcode. If you show the owner what to put in the shop, ' +
-  'copy the shortcode exactly as given. = and ? are not the problem. Only where you wrote these characters yourself, plan the value again without them.';
+ *  out, not only the diagnosis. The way out is the preview, which shows the owner the whole
+ *  planned text to copy (`refusedValue`); the model points there and writes no text of its own,
+ *  since three wordings that asked it to copy or leave the link failed in a real-model eval. */
+export const SHORTCODE_CHANGED_NOTE = 'shortcode_changed: the new text has a [shortcode] containing &, < or > that lynox cannot write. ' +
+  'The preview shows the owner the whole new text exactly as planned, to copy into the shop themselves. Tell the owner that. ' +
+  'Do not put the text, the shortcode or a changed form of it in your reply, and do not offer another way out. ' +
+  'Only where you wrote these characters yourself, plan the value again without them.';
 
 export function formatStatus(s: BulkRunStatus): string {
   const invalid = Object.entries(s.invalidReasons).map(([r, n]) => `${r} ${String(n)}`).join(', ');

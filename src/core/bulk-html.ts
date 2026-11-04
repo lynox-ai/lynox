@@ -314,6 +314,12 @@ function shortcodeTextOf(value: string): string[] {
   return [...tags, ...enclosed];
 }
 
+/** Whether a value holds a shortcode whose text carries `&`, `<` or `>`: the field a
+ *  `shortcode_changed` refusal is about (1130). */
+export function holdsShortcodeMarkup(value: string): boolean {
+  return shortcodeTextOf(value).some((s) => /[&<>]/.test(s));
+}
+
 /** The first shortcode text the canonical form does not keep byte for byte, or null. */
 export function shortcodeChangedBy(value: string, canonical: string): string | null {
   if (value === canonical) return null;

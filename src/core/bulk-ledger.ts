@@ -24,7 +24,7 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, prin
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
-import { checkMarkup, droppedTagsOf, endsClosed, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
+import { checkMarkup, droppedTagsOf, endsClosed, holdsShortcodeMarkup, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
@@ -566,6 +566,10 @@ export interface PreviewTarget {
    *  and removes, each with its full value (PRD shopify-preset §20.2 item 5, M3). Computed here
    *  from the parser's tree, so the view shows it and computes nothing. */
   markupChanges?: FieldMarkupChange[] | undefined;
+  /** A target refused for `shortcode_changed` (1130): the HTML field it is about with its whole
+   *  planned value, as the planner wrote it. Nothing is written for it, so the owner copies this
+   *  value into the shop themselves. Set only where it holds. */
+  refusedValue?: { field: string; value: string } | undefined;
   /** Written, and its read-back held markup the write never sent (PRD shopify-preset §21.2
    *  item 6): the target the halt `markupAddedByShop` is about. Set only where it holds. */
   shopAddedMarkup?: true | undefined;
@@ -1533,6 +1537,12 @@ export class BulkLedger {
           return c.added.length + c.removed.length > 0 ? [c] : [];
         })
         : [];
+      // The field a `shortcode_changed` refusal is about, with the whole value the planner wrote.
+      const refusedField = r.change === 'invalid' && r.error === 'shortcode_changed' && after !== null && typeof after === 'object'
+        ? htmlFields.find((f) => { const v = (after as Record<string, unknown>)[f]; return typeof v === 'string' && holdsShortcodeMarkup(v); })
+        : undefined;
+      const refusedValue = refusedField === undefined ? undefined
+        : { field: refusedField, value: (after as Record<string, unknown>)[refusedField] as string };
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
@@ -1541,6 +1551,7 @@ export class BulkLedger {
         ...(r.host_rewrote === 1 ? { hostRewrote: true as const } : {}),
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
+        ...(refusedValue !== undefined ? { refusedValue } : {}),
       };
     });
   }

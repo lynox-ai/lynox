@@ -170,13 +170,20 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
     const status = ledger.getStatus(id)!;
     expect(status.invalidReasons).toEqual({ shortcode_changed: 1 });
     const note = formatStatus(status);
-    expect(note).toContain('shortcode_changed: the new text has a [shortcode] whose attributes or content contain &, < or >, '
-      + 'written as such or as references like &amp;. lynox cannot write it: either form changes what the shop reads.');
-    expect(note).toContain('do not change, drop or encode them to make the plan pass: tell the owner that lynox cannot write this shortcode '
-      + 'and leave the field to them to change in the shop.');
-    expect(note).toContain('Do not suggest a changed, shortened or encoded version to the owner either (for example &amp; for &): '
-      + 'the shop would read another link or another shortcode. If you show the owner what to put in the shop, '
-      + 'copy the shortcode exactly as given. = and ? are not the problem.');
+    // The wording ux released (U-103, version after the third eval), word for word.
+    expect(note).toContain('shortcode_changed: the new text has a [shortcode] containing &, < or > that lynox cannot write. '
+      + 'The preview shows the owner the whole new text exactly as planned, to copy into the shop themselves. Tell the owner that. '
+      + 'Do not put the text, the shortcode or a changed form of it in your reply, and do not offer another way out. '
+      + 'Only where you wrote these characters yourself, plan the value again without them.');
+    // …and the preview does show it: the whole planned value of the field the refusal is about.
+    const shown = ledger.getPreview(id).find((p) => p.seq === seq)!;
+    expect(shown.refusedValue).toEqual({ field: 'description', value: after.description });
+  });
+
+  it('CONTROL: a target refused for another reason carries no value to copy', () => {
+    const { id, seq } = listed({ description: '[button url="/a?x=1&y=2"]Neu[/button]' });
+    expect(ledger.recordRead(id, seq, { invalid: 'markup_dropped' })).toBe(true);
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValue).toBeUndefined();
   });
 });
 

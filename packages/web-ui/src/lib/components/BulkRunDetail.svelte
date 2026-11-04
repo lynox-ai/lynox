@@ -11,6 +11,7 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { isMandateSession, isOwnerSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
+	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
 		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
@@ -463,6 +464,9 @@
 											{/if}
 											{#if target.change === 'invalid' && target.error}
 												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, i18n)}</p>
+												{#if target.error === 'shortcode_changed' && target.refusedValue}
+													<BulkRefusedValue value={target.refusedValue.value} />
+												{/if}
 											{/if}
 											{#if approving && (target.deselected || writes(target))}
 												<div class="mt-1 flex flex-wrap items-center gap-2 text-xs">
