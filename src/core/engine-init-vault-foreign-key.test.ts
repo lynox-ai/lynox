@@ -17,6 +17,8 @@ describe('initSecrets — no plaintext moved into a vault the key does not open'
   const KEY_A = 'vault-key-a-000000000000000000000000';
   const KEY_B = 'vault-key-b-111111111111111111111111';
   let dir: string;
+  /** config.json as an old install held it: the API key and the Google client pair in plaintext. */
+  const CONFIG = { api_key: 'plain-api-key', google_client_id: 'plain-gid', google_client_secret: 'plain-gsecret' };
 
   const secretsPath = (): string => join(getLynoxDir(), 'secrets.json');
   const configPath = (): string => join(getLynoxDir(), 'config.json');
@@ -27,7 +29,7 @@ describe('initSecrets — no plaintext moved into a vault the key does not open'
 
   function boot(key: string): LynoxUserConfig {
     vi.stubEnv('LYNOX_VAULT_KEY', key);
-    const userConfig: LynoxUserConfig = { api_key: 'plain-api-key' };
+    const userConfig: LynoxUserConfig = { ...CONFIG };
     const result = initSecrets(userConfig);
     result.vault?.close();
     return userConfig;
@@ -46,7 +48,7 @@ describe('initSecrets — no plaintext moved into a vault the key does not open'
     v.set('PROBE_A', 'alpha');
     v.close();
     writeFileSync(secretsPath(), JSON.stringify({ LEGACY_X: { value: 'plain-x' } }));
-    writeFileSync(configPath(), JSON.stringify({ api_key: 'plain-api-key' }));
+    writeFileSync(configPath(), JSON.stringify(CONFIG));
   });
 
   afterEach(() => {
@@ -67,10 +69,11 @@ describe('initSecrets — no plaintext moved into a vault the key does not open'
     boot(KEY_B);
     expect(existsSync(secretsPath()), 'secrets.json is the only copy of LEGACY_X').toBe(true);
     expect(JSON.parse(readFileSync(secretsPath(), 'utf-8'))).toEqual({ LEGACY_X: { value: 'plain-x' } });
-    expect(JSON.parse(readFileSync(configPath(), 'utf-8'))).toEqual({ api_key: 'plain-api-key' });
+    expect(JSON.parse(readFileSync(configPath(), 'utf-8'))).toEqual(CONFIG);
     const a = vaultUnder(KEY_A);
     expect(a.has('LEGACY_X')).toBe(false);
     expect(a.has('ANTHROPIC_API_KEY')).toBe(false);
+    expect(a.has('GOOGLE_CLIENT_ID') || a.has('GOOGLE_CLIENT_SECRET'), 'the Google pair stays in config.json').toBe(false);
     expect(a.get('PROBE_A')).toBe('alpha');
     a.close();
   });
@@ -82,6 +85,8 @@ describe('initSecrets — no plaintext moved into a vault the key does not open'
     const a = vaultUnder(KEY_A);
     expect(a.get('LEGACY_X')).toBe('plain-x');
     expect(a.get('ANTHROPIC_API_KEY')).toBe('plain-api-key');
+    expect(a.get('GOOGLE_CLIENT_ID')).toBe('plain-gid');
+    expect(a.get('GOOGLE_CLIENT_SECRET')).toBe('plain-gsecret');
     a.close();
   });
 
@@ -98,7 +103,7 @@ describe('initSecrets — no plaintext moved into a vault the key does not open'
       stderr.mockRestore();
     }
     expect(JSON.parse(readFileSync(secretsPath(), 'utf-8'))).toEqual({ LEGACY_X: { value: 'plain-x' } });
-    expect(JSON.parse(readFileSync(configPath(), 'utf-8'))).toEqual({ api_key: 'plain-api-key' });
+    expect(JSON.parse(readFileSync(configPath(), 'utf-8'))).toEqual(CONFIG);
     const a = vaultUnder(KEY_A);
     expect(a.get('PROBE_A')).toBe('alpha');
     expect(a.has('LEGACY_X')).toBe(false);
