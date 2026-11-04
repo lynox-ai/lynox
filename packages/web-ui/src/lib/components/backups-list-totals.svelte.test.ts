@@ -73,4 +73,14 @@ describe('BackupsView: file count and size', () => {
 		expect(target.textContent).not.toContain('1 ' + t('backups.files'));
 		expect(target.textContent).not.toContain('10 B');
 	});
+
+	it('counts from the files list when an older engine sends no totals', async () => {
+		listed = [{
+			backup_id: 'b-1', version: '2.16.0', created_at: '2026-10-28T08:00:00.000Z', encrypted: false,
+			checksum: 'c', provenance: 'verified', files: [{ path: 'a', size_bytes: 512 }, { path: 'b', size_bytes: 1536 }],
+		}];
+		await render();
+		expect(target.textContent).toContain('2 ' + t('backups.files'));
+		expect(target.textContent).toContain('2.0 KB');
+	});
 });

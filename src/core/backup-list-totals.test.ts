@@ -67,6 +67,27 @@ describe('the backup list totals', () => {
     expect(entry?.total_bytes).toBe(7);
   });
 
+  it('skips a size that is not finite', () => {
+    mkdirSync(join(backupDir, 'b-inf'), { recursive: true });
+    // JSON has no Infinity, but `1e999` parses to it.
+    writeFileSync(join(backupDir, 'b-inf', 'manifest.json'),
+      `{"version":"2.17.0","created_at":"2026-10-28T08:00:00.000Z","lynox_dir":"x","encrypted":false,"checksum":"c","files":[{"path":"a","size_bytes":1e999},{"path":"b","size_bytes":4}]}`);
+    const [entry] = manager().listBackups();
+    expect(entry?.file_count).toBe(2);
+    expect(entry?.total_bytes).toBe(4);
+  });
+
+  it('computes the totals over any the manifest itself carries', () => {
+    mkdirSync(join(backupDir, 'b-own'), { recursive: true });
+    writeFileSync(join(backupDir, 'b-own', 'manifest.json'), JSON.stringify({
+      version: '2.17.0', created_at: '2026-10-28T08:00:00.000Z', lynox_dir: data, encrypted: false, checksum: 'c',
+      files: [{ path: 'a', size_bytes: 4 }], file_count: 999, total_bytes: 999,
+    }));
+    const [entry] = manager().listBackups();
+    expect(entry?.file_count).toBe(1);
+    expect(entry?.total_bytes).toBe(4);
+  });
+
   it('gives 0 and 0 for a manifest whose files are not a list, and still lists it', () => {
     writeManifest('b-none', { not: 'a list' });
     const list = manager().listBackups();
