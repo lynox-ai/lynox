@@ -33,12 +33,13 @@
  *
  * A binding whose initializer is `any` (`const pr: P = JSON.parse(…)`) names nothing either: its
  * declared type is believed like a cast (1194). Read only in these forms: a `const`/`let`/`var`
- * identifier handed over directly, as `principal: x`, as `{ principal }`, spread (`{ ...o }`), or
- * one binding back as an object literal whose `principal` is such an identifier or itself `any`.
+ * identifier handed over directly, as `principal: x`, or as `{ principal }`; or one binding back as
+ * an object literal whose `principal` is written out or short as such an identifier, or is itself
+ * `any`.
  *
  * What it still does not see: a principal removed after the place read its type, through a looser
  * alias (`delete`, `Object.assign`); a value of type `any` behind a typed binding in any other form:
- * through a property of it (`cfg.principal`), a destructured binding, inside an expression
+ * spread (`{ ...o }`, in any literal), through a property of it (`cfg.principal`), a destructured binding, inside an expression
  * (`pr ?? p`), from a function typed to return a principal, a class field, a later assignment, a
  * parameter default, or two bindings back;
  * a cast anywhere but on the value handed over or on the `const` initializer it names (a parameter
@@ -213,18 +214,17 @@ export function censusOf(program: ts.Program, srcRoot: string): Census {
     while (ts.isParenthesizedExpression(e)) e = e.expression;
     return ts.isIdentifier(e) && anyInitialized(checker.getSymbolAtLocation(e));
   };
-  /** The same, for the `principal` of an object literal handed over, written out or short. */
   /** Whether an expression's own type is `any`. */
   const isAny = (e: ts.Expression): boolean => (checker.getTypeAtLocation(e).flags & ts.TypeFlags.Any) !== 0;
+  /** The same as `anyBound`, for the `principal` of an object literal, written out or short. A spread
+   *  in the literal is not read: it says nothing about the principal a later property writes. */
   const principalAnyBound = (e: ts.Expression | undefined): boolean => {
     if (e === undefined) return false;
     while (ts.isParenthesizedExpression(e)) e = e.expression;
     return ts.isObjectLiteralExpression(e) && e.properties.some((p) =>
       // `principal: x`, x bound from `any` or itself `any` (behind a typed binding, one back).
       (ts.isPropertyAssignment(p) && p.name.getText().replace(/['"[\]]/g, '') === 'principal' && (anyBound(p.initializer) || isAny(p.initializer)))
-      || (ts.isShorthandPropertyAssignment(p) && p.name.text === 'principal' && anyInitialized(checker.getShorthandAssignmentValueSymbol(p)))
-      // `{ ...o }`, o bound from `any` or a literal that names its principal that way.
-      || (ts.isSpreadAssignment(p) && (anyBound(p.expression) || principalAnyBound(p.expression))));
+      || (ts.isShorthandPropertyAssignment(p) && p.name.text === 'principal' && anyInitialized(checker.getShorthandAssignmentValueSymbol(p))));
   };
   const anyAt = (e: ts.Expression): boolean => anyBound(e) || principalAnyBound(e) || principalAnyBound(initializerOf(e));
 
@@ -412,7 +412,7 @@ export function notInternal() { void s.run('t', { internal: false }); }
 export function cast() { e.createSession({ principal: maybe as P }); e.createSession({ principal: maybe! }); e.createSession({} as { principal: P }); spawnPipeline(1, maybe!); }
 export function castMore() { e.createSession({ principal: <P>maybe }); e.createSession({ principal: p } satisfies { principal: P }); e.createSession({ ...({} as { principal: P }) }); const o = { principal: maybe! }; e.createSession(o); }
 export function anyValue() { e.createSession({ principal: loose }); }
-export function anyBinding() { const pr: P = loose; e.createSession({ principal: pr }); const principal: P = loose; e.createSession({ principal }); const o: { principal: P } = loose; e.createSession(o); spawnPipeline(1, pr); const o2 = { principal: pr }; e.createSession(o2); e.createSession({ principal: (pr) }); spawnPipeline(1, (pr)); e.createSession({ ...o }); const o3: { principal: P } = { principal: loose }; e.createSession(o3); const ok: P = p; e.createSession({ principal: ok }); }
+export function anyBinding() { const pr: P = loose; e.createSession({ principal: pr }); const principal: P = loose; e.createSession({ principal }); const o: { principal: P } = loose; e.createSession(o); spawnPipeline(1, pr); const o2 = { principal: pr }; e.createSession(o2); e.createSession({ principal: (pr) }); spawnPipeline(1, (pr)); e.createSession({ ...o }); const o3: { principal: P } = { principal: loose }; e.createSession(o3); const o4 = ({ principal: pr }); e.createSession(o4); const ok: P = p; e.createSession({ principal: ok }); }
 declare const limiter: { getOrCreate(key: string): number }; declare const keys: [string];
 export function spreadArgs() { limiter.getOrCreate(...keys); limiter.getOrCreate('k'); }
 export interface Deps { runManifest(m: unknown, c: unknown, o: { principal?: P | undefined }): void }
@@ -481,6 +481,8 @@ export function harmless(x: unknown) { void Agent.MAX; return x instanceof Agent
       'createSession in anyBinding · nothing',
       'createSession in anyBinding · nothing',
       'spawnPipeline in anyBinding · nothing',
+      // A spread is not read (header): `{ ...o }` still names the principal of `o`'s declared type.
+      'createSession in anyBinding · principal',
       'createSession in anyBinding · nothing',
       'createSession in anyBinding · nothing',
       'createSession in anyBinding · principal',
