@@ -130,6 +130,9 @@ export type BulkInvalidReason =
   | 'list_item_mismatch'
   /** a product held more media than its list page reads: those past it are not listed */
   | 'list_item_truncated'
+  /** a filtered Shopify list's search listed a product whose product type or vendor is not the
+   *  filter's value up to ASCII letter case (Shopify folds diacritics; PRD shopify-preset §22.4) */
+  | 'not_in_filter'
   /** An undo would write back an `actual` whose read-back held markup the write never sent
    *  (`shop_added_markup`, PRD shopify-preset §21.2 item 7 (b)): never the owner's state. */
   | 'shop_added_markup'
@@ -387,6 +390,7 @@ export const BULK_HALT_REASONS = {
   listTooLarge: 'the list is longer, or larger, than a bulk run may hold',
   listNoProgress: 'a full page of the list held no target not seen before',
   listFormWithdrawn: 'the list\'s path is no longer one a bulk run may read',
+  listFilterWithdrawn: 'the list\'s filter is no longer one a bulk run may read',
   // A Shopify store's list and before-images, read through its GraphQL API (`bulk-shopify.ts`):
   listOrder: 'a page of the list did not continue in id order after the last id read',
   listReadFailed: 'the store answered a page of the list with an error',

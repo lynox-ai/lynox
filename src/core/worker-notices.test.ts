@@ -50,6 +50,8 @@ function bulkSamples(n: BulkNotices): Record<string, string> {
   return {
     applyDone: n.applyDone, previewDone: n.previewDone, readDone: n.readDone, listEmpty: n.listEmpty,
     listWaiting: n.listWaiting, judgeDone: n.judgeDone,
+    listNoMatchType: n.listNoMatch('product_type'), listNoMatchVendor: n.listNoMatch('vendor'), listNoMatchBoth: n.listNoMatch('both'),
+    listNoneLeftType: n.listNoneLeft('product_type'), listNoneLeftVendor: n.listNoneLeft('vendor'), listNoneLeftBoth: n.listNoneLeft('both'),
     applyCounts: n.applyCounts({ applied: 3, foundAsPlanned: 1, failed: 1, conflicts: 0, undone: 0, total: 5, sentUnknown: 1 }),
     previewCounts: n.previewCounts(2, 1, 0, 3), judgeCounts: n.judgeCounts(2, 1, 0, 3), costs: n.costs(2, 0.01),
     previewStopped: n.previewStopped, listStopped: n.listStopped, judgeStopped: n.judgeStopped,

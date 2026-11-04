@@ -164,6 +164,8 @@ describe('a Shopify media list source', () => {
     const s = parse({ form: 'shopify_media', after: { alt: 'Mug' } });
     expect(s).toEqual({ form: 'shopify_media', path: '', filters: {}, idField: 'id', method: null, after: { alt: 'Mug' } });
     expect(isOfferedListSource(s)).toBe(true);
+    // Its read takes no filters: a stored one with filters would read every image past them.
+    expect(isOfferedListSource({ ...s, filters: { vendor: 'Acme' } })).toBe(false);
     expect(parse({ form: 'shopify_media', after: { alt: null } }).after).toEqual({ alt: '' });
     expect(maxListPages('shopify_media')).toBe(Math.ceil(BULK_MAX_TARGETS / SHOPIFY_MEDIA_LIST_PAGE_SIZE) + 1);
     expect(listReadContract(HOST, s)).toMatchObject({ httpMethods: ['GET'], hostPatterns: [HOST], pathPatterns: [] });
@@ -187,9 +189,9 @@ describe('the grants for a media run', () => {
 
   it('mints the media list page, an image\'s read and its write, each under its own body only', async () => {
     const list = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, form: 'shopify_media_list' });
-    const products = withShopifyRead(base, HOST, { phase: 'list', afterId: 0 });
+    const products = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: {} });
     expect(await client(list).graphqlRead(ENDPOINT, { form: 'shopify_media_list', afterId: 0 })).not.toEqual({ kind: 'not_granted' });
-    expect(await client(list).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 0 })).toEqual({ kind: 'not_granted' });
+    expect(await client(list).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 0, filters: {} })).toEqual({ kind: 'not_granted' });
     expect(await client(products).graphqlRead(ENDPOINT, { form: 'shopify_media_list', afterId: 0 })).toEqual({ kind: 'not_granted' });
     const read = withShopifyRead(base, HOST, { phase: 'read', targets: [image(1)] });
     expect(await client(read).graphqlRead(ENDPOINT, { form: 'shopify_media_read', gid: image(2) })).toEqual({ kind: 'not_granted' });

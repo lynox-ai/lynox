@@ -113,6 +113,15 @@ describe('which fields are checked', () => {
     expect(checkSeoText('woocommerce', 'seo_title', 'evil.com', null, OWN)).toEqual({ ok: true });
     expect(checkSeoText(null, 'seo_title', 'evil.com', null, OWN)).toEqual({ ok: true });
   });
+
+  // A filtered list is stored under its own form (bulk-list.ts SHOPIFY_FILTERED_LIST_FORM), and a
+  // judged run reads that stored form: without its own entry, its verdicts would go unchecked.
+  it('reads the same fields for a filtered Shopify list as for the whole store', () => {
+    expect(seoFieldsOfListForm('shopify_filtered')).toEqual(['title', 'seo_title', 'seo_description']);
+    expect(checkSeoAfter('shopify_filtered', { seo_description: 'Neu auf https://evil.example' }, {}, OWN)).toEqual(refused('link'));
+    expect(checkSeoAfter('shopify_filtered', { title: 'info@x.example' }, {}, OWN)).toEqual(refused('address'));
+    expect(checkSeoAfter('shopify_filtered', { seo_title: 'Neuer Titel' }, {}, OWN)).toEqual({ ok: true });
+  });
 });
 
 describe('only what the run writes (condition A)', () => {
