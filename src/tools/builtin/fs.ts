@@ -380,6 +380,30 @@ export function writeArtifactFile(path: string, data: string, create: boolean): 
     throw new Error(`${path} is not in the artifacts directory.`);
   }
   if (create) mkdirSync(root, { recursive: true });
+  writeBelow(root, rel, path, data, create, () => linkRefusal(path, rel));
+}
+
+/**
+ * Write a file whose path was resolved when it was checked (every link in it followed then, and
+ * the target judged): each component is opened again from the root with O_NOFOLLOW, so a link
+ * that turns up on the way after the check is refused instead of followed. A link that was there
+ * at the check was followed by the resolution and is not on the path any more. A file with more
+ * than one name is refused, as in the workspace and the artifacts directory.
+ */
+export function writeResolvedFile(path: string, data: string, create: boolean): void {
+  if (!isAbsolute(path) || path === '/') throw new Error(`${path} is not a resolved file path.`);
+  writeBelow('/', path.slice(1), path, data, create, () =>
+    `${path}: a link turned up on the way to the file after its path was checked; nothing was written. ` +
+    'Write the file again: its path is then checked anew.');
+}
+
+/**
+ * Write `data` to `rel` below the directory `root`, opened once: every component below it with
+ * O_NOFOLLOW, a file with a second name refused, the file emptied and then written. With `create`,
+ * a missing file and missing directories get the modes a write by name gives them. A platform
+ * without O_NOFOLLOW (Windows) writes by name, as before.
+ */
+function writeBelow(root: string, rel: string, path: string, data: string, create: boolean, linkText: () => string): void {
   let anchor: WorkspaceAnchor;
   try {
     anchor = openAnchor(root);
@@ -408,7 +432,7 @@ export function writeArtifactFile(path: string, data: string, create: boolean): 
       ({ fd } = openWrite(anchor, rel, create ? { createMode: 0o666 & ~umask, dirMode: 0o777 & ~umask } : {}));
     } catch (err) {
       if (err instanceof WorkspaceAccessError && err.code === 'SYMLINK') {
-        throw new Error(linkRefusal(path, rel), { cause: err });
+        throw new Error(linkText(), { cause: err });
       }
       throw err;
     }
@@ -565,16 +589,14 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
         if (isInArtifactsRoot(target.path)) {
           writeArtifactFile(target.path, input.content, true);
         } else {
-          mkdirSync(dirname(target.path), { recursive: true });
-          writeFileSync(target.path, input.content, 'utf-8');
+          writeResolvedFile(target.path, input.content, true);
         }
         agent.sessionCounters.writeBytes += contentBytes;
         return `Written to ${target.path}`;
       }
       const realPath = cliWriteTarget(input.path);
       refuseEvictionPlaceholder(input.content, realPath);
-      mkdirSync(dirname(realPath), { recursive: true });
-      writeFileSync(realPath, input.content, 'utf-8');
+      writeResolvedFile(realPath, input.content, true);
       agent.sessionCounters.writeBytes += contentBytes;
       return `Written to ${realPath}`;
     } catch (err: unknown) {
@@ -689,7 +711,7 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       } else if (isInArtifactsRoot(realPath)) {
         writeArtifactFile(realPath, updated, false);
       } else {
-        writeFileSync(realPath, updated, 'utf-8');
+        writeResolvedFile(realPath, updated, false);
       }
       agent.sessionCounters.writeBytes += delta;
       const n = replaceAll ? matches : 1;
