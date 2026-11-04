@@ -1,4 +1,4 @@
-import { fstatSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, fstatSync, readFileSync, realpathSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import { getLynoxDir } from './config.js';
 import { getWorkspaceDir } from './workspace.js';
@@ -206,4 +206,13 @@ export function processUmask(): number {
     if (m?.[1] !== undefined) return parseInt(m[1], 8);
   } catch { /* fall through */ }
   return 0o077;
+}
+
+/**
+ * The umask a write by name would apply, for files a tool creates outside the workspace's open
+ * directory. `processUmask` assumes 077 without /proc, which would make every new file private on
+ * macOS; there the process's own umask is read instead (in the main thread, where the tools run).
+ */
+export function creatingUmask(): number {
+  return existsSync('/proc/self/status') ? processUmask() : process.umask();
 }

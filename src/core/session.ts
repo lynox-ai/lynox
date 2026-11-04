@@ -32,6 +32,7 @@ import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError } from './agent.js';
 import { isInputRequired } from './input-required.js';
+import { loopGuardStopReason } from './loop-guard-stop.js';
 import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
@@ -274,6 +275,14 @@ export interface RunUsageSummary {
    *  tooltip — before this, a delegated turn under-reported by whatever the
    *  children spent (measured: $0.38 shown, $0.45 actually billed). */
   spawnCostUsd?: number;
+  /** The requests to APIs with a cost that this run and its sub-agents sent, from their rows
+   *  (`RunHistory.getApiCallsOfRun`), never from what the model wrote. Absent when there were
+   *  none. `apiCostUsd` sums the amounts known; `apiCostEstimated` when any is a profile rate;
+   *  `apiCallsUnpriced` how many had no amount. */
+  apiCalls?: number;
+  apiCostUsd?: number;
+  apiCostEstimated?: boolean;
+  apiCallsUnpriced?: number;
   /** Diagnostics (opt-in UI panel): the run's id for log/Bugsink correlation
    *  and its wall-to-wall agent duration. Persisted via setMessageUsage so the
    *  diagnostics detail survives a thread resume. */
@@ -357,6 +366,8 @@ export class Session {
   } = {};
   readonly sessionId: string;
   private briefing: string | undefined;
+  /** The blocks the engine wrapped into its briefing (`Engine.getBriefingOwnBlocks`). */
+  private briefingOwnBlocks: readonly string[] | undefined;
   /** The vault's `<secrets>` listing, consumed with the briefing; the agent gives it to an owner's
    *  turn only, since the principal is per run and this is per session. */
   private secretsBriefing: string | undefined;
@@ -366,7 +377,8 @@ export class Session {
    * The principal of the run in flight, or of the last one. Kept between runs on purpose:
    * the agent can be rebuilt outside a run (`setModel`, `reloadUserConfig`, the restore
    * after a compaction), and a session a mandate drove must not come back unlocked from
-   * such a rebuild. The next run that names a principal replaces it.
+   * such a rebuild. The next run that names a principal replaces it. The owner before any is the
+   * library's default; the engine's own places name theirs (principal-sites.test.ts).
    */
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
 
@@ -547,6 +559,10 @@ export class Session {
     this.briefing = rawBriefing && rawBriefing.length > 8000
       ? rawBriefing.slice(0, 8000) + '\n[...truncated]'
       : rawBriefing;
+    // A caller's own briefing holds none of the engine's blocks. A block the cut below splits is
+    // not found whole, so it is simply scanned with the rest; its closer is cut off with it, so it
+    // cannot warn either. Keep the match exact: exempting a cut prefix would exempt forged text.
+    this.briefingOwnBlocks = opts?.briefing === undefined ? engine.getBriefingOwnBlocks?.() : undefined;
     // Only on the default path, as before: a caller's own briefing never carried the listing.
     // `?.()` on the method: several suites hand Session a partial engine double.
     const rawSecrets = opts?.briefing === undefined ? engine.getSecretsBriefing?.() : undefined;
@@ -636,6 +652,7 @@ export class Session {
             contract: call.contract,
             lift: call.grant,
             filed: call.filed,
+            apiCost: call.apiCost,
           });
         } catch {
           // Fire-and-forget
@@ -1333,9 +1350,12 @@ export class Session {
       // this line the figure is complete. Best-effort — a cost line must never
       // be the reason a turn fails.
       let spawnCostUsd = 0;
+      let apiCalls: ReturnType<RunHistory['getApiCallsOfRun']> | undefined;
       if (runHistory && this.currentRunId) {
         try { spawnCostUsd = runHistory.getDescendantCostUsd(this.currentRunId); }
         catch { spawnCostUsd = 0; }
+        try { apiCalls = runHistory.getApiCallsOfRun(this.currentRunId); }
+        catch { apiCalls = undefined; }
       }
 
       // Snapshot this run's usage in the UI footer's convention (tokensIn =
@@ -1350,6 +1370,9 @@ export class Session {
         costUsd: displayCostUsd,
         model,
         ...(spawnCostUsd > 0 ? { spawnCostUsd } : {}),
+        ...(apiCalls !== undefined && apiCalls.calls > 0
+          ? { apiCalls: apiCalls.calls, apiCostUsd: apiCalls.usd, apiCostEstimated: apiCalls.estimated, apiCallsUnpriced: apiCalls.unpriced }
+          : {}),
         ...(this.currentRunId ? { runId: this.currentRunId } : {}),
         durationMs,
       };
@@ -1552,6 +1575,7 @@ export class Session {
       // path. Record it distinctly as 'aborted' (not the scary 'failed') and
       // surface a calm interruption note instead of a provider-error banner.
       const isAbort = err instanceof RunAbortedError;
+      const guardStop = loopGuardStopReason(err);
       // The note code and whether it is reported: a hard loop break and a continuation
       // loop each get their own calm note naming WHY, a question nobody could be asked
       // gets one naming the question (`classifyRunFailure`).
@@ -1625,6 +1649,8 @@ export class Session {
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: isAbort ? 'aborted' : 'failed',
+            // A loop guard's stop is an abort too; the reason tells it from a stop by the user.
+            ...(guardStop !== null ? { stopReason: guardStop } : {}),
             errorText: secretStore ? secretStore.maskSecrets(errorDetail) : errorDetail,
           });
         } catch {
@@ -2860,6 +2886,7 @@ export class Session {
       // model looks Anthropic; a cross-provider slot pins it to the slot model.
       openaiModelId: slotCfg.crossProviderSlot ? slotCfg.openaiModelId : (this._profileOverride?.model_id ?? userConfig.openai_model_id),
       briefing: this._briefingConsumed ? undefined : this.briefing,
+      briefingOwnBlocks: this._briefingConsumed ? undefined : this.briefingOwnBlocks,
       secretsBriefing: this._briefingConsumed ? undefined : this.secretsBriefing,
       autonomy: this.agentOverrides.autonomy,
       secretStore: engine.getSecretStore() ?? undefined,

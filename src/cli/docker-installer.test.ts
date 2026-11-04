@@ -92,7 +92,7 @@ describe('docker-installer', () => {
       // OpenAI-compatible adapter); Mistral additionally pre-fills the
       // canonical Mistral endpoint.
       expect(INSTALLER_SRC).toMatch(/LYNOX_LLM_PROVIDER'\]\s*=\s*'openai'/);
-      expect(INSTALLER_SRC).toMatch(/https:\/\/api\.mistral\.ai\/v1/);
+      expect(INSTALLER_SRC).toMatch(/https:\/\/api\.eu\.mistral\.ai\/v1/);
     });
 
     it('uses MISTRAL_API_KEY (primary slot) for the Mistral branch', () => {
@@ -257,7 +257,9 @@ describe('docker-installer', () => {
     it('installer source surfaces actionable PORT= guidance', () => {
       // The user-facing copy is what makes the silent-failure mode go away;
       // assert the help text is present so a refactor doesn't drop it.
-      expect(INSTALLER_SRC).toMatch(/PORT=3001 npx @lynox-ai\/core/);
+      // The non-interactive line is tested in docker-installer-noninteractive.test.ts.
+      expect(INSTALLER_SRC).toContain('`PORT=${String(nextPort)} npx @lynox-ai/core`');
+      expect(INSTALLER_SRC).toContain('const nextPort = hostPort < 65535 ? hostPort + 1 : 3001;');
     });
   });
 
@@ -315,7 +317,7 @@ describe('docker-installer', () => {
       );
       await validateMistralKey('test-key-xyz');
       expect(fetchSpy).toHaveBeenCalledWith(
-        'https://api.mistral.ai/v1/models',
+        'https://api.eu.mistral.ai/v1/models',
         expect.objectContaining({
           method: 'GET',
           headers: expect.objectContaining({ Authorization: 'Bearer test-key-xyz' }) as unknown,
@@ -810,7 +812,8 @@ describe('which user each container runs as', () => {
   });
 
   it('says lynox is running only when the health check passed', () => {
-    expect(INSTALLER_SRC).toMatch(/healthy\s*\?\s*`[^`]*✨ lynox is running/);
+    // The behaviour itself is pinned in docker-installer-noninteractive.test.ts › startupReport.
+    expect(INSTALLER_SRC).toMatch(/if \(f\.healthy\) \{\s*out\.push\(`[^`]*✨ lynox is running/);
     expect(INSTALLER_SRC.match(/✨ lynox is running/g)).toHaveLength(1);
   });
 });

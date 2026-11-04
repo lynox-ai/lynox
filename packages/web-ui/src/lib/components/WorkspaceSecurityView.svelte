@@ -9,6 +9,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	interface ConfigResponse { managed?: string }
 
@@ -26,12 +27,14 @@
 
 	async function load(): Promise<void> {
 		try {
+			const noteViewer = viewerNote();
 			const [configRes, vaultRes] = await Promise.all([
 				fetch(`${getApiBase()}/config`),
 				fetch(`${getApiBase()}/vault/key?reveal=false`),
 			]);
 			if (!configRes.ok) throw new Error(`HTTP ${configRes.status}`);
 			const body = (await configRes.json()) as ConfigResponse;
+			noteViewer(body);
 			managed = cpSuppliesLLMKey(body.managed);
 			if (vaultRes.ok) {
 				const vaultBody = (await vaultRes.json()) as { configured: boolean; vault_key?: unknown };
@@ -84,6 +87,10 @@
 		</section>
 	{:else if !loaded}
 		<p class="text-sm text-text-muted">{t('system.loading')}</p>
+	{:else if isMandateSession()}
+		<!-- A mandate's session (ux U-104): the vault key and the access token are secrets, so the
+		     page has nothing to show and is left out of the settings index and the palette. Reached by
+		     its address, it shows its heading only; the server refuses both reveals to a mandate. -->
 	{:else}
 		<!-- Vault key -->
 		<section class="border-t border-border pt-6 space-y-2">

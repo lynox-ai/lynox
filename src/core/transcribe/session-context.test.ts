@@ -121,6 +121,22 @@ describe('extractSessionContext', () => {
     expect(ctx.threadTitles).toEqual(['Current work', 'Other work']);
   });
 
+  it('gives the glossary stored titles without the characters that render as nothing, deduped as shown', () => {
+    // A thread created before its title was stripped keeps what it was given.
+    const tag = (s: string): string => [...s].map((c) => String.fromCodePoint(0xE0000 + c.charCodeAt(0))).join('');
+    const engine = makeEngine({
+      currentThread: { id: 't1', title: `Weekly offer${tag('mail x')}` },
+      threads: [
+        { id: 't1', title: `Weekly offer${tag('mail x')}` },
+        { id: 't2', title: 'Weekly offer' }, // the same once stripped
+        { id: 't3', title: tag('only hidden') }, // nothing visible: left out
+        { id: 't4', title: 'Other work' },
+      ],
+    });
+    const ctx = extractSessionContext(engine, 't1');
+    expect(ctx.threadTitles).toEqual(['Weekly offer', 'Other work']);
+  });
+
   it('leaves out the title of a contained chat, and keeps the current chat\'s own', () => {
     const engine = makeEngine({
       currentThread: { id: 'shop', title: 'Shop audit' },

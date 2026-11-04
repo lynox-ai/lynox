@@ -33,6 +33,9 @@ import { sanitizeHeader, stripHtmlAndInvisibles } from './classifier/sanitize.js
 /** Sentinel used in single-user instances. Team-inbox lands in Phase 5+. */
 export const DEFAULT_TENANT_ID = 'default';
 
+/** No account left out — the default for the account filters below. */
+const NO_ACCOUNTS: ReadonlySet<string> = new Set<string>();
+
 // ── Input shapes ───────────────────────────────────────────────────────────
 
 export interface InboxItemInput {
@@ -733,7 +736,10 @@ export class InboxStateDb {
     return (row?.c ?? 0) > 0;
   }
 
-  countItemsByBucket(tenantId: string = DEFAULT_TENANT_ID): Record<InboxBucket, number> {
+  countItemsByBucket(
+    tenantId: string = DEFAULT_TENANT_ID,
+    excludeAccounts: ReadonlySet<string> = NO_ACCOUNTS,
+  ): Record<InboxBucket, number> {
     // Mirrors listItems' snooze filter AND the client-side `!userAction`
     // filter applied in InboxView.svelte. Without the user_action exclusion
     // the badge sticks at the pre-archive number because SQL counts every
@@ -741,14 +747,15 @@ export class InboxStateDb {
     // marked-unhandled it.
     const now = Date.now();
     const rows = this.db
-      .prepare<[string, number], { bucket: string; c: number }>(
+      .prepare<[string, number, string], { bucket: string; c: number }>(
         `SELECT bucket, COUNT(*) as c FROM inbox_items
          WHERE tenant_id = ?
            AND (snooze_until IS NULL OR snooze_until <= ?)
            AND user_action IS NULL
+           AND account_id NOT IN (SELECT value FROM json_each(?))
          GROUP BY bucket`,
       )
-      .all(tenantId, now);
+      .all(tenantId, now, JSON.stringify([...excludeAccounts]));
     const counts: Record<InboxBucket, number> = {
       requires_user: 0,
       draft_ready: 0,
@@ -760,6 +767,38 @@ export class InboxStateDb {
       }
     }
     return counts;
+  }
+
+  /**
+   * The open items of one bucket, the rows `countItemsByBucket` counts: not snoozed, no user
+   * action, outside `excludeAccounts`. Newest classification first, as `listItems` orders.
+   */
+  listOpenItems(opts: {
+    tenantId?: string | undefined;
+    bucket: InboxBucket;
+    limit: number;
+    offset: number;
+    excludeAccounts?: ReadonlySet<string> | undefined;
+  }): ReadonlyArray<InboxItem> {
+    const rows = this.db
+      .prepare<[string, string, number, string, number, number], ItemRow>(
+        `SELECT * FROM inbox_items
+         WHERE tenant_id = ? AND bucket = ?
+           AND (snooze_until IS NULL OR snooze_until <= ?)
+           AND user_action IS NULL
+           AND account_id NOT IN (SELECT value FROM json_each(?))
+         ORDER BY classified_at DESC, rowid DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(
+        opts.tenantId ?? DEFAULT_TENANT_ID,
+        opts.bucket,
+        Date.now(),
+        JSON.stringify([...(opts.excludeAccounts ?? NO_ACCOUNTS)]),
+        clampLimit(opts.limit),
+        Math.max(0, opts.offset),
+      );
+    return rows.map(rowToItem);
   }
 
   /**

@@ -436,7 +436,7 @@ describe('applying an external run', () => {
       expect([s.items.get('/products/1')!['price'], s.items.get('/products/2')!['price']]).toEqual(['15.00', '15.00']);
       expect(targetErrors(runId)).toEqual(['secret']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, failed: 1 });
-      expect(done.summary).toContain('Applied 2, failed 1,');
+      expect(done.summary).toContain('2 applied, 1 failed,');
       const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
       expect(await bulkStatusTool.handler({ run_id: runId }, agent)).toContain('Applied 2, failed 1, conflicts 0, undone 0.');
       expect(s.requests.filter((r) => r.path.includes(LOOKS_LIKE_A_KEY))).toEqual([]);
@@ -1364,7 +1364,7 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
       for (const i of [1, 2, 3]) s.items.get(`/products/${String(i)}`)!['price'] = '15.00';
       const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
-      expect(out.summary).toContain('Applied 3 (3 already held the planned value and were sent nothing), failed 0');
+      expect(out.summary).toContain('3 applied (of which 3 already as planned), of');
       // Every target read, none written: the cap bounds the targets that receive the verb.
       expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
@@ -1686,7 +1686,7 @@ describe('an unmeasured write form', () => {
       // is on record for them, and still the second run writes one target first.
       const second = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
       expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
-        .get(HOST, 'PATCH', 'unmeasured:/products/')).toEqual({ run_id: first });
+        .get(HOST, 'PATCH', `unmeasured:${first}:/products/`)).toEqual({ run_id: first });
       expect(ledger.getStatus(second)!.probeConfirmed).toBe(false);
       expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, maxTargets: 2, unmeasuredConfirmed: true }))
         .toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'other_run' }], step: null } });
@@ -1814,7 +1814,7 @@ describe('an unmeasured write form', () => {
     }
   });
 
-  it('offers to confirm again a run whose unchecked probe another run\'s confirmation took over', async () => {
+  it('keeps a run\'s unchecked probe when a later run on the same host confirms one of the same kind', async () => {
     const s = shop();
     const restore = serve(s);
     try {
@@ -1831,10 +1831,43 @@ describe('an unmeasured write form', () => {
       expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
       expect(ledger.probeBlockFor(y)).toEqual({ missing: [{ kind: '/products/', cause: 'other_run' }], step: 'confirm' });
       expect(ledger.probeKey(y)).toBe(url(2));
-      // Y's confirmation takes the row, and X is the one to confirm again.
+      // Y's confirmation files a row of its own: both runs hold, and neither is offered it again.
       expect(ledger.confirmProbe(y)).toEqual({ ok: true });
-      expect(ledger.probeBlockFor(x)).toEqual({ missing: [{ kind: '/products/', cause: 'other_run' }], step: 'confirm' });
-      expect(ledger.probeKey(x)).toBe(url(0));
+      expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
+      expect([ledger.probeKey(y), ledger.probeBlockFor(y)]).toEqual([null, null]);
+      expect(ledger.resume(x, { checksum: ledger.computeChecksum(x)!, maxTargets: 2 }).ok).toBe(true);
+      const rows = engineDb.getDb().prepare('SELECT kind, run_id FROM bulk_host_probes WHERE host = ? AND method = ?').all(HOST, 'PATCH') as { kind: string; run_id: string }[];
+      expect(rows).toHaveLength(2);
+      expect(rows).toEqual(expect.arrayContaining([{ kind: `unmeasured:${x}:/products/`, run_id: x }, { kind: `unmeasured:${y}:/products/`, run_id: y }]));
+    } finally {
+      restore();
+    }
+  });
+
+  // A row confirmed before the kind carried its run: `unmeasured:<kind>`, read with its `run_id`.
+  it('reads an unchecked probe filed before rows carried their run as the run\'s own, and as another run\'s for the rest', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const halted = async (ids: number[]): Promise<string> => {
+        const id = await previewedRun(ids.map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+        await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        return id;
+      };
+      const x = await halted([0, 1]);
+      const y = await halted([2, 3]);
+      engineDb.getDb().prepare('INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, NULL, ?)')
+        .run(HOST, 'PATCH', 'unmeasured:/products/', x, new Date().toISOString());
+      expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
+      expect(ledger.resume(x, { checksum: ledger.computeChecksum(x)!, maxTargets: 2 }).ok).toBe(true);
+      expect(ledger.probeBlockFor(y)).toEqual({ missing: [{ kind: '/products/', cause: 'other_run' }], step: 'confirm' });
+      // Y confirms its own; the row from before stays X's.
+      expect(ledger.confirmProbe(y)).toEqual({ ok: true });
+      expect(ledger.probeBlockFor(y)).toBeNull();
+      expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
+        .get(HOST, 'PATCH', 'unmeasured:/products/')).toEqual({ run_id: x });
     } finally {
       restore();
     }
@@ -2618,7 +2651,7 @@ describe('a send without a clear answer is not sent again', () => {
       const runId = await unknownFirst(s, c);
       const second = await run(runId, c);
       expect(second.status).toBe('done');
-      expect(second.summary).toContain('Unclear 1: sent without a clear answer, not sent again.');
+      expect(second.summary).toContain('1 unclear: sent without a clear answer, not sent again.');
       expect(patches(s)).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
       expect(s.items.get('/products/0')!['price']).toBe('12.00');
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 4, failed: 0, failedOnce: 1, sentUnknown: 1 });

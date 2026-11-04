@@ -72,7 +72,7 @@ export function escalateToUser(
   const threadId = escalationThreadId(threadStore, opts.key);
   // INSERT OR IGNORE — first event creates the thread (+ its title); later events
   // keep the same row and just append + re-unread below.
-  threadStore.createThread(threadId, { title: opts.title });
+  threadStore.createThread(threadId, { title: stripHidden(opts.title) });
   // An escalation thread is the owner's. If a mandate's session ever holds this id, the
   // owner's detail must not land in a thread the mandate reaches: fall back to the bare push,
   // as without a thread store. `POST /api/sessions` refuses a mandate this id up front; this is

@@ -12,6 +12,10 @@
  *  - the path is under `/admin/` and carries no `%` and no `;`: an encoded `/`, `\` or `.`,
  *    a double encoding (`%252e`) or a matrix segment (`/admin/..;/apps/`) is something a server
  *    in front of the store could route to another path;
+ *  - for a credential pass, the path has the shape of an Admin API call
+ *    ({@link credentialPathRefusal}) and stays out of the store's OAuth endpoints;
+ *  - for a credential pass, the request names no access token: not in a path segment, not in
+ *    the query, not in the body, which is JSON sent as it is ({@link namesAccessToken});
  *  - no header re-targets the request (`Host`, `X-Original-URL`, `X-Forwarded-*`, …), on a
  *    read as on a write;
  *  - exactly one header of the credential set is sent, it is the pass's header, and its
@@ -48,6 +52,143 @@ export const STORE_PASS_PATH_PREFIX = '/admin/';
 
 /** The token endpoint: the one path an exchange pass reaches. */
 export const STORE_EXCHANGE_PATH = '/admin/oauth/access_token';
+
+/** The one path under `/admin/oauth/` a credential pass reaches: the read of the token's own scopes. */
+export const STORE_SCOPES_PATH = '/admin/oauth/access_scopes.json';
+
+/**
+ * Why a credential pass may not reach `path`, or `null` when it may. An allowlist of the path's
+ * shape, not a refusal of one prefix: non-empty segments of lowercase letters, digits, `_`, `-`
+ * and `.` under `/admin/`, none of which starts with `oauth`, or exactly {@link STORE_SCOPES_PATH}.
+ *
+ * A refusal of `/admin/oauth/` alone did not hold: `/admin//oauth/access_token` keeps both
+ * slashes in `URL.pathname`, and `/admin/OAuth/…` passes a case-sensitive compare. Here a repeated
+ * slash and a capital are refused rather than folded, so how the store reads them does not
+ * matter. Admin API paths are lowercase; a segment starting with `oauth` is refused anywhere, so
+ * neither a versioned spelling nor `oauth.json` reaches the token endpoint.
+ */
+export function credentialPathRefusal(path: string): string | null {
+  if (path === STORE_SCOPES_PATH) return null;
+  if (!/^\/admin(?:\/[a-z0-9_.-]+)+$/.test(path)) return 'the request is not for the Admin API';
+  if (path.split('/').some((segment) => segment.startsWith('oauth'))) return 'a store pass does not reach the store\'s OAuth endpoints';
+  if (path.split('/').some((segment) => segment.includes('access_token'))) return ACCESS_TOKEN_REFUSAL + TELL_NO_TOKENS;
+  return null;
+}
+
+const ACCESS_TOKEN_REFUSAL = 'a store pass does not reach the store\'s access tokens';
+/** What the model is told to do after a refusal of the path or the address: stop and say so (ux U-086). */
+const TELL_NO_TOKENS = '; tell the user that lynox does not create or read access tokens through the connected store';
+/** The token word in a body: named, so a text that only contains it can be found and changed (ux U-086). */
+const BODY_TOKEN_REFUSAL = 'the body names an access token: ' + ACCESS_TOKEN_REFUSAL
+  + '. Stop here and tell the user that lynox does not create or read the store\'s access tokens through the connected store, and that a request whose text names one is refused as well';
+const PERSISTED_ADDRESS_REFUSAL = 'the address asks for a persisted query';
+const PERSISTED_BODY_REFUSAL = 'the body asks for a persisted query';
+const ENCODED_REFUSAL = 'the body is sent encoded (Content-Encoding)';
+const CONTENT_TYPE_REFUSAL = 'a request under a store pass sends one Content-Type, application/json';
+const NOT_JSON_REFUSAL = 'a request under a store pass sends its body as JSON';
+
+/**
+ * The refusals of the form a request is sent in, not of what it asks for (ux U-086). A request
+ * sent again in the one form these checks read goes through every check again, the access-token
+ * ones included, so telling the model how to send it opens nothing.
+ */
+const FORMAT_REFUSALS: ReadonlySet<string> = new Set([
+  PERSISTED_ADDRESS_REFUSAL, PERSISTED_BODY_REFUSAL, ENCODED_REFUSAL, CONTENT_TYPE_REFUSAL, NOT_JSON_REFUSAL,
+]);
+
+/**
+ * The sentence `fetchPinned` puts after a store refusal: how to send it again for a refusal of its
+ * form, and not to try another way for every other one.
+ */
+export function storeRefusalNext(refusal: string): string {
+  return FORMAT_REFUSALS.has(refusal)
+    ? 'Send it again as JSON text with exactly one Content-Type: application/json header, no Content-Encoding, and the full query text instead of a persisted query.'
+    : 'Do not retry it with changed headers or a changed address.';
+}
+const TOKEN_WORD = /access_?token/i;
+const PERSISTED_WORD = /persistedquery/i;
+/**
+ * A `\uXXXX` or `\u{X…}` escape (JSON's and GraphQL's string escapes) with every backslash before
+ * it: one left standing would split a word that the escape sits in the middle of. A run of
+ * backslashes is matched from its start only, so a long run costs one pass, not one per backslash.
+ * GraphQL allows any number of digits in braces (`\u{00000041}`): leading zeros are read past.
+ */
+const UNICODE_ESCAPE = /(?<!\\)\\+u(?:\{0*([0-9a-fA-F]{1,6})\}|([0-9a-fA-F]{4}))/g;
+
+/**
+ * `text` with every unicode escape resolved, again and again until nothing changes (at most eight
+ * rounds). A document nested in a GraphQL string literal (`bulkOperationRunQuery(query: "…")`) is
+ * decoded once more by the store, so one round of JSON decoding does not show what it names.
+ * Resolving an escape that is really an escaped backslash can eat the letters after it, so the
+ * words are looked for in the text as sent as well ({@link namesAccessToken}).
+ */
+function resolveEscapes(text: string): string {
+  let current = text;
+  for (let round = 0; round < 8; round++) {
+    const next = current.replace(UNICODE_ESCAPE, (_, braced: string | undefined, plain: string | undefined) => {
+      const code = Number.parseInt(braced ?? plain ?? '', 16);
+      return code <= 0x10ffff ? String.fromCodePoint(code) : '\uFFFD';
+    });
+    if (next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
+/**
+ * Whether `text` names an access token (`accessToken`, `access_token`, any case), with its escapes
+ * resolved and as sent. A GraphQL field name has no escapes, and an alias or a fragment carries it
+ * as written, so a document that selects a token field names it here. The response is not read:
+ * a token the store returns under another name is not seen.
+ */
+export function namesAccessToken(text: string): boolean {
+  return TOKEN_WORD.test(text) || TOKEN_WORD.test(resolveEscapes(text));
+}
+
+/**
+ * Whether `text`, its escapes resolved, asks for a persisted query: a document the store runs
+ * without its being sent. Unlike `access`, the word starts with a letter that is no hex digit, so
+ * resolving an escape cannot eat its first letters.
+ */
+function asksPersisted(text: string): boolean {
+  return PERSISTED_WORD.test(resolveEscapes(text));
+}
+
+/** The `Content-Type` values a credential request may send, as `http.ts` lets a connected write send them. */
+const JSON_CONTENT_TYPES: ReadonlySet<string> = new Set(['application/json', 'application/json; charset=utf-8']);
+
+/** The `Content-Type` values `headers` sends, any spelling of the name. */
+function contentTypesOf(headers: Record<string, string>): string[] {
+  return Object.entries(headers).filter(([name]) => name.trim().toLowerCase() === 'content-type').map(([, value]) => value);
+}
+
+/** `value` without ASCII spaces and tabs at its ends: a no-break space is sent as written, as in `http.ts`. */
+const asciiTrim = (value: string): string => value.replace(/^[ \t]+|[ \t]+$/g, '');
+
+/**
+ * Why a credential request's query or headers may not go out, or `null`. The query is read as
+ * the store decodes it, names and values. The body check reads the body as JSON in UTF-8, so a
+ * body sent compressed, or labelled as anything other than one of {@link JSON_CONTENT_TYPES}, is
+ * refused: a form type would let the store read the same bytes as a query, and a charset as other
+ * text. A body with no `Content-Type` is refused as well ({@link storePassBodyRefusal}): a server
+ * may read a POST without one as a form (Rack does).
+ */
+function credentialRequestRefusal(url: URL, headers: Record<string, string>): string | null {
+  if (url.search !== '') {
+    const pieces = [...url.searchParams].flat();
+    if (pieces.some(namesAccessToken)) return 'the address names an access token: ' + ACCESS_TOKEN_REFUSAL + TELL_NO_TOKENS;
+    if (pieces.some(asksPersisted)) return PERSISTED_ADDRESS_REFUSAL;
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.trim().toLowerCase() === 'content-encoding' && value.trim().toLowerCase() !== 'identity') return ENCODED_REFUSAL;
+  }
+  const types = contentTypesOf(headers);
+  // Two of them are refused with a body ({@link storePassBodyRefusal}); without one they say nothing.
+  if (types.some((type) => !JSON_CONTENT_TYPES.has(asciiTrim(type).toLowerCase()))) {
+    return CONTENT_TYPE_REFUSAL;
+  }
+  return null;
+}
 
 const DIGEST_KEY = randomBytes(32);
 const minted = new WeakSet<object>();
@@ -141,6 +282,8 @@ export function storePassRefusal(url: URL, headers: Record<string, string>, pass
     if (method.toUpperCase() !== 'POST') return 'an exchange pass sends only the token exchange';
   } else {
     if (!path.startsWith(STORE_PASS_PATH_PREFIX)) return 'the request is not for the Admin API';
+    const refused = credentialPathRefusal(path) ?? credentialRequestRefusal(url, headers);
+    if (refused !== null) return refused;
   }
   if (path.includes('%') || path.includes(';')) return 'the path carries an encoded character or a matrix segment';
   // `Host` is one of them: `fetchPinned` sets it itself, after this check.
@@ -159,10 +302,26 @@ export function storePassRefusal(url: URL, headers: Record<string, string>, pass
 
 /**
  * Why the body of a hop may not go out under `pass`, or `null` when it may. `body` is what the
- * hop sends, as bytes. An exchange pass is spent here, by the first request that passes.
+ * hop sends, as bytes. An exchange pass is spent here, by the first request that passes. A
+ * credential request's body is JSON, and its text, escapes resolved, names no access token and
+ * asks for no persisted query. JSON's escapes are the ones resolved, so its keys and strings are
+ * read as decoded. A credential body goes with exactly one `Content-Type`, a JSON one
+ * ({@link storePassRefusal} refuses any other); `headers` are the hop's.
  */
-export function storePassBodyRefusal(pass: StorePass, body: Buffer | undefined): string | null {
-  if (pass.kind !== 'exchange') return null;
+export function storePassBodyRefusal(pass: StorePass, body: Buffer | undefined, headers: Record<string, string>): string | null {
+  if (pass.kind !== 'exchange') {
+    if (body === undefined || body.length === 0) return null;
+    if (contentTypesOf(headers).length !== 1) return CONTENT_TYPE_REFUSAL;
+    const text = body.toString('utf8');
+    try {
+      JSON.parse(text);
+    } catch {
+      return NOT_JSON_REFUSAL;
+    }
+    if (namesAccessToken(text)) return BODY_TOKEN_REFUSAL;
+    if (asksPersisted(text)) return PERSISTED_BODY_REFUSAL;
+    return null;
+  }
   if (spent.has(pass)) return 'an exchange pass sends one request, and it has sent it';
   if (body === undefined || !sameDigest(digestOf(body), pass.bodyDigest)) return 'the body sent is not the token exchange that was verified';
   spent.add(pass);
