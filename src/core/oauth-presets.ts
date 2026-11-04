@@ -286,7 +286,7 @@ export interface PresetRegister {
  * product decision, not a build one: nothing here can be connected that nobody
  * has vouched for. Each entry names its source.
  */
-const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
+const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
   {
     // Decided 2026-10-05 as the first provider. Endpoints from bexio's OpenID discovery
     // document (https://auth.bexio.com/realms/bexio/.well-known/openid-configuration, read
