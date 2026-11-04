@@ -171,6 +171,12 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(notifyNewItem).not.toHaveBeenCalled();
   });
 
+  it('the store reopens only a replied item', () => {
+    const archived = seedReplied('requires_user', 'archived');
+    expect(inbox.reopenReplied(archived, 'default')).toBe(false);
+    expect(inbox.getItem(archived)!.userAction).toBe('archived');
+  });
+
   it('a reply to the follow-up marks the item replied again, also from another account', async () => {
     const id = seedReplied();
     await hook()(ACCOUNT.id, envelope());
