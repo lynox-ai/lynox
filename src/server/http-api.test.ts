@@ -23895,3 +23895,54 @@ describe('moveMistralEndpointsToEu', () => {
     expect(update.api_base_url).toBe('https://api.mistral.ai.evil.com/v1');
   });
 });
+
+// PRD inbox-user-rules 3a over the wire: the route maps the body and the query itself, which the
+// handler tests in `integrations/inbox/api.test.ts` do not reach.
+describe('inbox rules over HTTP: name, confirm, filter by rule', () => {
+  type Host = { engine: Record<string, unknown> };
+  let orig: unknown;
+  let close: () => void = () => {};
+  let state: import('../integrations/inbox/state.js').InboxStateDb;
+
+  beforeEach(async () => {
+    repayRateWindow();
+    const { MailStateDb } = await import('../integrations/mail/state.js');
+    const { InboxStateDb } = await import('../integrations/inbox/state.js');
+    const { InboxRulesLoader } = await import('../integrations/inbox/rules-loader.js');
+    const mail = new MailStateDb({ path: ':memory:' });
+    close = () => mail.close();
+    state = new InboxStateDb(mail.getConnection());
+    const runtime = { state, rules: new InboxRulesLoader(state), coldStartTracker: {}, sensitiveMode: 'skip', contactResolver: null };
+    const host = api as unknown as Host;
+    orig = host.engine['getInboxRuntime'];
+    host.engine['getInboxRuntime'] = () => runtime;
+  });
+  afterEach(() => {
+    (api as unknown as Host).engine['getInboxRuntime'] = orig;
+    close();
+  });
+
+  it('stores the name the owner gives, confirms a waiting rule, and lists the items one rule filed', async () => {
+    const created = await jsonFetch('/api/inbox/rules', {
+      method: 'POST',
+      body: JSON.stringify({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'a@x', bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Belege' }),
+    });
+    expect(created.status).toBe(201);
+    const ruleId = ((await created.json()) as { id: string }).id;
+    expect(state.listRulesForAccount('acct-1').map((r) => r.name)).toEqual(['Belege']);
+
+    const p = state.proposeRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'b@x', name: 'B' }, 10);
+    const waiting = p.ok ? p.id : '';
+    expect((await jsonFetch(`/api/inbox/rules/${waiting}/confirm`, { method: 'POST', body: '{}' })).status).toBe(200);
+    expect(state.listConfirmedRulesForAccount('acct-1').map((r) => r.id)).toContain(waiting);
+    expect((await jsonFetch('/api/inbox/rules/rul_missing/confirm', { method: 'POST', body: '{}' })).status).toBe(404);
+
+    const base = { accountId: 'acct-1', channel: 'email' as const, bucket: 'requires_user' as const, confidence: 1, reasonDe: 'r', classifiedAt: new Date(), classifierVersion: 'v' };
+    state.insertItem({ ...base, threadKey: 'filed', matchedRuleId: ruleId });
+    state.insertItem({ ...base, threadKey: 'other' });
+    const listed = await jsonFetch(`/api/inbox/items?ruleId=${encodeURIComponent(ruleId)}`);
+    expect(listed.status).toBe(200);
+    expect(((await listed.json()) as { items: Array<{ threadKey: string }> }).items.map((i) => i.threadKey)).toEqual(['filed']);
+    expect((await jsonFetch('/api/inbox/items?ruleId=itm_1')).status).toBe(400);
+  });
+});

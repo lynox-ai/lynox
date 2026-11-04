@@ -376,3 +376,20 @@ describe('inbox_read — the trail target', () => {
     expect(target({ action: 'item', id: 'Kundin Müller' })).toBe('item');
   });
 });
+
+describe('inbox_read — the items one rule filed', () => {
+  it('lists only the open items the rule filed, names the rule on each line, and refuses what is not a rule id', async () => {
+    const ruleId = runtime.state.insertRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'kunde@example.com', bucket: 'requires_user', action: 'show', source: 'on_demand' });
+    const filed = item({ subject: 'Von der Regel', matchedRuleId: ruleId });
+    const other = item({ subject: 'Ohne Regel' });
+    const out = await call({ action: 'list', bucket: 'requires_user', rule_id: ruleId });
+    expect(out).toContain(`Open items in requires_user filed by rule ${ruleId}`);
+    expect(out).toContain(`id:${filed}`);
+    expect(out).toContain(`rule:${ruleId}`);
+    expect(out).not.toContain(`id:${other}`);
+    const all = await call({ action: 'list', bucket: 'requires_user' });
+    expect(all).toContain(`id:${other}`);
+    expect(await call({ action: 'list', bucket: 'requires_user', rule_id: "rul_x' OR 1=1" })).toMatch(/rule_id must be a rule id/);
+    expect(await call({ action: 'list', bucket: 'requires_user', rule_id: 'rul_none' })).toBe('No open items in requires_user filed by rule rul_none.');
+  });
+});

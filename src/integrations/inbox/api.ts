@@ -151,6 +151,8 @@ export function handleListItems(deps: InboxApiDeps, query: ListItemsQuery): ApiR
   }
   if (query.ruleId !== undefined && query.ruleId.length > 0) {
     if (!RULE_ID.test(query.ruleId)) return bad('invalid ruleId');
+    // The snoozed list ignores every other filter; refuse rather than answer for all rules.
+    if (snoozedOnly) return bad('ruleId cannot be combined with snoozedOnly');
     opts.ruleId = query.ruleId;
   }
   return { status: 200, body: { items: deps.state.listItems(opts) } };
@@ -945,7 +947,9 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
   if (!VALID_RULE_ACTIONS.includes(body.action)) return bad('invalid action');
   if (!VALID_RULE_SOURCES.includes(body.source)) return bad('invalid source');
   // One line, as the agent's proposals are cut: the name lands in audit rows the model can read.
-  const name = typeof body.name === 'string' ? body.name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim() : '';
+  const oneLine = (v: string): string =>
+    v.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
+  const name = typeof body.name === 'string' ? oneLine(body.name) : '';
   if (name.length > MAX_RULE_NAME_CHARS) return bad(`name exceeds ${MAX_RULE_NAME_CHARS} chars`);
   const id = deps.state.insertRule({
     accountId: body.accountId,
@@ -955,7 +959,8 @@ export function handleCreateRule(deps: InboxApiDeps, body: CreateRuleBody): ApiR
     action: body.action,
     source: body.source,
     tenantId: body.tenantId,
-    ...(name.length > 0 ? { name } : {}),
+    // Unnamed, a rule is called by what it matches (cut to the name's length).
+    name: name.length > 0 ? name : oneLine(body.matcherValue).slice(0, MAX_RULE_NAME_CHARS),
   });
   deps.rules?.invalidate(body.accountId, body.tenantId);
   return { status: 201, body: { id } };

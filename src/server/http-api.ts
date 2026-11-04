@@ -12786,6 +12786,7 @@ export class LynoxHTTPApi {
         bucket: b['bucket'] as import('../integrations/inbox/api.js').CreateRuleBody['bucket'],
         action: b['action'] as import('../integrations/inbox/api.js').CreateRuleBody['action'],
         source: b['source'] as import('../integrations/inbox/api.js').CreateRuleBody['source'],
+        ...(typeof b['name'] === 'string' ? { name: b['name'] } : {}),
       };
       const finalRuleBody: import('../integrations/inbox/api.js').CreateRuleBody =
         typeof b['tenantId'] === 'string'

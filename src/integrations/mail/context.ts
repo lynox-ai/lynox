@@ -231,8 +231,9 @@ export interface InboxReader {
    * items of `exclude` (accounts).
    */
   countByBucket(exclude: ReadonlySet<string>): Record<InboxBucket, number>;
-  /** The open items of one bucket, the ones `countByBucket` counts, newest first. */
-  listItems(bucket: InboxBucket, limit: number, offset: number, exclude: ReadonlySet<string>): ReadonlyArray<InboxItem>;
+  /** The open items of one bucket, the ones `countByBucket` counts, newest first; with `ruleId`,
+   *  only those that rule filed. */
+  listItems(bucket: InboxBucket, limit: number, offset: number, exclude: ReadonlySet<string>, ruleId?: string): ReadonlyArray<InboxItem>;
   getItem(id: string): InboxItem | null;
   /** The item's own message text, or null when none is stored (a skipped sensitive mail). */
   bodyOf(item: InboxItem): string | null;

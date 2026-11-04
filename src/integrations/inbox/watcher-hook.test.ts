@@ -317,6 +317,7 @@ describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
       expect(queue.enqueue).not.toHaveBeenCalled();
       const payload = JSON.parse(inbox.listAuditForItem(item.id)[0]!.payloadJson) as Record<string, unknown>;
       expect(payload['rule_withheld']).toBe(ruleId);
+      expect(payload['sensitive_mode']).toBe(mode);
     });
   }
 

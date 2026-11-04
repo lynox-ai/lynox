@@ -894,13 +894,17 @@ export class InboxStateDb {
     limit: number;
     offset: number;
     excludeAccounts?: ReadonlySet<string> | undefined;
+    /** Only the items this rule filed. */
+    ruleId?: string | undefined;
   }): ReadonlyArray<InboxItem> {
+    const ruleId = opts.ruleId ?? null;
     const rows = this.db
-      .prepare<[string, string, number, string, number, number], ItemRow>(
+      .prepare<[string, string, number, string | null, string | null, string, number, number], ItemRow>(
         `SELECT * FROM inbox_items
          WHERE tenant_id = ? AND bucket = ?
            AND (snooze_until IS NULL OR snooze_until <= ?)
            AND user_action IS NULL
+           AND (? IS NULL OR matched_rule_id = ?)
            AND account_id NOT IN (SELECT value FROM json_each(?))
          ORDER BY classified_at DESC, rowid DESC
          LIMIT ? OFFSET ?`,
@@ -909,6 +913,8 @@ export class InboxStateDb {
         opts.tenantId ?? DEFAULT_TENANT_ID,
         opts.bucket,
         Date.now(),
+        ruleId,
+        ruleId,
         JSON.stringify([...(opts.excludeAccounts ?? NO_ACCOUNTS)]),
         clampLimit(opts.limit),
         Math.max(0, opts.offset),
@@ -1519,15 +1525,18 @@ export class InboxStateDb {
     }).immediate();
   }
 
-  /** The owner confirms a waiting rule. False when it does not exist or is confirmed already. */
+  /** The owner confirms a waiting rule. True when the rule exists; confirming it again keeps the
+   *  first confirmation's time, so a retried click is not "not found". */
   confirmRule(id: string, tenantId: string = DEFAULT_TENANT_ID, at: Date = new Date()): boolean {
     const result = this.db
-      .prepare('UPDATE inbox_rules SET confirmed_at = ? WHERE id = ? AND tenant_id = ? AND confirmed_at IS NULL')
+      .prepare('UPDATE inbox_rules SET confirmed_at = COALESCE(confirmed_at, ?) WHERE id = ? AND tenant_id = ?')
       .run(at.getTime(), id, tenantId) as { changes: number };
     return result.changes > 0;
   }
 
-  /** The rules that apply: confirmed ones only, oldest first (the first match wins). */
+  /** The rules that apply: confirmed ones only, in the order they were confirmed (the first match
+   *  wins). A proposal confirmed today ranks after an owner rule made yesterday, though it was
+   *  proposed before it; an owner's rule is confirmed when it is made. */
   listConfirmedRulesForAccount(
     accountId: string,
     tenantId: string = DEFAULT_TENANT_ID,
@@ -1536,7 +1545,7 @@ export class InboxStateDb {
       .prepare<[string, string], RuleRow>(
         `SELECT * FROM inbox_rules
          WHERE tenant_id = ? AND account_id = ? AND confirmed_at IS NOT NULL
-         ORDER BY created_at ASC`,
+         ORDER BY confirmed_at ASC, created_at ASC, rowid ASC`,
       )
       .all(tenantId, accountId);
     return rows.map(rowToRule);

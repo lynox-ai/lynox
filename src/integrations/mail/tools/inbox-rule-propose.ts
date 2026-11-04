@@ -28,10 +28,11 @@ export interface InboxRuleProposeInput {
   name: string;
 }
 
-/** One line: control and separator characters become spaces, runs of space collapse. */
+/** One line: control, separator, zero-width and direction characters become spaces (a name must
+ *  read as it is stored when the owner confirms it), runs of space collapse. */
 function oneLine(raw: unknown): string {
   if (typeof raw !== 'string') return '';
-  return raw.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim();
+  return raw.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 const INBOX_OFF = 'inbox_rule_propose: the inbox is not running on this instance, so there is nothing to propose a rule for.';
@@ -75,7 +76,8 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
       }
       if (input.matcher_kind === 'from') {
         value = value.toLowerCase();
-        if (!/^[^\s@]+@[^\s@]+$/.test(value)) {
+        // A bare address: brackets, a scheme or a list would never equal a sender and only hold a place.
+        if (!/^[^\s@<>()[\]{},;:"'`]+@[^\s@<>()[\]{},;:"'`]+$/.test(value)) {
           return Promise.resolve('inbox_rule_propose: for "from", matcher_value must be one sender address.');
         }
       } else if (value.length < INBOX_RULE_SUBJECT_MIN) {
@@ -95,7 +97,8 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
         );
       }
       return Promise.resolve(
-        `Proposed the rule "${name}" (${result.id}). It does nothing yet: it applies once the owner confirms it in the inbox rule view, ` +
+        // The name is not echoed: it is text the model wrote after reading foreign mail.
+        `Proposed the rule ${result.id}. It does nothing yet: it applies once the owner confirms it in the inbox rule view, ` +
         'and then sends matching mail to "requires_user". Tell the user it is waiting for their confirmation.',
       );
     },

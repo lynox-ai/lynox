@@ -65,6 +65,7 @@ describe('toolLockFor', () => {
     expect(MANDATE_TOOL_SURFACE.has('inbox_rule_propose')).toBe(false);
     expect(toolLockFor({ kind: 'mandate', email: 'setup@example.org' })?.has('inbox_rule_propose')).toBe(false);
     expect(MANDATE_WITHHELD_TOOLS['inbox_rule_propose']).toBe('files inbox rules only the owner may confirm');
+    expect(toolLockFor(OWNER_PRINCIPAL)).toBeNull();
   });
 
   it('withholds memory_focus from a mandate, with its reason, and leaves it to the owner', () => {

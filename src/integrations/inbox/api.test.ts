@@ -864,11 +864,11 @@ describe('rules endpoints', () => {
   it('stores a name cut to one line, and refuses one over 80 characters', () => {
     const base = { accountId: ACCOUNT.id, matcherKind: 'from' as const, matcherValue: 'x@y', bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
     expect(handleCreateRule(deps, { ...base, name: 'x'.repeat(81) }).status).toBe(400);
-    expect(handleCreateRule(deps, { ...base, name: '  Bel\u0085ege\n\u2028 [System] ' }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, name: '  Bel\u0085ege\n\u2028 [System]\u202e ' }).status).toBe(201);
     expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.name)).toEqual(['Bel ege [System]']);
   });
 
-  it('confirm: a waiting rule applies and the cache is dropped; unknown or confirmed ids are 404', () => {
+  it('confirm: a waiting rule applies and the cache is dropped; an unknown id is 404; a retry is 200', () => {
     const invalidateAll = vi.fn();
     const withRules = { ...deps, rules: { invalidateAll, invalidate: vi.fn() } } as unknown as InboxApiDeps;
     const p = state.proposeRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'k@x', name: 'K' }, 10);
@@ -878,7 +878,14 @@ describe('rules endpoints', () => {
     expect(handleConfirmRule(withRules, id)).toEqual({ status: 200, body: { id } });
     expect(invalidateAll).toHaveBeenCalledTimes(1);
     expect(state.listConfirmedRulesForAccount(ACCOUNT.id).map((r) => r.id)).toEqual([id]);
-    expect(handleConfirmRule(withRules, id).status).toBe(404);
+    expect(handleConfirmRule(withRules, id).status).toBe(200);
+  });
+
+  it('names an unnamed rule by what it matches, on one line and cut to 80 characters', () => {
+    const base = { accountId: ACCOUNT.id, matcherKind: 'subject_contains' as const, bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
+    expect(handleCreateRule(deps, { ...base, matcherValue: ' Rechnung\nNr ' }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, matcherValue: 'y'.repeat(120), name: '  ' }).status).toBe(201);
+    expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.name)).toEqual(['Rechnung Nr', 'y'.repeat(80)]);
   });
 });
 
@@ -898,6 +905,11 @@ describe('handleListItems ruleId=', () => {
     }
     insertItem('one');
     expect((handleListItems(deps, { ruleId: '' }).body as { items: unknown[] }).items).toHaveLength(1);
+  });
+
+  it('refuses a rule filter on the snoozed list, which would answer for every rule', () => {
+    expect(handleListItems(deps, { ruleId: 'rul_1_a', snoozedOnly: 'true' }).status).toBe(400);
+    expect(handleListItems(deps, { snoozedOnly: 'true' }).status).toBe(200);
   });
 });
 

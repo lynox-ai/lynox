@@ -449,14 +449,14 @@ describe('InboxStateDb — rules the agent proposes (PRD inbox-user-rules E7)', 
     expect(inbox.listConfirmedRulesForAccount(TEST_ACCOUNT.id)).toHaveLength(0);
   });
 
-  it('confirming makes it apply, once; an unknown or other-tenant id confirms nothing', () => {
+  it('confirming makes it apply; again keeps the first time; an unknown or other-tenant id confirms nothing', () => {
     const r = inbox.proposeRule(proposal(), 10);
     const id = r.ok ? r.id : '';
     expect(inbox.confirmRule(id, 'other-tenant')).toBe(false);
     expect(inbox.listConfirmedRulesForAccount(TEST_ACCOUNT.id)).toHaveLength(0);
     expect(inbox.confirmRule('rul_missing')).toBe(false);
     expect(inbox.confirmRule(id, DEFAULT_TENANT_ID, new Date(9000))).toBe(true);
-    expect(inbox.confirmRule(id)).toBe(false);
+    expect(inbox.confirmRule(id, DEFAULT_TENANT_ID, new Date(12000))).toBe(true);
     const applied = inbox.listConfirmedRulesForAccount(TEST_ACCOUNT.id);
     expect(applied.map((x) => x.id)).toEqual([id]);
     expect(applied[0]?.confirmedAt?.getTime()).toBe(9000);
@@ -474,6 +474,29 @@ describe('InboxStateDb — rules the agent proposes (PRD inbox-user-rules E7)', 
     const first = inbox.listRulesForAccount(TEST_ACCOUNT.id)[0]!;
     expect(inbox.confirmRule(first.id)).toBe(true);
     expect(inbox.proposeRule(proposal({ matcherValue: 'k10@example.com' }), 10).ok).toBe(true);
+  });
+
+  it('applies rules in the order they were confirmed, not proposed', () => {
+    const p = inbox.proposeRule(proposal({ matcherValue: 'same@x' }), 10, new Date(1000));
+    const proposed = p.ok ? p.id : '';
+    const owner = inbox.insertRule({
+      accountId: TEST_ACCOUNT.id, matcherKind: 'from', matcherValue: 'same@x', bucket: 'auto_handled',
+      action: 'archive', source: 'on_demand', createdAt: new Date(2000),
+    });
+    inbox.confirmRule(proposed, DEFAULT_TENANT_ID, new Date(3000));
+    expect(inbox.listConfirmedRulesForAccount(TEST_ACCOUNT.id).map((r) => r.id)).toEqual([owner, proposed]);
+  });
+
+  it('lists the open items of one bucket that one rule filed', () => {
+    const ruleId = inbox.insertRule({
+      accountId: TEST_ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@x', bucket: 'requires_user', action: 'show', source: 'on_demand',
+    });
+    insertSampleItem({ threadKey: 'r-1', matchedRuleId: ruleId });
+    insertSampleItem({ threadKey: 'r-2' });
+    const open = (r?: string) => inbox.listOpenItems({ bucket: 'requires_user', limit: 50, offset: 0, ruleId: r }).map((i) => i.threadKey).sort();
+    expect(open()).toEqual(['r-1', 'r-2']);
+    expect(open(ruleId)).toEqual(['r-1']);
+    expect(open('rul_other')).toEqual([]);
   });
 
   it("an owner's rule is confirmed when it is made, and keeps its name", () => {

@@ -388,8 +388,8 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   const readerTenant = opts.tenantId ?? DEFAULT_TENANT_ID;
   const inboxReader: InboxReader = {
     countByBucket: (exclude) => state.countItemsByBucket(readerTenant, exclude),
-    listItems: (bucket, limit, offset, exclude) =>
-      state.listOpenItems({ tenantId: readerTenant, bucket, limit, offset, excludeAccounts: exclude }),
+    listItems: (bucket, limit, offset, exclude, ruleId) =>
+      state.listOpenItems({ tenantId: readerTenant, bucket, limit, offset, excludeAccounts: exclude, ruleId }),
     getItem: (id) => state.getItem(id, readerTenant),
     bodyOf: (item) => {
       const tm = item.messageId !== undefined && item.messageId.length > 0
