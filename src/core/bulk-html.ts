@@ -861,10 +861,11 @@ function shortcodeLinksOf(value: string): string[] {
 }
 
 /** A value as written and as a browser reads it once the shop prints it into an attribute: with
- *  its character references decoded (`&#x6a;avascript:` is `javascript:`), trimmed as a URL is. */
+ *  its character references decoded (`&#x6a;avascript:` is `javascript:`). Leading and trailing
+ *  spaces need no trim here: `new URL` drops them, as a browser does. */
 function linkForms(value: string): string[] {
   const decoded = value.includes('&') ? textBelow(parseHtmlFragment(value.replace(/</g, '&lt;'))) : value;
-  return [...new Set([value.trim(), decoded.trim()])];
+  return [...new Set([value, decoded])];
 }
 
 /**

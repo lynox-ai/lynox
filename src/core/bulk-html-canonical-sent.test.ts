@@ -599,7 +599,8 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     expect(check('<p>x [video src="https://evil.example/b.mp4"]</p>', '<p><a href="https://evil.example/">x</a></p>')).toEqual({ ok: true });
     expect(check('<p>[embed]https://evil.example/b[/embed]</p>', '<p>[video src="https://evil.example/a.mp4"]</p>')).toEqual({ ok: true });
     // Prose in brackets is not a link.
-    for (const after of ['<p>[Hinweis: neu]</p>', '<p>[siehe unten] und [Preis 20 CHF]</p>', '[button size=large]Zum Angebot[/button]']) {
+    // A closing tag takes no attributes, so what follows its name is not read as one.
+    for (const after of ['<p>[Hinweis: neu]</p>', '<p>[siehe unten] und [Preis 20 CHF]</p>', '[button size=large]Zum Angebot[/button]', '[b]x[/b note:y]']) {
       expect(check(after), after).toEqual({ ok: true });
     }
   });
