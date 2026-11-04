@@ -1300,7 +1300,7 @@ function planMayUse(profile: ApiProfile): boolean {
  * The model reads it and passes it on, so it names the place in both languages the owner's screen
  * may be in: what it says is what the owner finds.
  */
-const OWNER_ALLOWS_AT = 'The owner can allow it under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
+const OWNER_ALLOWS_AT = 'The owner can allow this connection under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
 
 export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
   const presetId = profile.auth?.oauth?.preset_id;
