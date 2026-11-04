@@ -136,7 +136,8 @@ describe('the docs section the link leads to', () => {
 		const mentioned = new Set([...paragraph.matchAll(/`([^`]+)`/g)].map((m) => m[1]!));
 		expect([...mentioned].sort()).toEqual([...named].sort());
 		expect(paragraph).toContain('lynox does not ask for Gmail with this client.');
-		expect(GOOGLE_BROKER_SCOPES.some((x) => x.includes('/auth/gmail') || x === 'https://mail.google.com/')).toBe(false);
+		const list: readonly string[] = GOOGLE_BROKER_SCOPES;
+		expect(list.filter((x) => x.includes('/auth/gmail') || x === 'https://mail.google.com/')).toEqual([]);
 	});
 
 	it('says what drive.file reaches as Google defines it', () => {
