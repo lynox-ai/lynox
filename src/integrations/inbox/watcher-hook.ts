@@ -47,7 +47,7 @@ export interface AccountResolver {
 /**
  * Providers whose watch envelope cannot tell an automatic reply: Graph's delta query carries no
  * headers, so `isAutoReply` is always false there (`providers/oauth-graph.ts`, ENVELOPE_FIELDS).
- * Before such an account reopens an item, the hook asks `confirmAutoReply`.
+ * For every follow-up from someone else on such an account, the hook asks `confirmAutoReply`.
  */
 const AUTO_REPLY_NOT_IN_ENVELOPE: ReadonlySet<MailAuthType> = new Set(['oauth_microsoft']);
 

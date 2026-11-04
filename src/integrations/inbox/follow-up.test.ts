@@ -376,6 +376,16 @@ describe('follow-up mails in a known thread (part 1b)', () => {
       expect(stored('<ooo@x>').autoReply).toBe(true);
     });
 
+    it('a later store of the same message without a mark keeps the mark', () => {
+      seedReplied();
+      inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<m@x>', fromAddress: 'k@x', subject: 's', autoReply: true });
+      inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<m@x>', fromAddress: 'k@x', subject: 's' });
+      expect(stored('<m@x>').autoReply).toBe(true);
+      inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<n@x>', fromAddress: 'k@x', subject: 's' });
+      inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<n@x>', fromAddress: 'k@x', subject: 's', autoReply: false });
+      expect(stored('<n@x>').autoReply).toBe(false);
+    });
+
     it('our own mail is stored as sent, without a mark', async () => {
       seedReplied();
       await hook()(ACCOUNT.id, envelope({ from: [{ address: 'ME@acme.example' }], messageId: '<own@x>' }));

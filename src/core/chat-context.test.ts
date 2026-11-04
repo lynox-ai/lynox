@@ -249,6 +249,7 @@ function makeReader(
     getItemBody: (_id) => (opts.bodyMd != null ? { bodyMd: opts.bodyMd } : null),
     getUidByMessageId: (_a, _m) => opts.uid ?? null,
     listThreadMessages: () => opts.thread ?? [],
+    listAuditForItem: () => [],
   };
 }
 
@@ -383,6 +384,7 @@ function makeMultiReader(items: InboxItem[], opts: { uid?: boolean } = {}): Chat
       return idx >= 0 ? { uid: idx + 100, folder: 'INBOX' } : null;
     },
     listThreadMessages: () => [],
+    listAuditForItem: () => [],
   };
 }
 
@@ -635,16 +637,17 @@ describe('resolveChatContext (kind: mail) — the follow-up a reply answers', ()
     autoReply: false, mailDate: new Date('2026-06-25T09:00:00.000Z'), ...over,
   });
   /** Newest first, as `listThreadMessages` returns them; a uid per Message-ID. */
-  const readerWith = (thread: ChatThreadMessage[]): ChatInboxReader => ({
+  const readerWith = (thread: ChatThreadMessage[], audit: Array<{ action: string; payloadJson: string }> = []): ChatInboxReader => ({
     getItem: (id) => (id === 'item-1' ? makeInboxItem() : null),
     getItemBody: () => ({ bodyMd: 'Can you confirm Thursday?' }),
     getUidByMessageId: (_a, m) => (m === '<m-1@example.com>' ? { uid: 41, folder: 'INBOX' } : m === '<m-2@example.com>' ? { uid: 42, folder: 'INBOX' } : null),
     listThreadMessages: () => thread,
+    listAuditForItem: () => audit,
   });
 
   it('names the follow-up\'s text and points mail_reply at its uid', () => {
     const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow(), own]))!;
-    expect(out).toContain('— the newest message of its thread, a follow-up to the mail the inbox took in]');
+    expect(out).toContain('— the newest message of its thread, a follow-up to the mail the inbox took in — Message is an excerpt]');
     expect(out).toContain('Message: The parcel still has not arrived.');
     expect(out).toContain('Subject: Re: Project update');
     expect(out).toContain('mail_reply with uid: 42,');
@@ -686,9 +689,43 @@ describe('resolveChatContext (kind: mail) — the follow-up a reply answers', ()
 
   it('withholds a sensitive follow-up\'s text, says so outside the block, and still answers it', () => {
     const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ subject: 'Ihr Code', snippet: 'Bestätigungscode: 482917 — gültig für 5 Minuten.' }), own]))!;
-    expect(out).toContain('— subject and message withheld: sensitive content (otp_or_2fa)]');
+    expect(out).toContain('— sender name, subject and message withheld: sensitive content (otp_or_2fa)]');
     expect(out).not.toContain('482917');
     expect(out).not.toContain('Ihr Code');
     expect(out).toContain('mail_reply with uid: 42,');
+  });
+
+  it('a withheld follow-up shows only the sender address, not a name that carries the code', () => {
+    const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ fromName: 'Code 482917', snippet: 'Hallo' }), own]))!;
+    expect(out).toContain('withheld: sensitive content (otp_or_2fa)]');
+    expect(out).toContain('From: alice@example.com');
+    expect(out).not.toContain('482917');
+  });
+
+  it('a withheld follow-up without a uid is not to be searched by the subject it does not show', () => {
+    const r = readerWith([follow({ snippet: 'Bestätigungscode: 482917 — gültig für 5 Minuten.' }), own]);
+    const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, { ...r, getUidByMessageId: () => null })!;
+    expect(out).toContain('mail_search (by the sender, or the Message-ID shown above)');
+  });
+
+  it('takes an unchecked message when it is the one that reopened the item', () => {
+    const audit = [{ action: 'reopened_on_reply', payloadJson: JSON.stringify({ trigger: 'inbound_mail', message_id: '<m-2@example.com>' }) }];
+    const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ autoReply: undefined }), own], audit))!;
+    expect(out).toContain('mail_reply with uid: 42,');
+    const other = [{ action: 'reopened_on_reply', payloadJson: JSON.stringify({ message_id: '<m-9@example.com>' }) }, { action: 'reopened_on_reply', payloadJson: '{not json' }];
+    expect(resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ autoReply: undefined }), own], other))!).toContain('mail_reply with uid: 41,');
+  });
+
+  it('says the inbox stored no text of a follow-up it kept none of, instead of "no message"', () => {
+    const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ snippet: undefined, subject: 'Re: Project update' }), own]))!;
+    expect(out).toContain('a follow-up to the mail the inbox took in — the inbox stored no text of it]');
+    expect(out).not.toContain('no message');
+    expect(out).toContain('mail_reply with uid: 42,');
+  });
+
+  it('names no excerpt when the follow-up has its whole body', () => {
+    const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, readerWith([follow({ bodyMd: 'The parcel still has not arrived. Tracking says delivered.' }), own]))!;
+    expect(out).toContain('a follow-up to the mail the inbox took in]');
+    expect(out).toContain('Message: The parcel still has not arrived. Tracking says delivered.');
   });
 });
