@@ -26,7 +26,7 @@ import {
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
-import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoneLeftSentence, shopifyPairedAfter, shopifyTargetIo } from './bulk-shopify.js';
+import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoneLeftSentence, shopifyPairedAfter, shopifySeoEntityFields, shopifyTargetIo } from './bulk-shopify.js';
 import { SHOPIFY_READ_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { ApiStore } from './api-store.js';
@@ -1914,5 +1914,128 @@ describe('whether a read product lies in a list\'s filters', () => {
   it('holds no product of an answer that is not one', () => {
     expect(shopifyInFilter({ product: null }, { vendor: 'Acme' })).toBe(false);
     expect(shopifyInFilter('Acme', { vendor: 'Acme' })).toBe(false);
+  });
+});
+
+describe('shopifySeoEntityFields', () => {
+  it('names an SEO field that gains an &, counted against its before-image', () => {
+    expect(shopifySeoEntityFields({ seo_title: 'Bio und Natur' }, { seo_title: 'Bio & Natur' })).toEqual(['seo_title']);
+    expect(shopifySeoEntityFields({ seo_description: 'A' }, { seo_description: 'A & B' })).toEqual(['seo_description']);
+    expect(shopifySeoEntityFields({ seo_title: 'A & B' }, { seo_title: 'A & B & C' })).toEqual(['seo_title']);
+    expect(shopifySeoEntityFields({ seo_title: null, seo_description: null }, { seo_title: 'A & B', seo_description: 'C & D' })).toEqual(['seo_title', 'seo_description']);
+  });
+
+  it('compares the page title as the store shows it: the SEO title, or the product title where it is empty', () => {
+    // A new & in the title reaches the page title where the SEO title is empty.
+    expect(shopifySeoEntityFields({ title: 'A und B', seo_title: null }, { title: 'A & B' })).toEqual(['title']);
+    expect(shopifySeoEntityFields({ title: 'A und B', seo_title: 'Eigen' }, { title: 'A & B' })).toEqual([]);
+    // Emptying the SEO title shows the product title: its & is new on the page.
+    expect(shopifySeoEntityFields({ title: 'A & B', seo_title: 'A und B' }, { seo_title: '' })).toEqual(['title']);
+    expect(shopifySeoEntityFields({ title: 'A & B', seo_title: 'A und B' }, { seo_title: null })).toEqual(['title']);
+    // An SEO title set to the title the page already shows adds nothing.
+    expect(shopifySeoEntityFields({ title: 'A & B', seo_title: null }, { seo_title: 'A & B' })).toEqual([]);
+  });
+
+  it('does not name a product not read yet, which the same text against a read empty product would be', () => {
+    expect(shopifySeoEntityFields(null, { seo_title: 'A & B' })).toEqual([]);
+    expect(shopifySeoEntityFields({}, { seo_title: 'A & B' })).toEqual(['seo_title']);
+  });
+
+  it('names only an &: the note says &, so a < or > a theme may show alike is not counted', () => {
+    expect(shopifySeoEntityFields({ seo_description: 'A' }, { seo_description: 'A < B > C' })).toEqual([]);
+    // Through the title fallback too: emptying the SEO title shows a title with > on the page.
+    expect(shopifySeoEntityFields({ title: 'A > B', seo_title: 'X' }, { seo_title: '' })).toEqual([]);
+  });
+
+  it('does not name a field whose before-image holds as many', () => {
+    expect(shopifySeoEntityFields({ seo_title: 'Bio & Natur' }, { seo_title: 'Natur & Bio' })).toEqual([]);
+    expect(shopifySeoEntityFields({ seo_title: 'A & B & C' }, { seo_title: 'A & B' })).toEqual([]);
+    expect(shopifySeoEntityFields({ seo_description: 'Bio & Natur' }, { seo_description: 'Natur & Bio' })).toEqual([]);
+  });
+
+  it('does not name a field that is not an SEO field, nor a value that is not text', () => {
+    expect(shopifySeoEntityFields({ title: 'A', seo_title: 'S' }, { title: 'A & B' })).toEqual([]);
+    expect(shopifySeoEntityFields({ descriptionHtml: '<p>A</p>' }, { descriptionHtml: '<p>A &amp; B</p>' })).toEqual([]);
+    expect(shopifySeoEntityFields({ seo_title: 'A' }, { seo_title: null })).toEqual([]);
+    expect(shopifySeoEntityFields({ seo_title: 'A' }, null)).toEqual([]);
+  });
+});
+
+describe('a Shopify preview naming SEO text a theme may show as an entity', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const previewedWith = async (after: Record<string, unknown>): Promise<string> => {
+    vi.stubEnv(FLAG, '1');
+    fill(1);
+    const id = startedList(source(after));
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    return id;
+  };
+  const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string }> => runBulkEffect(id, effect, {
+    ledger, trailFor: () => null,
+    writerFor: (run) => bulkWriterFor(run, null, (r) => {
+      const granted = ledger.shopifyApplyOf(r.id);
+      const stored = r.contractJson === null ? null : parseBulkContract(r.contractJson);
+      if (granted === null || stored === null) return null;
+      const c = client(withShopifyApply(stored, HOST, granted));
+      return externalWriter(c, { sleep: async () => {}, io: shopifyTargetIo(c, ENDPOINT) });
+    }),
+  });
+
+  it('marks an update whose SEO title gains an &, and refuses nothing', async () => {
+    const id = await previewedWith({ seo_title: 'Bio & Natur' });
+    const t = ledger.getPreview(id)[0]!;
+    expect(t).toMatchObject({ change: 'update', error: null, seoEntityFields: ['seo_title'] });
+  });
+
+  it('does not mark an update whose SEO text gains none', async () => {
+    const id = await previewedWith({ seo_title: 'Bio und Natur' });
+    const t = ledger.getPreview(id)[0]!;
+    expect(t.change).toBe('update');
+    expect(t).not.toHaveProperty('seoEntityFields');
+  });
+
+  it('does not mark a target that is not an update', async () => {
+    const id = await previewedWith({ seo_title: 'Bio & Natur' });
+    expect(ledger.getPreview(id)[0]!.seoEntityFields).toEqual(['seo_title']);
+    // The same read target, before and after unchanged, as any other kind of change.
+    for (const change of ['invalid', 'unchanged']) {
+      engineDb.getDb().prepare('UPDATE bulk_targets SET change = ? WHERE run_id = ?').run(change, id);
+      const t = ledger.getPreview(id)[0]!;
+      expect(t.change).toBe(change);
+      expect(t).not.toHaveProperty('seoEntityFields');
+    }
+  });
+
+  it('does not mark a product before it is read', async () => {
+    vi.stubEnv(FLAG, '1');
+    fill(1);
+    const id = startedList(source({ seo_title: 'Bio & Natur' }));
+    // The first tick lists the product and halts for the owner: planned, not read.
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    const t = ledger.getPreview(id)[0]!;
+    expect([t.change, t.before]).toEqual(['update', null]);
+    expect(shopifySeoEntityFields({}, t.after)).toEqual(['seo_title']);
+    expect(t).not.toHaveProperty('seoEntityFields');
+  });
+
+  it('does not mark an undo, which writes back the product\'s own earlier text', async () => {
+    vi.stubEnv(FLAG, '1');
+    fill(1);
+    s.products.set(10, { ...s.products.get(10)!, seo: { title: 'Alt & Neu', description: 'D' } });
+    const id = startedList(source({ seo_title: 'Neu' }));
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+    await apply(id);
+    const undo = ledger.planUndo(id);
+    if (!undo.ok) throw new Error(undo.reason);
+    const t = ledger.getPreview(undo.status.id)[0]!;
+    // The undo's after-state gains the & over what the product holds now: only the run kind leaves it unmarked.
+    expect(t.change).toBe('update');
+    expect(shopifySeoEntityFields(t.before?.absent === false ? t.before.value : null, t.after)).toEqual(['seo_title']);
+    expect(t).not.toHaveProperty('seoEntityFields');
   });
 });

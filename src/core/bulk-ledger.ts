@@ -28,7 +28,7 @@ import { checkMarkup, droppedTagsOf, endsClosed, shortcodeRefusalOf, htmlFieldsO
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
-import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
+import { shopifyBulkReadEnabled, shopifyPairedAfter, shopifySeoEntityFields } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
@@ -325,7 +325,7 @@ export const BULK_UNKEYED_CHECKSUM_NOTE =
  * `none`, no confirmed probe for that kind; `wrong_form`, the confirmed probe for that kind does not
  * vouch for a measured write of it (its target was not one, or is gone); `filed_measured`, the run writes the kind in an unmeasured form, and its
  * own confirmation was filed under the plain kind because its probe target was a measured write;
- * `other_run`, the unmeasured probe of that kind belongs to another run; `own_missing`, the run
+ * `other_run`, another run confirmed an unmeasured probe of that kind, which widens only that run; `own_missing`, the run
  * writes the kind in an unmeasured form and has no probe of its own.
  */
 export type BulkProbeCause = 'none' | 'wrong_form' | 'filed_measured' | 'other_run' | 'own_missing';
@@ -624,6 +624,10 @@ export interface PreviewTarget {
   /** Written, and the store kept an HTML field otherwise than sent, within what the run may write:
    *  counted and named, not halted. Set only where it holds. */
   hostRewrote?: true | undefined;
+  /** A read Shopify product's `update` in a run that is not an undo: the fields behind the page's
+   *  SEO title and description whose text gains an `&` (`shopifySeoEntityFields`), which a
+   *  theme may show as an entity. A note to the owner; nothing is refused. Set only where it holds. */
+  seoEntityFields?: string[] | undefined;
   /** With `secret_in_context`: the field of the rule's context C that held it, by its name, so the
    *  owner knows which one to clean. Never its value. */
   contextField?: string | undefined;
@@ -790,19 +794,29 @@ export function resourceKindOf(path: string): string {
   return trimmed.slice(0, trimmed.lastIndexOf('/') + 1);
 }
 
-/** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A kind is a path
- *  and starts with `/`, so a marked one never equals a plain one. */
+/** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A plain kind is a
+ *  path and starts with `/`, so a marked one never equals a plain one; a Shopify form is always
+ *  marked. */
 const UNMEASURED_PROBE = 'unmeasured:';
 /** The method a Shopify run's probe is filed under: its form writes with a `POST` to the store's endpoint. */
 const SHOPIFY_PROBE_METHOD = 'POST';
 
-/** The `bulk_host_probes` kind a confirmation of this probe target files: kept apart under
- *  {@link UNMEASURED_PROBE} where the target's own path is an unmeasured write. */
-function probeRowKind(probe: { host: string; method: string; key: string; form: ShopifyWriteForm | null }): string {
+/** The `bulk_host_probes` kind of an unmeasured probe of `kind`, filed under the run that wrote it.
+ *  It widens only that run, so a later run's confirmation of the same kind gets a row of its own
+ *  instead of taking this one, and the earlier run keeps its probe. A row filed before carries no
+ *  run in its kind (`unmeasured:<kind>`); it is read only together with its `run_id`. */
+function unmeasuredProbeKind(runId: string, kind: string): string {
+  return `${UNMEASURED_PROBE}${runId}:${kind}`;
+}
+
+/** The `bulk_host_probes` kind a confirmation of this probe target files for `runId`: kept apart
+ *  under {@link unmeasuredProbeKind} where the target's own path is an unmeasured write. */
+function probeRowKind(probe: { host: string; method: string; key: string; form: ShopifyWriteForm | null }, runId: string): string {
   // A Shopify run's probe is filed under its write form, which no store measures yet.
-  if (probe.form !== null) return `${UNMEASURED_PROBE}${probe.form}`;
+  if (probe.form !== null) return unmeasuredProbeKind(runId, probe.form);
   const path = new URL(probe.key).pathname;
-  return `${isMeasuredWriteForm(probe.host, path, probe.method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
+  const kind = resourceKindOf(path);
+  return isMeasuredWriteForm(probe.host, path, probe.method) ? kind : unmeasuredProbeKind(runId, kind);
 }
 
 /** The before-image an external undo writes, cut to the fields its source sent to that target.
@@ -1590,6 +1604,10 @@ export class BulkLedger {
     const contextNames = judged ? this.judgeRuleOf(run!).context ?? [] : [];
     // An undo's list is what it restores: the HTML fields of the run its family started from.
     const htmlFields = this.htmlFieldsOf(runId);
+    // An undo writes back a state the product held before: the owner's, or for an undo of an undo
+    // the text the apply wrote, which its own preview already named. An undo is never approved
+    // from a preview, so the line that counts the marks would not show either.
+    const seoNoted = run !== undefined && run.kind !== 'undo' && this.shopifyFormOfRun(run) === 'shopify_product';
     return rows.map((r) => {
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
       // A judged target without its verdict holds the template (every field null), not a plan:
@@ -1622,6 +1640,7 @@ export class BulkLedger {
           return typeof value === 'string' && value !== was && refusesShortcode(value, typeof was === 'string' ? was : null) ? [{ field: f, value }] : [];
         })
         : [];
+      const seoEntityFields = seoNoted && r.change === 'update' ? shopifySeoEntityFields(prior, after) : [];
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
@@ -1633,6 +1652,7 @@ export class BulkLedger {
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
         ...(refusedValues.length > 0 ? { refusedValues } : {}),
+        ...(seoEntityFields.length > 0 ? { seoEntityFields } : {}),
       };
     });
   }
@@ -1828,12 +1848,8 @@ export class BulkLedger {
     const form = this.shopifyFormOfRun(run);
     if (form !== null) {
       if (run.kind === 'undo') return { holds: true, missing: [] };
-      const kind = `${UNMEASURED_PROBE}${form}`;
-      const db = this.engineDb.getDb();
-      if (db.prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?').get(host, SHOPIFY_PROBE_METHOD, kind, run.id) !== undefined) {
-        return { holds: true, missing: [] };
-      }
-      const other = db.prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?').get(host, SHOPIFY_PROBE_METHOD, kind) !== undefined;
+      if (this.unmeasuredProbeOf(host, SHOPIFY_PROBE_METHOD, form, run.id, 'own')) return { holds: true, missing: [] };
+      const other = this.unmeasuredProbeOf(host, SHOPIFY_PROBE_METHOD, form, run.id, 'any');
       return { holds: false, missing: [{ kind: form, cause: other ? 'other_run' : 'own_missing' }] };
     }
     const method = parseContractMethods(run.contract_json);
@@ -1853,12 +1869,12 @@ export class BulkLedger {
     const missing: BulkProbeMissing[] = [];
     for (const kind of kinds) {
       if (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))) {
-        if (own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined) continue;
-        // Why this run has no probe of its own: another run's confirmation holds the row, or this
-        // run's own was filed under the plain kind because its target was a measured write. A
-        // confirmation filed plain before the write forms were told apart, on an unmeasured
-        // target, is not that: the run has no probe of its own under today's rule.
-        const cause: BulkProbeCause = probed.get(host, method, `${UNMEASURED_PROBE}${kind}`) !== undefined ? 'other_run'
+        if (this.unmeasuredProbeOf(host, method, kind, run.id, 'own')) continue;
+        // Why this run has no probe of its own: another run confirmed one of this kind, which does
+        // not count here, or this run's own was filed under the plain kind because its target was a
+        // measured write. A confirmation filed plain before the write forms were told apart, on an
+        // unmeasured target, is not that: the run has no probe of its own under today's rule.
+        const cause: BulkProbeCause = this.unmeasuredProbeOf(host, method, kind, run.id, 'any') ? 'other_run'
           : own.get(host, method, kind, run.id) !== undefined && this.probeWroteMeasuredForm(run.id, host, method, kind) ? 'filed_measured'
           : 'own_missing';
         missing.push({ kind, cause });
@@ -1869,6 +1885,24 @@ export class BulkLedger {
       missing.push({ kind, cause: row === undefined ? 'none' : 'wrong_form' });
     }
     return { holds: missing.length === 0, missing };
+  }
+
+  /**
+   * Whether an unmeasured probe of `kind` (a resource path, or a Shopify write form) is confirmed
+   * on this host and verb: `own`, by run `runId`; `any`, by any run. A row belongs to its run under
+   * {@link unmeasuredProbeKind}, or under the kind without a run that rows filed before carry, read
+   * with their `run_id`. Callers ask `any` only after `own` found none, so it finds another run's.
+   */
+  private unmeasuredProbeOf(host: string, method: string, kind: string, runId: string, whose: 'own' | 'any'): boolean {
+    const legacy = `${UNMEASURED_PROBE}${kind}`;
+    const db = this.engineDb.getDb();
+    if (whose === 'own') {
+      return db.prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind IN (?, ?) AND run_id = ?')
+        .get(host, method, unmeasuredProbeKind(runId, kind), legacy, runId) !== undefined;
+    }
+    return db.prepare(
+      `SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND (kind = ? OR kind = ? || run_id || ':' || ?)`,
+    ).get(host, method, legacy, UNMEASURED_PROBE, kind) !== undefined;
   }
 
   /**
@@ -2062,7 +2096,7 @@ export class BulkLedger {
     if (probe === 'not_found') return { ok: false, reason: 'not_found' };
     if (probe === null) return { ok: false, reason: 'not_a_probe' };
     const { host, method } = probe;
-    const kind = probeRowKind(probe);
+    const kind = probeRowKind(probe, runId);
     this.engineDb.getDb().prepare(
       `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
@@ -2116,19 +2150,25 @@ export class BulkLedger {
 
   /** {@link probeCandidate} while confirming it would file a row this run does not hold: once its
    *  probe is confirmed, confirming again changes nothing. Where another run's confirmation has
-   *  since taken the row, confirming files it again. Null for a key that is not a URL, which
-   *  {@link confirmProbe} could not file either. */
+   *  since taken a measured row, confirming files it again; an unmeasured row is the run's own and
+   *  stays so. Null for a key that is not a URL, which {@link confirmProbe} could not file either. */
   private probeToConfirm(runId: string): { host: string; method: string; key: string; found: boolean } | null {
     const candidate = this.probeCandidate(runId);
     if (candidate === null || candidate === 'not_found') return null;
     let kind: string;
     try {
-      kind = probeRowKind(candidate);
+      kind = probeRowKind(candidate, runId);
     } catch {
       return null;
     }
-    const filed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?')
-      .get(candidate.host, candidate.method, kind, runId) !== undefined;
+    const db = this.engineDb.getDb();
+    // An unmeasured probe this run confirmed before rows carried the run counts as filed: the
+    // run's coverage reads it, so confirming again would change nothing it reads.
+    const unmeasured = kind.startsWith(`${UNMEASURED_PROBE}${runId}:`) ? kind.slice(`${UNMEASURED_PROBE}${runId}:`.length) : null;
+    const filed = unmeasured !== null
+      ? this.unmeasuredProbeOf(candidate.host, candidate.method, unmeasured, runId, 'own')
+      : db.prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?')
+        .get(candidate.host, candidate.method, kind, runId) !== undefined;
     return filed ? null : candidate;
   }
 
