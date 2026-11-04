@@ -77,7 +77,7 @@ describe('the backup list totals', () => {
     expect(entry?.total_bytes).toBe(4);
   });
 
-  it('computes the totals over any the manifest itself carries', () => {
+  it('overwrites totals that the manifest itself carries', () => {
     mkdirSync(join(backupDir, 'b-own'), { recursive: true });
     writeFileSync(join(backupDir, 'b-own', 'manifest.json'), JSON.stringify({
       version: '2.17.0', created_at: '2026-10-28T08:00:00.000Z', lynox_dir: data, encrypted: false, checksum: 'c',
