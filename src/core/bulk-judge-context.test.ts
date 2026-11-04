@@ -291,9 +291,12 @@ describe('judgeContext: what is sent', () => {
   it('sends a record as its JSON text, without hidden characters, and cuts it to the bounds', () => {
     expect(sent({ meta: { b: 'x\u200By', a: 1 } }, ['meta'])).toEqual({ meta: '{"a":1,"b":"xy"}' });
     expect(sent({ t: ['a', { k: 'v' }, 2] }, ['t'])).toEqual({ t: ['a', '{"k":"v"}', 2] });
-    const big = sent({ a: 'x'.repeat(3_000), meta: { note: 'n'.repeat(60_000) } }, ['a', 'meta']);
+    // Each text alone fits its own bound; together they pass the whole's, so the record — the last
+    // field — is cut further, below its own bound.
+    const big = sent({ a: 'x'.repeat(3_990), meta: { note: 'n'.repeat(60_000) } }, ['a', 'meta']);
     expect(Array.from(JSON.stringify(big)).length).toBeLessThanOrEqual(JUDGE_CONTEXT_MAX_TOTAL);
-    expect(big['a']).toBe('x'.repeat(3_000));
+    expect(big['a']).toBe('x'.repeat(3_990));
+    expect(Array.from(big['meta'] as string).length).toBeLessThan(JUDGE_CONTEXT_MAX_CHARS);
     expect((big['meta'] as string).endsWith(JUDGE_CONTEXT_CUT)).toBe(true);
   });
 
