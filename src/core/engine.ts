@@ -857,6 +857,21 @@ export class Engine {
    * And the instance's language, for the reminder poller's title (`notice-language.ts`): set here
    * so the cold boot and the rebootstrap cannot hand the inbox different ones.
    */
+  /**
+   * What the inbox reads through the mail registry. `confirmAutoReply`: an envelope from Graph's
+   * watch carries no headers, so before a follow-up reopens a replied item the hook asks for the
+   * full message, whose envelope reads Auto-Submitted. Looked up at call time, so a provider
+   * added or replaced later is the one asked. No provider: throw, and the hook reopens.
+   */
+  private _applyInboxMailLookups(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
+    bootOpts.confirmAutoReply = async (accountId, env) => {
+      const provider = this._mailContext?.registry.get(accountId);
+      if (!provider) throw new Error(`no mail provider for ${accountId}`);
+      const message = await provider.fetch({ uid: env.uid, folder: env.folder });
+      return message.envelope.isAutoReply;
+    };
+  }
+
   private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
     const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
     if (key !== undefined) bootOpts.mistralApiKey = key;
@@ -932,6 +947,7 @@ export class Engine {
       const runHistoryForInbox = this.getRunHistory();
       if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
       this._applyInboxKeyAndMeter(bootOpts);
+      this._applyInboxMailLookups(bootOpts);
       const runtime = bootstrapInbox(bootOpts);
       if (this._mailContext) {
         // Suspension-aware wrapper: while `_inboxClassifierSuspended` is
@@ -2274,6 +2290,7 @@ export class Engine {
         const runHistoryForInbox = this.getRunHistory();
         if (runHistoryForInbox) bootOpts.runHistory = runHistoryForInbox;
         this._applyInboxKeyAndMeter(bootOpts);
+        this._applyInboxMailLookups(bootOpts);
         const runtime = bootstrapInbox(bootOpts);
         // If a MailContext exists, wire the inbox hook into its hooks so
         // the watcher fires it per envelope. When no vault is configured
