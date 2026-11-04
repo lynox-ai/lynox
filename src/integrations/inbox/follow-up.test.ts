@@ -125,6 +125,7 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     const id = seedReplied('draft_ready');
     inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'kunde@example.com', bucket: 'auto_handled', action: 'show', source: 'on_demand' });
     await hook()(ACCOUNT.id, envelope());
+    expect(messageIds()).toEqual(['<first@x>', '<follow@x>']);
     expect(inbox.getItem(id)!.bucket).toBe('draft_ready');
     expect(inbox.getItem(id)!.userAction).toBeUndefined();
     expect(queued).toBe(0);
@@ -200,6 +201,47 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     seedReplied('draft_ready');
     await hook()(ACCOUNT.id, envelope());
     expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
+  it('our own mail coming back into the thread does not open the item', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope({ from: [{ address: 'ME@acme.example', name: 'Me' }], messageId: '<own@x>' }));
+    expect(messageIds()).toEqual(['<first@x>', '<own@x>']);
+    expect(inbox.getItem(id)!.userAction).toBe('replied');
+  });
+
+  it('a message dated before the reply does not open the item', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope({ date: new Date('2026-11-03T08:30:00Z') }));
+    expect(messageIds()).toEqual(['<first@x>', '<follow@x>']);
+    expect(inbox.getItem(id)!.userAction).toBe('replied');
+  });
+
+  it('a snoozed replied item wakes up, so the item it notifies about is in the list', async () => {
+    const id = seedReplied();
+    inbox.setSnooze(id, new Date(Date.now() + 86_400_000), null, false);
+    await hook()(ACCOUNT.id, envelope());
+    expect(inbox.getItem(id)!.snoozeUntil).toBeUndefined();
+    expect(inbox.countItemsByBucket().requires_user).toBe(1);
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('the reconcile prefers the item of the account the reply leaves from', async () => {
+    const other: MailAccountConfig = { ...ACCOUNT, id: 'acct-2', address: 'info@acme.example', isDefault: false };
+    mail.upsertAccount(other);
+    const mine = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    const theirs = inbox.insertItem({
+      accountId: other.id, channel: 'email', threadKey: THREAD, bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'zweites Konto', classifiedAt: new Date('2026-11-05T08:00:00Z'), classifierVersion: 'v1',
+    });
+    inbox.insertThreadMessage({ accountId: other.id, threadKey: THREAD, messageId: '<follow@x>', fromAddress: 'kunde@example.com', subject: 'Re', direction: 'inbound', inboxItemId: theirs });
+    reconcileOutboundReply(inbox, ACCOUNT.id, {
+      input: { to: [], subject: 'Re', text: 'ok' }, result: { messageId: '<sent2@x>', accepted: [], rejected: [] },
+      isReply: true, originalMessageId: '<follow@x>',
+    });
+    expect(inbox.getItem(mine)!.userAction).toBe('replied');
+    expect(inbox.getItem(theirs)!.userAction).toBeUndefined();
   });
 
   it('the store reopens only a replied item', () => {

@@ -37,7 +37,7 @@ export function reconcileOutboundReply(
   // A reply to a later message of the thread (a follow-up the inbox stored, which reopened the
   // item): its Message-ID is a thread message's, not the item's.
   if (!item && ctx.originalMessageId) {
-    item = state.findItemByThreadMessageId(ctx.originalMessageId);
+    item = state.findItemByThreadMessageId(ctx.originalMessageId, accountId);
     matchedBy = 'thread_message_id';
   }
   if (!item && ctx.originalThreadKey) {

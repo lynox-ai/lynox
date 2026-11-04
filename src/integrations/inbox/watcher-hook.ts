@@ -117,7 +117,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
    * stored already, nothing happens. Only Gmail and Graph have threads: on IMAP every mail is an
    * item of its own and never comes here.
    */
-  const recordFollowUp = (existing: InboxItem, env: MailEnvelope, mode: SensitiveMode): void => {
+  const recordFollowUp = (existing: InboxItem, env: MailEnvelope, mode: SensitiveMode, ownAddress: string): void => {
     const messageId = env.messageId;
     if (messageId === undefined || messageId.length === 0) return;
     if (opts.state.hasThreadMessage(existing.tenantId, existing.accountId, messageId)) return;
@@ -150,6 +150,11 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       opts.state.insertThreadMessage(input);
       // Only a `replied` item opens; `reopenReplied` checks that in the same UPDATE.
       if (env.isAutoReply) return false;
+      // Our own mail coming back into the thread (a copy of the reply) is no new customer message.
+      if ((fields.fromAddress ?? '').toLowerCase() === ownAddress.toLowerCase()) return false;
+      // A message older than the reply (a backfill or a redelivery) did not come after it.
+      if (fields.mailDate !== undefined && existing.userActionAt !== undefined
+        && fields.mailDate.getTime() <= existing.userActionAt.getTime()) return false;
       if (!opts.state.reopenReplied(existing.id, existing.tenantId, fields.mailDate ?? new Date())) return false;
       opts.state.appendAudit({
         tenantId: existing.tenantId,
@@ -210,7 +215,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           });
         });
       }
-      recordFollowUp(existing, env, sensitiveMode);
+      recordFollowUp(existing, env, sensitiveMode, account.address);
       return 'duplicate';
     }
 
