@@ -5,11 +5,16 @@
  * the user wants to keep beyond the chat session. Stored as JSON index +
  * individual content files in ~/.lynox/artifacts/.
  */
-import { join, resolve } from 'node:path';
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { closeSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { containsEvictionMarker } from './artifact-eviction.js';
+import {
+  closeAnchor, listDir, openAnchor, openRead, openWrite, readFdCapped, readFileAt, statEntry, unlinkAt, writeFileAt,
+  WorkspaceAccessError, type WorkspaceAnchor,
+} from './workspace-fd.js';
+import { creatingUmask } from './workspace-rel.js';
 
 const SAFE_ID = /^[a-f0-9-]{8}$/;
 
@@ -92,16 +97,105 @@ export class ArtifactPlaceholderError extends Error {
   }
 }
 
+/**
+ * Thrown by {@link ArtifactStore.save} when the artifact's file is a link, or has a second name (a
+ * hard link): the store writes neither through, so nothing was written. Each caller words it.
+ */
+export class ArtifactFileRefusedError extends Error {
+  constructor(readonly reason: 'link' | 'second-name', readonly path: string) {
+    super(reason === 'link'
+      ? `${path}: a link on the way to the file is not followed; nothing was written`
+      : `${path} has more than one name (a hard link); nothing was written`);
+    this.name = 'ArtifactFileRefusedError';
+  }
+}
+
+/** A kernel error said by the file's path, its `code` kept for callers that branch on it. */
+function errnoError(code: string, path: string, cause: unknown): Error {
+  return Object.assign(new Error(`${code}: ${path}`, { cause }), { code });
+}
+
+/**
+ * Thrown by {@link ArtifactStore.restore} when the version to restore is a link or has a second
+ * name: it was not read, and nothing was restored.
+ */
+export class ArtifactVersionRefusedError extends Error {
+  constructor(readonly id: string, readonly version: number) {
+    super(`v${version} of artifact ${id} is a link or has more than one name, so it was not read; nothing was restored`);
+    this.name = 'ArtifactVersionRefusedError';
+  }
+}
+
+/**
+ * The store reaches its files through a handle on its directory, opened once and held, each
+ * component below it opened without following links: a link put into the directory (by bash, say)
+ * is neither written through nor read through, and a folder above it swapped for a link later
+ * does not move the store. The handle is opened again only when the directory was deleted (the
+ * erasure removes it), and then by the path resolved when the store was made. On Linux this needs
+ * /proc, as the workspace does. A platform without that kind of open (Windows) uses names, as
+ * before.
+ */
 export class ArtifactStore {
   private readonly dir: string;
   private readonly indexPath: string;
   private index: ArtifactMeta[] = [];
+  /** The directory as resolved when the store was made (an operator may have linked it). */
+  private readonly anchorDir: string;
+  /** The held handle; null where the platform has none. */
+  private anchor: WorkspaceAnchor | null;
 
   constructor(dir?: string) {
     this.dir = dir ?? join(getLynoxDir(), 'artifacts');
     mkdirSync(this.dir, { recursive: true });
+    this.anchorDir = realpathSync(this.dir);
+    this.anchor = this.openStoreAnchor();
     this.indexPath = join(this.dir, 'index.json');
     this.loadIndex();
+  }
+
+  private openStoreAnchor(): WorkspaceAnchor | null {
+    try {
+      return openAnchor(this.anchorDir);
+    } catch (err) {
+      if (err instanceof WorkspaceAccessError && err.code === 'UNSUPPORTED') return null;
+      throw err;
+    }
+  }
+
+  /**
+   * The held handle, opened again if its directory was deleted (or its filesystem no longer
+   * answers for it); null where there is none. A directory renamed away is not noticed: the
+   * store keeps writing into it. Comparing the handle with what the path names now would
+   * follow a folder above the store that was swapped for a link — the move the handle is held
+   * against.
+   */
+  private liveAnchor(): WorkspaceAnchor | null {
+    if (this.anchor === null) return null;
+    let gone: boolean;
+    try {
+      gone = fstatSync(this.anchor.fd).nlink === 0;
+    } catch (err) {
+      // A filesystem that no longer answers for the directory. Anything else (EBADF: the
+      // descriptor itself is wrong) is passed on: reopening would close a number that may
+      // belong to someone else now.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ESTALE' && code !== 'EIO' && code !== 'ENOENT') throw err;
+      gone = true;
+    }
+    if (gone) this.reopen(this.anchor);
+    return this.anchor;
+  }
+
+  /**
+   * Open the directory again, then let go of the old handle. If the open fails, the old handle
+   * stays held — its directory is still gone, so the next use tries again and fails the same
+   * way, never on a closed descriptor that may have been handed out again.
+   */
+  private reopen(old: WorkspaceAnchor): void {
+    mkdirSync(this.anchorDir, { recursive: true });
+    const next = openAnchor(this.anchorDir);
+    this.anchor = next;
+    closeAnchor(old);
   }
 
   /**
@@ -111,13 +205,122 @@ export class ArtifactStore {
    */
   forgetAll(): void {
     this.index = [];
+    // The handle is opened again on its next use: its directory is gone (see liveAnchor).
     mkdirSync(this.dir, { recursive: true });
+  }
+
+  /**
+   * Run `op` on the store's handle; `byName` where the platform has none. An error from the
+   * kernel names the file by its path below the store, not by the process handle path it went
+   * through, which the model would copy.
+   */
+  private atDir<T>(rel: string, op: (anchor: WorkspaceAnchor) => T, byName: () => T): T {
+    const anchor = this.liveAnchor();
+    if (anchor === null) return byName();
+    try {
+      return op(anchor);
+    } catch (err) {
+      if (err instanceof WorkspaceAccessError || err instanceof ArtifactFileRefusedError) throw err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (typeof code === 'string') throw errnoError(code, join(this.dir, rel), err);
+      throw err;
+    }
+  }
+
+  /** Read a file below the directory; a link on the way is refused, not followed. */
+  private readRel(rel: string): Buffer {
+    return this.atDir(rel, anchor => readFileAt(anchor, rel), () => readFileSync(join(this.dir, rel)));
+  }
+
+  /**
+   * Read an artifact's content or a version, as {@link readRel}, and refuse a file with a second
+   * name too: that name may be a file outside the directory, which a snapshot or a restore would
+   * copy into an artifact. (With hard-link protection off, a file the engine later replaced by
+   * rename has one name again; this check is a second layer, not the boundary.) Not for the
+   * index: an index read as missing is written anew, empty.
+   */
+  private readArtifactRel(rel: string): Buffer {
+    return this.atDir(rel, anchor => {
+      const fd = openRead(anchor, rel);
+      try {
+        if (fstatSync(fd).nlink > 1) throw new ArtifactFileRefusedError('second-name', join(this.dir, rel));
+        return readFdCapped(fd, Number.MAX_SAFE_INTEGER, rel);
+      } finally {
+        closeSync(fd);
+      }
+    }, () => readFileSync(join(this.dir, rel)));
+  }
+
+  /**
+   * Open an artifact's content file for writing in place, its inode kept (the file tools edit the
+   * same file), creating it when missing. A link at the file and a file with a second name are
+   * refused here, before anything else of the save happens. `fd` is null where the platform has
+   * no handle: {@link fillContent} then writes by name. `created`: the file did not exist.
+   */
+  private openContent(rel: string): { fd: number | null; created: boolean } {
+    const path = join(this.dir, rel);
+    return this.atDir<{ fd: number | null; created: boolean }>(rel, anchor => {
+      const umask = creatingUmask();
+      let fd: number;
+      let created: boolean;
+      try {
+        ({ fd, created } = openWrite(anchor, rel, { createMode: 0o666 & ~umask }));
+      } catch (err) {
+        if (err instanceof WorkspaceAccessError && err.code === 'SYMLINK') throw new ArtifactFileRefusedError('link', path);
+        throw err;
+      }
+      try {
+        if (fstatSync(fd).nlink > 1) throw new ArtifactFileRefusedError('second-name', path);
+      } catch (err) {
+        closeSync(fd);
+        throw err;
+      }
+      return { fd, created };
+    }, () => ({ fd: null, created: !existsSync(path) }));
+  }
+
+  /** Empty and write the file {@link openContent} opened, and close it. */
+  private fillContent(fd: number | null, rel: string, data: string): void {
+    if (fd === null) {
+      writeFileSync(join(this.dir, rel), data, 'utf-8');
+      return;
+    }
+    try {
+      if (fstatSync(fd).size > 0) ftruncateSync(fd, 0);
+      writeFileSync(fd, data, 'utf-8');
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      throw typeof code === 'string' ? errnoError(code, join(this.dir, rel), err) : err;
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  /**
+   * Replace a file the store alone keeps (the index, a version): a new file renamed over it, so a
+   * link there is replaced, not followed. A file already there keeps its mode.
+   */
+  private replaceRel(rel: string, data: string): void {
+    const umask = creatingUmask();
+    this.atDir(
+      rel,
+      anchor => {
+        let before: ReturnType<typeof statEntry> = null;
+        try { before = statEntry(anchor, rel); } catch { /* its folder is missing or refused; writeFileAt says which */ }
+        const fileMode = before?.type === 'file' ? before.mode & 0o7777 : 0o666 & ~umask;
+        writeFileAt(anchor, rel, data, { fileMode, dirMode: 0o777 & ~umask });
+      },
+      () => {
+        mkdirSync(dirname(join(this.dir, rel)), { recursive: true });
+        writeFileSync(join(this.dir, rel), data, 'utf-8');
+      },
+    );
   }
 
   private loadIndex(): void {
     try {
       if (existsSync(this.indexPath)) {
-        const raw = JSON.parse(readFileSync(this.indexPath, 'utf-8')) as ArtifactMeta[];
+        const raw = JSON.parse(this.readRel('index.json').toString('utf-8')) as ArtifactMeta[];
         // Normalize legacy entries that predate the `version` field.
         this.index = raw.map(m => ({ ...m, version: m.version ?? 1 }));
       }
@@ -158,7 +361,11 @@ export class ArtifactStore {
       if (!f.endsWith('.html')) continue;
       const id = f.slice(0, -'.html'.length);
       if (!SAFE_ID.test(id) || this.index.some(a => a.id === id)) continue;
-      const st = statSync(join(this.dir, f));
+      // A regular file with one name only: a link named like an artifact is not adopted as one,
+      // nor a file whose other name may be outside (get() would not read it).
+      let st: ReturnType<typeof lstatSync>;
+      try { st = lstatSync(join(this.dir, f)); } catch { continue; }
+      if (!st.isFile() || st.nlink > 1) continue;
       const iso = new Date(st.mtimeMs).toISOString();
       this.index.push({
         id, title: id, description: '', type: 'html',
@@ -197,7 +404,14 @@ export class ArtifactStore {
     // interpolated into the RegExp below. SAFE_ID's charset is regex-literal.
     if (!SAFE_ID.test(id)) return [];
     let entries: string[];
-    try { entries = readdirSync(this.versionsDir()); } catch { return []; }
+    try {
+      // Regular files only: a link named like a version is not one of the store's.
+      entries = this.atDir(
+        'versions',
+        anchor => listDir(anchor, 'versions').filter(e => e.type === 'file' && e.exactName).map(e => e.name),
+        () => readdirSync(this.versionsDir()),
+      );
+    } catch { return []; }
     const re = new RegExp(`^${id}\\.v(\\d+)\\.html$`);
     const out: number[] = [];
     for (const f of entries) {
@@ -207,46 +421,69 @@ export class ArtifactStore {
     return out;
   }
 
+  private versionRel(id: string, n: number): string {
+    this.versionPath(id, n); // validates id and n
+    return `versions/${id}.v${n}.html`;
+  }
+
+  private unlinkVersion(id: string, n: number): void {
+    const rel = this.versionRel(id, n);
+    this.atDir(rel, anchor => unlinkAt(anchor, rel), () => unlinkSync(this.versionPath(id, n)));
+  }
+
   /** Snapshot content as version `n`, then prune to the newest MAX_VERSIONS. */
   private snapshotVersion(id: string, n: number, content: string): string {
-    mkdirSync(this.versionsDir(), { recursive: true });
-    const p = this.versionPath(id, n);
-    writeFileSync(p, content, 'utf-8');
+    this.replaceRel(this.versionRel(id, n), content);
     const nums = this.listVersionNumbers(id).sort((a, b) => b - a);
     for (const old of nums.slice(MAX_VERSIONS)) {
-      try { unlinkSync(this.versionPath(id, old)); } catch { /* already gone */ }
+      try { this.unlinkVersion(id, old); } catch { /* already gone */ }
     }
-    return p;
+    return this.versionPath(id, n);
   }
 
   /** Prior versions available for rollback, newest first. Captures save()-path
    *  overwrites; external file-tool edits bump the version but can't be
    *  snapshotted retroactively (the prior bytes are already gone from disk). */
   history(id: string): Array<{ version: number; bytes: number; savedAt: string }> {
-    return this.listVersionNumbers(id)
-      .sort((a, b) => b - a)
-      .map(n => {
-        const st = statSync(this.versionPath(id, n));
-        return { version: n, bytes: st.size, savedAt: new Date(st.mtimeMs).toISOString() };
-      });
+    const out: Array<{ version: number; bytes: number; savedAt: string }> = [];
+    for (const n of this.listVersionNumbers(id).sort((a, b) => b - a)) {
+      // Listed as a regular file through the handle; gone since, it is left out.
+      let st: ReturnType<typeof lstatSync>;
+      try { st = lstatSync(this.versionPath(id, n)); } catch { continue; }
+      if (!st.isFile()) continue;
+      out.push({ version: n, bytes: st.size, savedAt: new Date(st.mtimeMs).toISOString() });
+    }
+    return out;
+  }
+
+  /** Absolute path of a stored prior version, for the agent to read_file. */
+  versionPathFor(id: string, n: number): string {
+    return this.versionPath(id, n);
   }
 
   /** Roll an artifact back to a stored prior version. The restore is itself a
    *  save(), so the CURRENT content is snapshotted first (rollback is
    *  reversible) and the artifact bumps to a fresh version. Returns null if the
-   *  artifact or that version is missing; a version that holds only the placeholder
+   *  artifact or that version is missing; a version that is a link or has a second name is
+   *  refused ({@link ArtifactVersionRefusedError}), and one that holds only the placeholder
    *  is refused like any save ({@link ArtifactPlaceholderError}). */
   restore(id: string, version: number): Artifact | null {
     const meta = this.index.find(a => a.id === id);
     if (!meta) return null;
     let content: string;
-    try { content = readFileSync(this.versionPath(id, version), 'utf-8'); }
-    catch { return null; }
+    try {
+      content = this.readArtifactRel(this.versionRel(id, version)).toString('utf-8');
+    } catch (err) {
+      if ((err instanceof WorkspaceAccessError && err.code === 'SYMLINK') || err instanceof ArtifactFileRefusedError) {
+        throw new ArtifactVersionRefusedError(id, version);
+      }
+      return null;
+    }
     return this.save({ id, title: meta.title, content, type: meta.type, description: meta.description });
   }
 
   private saveIndex(): void {
-    writeFileSync(this.indexPath, JSON.stringify(this.index, null, 2), 'utf-8');
+    this.replaceRel('index.json', JSON.stringify(this.index, null, 2));
   }
 
   private contentPath(id: string): string {
@@ -274,20 +511,27 @@ export class ArtifactStore {
       const previousVersion = existing.version;
       let previousBytes = 0;
       let backupPath = '';
-      try {
-        const prev = readFileSync(this.contentPath(existing.id), 'utf-8');
-        previousBytes = Buffer.byteLength(prev, 'utf-8');
-        // Snapshot the version being replaced into the history ring (supersedes
-        // the old single .bak — now up to MAX_VERSIONS recoverable steps).
-        backupPath = this.snapshotVersion(existing.id, previousVersion, prev);
-      } catch { /* no prior content to back up */ }
+      // The content file is opened, and a link or a second name refused, before anything else:
+      // a refused save leaves the entry and the version ring as they were.
+      this.contentPath(existing.id); // validates the id
+      const { fd, created } = this.openContent(`${existing.id}.html`);
+      // A file made just now holds nothing to back up.
+      if (!created) {
+        try {
+          const prev = this.readArtifactRel(`${existing.id}.html`).toString('utf-8');
+          previousBytes = Buffer.byteLength(prev, 'utf-8');
+          // Snapshot the version being replaced into the history ring (supersedes
+          // the old single .bak — now up to MAX_VERSIONS recoverable steps).
+          backupPath = this.snapshotVersion(existing.id, previousVersion, prev);
+        } catch { /* no prior content to back up */ }
+      }
 
+      this.fillContent(fd, `${existing.id}.html`, opts.content);
       existing.title = opts.title || existing.title;
       existing.description = opts.description ?? existing.description;
       existing.type = opts.type ?? existing.type;
       existing.updatedAt = now;
       existing.version += 1;
-      writeFileSync(this.contentPath(existing.id), opts.content, 'utf-8');
       this.saveIndex();
 
       const newBytes = Buffer.byteLength(opts.content, 'utf-8');
@@ -318,8 +562,9 @@ export class ArtifactStore {
       threadId: opts.threadId ?? '',
       version: 1,
     };
+    this.contentPath(id); // validates the id
+    this.fillContent(this.openContent(`${id}.html`).fd, `${id}.html`, opts.content);
     this.index.push(meta);
-    writeFileSync(this.contentPath(id), opts.content, 'utf-8');
     this.saveIndex();
     return { ...meta, content: opts.content };
   }
@@ -329,7 +574,8 @@ export class ArtifactStore {
     const meta = this.index.find(a => a.id === id);
     if (!meta) return null;
     try {
-      const raw = readFileSync(this.contentPath(id));
+      this.contentPath(id); // validates the id
+      const raw = this.readArtifactRel(`${id}.html`);
       const content = raw.toString('utf-8');
       return { ...meta, ...(isLostOnSave(raw.length, content) ? { lostOnSave: true as const } : {}), content };
     } catch {
@@ -350,7 +596,7 @@ export class ArtifactStore {
     try {
       const p = this.contentPath(id);
       if (statSync(p).size > LOST_ON_SAVE_MAX_BYTES) return false;
-      return containsEvictionMarker(readFileSync(p, 'utf-8'));
+      return containsEvictionMarker(this.readArtifactRel(`${id}.html`).toString('utf-8'));
     } catch {
       return false;
     }
@@ -360,9 +606,13 @@ export class ArtifactStore {
     const idx = this.index.findIndex(a => a.id === id);
     if (idx === -1) return false;
     this.index.splice(idx, 1);
-    try { unlinkSync(this.contentPath(id)); } catch { /* file may not exist */ }
+    try {
+      const rel = `${id}.html`;
+      this.contentPath(id); // validates the id
+      this.atDir(rel, anchor => unlinkAt(anchor, rel), () => unlinkSync(this.contentPath(id)));
+    } catch { /* file may not exist */ }
     for (const n of this.listVersionNumbers(id)) {
-      try { unlinkSync(this.versionPath(id, n)); } catch { /* already gone */ }
+      try { this.unlinkVersion(id, n); } catch { /* already gone */ }
     }
     this.saveIndex();
     return true;
