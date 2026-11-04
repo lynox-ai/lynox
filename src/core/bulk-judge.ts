@@ -584,11 +584,12 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       }
       const textRefused = verdictTextRefusal(verdict, beforeRow, textRun);
       if (textRefused !== null) {
-        // A shortcode refusal keeps the judge's values for the owner to copy (1130) — unless they
-        // carry a credential, which the preview must not show either.
+        // The judge's values go with the refusal for the owner to copy (1130); the ledger keeps them
+        // only for `shortcode_changed`. Not where they would be refused as a write — a credential
+        // (`secret_in_after`) among them — nor where they hold a vault value: the preview must not
+        // show either.
         const text = JSON.stringify(verdict);
-        const keep = textRefused === 'shortcode_changed' && deps.scanSecret(text) === null
-          && (!external || refuseExternalAfter(target.key, verdict, deps.scanSecret) === null)
+        const keep = refuseExternalAfter(target.key, verdict, deps.scanSecret) === null
           && deps.maskVault(text) === text && (stringsIn(verdict)?.every((v) => deps.maskVault(v) === v) ?? false);
         record(keep ? { invalid: textRefused, refused: verdict } : { invalid: textRefused });
         return;

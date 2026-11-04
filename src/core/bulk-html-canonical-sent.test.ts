@@ -261,6 +261,23 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     expect([shown.error, shown.refusedValues]).toEqual(['shortcode_changed', undefined]);
   });
 
+  it('stores the judge\'s values with a shortcode_changed refusal only, never with another reason', () => {
+    const { id, seq } = listed({}, true, both);
+    expect(ledger.recordRead(id, seq, { before })).toBe(true);
+    expect(ledger.claimJudge(id, seq, 'tok', Date.now(), 60_000)).toBe(true);
+    expect(ledger.recordJudgement(id, seq, 'tok', { invalid: 'new_link_domain', refused: verdict })).toBe(true);
+    // The template the run was planned with, every field null: the refused values are not stored.
+    expect(storedAfter(id)).toEqual({ description: null, short_description: null });
+  });
+
+  it('CONTROL: the same values are stored with a shortcode_changed refusal', () => {
+    const { id, seq } = listed({}, true, both);
+    expect(ledger.recordRead(id, seq, { before })).toBe(true);
+    expect(ledger.claimJudge(id, seq, 'tok', Date.now(), 60_000)).toBe(true);
+    expect(ledger.recordJudgement(id, seq, 'tok', { invalid: 'shortcode_changed', refused: verdict })).toBe(true);
+    expect(storedAfter(id)).toEqual(verdict);
+  });
+
   it('CONTROL: a verdict refused for another reason keeps no value either', async () => {
     const { id, seq } = await judge({ ...verdict, short_description: '<p>neu <a href="https://evil.example/x">x</a></p>' });
     const shown = ledger.getPreview(id).find((p) => p.seq === seq)!;
