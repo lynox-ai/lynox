@@ -1771,7 +1771,7 @@ export const READ_IDENTIFIERS: ReadonlyMap<string, readonly string[]> = new Map(
   ['GET /api/knowledge/queue', ['threadId']],
   ['GET /api/knowledge/queue/count', ['thread']],
   ['GET /api/history/runs', ['sessionId', 'thread_id']],
-  ['GET /api/inbox/items', ['tenantId']],
+  ['GET /api/inbox/items', ['tenantId', 'ruleId']],
   ['GET /api/inbox/counts', ['tenantId']],
   ['GET /api/inbox/rules', ['accountId', 'tenantId']],
   ['GET /api/metrics', ['name']],
@@ -12570,7 +12570,7 @@ export class LynoxHTTPApi {
       if (q !== null) query.q = q;
       const snoozedOnly = url.searchParams.get('snoozedOnly');
       if (snoozedOnly !== null) query.snoozedOnly = snoozedOnly;
-      // A filter like `bucket`, not an identifier of what is read (READ_IDENTIFIERS).
+      // Names which rule's items are read, so a mandate's read row carries it (READ_IDENTIFIERS).
       const ruleId = url.searchParams.get('ruleId');
       if (ruleId !== null) query.ruleId = ruleId;
       sendInbox(res, handleListItems(deps!, query));
