@@ -15,7 +15,8 @@
  * Shopify run's after-state may name.
  */
 import { isPlainObject, type ExternalClient, type ExternalRead, type TargetIo } from './bulk-external.js';
-import type { BulkInvalidReason, ListPageItem } from './bulk-ledger.js';
+import type { BulkInvalidReason, BulkRunStatus, ListPageItem } from './bulk-ledger.js';
+import type { BulkNotices } from './bulk-notices.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, mediaImageGidNumber, productGidNumber, type ShopifyWriteForm } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
 
@@ -137,6 +138,33 @@ export function shopifyInFilter(data: unknown, filters: Readonly<Record<string, 
     const held = name === null ? undefined : product[name];
     return typeof held === 'string' && asciiLower(held) === asciiLower(value);
   });
+}
+
+/**
+ * What a filtered Shopify list that matched no product tells the model and the owner, by the
+ * filters it has ({@link BulkNotices.listNoMatch}); null for a list without filters. The value is
+ * not repeated: no summary of this code echoes the planner's input, and the model has it in its
+ * own plan.
+ */
+export function shopifyNoMatchSentence(filters: Readonly<Record<string, string>>, say: BulkNotices): string | null {
+  const type = filters['product_type'] !== undefined;
+  const vendor = filters['vendor'] !== undefined;
+  if (!type && !vendor) return null;
+  // With both, each value may match products while the pair matches none: no value is to blame.
+  return say.listNoMatch(type && vendor ? 'both' : type ? 'product_type' : 'vendor');
+}
+
+/**
+ * The no-match sentence of a filtered list whose every listed product fell out as `not_in_filter`
+ * (PRD shopify-preset §22.2 item 7), null otherwise: then the filter kept nothing, as with a list
+ * that listed none. Only when every target fell out so: a target left out for another reason (a
+ * read that failed) may have matched, and the run does not say that none did.
+ */
+export function shopifyNoneLeftSentence(
+  filters: Readonly<Record<string, string>>, status: Pick<BulkRunStatus, 'total' | 'invalidReasons'> | null, say: BulkNotices,
+): string | null {
+  if (status === null || status.total === 0 || status.invalidReasons.not_in_filter !== status.total) return null;
+  return shopifyNoMatchSentence(filters, say);
 }
 
 /**

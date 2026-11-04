@@ -33,7 +33,7 @@ import {
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
 import { verdictTextRefusal } from './bulk-judge.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
-import { shopifyBulkReadEnabled, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
+import { shopifyBulkReadEnabled, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { productTitleOf } from './shopify-saved-form.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
@@ -140,20 +140,6 @@ function haltFor(read: ExternalRead): BulkHaltReason | null {
     case 'form_cost': return BULK_HALT_REASONS.formCost;
     default: return null;
   }
-}
-
-/**
- * What a filtered Shopify list that matched no product tells the model and the owner, by the
- * filters it has ({@link BulkNotices.listNoMatch}); null for a list without filters. The value is
- * not repeated: no summary of this code echoes the planner's input, and the model has it in its
- * own plan.
- */
-function noMatchSentence(filters: Readonly<Record<string, string>>, say: BulkNotices): string | null {
-  const type = filters['product_type'] !== undefined;
-  const vendor = filters['vendor'] !== undefined;
-  if (!type && !vendor) return null;
-  // With both, each value may match products while the pair matches none: no value is to blame.
-  return say.listNoMatch(type && vendor ? 'both' : type ? 'product_type' : 'vendor');
 }
 
 /**
@@ -311,16 +297,15 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   }
 
   if (ledger.listUnread(runId).length > 0) return pending(now() + DEFAULT_RETRY_MS, 'Bulk preview has targets left to read.');
+  // A judged run is read for its judge, which goes on in the same effect (`bulk-judge.ts`): its
+  // targets have no after-state yet, so reading them does not make it previewed. The judge's own
+  // summary is the one the owner gets, so a filter that kept nothing is said there.
+  if (ledger.getJudgeRun(runId) !== null) {
+    return { status: 'done', summary: costed(summarize(ledger, runId, say.readDone, say)) };
+  }
   // A filtered list whose every listed product fell out as `not_in_filter` matched nothing either
   // (PRD shopify-preset §22.2 item 7): it says so as a list that listed none does.
-  const counted = ledger.getStatus(runId);
-  const noneLeft = list !== null && counted !== null && counted.total > 0 && counted.invalidReasons.not_in_filter === counted.total
-    ? noMatchSentence(list.source.filters, say) : null;
-  // A judged run is read for its judge, which goes on in the same effect (`bulk-judge.ts`): its
-  // targets have no after-state yet, so reading them does not make it previewed.
-  if (ledger.getJudgeRun(runId) !== null) {
-    return { status: 'done', summary: costed(summarize(ledger, runId, noneLeft ?? say.readDone, say)) };
-  }
+  const noneLeft = list === null ? null : shopifyNoneLeftSentence(list.source.filters, ledger.getStatus(runId), say);
   if (!ledger.finishPreview(runId)) {
     return { status: 'halted', summary: summarize(ledger, runId, say.previewStopped, say) };
   }
@@ -518,7 +503,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     }
     return {
       status: 'done',
-      summary: costed(summarize(ledger, runId, closed === 'empty' ? (noMatchSentence(source.filters, say) ?? say.listEmpty) : say.listWaiting, say)),
+      summary: costed(summarize(ledger, runId, closed === 'empty' ? (shopifyNoMatchSentence(source.filters, say) ?? say.listEmpty) : say.listWaiting, say)),
     };
   }
 
