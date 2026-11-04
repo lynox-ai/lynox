@@ -25,13 +25,14 @@ import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
 import { checkMarkup, droppedTagsOf, endsClosed, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
+import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
-import { judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
+import { contextFieldsOfListForm, judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
 import type { ContainmentMirror } from './history-markers.js';
@@ -135,6 +136,9 @@ export type BulkInvalidReason =
   // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
   /** the target's current state holds something shaped like a credential, so it is not sent to a model */
   | 'secret_in_before'
+  /** a field of the context C (`JudgeRule.context`) holds something shaped like a credential, so
+   *  the target is not sent to a model; which field is recorded beside it (`context_secret_field`) */
+  | 'secret_in_context'
   /** the model's reply was cut off before its verdict was complete */
   | 'cut_off'
   /** the model's verdict did not fit the rule's schema */
@@ -304,6 +308,38 @@ export const BULK_UNKEYED_CHECKSUM_NOTE =
   'This instance has no vault key, so the approval checksum is a plain SHA-256: it catches a run that ' +
   'changed by accident, but whoever can write the engine database can change the run and recompute it. ' +
   'It does not bind your approval to what you were shown. Set a vault key for a checksum that does.';
+
+/**
+ * Why a kind of resource a run writes has no probe that holds ({@link BulkLedger.probeBlockFor}):
+ * `none`, no confirmed probe for that kind; `wrong_form`, the confirmed probe for that kind does not
+ * vouch for a measured write of it (its target was not one, or is gone); `filed_measured`, the run writes the kind in an unmeasured form, and its
+ * own confirmation was filed under the plain kind because its probe target was a measured write;
+ * `other_run`, the unmeasured probe of that kind belongs to another run; `own_missing`, the run
+ * writes the kind in an unmeasured form and has no probe of its own.
+ */
+export type BulkProbeCause = 'none' | 'wrong_form' | 'filed_measured' | 'other_run' | 'own_missing';
+/** `kind`: the resource path the probe is filed under (`/products/`), or for a Shopify run its
+ *  write form (`shopify_product`), which is the kind its probe is filed under; never prefixed. */
+export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
+/**
+ * Where an approved run stands towards a probe of its own, read from its targets: `write_one`,
+ * nothing applied and nothing sent yet, so writing on under a maximum of one writes the probe; `confirm`, its one
+ * applied target is a probe the owner can confirm ({@link BulkLedger.probeKey}), and confirming it
+ * would file a row this run does not hold (not confirmed yet, or another run's confirmation has
+ * since taken the row); `too_many`, more
+ * than one target applied, so it can no longer be a probe; `already_first`, its one applied target
+ * is recorded as already holding the value, so it is no probe (a send of this run's that got no
+ * clear answer may have set it). Null where none of these is known:
+ * a run not approved yet, one whose probe is confirmed already, one whose single applied target
+ * is neither, or one that applied nothing but has sent a write ({@link sentCount}). Such a send
+ * takes the one place a maximum of one allows; whether writing on sends anything then depends on
+ * how it ended (one without a clear answer is never sent again, one the host clearly refused is),
+ * so `write_one` is not claimed there. A fact about the run, not advice: whether a step helps also
+ * depends on `missing`.
+ */
+export type BulkProbeStep = 'write_one' | 'confirm' | 'too_many' | 'already_first';
+/** Why a run may not go past one target, and where it stands. */
+export interface BulkProbeBlock { missing: BulkProbeMissing[]; step: BulkProbeStep | null }
 
 /**
  * Why a run stopped short. FIXED texts: `halt_reason` reaches the model through
@@ -568,6 +604,9 @@ export interface PreviewTarget {
   /** Written, and the store kept an HTML field otherwise than sent, within what the run may write:
    *  counted and named, not halted. Set only where it holds. */
   hostRewrote?: true | undefined;
+  /** With `secret_in_context`: the field of the rule's context C that held it, by its name, so the
+   *  owner knows which one to clean. Never its value. */
+  contextField?: string | undefined;
   /** The owner took this target out of the write before approving (`deselectTarget`). */
   deselected: boolean;
   /** This run wrote the target: recorded as applied, and not found already as planned. */
@@ -736,6 +775,15 @@ export function resourceKindOf(path: string): string {
 const UNMEASURED_PROBE = 'unmeasured:';
 /** The method a Shopify run's probe is filed under: its form writes with a `POST` to the store's endpoint. */
 const SHOPIFY_PROBE_METHOD = 'POST';
+
+/** The `bulk_host_probes` kind a confirmation of this probe target files: kept apart under
+ *  {@link UNMEASURED_PROBE} where the target's own path is an unmeasured write. */
+function probeRowKind(probe: { host: string; method: string; key: string; form: ShopifyWriteForm | null }): string {
+  // A Shopify run's probe is filed under its write form, which no store measures yet.
+  if (probe.form !== null) return `${UNMEASURED_PROBE}${probe.form}`;
+  const path = new URL(probe.key).pathname;
+  return `${isMeasuredWriteForm(probe.host, path, probe.method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
+}
 
 /** The before-image an external undo writes, cut to the fields its source sent to that target.
  *  A before-image is read over exactly those fields today (`beforeOverFields`); this holds it so
@@ -1497,16 +1545,19 @@ export class BulkLedger {
       // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test.
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
          (applied_at IS NOT NULL AND found_unsent = 0 AND ${WRITING_SQL}) AS written, undone_at IS NOT NULL AS undone,
-         shop_added_markup, host_rewrote
+         shop_added_markup, host_rewrote, context_secret_field
        FROM bulk_targets WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
       deselected_at: string | null; written: number; undone: number; shop_added_markup: number; host_rewrote: number;
+      context_secret_field: number | null;
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
     const judged = (run?.judge_rule ?? null) !== null;
+    // The field of C a `secret_in_context` names, by its name in the rule (the owner cleans it there).
+    const contextNames = judged ? this.judgeRuleOf(run!).context ?? [] : [];
     // An undo's list is what it restores: the HTML fields of the run its family started from.
     const htmlFields = this.htmlFieldsOf(runId);
     return rows.map((r) => {
@@ -1535,6 +1586,8 @@ export class BulkLedger {
         error: r.error, deselected: r.deselected_at !== null, written: r.written === 1, undone: r.undone === 1,
         ...(r.shop_added_markup === 1 ? { shopAddedMarkup: true as const } : {}),
         ...(r.host_rewrote === 1 ? { hostRewrote: true as const } : {}),
+        ...(r.error === 'secret_in_context' && r.context_secret_field !== null && contextNames[r.context_secret_field] !== undefined
+          ? { contextField: contextNames[r.context_secret_field]! } : {}),
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
       };
@@ -1603,10 +1656,13 @@ export class BulkLedger {
     return JSON.parse(this.engineDb.dec(row.judge_rule!)) as JudgeRule;
   }
 
-  /** Why planning would refuse a judged run's stored rule today, or null. */
-  private judgeRuleRefusal(row: Pick<RunRow, 'judge_rule'>): string | null {
+  /** Why planning would refuse a judged run's stored rule today, or null. On a list run with the
+   *  list's id field and form, as planning had them, so a context naming the id field or a name
+   *  its form does not read is refused at the start too. */
+  private judgeRuleRefusal(row: Pick<RunRow, 'judge_rule' | 'list_source'>): string | null {
     try {
-      normalizeJudgeRule(this.judgeRuleOf(row));
+      const source = row.list_source === null ? null : JSON.parse(this.engineDb.dec(row.list_source)) as BulkListSource;
+      normalizeJudgeRule(this.judgeRuleOf(row), source === null ? {} : { idField: source.idField, contextFields: contextFieldsOfListForm(source.form) });
       return null;
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return err.message;
@@ -1707,37 +1763,63 @@ export class BulkLedger {
    * back — it knows only the fields it wrote.
    */
   private probeHolds(run: RunRow): boolean {
+    return this.probeCoverage(run).holds;
+  }
+
+  /**
+   * {@link probeHolds} with the reason: for each kind of resource whose probe does not hold, why
+   * not. One walk decides both, so a refusal and the reason given for it cannot disagree. `missing`
+   * is empty where the run holds, and where it cannot hold for want of a write verb or a path.
+   */
+  private probeCoverage(run: RunRow): { holds: boolean; missing: BulkProbeMissing[] } {
     const host = externalHostOf(run.target_system);
-    if (host === null) return true;
+    if (host === null) return { holds: true, missing: [] };
     // A Shopify run writes through its form; the form is its kind, and no form of a store is
     // measured yet, so the probe must be this run's own (PRD shopify-preset §16.3 item 4).
     const form = this.shopifyFormOfRun(run);
     if (form !== null) {
-      if (run.kind === 'undo') return true;
-      return this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?')
-        .get(host, SHOPIFY_PROBE_METHOD, `${UNMEASURED_PROBE}${form}`, run.id) !== undefined;
+      if (run.kind === 'undo') return { holds: true, missing: [] };
+      const kind = `${UNMEASURED_PROBE}${form}`;
+      const db = this.engineDb.getDb();
+      if (db.prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?').get(host, SHOPIFY_PROBE_METHOD, kind, run.id) !== undefined) {
+        return { holds: true, missing: [] };
+      }
+      const other = db.prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?').get(host, SHOPIFY_PROBE_METHOD, kind) !== undefined;
+      return { holds: false, missing: [{ kind: form, cause: other ? 'other_run' : 'own_missing' }] };
     }
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
-    if (method === null || kinds.length === 0) return false;
+    if (method === null || kinds.length === 0) return { holds: false, missing: [] };
     // An undo writes only to targets its source wrote, with the form and the verb the source
     // already used on them: whatever that verb does to unsent fields, the source did it first.
     // A probe for the undo would only block it without measuring anything, and an undo cannot
     // be a probe itself — also where the source's probe no longer holds.
-    if (run.kind === 'undo') return true;
+    if (run.kind === 'undo') return { holds: true, missing: [] };
     const paths = parseContractPaths(run.contract_json);
     const probed = this.engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
     const own = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?');
     // Every kind of resource the run writes needs its own probe. Where the run writes an
     // unmeasured form of that kind, nobody knows whether a second run acts like the first:
     // the probe must be this run's, and it must have been written to an unmeasured target.
-    return kinds.every((kind) => {
+    const missing: BulkProbeMissing[] = [];
+    for (const kind of kinds) {
       if (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))) {
-        return own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined;
+        if (own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined) continue;
+        // Why this run has no probe of its own: another run's confirmation holds the row, or this
+        // run's own was filed under the plain kind because its target was a measured write. A
+        // confirmation filed plain before the write forms were told apart, on an unmeasured
+        // target, is not that: the run has no probe of its own under today's rule.
+        const cause: BulkProbeCause = probed.get(host, method, `${UNMEASURED_PROBE}${kind}`) !== undefined ? 'other_run'
+          : own.get(host, method, kind, run.id) !== undefined && this.probeWroteMeasuredForm(run.id, host, method, kind) ? 'filed_measured'
+          : 'own_missing';
+        missing.push({ kind, cause });
+        continue;
       }
       const row = probed.get(host, method, kind) as { run_id: string } | undefined;
-      return row !== undefined && this.probeWroteMeasuredForm(row.run_id, host, method, kind);
-    });
+      if (row !== undefined && this.probeWroteMeasuredForm(row.run_id, host, method, kind)) continue;
+      missing.push({ kind, cause: row === undefined ? 'none' : 'wrong_form' });
+    }
+    return { holds: missing.length === 0, missing };
   }
 
   /**
@@ -1767,6 +1849,34 @@ export class BulkLedger {
   probeHoldsFor(runId: string): boolean {
     const run = this.runRow(runId);
     return run !== undefined && this.probeHolds(run);
+  }
+
+  /** Why this run may not write more than one target, read now; null where its probe holds or
+   *  it is not an external run. For the owner's page at a run halted for want of a probe: the
+   *  effect checks the probe again when it starts, so a resume that was let through can still
+   *  halt there. */
+  probeBlockFor(runId: string): BulkProbeBlock | null {
+    const run = this.runRow(runId);
+    if (!run) return null;
+    const coverage = this.probeCoverage(run);
+    return coverage.holds ? null : { missing: coverage.missing, step: this.probeStep(run) };
+  }
+
+  /** {@link BulkProbeStep} for an approved run, from its applied targets. */
+  private probeStep(run: RunRow): BulkProbeStep | null {
+    if (run.phase !== 'approved' && run.phase !== 'writing') return null;
+    const applied = this.engineDb.getDb().prepare(
+      // As {@link probeCandidate}: a target found already holding its value was not written.
+      'SELECT result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 LIMIT 2',
+    ).all(run.id) as { result: string | null }[];
+    // Once anything was sent, whether writing on sends again depends on how that send ended:
+    // claim `write_one` only before any send.
+    if (applied.length === 0) return this.sentCount(run.id) === 0 ? 'write_one' : null;
+    if (applied.length > 1) return 'too_many';
+    const candidate = this.probeCandidate(run.id);
+    if (candidate !== null && candidate !== 'not_found') return this.probeToConfirm(run.id) === null ? null : 'confirm';
+    const only = applied[0]!;
+    return only.result !== null && this.engineDb.dec(only.result) === 'already' ? 'already_first' : null;
   }
 
   /**
@@ -1815,6 +1925,16 @@ export class BulkLedger {
   comparedAsHtml(runId: string): readonly string[] {
     const run = this.runRow(runId);
     return run !== undefined && this.shopifyFormOfRun(run) === 'shopify_product' ? this.htmlFieldsOf(runId) : [];
+  }
+
+  /**
+   * Whether a run also compares a value in the form its store saves it in (`shopifySavedForm`):
+   * a Shopify product run and its undos, the one form whose saving is measured. Every other run
+   * compares as it did.
+   */
+  comparedInSavedForm(runId: string): boolean {
+    const run = this.runRow(runId);
+    return run !== undefined && this.shopifyFormOfRun(run) === 'shopify_product';
   }
 
   /** The list source form of a run, or of the first run up its `source_run_id` chain that has one; null without. */
@@ -1867,8 +1987,8 @@ export class BulkLedger {
     const probe = this.probeCandidate(runId);
     if (probe === 'not_found') return { ok: false, reason: 'not_found' };
     if (probe === null) return { ok: false, reason: 'not_a_probe' };
-    const { host, method, key, form } = probe;
-    const kind = form !== null ? `${UNMEASURED_PROBE}${form}` : ((path: string) => `${isMeasuredWriteForm(host, path, method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`)(new URL(key).pathname);
+    const { host, method } = probe;
+    const kind = probeRowKind(probe);
     this.engineDb.getDb().prepare(
       `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
@@ -1896,10 +2016,28 @@ export class BulkLedger {
   }
 
   /** The key of the target {@link confirmProbe} would accept for this run, or null. For the
-   *  owner's page: it offers the confirmation only where the confirmation can succeed. */
+   *  owner's page: it offers the confirmation only where the confirmation can succeed and would
+   *  file something new. */
   probeKey(runId: string): string | null {
-    const probe = this.probeCandidate(runId);
-    return probe === null || probe === 'not_found' ? null : probe.key;
+    return this.probeToConfirm(runId)?.key ?? null;
+  }
+
+  /** {@link probeCandidate} while confirming it would file a row this run does not hold: once its
+   *  probe is confirmed, confirming again changes nothing. Where another run's confirmation has
+   *  since taken the row, confirming files it again. Null for a key that is not a URL, which
+   *  {@link confirmProbe} could not file either. */
+  private probeToConfirm(runId: string): { host: string; method: string; key: string } | null {
+    const candidate = this.probeCandidate(runId);
+    if (candidate === null || candidate === 'not_found') return null;
+    let kind: string;
+    try {
+      kind = probeRowKind(candidate);
+    } catch {
+      return null;
+    }
+    const filed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?')
+      .get(candidate.host, candidate.method, kind, runId) !== undefined;
+    return filed ? null : candidate;
   }
 
   /** How many of the run's targets an undo would take back now — for an external run that
@@ -1981,7 +2119,8 @@ export class BulkLedger {
     unmeasuredConfirmed?: boolean | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'unmeasured_unconfirmed' | 'mail_api' | 'shopify_off' | UndoRefusal } {
+    | { ok: false; reason: 'probe_required'; probe: BulkProbeBlock }
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'unmeasured_unconfirmed' | 'mail_api' | 'shopify_off' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed' || run.list_state === 'pending') return { ok: false, reason: 'wrong_phase' };
@@ -1996,7 +2135,10 @@ export class BulkLedger {
     if (writing === 0) return { ok: false, reason: 'nothing_to_apply' };
     const maxTargets = params.maxTargets ?? writing;
     if (!Number.isInteger(maxTargets) || maxTargets < 1 || maxTargets > writing) return { ok: false, reason: 'bad_max_targets' };
-    if (maxTargets > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
+    if (maxTargets > 1) {
+      const coverage = this.probeCoverage(run);
+      if (!coverage.holds) return { ok: false, reason: 'probe_required', probe: { missing: coverage.missing, step: null } };
+    }
     // An atomic run capped below its size could only ever stop half written.
     if (run.atomic === 1 && maxTargets !== writing) return { ok: false, reason: 'bad_max_targets' };
     const now = params.now ?? Date.now();
@@ -2036,7 +2178,8 @@ export class BulkLedger {
    */
   resume(runId: string, params: { checksum: string; maxTargets?: number | undefined; now?: number | undefined }):
     { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' | 'mail_api' | 'shopify_off' | UndoRefusal } {
+    | { ok: false; reason: 'probe_required'; probe: BulkProbeBlock }
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'mail_api' | 'shopify_off' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'approved' && run.phase !== 'writing') return { ok: false, reason: 'wrong_phase' };
@@ -2055,7 +2198,10 @@ export class BulkLedger {
     }
     // Also when the cap stays: a run approved for more than one target under an earlier rule,
     // or before its probe stopped holding, must not go on wide.
-    if ((maxTargets ?? this.countWriting(runId)) > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
+    if ((maxTargets ?? this.countWriting(runId)) > 1) {
+      const coverage = this.probeCoverage(run);
+      if (!coverage.holds) return { ok: false, reason: 'probe_required', probe: { missing: coverage.missing, step: this.probeStep(run) } };
+    }
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';
@@ -2422,6 +2568,12 @@ export class BulkLedger {
     via: AttachedConnection | null = null,
     /** The after-state the read completed (a Shopify target's seo pair): stored with the image, in one transaction, and classified against. */
     completedAfter?: Readonly<Record<string, unknown>>,
+    /** The title the same read answered, on a run compared in its store's saved form
+     *  ({@link comparedInSavedForm}): classified with, never stored. */
+    titleNow?: string | null,
+    /** The context C the same read answered (PRD shopify-preset §20.2 item 7): stored beside the
+     *  image for the judge, never part of it — not compared, not diffed, not undone. */
+    context?: Readonly<Record<string, unknown>>,
   ): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL
@@ -2436,10 +2588,18 @@ export class BulkLedger {
     const after = completedAfter ?? JSON.parse(this.engineDb.dec(row.after_planned)) as unknown;
     // The before-image holds exactly F, so comparing whole images compares over F (§6 P4). A
     // judged target's after-state is its template until the verdict: its change is not known.
-    const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : classifyChange(before, after, this.comparedAsHtml(runId));
+    const html = this.comparedAsHtml(runId);
+    // A plan the store would save as the product already holds it is no change either (a SEO
+    // title equal to the title it keeps): only with the title this read answered.
+    const saved = titleNow !== undefined && this.comparedInSavedForm(runId)
+      && sameValue(read.before, shopifySavedForm(after, titleNow), html);
+    const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : saved ? 'unchanged' : classifyChange(before, after, html);
     return db.transaction((): boolean => {
-      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ? WHERE ${guard}`)
-        .run(this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)), runId, seq, runId).changes === 1;
+      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ?, context = ? WHERE ${guard}`)
+        .run(
+          this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)),
+          context === undefined ? null : this.engineDb.enc(JSON.stringify(context)), runId, seq, runId,
+        ).changes === 1;
       if (stored) this.noteConnection(runId, seq, 'read', via);
       return stored;
     })();
@@ -2716,13 +2876,23 @@ export class BulkLedger {
     ).run(runId, seq, token);
   }
 
-  /** A target the judge is to decide: its key and before-image. */
-  loadJudgeTarget(runId: string, seq: number): { key: string; before: BeforeImage } | null {
+  /** A target the judge is to decide: its key, before-image, and the context its read stored
+   *  (null where none was: a run without C, a data-store run, a target read before C). */
+  loadJudgeTarget(runId: string, seq: number): { key: string; before: BeforeImage; context: Record<string, unknown> | null } | null {
     const r = this.engineDb.getDb().prepare(
-      `SELECT target_key, before FROM bulk_targets WHERE run_id = ? AND seq = ? AND change != 'invalid' AND before IS NOT NULL`,
-    ).get(runId, seq) as { target_key: string; before: string } | undefined;
+      `SELECT target_key, before, context FROM bulk_targets WHERE run_id = ? AND seq = ? AND change != 'invalid' AND before IS NOT NULL`,
+    ).get(runId, seq) as { target_key: string; before: string; context: string | null } | undefined;
     if (!r) return null;
-    return { key: this.engineDb.dec(r.target_key), before: JSON.parse(this.engineDb.dec(r.before)) as BeforeImage };
+    return {
+      key: this.engineDb.dec(r.target_key), before: JSON.parse(this.engineDb.dec(r.before)) as BeforeImage,
+      context: r.context === null ? null : JSON.parse(this.engineDb.dec(r.context)) as Record<string, unknown>,
+    };
+  }
+
+  /** The fields of context C a judged run reads (its rule's `context`), or none. */
+  judgeContextOf(runId: string): readonly string[] {
+    const r = this.runRow(runId);
+    return r === undefined || r.judge_rule === null ? [] : this.judgeRuleOf(r).context ?? [];
   }
 
   /** Book a paid call into the run's spend. No phase guard: what was paid stays counted,
@@ -2739,7 +2909,12 @@ export class BulkLedger {
    * the verdict of the loop that took it over, and a verdict in flight does not write into a run
    * that was superseded (PRD bulk-loop §3.1).
    */
-  recordJudgement(runId: string, seq: number, token: string, verdict: { after: unknown } | { invalid: BulkInvalidReason }, now: number = Date.now()): boolean {
+  recordJudgement(
+    runId: string, seq: number, token: string,
+    /** `contextField`: with `secret_in_context`, the index in the rule's `context` of the field that held it. */
+    verdict: { after: unknown } | { invalid: BulkInvalidReason; contextField?: number | undefined },
+    now: number = Date.now(),
+  ): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND judge_claim_token = ? AND judged_at IS NULL AND change != 'invalid'
       AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND phase = 'planned')`;
@@ -2747,8 +2922,8 @@ export class BulkLedger {
     return db.transaction((): boolean => {
       if ('invalid' in verdict) {
         return db.prepare(
-          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
-        ).run(verdict.invalid, at, runId, seq, token, runId).changes === 1;
+          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, context_secret_field = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
+        ).run(verdict.invalid, verdict.contextField ?? null, at, runId, seq, token, runId).changes === 1;
       }
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;

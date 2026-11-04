@@ -8,6 +8,7 @@ import { externalWriter, parseBulkContract, writeMethodOf, type ExternalClient, 
 import { droppedTagsOf, htmlFieldsOfListForm, markupAddedByHost } from './bulk-html.js';
 import { externalHostOf, type BulkLedger, type BulkRunForApply } from './bulk-ledger.js';
 import { shopifyTargetIo } from './bulk-shopify.js';
+import { productTitleOf } from './shopify-saved-form.js';
 import { shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import { withListQuery, withShopifyApply, withShopifyRead, type ListQueryConstraints, type ShopifyApplyPhase, type ShopifyReadPhase } from '../tools/permission-guard.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -35,7 +36,7 @@ export function externalRunWriter(
     // A product's description is read back for markup the write never sent (PRD shopify-preset
     // §21.2 item 6), on this form only (N5): an image's `alt` is plain text.
     return shopifyApply.form === 'shopify_product'
-      ? externalWriter(client, { io, readBack: productReadBack(host, ledger.startDomainsOf(run.id)) })
+      ? externalWriter(client, { io, readBack: productReadBack(host, ledger.startDomainsOf(run.id)), titleOf: productTitleOf })
       : externalWriter(client, { io });
   }
   const client = clientFor(run);

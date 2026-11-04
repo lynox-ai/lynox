@@ -117,6 +117,26 @@ export function shopifyBeforeImage(data: unknown, gid: string): { value: Record<
 }
 
 /**
+ * The context C of a product from the same `shopify_product_read` answer as its before-image
+ * (PRD shopify-preset §20.2 item 7): each of `fields` flat, as {@link SHOPIFY_CONTEXT_FIELDS} names
+ * them (`seo.title` → `seo_title`), `null` where the answer holds none, and `tags` only as a list
+ * of texts. Read only, for the judge: never part of the before-image, so never compared or written.
+ * Call it only on an answer {@link shopifyBeforeImage} took as the target.
+ */
+export function shopifyContextOf(data: unknown, fields: readonly string[]): Record<string, unknown> {
+  const product = isPlainObject(data) && isPlainObject(data['product']) ? data['product'] : {};
+  const seo = isPlainObject(product['seo']) ? product['seo'] : {};
+  const text = (v: unknown): string | null => typeof v === 'string' ? v : null;
+  const flat: Record<string, unknown> = {
+    title: text(product['title']), descriptionHtml: text(product['descriptionHtml']),
+    seo_title: text(seo['title']), seo_description: text(seo['description']),
+    productType: text(product['productType']), vendor: text(product['vendor']),
+    tags: Array.isArray(product['tags']) && product['tags'].every((t) => typeof t === 'string') ? product['tags'] : null,
+  };
+  return Object.fromEntries(fields.map((f) => [f, Object.hasOwn(flat, f) ? flat[f] : null]));
+}
+
+/**
  * How an approved Shopify run reaches a product: its read and its write go to the store's GraphQL
  * endpoint with the engine's documents (`shopify-graphql.ts`), and the run's contract grants each
  * body byte for byte (`withShopifyApply`). A read answers the flat before-image: a product that is

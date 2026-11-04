@@ -151,7 +151,7 @@ import type { WorkspaceAccess } from '../core/workspace-access.js';
 import type { StagedArchive, WorkspaceManifest } from '../core/workspace-export.js';
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
-import { ArtifactPlaceholderError } from '../core/artifact-store.js';
+import { ArtifactFileRefusedError, ArtifactPlaceholderError } from '../core/artifact-store.js';
 import { findHiddenChar } from '../core/hidden-text.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -827,6 +827,28 @@ export function moveMistralEndpointsToEu(update: {
   }
 }
 
+/**
+ * An endpoint as a refusal may quote it: scheme, host and path, never credentials, a query or a
+ * fragment. A value the URL parser reads with a host is rebuilt from what it parsed, so an `@` in
+ * the query or path stays where it belongs. Anything else (a tier slot's `api_base_url` is any
+ * string) is cut by hand: first everything between the scheme and the last `@` (or `%40`, or a
+ * full-width or small `@`, which a reader takes for one), so a `?` or `#` inside a password cannot shield it;
+ * then everything from the first `?` or `#`. A path holding an `@` loses its host there as well:
+ * that cuts too much, never too little. Control and line-separator characters are dropped.
+ */
+export function endpointForMessage(value: string): string {
+  const clean = (s: string): string => s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
+  if (URL.canParse(value)) {
+    const url = new URL(value);
+    if (url.host !== '') return clean(`${url.protocol}//${url.host}${url.pathname}`);
+  }
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(value)?.[0] ?? '';
+  const rest = value.slice(scheme.length);
+  let cut = 0;
+  for (const m of rest.matchAll(/[@\uFF20\uFE6B]|%40/gi)) cut = m.index + m[0].length;
+  return clean(`${scheme}${rest.slice(cut).replace(/[?#][^]*$/, '')}`);
+}
+
 function enforceManagedProviderConstraints(
   update: Record<string, unknown>,
   // Model blocklist (`blocked_model_ids`, env LYNOX_BLOCKED_MODEL_IDS) — the
@@ -858,7 +880,7 @@ function enforceManagedProviderConstraints(
     if (provider === 'openai') {
       const baseUrl = update['api_base_url'];
       if (typeof baseUrl !== 'string' || !MANAGED_OPENAI_MISTRAL_HOSTS.has(baseUrl)) {
-        return `Managed instance: provider 'openai' is only allowed with the curated Mistral preset api_base_url; got '${String(baseUrl)}'.`;
+        return `Managed instance: provider 'openai' is only allowed with the curated Mistral preset api_base_url; got '${typeof baseUrl === 'string' ? endpointForMessage(baseUrl) : String(baseUrl)}'.`;
       }
     }
   }
@@ -871,7 +893,7 @@ function enforceManagedProviderConstraints(
   if ('api_base_url' in update) {
     const baseUrl = update['api_base_url'];
     if (typeof baseUrl === 'string' && baseUrl.length > 0 && !MANAGED_CURATED_HOSTS.has(baseUrl)) {
-      return `Managed instance: cannot set api_base_url to '${baseUrl}' — only the curated Anthropic/Mistral endpoints are allowed.`;
+      return `Managed instance: cannot set api_base_url to '${endpointForMessage(baseUrl)}' — only the curated Anthropic/Mistral endpoints are allowed.`;
     }
     // The pair counts, not the host alone: a Mistral URL beside the Anthropic provider would
     // send the pool's Anthropic key to Mistral, and the reverse. Checked against the provider
@@ -879,7 +901,7 @@ function enforceManagedProviderConstraints(
     // on each save, and the loader already drops an unpaired one (`poolEndpointFor`).
     const provider = typeof update['provider'] === 'string' ? update['provider'] : stored.provider;
     if (typeof baseUrl === 'string' && baseUrl.length > 0 && baseUrl !== stored.api_base_url && poolEndpointFor(provider, baseUrl) !== baseUrl) {
-      return `Managed instance: api_base_url '${baseUrl}' does not belong to provider '${provider ?? 'anthropic'}'.`;
+      return `Managed instance: api_base_url '${endpointForMessage(baseUrl)}' does not belong to provider '${provider ?? 'anthropic'}'.`;
     }
   }
   // 3. tier_set (hybrid routing) carries a per-slot api_base_url — the SAME
@@ -895,7 +917,7 @@ function enforceManagedProviderConstraints(
       if (!slot || typeof slot !== 'object') continue;
       const slotUrl = (slot as Record<string, unknown>)['api_base_url'];
       if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
-        return `Managed instance: tier_set slot '${tier}' api_base_url '${slotUrl}' is not a curated Anthropic/Mistral endpoint.`;
+        return `Managed instance: tier_set slot '${tier}' api_base_url '${endpointForMessage(slotUrl)}' is not a curated Anthropic/Mistral endpoint.`;
       }
       // Model blocklist: reject a slot naming a blocked model honestly at write
       // time — the loader would drop it in-memory and silently reroute the tier
@@ -933,7 +955,7 @@ function enforceManagedProviderConstraints(
     for (const [tier, slot] of Object.entries(expanded.tier_set)) {
       const slotUrl = slot?.api_base_url;
       if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
-        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${slotUrl}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
+        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${endpointForMessage(slotUrl)}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
       }
       // Model blocklist: a preset whose expanded slot names a blocked model is
       // rejected honestly (never advertised, then silently rerouted at load).
@@ -4662,7 +4684,8 @@ export class LynoxHTTPApi {
         : undefined;
       // Always an object so the Tier-2 eager-persist checkpoint hook can be
       // attached below (once runId + buffer exist). effort/thinking stay optional.
-      const runOptions: import('../core/session.js').RunOptions = {
+      // `principal` required here (1173): the census reads by type whom this run is for.
+      const runOptions: import('../core/session.js').RunOptions & { principal: import('../core/request-principal.js').RequestPrincipal } = {
         ...(runEffort ? { effort: runEffort } : {}),
         ...(runThinking ? { thinking: runThinking } : {}),
         // Always named, the owner included: the session keeps the last run's principal
@@ -9458,6 +9481,16 @@ export class LynoxHTTPApi {
       const [code, msg] = BULK_REFUSALS[reason] ?? [400, 'Refused.'];
       errorResponse(res, code, msg);
     };
+    /** A refusal for want of a probe, with the engine's reason: what each kind of entry lacks and
+     *  where the run stands, from the same check that refused it. */
+    const refuseOut = (res: import('node:http').ServerResponse, out: { reason: string; probe?: import('../core/bulk-ledger.js').BulkProbeBlock }): void => {
+      if (out.reason === 'probe_required' && out.probe !== undefined) {
+        const [code, msg] = BULK_REFUSALS['probe_required']!;
+        errorResponse(res, code, msg, 'probe_required', { probe: out.probe });
+        return;
+      }
+      refuse(res, out.reason);
+    };
 
     this.addStatic('user', 'GET /api/bulk/runs', async (_req, res) => {
       const ledger = bulkLedger(res);
@@ -9503,7 +9536,9 @@ export class LynoxHTTPApi {
         // source's confirmation, so the note's promise of one target first would not hold.
         writeFormNote: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_NOTE : null,
         writeFormConfirmation: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_CONFIRMATION : null,
-        judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier } : null,
+        // The context C goes to the judge's provider with the record (PRD shopify-preset §20.2 item 7):
+        // the owner sees it before the start the hash binds, never only the fields it decides.
+        judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier, ...(judgeRule.context !== undefined ? { context: judgeRule.context } : {}) } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
         judgeModel,
         judgeServedBy,
@@ -9515,6 +9550,9 @@ export class LynoxHTTPApi {
         // The one target an external run wrote before its probe is confirmed: what the owner
         // opens at the provider, and the fields the write changed there.
         probe: bulkProbeOf(status, ledger),
+        // Why a run halted for want of a probe cannot go past one target, read now: the effect
+        // checks the probe again when it starts, so a resume the route let through can halt here.
+        probeBlock: bulkHaltKey(status.haltReason) === 'probeRequired' ? ledger.probeBlockFor(status.id) : null,
         // What an undo would take back now; for an external run that includes a failed write,
         // which may have landed although its answer never came back.
         undoable: ledger.countUndoable(status.id),
@@ -9704,7 +9742,7 @@ export class LynoxHTTPApi {
         checksum, maxTargets, unmeasuredConfirmed,
         approvedBy: JSON.stringify({ auth: this._authOrigin.get(req) ?? 'unknown', ...(unmeasuredConfirmed ? { unmeasuredConfirmed: true } : {}) }),
       });
-      if (!out.ok) { refuse(res, out.reason); return; }
+      if (!out.ok) { refuseOut(res, out); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('approve a bulk run')));
 
@@ -9822,7 +9860,7 @@ export class LynoxHTTPApi {
         return;
       }
       const out = ledger.resume(params['id']!, { checksum, maxTargets: resumeMax });
-      if (!out.ok) { refuse(res, out.reason); return; }
+      if (!out.ok) { refuseOut(res, out); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('resume a bulk run')));
 
@@ -9991,6 +10029,10 @@ export class LynoxHTTPApi {
           ...(typeof b['id'] === 'string' ? { id: b['id'] } : {}),
         });
       } catch (err) {
+        if (err instanceof ArtifactFileRefusedError) {
+          errorResponse(res, 409, 'The artifact\'s file is a link or has more than one name (a hard link), so it was not written; nothing was saved. Send the save again without an id to keep the content as a new artifact.', 'artifact_file_refused');
+          return;
+        }
         if (!(err instanceof ArtifactPlaceholderError)) throw err;
         errorResponse(res, 422, 'This is the placeholder the assistant keeps for an already saved document, not the document. Nothing was saved.', 'artifact_placeholder');
         return;
@@ -12946,7 +12988,8 @@ export class LynoxHTTPApi {
         // asks before it sends this.
         const allowUnverified = (body as { allow_unverified?: unknown } | null)?.allow_unverified === true;
         const result = await bm.restoreBackup(backupPath, { allowUnverified });
-        jsonResponse(res, result.success ? 200 : result.code !== undefined ? 409 : 500, result);
+        // `backup_path`: where an entry the restore left out (`skipped`) can still be taken from by hand.
+        jsonResponse(res, result.success ? 200 : result.code !== undefined ? 409 : 500, result.success ? { ...result, backup_path: backupPath } : result);
         // Auto-restart after successful restore so restored data takes effect
         if (result.success) {
           setTimeout(() => { process.exit(0); }, 500);
@@ -14419,7 +14462,7 @@ export class LynoxHTTPApi {
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
         const { createReadStream } = await import('node:fs');
-        const { stat } = await import('node:fs/promises');
+        const { open, stat } = await import('node:fs/promises');
         const { basename } = await import('node:path');
         // With isolation: the file is opened once through the workspace's open directory, and its
         // size, its checks and the stream all come from that one open file.
@@ -14460,16 +14503,30 @@ export class LynoxHTTPApi {
         if (!st.isFile()) { errorResponse(res, 400, 'Not a file'); return; }
         if (st.size > 100 * 1024 * 1024) { errorResponse(res, 413, 'File too large'); return; }
         const name = basename(resolved);
-        res.writeHead(200, {
-          'Content-Type': 'application/octet-stream',
-          'Content-Disposition': attachmentDisposition(name),
-          'Content-Length': st.size,
-        });
+        // Opened before the header goes out, so a file the server may not read is answered as a
+        // failed read instead of a 200 that breaks off.
+        const fh = await open(resolved, 'r');
+        try {
+          res.writeHead(200, {
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': attachmentDisposition(name),
+            'Content-Length': st.size,
+          });
+        } catch (err) {
+          await fh.close();
+          throw err;
+        }
         // Bounded by the size answered in Content-Length, also when the file grows.
-        if (st.size === 0) { res.end(); return; }
-        await sendExactly(createReadStream(resolved, { start: 0, end: st.size - 1 }), res, st.size);
-      } catch {
-        errorResponse(res, 404, 'File not found');
+        if (st.size === 0) { await fh.close(); res.end(); return; }
+        await sendExactly(fh.createReadStream({ start: 0, end: st.size - 1 }), res, st.size);
+      } catch (err: unknown) {
+        // Only a missing file is "not found". Anything else (a permission error) means the file
+        // is there and could not be read.
+        const code = err instanceof Error && 'code' in err ? err.code : undefined;
+        if (code === 'ENOENT' || code === 'ENOTDIR') { errorResponse(res, 404, 'File not found'); return; }
+        // The error code only, never the error's text (it can carry a path).
+        console.error(`[lynox] GET /api/files/download failed: ${String(code ?? (err instanceof Error ? err.name : 'unknown'))}`);
+        errorResponse(res, 500, 'Could not read the file');
       }
     }, READS);
 
@@ -14497,8 +14554,13 @@ export class LynoxHTTPApi {
         if (st.size > 1024 * 1024) { errorResponse(res, 413, 'File too large for preview (max 1 MB)'); return; }
         const content = await readFile(resolved, 'utf-8');
         jsonResponse(res, 200, { content });
-      } catch {
-        errorResponse(res, 404, 'File not found');
+      } catch (err: unknown) {
+        // As for the download: only a missing file is "not found".
+        const code = err instanceof Error && 'code' in err ? err.code : undefined;
+        if (code === 'ENOENT' || code === 'ENOTDIR') { errorResponse(res, 404, 'File not found'); return; }
+        // The error code only, never the error's text (it can carry a path).
+        console.error(`[lynox] GET /api/files/read failed: ${String(code ?? (err instanceof Error ? err.name : 'unknown'))}`);
+        errorResponse(res, 500, 'Could not read the file');
       }
     }, READS);
 

@@ -35,6 +35,7 @@ import { ALL_NAMESPACES } from '../types/index.js';
 import { INSTANCE_WRITE_SITES } from './mandate-tool-lock.js';
 import type { KnowledgeStoreResult } from '../types/index.js';
 import { configurePersistentBudget } from './session-budget.js';
+import { describeConnectionTokens } from './profile-secret-view.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
 import { configureMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
@@ -453,6 +454,34 @@ export function ensureVaultKey(): void {
   }
 }
 
+/**
+ * The `<secrets>` listing: every agent-visible name as a `secret:` reference, with its masked
+ * value, except a name that holds a connection's token. Those are used through their API profile
+ * and are counted per profile, not named (`describeConnectionTokens`). Left out entirely, the
+ * briefing reads as if the vault had no access for the profile, and a model asks the owner for it
+ * again under a new name (tests/online/ask-secret-token-slot-eval.test.ts). `tokenHolders` answers the
+ * profiles that hold a name, empty for a free one. The boot renders the listing before the API
+ * profiles are loaded, with no holders; the engine renders it again once they are.
+ */
+export function renderSecretsBriefing(
+  store: Pick<SecretStore, 'listAgentVisibleNames' | 'getMasked'>,
+  tokenHolders: (name: string) => readonly { id?: unknown; name: unknown }[] = () => [],
+): string | undefined {
+  const free: string[] = [];
+  const tokens: (readonly { id?: unknown; name: unknown }[])[] = [];
+  for (const n of store.listAgentVisibleNames()) {
+    const holders = tokenHolders(n);
+    if (holders.length === 0) free.push(`secret:${n} (${store.getMasked(n)})`);
+    else tokens.push(holders);
+  }
+  const tokenLine = describeConnectionTokens(tokens);
+  if (free.length === 0 && tokenLine === undefined) return undefined;
+  const lines: string[] = [];
+  if (free.length > 0) lines.push(free.join(', '));
+  if (tokenLine !== undefined) lines.push(tokenLine);
+  return compose([renderFence('secrets', lines.join('\n'))]);
+}
+
 export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   const parts: Part[] = [];
   let secretsBriefing: string | undefined;
@@ -467,13 +496,27 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   try {
     try {
       vault = new SecretVault();
-      const migrated = vault.migrateFromFile();
-      if (migrated > 0) {
-        parts.push(engineText(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`));
-      }
+      // The two migrations below write plaintext secrets into the vault and then delete their
+      // source. Under a key the vault was not written with, the copies would not decrypt once
+      // the right key is back, and the plaintext would be gone. So while any stored entry does
+      // not decrypt under the loaded key, neither runs: the plaintext stays where it is, and
+      // they run on the next boot whose key opens every entry. A vault with a corrupt entry
+      // holds them back as well; that keeps plaintext on disk, it loses nothing.
+      const undecryptable = vault.undecryptableCount();
+      if (undecryptable > 0) {
+        process.stderr.write(
+          `⚠ Vault: ${undecryptable} stored secret(s) do not decrypt with the current LYNOX_VAULT_KEY — ` +
+          `not moving secrets from secrets.json or config.json into the vault on this boot.\n`,
+        );
+      } else {
+        const migrated = vault.migrateFromFile();
+        if (migrated > 0) {
+          parts.push(engineText(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`));
+        }
 
-      // Migrate secrets from plaintext config to vault
-      _migrateConfigSecretsToVault(vault, userConfig);
+        // Migrate secrets from plaintext config to vault
+        _migrateConfigSecretsToVault(vault, userConfig);
+      }
 
       // Load secrets from vault — vault wins over config.json, but explicit env vars
       // always override vault (so users can fix stale vault entries without Web UI).
@@ -558,11 +601,7 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
     // Only advertise agent-visible secrets — infrastructure secrets (mail
     // account / OAuth / SMTP/IMAP / engine-internal) are excluded so their
     // names never enter the model context (and cannot be referenced for exfil).
-    const visibleNames = store.listAgentVisibleNames();
-    if (visibleNames.length > 0) {
-      const names = visibleNames.map(n => `secret:${n} (${store!.getMasked(n)})`).join(', ');
-      secretsBriefing = compose([renderFence('secrets', names)]);
-    }
+    secretsBriefing = renderSecretsBriefing(store);
   } catch {
     store = null;
   }
