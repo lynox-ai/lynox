@@ -481,6 +481,8 @@ import { setTierSetResolver, resolveTierModel, snapshotForSlot } from './tier-re
 import { MISTRAL_MODEL_MAP, setOpenAIModelResolver, getBetasForProvider } from '../types/index.js';
 import { InputRequiredError } from './input-required.js';
 import { reportMeteredCost } from './metered-request.js';
+import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from './chat-context.js';
+import { approvalChatTitle } from './approval-chat-title.js';
 import { ChangesetManager } from './changeset.js';
 import { setTenantWorkspace } from './workspace.js';
 import { mkdtempSync as mkdtempForWorkspace, rmSync as rmForWorkspace } from 'node:fs';
@@ -3743,6 +3745,46 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(llmTitle).toHaveBeenCalledTimes(1);
       expect(llmTitle.mock.calls[0]?.[0]).toBe('Plan the Q3 budget');
       llmTitle.mockRestore();
+    });
+
+    // The run titles a chat on a loaded approval draft through `firstThreadTitle`: the engine's
+    // phrase in the configured language, never the draft, and no LLM upgrade. What that title
+    // does in other chats' dictation is tested in `transcribe/session-context.test.ts`.
+    it('a chat on a loaded approval draft is titled by the engine, without an LLM upgrade (control: a draft that did not load keeps its first line)', async () => {
+      const { engine } = await createEngineAndSession({ language: 'de' });
+      const llmTitle = vi.spyOn(Object.getPrototypeOf(engine.createSession()) as { _generateLLMTitle: () => Promise<void> }, '_generateLLMTitle')
+        .mockResolvedValue(undefined);
+      const updates = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      const titleOf = (id: string): unknown => updates.mock.calls.find(([t, u]) => t === id && 'title' in (u as object))?.[1]?.title;
+      const MARK = 'Quittenmarmelade';
+      const firstLine = 'Ich möchte diesen Entwurf ändern, bevor er rausgeht.';
+      const draft = closeLoadedContext(
+        '[Loaded draft moved from the approval queue — entry: e1 · mail_send · from a task run]\n'
+        + `<untrusted_data source="approval:e1">\nSubject: ${MARK}\n</untrusted_data>`,
+      );
+      try {
+        const chat = engine.createSession();
+        // UTC+14 all year: no engine's own zone gives the same wall clock, so the user's zone
+        // is shown to reach the title. Read before and after, for a minute that turns mid-run.
+        chat.userTimezone = 'Pacific/Kiritimati';
+        mockSend.mockResolvedValueOnce('ok');
+        const before = approvalChatTitle('de', new Date(), 'Pacific/Kiritimati');
+        await chat.run(`${draft}${firstLine}`);
+        const after = approvalChatTitle('de', new Date(), 'Pacific/Kiritimati');
+        expect([before, after]).toContain(titleOf(chat.sessionId));
+        expect(titleOf(chat.sessionId)).toMatch(/^Entwurf überarbeiten · \d{1,2}\. \S+, \d{2}:\d{2}$/);
+        expect(String(titleOf(chat.sessionId))).not.toContain(MARK);
+        expect(llmTitle).not.toHaveBeenCalled();
+
+        const missing = engine.createSession();
+        mockSend.mockResolvedValueOnce('ok');
+        await missing.run(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}${firstLine}`);
+        expect(titleOf(missing.sessionId)).toBe(firstLine);
+        expect(llmTitle).toHaveBeenCalledTimes(1);
+      } finally {
+        llmTitle.mockRestore();
+        updates.mockRestore();
+      }
     });
 
     it('two runs are two groups, also when the second is started from inside the first', async () => {
