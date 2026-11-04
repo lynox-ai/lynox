@@ -24,7 +24,7 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, principalFromTag, prin
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
-import { checkMarkup, droppedTagsOf, endsClosed, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
+import { checkMarkup, droppedTagsOf, endsClosed, shortcodeRefusalOf, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
@@ -32,7 +32,7 @@ import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
-import { judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
+import { contextFieldsOfListForm, judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
 import type { ContainmentMirror } from './history-markers.js';
@@ -136,6 +136,9 @@ export type BulkInvalidReason =
   // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
   /** the target's current state holds something shaped like a credential, so it is not sent to a model */
   | 'secret_in_before'
+  /** a field of the context C (`JudgeRule.context`) holds something shaped like a credential, so
+   *  the target is not sent to a model; which field is recorded beside it (`context_secret_field`) */
+  | 'secret_in_context'
   /** the model's reply was cut off before its verdict was complete */
   | 'cut_off'
   /** the model's verdict did not fit the rule's schema */
@@ -171,8 +174,11 @@ export type BulkInvalidReason =
   /** an HTML value carries a tag the fragment drops but the page reads, which its field does not hold */
   | 'markup_dropped'
   /** as `markup_dropped`, with attributes, and the field's current value carries it already: only
-   *  the owner removing it in the shop lets the field be written */
-  | 'markup_dropped_before';
+   *  the owner removing it in the shop lets the field be written. No longer recorded since the run
+   *  sends the canonical form (1130); kept for rows recorded before. */
+  | 'markup_dropped_before'
+  /** an HTML value holds a shortcode whose text the canonical form the run sends would change */
+  | 'shortcode_changed';
 
 /** Every markup refusal is a reason a target can record. */
 const _markupRefusalsAreReasons: MarkupRefusal extends BulkInvalidReason ? true : never = true;
@@ -602,12 +608,21 @@ export interface PreviewTarget {
    *  and removes, each with its full value (PRD shopify-preset §20.2 item 5, M3). Computed here
    *  from the parser's tree, so the view shows it and computes nothing. */
   markupChanges?: FieldMarkupChange[] | undefined;
+  /** A target refused for `shortcode_changed` (1130): each HTML field the value changes and whose
+   *  shortcode the check refuses (against its before-image where the row holds one; a planned
+   *  target refused at its read holds none), with its whole value as the planner or the judge
+   *  wrote it. Nothing is written for the target, so the owner copies these values into the shop
+   *  themselves. Set only where one holds. */
+  refusedValues?: { field: string; value: string }[] | undefined;
   /** Written, and its read-back held markup the write never sent (PRD shopify-preset §21.2
    *  item 6): the target the halt `markupAddedByShop` is about. Set only where it holds. */
   shopAddedMarkup?: true | undefined;
   /** Written, and the store kept an HTML field otherwise than sent, within what the run may write:
    *  counted and named, not halted. Set only where it holds. */
   hostRewrote?: true | undefined;
+  /** With `secret_in_context`: the field of the rule's context C that held it, by its name, so the
+   *  owner knows which one to clean. Never its value. */
+  contextField?: string | undefined;
   /** The owner took this target out of the write before approving (`deselectTarget`). */
   deselected: boolean;
   /** This run wrote the target: recorded as applied, and not found already as planned. */
@@ -807,6 +822,16 @@ function onlySentFields(before: BeforeImage, sent: BeforeImage): BeforeImage {
 
 function isPlainRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Whether the shortcode check refuses this value of one field. A value the parser cannot read
+ *  is refused by `checkMarkup` for another reason, so it is not one the preview shows to copy. */
+function refusesShortcode(value: string, was: string | null): boolean {
+  try {
+    return shortcodeRefusalOf(value, was) !== null;
+  } catch {
+    return false;
+  }
 }
 
 /** The target paths an external run's stored contract grants. */
@@ -1556,16 +1581,19 @@ export class BulkLedger {
       // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test.
       `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at,
          (applied_at IS NOT NULL AND found_unsent = 0 AND ${WRITING_SQL}) AS written, undone_at IS NOT NULL AS undone,
-         shop_added_markup, host_rewrote
+         shop_added_markup, host_rewrote, context_secret_field
        FROM bulk_targets WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
       deselected_at: string | null; written: number; undone: number; shop_added_markup: number; host_rewrote: number;
+      context_secret_field: number | null;
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
     const judged = (run?.judge_rule ?? null) !== null;
+    // The field of C a `secret_in_context` names, by its name in the rule (the owner cleans it there).
+    const contextNames = judged ? this.judgeRuleOf(run!).context ?? [] : [];
     // An undo's list is what it restores: the HTML fields of the run its family started from.
     const htmlFields = this.htmlFieldsOf(runId);
     return rows.map((r) => {
@@ -1588,14 +1616,29 @@ export class BulkLedger {
           return c.added.length + c.removed.length > 0 ? [c] : [];
         })
         : [];
+      // The fields a `shortcode_changed` refusal is about, each with the whole value written for it:
+      // a field the value changes and the shortcode check refuses, against its before-image where
+      // the row holds one, so a shortcode a field already holds does not stand in for the one
+      // refused in another. A planned target refused at its read holds no before-image: there each
+      // changed field is checked against none, and may be shown although its shortcode was held.
+      const refusedValues = r.change === 'invalid' && r.error === 'shortcode_changed' && after !== null && typeof after === 'object'
+        ? htmlFields.flatMap((f) => {
+          const value = (after as Record<string, unknown>)[f];
+          const was = prior !== null && typeof prior === 'object' ? (prior as Record<string, unknown>)[f] : null;
+          return typeof value === 'string' && value !== was && refusesShortcode(value, typeof was === 'string' ? was : null) ? [{ field: f, value }] : [];
+        })
+        : [];
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
         error: r.error, deselected: r.deselected_at !== null, written: r.written === 1, undone: r.undone === 1,
         ...(r.shop_added_markup === 1 ? { shopAddedMarkup: true as const } : {}),
         ...(r.host_rewrote === 1 ? { hostRewrote: true as const } : {}),
+        ...(r.error === 'secret_in_context' && r.context_secret_field !== null && contextNames[r.context_secret_field] !== undefined
+          ? { contextField: contextNames[r.context_secret_field]! } : {}),
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
+        ...(refusedValues.length > 0 ? { refusedValues } : {}),
       };
     });
   }
@@ -1668,10 +1711,13 @@ export class BulkLedger {
     return JSON.parse(this.engineDb.dec(row.judge_rule!)) as JudgeRule;
   }
 
-  /** Why planning would refuse a judged run's stored rule today, or null. */
-  private judgeRuleRefusal(row: Pick<RunRow, 'judge_rule'>): string | null {
+  /** Why planning would refuse a judged run's stored rule today, or null. On a list run with the
+   *  list's id field and form, as planning had them, so a context naming the id field or a name
+   *  its form does not read is refused at the start too. */
+  private judgeRuleRefusal(row: Pick<RunRow, 'judge_rule' | 'list_source'>): string | null {
     try {
-      normalizeJudgeRule(this.judgeRuleOf(row));
+      const source = row.list_source === null ? null : JSON.parse(this.engineDb.dec(row.list_source)) as BulkListSource;
+      normalizeJudgeRule(this.judgeRuleOf(row), source === null ? {} : { idField: source.idField, contextFields: contextFieldsOfListForm(source.form) });
       return null;
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return err.message;
@@ -1938,6 +1984,30 @@ export class BulkLedger {
     const fields = new Set(htmlFieldsOfListForm(this.listFormOfFamily(run)));
     if (this.shopifyFormOfRun(run) === 'shopify_product') for (const f of htmlFieldsOfListForm('shopify')) fields.add(f);
     return [...fields];
+  }
+
+  /**
+   * An after-state as the run stores, and so sends, it (1130): each HTML field of the run
+   * ({@link htmlFieldsOf}) in the canonical bytes the markup check reads, not the planner's or the
+   * verdict's raw bytes. The fragment parser drops what it cannot place (a `<body onload>`), so raw
+   * bytes could carry to the page what the check never saw. Done where the after-state is stored,
+   * so what is checked, stored, compared and sent is one value. A value whose canonical form is
+   * not stable is left as it is: the check refuses it (`not_canonical`), and so does the send.
+   * A field equal to its before-image is the store's own value and stays byte for byte: the check
+   * skips it, and rewriting it would turn an unchanged field into a write.
+   * Comments and text keep their characters (a block comment, a shortcode); text is re-escaped.
+   */
+  private canonicalAfterOf(runId: string, after: unknown, before: unknown): unknown {
+    if (!isPlainRecord(after)) return after;
+    const held = isPlainRecord(before) ? before : {};
+    const fields = this.htmlFieldsOf(runId).filter((f) => typeof after[f] === 'string' && after[f] !== held[f]);
+    if (fields.length === 0) return after;
+    const out: Record<string, unknown> = { ...after };
+    for (const f of fields) {
+      const canonical = canonicalHtml(after[f] as string);
+      if (canonicalHtml(canonical) === canonical) out[f] = canonical;
+    }
+    return out;
   }
 
   /**
@@ -2619,6 +2689,9 @@ export class BulkLedger {
     /** The title the same read answered, on a run compared in its store's saved form
      *  ({@link comparedInSavedForm}): classified with, never stored. */
     titleNow?: string | null,
+    /** The context C the same read answered (PRD shopify-preset §20.2 item 7): stored beside the
+     *  image for the judge, never part of it — not compared, not diffed, not undone. */
+    context?: Readonly<Record<string, unknown>>,
   ): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL
@@ -2630,7 +2703,9 @@ export class BulkLedger {
     const row = db.prepare('SELECT after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { after_planned: string | null } | undefined;
     if (!row || row.after_planned === null) return false;
     const before: BeforeImage = { absent: false, value: read.before };
-    const after = completedAfter ?? JSON.parse(this.engineDb.dec(row.after_planned)) as unknown;
+    // Stored canonical in its HTML fields (1130): the preview checked this after-state against this
+    // before-image just now, and the write sends what is stored.
+    const after = this.canonicalAfterOf(runId, completedAfter ?? JSON.parse(this.engineDb.dec(row.after_planned)) as unknown, read.before);
     // The before-image holds exactly F, so comparing whole images compares over F (§6 P4). A
     // judged target's after-state is its template until the verdict: its change is not known.
     const html = this.comparedAsHtml(runId);
@@ -2640,8 +2715,11 @@ export class BulkLedger {
       && sameValue(read.before, shopifySavedForm(after, titleNow), html);
     const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : saved ? 'unchanged' : classifyChange(before, after, html);
     return db.transaction((): boolean => {
-      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ? WHERE ${guard}`)
-        .run(this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)), runId, seq, runId).changes === 1;
+      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ?, context = ? WHERE ${guard}`)
+        .run(
+          this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)),
+          context === undefined ? null : this.engineDb.enc(JSON.stringify(context)), runId, seq, runId,
+        ).changes === 1;
       if (stored) this.noteConnection(runId, seq, 'read', via);
       return stored;
     })();
@@ -2918,13 +2996,23 @@ export class BulkLedger {
     ).run(runId, seq, token);
   }
 
-  /** A target the judge is to decide: its key and before-image. */
-  loadJudgeTarget(runId: string, seq: number): { key: string; before: BeforeImage } | null {
+  /** A target the judge is to decide: its key, before-image, and the context its read stored
+   *  (null where none was: a run without C, a data-store run, a target read before C). */
+  loadJudgeTarget(runId: string, seq: number): { key: string; before: BeforeImage; context: Record<string, unknown> | null } | null {
     const r = this.engineDb.getDb().prepare(
-      `SELECT target_key, before FROM bulk_targets WHERE run_id = ? AND seq = ? AND change != 'invalid' AND before IS NOT NULL`,
-    ).get(runId, seq) as { target_key: string; before: string } | undefined;
+      `SELECT target_key, before, context FROM bulk_targets WHERE run_id = ? AND seq = ? AND change != 'invalid' AND before IS NOT NULL`,
+    ).get(runId, seq) as { target_key: string; before: string; context: string | null } | undefined;
     if (!r) return null;
-    return { key: this.engineDb.dec(r.target_key), before: JSON.parse(this.engineDb.dec(r.before)) as BeforeImage };
+    return {
+      key: this.engineDb.dec(r.target_key), before: JSON.parse(this.engineDb.dec(r.before)) as BeforeImage,
+      context: r.context === null ? null : JSON.parse(this.engineDb.dec(r.context)) as Record<string, unknown>,
+    };
+  }
+
+  /** The fields of context C a judged run reads (its rule's `context`), or none. */
+  judgeContextOf(runId: string): readonly string[] {
+    const r = this.runRow(runId);
+    return r === undefined || r.judge_rule === null ? [] : this.judgeRuleOf(r).context ?? [];
   }
 
   /** Book a paid call into the run's spend. No phase guard: what was paid stays counted,
@@ -2940,17 +3028,28 @@ export class BulkLedger {
    * verdict, and only while the run is `planned`: a loop whose claim expired cannot overwrite
    * the verdict of the loop that took it over, and a verdict in flight does not write into a run
    * that was superseded (PRD bulk-loop §3.1).
+   *
+   * A verdict refused for `shortcode_changed` keeps the values the judge wrote (`refused`), as
+   * the plan's own refusal keeps the plan: the preview shows them to the owner to copy into the
+   * shop (1130). Nothing reads them as a write, since the target is invalid.
    */
-  recordJudgement(runId: string, seq: number, token: string, verdict: { after: unknown } | { invalid: BulkInvalidReason }, now: number = Date.now()): boolean {
+  recordJudgement(
+    runId: string, seq: number, token: string,
+    /** `contextField`: with `secret_in_context`, the index in the rule's `context` of the field that held it. */
+    verdict: { after: unknown } | { invalid: BulkInvalidReason; refused?: Record<string, unknown> | undefined; contextField?: number | undefined },
+    now: number = Date.now(),
+  ): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND judge_claim_token = ? AND judged_at IS NULL AND change != 'invalid'
       AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND phase = 'planned')`;
     const at = new Date(now).toISOString();
     return db.transaction((): boolean => {
       if ('invalid' in verdict) {
+        const kept = verdict.invalid === 'shortcode_changed' && verdict.refused !== undefined
+          ? this.engineDb.enc(JSON.stringify(verdict.refused)) : null;
         return db.prepare(
-          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
-        ).run(verdict.invalid, at, runId, seq, token, runId).changes === 1;
+          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, after_planned = COALESCE(?, after_planned), context_secret_field = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
+        ).run(verdict.invalid, kept, verdict.contextField ?? null, at, runId, seq, token, runId).changes === 1;
       }
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;
@@ -2958,9 +3057,10 @@ export class BulkLedger {
       // A verdict on a Shopify run is completed as a planned after-state is (`shopifyPairedAfter`):
       // a write never sends one seo field without the other.
       const run = this.runRow(runId);
-      const after = run !== undefined && this.shopifyFormOfRun(run) !== null && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
+      // Stored canonical in its HTML fields (1130), as the markup check read it.
+      const after = this.canonicalAfterOf(runId, run !== undefined && this.shopifyFormOfRun(run) !== null && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
         ? shopifyPairedAfter(verdict.after, before.value)
-        : verdict.after;
+        : verdict.after, before.absent ? null : before.value);
       return db.prepare(
         `UPDATE bulk_targets SET after_planned = ?, change = ?, error = NULL, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
       ).run(this.engineDb.enc(JSON.stringify(after)), classifyChange(before, after, this.comparedAsHtml(runId)), at, runId, seq, token, runId).changes === 1;

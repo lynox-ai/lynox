@@ -117,6 +117,30 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('Product/2');
 	});
 
+	it('shows a description lynox does not write for a shortcode, whole, under the reason (1130)', async () => {
+		const planned = '<p>Neu</p>[button url="https://shop.example.com/sale?cat=tee&size=m"]Zum Angebot[/button]';
+		// The fixture's third product, refused for the shortcode instead of not being found.
+		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'shortcode_changed', refusedValues: [{ field: 'descriptionHtml', value: planned }] } : x));
+		await render();
+		const blocks = target.querySelectorAll('[data-testid="bulk-refused-value-text"]');
+		expect(blocks, 'one block, for the shortcode target only').toHaveLength(1);
+		expect(target.textContent).toContain(t('bulk.invalid.shortcode_changed').slice(0, 40));
+		expect(blocks[0]!.textContent).toBe(planned);
+		// One field refused: no field name over the block, as ux released it.
+		expect(target.textContent).not.toContain('descriptionHtml:');
+	});
+
+	it('shows each refused field under its name when a product has more than one (1130)', async () => {
+		const a = '[box a="1&2"]x[/box]';
+		const b = '[pbutton url="/b?x=1&y=2"]Los[/pbutton]';
+		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'shortcode_changed', refusedValues: [{ field: 'description', value: a }, { field: 'short_description', value: b }] } : x));
+		await render();
+		const blocks = [...target.querySelectorAll('[data-testid="bulk-refused-value-text"]')].map((e) => e.textContent);
+		expect(blocks).toEqual([a, b]);
+		expect(target.textContent).toContain('description:');
+		expect(target.textContent).toContain('short_description:');
+	});
+
 	it('takes a product out against the checksum it showed, and then shuts an approval with nothing left', async () => {
 		await render();
 		const approve = buttonByText(t('bulk.approve.write_one'))!;
@@ -440,6 +464,36 @@ describe('the sentence and the way on for a halt', () => {
 			expect(target.textContent).not.toContain(middle(whole ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_found'));
 		});
 	}
+
+	it('shows before the start the fields the judge only reads: readable on a store, the owner\'s column names elsewhere (U-140)', async () => {
+		const judged = (o: Partial<BulkRunDetailData>): BulkRunDetailData => makeRun({
+			phase: 'planned', haltKey: 'awaitingStart', haltReason: 'engine English', judge: {} as BulkRunDetailData['judge'],
+			judgeServedBy: { provider: 'anthropic', label: 'm' } as unknown as BulkRunDetailData['judgeServedBy'], ...o,
+		});
+		const rule = { rule: 'Write SEO texts.', schema: { properties: { seo_title: { type: 'string', maxLength: 70 } } }, tier: 'fast' };
+		run = judged({ judgeRule: { ...rule, context: ['vendor', 'tags'] } });
+		await render();
+		const list = target.querySelector('[data-testid="bulk-start-context"]');
+		expect(list).not.toBeNull();
+		expect(list!.textContent).toContain(t('bulk.start.context_fields'));
+		expect([...list!.querySelectorAll('li')].map((li) => li.textContent?.trim())).toEqual([t('bulk.field.shopify.vendor'), t('bulk.field.shopify.tags')]);
+		expect(list!.textContent).toContain(tf('bulk.start.context_explain', { provider: 'Anthropic' }).slice(0, 20));
+		unmount(component!);
+		component = undefined;
+
+		run = judged({ targetSystem: 'data_store', judgeRule: { ...rule, context: ['note'] } });
+		await render();
+		const rows = target.querySelector('[data-testid="bulk-start-context"]');
+		expect(rows!.querySelector('code')?.textContent).toBe('note');
+		unmount(component!);
+		component = undefined;
+
+		// Twin: a rule without a context shows no such list.
+		run = judged({ judgeRule: rule });
+		await render();
+		expect(target.querySelector('[data-testid="bulk-start-context"]')).toBeNull();
+		expect(target.textContent).toContain(t('bulk.start.fields'));
+	});
 
 	it('at a probe the server does not offer, says to plan again instead of naming a button', async () => {
 		run = makeRun({ phase: 'writing', haltKey: 'probeRequired', haltReason: 'engine English', applied: 1, probe: null });

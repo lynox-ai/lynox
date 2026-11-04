@@ -9,7 +9,7 @@ import {
   bulkFileKey, parseSourceText, planDataStore, planWorkspace, readBulkKey, rowsToSource,
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
-import { judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { contextFieldsOfListForm, judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
 import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 
@@ -50,7 +50,16 @@ function formatUsd(usd: number, round: 'down' | 'nearest' = 'nearest'): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
-function formatStatus(s: BulkRunStatus): string {
+/** What the model reads when a target is left out for `shortcode_changed` (1130, U-103): the way
+ *  out, not only the diagnosis. The way out is the preview, which shows the owner the whole
+ *  planned text to copy (`refusedValues`); the model points there and writes no text of its own,
+ *  since three wordings that asked it to copy or leave the link failed in a real-model eval. */
+export const SHORTCODE_CHANGED_NOTE = 'shortcode_changed: the new text has a [shortcode] containing &, < or > that lynox cannot write. ' +
+  'The preview shows the owner the whole new text exactly as planned, to copy into the shop themselves. Tell the owner that. ' +
+  'Do not put the text, the shortcode or a changed form of it in your reply, and do not offer another way out. ' +
+  'Only where you wrote these characters yourself, plan the value again without them.';
+
+export function formatStatus(s: BulkRunStatus): string {
   const invalid = Object.entries(s.invalidReasons).map(([r, n]) => `${r} ${String(n)}`).join(', ');
   const lines = [
     `Bulk ${s.kind === 'undo' ? `undo run ${s.id} of run ${s.sourceRunId ?? '(deleted)'}` : `run ${s.id}`} ` +
@@ -66,6 +75,7 @@ function formatStatus(s: BulkRunStatus): string {
       'an email to a customer, a payment, or a change of someone\'s access or data. A bulk run never writes ' +
       'such a field: leave it out, or make that change in the provider\'s own interface.');
   }
+  if ((s.invalidReasons.shortcode_changed ?? 0) > 0) lines.push(SHORTCODE_CHANGED_NOTE);
   if (s.judge !== null) {
     lines.push(`A model decides each target's new values with the run's rule: ` +
       `${String(judgedTargets(s))} judged, ${String(s.judge.unjudged)} target(s) without a verdict yet. The verdicts are only in the run's ledger, for the user to review.`);
@@ -202,7 +212,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     const raw = typeof listInput === 'object' && listInput !== null ? listInput as Record<string, unknown> : {};
     if (raw['after'] !== undefined) throw new BulkSourceError('With judge, source_list takes no "after": the model decides each target\'s values.');
     const idField = typeof raw['id_field'] === 'string' ? raw['id_field'] : 'id';
-    judge = normalizeJudgeRule(judgeInput, { idField });
+    judge = normalizeJudgeRule(judgeInput, { idField, contextFields: contextFieldsOfListForm(raw['form']) });
     // A store takes its product fields as text: a verdict of another type would be judged and paid
     // for, then refused by the write document for the whole run. A field the store cannot be
     // written is left to the Shopify parse below, which names the fields that can.
@@ -299,6 +309,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             rule: { type: 'string', description: 'What to decide for each target, in plain words (up to 4000 characters).' },
             schema: { type: 'object', description: 'The fields the model sets, field name → {type: "string", maxLength} or {type: "string", enum: [...]} or {type: "number"|"integer"} or {type: "boolean"}. No pattern, no lists or nested objects; at most 20 fields.' },
             tier: { type: 'string', enum: ['fast', 'balanced', 'deep'], description: 'Which tier places the call (its provider, its limit). The model that judges is set per provider, not by the tier. Default fast.' },
+            context: { type: 'array', items: { type: 'string' }, description: 'Optional: other fields of each target the model reads to decide, but never sets — not a field of schema, not the id field; at most 20. The user sees them before starting the run, and they go to the model too.' },
           },
           required: ['rule', 'schema'],
         },
@@ -366,6 +377,10 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             if (!(JUDGE_COLUMN_TYPES[fieldType] ?? []).includes(col.type)) {
               throw new BulkSourceError(`judge.schema gives ${f} the type ${fieldType}, which its ${col.type} column does not take.`);
             }
+          }
+          // A context column is read from the row as it is, never written: it only has to exist.
+          for (const f of judge.context ?? []) {
+            if (!colDefs.has(f)) throw new BulkSourceError(`judge.context names ${f}, which is not a column of the target collection.`);
           }
           const template = judgeTemplate(judge);
           // A verdict replaces F on an existing row; a row that is not there has nothing to judge.

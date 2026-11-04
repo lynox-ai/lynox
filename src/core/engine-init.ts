@@ -3,6 +3,7 @@
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
+import { VAULT_KEY_PATTERN, recordVaultKeySource, sourceOfEnvKey } from './vault-key-source.js';
 import { processErrorText } from './error-egress.js';
 import { existsSync, readFileSync, writeFileSync, lstatSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -353,7 +354,6 @@ export function ensureHttpSecret(): void {
   }
 }
 
-const VAULT_KEY_PATTERN = /^[A-Za-z0-9+/=]{32,128}$/;
 
 /**
  * Load `LYNOX_VAULT_KEY` from `~/.lynox/.env` into `process.env` if not already
@@ -403,6 +403,7 @@ export function loadVaultKeyFromDotEnv(): void {
         return;
       }
       process.env['LYNOX_VAULT_KEY'] = value;
+      recordVaultKeySource('volume-env');
       return;
     }
   } catch {
@@ -423,7 +424,10 @@ export function loadVaultKeyFromDotEnv(): void {
  * + idempotent so `Engine.init()` can hoist it ahead of persistence.
  */
 export function ensureVaultKey(): void {
-  if (process.env['LYNOX_VAULT_KEY']) return;
+  if (process.env['LYNOX_VAULT_KEY']) {
+    recordVaultKeySource(sourceOfEnvKey());
+    return;
+  }
 
   const lynoxDir = getLynoxDir();
   const keyFilePath = join(lynoxDir, 'vault.key');
@@ -435,21 +439,27 @@ export function ensureVaultKey(): void {
       const key = readFileSync(keyFilePath, 'utf-8').trim();
       if (key) {
         process.env['LYNOX_VAULT_KEY'] = key;
+        recordVaultKeySource('vault-key');
         return;
       }
     } catch { /* fall through */ }
   }
 
   // vault.db exists but no key anywhere → user lost their key, don't overwrite
-  if (existsSync(vaultDbPath)) return;
+  if (existsSync(vaultDbPath)) {
+    recordVaultKeySource('none');
+    return;
+  }
 
   // First run: generate key and persist
   const key = randomBytes(48).toString('base64');
   try {
     writeFileSync(keyFilePath, key + '\n', { mode: FILE_MODE_PRIVATE });
     process.env['LYNOX_VAULT_KEY'] = key;
+    recordVaultKeySource('minted');
     process.stderr.write(`Generated vault key → ${keyFilePath}\n`);
   } catch {
+    recordVaultKeySource('none');
     process.stderr.write('⚠ Could not write vault key file. Secrets will not be persisted.\n');
   }
 }
@@ -496,13 +506,27 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   try {
     try {
       vault = new SecretVault();
-      const migrated = vault.migrateFromFile();
-      if (migrated > 0) {
-        parts.push(engineText(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`));
-      }
+      // The two migrations below write plaintext secrets into the vault and then delete their
+      // source. Under a key the vault was not written with, the copies would not decrypt once
+      // the right key is back, and the plaintext would be gone. So while any stored entry does
+      // not decrypt under the loaded key, neither runs: the plaintext stays where it is, and
+      // they run on the next boot whose key opens every entry. A vault with a corrupt entry
+      // holds them back as well; that keeps plaintext on disk, it loses nothing.
+      const undecryptable = vault.undecryptableCount();
+      if (undecryptable > 0) {
+        process.stderr.write(
+          `⚠ Vault: ${undecryptable} stored secret(s) do not decrypt with the current LYNOX_VAULT_KEY — ` +
+          `not moving secrets from secrets.json or config.json into the vault on this boot.\n`,
+        );
+      } else {
+        const migrated = vault.migrateFromFile();
+        if (migrated > 0) {
+          parts.push(engineText(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`));
+        }
 
-      // Migrate secrets from plaintext config to vault
-      _migrateConfigSecretsToVault(vault, userConfig);
+        // Migrate secrets from plaintext config to vault
+        _migrateConfigSecretsToVault(vault, userConfig);
+      }
 
       // Load secrets from vault — vault wins over config.json, but explicit env vars
       // always override vault (so users can fix stale vault entries without Web UI).

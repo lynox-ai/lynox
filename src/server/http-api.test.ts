@@ -11842,6 +11842,21 @@ describe('LynoxHTTPApi', () => {
 
       // The link domains the owner allows a judged list run's verdicts to add (PRD
       // shopify-preset §20.2 item 5, S20-4): taken at the start that begins the judge only.
+      it('shows the owner the context the judge reads beside the record, as the hash binds it (PRD shopify-preset §20.2 item 7)', async () => {
+        const withContext = normalizeJudgeRule({ rule: 'Write a short title.', schema: { title: { type: 'string', maxLength: 40 } }, context: ['brand', 'note'] });
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old', brand: 'Acme', note: 'n' } }, after: judgeTemplate(withContext) }],
+          judge: withContext,
+        }).id;
+        const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+        expect(shown['judgeRule']).toEqual({ rule: withContext.rule, schema: withContext.schema, tier: 'fast', context: ['brand', 'note'] });
+        expect(shown['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
+        // Twin: a rule without one shows no context key at all.
+        const plain = await (await jsonFetch(`/api/bulk/runs/${judgedRun()}`)).json() as { judgeRule: Record<string, unknown> };
+        expect(Object.hasOwn(plain.judgeRule, 'context')).toBe(false);
+      });
+
       it('takes the start list at the judge start, refuses it at the list read and on a resume', async () => {
         const host = 'shop.example.com';
         const LIST_RULE = normalizeJudgeRule({ rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } }, { idField: 'id' });
