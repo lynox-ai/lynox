@@ -7,7 +7,7 @@ import { ensureVaultKey, loadVaultKeyFromDotEnv } from './engine-init.js';
 import { reloadConfig } from './config.js';
 import { createManagedHook } from './managed-hook.js';
 import {
-  _resetVaultKeySource, keyDelivery, keyDeliveryHeaders, recordVaultKeySource, vaultKeySource,
+  VAULT_KEY_PATTERN, _resetVaultKeySource, keyDelivery, keyDeliveryHeaders, recordVaultKeySource, vaultKeySource,
 } from './vault-key-source.js';
 
 /**
@@ -40,9 +40,13 @@ describe('the word sent for each source', () => {
   });
 
   it('names a key from the volume, the data dir or this start fallback, whatever its form', () => {
-    for (const source of ['volume-env', 'vault-key', 'minted'] as const) {
+    for (const source of ['volume-env', 'vault-key', 'minted', 'unknown'] as const) {
       expect(keyDelivery(source, KEY64)).toBe('fallback');
     }
+  });
+
+  it('names a key whose source was not recorded fallback, not env', () => {
+    expect(keyDelivery(null, KEY64)).toBe('fallback');
   });
 
   it('names no key none, also when a source was recorded', () => {
@@ -57,10 +61,13 @@ describe('the word sent for each source', () => {
   });
 
   it('never carries the key or a piece of it', () => {
-    for (const source of ['env', 'volume-env', 'vault-key', 'minted', 'none'] as const) {
-      const sent = JSON.stringify(keyDeliveryHeaders(source, KEY64));
-      expect(sent).not.toContain(KEY64.slice(0, 8));
-      expect(sent).not.toContain(KEY64.slice(-8));
+    // A key with no lower-case letter shares no run of characters with the words, which are lower
+    // case, or with the one-digit length flag: any run of it found in the headers came from the key.
+    const key = 'QZ9/+XW7'.repeat(8);
+    expect(key).toMatch(VAULT_KEY_PATTERN);
+    for (const source of ['env', 'volume-env', 'vault-key', 'minted', 'none', 'unknown'] as const) {
+      const sent = Object.values(keyDeliveryHeaders(source, key)).join('\n');
+      for (let i = 0; i + 2 <= key.length; i++) expect(sent, key.slice(i, i + 2)).not.toContain(key.slice(i, i + 2));
     }
   });
 
@@ -91,7 +98,7 @@ describe('the source as a start settles the key', () => {
   it('takes the entrypoint\'s word for a key it put into the environment', () => {
     dataDir();
     vi.stubEnv('LYNOX_VAULT_KEY', KEY64);
-    for (const [said, recorded] of [['volume-env', 'volume-env'], ['minted', 'minted'], ['env', 'env'], ['none', 'env'], ['something', 'env']] as const) {
+    for (const [said, recorded] of [['volume-env', 'volume-env'], ['minted', 'minted'], ['env', 'env'], ['none', 'unknown'], ['something', 'unknown'], ['', 'env']] as const) {
       _resetVaultKeySource();
       vi.stubEnv('LYNOX_VAULT_KEY_SOURCE', said);
       ensureVaultKey();

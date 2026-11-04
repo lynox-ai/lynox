@@ -8,8 +8,10 @@ import type { KeyDelivery, UsageStatusRequestHeaders } from '../contract/http.js
  *  - `vault-key`  — read from the data dir's `vault.key`.
  *  - `minted`     — generated at this start (by the entrypoint or by `ensureVaultKey`).
  *  - `none`       — no key.
+ *  - `unknown`    — a key is in the environment, but the entrypoint said there was none or said a
+ *    word it does not use: something after the start put it there.
  */
-export type VaultKeySource = 'env' | 'volume-env' | 'vault-key' | 'minted' | 'none';
+export type VaultKeySource = 'env' | 'volume-env' | 'vault-key' | 'minted' | 'none' | 'unknown';
 
 /** The form of a vault key: 32 to 128 characters of base64. */
 export const VAULT_KEY_PATTERN = /^[A-Za-z0-9+/=]{32,128}$/;
@@ -35,12 +37,15 @@ export function recordVaultKeySource(source: VaultKeySource): void {
 /**
  * A key found in the environment: where it came from. The entrypoint sets `LYNOX_VAULT_KEY_SOURCE`
  * before the engine starts; without it (a start outside the container image) the key is the
- * environment's own.
+ * environment's own. Where the entrypoint's word does not explain the key, the answer is
+ * `unknown`, never `env`: `env` is the word a stricter start will accept.
  */
 export function sourceOfEnvKey(): VaultKeySource {
-  const said = ENTRYPOINT_SOURCES[process.env['LYNOX_VAULT_KEY_SOURCE'] ?? ''];
+  const word = process.env['LYNOX_VAULT_KEY_SOURCE'];
+  if (word === undefined || word === '') return 'env';
+  const said = ENTRYPOINT_SOURCES[word];
   // The entrypoint said `none` but a key is there now: something after it set one, not the start.
-  return said === undefined || said === 'none' ? 'env' : said;
+  return said === undefined || said === 'none' ? 'unknown' : said;
 }
 
 /** Where the key came from, or null before it was settled. */
@@ -53,10 +58,13 @@ export function _resetVaultKeySource(): void {
   recorded = null;
 }
 
-/** The word the control plane is told, from the recorded source and the key now in the environment. */
+/**
+ * The word the control plane is told, from the recorded source and the key now in the environment.
+ * Only a key recorded as the environment's own is `env`; a source not yet recorded is `fallback`.
+ */
 export function keyDelivery(source: VaultKeySource | null, key: string | undefined): KeyDelivery {
   if (key === undefined || key === '') return 'none';
-  if (source === 'env' || source === null) return VAULT_KEY_PATTERN.test(key) ? 'env' : 'malformed';
+  if (source === 'env') return VAULT_KEY_PATTERN.test(key) ? 'env' : 'malformed';
   return 'fallback';
 }
 
