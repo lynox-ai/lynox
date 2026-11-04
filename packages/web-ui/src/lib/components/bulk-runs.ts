@@ -85,6 +85,8 @@ export interface BulkRunDetailData extends BulkRun {
 	undoable: number;
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
 	listFirstPage: string | null;
+	/** A Shopify list narrowed to a product type and/or vendor: the values as the planner gave them (supplied text). */
+	listFilters: Readonly<Record<string, string>> | null;
 	listStartChecksum: string | null;
 	/** The engine's note on a list read page by page (English). */
 	listNote: string | null;
@@ -130,7 +132,7 @@ const BULK_RESTART_AS_IS = new Set([
 	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap', 'unrecorded', 'listReadFailed', 'shopInactive',
 ]);
 /** Halts a restart would meet again on the same targets: the run has to be planned again. */
-const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff']);
+const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff']);
 
 /** How a planned run that halted on a failure goes on: read on, read its list on, judge on, judge
  *  on under a higher spend limit — or not at all (`none`, `no_judge`, `judge_own_key`). Null for a
@@ -388,6 +390,18 @@ export function bulkMergeAnswer(
 /** Text the owner reads before a run acts on it, every hidden character shown as its code point
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
+
+/** The line naming a filtered Shopify list's group, where the run is started and approved. The
+ *  values are the planner's, so they are shown through {@link bulkVisibleText}. Null without a filter. */
+export function bulkListFilterText(filters: Readonly<Record<string, string>> | null, i18n: BulkI18n): string | null {
+	if (filters === null) return null;
+	const type = filters['product_type'];
+	const vendor = filters['vendor'];
+	if (type !== undefined && vendor !== undefined) return i18n.tf('bulk.list.filter_both', { type: bulkVisibleText(type), vendor: bulkVisibleText(vendor) });
+	if (type !== undefined) return i18n.tf('bulk.list.filter_type', { type: bulkVisibleText(type) });
+	if (vendor !== undefined) return i18n.tf('bulk.list.filter_vendor', { vendor: bulkVisibleText(vendor) });
+	return null;
+}
 
 /** The provider that serves a judge call, by name. */
 export function bulkJudgeProviderName(provider: string): string {
@@ -660,6 +674,7 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	list_item_no_id: 'list_item', list_item_bad_id: 'list_item', list_item_not_object: 'list_item', list_item_outside_list: 'list_item',
 	list_item_mismatch: 'list_item_mismatch',
 	list_item_truncated: 'list_item_truncated',
+	not_in_filter: 'not_in_filter',
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
 	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char', seo_text_refused: 'seo_text_refused', shop_added_markup: 'shop_added_markup',
 };

@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { BULK_HALT_REASONS, BulkPreviewCapError, bulkFoundAsPlannedNote, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
 import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
-import { isShopifyListForm, listReadContract, parseListSource } from '../../core/bulk-list.js';
+import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { shopifyBulkReadEnabled } from '../../core/bulk-shopify.js';
 import { detectSecretInContent } from './http.js';
 import {
@@ -10,7 +10,7 @@ import {
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
 import { contextFieldsOfListForm, judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
-import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
+import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_FILTER_VALUE_RULE, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 
 /**
@@ -150,11 +150,17 @@ function refusePlannerStartDomains(input: BulkPlanInput): void {
   }
 }
 
+/** The Shopify forms a planner may name. The stored `shopify_filtered` is not one: parseListSource
+ *  refuses it, and it has no rules of its own to say. */
+function isPlannerShopifyForm(form: unknown): form is typeof SHOPIFY_LIST_FORM | typeof SHOPIFY_MEDIA_LIST_FORM {
+  return form === SHOPIFY_LIST_FORM || form === SHOPIFY_MEDIA_LIST_FORM;
+}
+
 /** What a Shopify form takes, said with every refusal of a plan in that form: its checks stop at
  *  the first fault, and the schema does not describe the form, so a model would learn the rules
  *  one refusal at a time. */
 const SHOPIFY_FORM_RULES: Record<string, string> = {
-  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.`,
+  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com), all of them or those of one product type and/or vendor: no path, id_field or write_method; source_list.filters may name product_type, vendor or both, each the value as the store shows it (letter case of A-Z aside, nothing else), which may hold ${SHOPIFY_FILTER_VALUE_RULE} (a value that does not fit is refused, never changed); source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.`,
   shopify_media: `Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only ${SHOPIFY_MEDIA_WRITABLE_FIELDS.join(', ')}, as text of at most ${String(SHOPIFY_ALT_MAX_CHARS)} characters or null. For product fields, use form shopify.`,
 };
 
@@ -167,7 +173,7 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
   } catch (err) {
     const list = input.source_list;
     const form = typeof list === 'object' && list !== null ? (list as Record<string, unknown>)['form'] : undefined;
-    if (!(err instanceof BulkSourceError) || !isShopifyListForm(form) || err.message === SHOPIFY_READ_OFF) throw err;
+    if (!(err instanceof BulkSourceError) || !isPlannerShopifyForm(form) || err.message === SHOPIFY_READ_OFF) throw err;
     throw new BulkSourceError(`${err.message} ${SHOPIFY_FORM_RULES[String(form)]!}`);
   }
 }
@@ -182,7 +188,7 @@ function shopifyHostHint(input: BulkPlanInput): string {
   const host = canonicalHost(input.target_host);
   if (host === null || !isShopifyStoreHostName(host)) return '';
   const list = input.source_list;
-  if (typeof list === 'object' && list !== null && isShopifyListForm((list as Record<string, unknown>)['form'])) return '';
+  if (typeof list === 'object' && list !== null && isPlannerShopifyForm((list as Record<string, unknown>)['form'])) return '';
   return ' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields) or shopify_media (image alt texts).';
 }
 
@@ -197,8 +203,9 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
   if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
   if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
   let listInput = input.source_list;
-  if (typeof listInput === 'object' && listInput !== null && isShopifyListForm((listInput as Record<string, unknown>)['form'])) {
-    const form = String((listInput as Record<string, unknown>)['form']);
+  const listForm = typeof listInput === 'object' && listInput !== null ? (listInput as Record<string, unknown>)['form'] : undefined;
+  if (isPlannerShopifyForm(listForm)) {
+    const form = listForm;
     // Checked when the run is planned and again on every tick of it (`bulk-preview.ts`).
     if (!shopifyBulkReadEnabled()) throw new BulkSourceError(SHOPIFY_READ_OFF);
     // A judge plans its fields F like an after-state: the Shopify parse below bounds them to the
@@ -216,7 +223,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     // A store takes its product fields as text: a verdict of another type would be judged and paid
     // for, then refused by the write document for the whole run. A field the store cannot be
     // written is left to the Shopify parse below, which names the fields that can.
-    if (isShopifyListForm(raw['form'])) {
+    if (isPlannerShopifyForm(raw['form'])) {
       const rule = judge;
       const notText = judgeFields(rule).find((f) => SHOPIFY_WRITABLE_FIELDS.includes(f) && rule.schema.properties[f]!.type !== 'string');
       if (notText !== undefined) throw new BulkSourceError(`judge.schema.${notText} must be type "string" for form shopify: the store takes its product fields as text.`);
@@ -294,7 +301,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           properties: {
             form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com); shopify_media: the images of its products.' },
             path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products. Not for the Shopify forms.' },
-            filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status); values are 1–64 letters, digits, - or _.' },
+            filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status; values are 1–64 letters, digits, - or _). shopify: product_type, vendor or both, each the value as the store shows it (letter case of A-Z aside, nothing else). Not for shopify_media.' },
             id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },
             after: { type: 'object', description: 'The fields to set on every listed element (text, number, true/false or null); not the id field. Not with judge.' },
           },
