@@ -151,42 +151,75 @@ describe('the docs section the link leads to', () => {
 	});
 });
 
-describe('the other places on the page that repeat lynox\'s consent set in words', () => {
-	// Row 370: besides the admin table, two passages say in prose what the standard consent asks
-	// for. They move with the contract list, or a scope change leaves them describing the old set.
+describe('the other places on the page that say what the Standard set holds', () => {
+	// Row 370: besides the admin table, the page says in prose what the standard consent asks
+	// for. Each statement is tied to the contract list, so a scope change in EITHER direction
+	// fails here until the page says the new truth.
+	const short = (x: string): string => x.replace('https://www.googleapis.com/auth/', '');
+	const identity = new Set(['openid', 'userinfo.email']);
+	const inSet = new Set(GOOGLE_BROKER_SCOPES.map(short).filter((x) => !identity.has(x)));
+
+	// Every scope the prose has a phrase for, sent or not. A phrase must appear in both passages
+	// exactly while its scope is on the list — so dropping a scope forces its phrase out.
 	const PHRASES: Record<string, string> = {
 		'calendar.events': 'calendar events',
 		'calendar.freebusy': 'free/busy',
-		'drive.file': 'Drive files lynox',
+		'drive.file': 'drive files lynox',
 	};
-	const NOT_IN_THE_SET = ['Gmail', 'Sheets', 'Docs', 'spreadsheet', 'full Drive'];
+	const NOT_IN_THE_SET = ['gmail', 'sheets', 'docs', 'document', 'spreadsheet', 'full drive', 'contacts', 'tasks'];
 
-	const between = (from: string, to: string): string => {
+	const between = (from: string, to: string, fence?: string): string => {
 		const start = DOCS.indexOf(from);
 		expect(start, `the passage opening with ${from} is gone`).toBeGreaterThan(-1);
 		const end = DOCS.indexOf(to, start + from.length);
 		expect(end, `the end of the passage opening with ${from} is gone`).toBeGreaterThan(start);
-		return DOCS.slice(start, end);
+		if (fence !== undefined) {
+			const close = DOCS.indexOf(fence, start + from.length);
+			expect(close, 'the end anchor moved out of its block').toBeGreaterThan(end);
+		}
+		return DOCS.slice(start, end).toLowerCase();
 	};
 	// The managed tip, up to the sentence that names what the set does NOT include.
-	const tip = (): string => between(':::tip[On lynox.cloud you can skip all of it]', 'If you need more than that');
+	const tip = (): string => between(':::tip[On lynox.cloud you can skip all of it]', 'If you need more than that', '\n:::');
 	const standardRow = (): string => between('| **Standard** (default) |', '\n');
 
-	it('has a phrase for exactly the data scopes on the contract list', () => {
-		const identity = new Set(['openid', 'https://www.googleapis.com/auth/userinfo.email']);
-		const data = GOOGLE_BROKER_SCOPES.filter((x) => !identity.has(x)).map((x) => x.replace('https://www.googleapis.com/auth/', ''));
-		expect(Object.keys(PHRASES).sort()).toEqual([...data].sort());
+	it('has a phrase for every data scope on the list, and the phrases cannot stand in for each other', () => {
+		for (const scope of inSet) expect(Object.keys(PHRASES), `no phrase for ${scope}`).toContain(scope);
+		const phrases = Object.values(PHRASES);
+		for (const a of phrases) for (const b of phrases) if (a !== b) expect(b.includes(a), `${a} is inside ${b}`).toBe(false);
 	});
 
-	it('the managed tip names every one of them, and nothing outside the set', () => {
-		const t = tip();
-		for (const phrase of Object.values(PHRASES)) expect(t).toContain(phrase);
-		for (const word of NOT_IN_THE_SET) expect(t).not.toContain(word);
-	});
+	it.each([['the managed tip', tip], ['the Standard row of the access-level table', standardRow]] as const)(
+		'%s names exactly the scopes on the list, and nothing outside the set',
+		(_name, passage) => {
+			const text = passage();
+			for (const [scope, phrase] of Object.entries(PHRASES)) {
+				expect(text.includes(phrase), `${phrase} (${scope}) ${inSet.has(scope) ? 'missing' : 'still named, but off the list'}`).toBe(inSet.has(scope));
+			}
+			for (const word of NOT_IN_THE_SET) expect(text, `names ${word}`).not.toContain(word);
+		},
+	);
 
-	it('the Standard row of the access-level table names every one of them, and nothing outside the set', () => {
-		const r = standardRow();
-		for (const phrase of Object.values(PHRASES)) expect(r).toContain(phrase);
-		for (const word of NOT_IN_THE_SET) expect(r).not.toContain(word);
+	it('the per-service sections claim membership only for scopes on the list', () => {
+		// `Standard grants \`x\`` and `\`x\` is part of Standard` are claims about the list.
+		const claimed = [
+			...[...DOCS.matchAll(/Standard grants `([^`]+)`/g)].map((m) => m[1]!),
+			...[...DOCS.matchAll(/`([^`]+)` is part of Standard/g)].map((m) => m[1]!),
+		];
+		expect(claimed.length, 'the membership claims are gone').toBeGreaterThan(0);
+		for (const scope of claimed) expect(inSet, `${scope} is claimed for Standard`).toContain(scope);
+		// The Calendar heading says the whole service is in; it is while events are.
+		expect(DOCS.includes('### Google Calendar — in the Standard set')).toBe(inSet.has('calendar.events'));
+		// The services the page says Standard leaves out are out.
+		const list: readonly string[] = GOOGLE_BROKER_SCOPES;
+		const out: Array<[string, RegExp]> = [
+			['Gmail is **not** part of the Standard set.', /\/auth\/gmail|mail\.google\.com/],
+			['Standard grants no Sheets access.', /\/auth\/spreadsheets/],
+			['Standard grants no Docs access at all, reading included.', /\/auth\/documents/],
+		];
+		for (const [sentence, scope] of out) {
+			expect(DOCS, `the sentence "${sentence}" is gone`).toContain(sentence);
+			expect(list.filter((x) => scope.test(x)), sentence).toEqual([]);
+		}
 	});
 });
