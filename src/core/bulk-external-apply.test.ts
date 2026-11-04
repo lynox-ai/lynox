@@ -46,6 +46,7 @@ import { detectSecretInContent } from '../tools/builtin/http.js';
 import { bulkStatusTool } from '../tools/builtin/bulk.js';
 import type { IAgent } from '../types/index.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
+import { shopifySeoEntityFields } from './bulk-shopify.js';
 
 /**
  * Build plan B, the write half (§1.4, §2.3–§2.4, §4 F5/F7): an approved external run is
@@ -1519,6 +1520,23 @@ describe('the write verb and the one-target probe', () => {
       // …and on no other.
       expect(s.items.get('/products/1')!['title']).toBe('Item 1');
       expect(s.items.get('/products/2')!['title']).toBe('Item 2');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not mark an SEO text with an & on a host that is not a Shopify store', async () => {
+    const s = shop();
+    s.items.get('/products/0')!['seo_title'] = 'A und B';
+    const restore = serve(s);
+    try {
+      const runId = await previewedRun([{ target: url(0), after: { seo_title: 'A & B' } }]);
+      const t = ledger.getPreview(runId)[0]!;
+      expect(t.error).toBeNull();
+      // The same before and after would be marked on a store: only the host leaves it unmarked.
+      expect(t.change).toBe('update');
+      expect(shopifySeoEntityFields(t.before?.absent === false ? t.before.value : null, t.after)).toEqual(['seo_title']);
+      expect(t).not.toHaveProperty('seoEntityFields');
     } finally {
       restore();
     }

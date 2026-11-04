@@ -380,8 +380,9 @@ export interface CaptureReport {
    * How the recovery pass routed each fact it wrote, and what came of it.
    *
    * The pair is the point: `written` alone cannot separate "the narrowing works" from
-   * "the narrowing leaks". `fact_user_stated` is the only rule that writes without a
-   * human check, so its `written` count is the volume this change newly releases — and a
+   * "the narrowing leaks". On a turn that read something, `fact_user_stated` is the only
+   * rule that writes without a human check (on a clean turn, `turn_trusted` does), so its
+   * `written` count is the volume the narrowing newly releases — and a
    * later rejection of one of those entries is the precision cost, visible nowhere else
    * (a rejected entry looks identical to a rejected queued one once it has a status).
    *
@@ -423,7 +424,7 @@ const KNOWN_CAUSES: ReadonlySet<string> = new Set<UntrustedCause>(['none', 'mark
  *  NEWER writer must read as "cannot tell" (null, uncounted) and never be trusted into a
  *  bucket whose meaning this build cannot know. */
 const KNOWN_ROUTINGS: ReadonlySet<string> =
-  new Set<CaptureRouting>(['turn_trusted', 'excerpt_external', 'injection_suspected', 'fact_external', 'fact_user_stated']);
+  new Set<CaptureRouting>(['turn_trusted', 'turn_trusted_assistant', 'excerpt_external', 'injection_suspected', 'fact_external', 'fact_user_stated']);
 
 /** Suppression reasons this build knows. Guards the breakdown against an out-of-enum value. */
 const KNOWN_SUPPRESSED_REASONS: ReadonlySet<string> =
@@ -636,9 +637,9 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   // Per-fact routing of the recovery pass. Counters, not a collected array: this report
   // STREAMS the sink (`scanBoundedJsonl`) precisely so a 32 MiB log cannot be held in
   // memory, and materialising the lines to filter them afterwards would quietly undo that.
-  const routingFacts = { turn_trusted: 0, excerpt_external: 0, injection_suspected: 0, fact_external: 0, fact_user_stated: 0 };
-  const routingWritten = { turn_trusted: 0, excerpt_external: 0, injection_suspected: 0, fact_external: 0, fact_user_stated: 0 };
-  const routingQueued = { turn_trusted: 0, excerpt_external: 0, injection_suspected: 0, fact_external: 0, fact_user_stated: 0 };
+  const routingFacts = { turn_trusted: 0, turn_trusted_assistant: 0, excerpt_external: 0, injection_suspected: 0, fact_external: 0, fact_user_stated: 0 };
+  const routingWritten = { turn_trusted: 0, turn_trusted_assistant: 0, excerpt_external: 0, injection_suspected: 0, fact_external: 0, fact_user_stated: 0 };
+  const routingQueued = { turn_trusted: 0, turn_trusted_assistant: 0, excerpt_external: 0, injection_suspected: 0, fact_external: 0, fact_user_stated: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
@@ -794,7 +795,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   // Every rule gets a row even at zero. A rule that stops firing is a signal — a sudden
   // empty `fact_user_stated` means the extractor stopped attributing, which reads as
   // "nothing to release" instead of "the instrument broke" when the row is simply absent.
-  const routing = (['turn_trusted', 'excerpt_external', 'injection_suspected', 'fact_external', 'fact_user_stated'] as const)
+  const routing = (['turn_trusted', 'turn_trusted_assistant', 'excerpt_external', 'injection_suspected', 'fact_external', 'fact_user_stated'] as const)
     .map(rule => ({
       rule,
       facts: routingFacts[rule],
