@@ -246,6 +246,11 @@ export interface BulkRunStatus {
    *  so the pass reads on to the next one. Below
    *  {@link resumeOpen} when the cap stops the pass first. */
   resumeTries: number;
+  /** Of {@link resumeTries}, the targets the next pass sends the write verb to at most: not one
+   *  with an earlier send still unclear ({@link sentUnknown}, and one in conflict too), which
+   *  the pass reads at the host, records as written if it holds the planned value, and never
+   *  sends again. Zero with unclear targets open: writing on then only checks them. */
+  resumeSends: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
   conflicts: number;
   /** Targets of an external run that a send reached without a clear answer, and that are not
@@ -334,8 +339,10 @@ export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
  * would file a row this run does not hold (not confirmed yet, or another run's confirmation has
  * since taken the row); `too_many`, more
  * than one target applied, so it can no longer be a probe; `already_first`, its one applied target
- * is recorded as already holding the value, so it is no probe (a send of this run's that got no
- * clear answer may have set it). Null where none of these is known:
+ * is recorded as already holding the value and is no probe: no send of this run's to it is still
+ * unclear (a run from before sends were told apart from finds, or a send the host refused), or
+ * the run has not stopped yet. One this run sent to without a clear answer and then found so is
+ * `confirm` once the run stopped. Null where none of these is known:
  * a run not approved yet, one whose probe is confirmed already, one whose single applied target
  * is neither, or one that applied nothing but has sent a write ({@link sentCount}). Such a send
  * takes the one place a maximum of one allows; whether writing on sends anything then depends on
@@ -1649,14 +1656,20 @@ export class BulkLedger {
     ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; hostRewrote: number | null; sentUnknown: number | null };
     const pass = db.prepare(
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
-         SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent
+         SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent,
+         SUM(${RESUMABLE_SQL} AND unknown_sends > 0) AS openUnclear
        FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}`,
-    ).get(row.id) as { writing: number; unknown: number | null; failedOnce: number | null; open: number | null; openSent: number | null };
+    ).get(row.id) as { writing: number; unknown: number | null; failedOnce: number | null; open: number | null; openSent: number | null; openUnclear: number | null };
     const open = pass.open ?? 0;
     const openSent = pass.openSent ?? 0;
     const cap = bulkWriteCap(row.max_targets, this.probeHolds(row));
     // A target already sent to takes nothing from the cap; one never sent to takes a place.
     const resumeTries = cap === null ? open : openSent + Math.min(open - openSent, Math.max(0, cap - this.sentCount(row.id)));
+    // A target with a send still unclear was sent to by this run (`write_sent`), so it is in
+    // `resumeTries`; the next pass only reads it at the host and never sends it again. Counted
+    // by `unknown_sends`, not {@link UNCLEAR_SQL}: one in conflict or held by a loop that died
+    // is not sent again either, though the owner is not shown it as unclear.
+    const resumeSends = externalHostOf(row.target_system) === null ? resumeTries : Math.max(0, resumeTries - (pass.openUnclear ?? 0));
     return {
       id: row.id, createdAt: row.created_at, targetSystem: row.target_system, phase: row.phase, undo: row.undo,
       total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, deselected, invalidReasons,
@@ -1667,7 +1680,7 @@ export class BulkLedger {
       sentUnknown: externalHostOf(row.target_system) === null ? 0 : outcome.sentUnknown ?? 0,
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
-      failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries,
+      failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries, resumeSends,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
       probeConfirmed: this.probeHolds(row),
@@ -2039,8 +2052,9 @@ export class BulkLedger {
    * with that verb, over targets of that kind ({@link resourceKindOf}), may be approved or
    * resumed for more than one target. A probe written to an unmeasured target is kept apart
    * ({@link UNMEASURED_PROBE}): it widens only the run that wrote it, and never a measured run.
-   * A target found already holding its value was not written and proves nothing, so it does
-   * not count.
+   * A target found already holding its value counts only where this run's send to it is still
+   * unclear ({@link probeCandidate}): it may be that send that landed. Found so and never sent
+   * to, or after a send the host refused, it proves nothing and does not count.
    */
   confirmProbe(runId: string, params: { confirmedBy?: string | undefined; now?: number | undefined } = {}):
     { ok: true } | { ok: false; reason: 'not_found' | 'not_a_probe' } {
@@ -2058,8 +2072,11 @@ export class BulkLedger {
 
   /** The target {@link confirmProbe} would accept as this run's probe, with its host and
    *  verb: an external apply run that stopped with exactly one applied target, and that one
-   *  written. 'not_found' for no such run; null for a run that holds no probe. */
-  private probeCandidate(runId: string): { host: string; method: string; key: string; form: ShopifyWriteForm | null } | 'not_found' | null {
+   *  written — or sent to by this run without a clear answer and then found holding the planned
+   *  value, which is this run's send having arrived as far as anyone can read it (the owner
+   *  checks it at the host before confirming, like a written one). 'not_found' for no such
+   *  run; null for a run that holds no probe. */
+  private probeCandidate(runId: string): { host: string; method: string; key: string; form: ShopifyWriteForm | null; found: boolean } | 'not_found' | null {
     const run = this.runRow(runId);
     if (!run) return 'not_found';
     const host = externalHostOf(run.target_system);
@@ -2068,11 +2085,26 @@ export class BulkLedger {
     if (host === null || method === null || run.kind !== 'apply') return null;
     const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
     const applied = (this.engineDb.getDb().prepare(
-      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0',
-    ).all(runId) as { target_key: string; result: string | null }[]);
+      'SELECT target_key, result, unknown_sends FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0',
+    ).all(runId) as { target_key: string; result: string | null; unknown_sends: number }[]);
     const only = applied[0];
-    if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') return null;
-    return { host, method, key: this.engineDb.dec(only.target_key), form };
+    if (!stopped || applied.length !== 1 || !only || only.result === null) return null;
+    const result = this.engineDb.dec(only.result);
+    // `unknown_sends`, not `write_sent`: a send the host clearly refused keeps `write_sent` and
+    // proves the write form does not work there, so a value found after it was set by someone
+    // else. Not `found_unsent = 0` alone either: a run from before `unsent_tracked` leaves a
+    // target found so and never sent to at 0 as well. A send from before refusals were counted
+    // (v54) reads as unclear: the backfill could not tell the two apart, so it takes the side of
+    // a send that may have landed.
+    if (result !== 'written' && !(result === 'already' && only.unknown_sends > 0)) return null;
+    return { host, method, key: this.engineDb.dec(only.target_key), form, found: result === 'already' };
+  }
+
+  /** Whether the probe {@link probeKey} names was found holding its value after a send without
+   *  a clear answer, rather than written with one: lynox cannot say it wrote it, since someone
+   *  else may have set the same value. False where there is no probe to confirm. */
+  probeFound(runId: string): boolean {
+    return this.probeToConfirm(runId)?.found ?? false;
   }
 
   /** The key of the target {@link confirmProbe} would accept for this run, or null. For the
@@ -2086,7 +2118,7 @@ export class BulkLedger {
    *  probe is confirmed, confirming again changes nothing. Where another run's confirmation has
    *  since taken the row, confirming files it again. Null for a key that is not a URL, which
    *  {@link confirmProbe} could not file either. */
-  private probeToConfirm(runId: string): { host: string; method: string; key: string } | null {
+  private probeToConfirm(runId: string): { host: string; method: string; key: string; found: boolean } | null {
     const candidate = this.probeCandidate(runId);
     if (candidate === null || candidate === 'not_found') return null;
     let kind: string;

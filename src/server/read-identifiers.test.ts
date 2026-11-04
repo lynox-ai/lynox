@@ -26,6 +26,8 @@ const NOT_IDENTIFYING = new Set([
   'limit', 'offset', 'before', 'since', 'fromSeq', 'days', 'dateFrom', 'dateTo', 'tzOffsetMin', 'window',
   // Filters over a list: what kind, not which one.
   'status', 'type', 'stage', 'bucket', 'model', 'includeArchived', 'snoozedOnly', 'hidden', 'reveal', 'view',
+  // How much of each listed item to send: the backup list's per-file entries.
+  'files',
   // Free text: content, never logged.
   'q',
   // An OAuth provider's answer: a code and a state are credentials.
