@@ -49,7 +49,7 @@ export function createInboxRuleProposeTool(registry: MailRegistry, hooks?: MailH
         type: 'object' as const,
         properties: {
           account: { type: 'string', description: 'The mail account id the rule is for.' },
-          matcher_kind: { type: 'string', enum: [...KINDS], description: '"from" = one exact sender address; "subject_contains" = a phrase in the subject.' },
+          matcher_kind: { type: 'string', enum: [...KINDS], description: '"from" = one exact sender address; "subject_contains" = a phrase in the subject; "matches_description" = which mail is meant, in words.' },
           matcher_value: { type: 'string', description: `The sender address, or the subject phrase (at least ${String(INBOX_RULE_SUBJECT_MIN)}, at most ${String(INBOX_RULE_VALUE_MAX)} characters), or the description (one line, ${String(DESCRIPTION_MIN)} to ${String(DESCRIPTION_MAX)} characters).` },
           name: { type: 'string', description: `What the rule is called, e.g. "Retoure". At most ${String(INBOX_RULE_NAME_MAX)} characters.` },
         },

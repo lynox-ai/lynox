@@ -39,7 +39,7 @@ function payload(over: Partial<InboxQueuePayload> = {}): InboxQueuePayload {
   };
 }
 
-function descriptionRule(description: string, bucket: InboxBucket = 'requires_user', name = 'Mahnungen', action: InboxRuleAction = 'show'): string {
+function descriptionRule(description: string, bucket: InboxRule['bucket'] = 'requires_user', name = 'Mahnungen', action: InboxRuleAction = 'show'): string {
   return inbox.insertRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: description, bucket, action, source: 'on_demand', name });
 }
 
@@ -98,7 +98,7 @@ describe('rule check — the prompt', () => {
 
 describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
   it('files a mail a description rule names, without the classifier', async () => {
-    const ruleId = descriptionRule('Mahnungen und Zahlungserinnerungen', 'draft_ready');
+    const ruleId = descriptionRule('Mahnungen und Zahlungserinnerungen', 'auto_handled', 'Mahnungen', 'mark_read');
     const ruleLlm = vi.fn(async () => '{"rule_id": "R1"}');
     const llm = classifierSays();
     const queue = buildInboxRunner({ state: inbox, llm, ruleCheck: { rules, llm: ruleLlm } });
@@ -107,8 +107,8 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
     expect(llm).not.toHaveBeenCalled();
     expect(ruleLlm).toHaveBeenCalledTimes(1);
     const item = inbox.listItems()[0]!;
-    expect(item).toMatchObject({ bucket: 'draft_ready', matchedRuleId: ruleId, classifierVersion: `rule:${ruleId}`, reasonDe: 'Regel: Mahnungen' });
-    expect(audit(item.id)).toEqual({ action: 'rule_applied', actor: 'rule_engine', payload: expect.objectContaining({ rule_id: ruleId, rule_name: 'Mahnungen', matcher_kind: 'matches_description', stage: 'description', bucket: 'draft_ready' }) });
+    expect(item).toMatchObject({ bucket: 'auto_handled', matchedRuleId: ruleId, classifierVersion: `rule:${ruleId}`, reasonDe: 'Regel: Mahnungen' });
+    expect(audit(item.id)).toEqual({ action: 'rule_applied', actor: 'rule_engine', payload: expect.objectContaining({ rule_id: ruleId, rule_name: 'Mahnungen', matcher_kind: 'matches_description', stage: 'description', bucket: 'auto_handled' }) });
   });
 
   it('hands a mail no rule names to the classifier', async () => {
