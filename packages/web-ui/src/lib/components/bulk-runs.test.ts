@@ -902,6 +902,19 @@ describe('what the preview says about a target lynox leaves out', () => {
 		expect(bulkInvalidText('markup_dropped_before', false, true, own)).toBe('remove them where you manage them');
 		expect(i18nSource).toMatch(/'bulk\.invalid\.markup_dropped_before': \{ de: '[^']*\{where\}[^']*', en: "[^"]*\{where\}[^"]*" \}/);
 	});
+	it('words a shortcode the write would change on every run, with where to change it (1130)', () => {
+		const table: Record<string, string> = {
+			'bulk.invalid.shortcode_changed': 'change it {where}',
+			'bulk.invalid.where_shopify': 'in Shopify', 'bulk.invalid.where_other': 'where you manage them', 'bulk.invalid.other': 'skip ({code})',
+		};
+		const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => (table[k] ?? k).replace(/\{(\w+)\}/g, (_, n: string) => v[n] ?? '') };
+		expect(bulkInvalidText('shortcode_changed', true, true, own)).toBe('change it in Shopify');
+		expect(bulkInvalidText('shortcode_changed', false, true, own)).toBe('change it where you manage them');
+		expect(i18nSource).toMatch(/'bulk\.invalid\.shortcode_changed': \{ de: '(?:[^'\\]|\\.)*\{where\}(?:[^'\\]|\\.)*', en: '(?:[^'\\]|\\.)*\{where\}(?:[^'\\]|\\.)*' \}/);
+		// The way out ux released (U-103): the text below, to paste in the editor's HTML view.
+		expect(i18nSource).toContain('lynox schreibt diesen Text deshalb nicht. Den neuen Text siehst du unten. Kopier ihn und füge ihn {where} in der HTML- oder Text-Ansicht des Editors ein, nicht in der formatierten Ansicht, sonst wandelt der Editor die Zeichen selbst um. Oder bitte lynox im Chat, den Lauf ohne diese Beschreibung neu zu planen.');
+		expect(i18nSource).toContain("lynox does not write this text. You see the new text below. Copy it and paste it {where} in the editor\\'s HTML or text view, not the formatted view, or the editor converts the characters itself. Or ask lynox in the chat to plan the run again without this description.");
+	});
 	it('adds the way to support on a managed instance only, and an unknown one reads as managed', () => {
 		expect(bulkInvalidText('read_failed', true, true, i18n)).toBe('bulk.invalid.read_failed bulk.invalid.persists_support');
 		expect(bulkInvalidText('read_failed', true, null, i18n)).toBe('bulk.invalid.read_failed bulk.invalid.persists_support');

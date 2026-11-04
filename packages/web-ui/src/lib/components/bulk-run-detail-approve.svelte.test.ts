@@ -117,6 +117,30 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain('Product/2');
 	});
 
+	it('shows a description lynox does not write for a shortcode, whole, under the reason (1130)', async () => {
+		const planned = '<p>Neu</p>[button url="https://shop.example.com/sale?cat=tee&size=m"]Zum Angebot[/button]';
+		// The fixture's third product, refused for the shortcode instead of not being found.
+		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'shortcode_changed', refusedValues: [{ field: 'descriptionHtml', value: planned }] } : x));
+		await render();
+		const blocks = target.querySelectorAll('[data-testid="bulk-refused-value-text"]');
+		expect(blocks, 'one block, for the shortcode target only').toHaveLength(1);
+		expect(target.textContent).toContain(t('bulk.invalid.shortcode_changed').slice(0, 40));
+		expect(blocks[0]!.textContent).toBe(planned);
+		// One field refused: no field name over the block, as ux released it.
+		expect(target.textContent).not.toContain('descriptionHtml:');
+	});
+
+	it('shows each refused field under its name when a product has more than one (1130)', async () => {
+		const a = '[box a="1&2"]x[/box]';
+		const b = '[pbutton url="/b?x=1&y=2"]Los[/pbutton]';
+		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'shortcode_changed', refusedValues: [{ field: 'description', value: a }, { field: 'short_description', value: b }] } : x));
+		await render();
+		const blocks = [...target.querySelectorAll('[data-testid="bulk-refused-value-text"]')].map((e) => e.textContent);
+		expect(blocks).toEqual([a, b]);
+		expect(target.textContent).toContain('description:');
+		expect(target.textContent).toContain('short_description:');
+	});
+
 	it('takes a product out against the checksum it showed, and then shuts an approval with nothing left', async () => {
 		await render();
 		const approve = buttonByText(t('bulk.approve.write_one'))!;
