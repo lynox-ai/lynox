@@ -59,7 +59,7 @@ afterEach(() => {
   for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
 });
 
-describe('the entrypoint starts the engine for a uid the image has no name for', () => {
+describe('the entrypoint starts the engine when `id -un` cannot name the uid', () => {
 
   it('reaches the engine and says the uid has no name', () => {
     const r = start(sandbox(null));
