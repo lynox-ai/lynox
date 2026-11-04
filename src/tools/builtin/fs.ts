@@ -448,8 +448,8 @@ function creatingUmask(): number {
 
 /**
  * An open that failed for another reason than a link, said by the file's own path: the walk's
- * errors name it by the process handle it went through (`/proc/self/fd/N/…`), which the model
- * would copy.
+ * errors name it by the process handle it went through (a path in the process's fd table), which
+ * the model would copy.
  */
 function writeOpenError(path: string, err: unknown): Error {
   if (err instanceof WorkspaceAccessError) {
