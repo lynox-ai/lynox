@@ -142,7 +142,9 @@ function connectionLines(p: TakeoverPreview): TakeoverLine[] {
 function runsAsLine(p: TakeoverPreview): TakeoverLine {
 	if (p.runsAs === 'owner') return { kind: 'runs_as_owner', text: t('takeover.runs_as_owner') };
 	const name = nameOfTag(p.runsAs);
-	const member = p.members.find((m) => m.name === name);
+	// The same person can be listed once per access (an ended one and the live one): the member that
+	// stays is the one whose access still runs, and its own roles say how it came to the workflow.
+	const member = p.members.find((m) => m.name === name && !m.ended) ?? p.members.find((m) => m.name === name);
 	const changed = member?.roles.includes('workflow-edited') === true;
 	return {
 		kind: 'runs_as_member',

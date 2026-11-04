@@ -242,7 +242,13 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
 
   // Everyone the owner is shown: who the plan was paused for, as they are now (a renewed grant is
   // live again), every other mandate whose mark the takeover covers, and the member that stays.
+  // One entry per access, not per address: the same person under an ended grant and under a live
+  // one are two members with their own roles (a role is read per grant, `rolesOn`), so neither
+  // takes the other's lines, and the one that stays is the live one.
+  const grantKey = (email: string, mandateId: string | undefined): string => `${email}\u0000${mandateId ?? ''}`;
+  const seen = new Set<string>();
   const members: TakeoverMember[] = pausedForOf(trigger.paused_for).entries.map((e) => {
+    seen.add(grantKey(e.email, e.mandateId));
     const ended = principalHasEnded({ kind: 'mandate', email: e.email, mandateId: e.mandateId }, isLive);
     return { name: e.email, roles: e.roles, ended, reason: ended ? e.reason : null };
   });
@@ -253,7 +259,11 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
       : []),
   ];
   const named = (p: Extract<RequestPrincipal, { kind: 'mandate' }>): void => {
-    if (members.some((m) => m.name === p.email)) return;
+    const key = grantKey(p.email, p.mandateId);
+    // A mark without a grant id (written before marks carried one) names the person, not an
+    // access: it adds nobody the list already has under that address.
+    if (seen.has(key) || (p.mandateId === undefined && [...seen].some((k) => k.startsWith(`${p.email}\u0000`)))) return;
+    seen.add(key);
     members.push({ name: p.email, roles: roles(p), ended: principalHasEnded(p, isLive), reason: null });
   };
   for (const m of coveredMarks) {

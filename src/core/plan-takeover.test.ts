@@ -352,6 +352,34 @@ describe('the workflow’s side', () => {
     expect(out.kind === 'taken_over' && out.runsAs).toBe(tag('h@x.ch'));
   });
 
+  it('one person under two grants is two members, each with its own roles: the ended one and the live one that stays', () => {
+    const b = box();
+    // The workflow was made under a later, live grant of the same person the plan was paused for.
+    workflow(b, 'w', { email: 'h@x.ch', grant: 'g2-h@x.ch' });
+    renewed(b, 'h@x.ch', 'g2-h@x.ch');
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    if (p.kind !== 'preview') throw new Error('no preview');
+    expect(p.preview.runsAs).toBe(tag('h@x.ch'));
+    expect(p.preview.members).toEqual([
+      { name: 'h@x.ch', roles: ['created'], ended: true, reason: 'expired' },
+      { name: 'h@x.ch', roles: ['workflow-created'], ended: false, reason: null },
+    ]);
+  });
+
+  it('a mark without a grant id adds nobody the list already has under that address', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch', grant: null });
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    if (p.kind !== 'preview') throw new Error('no preview');
+    expect(p.preview.members.map((m) => m.name)).toEqual(['h@x.ch']);
+  });
+
   it('the member that stays is named, as live', () => {
     const b = box();
     workflow(b, 'w', { email: 'z@x.ch' });

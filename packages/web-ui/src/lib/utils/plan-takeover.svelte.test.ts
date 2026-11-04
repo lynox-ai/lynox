@@ -180,6 +180,21 @@ describe('T-4 or T-5: whom the plan runs for afterwards', () => {
 	});
 });
 
+describe('one person under two grants (1029)', () => {
+	it('T-5 reads the live grant\'s roles, not the ended one\'s listed first, and each grant keeps its own line', () => {
+		const p = preview({
+			// The plan was made under an ended grant; the workflow was changed under the person's live one.
+			members: [{ name: 'ida@x.ch', roles: ['created'], ended: true, reason: 'expired' }, { name: 'ida@x.ch', roles: ['workflow-edited'], ended: false, reason: null }],
+			runsAs: 'mandate:ida@x.ch',
+			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
+		});
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'runs_as_member')?.text).toBe(
+			'Den Workflow „Rechnungen“ hat ida@x.ch geändert, und ida@x.ch hat weiter Zugang. Darum läuft der Plan danach unter dem Namen von ida@x.ch, nicht unter deinem. Endet dieser Zugang, pausiert der Plan wieder, und du kannst ihn dann noch einmal übernehmen.',
+		);
+		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'role').map((l) => l.text)).toEqual(['Angelegt von ida@x.ch', 'Nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat']);
+	});
+});
+
 describe('T-6: a one-shot that runs only on "Run now"', () => {
 	it('(a) the date was missed', () => {
 		const lines = takeoverLines(preview({ schedule: 'run_now_only_missed', dueAt: '2026-11-02T08:00:00.000Z' }), fmt);
