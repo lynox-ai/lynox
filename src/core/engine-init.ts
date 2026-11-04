@@ -496,13 +496,27 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   try {
     try {
       vault = new SecretVault();
-      const migrated = vault.migrateFromFile();
-      if (migrated > 0) {
-        parts.push(engineText(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`));
-      }
+      // The two migrations below write plaintext secrets into the vault and then delete their
+      // source. Under a key the vault was not written with, the copies would not decrypt once
+      // the right key is back, and the plaintext would be gone. So while any stored entry does
+      // not decrypt under the loaded key, neither runs: the plaintext stays where it is, and
+      // they run on the next boot whose key opens every entry. A vault with a corrupt entry
+      // holds them back as well; that keeps plaintext on disk, it loses nothing.
+      const undecryptable = vault.undecryptableCount();
+      if (undecryptable > 0) {
+        process.stderr.write(
+          `⚠ Vault: ${undecryptable} stored secret(s) do not decrypt with the current LYNOX_VAULT_KEY — ` +
+          `not moving secrets from secrets.json or config.json into the vault on this boot.\n`,
+        );
+      } else {
+        const migrated = vault.migrateFromFile();
+        if (migrated > 0) {
+          parts.push(engineText(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`));
+        }
 
-      // Migrate secrets from plaintext config to vault
-      _migrateConfigSecretsToVault(vault, userConfig);
+        // Migrate secrets from plaintext config to vault
+        _migrateConfigSecretsToVault(vault, userConfig);
+      }
 
       // Load secrets from vault — vault wins over config.json, but explicit env vars
       // always override vault (so users can fix stale vault entries without Web UI).
