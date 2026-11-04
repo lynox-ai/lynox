@@ -33,7 +33,7 @@ import {
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
 import { verdictTextRefusal } from './bulk-judge.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
-import { shopifyBulkReadEnabled, shopifyContextOf, shopifyListPage, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
+import { shopifyBulkReadEnabled, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { productTitleOf } from './shopify-saved-form.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
@@ -266,6 +266,10 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       const image = shopifyTargetBeforeImage(shopifyForm ?? 'shopify_product', read.value, target.key);
       if ('invalid' in image) {
         ledger.recordRead(runId, seq, image);
+      } else if (!shopifyInFilter(read.value, list?.source.filters ?? {})) {
+        // Shopify's search lists a neighbour spelling too (diacritics folded, PRD shopify-preset
+        // §22.4): a product the filter does not name is left out before it is judged or written.
+        ledger.recordRead(runId, seq, { invalid: 'not_in_filter' });
       } else {
         // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
         const after = shopifyPairedAfter(target.after, image.value);
@@ -307,15 +311,20 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   }
 
   if (ledger.listUnread(runId).length > 0) return pending(now() + DEFAULT_RETRY_MS, 'Bulk preview has targets left to read.');
+  // A filtered list whose every listed product fell out as `not_in_filter` matched nothing either
+  // (PRD shopify-preset §22.2 item 7): it says so as a list that listed none does.
+  const counted = ledger.getStatus(runId);
+  const noneLeft = list !== null && counted !== null && counted.total > 0 && counted.invalidReasons.not_in_filter === counted.total
+    ? noMatchSentence(list.source.filters, say) : null;
   // A judged run is read for its judge, which goes on in the same effect (`bulk-judge.ts`): its
   // targets have no after-state yet, so reading them does not make it previewed.
   if (ledger.getJudgeRun(runId) !== null) {
-    return { status: 'done', summary: costed(summarize(ledger, runId, say.readDone, say)) };
+    return { status: 'done', summary: costed(summarize(ledger, runId, noneLeft ?? say.readDone, say)) };
   }
   if (!ledger.finishPreview(runId)) {
     return { status: 'halted', summary: summarize(ledger, runId, say.previewStopped, say) };
   }
-  return { status: 'done', summary: costed(summarize(ledger, runId, say.previewDone, say)) };
+  return { status: 'done', summary: costed(summarize(ledger, runId, noneLeft ?? say.previewDone, say)) };
 
   /**
    * Read the run's list, page by page from the one after the last recorded, until a short

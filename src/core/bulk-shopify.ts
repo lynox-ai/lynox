@@ -116,6 +116,29 @@ export function shopifyBeforeImage(data: unknown, gid: string): { value: Record<
   return { value };
 }
 
+/** A text with only `A`–`Z` made lower case: no locale and no Unicode case mapping takes part. */
+function asciiLower(text: string): string {
+  return text.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+/**
+ * Whether a product, as the preview's `shopify_product_read` answered it, lies in the list's
+ * filters (PRD shopify-preset §22.4, `not_in_filter`): each filter's field of the RAW answer
+ * equals its value up to ASCII letter case. Shopify's search folds diacritics, so a search for
+ * `Gemuse` lists `Gemüse` too; this check does not, and fails closed — `GEMÜSE` is not in a
+ * `Gemüse` group, and an answer without the field, or with another key, is in none. A list
+ * without filters holds every product it lists.
+ */
+export function shopifyInFilter(data: unknown, filters: Readonly<Record<string, string>>): boolean {
+  const product = isPlainObject(data) && isPlainObject(data['product']) ? data['product'] : {};
+  const field: Readonly<Record<string, string>> = { product_type: 'productType', vendor: 'vendor' };
+  return Object.entries(filters).every(([key, value]) => {
+    const name = Object.hasOwn(field, key) ? field[key]! : null;
+    const held = name === null ? undefined : product[name];
+    return typeof held === 'string' && asciiLower(held) === asciiLower(value);
+  });
+}
+
 /**
  * The context C of a product from the same `shopify_product_read` answer as its before-image
  * (PRD shopify-preset §20.2 item 7): each of `fields` flat, as {@link SHOPIFY_CONTEXT_FIELDS} names

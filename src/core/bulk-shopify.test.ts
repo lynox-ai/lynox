@@ -26,7 +26,7 @@ import {
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { bulkRunContract, externalRunWriter } from './bulk-external-writer.js';
-import { shopifyBeforeImage, shopifyContextOf, shopifyListPage, shopifyPairedAfter, shopifyTargetIo } from './bulk-shopify.js';
+import { shopifyBeforeImage, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyPairedAfter, shopifyTargetIo } from './bulk-shopify.js';
 import { SHOPIFY_READ_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { ApiStore } from './api-store.js';
@@ -199,8 +199,13 @@ function serve(s: Store): () => void {
       const terms = [...m[2]!.matchAll(/ AND (product_type|vendor):"([^"]*)"/g)].map((t) => [t[1] as 'product_type' | 'vendor', t[2]!] as const);
       const special = s.listAnswer?.(afterId);
       if (special !== undefined) return new Response(JSON.stringify(special), { status: 200 });
-      // Matched like Shopify matches a quoted value: whole value, letter case ignored (measured, M-F1).
-      const inGroup = (id: number): boolean => terms.every(([k, v]) => s.groups?.get(id)?.[k]?.toLowerCase() === v.toLowerCase());
+      // Matched like Shopify matches a quoted value: whole value, letter case ignored (measured,
+      // M-F1), and diacritics folded, so `Gemuse` lists `Gemüse` too (measured, M-F2).
+      const folded = (t: string): string => t.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+      const inGroup = (id: number): boolean => terms.every(([k, v]) => {
+        const held = s.groups?.get(id)?.[k];
+        return held !== undefined && folded(held) === folded(v);
+      });
       const ids = [...s.products.keys()].filter((id) => id > afterId && inGroup(id)).sort((a, b) => a - b).slice(0, variables['n'] as number);
       return new Response(JSON.stringify({ data: { products: { nodes: ids.map((id) => ({ id: gid(id) })) } } }), { status: 200 });
     }
@@ -209,7 +214,10 @@ function serve(s: Store): () => void {
     if (special !== undefined) return new Response(JSON.stringify(special), { status: 200 });
     const n = Number(id.slice(id.lastIndexOf('/') + 1));
     const p = s.products.get(n);
-    return new Response(JSON.stringify({ data: { product: p === undefined ? null : { id, ...p } } }), { status: 200 });
+    // A product of a group answers its product type and vendor as the store holds them.
+    const g = s.groups?.get(n);
+    const group = { ...(g?.product_type !== undefined ? { productType: g.product_type } : {}), ...(g?.vendor !== undefined ? { vendor: g.vendor } : {}) };
+    return new Response(JSON.stringify({ data: { product: p === undefined ? null : { id, ...p, ...group } } }), { status: 200 });
   });
 }
 
@@ -399,6 +407,88 @@ describe('reading a store\'s product list narrowed by a filter', () => {
   it('keeps the German sentence of an empty list without a filter', async () => {
     const summary = (await runBulkPreview(startedList(), deps({ notices: BULK_NOTICES.de }))).summary;
     expect(summary.startsWith('Liste gelesen. Sie enthält kein Ziel, das sich planen lässt.'), summary).toBe(true);
+  });
+
+  // Shopify's search folds diacritics (M-F2): `Gemuse` lists `Gemüse` too. The preview compares
+  // each listed product with the filter on the raw read answer, up to ASCII letter case only
+  // (PRD shopify-preset §22.4), and leaves out what the filter does not name.
+  describe('a product the search lists under a folded spelling', () => {
+    const FOLDED: [string, 'product_type' | 'vendor'][] = [['product type', 'product_type'], ['vendor', 'vendor']];
+    /** 10 holds the value, 20 its diacritic neighbour, 30 the value in ASCII capitals. */
+    function neighbours(key: 'product_type' | 'vendor'): void {
+      fill(3);
+      s.groups = new Map([[10, { [key]: 'Gemuse' }], [20, { [key]: 'Gemüse' }], [30, { [key]: 'GEMUSE' }]]);
+    }
+    async function read(src: BulkListSource): Promise<string> {
+      vi.stubEnv(FLAG, '1');
+      const id = startedList(src);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      // The store's search listed all three: the folded neighbour is the engine's to leave out.
+      expect(ledger.externalTargetKeys(id)).toEqual([gid(10), gid(20), gid(30)]);
+      expect(ledger.resumePreview(id).ok).toBe(true);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      return id;
+    }
+    const apply = (id: string): Promise<{ status: string }> => runBulkEffect(id, 'bulk_apply', {
+      ledger, trailFor: () => null,
+      writerFor: (run) => bulkWriterFor(run, null, (r) => {
+        const granted = ledger.shopifyApplyOf(r.id);
+        const stored = r.contractJson === null ? null : parseBulkContract(r.contractJson);
+        if (granted === null || stored === null) return null;
+        const c = client(withShopifyApply(stored, HOST, granted));
+        return externalWriter(c, { sleep: async () => {}, io: shopifyTargetIo(c, ENDPOINT) });
+      }),
+    });
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it.each(FOLDED)('is listed by the %s filter, left out as not_in_filter, and never written, while ASCII capitals pass', async (_name, key) => {
+      neighbours(key);
+      const id = await read(filtered({ [key]: 'Gemuse' }));
+      expect(ledger.getPreview(id).map((t) => [t.key, t.change, t.error])).toEqual([
+        [gid(10), 'update', null], [gid(20), 'invalid', 'not_in_filter'], [gid(30), 'update', null],
+      ]);
+      expect(ledger.getStatus(id)!.invalidReasons).toEqual({ not_in_filter: 1 });
+      expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+      expect(ledger.shopifyApplyOf(id)!.writes.map((w) => w.gid)).not.toContain(gid(20));
+      s.requests.length = 0;
+      await apply(id);
+      expect(ledger.confirmProbe(id)).toEqual({ ok: true });
+      expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 2 })).toMatchObject({ ok: true });
+      await apply(id);
+      expect(s.requests.filter((r) => 'seoTitle' in r.variables).map((r) => r.variables['id'])).toEqual([gid(10), gid(30)]);
+      expect(s.products.get(20)!['seo']).toEqual({ title: null, description: 'D2' });
+    });
+
+    it('leaves out a product whose answer lacks the filtered field, and keeps the summary of a list that kept some', async () => {
+      neighbours('product_type');
+      // 30 lists under the filter, but its read answers no product type: fail closed.
+      s.productAnswer = (id) => id === gid(30) ? { data: { product: { id, title: 'T3', descriptionHtml: '<p>3</p>', seo: { title: null, description: 'D3' } } } } : undefined;
+      vi.stubEnv(FLAG, '1');
+      const id = startedList(filtered({ product_type: 'Gemuse' }));
+      await runBulkPreview(id, deps());
+      expect(ledger.resumePreview(id).ok).toBe(true);
+      const out = await runBulkPreview(id, deps());
+      expect(ledger.getPreview(id).map((t) => t.error)).toEqual([null, 'not_in_filter', 'not_in_filter']);
+      expect(out.summary.startsWith('Bulk preview done.'), out.summary).toBe(true);
+    });
+
+    it.each([
+      ['en', { product_type: 'Gemuse' }, 'List read: no product has the product type in the filter.'],
+      ['de', { vendor: 'Gemuse' }, 'Liste gelesen: Kein Produkt hat den Anbieter aus dem Filter.'],
+    ])('says in %s that no product matched %j when every listed one fell out as not_in_filter', async (lang, filters, text) => {
+      fill(2);
+      const key = Object.keys(filters)[0]!;
+      s.groups = new Map([[10, { [key]: 'Gemüse' }], [20, { [key]: 'Gémuse' }]]);
+      vi.stubEnv(FLAG, '1');
+      const id = startedList(filtered(filters));
+      await runBulkPreview(id, deps({ notices: BULK_NOTICES[lang as 'en' | 'de'] }));
+      expect(ledger.externalTargetKeys(id)).toEqual([gid(10), gid(20)]);
+      expect(ledger.resumePreview(id).ok).toBe(true);
+      const out = await runBulkPreview(id, deps({ notices: BULK_NOTICES[lang as 'en' | 'de'] }));
+      expect(out.status).toBe('done');
+      expect(out.summary.startsWith(text), out.summary).toBe(true);
+      expect(out.summary).not.toContain('Gemuse');
+    });
   });
 
   it.each([
@@ -1217,7 +1307,7 @@ describe('applying a Shopify run', () => {
     });
     const previewedWith = async (after: Record<string, unknown>): Promise<string> => {
       vi.stubEnv(FLAG, '1');
-      const id = startedList(after);
+      const id = startedList(source(after));
       expect((await runBulkPreview(id, deps())).status).toBe('done');
       expect(ledger.resumePreview(id).ok).toBe(true);
       expect((await runBulkPreview(id, deps())).status).toBe('done');
@@ -1395,9 +1485,9 @@ describe('a judged Shopify run', () => {
   const RULE = { rule: 'Write a better SEO title.', schema: { seo_title: { type: 'string', maxLength: 70 } } };
 
   /** Planned, its list read, and started for judging: the state the worker's judge loop meets. */
-  async function judgedRun(): Promise<string> {
+  async function judgedRun(filters?: Record<string, string>): Promise<string> {
     const judge = normalizeJudgeRule(RULE);
-    const src = parseListSource(HOST, { form: 'shopify', after: judgeTemplate(judge) }, 'PATCH', scan);
+    const src = parseListSource(HOST, { form: 'shopify', ...(filters !== undefined ? { filters } : {}), after: judgeTemplate(judge) }, 'PATCH', scan);
     const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source: src, readContract: listReadContract(HOST, src), judge });
     if (!out.ok) throw new Error(out.reason);
     const id = out.status.id;
@@ -1429,6 +1519,27 @@ describe('a judged Shopify run', () => {
     };
     return box;
   }
+
+  it('never sends the model a product the filter does not name, though the search listed it', async () => {
+    fill(3);
+    s.groups = new Map([[10, { product_type: 'Gemuse' }], [20, { product_type: 'Gemüse' }], [30, { product_type: 'gemuse' }]]);
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await judgedRun({ product_type: 'Gemuse' });
+      expect(ledger.externalTargetKeys(id)).toEqual([gid(10), gid(20), gid(30)]);
+      const box = judgeDeps(id);
+      expect((await runBulkJudge(id, box.deps)).status).toBe('done');
+      expect(box.calls).toBe(2);
+      expect(ledger.getPreview(id).map((t) => [t.key, t.change, t.error, t.after])).toEqual([
+        [gid(10), 'update', null, { seo_title: 'S1', seo_description: 'D1' }],
+        // Never judged: the plan's template stands, with no value of the model's.
+        [gid(20), 'invalid', 'not_in_filter', { seo_title: null }],
+        [gid(30), 'update', null, { seo_title: 'S2', seo_description: 'D3' }],
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   it('halts before the next paid call once the operator switches Shopify off', async () => {
     fill(3);
@@ -1564,9 +1675,9 @@ describe('the context C of a judged Shopify run (PRD shopify-preset §20.2 item 
       .toEqual({ tags: null, vendor: null, productType: null });
   });
 
-  async function contextRun(context: readonly string[]): Promise<string> {
+  async function contextRun(context: readonly string[], filters?: Record<string, string>): Promise<string> {
     const judge = normalizeJudgeRule({ rule: 'Write SEO texts from the product.', schema: F, context }, { contextFields: SHOPIFY_CONTEXT_FIELDS });
-    const src = parseListSource(HOST, { form: 'shopify', after: judgeTemplate(judge) }, 'PATCH', scan);
+    const src = parseListSource(HOST, { form: 'shopify', ...(filters !== undefined ? { filters } : {}), after: judgeTemplate(judge) }, 'PATCH', scan);
     const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source: src, readContract: listReadContract(HOST, src), judge });
     if (!out.ok) throw new Error(out.reason);
     const id = out.status.id;
@@ -1671,10 +1782,12 @@ describe('the context C of a judged Shopify run (PRD shopify-preset §20.2 item 
     expect(() => normalizeJudgeRule({ rule: 'x', schema: F, context: ['seo_title'] }, { contextFields: SHOPIFY_CONTEXT_FIELDS })).toThrow(/decides/);
   });
 
-  it('refuses at the start a stored context the list\'s form does not read, or naming the list\'s id field', async () => {
+  // A filtered list is stored under a form of its own; its products are read as any product list's.
+  it.each([['every product', undefined], ['a filtered list', { vendor: 'Acme' }]] as const)('refuses at the start a stored context the form of %s does not read', async (_name, filters) => {
     vi.stubEnv(FLAG, '1');
     try {
       stores();
+      s.groups = new Map([[10, { vendor: 'Acme' }]]);
       const swap = (id: string, context: string[]): void => {
         const [text, hash] = (ledger as unknown as { judgeColumns(j: unknown): [string, string] })
           .judgeColumns({ ...normalizeJudgeRule({ rule: 'x', schema: F }), context });
@@ -1682,7 +1795,8 @@ describe('the context C of a judged Shopify run (PRD shopify-preset §20.2 item 
       };
       const begin = (id: string): ReturnType<BulkLedger['resumePreview']> =>
         ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
-      const shop = await contextRun(['vendor']);
+      const shop = await contextRun(['vendor'], filters);
+      expect(ledger.getListRun(shop)!.source.form).toBe(filters === undefined ? 'shopify' : SHOPIFY_FILTERED_LIST_FORM);
       swap(shop, ['note']);
       expect(begin(shop)).toMatchObject({ ok: false, reason: 'rule_refused' });
       // Twin: the same run with a name the form reads starts.
@@ -1714,5 +1828,30 @@ describe('the context C of a judged Shopify run (PRD shopify-preset §20.2 item 
       engineDb.getDb().prepare('UPDATE bulk_runs SET judge_rule = ?, judge_rule_hash = ? WHERE id = ?').run(text2, hash2, planned.status.id);
       expect(begin(planned.status.id).ok).toBe(true);
     }
+  });
+});
+
+describe('whether a read product lies in a list\'s filters', () => {
+  const answer = (product: Record<string, unknown>): unknown => ({ product: { id: gid(10), ...product } });
+  it.each([
+    ['the same value', { productType: 'Gemuse' }, { product_type: 'Gemuse' }, true],
+    ['ASCII capitals', { productType: 'GEMUSE' }, { product_type: 'gemuse' }, true],
+    ['a diacritic the search folds', { productType: 'Gemüse' }, { product_type: 'Gemuse' }, false],
+    ['the reverse fold', { productType: 'Gemuse' }, { product_type: 'Gemüse' }, false],
+    // Only A–Z change case: `Ü` and `ü` are two letters here, so a store type in capitals falls out.
+    ['a capital letter outside ASCII', { productType: 'GEMÜSE' }, { product_type: 'Gemüse' }, false],
+    ['a vendor', { productType: 'Tee', vendor: 'Acme' }, { vendor: 'ACME' }, true],
+    ['both, one of them off', { productType: 'Tee', vendor: 'Acmé' }, { product_type: 'Tee', vendor: 'Acme' }, false],
+    ['a missing field', { vendor: 'Acme' }, { product_type: 'Tee' }, false],
+    ['a field that is not text', { productType: ['Tee'] }, { product_type: 'Tee' }, false],
+    ['a key no field answers', { productType: 'Tee' }, { tag: 'Tee' }, false],
+    ['the filter key as a field name', { product_type: 'Tee' }, { product_type: 'Tee' }, false],
+    ['no filter', {}, {}, true],
+  ])('%s', (_name, product, filters, inside) => {
+    expect(shopifyInFilter(answer(product), filters)).toBe(inside);
+  });
+  it('holds no product of an answer that is not one', () => {
+    expect(shopifyInFilter({ product: null }, { vendor: 'Acme' })).toBe(false);
+    expect(shopifyInFilter('Acme', { vendor: 'Acme' })).toBe(false);
   });
 });

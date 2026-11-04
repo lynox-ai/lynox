@@ -130,6 +130,9 @@ export type BulkInvalidReason =
   | 'list_item_mismatch'
   /** a product held more media than its list page reads: those past it are not listed */
   | 'list_item_truncated'
+  /** a filtered Shopify list's search listed a product whose product type or vendor is not the
+   *  filter's value up to ASCII letter case (Shopify folds diacritics; PRD shopify-preset §22.4) */
+  | 'not_in_filter'
   /** An undo would write back an `actual` whose read-back held markup the write never sent
    *  (`shop_added_markup`, PRD shopify-preset §21.2 item 7 (b)): never the owner's state. */
   | 'shop_added_markup'
