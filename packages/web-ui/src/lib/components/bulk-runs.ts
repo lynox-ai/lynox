@@ -442,6 +442,9 @@ export interface BulkTarget {
 	shopAddedMarkup?: true | undefined;
 	/** Written, and the store kept the description otherwise than sent, without outside markup. */
 	hostRewrote?: true | undefined;
+	/** A Shopify product's SEO fields whose new text holds `&`, `<` or `>` more often than before,
+	 *  which a theme may show as `&amp;`, `&lt;` or `&gt;`. A note; nothing is refused. */
+	seoEntityFields?: string[] | undefined;
 	/** Refused for `shortcode_changed`: each field the shortcode check refuses, with its whole
 	 *  planned value, for the owner to copy into the shop (1130). Set only where one holds. */
 	refusedValues?: { field: string; value: string }[] | undefined;
@@ -651,6 +654,12 @@ export function bulkRollbackIncomplete(run: Pick<BulkRun, 'phase' | 'haltKey'>):
  *  target it wrote and did not take back. */
 export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target: Pick<BulkTarget, 'written' | 'undone'>): boolean {
 	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
+}
+
+/** How many targets the owner still writes whose SEO text gains `&`, `<` or `>`: the products
+ *  the preview's line names. One the owner took out is not counted. */
+export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntityFields' | 'deselected'>[]): number {
+	return targets.filter((x) => (x.seoEntityFields?.length ?? 0) > 0 && x.deselected !== true).length;
 }
 
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;

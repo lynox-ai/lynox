@@ -29,6 +29,28 @@ export function shopifyBulkReadEnabled(): boolean {
 /** The fields of a product's flat before-image, and so of a Shopify run's after-state. */
 export const SHOPIFY_PRODUCT_FIELDS = ['title', 'descriptionHtml', 'seo_title', 'seo_description'] as const;
 
+/** The characters a theme may show as an entity in a product's SEO title or description. */
+const SEO_ENTITY_CHARS = ['&', '<', '>'] as const;
+
+/**
+ * The SEO fields of a product's after-state that hold one of `&`, `<` or `>` more often than its
+ * before-image holds it. A theme may escape `page_title` and `page_description` twice, and then the
+ * browser tab and a search result show `&amp;`, `&lt;` or `&gt;` (measured on one theme, not on
+ * every one). lynox cannot tell which theme does, so the preview names the target and refuses
+ * nothing: "A & B" is a legitimate text.
+ */
+export function shopifySeoEntityFields(prior: unknown, after: unknown): string[] {
+  if (!isPlainObject(after)) return [];
+  const held = isPlainObject(prior) ? prior : {};
+  const count = (text: string, c: string): number => text.split(c).length - 1;
+  return (['seo_title', 'seo_description'] as const).filter((field) => {
+    const next = after[field];
+    if (typeof next !== 'string') return false;
+    const was = typeof held[field] === 'string' ? held[field] as string : '';
+    return SEO_ENTITY_CHARS.some((c) => count(next, c) > count(was, c));
+  });
+}
+
 /** The field of an image's before-image, and so of a media run's after-state. */
 export const SHOPIFY_MEDIA_FIELDS = ['alt'] as const;
 

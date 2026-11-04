@@ -28,7 +28,7 @@ import { checkMarkup, droppedTagsOf, endsClosed, shortcodeRefusalOf, htmlFieldsO
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqual } from './html-tree.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
-import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
+import { shopifyBulkReadEnabled, shopifyPairedAfter, shopifySeoEntityFields } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
@@ -617,6 +617,10 @@ export interface PreviewTarget {
   /** Written, and the store kept an HTML field otherwise than sent, within what the run may write:
    *  counted and named, not halted. Set only where it holds. */
   hostRewrote?: true | undefined;
+  /** A Shopify product's `update` in a run that is not an undo: the SEO fields whose after-state
+   *  holds `&`, `<` or `>` more often than the before-image (`shopifySeoEntityFields`), which a
+   *  theme may show as an entity. A note to the owner; nothing is refused. Set only where it holds. */
+  seoEntityFields?: string[] | undefined;
   /** With `secret_in_context`: the field of the rule's context C that held it, by its name, so the
    *  owner knows which one to clean. Never its value. */
   contextField?: string | undefined;
@@ -1583,6 +1587,9 @@ export class BulkLedger {
     const contextNames = judged ? this.judgeRuleOf(run!).context ?? [] : [];
     // An undo's list is what it restores: the HTML fields of the run its family started from.
     const htmlFields = this.htmlFieldsOf(runId);
+    // An undo writes back what the product held before, so what a theme shows of it is the
+    // owner's own earlier state, not a text lynox wrote.
+    const seoNoted = run !== undefined && run.kind !== 'undo' && this.shopifyFormOfRun(run) === 'shopify_product';
     return rows.map((r) => {
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
       // A judged target without its verdict holds the template (every field null), not a plan:
@@ -1615,6 +1622,7 @@ export class BulkLedger {
           return typeof value === 'string' && value !== was && refusesShortcode(value, typeof was === 'string' ? was : null) ? [{ field: f, value }] : [];
         })
         : [];
+      const seoEntityFields = seoNoted && r.change === 'update' ? shopifySeoEntityFields(prior, after) : [];
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
@@ -1626,6 +1634,7 @@ export class BulkLedger {
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
         ...(refusedValues.length > 0 ? { refusedValues } : {}),
+        ...(seoEntityFields.length > 0 ? { seoEntityFields } : {}),
       };
     });
   }

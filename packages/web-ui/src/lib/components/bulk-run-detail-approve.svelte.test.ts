@@ -444,3 +444,42 @@ describe('the sentence and the way on for a halt', () => {
 		expect(target.textContent).not.toContain('engine English');
 	});
 });
+
+// A preview whose SEO text gains an &: a theme may show it as `&amp;`. A note above the list and a
+// mark on each product; nothing is refused, and a product the owner takes out is not counted.
+describe('a preview whose SEO text gains an &', () => {
+	const gaining = (marked: number[], deselected: number[] = [], o: Partial<BulkRunDetailData> = {}): void => {
+		run = makeRun({ total: 4, changes: { update: 4, create: 0, delete: 0, unchanged: 0, invalid: 0 }, ...o });
+		targets = Array.from({ length: 4 }, (_, i): BulkTarget => ({
+			seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: fieldsDiff('A', 'B'), error: null,
+			deselected: deselected.includes(i + 1), ...(marked.includes(i + 1) ? { seoEntityFields: ['seo_title'] } : {}),
+		}));
+	};
+	const line = (): string | null | undefined => target.querySelector('[data-testid="bulk-seo-entity-count"]')?.textContent;
+	const markedKeys = (): string[] => [...target.querySelectorAll('[data-testid="bulk-seo-entity"]')]
+		.map((m) => m.closest('tr')?.querySelector('code')?.textContent ?? '');
+
+	it('names two products with their number, marks each, and shows the entity as text', async () => {
+		gaining([1, 3]);
+		await render();
+		expect(line()).toBe(tf('bulk.preview.seo_entity', { n: '2' }));
+		expect(line()).toContain('&amp;');
+		expect(markedKeys()).toEqual(['gid://shopify/Product/1', 'gid://shopify/Product/3']);
+	});
+
+	it('names one product in the singular, and does not count one the owner took out', async () => {
+		gaining([1, 3], [3]);
+		await render();
+		expect(line()).toBe(t('bulk.preview.seo_entity_one'));
+	});
+
+	it('shows no line where none gains one, nor on a run that is not awaiting approval', async () => {
+		gaining([]);
+		await render();
+		expect(line()).toBeUndefined();
+		gaining([2], [], { phase: 'done', applied: 4, probeConfirmed: true });
+		await render();
+		expect(line()).toBeUndefined();
+		expect(markedKeys()).toEqual(['gid://shopify/Product/2']);
+	});
+});
