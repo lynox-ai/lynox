@@ -43,12 +43,15 @@ export function heldSource(source: RunSource | undefined): SavedRunSource | unde
 }
 
 export const WORKFLOW_ENDED_REFUSAL = 'This workflow was set up or changed by someone whose access has ended, so it does not run.';
-// Texts reviewed with ux (U-122).
-/** The run's stored error when a maker's access ended mid-run: what the library shows and what the
- *  worker keys on. No sentence to the model in it (1184); that is `WORKFLOW_ENDED_MID_RUN`. */
-export const WORKFLOW_ENDED_MID_RUN_ERROR = 'The access of someone who set up or changed this workflow ended while it ran, so it stopped before its next step.';
+// Texts reviewed with ux (U-122; the stored error U-145).
+/** Why a run stopped when a maker's access ended mid-run; both texts below begin with it. */
+const ENDED_MID_RUN_CAUSE = 'The access of someone who set up or changed this workflow ended while it ran, so it stopped before its next step.';
+/** The run's stored error for that end: what the library shows the owner, and what the worker keys
+ *  on. It speaks to the person, not to the model (1184); the model's text is `WORKFLOW_ENDED_MID_RUN`. */
+export const WORKFLOW_ENDED_MID_RUN_ERROR = `${ENDED_MID_RUN_CAUSE} `
+  + 'Starting it again will not work. To finish the remaining steps, ask lynox in a chat to do them or to write a new workflow for them.';
 /** What the model is told, as the result's `endedBecause`, when a run ended for that cause. */
-export const WORKFLOW_ENDED_MID_RUN = `${WORKFLOW_ENDED_MID_RUN_ERROR} `
+export const WORKFLOW_ENDED_MID_RUN = `${ENDED_MID_RUN_CAUSE} `
   + 'The steps listed in this result ran; the others did not. Starting this workflow again is refused for the same reason, so do not start it again. '
   + 'If the remaining steps are still needed, tell the user they can describe them in chat and ask lynox to do them or to write a new workflow for them.';
 /** The run's stored error, and its `endedBecause`, when the read of the makers' access threw

@@ -388,6 +388,14 @@ describe('an access that ends mid-run ends the run before its next step (1100)',
     expect(String(stored[0])).not.toMatch(/tell the user|do not start it again/i);
   });
 
+  it('the wording, as reviewed: the stored error speaks to the person (U-145), the model text is unchanged (U-122)', () => {
+    expect(WORKFLOW_ENDED_MID_RUN_ERROR).toBe('The access of someone who set up or changed this workflow ended while it ran, so it stopped before its next step. '
+      + 'Starting it again will not work. To finish the remaining steps, ask lynox in a chat to do them or to write a new workflow for them.');
+    expect(WORKFLOW_ENDED_MID_RUN).toBe('The access of someone who set up or changed this workflow ended while it ran, so it stopped before its next step. '
+      + 'The steps listed in this result ran; the others did not. Starting this workflow again is refused for the same reason, so do not start it again. '
+      + 'If the remaining steps are still needed, tell the user they can describe them in chat and ask lynox to do them or to write a new workflow for them.');
+  });
+
   it("the owner's chat still reads what to tell the user, as the result's endedBecause (1184)", async () => {
     authorship = BEAS;
     twoSteps();
