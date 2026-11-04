@@ -566,10 +566,11 @@ export interface PreviewTarget {
    *  and removes, each with its full value (PRD shopify-preset §20.2 item 5, M3). Computed here
    *  from the parser's tree, so the view shows it and computes nothing. */
   markupChanges?: FieldMarkupChange[] | undefined;
-  /** A target refused for `shortcode_changed` (1130): each HTML field whose value the shortcode
-   *  check refuses against that field's before-image, with its whole value as the planner or the
-   *  judge wrote it. Nothing is written for the target, so the owner copies these values into the
-   *  shop themselves. Set only where one holds. */
+  /** A target refused for `shortcode_changed` (1130): each HTML field the value changes and whose
+   *  shortcode the check refuses (against its before-image where the row holds one; a planned
+   *  target refused at its read holds none), with its whole value as the planner or the judge
+   *  wrote it. Nothing is written for the target, so the owner copies these values into the shop
+   *  themselves. Set only where one holds. */
   refusedValues?: { field: string; value: string }[] | undefined;
   /** Written, and its read-back held markup the write never sent (PRD shopify-preset §21.2
    *  item 6): the target the halt `markupAddedByShop` is about. Set only where it holds. */
@@ -1549,13 +1550,15 @@ export class BulkLedger {
         })
         : [];
       // The fields a `shortcode_changed` refusal is about, each with the whole value written for it:
-      // only those the shortcode check refuses against their own before-image, so a shortcode a
-      // field already holds does not stand in for the one refused in another field.
+      // a field the value changes and the shortcode check refuses, against its before-image where
+      // the row holds one, so a shortcode a field already holds does not stand in for the one
+      // refused in another. A planned target refused at its read holds no before-image: there each
+      // changed field is checked against none, and may be shown although its shortcode was held.
       const refusedValues = r.change === 'invalid' && r.error === 'shortcode_changed' && after !== null && typeof after === 'object'
         ? htmlFields.flatMap((f) => {
           const value = (after as Record<string, unknown>)[f];
           const was = prior !== null && typeof prior === 'object' ? (prior as Record<string, unknown>)[f] : null;
-          return typeof value === 'string' && refusesShortcode(value, typeof was === 'string' ? was : null) ? [{ field: f, value }] : [];
+          return typeof value === 'string' && value !== was && refusesShortcode(value, typeof was === 'string' ? was : null) ? [{ field: f, value }] : [];
         })
         : [];
       return {

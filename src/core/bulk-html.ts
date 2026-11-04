@@ -308,18 +308,125 @@ function refused(reason: MarkupRefusal, detail: string): MarkupCheckResult {
  *  unchecked. Bracketed prose that is no shortcode is read as one too, so it is refused rather than
  *  rewritten when it changes. The two brackets of a CDATA opener (`<![CDATA[`) are not a shortcode's:
  *  the shop would read one only under a shortcode named `CDATA`, and the tree checks below are what
- *  judge the section's text. */
-const SHORTCODE_TAG = /(?<!<!|<!\[CDATA)\[[^\]]*\]/g;
-/** A paired shortcode and what it encloses, which its handler reads as a string too. The name is
- *  anything WordPress allows in one: no whitespace and none of `[ ] / = < > & " '`. */
-const SHORTCODE_PAIR = /(?<!<!|<!\[CDATA)\[([^\s[\]/=<>&"']+)[^\]]*\]([\s\S]*?)\[\/\1\]/g;
+ *  judge the section's text.
+ *
+ *  Both readings below are scans, not regular expressions: `/\[[^\]]*\]/g` reads from every `[` to
+ *  the end of the value when no `]` follows, so a value of many `[` took quadratic time — seconds
+ *  for a description of some 10'000 brackets, on every preview, verdict and approval. Each scan
+ *  here reads every character a bounded number of times. */
+function isCdataBracket(value: string, i: number): boolean {
+  return (i >= 2 && value.slice(i - 2, i) === '<!') || (i >= 8 && value.slice(i - 8, i) === '<![CDATA');
+}
+
+/** Every shortcode tag, as `/(?<!<!|<!\[CDATA)\[[^\]]*\]/g` reads them: from a `[` to the first `]`. */
+function shortcodeTagsOf(value: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  let close = -1;
+  for (;;) {
+    const i = value.indexOf('[', from);
+    if (i < 0) break;
+    if (close <= i) close = value.indexOf(']', i + 1);
+    // No `]` after this `[`, so none after a later one either.
+    if (close < 0) break;
+    if (isCdataBracket(value, i)) { from = i + 1; continue; }
+    out.push(value.slice(i, close + 1));
+    from = close + 1;
+  }
+  return out;
+}
+
+/** A character WordPress allows in a shortcode's name: no whitespace and none of `[ ] / = < > & " '`. */
+const SHORTCODE_NAME_CHAR = /[^\s[\]/=<>&"']/;
+
+interface NameTrie { next: Map<string, NameTrie>; name: string | null }
+
+/**
+ * The text each paired shortcode encloses, as
+ * `/(?<!<!|<!\[CDATA)\[([^\s[\]/=<>&"']+)[^\]]*\]([\s\S]*?)\[\/\1\]/g` reads it: from a `[` whose
+ * name runs on to the first `]`, then to the first `[/name]` after it, where `name` is that name or
+ * any start of it (the pattern backtracks into the name), the longest that has one. A pair is read
+ * on after its closing tag. The closing tags are indexed once, by a trie of their names, so each
+ * opening tag reads its own name once.
+ */
+function shortcodeEnclosedOf(value: string): string[] {
+  const closers = new Map<string, number[]>();
+  const root: NameTrie = { next: new Map(), name: null };
+  let from = 0;
+  let close = -1;
+  for (;;) {
+    const i = value.indexOf('[/', from);
+    if (i < 0) break;
+    if (close <= i + 1) close = value.indexOf(']', i + 2);
+    if (close < 0) break;
+    from = i + 2;
+    const bracket = value.indexOf('[', i + 2);
+    // A name holds no `[`: one before the `]` ends it, so this is no closing tag.
+    if (bracket !== -1 && bracket < close) continue;
+    const name = value.slice(i + 2, close);
+    // Read in UTF-16 code units, as the opening tags below are and as the pattern reads.
+    const units = name.split('');
+    if (name === '' || !units.every((c) => SHORTCODE_NAME_CHAR.test(c))) continue;
+    let at = closers.get(name);
+    if (at === undefined) {
+      at = [];
+      closers.set(name, at);
+      let node = root;
+      for (const c of units) {
+        let child = node.next.get(c);
+        if (child === undefined) { child = { next: new Map(), name: null }; node.next.set(c, child); }
+        node = child;
+      }
+      node.name = name;
+    }
+    at.push(i);
+  }
+  if (closers.size === 0) return [];
+  const firstAtOrAfter = (list: number[], x: number): number | undefined => {
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid]! < x) lo = mid + 1; else hi = mid;
+    }
+    return list[lo];
+  };
+  const out: string[] = [];
+  from = 0;
+  close = -1;
+  for (;;) {
+    const i = value.indexOf('[', from);
+    if (i < 0) break;
+    if (close <= i) close = value.indexOf(']', i + 1);
+    if (close < 0) break;
+    from = i + 1;
+    if (isCdataBracket(value, i)) continue;
+    // The starts of the name that are a closing tag's name, shortest first.
+    const names: string[] = [];
+    let node = root;
+    for (let k = i + 1; k < close && SHORTCODE_NAME_CHAR.test(value[k]!); k++) {
+      const child = node.next.get(value[k]!);
+      if (child === undefined) break;
+      node = child;
+      if (node.name !== null) names.push(node.name);
+    }
+    for (let n = names.length - 1; n >= 0; n--) {
+      const name = names[n]!;
+      const end = firstAtOrAfter(closers.get(name)!, close + 1);
+      if (end === undefined) continue;
+      out.push(value.slice(close + 1, end));
+      from = end + name.length + 3;
+      break;
+    }
+  }
+  return out;
+}
 
 /** The text of every shortcode in a value: its tags, and the text it encloses without HTML tags
  *  (a `<img/>` that becomes `<img>` reads the same; an `&` that becomes `&amp;` does not). */
-function shortcodeTextOf(value: string): string[] {
-  const tags = value.match(SHORTCODE_TAG) ?? [];
-  const enclosed = [...value.matchAll(SHORTCODE_PAIR)].map((m) => (m[2] ?? '').replace(/<[^<>]*>/g, ''));
-  return [...tags, ...enclosed];
+export function shortcodeTextOf(value: string): string[] {
+  const enclosed = shortcodeEnclosedOf(value).map((e) => e.replace(/<[^<>]*>/g, ''));
+  return [...shortcodeTagsOf(value), ...enclosed];
 }
 
 /** The first shortcode text the canonical form does not keep byte for byte, or null. */
@@ -399,8 +506,10 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     // not by an HTML parser: the canonical form the run sends turns its `&`, `<` and `>` into
     // entities or cuts it at a `<`, so the shop would read another shortcode. Refused, not
     // rewritten (U-103). Asked LAST: the preview offers a value refused for this reason to the
-    // owner to paste into the shop by hand, so it must have passed every other check — a link to
-    // another domain, a script or a hidden character is refused for its own reason first.
+    // owner to paste into the shop by hand, so it must have passed every other check — an HTML
+    // link to another domain, a script or a hidden character is refused for its own reason first.
+    // A URL inside a shortcode's attributes is text to this check, not a link, and is not
+    // checked against the domains here, whether the value is refused or written.
     const shortcode = shortcodeRefusalOf(input.after, input.before);
     return shortcode === null ? tree : refused('shortcode_changed', shortcode);
   } catch {

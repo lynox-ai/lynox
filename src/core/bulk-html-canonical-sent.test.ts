@@ -9,7 +9,7 @@ import { mintBulkContract } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import { runBulkJudge, verdictTextRefusal, type BulkJudgeDeps } from './bulk-judge.js';
-import { checkMarkup, droppedTagsOf, shortcodeChangedBy, shortcodeRefusalOf } from './bulk-html.js';
+import { checkMarkup, droppedTagsOf, shortcodeChangedBy, shortcodeRefusalOf, shortcodeTextOf } from './bulk-html.js';
 import { canonicalHtml } from './html-tree.js';
 import { formatStatus } from '../tools/builtin/bulk.js';
 import { rawHtmlField, runBulkEffect, type TargetWriter } from './bulk-apply.js';
@@ -212,9 +212,9 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
   const verdict = { description: `<p>neu</p>${own}`, short_description: '[pbutton url="/b?x=1&y=2"]Los[/pbutton]' };
 
   /** Judge the run's one target with a stub model that answers `after`; `over` replaces deps. */
-  async function judge(after: Record<string, unknown>, over: Partial<BulkJudgeDeps> = {}): Promise<{ id: string; seq: number }> {
+  async function judge(after: Record<string, unknown>, over: Partial<BulkJudgeDeps> = {}, read: Record<string, unknown> = before): Promise<{ id: string; seq: number }> {
     const { id, seq } = listed({}, true, both);
-    expect(ledger.recordRead(id, seq, { before })).toBe(true);
+    expect(ledger.recordRead(id, seq, { before: read })).toBe(true);
     const call = (async () => ({ data: { keep: false, after }, inputTokens: 1, outputTokens: 1, costUsd: 0.001, modelId: 'claude-haiku-4-5' })) as unknown as BulkJudgeDeps['call'];
     await runBulkJudge(id, {
       ledger, call,
@@ -235,6 +235,15 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     expect(shown.refusedValues).toEqual([{ field: 'short_description', value: verdict.short_description }]);
   });
 
+  it('shows no field the verdict leaves as it is, though its own shortcode would be refused', async () => {
+    // The description holds a raw-& shortcode the canonical form would change; the verdict leaves it.
+    const raw = { description: '<p>alt</p>[x a="1&2"]', short_description: '<p>kurz</p>' };
+    expect(shortcodeRefusalOf(raw.description, raw.description)).not.toBeNull();
+    const kept = { description: raw.description, short_description: verdict.short_description };
+    const { id, seq } = await judge(kept, {}, raw);
+    expect(ledger.getPreview(id).find((p) => p.seq === seq)!.refusedValues).toEqual([{ field: 'short_description', value: verdict.short_description }]);
+  });
+
   it('shows each field the check refuses when both are', async () => {
     const twice = { description: '[box a="1&2"]x[/box]', short_description: verdict.short_description };
     const { id, seq } = await judge(twice);
@@ -243,22 +252,22 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     ]);
   });
 
-  it('keeps nothing to show where the value carries a credential', async () => {
+  it('records a credential among the values as that, with nothing to show', async () => {
     const secret = await judge({ ...verdict, short_description: '[pbutton url="/b?k=sk-live-1&y=2"]Los[/pbutton]' });
     const s = ledger.getPreview(secret.id).find((p) => p.seq === secret.seq)!;
-    expect([s.error, s.refusedValues]).toEqual(['shortcode_changed', undefined]);
+    expect([s.error, s.refusedValues]).toEqual(['secret_in_after', undefined]);
   });
 
-  it('keeps nothing to show where the value carries a vault value', async () => {
+  it('records a vault value among the values as a credential, with nothing to show', async () => {
     const vaulted = await judge(verdict, { maskVault: (t) => t.replace('/b?x=1', '***') });
     const v = ledger.getPreview(vaulted.id).find((p) => p.seq === vaulted.seq)!;
-    expect([v.error, v.refusedValues]).toEqual(['shortcode_changed', undefined]);
+    expect([v.error, v.refusedValues]).toEqual(['secret_in_after', undefined]);
   });
 
-  it('keeps nothing to show where the verdict is one an external run refuses as a write', async () => {
+  it('records the reason an external run refuses the values as a write for, with nothing to show', async () => {
     const { id, seq } = await judge({ ...verdict, extra: { nested: true } });
     const shown = ledger.getPreview(id).find((p) => p.seq === seq)!;
-    expect([shown.error, shown.refusedValues]).toEqual(['shortcode_changed', undefined]);
+    expect([shown.error, shown.refusedValues]).toEqual(['field_not_scalar', undefined]);
   });
 
   it('stores the judge\'s values with a shortcode_changed refusal only, never with another reason', () => {
@@ -298,6 +307,50 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
     const run = { listForm: 'woocommerce' as const, storeHost: HOST, startDomains: [] as string[] };
     expect(verdictTextRefusal({ description: sc, short_description: '<p><a href="https://evil.example/x">x</a></p>' }, before, run)).toBe('new_link_domain');
     expect(verdictTextRefusal({ description: sc, short_description: '<p>neu</p>' }, before, run)).toBe('shortcode_changed');
+  });
+});
+
+describe('the shortcode scans read what the patterns read, in linear time (1130)', () => {
+  // The patterns the scans replace, kept here as their specification.
+  const TAG = /(?<!<!|<!\[CDATA)\[[^\]]*\]/g;
+  const PAIR = /(?<!<!|<!\[CDATA)\[([^\s[\]/=<>&"']+)[^\]]*\]([\s\S]*?)\[\/\1\]/g;
+  const byPatterns = (value: string, pair = PAIR, tag = TAG): string[] => [
+    ...(value.match(tag) ?? []),
+    ...[...value.matchAll(pair)].map((m) => (m[2] ?? '').replace(/<[^<>]*>/g, '')),
+  ];
+  const PIECES = ['[', ']', '[/', '/', 'a', 'b', 'ab', 'a:b', ' ', '=', '"', '&', '<', '>', '<b>', '<!', 'CDATA', '<![CDATA[', ']]>',
+    '[a]', '[ab x="1"]', '[/a]', '[/ab]', '[/a:b]', '\u{1F600}', 'é'];
+  /** mulberry32: a seeded generator whose output is spread over [0, 1). */
+  const rng = (seed: number): (() => number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const values = (n: number): string[] => {
+    const next = rng(1130);
+    return Array.from({ length: n }, () => Array.from({ length: 1 + Math.floor(next() * 14) }, () => PIECES[Math.floor(next() * PIECES.length)]!).join(''));
+  };
+
+  it('reads every generated value as the patterns do', () => {
+    const differ = values(20_000).filter((v) => JSON.stringify(shortcodeTextOf(v)) !== JSON.stringify(byPatterns(v)));
+    expect(differ.slice(0, 5)).toEqual([]);
+  });
+
+  it('CONTROL: the same values tell a pattern apart that pairs only a whole name, or reads a CDATA bracket', () => {
+    const wholeName = /(?<!<!|<!\[CDATA)\[([^\s[\]/=<>&"']+)(?![^\s[\]/=<>&"'])[^\]]*\]([\s\S]*?)\[\/\1\]/g;
+    const noCdata = /\[[^\]]*\]/g;
+    const vs = values(20_000);
+    expect(vs.some((v) => JSON.stringify(byPatterns(v)) !== JSON.stringify(byPatterns(v, wholeName)))).toBe(true);
+    expect(vs.some((v) => JSON.stringify(byPatterns(v)) !== JSON.stringify(byPatterns(v, PAIR, noCdata)))).toBe(true);
+  });
+
+  it('reads a value of many brackets without a closing one in linear time', () => {
+    for (const value of ['['.repeat(200_000), '[a'.repeat(100_000), '[/'.repeat(100_000) + ']', '<![CDATA['.repeat(20_000) + ']', `[${'a'.repeat(100_000)}]`.repeat(2) + '[/a]'.repeat(1000)]) {
+      const start = performance.now();
+      shortcodeTextOf(value);
+      expect(performance.now() - start, `${value.slice(0, 12)}… of ${value.length}`).toBeLessThan(1500);
+    }
   });
 });
 

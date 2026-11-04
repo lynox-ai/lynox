@@ -584,14 +584,20 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       }
       const textRefused = verdictTextRefusal(verdict, beforeRow, textRun);
       if (textRefused !== null) {
-        // The judge's values go with the refusal for the owner to copy (1130); the ledger keeps them
-        // only for `shortcode_changed`. Not where they would be refused as a write — a credential
-        // (`secret_in_after`) among them — nor where they hold a vault value: the preview must not
-        // show either.
+        if (textRefused !== 'shortcode_changed') {
+          record({ invalid: textRefused });
+          return;
+        }
+        // A shortcode refusal shows the judge's values to the owner to copy into the shop (1130),
+        // so it is recorded only for values nothing else refuses: what the write itself would refuse
+        // (a credential among them, `secret_in_after`) and a vault value are recorded as that, and
+        // the preview shows neither — nor announces a text it does not show.
+        const write = refuseExternalAfter(target.key, verdict, deps.scanSecret);
         const text = JSON.stringify(verdict);
-        const keep = refuseExternalAfter(target.key, verdict, deps.scanSecret) === null
-          && deps.maskVault(text) === text && (stringsIn(verdict)?.every((v) => deps.maskVault(v) === v) ?? false);
-        record(keep ? { invalid: textRefused, refused: verdict } : { invalid: textRefused });
+        const vaulted = deps.maskVault(text) !== text || !(stringsIn(verdict)?.every((v) => deps.maskVault(v) === v) ?? false);
+        if (write !== null) record({ invalid: write });
+        else if (vaulted) record({ invalid: 'secret_in_after' });
+        else record({ invalid: textRefused, refused: verdict });
         return;
       }
       if (external) {
