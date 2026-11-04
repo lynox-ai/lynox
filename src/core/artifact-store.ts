@@ -172,7 +172,16 @@ export class ArtifactStore {
   private liveAnchor(): WorkspaceAnchor | null {
     if (this.anchor === null) return null;
     let gone: boolean;
-    try { gone = fstatSync(this.anchor.fd).nlink === 0; } catch { gone = true; }
+    try {
+      gone = fstatSync(this.anchor.fd).nlink === 0;
+    } catch (err) {
+      // A filesystem that no longer answers for the directory. Anything else (EBADF: the
+      // descriptor itself is wrong) is passed on: reopening would close a number that may
+      // belong to someone else now.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ESTALE' && code !== 'EIO' && code !== 'ENOENT') throw err;
+      gone = true;
+    }
     if (gone) this.reopen(this.anchor);
     return this.anchor;
   }
