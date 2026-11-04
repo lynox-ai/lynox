@@ -413,6 +413,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       },
     };
     if (opts.tenantId !== undefined) payload.tenantId = opts.tenantId;
+    // No description rule is checked for an automatic reply (runner). On Microsoft 365 the watch
+    // envelope carries no headers, so this is false there.
+    if (env.isAutoReply) payload.isAutoReply = true;
     if (sensitive.isSensitive) {
       payload.sensitive = {
         categories: sensitive.categories,

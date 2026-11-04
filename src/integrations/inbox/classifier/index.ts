@@ -46,6 +46,12 @@ export interface ClassifyResult extends ClassifierVerdict {
   classifierVersion: string;
   /** True when the body was sliced for size — surfaced for telemetry. */
   bodyTruncated: boolean;
+  /**
+   * Set when a description rule named the mail (`rule-check.ts`). `withheld`: the rule would have
+   * filed it as handled, but the mail is sensitive or a person forwarded it, so it is shown instead
+   * and the item does not count as filed by the rule.
+   */
+  rule?: { id: string; name: string | undefined; action: string; withheld: boolean } | undefined;
 }
 
 /**

@@ -39,7 +39,9 @@ export type InboxAuditAction =
 
 export type InboxAuditActor = 'classifier' | 'user' | 'rule_engine' | 'system';
 
-export type InboxRuleMatcherKind = 'from' | 'subject_contains' | 'list_id';
+/** `matches_description`: a description in words ("Mahnungen"), checked by a model in the runner
+ *  (PRD inbox-user-rules E3); the others are checked in the hook without a model. */
+export type InboxRuleMatcherKind = 'from' | 'subject_contains' | 'list_id' | 'matches_description';
 
 export type InboxRuleAction = 'archive' | 'mark_read' | 'label' | 'show';
 

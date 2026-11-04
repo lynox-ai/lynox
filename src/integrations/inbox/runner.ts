@@ -30,6 +30,10 @@ import type { InboxCostBudget } from './cost-budget.js';
 import { fireBeforeRunGate, type HookHost } from '../../core/metered-request.js';
 import type { InboxNotifier } from './notifier.js';
 import type { InboxStateDb, ThreadMessageInput } from './state.js';
+import type { InboxRulesLoader } from './rules-loader.js';
+import type { InboxRule } from '../../types/index.js';
+import { checkDescriptionRules } from './rule-check.js';
+import { FORWARDED_REASON_DE, isForwardedByPerson } from './classifier/forwarded.js';
 
 /**
  * Payload threaded through the queue: the prompt input the classifier
@@ -70,6 +74,8 @@ export interface InboxQueuePayload {
     masked: boolean;
     redactionCount: number;
   } | undefined;
+  /** The envelope marks the mail as an automatic reply; no description rule is checked for it. */
+  isAutoReply?: boolean | undefined;
 }
 
 /**
@@ -122,6 +128,27 @@ export interface BuildInboxRunnerOptions {
    * bucket=`requires_user`. Absent on instances without web-push wiring.
    */
   notifier?: InboxNotifier | undefined;
+  /**
+   * Description rules (PRD inbox-user-rules E3): the account's confirmed `matches_description`
+   * rules and the cheap model that checks them, between the budget check and the classifier.
+   * Absent when the feature is off.
+   */
+  ruleCheck?: { rules: Pick<InboxRulesLoader, 'descriptionRules'>; llm: LLMCaller } | undefined;
+}
+
+/** A description rule named the mail: its bucket, unless it would file a sensitive or forwarded
+ *  mail as handled (F1, E3) — then the mail is shown, and the rule is named as withheld. */
+function ruleVerdict(rule: InboxRule, payload: InboxQueuePayload): ClassifyResult {
+  const label = rule.name ?? 'ohne Namen';
+  const base = { classifierVersion: `rule:${rule.id}`, bodyTruncated: false, confidence: 1 };
+  const named = { id: rule.id, name: rule.name, action: rule.action };
+  if (rule.bucket === 'auto_handled' && payload.sensitive !== undefined) {
+    return { ...base, bucket: 'requires_user', reasonDe: `Sensibler Inhalt — Regel „${label}“ nicht angewandt, bitte ansehen.`, failReason: 'rule_withheld_sensitive', rule: { ...named, withheld: true } };
+  }
+  if (rule.bucket === 'auto_handled' && isForwardedByPerson(payload.classifierInput)) {
+    return { ...base, bucket: 'requires_user', reasonDe: FORWARDED_REASON_DE, failReason: 'forwarded_by_person', rule: { ...named, withheld: true } };
+  }
+  return { ...base, bucket: rule.bucket, reasonDe: `Regel: ${label}`, failReason: null, rule: { ...named, withheld: false } };
 }
 
 /**
@@ -160,6 +187,22 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           return budgetExceededVerdict('AI-Guthaben erschöpft — manuell prüfen.');
         }
       }
+      // Description rules: one cheap call with the account's confirmed rules; a hit files the mail.
+      // No rule, no call; an automatic reply is never checked. A failed call leaves the mail to the
+      // classifier, unless the job itself was aborted (the classifier would share its signal).
+      const ruleCheck = opts.ruleCheck;
+      if (ruleCheck !== undefined && payload.isAutoReply !== true) {
+        const rules = ruleCheck.rules.descriptionRules(payload.accountId, payload.tenantId);
+        if (rules.length > 0) {
+          let hit: InboxRule | null = null;
+          try {
+            hit = await checkDescriptionRules(rules, payload.classifierInput, ruleCheck.llm, ctx.signal);
+          } catch (err) {
+            if (ctx.signal.aborted) throw err;
+          }
+          if (hit !== null) return ruleVerdict(hit, payload);
+        }
+      }
       return classifyMail(payload.classifierInput, llm, {
         signal: ctx.signal,
         classifierVersion: opts.classifierVersionOverride,
@@ -168,6 +211,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
     onSuccess: (payload, result) => {
       const envelopeFields = payload.envelope ?? {};
       const metadataWarning = _detectEmptyMetadata(payload.envelope);
+      const rule = result.rule;
       const itemId = state.insertItemWithAudit(
         {
           tenantId: payload.tenantId,
@@ -179,21 +223,38 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           reasonDe: result.reasonDe,
           classifiedAt: new Date(),
           classifierVersion: result.classifierVersion,
+          ...(rule !== undefined && !rule.withheld ? { matchedRuleId: rule.id } : {}),
           ...envelopeFields,
         },
-        {
-          tenantId: payload.tenantId,
-          action: 'classified',
-          actor: 'classifier',
-          payloadJson: JSON.stringify({
-            bucket: result.bucket,
-            confidence: result.confidence,
-            fail_reason: result.failReason,
-            body_truncated: result.bodyTruncated,
-            ...sensitiveAudit(payload),
-            ...(metadataWarning ? { warning: 'classified_with_empty_metadata', missing: metadataWarning } : {}),
-          }),
-        },
+        rule === undefined
+          ? {
+              tenantId: payload.tenantId,
+              action: 'classified',
+              actor: 'classifier',
+              payloadJson: JSON.stringify({
+                bucket: result.bucket,
+                confidence: result.confidence,
+                fail_reason: result.failReason,
+                body_truncated: result.bodyTruncated,
+                ...sensitiveAudit(payload),
+                ...(metadataWarning ? { warning: 'classified_with_empty_metadata', missing: metadataWarning } : {}),
+              }),
+            }
+          : {
+              tenantId: payload.tenantId,
+              action: rule.withheld ? 'classified' : 'rule_applied',
+              actor: 'rule_engine',
+              payloadJson: JSON.stringify({
+                ...(rule.withheld ? { rule_withheld: rule.id, fail_reason: result.failReason } : { rule_id: rule.id }),
+                ...(rule.name !== undefined ? { rule_name: rule.name } : {}),
+                matcher_kind: 'matches_description',
+                stage: 'description',
+                bucket: result.bucket,
+                action: rule.action,
+                ...sensitiveAudit(payload),
+                ...(metadataWarning ? { warning: 'classified_with_empty_metadata', missing: metadataWarning } : {}),
+              }),
+            },
       );
       // Persist the sanitised body the classifier saw so the draft
       // generator can read it without a second provider round-trip. We

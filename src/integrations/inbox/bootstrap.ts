@@ -14,7 +14,8 @@ import { randomUUID } from 'node:crypto';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { CRM } from '../../core/crm.js';
 import { reportMeteredCost, type HookHost } from '../../core/metered-request.js';
-import { getModelId } from '../../types/index.js';
+import { getModelId, MISTRAL_MODEL_MAP, MODEL_CAPABILITIES } from '../../types/index.js';
+import { isFeatureEnabled } from '../../core/features.js';
 import type { LLMCaller } from './classifier/index.js';
 import {
   type AnthropicLike,
@@ -275,13 +276,46 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       }
     }
   };
+  // The description-rule check (PRD inbox-user-rules E3): its own cheap model — ministral-8b in
+  // the EU, Haiku in the US — priced at that model's rates, against the same daily cap, debited
+  // and recorded like the classifier, as its own run.
+  const ruleModelId = region === 'eu' ? MISTRAL_MODEL_MAP.fast : getModelId('fast');
+  const rulePricing = region === 'eu'
+    ? { inputCostPerMtok: MODEL_CAPABILITIES[MISTRAL_MODEL_MAP.fast]!.pricing.input, outputCostPerMtok: MODEL_CAPABILITIES[MISTRAL_MODEL_MAP.fast]!.pricing.output }
+    : { inputCostPerMtok: DEFAULT_INPUT_COST_PER_MTOK, outputCostPerMtok: DEFAULT_OUTPUT_COST_PER_MTOK };
+  const onRuleUsage = (usage: { inputTokens: number; outputTokens: number }): void => {
+    const costUsd =
+      (usage.inputTokens / 1_000_000) * rulePricing.inputCostPerMtok
+      + (usage.outputTokens / 1_000_000) * rulePricing.outputCostPerMtok;
+    budget.recordCost(costUsd);
+    if (opts.meteredHost) reportMeteredCost(opts.meteredHost, randomUUID(), costUsd, 'fast');
+    if (opts.runHistory) {
+      try {
+        const id = opts.runHistory.insertRun({
+          taskText: 'inbox rule check',
+          modelTier: 'fast',
+          modelId: ruleModelId,
+          runType: 'single',
+          tenantId: opts.tenantId,
+          kind: 'llm',
+        });
+        opts.runHistory.updateRun(id, { tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd, status: 'completed' });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[inbox/bootstrap] RunHistory bridge failed: ${msg}\n`);
+      }
+    }
+  };
+
   let llm: LLMCaller;
+  let ruleLlm: LLMCaller;
   if (opts.llmRegion === 'eu' && providerListApplies()) {
     // On an instance connected to a Shopify store the EU caller — a direct request to Mistral —
     // is not on the provider list (`core/contained-providers.ts`). Nor is the US path a stand-in:
     // the operator chose that mail stays in the EU. Every classification is refused instead: the
     // queue retries and then dead-letters the item to `requires_user`, as for any classifier failure.
     llm = async () => { throw new FixedTextError(PROVIDER_NOT_ON_LIST_REFUSAL, PROVIDER_NOT_ON_LIST_REFUSAL); };
+    ruleLlm = llm;
   } else if (opts.llmRegion === 'eu') {
     if (!opts.mistralApiKey) {
       throw new Error('bootstrapInbox: llmRegion=eu requires mistralApiKey');
@@ -292,12 +326,14 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     };
     if (opts.modelIdOverride !== undefined) mistralOpts.modelId = opts.modelIdOverride;
     llm = createMistralEuLLMCaller(mistralOpts);
+    ruleLlm = createMistralEuLLMCaller({ apiKey: opts.mistralApiKey, onUsage: onRuleUsage, modelId: ruleModelId });
   } else {
     llm = wrapAnthropicAsLLMCaller(
       opts.anthropicClient as unknown as AnthropicLike,
       opts.modelIdOverride ?? getModelId('fast'),
       { onUsage },
     );
+    ruleLlm = wrapAnthropicAsLLMCaller(opts.anthropicClient as unknown as AnthropicLike, ruleModelId, { onUsage: onRuleUsage });
   }
 
   // Build the inbox notifier when a router is wired. Created here (not
@@ -331,6 +367,8 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     policy: opts.policy,
     ...(opts.meteredHost ? { meteredHost: opts.meteredHost } : {}),
     ...(notifier ? { notifier } : {}),
+    // Behind the flag, as the rest of the user rules: with it off no description rule is checked.
+    ...(isFeatureEnabled('inbox-user-rules') ? { ruleCheck: { rules, llm: ruleLlm } } : {}),
   });
 
   const accounts: AccountResolver = {
