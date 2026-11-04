@@ -169,6 +169,18 @@ describe('LLM_CATALOG', () => {
     expect(checked).toBeGreaterThan(0); // the guard actually exercised the registry-backed entries
   });
 
+  it('a Mistral catalog model lists vision exactly when the registry gives it vision', () => {
+    // Medium 3.5 was listed text-only here while the registry (verified live) and Mistral's
+    // model list both give it vision.
+    const mistral = getCatalogEntryByKey('mistral')!;
+    expect(mistral.models.length).toBeGreaterThan(0);
+    for (const model of mistral.models) {
+      const cap = MODEL_CAPABILITIES[model.id];
+      expect(cap, model.id).toBeDefined();
+      expect(model.capabilities?.includes('vision') ?? false, `${model.id} vision`).toBe(cap!.features.vision);
+    }
+  });
+
   it('vertex models use Vertex-specific IDs (haiku drops date suffix)', () => {
     const entry = getCatalogForProvider('vertex')!;
     const byTier = Object.fromEntries(entry.models.map((m) => [m.tier, m]));
@@ -179,7 +191,7 @@ describe('LLM_CATALOG', () => {
     expect(byTier['fast']?.id).toBe('claude-haiku-4-5');
   });
 
-  it('mistral preset pins dated snapshots and EU-Paris residency', () => {
+  it('mistral preset pins dated snapshots and EU/EFTA inference residency', () => {
     const entry = getCatalogEntryByKey('mistral')!;
     // Pinned to dated snapshots — mirrors MISTRAL_MODEL_MAP. The previous
     // catalog shipped `*-latest` aliases which auto-roll at Mistral's
@@ -193,8 +205,8 @@ describe('LLM_CATALOG', () => {
       'ministral-3b-2512',
       'ministral-8b-2512',
     ]);
-    expect(entry.default_residency).toContain('EU-Paris');
-    expect(entry.base_url_default).toBe('https://api.mistral.ai/v1');
+    expect(entry.default_residency).toContain('EU/EFTA inference');
+    expect(entry.base_url_default).toBe('https://api.eu.mistral.ai/v1');
     expect(entry.preset_id).toBe('mistral');
     expect(entry.provider).toBe('openai');
     // Tier mapping (2026-05-29 refresh): ministral-8b ↔ fast, ministral-14b ↔
@@ -206,10 +218,11 @@ describe('LLM_CATALOG', () => {
     expect(byId['ministral-14b-2512']?.tier).toBe('balanced');
     // Deep default is now Medium 3.5 (Large 3 kept as legacy option, still deep-tier).
     expect(byId['mistral-medium-2604']?.tier).toBe('deep');
-    expect(byId['mistral-medium-2604']?.pricing).toEqual({ input: 1.50, output: 7.50 });
+    // Headline prices are the EU endpoint's: list × 1.1.
+    expect(byId['mistral-medium-2604']?.pricing).toEqual({ input: 1.65, output: 8.25 });
     expect(byId['mistral-large-2512']?.tier).toBe('deep');
-    // Mistral Large 3 pricing — 75% cut vs Large 2
-    expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.50, output: 1.50 });
+    // Mistral Large 3 pricing — 75% cut vs Large 2 ($0.50/$1.50 list)
+    expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.55, output: 1.65 });
   });
 
   it('generic OpenAI-compatible preset accepts free-text model + base URL', () => {
@@ -609,11 +622,14 @@ describe('resolveCatalogKey', () => {
   it('mistral subdomain (eu.mistral.ai) activates the mistral preset', () => {
     expect(resolveCatalogKey('openai', 'https://eu.mistral.ai/v1')).toBe('mistral');
   });
-  it('mistral apex (mistral.ai) activates the mistral preset', () => {
-    // Defensive: a user typing `https://mistral.ai/v1` should land on the
-    // Mistral preset, not silently fall through to the generic openai
-    // entry. Mirrors the apex-match clause in `resolveCatalogKey`.
-    expect(resolveCatalogKey('openai', 'https://mistral.ai/v1')).toBe('mistral');
+  it('the global endpoint, saved before the move to the EU one, still activates the mistral preset', () => {
+    expect(resolveCatalogKey('openai', 'https://api.mistral.ai/v1')).toBe('mistral');
+    expect(resolveCatalogKey('openai', 'https://api.eu.mistral.ai/v1')).toBe('mistral');
+  });
+  it('the bare apex (mistral.ai), which serves no API, no longer activates the mistral preset', () => {
+    // The preset now pins `api.eu.mistral.ai`, whose apex is `eu.mistral.ai`. `mistral.ai` itself
+    // is no endpoint; it lands on the generic tile, which asks for the URL and shows the disclosure.
+    expect(resolveCatalogKey('openai', 'https://mistral.ai/v1')).toBe('openai-compat');
   });
   it('hostname normalises case', () => {
     expect(resolveCatalogKey('openai', 'https://API.MISTRAL.AI/v1')).toBe('mistral');

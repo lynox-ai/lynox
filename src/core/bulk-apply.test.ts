@@ -201,6 +201,44 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
     expect(again.changes).toEqual({ update: 0, create: 0, delete: 0, unchanged: 210, invalid: 0 });
   });
 
+  // 966: the worker hands the instance's notice language to the write, so the result it records
+  // and pushes is the owner's language.
+  it('records and pushes a written run in German on an instance set to German', async () => {
+    const runId = await planFiles(seedFiles().slice(0, 3));
+    approve(runId);
+    const triggers = new TriggerStore(engineDb);
+    const recordTaskRun = vi.fn((id: string, result: string, status: 'success' | 'failed' | 'timeout') => {
+      triggers.updateFields(id, { status: status === 'success' ? 'completed' : 'failed' });
+      triggers.updateRunResult(id, { lastRunAt: new Date().toISOString(), lastRunResult: result, lastRunStatus: status, nextRunAt: null });
+    });
+    const notify = vi.fn(async (_m: { body: string }) => {});
+    const engine = {
+      getTaskManager: () => ({
+        getDueTriggers: () => triggers.getDue(),
+        getExpiredWaitingTriggers: () => [],
+        endWait: () => false,
+        claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers),
+        getTrigger: (id: string) => triggers.getById(id),
+        recordTaskRun,
+      }),
+      getToolContext: () => ({ containment: null }),
+      getBulkLedger: () => ledger,
+      getDataStore: () => store,
+      getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+      getUserConfig: () => ({}),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+      config: { language: 'de' },
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
+    await loop.tick();
+    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 25_000 });
+    const said = 'Massenlauf fertig. 3 geschrieben, von 3 Zielen.';
+    expect(recordTaskRun.mock.calls[0]!.slice(1)).toEqual([said, 'success']);
+    await vi.waitFor(() => expect(notify).toHaveBeenCalled());
+    expect(notify.mock.calls[0]![0].body).toBe(said);
+  });
+
   it('bulk_status after the run reports counts and phase, no content', async () => {
     const runId = await planFiles(seedFiles());
     approve(runId);
@@ -806,7 +844,7 @@ describe('the owner stops a running write — between targets, never inside one'
     // Recorded as the owner's stop — no failure, no retry — and the record names the count.
     expect(out.records).toHaveLength(1);
     expect(out.records[0]![2]).toBe('stopped');
-    expect(out.records[0]![1]).toContain('Applied 4,');
+    expect(out.records[0]![1]).toContain('4 applied');
     expect(out.records[0]![1]).toContain(BULK_HALT_REASONS.stoppedByOwner);
     expect(out.notified, 'the owner asked; nobody is notified of it').toBe(0);
   });
@@ -892,7 +930,7 @@ describe('halt thresholds', () => {
     const halted = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
     expect(halted.status).toBe('halted');
     expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 6 });
-    expect(halted.summary).toContain('failed 6,');
+    expect(halted.summary).toContain('6 failed,');
     // What the resume button shows: six failed so far; five may fail in the next pass and the
     // sixth halts it; the fifty not written are what it tries.
     expect(ledger.getStatus(runId)).toMatchObject({ applied: 50, failedOnce: 6, failureLimit: 5, resumeOpen: 50, resumeTries: 50 });
@@ -909,7 +947,7 @@ describe('halt thresholds', () => {
     expect(s.failedOnce).toBe(9);
     expect(s.applied + s.conflicts + s.failed).toBeLessThanOrEqual(s.total);
     // The notice after the run and what the model reads say the same count.
-    expect(done.summary).toContain('Applied 97, failed 3, conflicts 0');
+    expect(done.summary).toContain('97 applied, 3 failed, of');
     expect(await bulkStatusTool.handler({ run_id: runId }, agent())).toContain('Applied 97, failed 3, conflicts 0, undone 0.');
   });
 

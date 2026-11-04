@@ -94,7 +94,9 @@ export function openAreaFile(t: AreaTarget, maxBytes: number, tooLarge: string):
     fd = openRead(t.anchor, t.rel);
   } catch (err) {
     if (err instanceof WorkspaceAccessError && err.code === 'NOT_FILE') throw new AreaRefusal(400, 'Not a file');
-    throw onTheWay(err) ?? new AreaRefusal(404, 'File not found');
+    // Any other error (no permission to read the file or a directory on the way) leaves the
+    // file where it is, so it is not answered as "not found": the route reports a failed read.
+    throw onTheWay(err) ?? err;
   }
   try {
     const st = fstatSync(fd);
@@ -134,7 +136,9 @@ export function deleteAreaFile(t: AreaTarget): void {
   try {
     st = statEntry(t.anchor, t.rel);
   } catch (err) {
-    throw onTheWay(err) ?? new AreaRefusal(404, 'File not found');
+    // Any other error (a directory on the way the server may not read) leaves the file in place,
+    // so it is not answered as "not found": the route reports it as a failed delete.
+    throw onTheWay(err) ?? err;
   }
   if (st === null) throw new AreaRefusal(404, 'File not found');
   if (st.type !== 'file' && st.type !== 'symlink') throw new AreaRefusal(400, 'Not a file');

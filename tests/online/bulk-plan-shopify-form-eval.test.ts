@@ -156,7 +156,7 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
 // FORM_CASES=s1 (or s1,s3) runs only those cases.
 const ONLY = process.env['FORM_CASES']?.split(',').map((x) => `(${x.trim()})`);
 const runs = CASES.filter((c) => !ONLY || ONLY.some((o) => c.label.startsWith(o))).flatMap((c) => Array.from({ length: RUNS }, (_, i) => ({ c, i, label: `${c.label} #${String(i)}` })));
-const base = { maxIterations: 8, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' as const }) };
+const base = { maxIterations: 8, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('bulk_plan Shopify form — Anthropic (Haiku)', () => {

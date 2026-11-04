@@ -404,6 +404,8 @@ describe('applying a media run', () => {
       { form: 'shopify_media_alt', gid: image(11), after: { alt: 'New alt' } },
       { form: 'shopify_media_alt', gid: image(12), after: { alt: 'New alt' } },
     ] });
+    // An image's alt is not compared in the form a store saves a product in: nothing of it is measured.
+    expect(ledger.comparedInSavedForm(id)).toBe(false);
   });
 
   it('writes its probe, one image, and goes wide only after this run\'s probe is confirmed', async () => {

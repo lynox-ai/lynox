@@ -99,6 +99,9 @@ export interface PipelineResult {
   steps: PipelineStepResult[];
   totalDurationMs: number;
   totalCostUsd: number;
+  /** Why the run ended before its next step, in lynox's own words, when it was not a step's
+   *  failure: today only that an access the workflow depends on ended during the run (1100). */
+  endedBecause?: string | undefined;
 }
 
 /**

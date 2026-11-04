@@ -2,6 +2,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { collapseToSingleLine } from '../../core/sanitize.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
 import { toolLockFor } from '../../core/mandate-tool-lock.js';
+import { connectionTokenHolderName, connectionTokenHolders, describeConnectionTokens, FORGING_CHARS } from '../../core/profile-secret-view.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -36,14 +37,15 @@ const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PROMPT_MAX_CHARS = 300;
 
 /**
- * What forges a quote rather than filling it: bidi overrides and isolates
- * (a span that reads forwards on screen and backwards in the store, so the
- * quote is no longer a quote) and the zero-width formatters (a box that looks
- * empty but is not). `collapseToSingleLine` covers neither — it handles C0/C1
- * and the exotic separators. LRM/RLM are left alone; see the note on the
- * client half in `chat-framing.ts`.
+ * A name in the vault that holds a connection's token is used through that connection's API
+ * profile: the `secret:` gate refuses a reference to it, so no text here offers one. Answered from
+ * the API store the engine wired; without one, no name counts as a token, and the texts stay as
+ * they were (the gate still refuses).
  */
-const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
+function tokenHoldersFor(agent: IAgent): (name: string) => ReturnType<typeof connectionTokenHolders> {
+  const apiStore = agent.toolContext?.apiStore;
+  return (name) => (apiStore ? connectionTokenHolders(apiStore, name) : []);
+}
 
 /** Collapse to one line and bound the length, ellipsising when it had to cut. */
 function boundPromptText(s: string): string {
@@ -125,8 +127,22 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       if (names.length === 0) {
         return 'No secrets are stored in the vault yet. Use ask_secret (action:"collect") to add one.';
       }
-      const listing = names.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');
-      return `Secrets already in the vault — reference with secret:NAME, never re-collect an existing one:\n${listing}`;
+      const holdersOf = tokenHoldersFor(agent);
+      const free: string[] = [];
+      const tokens: ReturnType<typeof holdersOf>[] = [];
+      for (const n of names) {
+        const holder = holdersOf(n);
+        if (holder.length === 0) free.push(n);
+        else tokens.push(holder);
+      }
+      const sections: string[] = [];
+      if (free.length > 0) {
+        const listing = free.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');
+        sections.push(`Secrets already in the vault — reference with secret:NAME, never re-collect an existing one:\n${listing}`);
+      }
+      const tokenLine = describeConnectionTokens(tokens);
+      if (tokenLine !== undefined) sections.push(tokenLine);
+      return sections.join('\n');
     }
 
     // action: 'collect'
@@ -155,16 +171,50 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     //    legitimately holds more than one distinct key, so blocking here would dead-end a
     //    genuine second key (and tempt referencing the WRONG existing one). Surface the
     //    sibling as a non-blocking hint on the prompt and STILL collect.
-    const nearMatches = agent.secretStore?.findNameMatches?.(input.name) ?? [];
+    const holdersOf = tokenHoldersFor(agent);
+    // A scoped view (a spawned child) lists only its own names, so the stored-name check below
+    // cannot see a token outside the scope, while its writes are not narrowed. A connection's token
+    // slot outside the scope is not the child's to collect, stored or not. Asked of scope
+    // membership (`explainUnresolved`), never of the vault: the answer reaches the model, and one
+    // drawn from existence would be an oracle over the vault.
+    if (agent.secretStore?.explainUnresolved?.(input.name) === 'out-of-scope' && holdersOf(input.name).length > 0) {
+      return `"${input.name}" is a connection's token slot outside this agent's vault scope, so it is not ` +
+        `collected here. This is a scope decision — whether the vault holds it is not something this agent ` +
+        `is told. Either proceed without it, or report back that this task needs secret_scope: "${input.name}".`;
+    }
+    // `findNameMatches` leaves out the requested name itself. A token STORED under exactly that
+    // name is the case that matters most (collecting it would overwrite the connection's token), so
+    // it is added here and turned away below like a near-identical one. Stored, not merely named by
+    // a profile: an empty refresh slot is exactly what `api_setup` asks to be collected.
+    const stored = agent.secretStore?.listAgentVisibleNames?.() ?? [];
+    const matches = [
+      ...(agent.secretStore?.findNameMatches?.(input.name) ?? []),
+      ...(stored.includes(input.name) && holdersOf(input.name).length > 0 ? [input.name] : []),
+    ];
+    const isToken = new Set(matches.filter(n => holdersOf(n).length > 0));
     const normName = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
     const reqNorm = normName(input.name);
-    const exactMatches = nearMatches.filter(n => normName(n) === reqNorm);
-    if (exactMatches.length > 0) {
-      const refs = exactMatches.map(n => `secret:${n}`).join(' or ');
+    const exactMatches = matches.filter(n => normName(n) === reqNorm);
+    // A connection's token is offered as no reference. When every exact match is one, the name
+    // still is not collected again: the value belongs to that connection, and a second copy under
+    // a near-identical name would only be refused at the gate too.
+    const exactFree = exactMatches.filter(n => !isToken.has(n));
+    if (exactMatches.length > 0 && exactFree.length === 0) {
+      const named = exactMatches.map(n => {
+        const who = connectionTokenHolderName(holdersOf(n));
+        return `"${n}"${who === null ? '' : ` (profile ${JSON.stringify(who)})`}`;
+      }).join(', ');
+      return `A key with the same name is already in the vault and holds a connection's token: ${named}. ` +
+        `It is used through that API profile, not referenced with secret:, and not collected again. ` +
+        `Only collect if you genuinely need a separate key under a clearly different name.`;
+    }
+    if (exactFree.length > 0) {
+      const refs = exactFree.map(n => `secret:${n}`).join(' or ');
       return `A key with the same name is already in the vault: ` +
-        `${exactMatches.map(n => `"${n}"`).join(', ')}. Reference ${refs} instead of collecting a duplicate. ` +
+        `${exactFree.map(n => `"${n}"`).join(', ')}. Reference ${refs} instead of collecting a duplicate. ` +
         `Only collect again if you genuinely need a separate key under a clearly different name.`;
     }
+    const nearMatches = matches.filter(n => !isToken.has(n));
     // Bounded, and the bound is not cosmetic: this hint is appended AFTER the
     // agent's (capped) text, so it is the tail of the string the dialog renders.
     // Left unbounded it grows ~64 chars per sibling key, and a vault with a

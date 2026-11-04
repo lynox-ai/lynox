@@ -7,6 +7,7 @@ import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, ContinuationLoopError, RunAbortedError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
+import { loopGuardStopReason } from '../../core/loop-guard-stop.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import type { AgentConfig } from '../../types/index.js';
@@ -63,7 +64,7 @@ function childOwnCostUSD(snap: CostSnapshot | null | undefined): number {
  * child's model is not restricted to the tier defaults, and because an earlier version of
  * this comment counted a set it had not measured. Over all **40** ids in
  * `MODEL_CAPABILITIES` (counted 2026-10-13) a cold first turn runs from **$0.00224576**
- * (`ministral-3b-2512`) to
+ * (`ministral-3b-2512`; $0.002470336 since Mistral is priced at its EU endpoint rate, × 1.1) to
  * **$0.88** (`claude-fable-5`: 20k prefix at $20/Mtok plus 9 600 output tokens at
  * $50/Mtok); over the three tier defaults it is $0.052288 / $0.192 / $0.44, a spread of
  * 8.41x. So the flat $0.05 this replaces was nearly exact for the fast tier and **17.60x
@@ -72,7 +73,8 @@ function childOwnCostUSD(snap: CostSnapshot | null | undefined): number {
  * up there it is no floor at all.
  *
  * ⚠ The other direction is larger, not a side note: at the cheap end the flat figure was
- * **55.66x too HIGH** (11.13x on `ministral-14b-2512`, the mid-cheap case), so batches on
+ * **22.26x too HIGH** at Mistral's list price (11.13x on `ministral-14b-2512`, the mid-cheap
+ * case; 20.24x and 10.12x at its EU endpoint rate, list × 1.1), so batches on
  * a cheap model were refused although every share could have paid for dozens of turns.
  * This change admits those.
  *
@@ -1673,7 +1675,10 @@ async function executeThinker(
   if (runHistory) {
     try {
       childRunId = runHistory.insertRun({
-        sessionId: parentAgent.currentThreadId ?? '',
+        // The chat this child runs for, as its own `originThreadId` below: a child of a workflow
+        // step or of another child has no thread of its own, and a run naming no chat is kept from
+        // everyone but the owner (register 1116).
+        sessionId: parentAgent.currentThreadId ?? parentAgent.originThreadId ?? '',
         taskText: spec.task,
         modelTier: modelTier as string,
         modelId: model,
@@ -1689,7 +1694,8 @@ async function executeThinker(
     }
   }
 
-  const agentConfig: AgentConfig = {
+  // `principal` required here (1173): the census reads by type whom this agent runs for.
+  const agentConfig: AgentConfig & { principal: import('../../core/request-principal.js').RequestPrincipal } = {
     name: spec.name,
     model,
     // A profile pins endpoint and model as one pair (`AgentConfig.modelPinnedByProfile`),
@@ -1729,9 +1735,6 @@ async function executeThinker(
     // refuses tool_use blocks naming disabled tools (in addition to the
     // tool list itself already being filtered above).
     excludeTools: [...parentAgent.getExcludedToolNames()],
-    // And the parent's principal, so the child runs under the same tool lock (PRD
-    // customer-granted-operator-access §3.13 E5) — again on top of the filtered list.
-    principal: parentAgent.principal,
     // The parent's review, as the writer view its own tools get: the child's writes are saved and
     // recorded in it, and a move under it is refused, as in the parent. Without a review there is
     // none here either.
@@ -1816,6 +1819,10 @@ async function executeThinker(
     // PARENT's scope below, and by carrying that same scope it makes its own children
     // land there too. Without it a grandchild is reachable by nothing.
     abortScope: parentAgent.abortScope,
+    // And the parent's principal, so the child runs under the same tool lock (PRD
+    // customer-granted-operator-access §3.13 E5) — again on top of the filtered list. After both
+    // spreads for the same reason as the scope: no key a source gains later can rebind it.
+    principal: parentAgent.principal,
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
     // onto the child and the child's downstream code (memory writes, tool-call
     // recording) can attribute work to this run.
@@ -1982,6 +1989,9 @@ async function executeThinker(
     // The time limit ended it — not the parent's stop and not a loop guard (both
     // guards' errors are RunAbortedErrors too). A failure, not an interruption.
     const timedOut = childAborted && !(err instanceof ToolLoopBreakError) && !(err instanceof ContinuationLoopError) && deadline?.signal.aborted === true;
+    // A loop guard ended it: recorded aborted like a stop, but with the guard as the reason and
+    // its message as the error, so the history tells a guard from a stop.
+    const guard = loopGuardStopReason(err);
     const timeoutReason = `Stopped after the ${String(Math.round(spawnTimeoutMs / 60_000) || 1)}-minute spawn time limit without finishing.`;
     if (runHistory && childRunId) {
       try {
@@ -1996,14 +2006,14 @@ async function executeThinker(
           // misreading that started this whole investigation (a customer instance, 2026-08-10).
           toolCallCount: childAgent?.getRecordedToolCallCount() ?? 0,
           status: timedOut ? 'failed' : (childAborted ? 'aborted' : 'failed'),
-          stopReason: timedOut ? 'spawn_timeout' : (childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error')),
+          stopReason: timedOut ? 'spawn_timeout' : (guard ?? (childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error'))),
           // Record the FULL structured error so a failed sub-agent is diagnosable
           // (not just status=failed + a null error_text). Skipped for an abort —
-          // an intentional interruption isn't an error to store.
+          // an intentional interruption isn't an error to store. A loop guard's stop is not one.
           // A child that died after being refused a key still owes that reason:
           // "it failed" and "it failed after the vault refused it X" send the
           // reader to different repairs.
-          errorText: timedOut ? timeoutReason : (childAborted ? undefined : appendDeniedKeyNote(formatSpawnError(err), deniedKeys)),
+          errorText: timedOut ? timeoutReason : (guard !== null ? appendDeniedKeyNote((err as Error).message, deniedKeys) : (childAborted ? undefined : appendDeniedKeyNote(formatSpawnError(err), deniedKeys))),
         });
       } catch { /* swallow */ }
     }

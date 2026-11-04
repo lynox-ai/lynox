@@ -393,7 +393,7 @@ describe('going on from a run that halted', () => {
 	it('places every halt the engine names', () => {
 		const STARTS = ['awaitingStart', 'listed'];
 		const ENDS_THE_RUN = ['superseded', 'mandateEnded'];
-		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff'];
+		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff', 'markupAddedByShop'];
 		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkRestartKind({ ...base, haltKey });
@@ -424,7 +424,7 @@ describe('going on from a run that halted', () => {
 		// A judged run may also have stopped on its model.
 		expect(bulkHaltText(at('unavailable', { judge: judged.judge }), true, DE)?.cause)
 			.toBe('Der Lauf kam nicht weiter. shop.example.invalid oder das KI-Modell hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.');
-		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in your instance\'s log. So lynox stopped reading at that point.', before: null });
+		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
 		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
 			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, verbraucht 0.0034 USD.');
 		expect(bulkHaltText(at('blocked'), true, DE)).toEqual({
@@ -607,7 +607,7 @@ describe('going on from a run that halted', () => {
 		// Under twenty targets the halt comes at the first failure.
 		expect(bulkResumeText(w('failureRate', { failureLimit: 0 }), true, EN)?.cause).toBe('In this pass, a target could not be written.');
 		expect(bulkResumeText(w('consecutiveFailures'), true, DE)?.cause).toBe('Dreimal hintereinander liess sich ein Ziel nicht schreiben.');
-		expect(bulkResumeText(w('unrecorded'), true, DE)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll deiner Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
+		expect(bulkResumeText(w('unrecorded'), true, DE)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN)?.cause).toBe('The run reached the approved maximum: 40 targets.');
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 1 }), true, DE)?.cause).toBe('Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.');
 		expect(bulkResumeText(w('unauthorized'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. If there is no profile, ask lynox in the chat to set up the access.');
@@ -939,6 +939,19 @@ describe('what the preview says about a target lynox leaves out', () => {
 		const odd = 'read\u202efailed';
 		expect(bulkVisibleText(odd)).not.toBe(odd);
 		expect(bulkInvalidText(odd, true, true, own)).toBe(`skip (${bulkVisibleText(odd)})`);
+	});
+	it('words the HTML check\'s refusals of dropped tags on every run, with where to remove them (U-103)', () => {
+		const table: Record<string, string> = {
+			'bulk.invalid.markup_dropped': 'plan again', 'bulk.invalid.markup_dropped_before': 'remove them {where}',
+			'bulk.invalid.where_shopify': 'in Shopify', 'bulk.invalid.where_other': 'where you manage them', 'bulk.invalid.other': 'skip ({code})',
+		};
+		const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => (table[k] ?? k).replace(/\{(\w+)\}/g, (_, n: string) => v[n] ?? '') };
+		for (const shopify of [true, false]) {
+			expect(bulkInvalidText('markup_dropped', shopify, true, own)).toBe('plan again');
+		}
+		expect(bulkInvalidText('markup_dropped_before', true, true, own)).toBe('remove them in Shopify');
+		expect(bulkInvalidText('markup_dropped_before', false, true, own)).toBe('remove them where you manage them');
+		expect(i18nSource).toMatch(/'bulk\.invalid\.markup_dropped_before': \{ de: '[^']*\{where\}[^']*', en: "[^"]*\{where\}[^"]*" \}/);
 	});
 	it('adds the way to support on a managed instance only, and an unknown one reads as managed', () => {
 		expect(bulkInvalidText('read_failed', true, true, i18n)).toBe('bulk.invalid.read_failed bulk.invalid.persists_support');
