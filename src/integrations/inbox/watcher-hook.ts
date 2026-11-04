@@ -128,8 +128,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
    * thread message after the same sensitive check a first mail gets: without its text on `skip`,
    * masked on `mask`. A `replied` item opens again for it, unless it is an automatic reply; the
    * bucket stays, and no rule or classifier runs. Without a Message-ID, or when the message is
-   * stored already, nothing happens. Only Gmail and Graph have threads: on IMAP every mail is an
-   * item of its own and never comes here.
+   * stored already, nothing happens. Only Gmail and Graph have threads: on IMAP the thread key is the
+   * Message-ID, so only a redelivered mail comes here, and it is stored already.
    */
   const recordFollowUp = async (
     existing: InboxItem,
@@ -189,10 +189,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         itemId: existing.id,
         action: 'reopened_on_reply',
         actor: 'system',
-        payloadJson: JSON.stringify({
-          trigger: 'inbound_mail',
-          ...(sensitive.isSensitive ? { sensitive_categories: sensitive.categories } : {}),
-        }),
+        // No `sensitive_categories` here: the item's audit is what a reader withholds the item's own
+        // mail by, and this is another message. Its stored text is checked again when it is read.
+        payloadJson: JSON.stringify({ trigger: 'inbound_mail', message_id: messageId }),
       });
       return true;
     });

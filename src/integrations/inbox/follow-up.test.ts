@@ -187,6 +187,13 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(raw.snippet).toContain('482917');
   });
 
+  it('a sensitive follow-up does not put its categories into the item audit', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope({ subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' }));
+    const reopened = inbox.listAuditForItem(id).find((a) => a.action === 'reopened_on_reply')!;
+    expect(JSON.parse(reopened.payloadJson)).toEqual({ trigger: 'inbound_mail', message_id: '<follow@x>' });
+  });
+
   it('notifies for a reopened requires_user item, not for another bucket', async () => {
     seedReplied();
     await hook()(ACCOUNT.id, envelope());
