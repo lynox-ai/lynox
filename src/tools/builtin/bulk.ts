@@ -59,6 +59,20 @@ export const SHORTCODE_CHANGED_NOTE = 'shortcode_changed: the new text has a [sh
   'Do not put the text, the shortcode or a changed form of it in your reply, and do not offer another way out. ' +
   'Only where you wrote these characters yourself, plan the value again without them.';
 
+/** The model's line for a previewed run in which no target writes and at least one is invalid
+ *  (ux, 1130 eval run 4): without it the model told the owner that approving would write. */
+export const NOTHING_TO_APPROVE_NOTE = 'Nothing in this run can be written, so there is nothing to approve.';
+
+/** Whether a run is previewed and nothing in it can be written: no update, create or delete the
+ *  owner kept, at least one invalid target, none taken out by the owner (they could put one back),
+ *  and every verdict in. Approving such a run is refused (`nothing_to_apply`). */
+export function nothingToApprove(s: BulkRunStatus): boolean {
+  return s.phase === 'previewed' && s.list?.state !== 'pending'
+    && s.changes.update + s.changes.create + s.changes.delete === 0
+    && s.changes.invalid > 0 && s.deselected === 0
+    && (s.judge === null || s.judge.unjudged === 0);
+}
+
 export function formatStatus(s: BulkRunStatus): string {
   const invalid = Object.entries(s.invalidReasons).map(([r, n]) => `${r} ${String(n)}`).join(', ');
   const lines = [
@@ -70,6 +84,7 @@ export function formatStatus(s: BulkRunStatus): string {
       `${s.deselected > 0 ? `, taken out by the owner ${String(s.deselected)}` : ''}.`,
     `Undo class if applied: ${s.undo}.`,
   ];
+  if (nothingToApprove(s)) lines.push(NOTHING_TO_APPROVE_NOTE);
   if ((s.invalidReasons.effect_field ?? 0) > 0) {
     lines.push('effect_field: the after-state sets a field whose value sets off an effect at the provider — ' +
       'an email to a customer, a payment, or a change of someone\'s access or data. A bulk run never writes ' +
@@ -420,9 +435,9 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             : 'Dry run recorded — nothing was written, and no target was valid, so there is nothing to read.',
           formatStatus(out.status),
           ...(judge ? [JUDGE_NOTE] : []),
-          'Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
+          ...(nothingToApprove(out.status) ? [] : ['Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
             'The before- and after-state of each target is then in the run\'s ledger for the user to review; it is not shown to you. ' +
-            'Only the user can start and approve it, outside this chat.',
+            'Only the user can start and approve it, outside this chat.']),
         ].join('\n');
       } else {
         throw new BulkSourceError('target_system must be "workspace", "data_store" or "http".');
@@ -438,8 +453,10 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         'Dry run recorded — nothing was written to any target.',
         formatStatus(status),
         ...(judge ? [JUDGE_NOTE] : []),
-        'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. ' +
-          'Only the user can approve and apply it, outside this chat; bulk_status shows how far it got.',
+        nothingToApprove(status)
+          ? 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you.'
+          : 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. ' +
+            'Only the user can approve and apply it, outside this chat; bulk_status shows how far it got.',
       ].join('\n');
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return `Error: ${err.message}${shopifyHostHint(input)}`;
