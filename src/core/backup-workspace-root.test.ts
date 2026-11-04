@@ -5,14 +5,17 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BackupManager } from './backup.js';
 
-/** A rename onto this path fails with EIO: a swap that breaks after staging went through. */
-const renameFault = vi.hoisted(() => ({ dest: null as string | null }));
+/**
+ * A rename onto a file of this name fails with EIO: a swap that breaks after staging went through.
+ * Matched by the last component: the restore renames in its folder's handle, not by the full path.
+ */
+const renameFault = vi.hoisted(() => ({ leaf: null as string | null }));
 vi.mock('node:fs', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs')>();
   return {
     ...fs,
     renameSync: (from: import('node:fs').PathLike, to: import('node:fs').PathLike): void => {
-      if (renameFault.dest !== null && String(to) === renameFault.dest) {
+      if (renameFault.leaf !== null && String(to).split('/').pop() === renameFault.leaf) {
         throw Object.assign(new Error(`EIO: i/o error, rename '${String(from)}' -> '${String(to)}'`), { code: 'EIO' });
       }
       fs.renameSync(from, to);
@@ -253,12 +256,12 @@ describe('backup — the workspace root', () => {
     expect(created.success).toBe(true);
     writeFileSync(ws('http-api/a.txt'), 'ZZ-a-live');
     // The rename over the live config.json fails (an I/O error): staging went through, the swap did not.
-    renameFault.dest = join(data, 'config.json');
+    renameFault.leaf = 'config.json';
     let restored;
     try {
       restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     } finally {
-      renameFault.dest = null;
+      renameFault.leaf = null;
     }
     expect(restored.success).toBe(false);
     expect(restored.error).toMatch(/EIO/);

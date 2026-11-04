@@ -607,6 +607,37 @@ export interface WriteOptions {
 export const STAGE_PREFIX = '.lynox-stage-';
 const STAGE_NAME = /^\.lynox-stage-[0-9a-f]{24}$/;
 
+/** Whether `name` is exactly the shape of a temp this module writes (a crashed write leaves it behind). */
+export function isStageName(name: string): boolean {
+  return STAGE_NAME.test(name);
+}
+
+/** The fold probe's file, of exactly this shape; a crash between writing and removing it leaves it behind. */
+export const FOLD_PROBE_NAME = /^\.lynox-fold-probe-[0-9a-f]{12}-éa$/;
+
+/**
+ * Whether the filesystem holding the directory `relDir` folds names: one file is made there under a
+ * lower-case name with an accent in NFC form (O_EXCL|O_NOFOLLOW), then looked up in upper case and in
+ * NFD form, each without following a link. Either lookup that finds an entry folds. The file is
+ * removed again. `relDir` must exist; a link on the way to it is refused.
+ */
+export function namesFoldAt(anchor: WorkspaceAnchor, relDir: string): boolean {
+  const base = `.lynox-fold-probe-${randomBytes(6).toString('hex')}-éa`;
+  const dir = walkDir(anchor, splitRel(relDir));
+  try {
+    const name = Buffer.from(base, 'utf8');
+    closeSync(openSync(at(dir, name), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_NOFOLLOW, 0o600));
+    try {
+      return lstatOrNull(dir, Buffer.from(base.toUpperCase(), 'utf8')) !== null
+        || lstatOrNull(dir, Buffer.from(base.normalize('NFD'), 'utf8')) !== null;
+    } finally {
+      try { unlinkSync(at(dir, name)); } catch { /* already gone */ }
+    }
+  } finally {
+    closeDir(dir, anchor);
+  }
+}
+
 function tempName(): Buffer {
   return Buffer.from(STAGE_PREFIX + randomBytes(12).toString('hex'), 'utf8');
 }

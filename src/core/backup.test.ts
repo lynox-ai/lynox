@@ -721,6 +721,15 @@ describe('restoreBackup writes only where createBackup writes', () => {
     expect(readFileSync(join(lynoxDir, 'memory', 'note.md'), 'utf-8')).toBe('lower');
   });
 
+  /** The refusals for a folded pair (ux U-139), word for word. */
+  const foldedText = (a: string, b: string): string =>
+    `This backup holds "${a}" and "${b}", and this machine's filesystem takes them for one name: it does not tell upper from lower case, or two ways of writing the same letter, apart. ` +
+    'Restoring would fail halfway, so the restore was refused; nothing was replaced. ' +
+    'To restore this backup, use a machine whose filesystem tells these names apart (Linux usually does), or rename one of the two where the backup was made and back up again.';
+  const unaskedText = (a: string, b: string, code: string): string =>
+    `Could not check whether this machine's filesystem tells "${a}" and "${b}" apart (${code}), so the restore was refused; nothing was replaced. ` +
+    `Check that lynox can create a file in the folder of "${a}" (a full disk or a missing permission are the usual causes), then start the restore again.`;
+
   it('refuses two names that differ only in case or Unicode form where the filesystem folds them, before replacing anything', async () => {
     for (const [a, b] of [['memory/Note.md', 'memory/note.md'], ['memory/caf\u00e9.md', 'memory/cafe\u0301.md']] as const) {
       const { manager, backupPath } = await backupWith([{ path: a, bytes: 'one' }, { path: b, bytes: 'two' }]);
@@ -728,7 +737,7 @@ describe('restoreBackup writes only where createBackup writes', () => {
       try {
         const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
         expect(result.success, b).toBe(false);
-        expect(result.error).toMatch(/names two paths this machine's filesystem takes for one name/);
+        expect(result.error).toBe(foldedText(a, b));
         expect(result.pre_restore_backup_path).toBe('');
         expect(liveTier()).toBe('deep');
         expect(existsSync(join(lynoxDir, a))).toBe(false);
@@ -749,7 +758,7 @@ describe('restoreBackup writes only where createBackup writes', () => {
     try {
       const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/names two paths this machine's filesystem takes for one name/);
+      expect(result.error).toBe(foldedText('memory/new/Note.md', 'memory/new/note.md'));
       expect(folds).toHaveBeenCalledTimes(1);
       expect(folds).toHaveBeenCalledWith(memory);
       expect(liveTier()).toBe('deep');
@@ -768,7 +777,7 @@ describe('restoreBackup writes only where createBackup writes', () => {
     try {
       const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
       expect(result.success).toBe(false);
-      expect(result.error).toContain('"artifacts/Y.md" from "artifacts/y.md"');
+      expect(result.error).toBe(foldedText('artifacts/Y.md', 'artifacts/y.md'));
       expect(liveTier()).toBe('deep');
     } finally {
       folds.mockRestore();
@@ -781,7 +790,7 @@ describe('restoreBackup writes only where createBackup writes', () => {
     try {
       const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
       expect(result.success).toBe(false);
-      expect(result.error).toContain('"memory/A" from "memory/a/b.md"');
+      expect(result.error).toBe(foldedText('memory/A', 'memory/a/b.md'));
       expect(result.pre_restore_backup_path).toBe('');
       expect(existsSync(join(lynoxDir, 'memory', 'a'))).toBe(false);
       expect(liveTier()).toBe('deep');
@@ -803,7 +812,7 @@ describe('restoreBackup writes only where createBackup writes', () => {
     try {
       const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
       expect(result.success).toBe(false);
-      expect(result.error).toBe('Could not tell whether this machine\'s filesystem tells "memory/Note.md" from "memory/note.md" (EROFS) — refusing to restore; nothing was replaced.');
+      expect(result.error).toBe(unaskedText('memory/Note.md', 'memory/note.md', 'EROFS'));
       expect(result.pre_restore_backup_path).toBe('');
       expect(liveTier()).toBe('deep');
     } finally {

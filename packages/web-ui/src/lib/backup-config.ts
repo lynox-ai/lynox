@@ -89,6 +89,8 @@ export type RestoreOutcome =
 	/** `skipped`: entries the restore did not write (archive paths); `backupPath`: the backup's folder on the server. */
 	| { kind: 'restored'; skipped: string[]; backupPath: string | null }
 	| { kind: 'ask'; reason: string; mismatch: boolean }
+	/** Another restore is running on the engine (`restore_in_progress`): this one was not started. */
+	| { kind: 'running' }
 	| { kind: 'failed'; error: string | undefined };
 
 /**
@@ -107,6 +109,7 @@ export async function requestRestore(apiBase: string, backupId: string, allowUnv
 		return { kind: 'restored', skipped, backupPath: typeof data.backup_path === 'string' ? data.backup_path : null };
 	}
 	if (data.code === 'unverified_backup' && !allowUnverified) return { kind: 'ask', reason: data.error ?? '', mismatch: data.provenance === 'mismatch' };
+	if (data.code === 'restore_in_progress') return { kind: 'running' };
 	return { kind: 'failed', error: data.error };
 }
 
