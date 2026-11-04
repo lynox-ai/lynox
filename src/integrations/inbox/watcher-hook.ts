@@ -17,9 +17,9 @@
 // canary cohort, and full-body fetching can land alongside the read-pane
 // integration in Phase 2.
 
-import type { MailEnvelope } from '../mail/provider.js';
+import type { MailAuthType, MailEnvelope } from '../mail/provider.js';
 import { resolveThreadKey } from '../mail/thread-key.js';
-import type { InboxChannel } from '../../types/index.js';
+import type { InboxChannel, InboxItem } from '../../types/index.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxQueuePayload } from './runner.js';
@@ -41,8 +41,15 @@ function channelFromAccountId(_accountId: string): InboxChannel {
  * `MailStateDb.getAccount(id)`; tests pass a plain Map.
  */
 export interface AccountResolver {
-  resolve(accountId: string): { address: string; displayName: string } | null;
+  resolve(accountId: string): { address: string; displayName: string; authType?: MailAuthType | undefined } | null;
 }
+
+/**
+ * Providers whose watch envelope cannot tell an automatic reply: Graph's delta query carries no
+ * headers, so `isAutoReply` is always false there (`providers/oauth-graph.ts`, ENVELOPE_FIELDS).
+ * Before such an account reopens an item, the hook asks `confirmAutoReply`.
+ */
+const AUTO_REPLY_NOT_IN_ENVELOPE: ReadonlySet<MailAuthType> = new Set(['oauth_microsoft']);
 
 export interface HookQueue {
   enqueue(payload: InboxQueuePayload): boolean;
@@ -80,6 +87,13 @@ export interface InboxClassifierHookOptions {
    * whole inbox feature. Engine wiring populates from env.
    */
   disabledAccounts?: ReadonlySet<string> | undefined;
+  /**
+   * Reads the full message of an account whose envelope cannot tell an automatic reply
+   * (`AUTO_REPLY_NOT_IN_ENVELOPE`) and answers whether it is one. Asked only before a follow-up
+   * would reopen a replied item. Missing, or throwing, the item reopens: losing a customer's
+   * message weighs more than one needless notification.
+   */
+  confirmAutoReply?: ((accountId: string, env: MailEnvelope) => Promise<boolean>) | undefined;
 }
 
 /**
@@ -108,6 +122,87 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     ? new Set([...opts.folderBlacklist].map((f) => f.toLowerCase()))
     : undefined;
   const disabledAccounts = opts.disabledAccounts;
+
+  /**
+   * A new message in a thread the inbox already holds (PRD inbox-user-rules E6). It is stored as a
+   * thread message after the same sensitive check a first mail gets: without its text on `skip`,
+   * masked on `mask`. A `replied` item opens again for it, unless it is an automatic reply; the
+   * bucket stays, and no rule or classifier runs. Without a Message-ID, or when the message is
+   * stored already, nothing happens. Only Gmail and Graph have threads: on IMAP the thread key is the
+   * Message-ID, so only a redelivered mail comes here, and it is stored already.
+   */
+  const recordFollowUp = async (
+    existing: InboxItem,
+    env: MailEnvelope,
+    mode: SensitiveMode,
+    account: { address: string; authType?: MailAuthType | undefined },
+  ): Promise<void> => {
+    const messageId = env.messageId;
+    if (messageId === undefined || messageId.length === 0) return;
+    if (opts.state.hasThreadMessage(existing.tenantId, existing.accountId, messageId)) return;
+    const fields = envelopeToItemInputFields(env);
+    const sensitive = analyzeSensitiveContent({ subject: env.subject, body: env.snippet });
+    let subject = fields.subject ?? '';
+    let snippet = fields.snippet;
+    if (sensitive.isSensitive && mode === 'skip') {
+      snippet = undefined;
+    } else if (sensitive.isSensitive && mode === 'mask') {
+      const masked = envelopeToItemInputFields({ ...env, subject: sensitive.masked.subject, snippet: sensitive.masked.body });
+      subject = masked.subject ?? '';
+      snippet = masked.snippet;
+    }
+    const input: ThreadMessageInput = {
+      tenantId: existing.tenantId,
+      accountId: existing.accountId,
+      threadKey: existing.threadKey,
+      messageId,
+      fromAddress: fields.fromAddress ?? '',
+      subject,
+      direction: 'inbound',
+      inboxItemId: existing.id,
+    };
+    if (fields.fromName !== undefined) input.fromName = fields.fromName;
+    if (fields.inReplyTo !== undefined) input.inReplyTo = fields.inReplyTo;
+    if (fields.mailDate !== undefined) input.mailDate = fields.mailDate;
+    if (snippet !== undefined) input.snippet = snippet;
+    // Only a `replied` item opens; `reopenReplied` checks that again in its UPDATE.
+    let opens = existing.userAction === 'replied'
+      && !env.isAutoReply
+      // Our own mail coming back into the thread (a copy of the reply) is no new customer message.
+      && (fields.fromAddress ?? '').toLowerCase() !== account.address.toLowerCase()
+      // A message older than the reply (a backfill or a redelivery) did not come after it.
+      && !(fields.mailDate !== undefined && existing.userActionAt !== undefined
+        && fields.mailDate.getTime() <= existing.userActionAt.getTime());
+    if (opens && opts.confirmAutoReply && account.authType !== undefined && AUTO_REPLY_NOT_IN_ENVELOPE.has(account.authType)) {
+      try {
+        if (await opts.confirmAutoReply(existing.accountId, env)) opens = false;
+      } catch {
+        // Unknown: reopen (see `confirmAutoReply`).
+      }
+    }
+    const reopened = opts.state.runInTransaction(() => {
+      opts.state.insertThreadMessage(input);
+      if (!opens) return false;
+      if (!opts.state.reopenReplied(existing.id, existing.tenantId, fields.mailDate ?? new Date())) return false;
+      opts.state.appendAudit({
+        tenantId: existing.tenantId,
+        itemId: existing.id,
+        action: 'reopened_on_reply',
+        actor: 'system',
+        // No `sensitive_categories` here: the item's audit is what a reader withholds the item's own
+        // mail by, and this is another message. Its stored text is checked again when it is read.
+        payloadJson: JSON.stringify({ trigger: 'inbound_mail', message_id: messageId }),
+      });
+      return true;
+    });
+    if (reopened && opts.notifier && existing.bucket === 'requires_user') {
+      const item = opts.state.getItem(existing.id, existing.tenantId);
+      // A snoozed item is not in the list until it wakes; a push now would lead nowhere.
+      const snoozed = item?.snoozeUntil !== undefined && item.snoozeUntil.getTime() > Date.now();
+      if (item && !snoozed) void opts.notifier.notifyNewItem(item);
+    }
+  };
+
   return async (accountId, env): Promise<InboxHookOutcome> => {
     if (disabledAccounts?.has(accountId)) return 'ignored';
     if (folderBlacklistLower?.has(env.folder.toLowerCase())) return 'ignored';
@@ -149,6 +244,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           });
         });
       }
+      await recordFollowUp(existing, env, sensitiveMode, account);
       return 'duplicate';
     }
 

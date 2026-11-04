@@ -44,6 +44,7 @@ import {
 } from './runner.js';
 import { DEFAULT_TENANT_ID, InboxStateDb } from './state.js';
 import { reconcileOutboundReply } from './outbound-reconcile.js';
+import type { MailEnvelope } from '../mail/provider.js';
 import type { SensitiveMode } from './sensitive-content.js';
 import {
   type AccountResolver,
@@ -137,6 +138,8 @@ export interface BootstrapInboxOptions {
   folderBlacklist?: ReadonlySet<string> | undefined;
   /** Account ids whose mails skip the inbox entirely. */
   disabledAccounts?: ReadonlySet<string> | undefined;
+  /** See `InboxClassifierHookOptions.confirmAutoReply`; the engine reads the message through its mail registry. */
+  confirmAutoReply?: ((accountId: string, env: MailEnvelope) => Promise<boolean>) | undefined;
   /**
    * When `llmRegion='us'` and this is true, bootstrap throws unless the
    * caller has confirmed via `privacyAck=true` that the operator agreed
@@ -324,7 +327,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   const accounts: AccountResolver = {
     resolve: (id) => {
       const acct = opts.mailStateDb.getAccount(id);
-      return acct ? { address: acct.address, displayName: acct.displayName } : null;
+      return acct ? { address: acct.address, displayName: acct.displayName, authType: acct.authType } : null;
     },
   };
 
@@ -339,6 +342,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   if (opts.folderBlacklist !== undefined) hookOpts.folderBlacklist = opts.folderBlacklist;
   if (opts.disabledAccounts !== undefined) hookOpts.disabledAccounts = opts.disabledAccounts;
   if (notifier !== undefined) hookOpts.notifier = notifier;
+  if (opts.confirmAutoReply !== undefined) hookOpts.confirmAutoReply = opts.confirmAutoReply;
   const hook = createInboxClassifierHook(hookOpts);
 
   // Disabled accounts must not get a backfill — same opt-out as the
