@@ -288,9 +288,10 @@ function htmlTextOf(text: string): string | null {
   return [body, ...rest].join('\n');
 }
 
-/** `text` without its hidden characters ({@link hiddenCharIndexes}), counted in code points. */
-function withoutHidden(text: string): string {
-  const drop = new Set(hiddenCharIndexes(text));
+/** `text` without its hidden characters ({@link hiddenCharIndexes}), counted in code points;
+ *  `inPlace: false` drops those that stand where real text puts them too. */
+function withoutHidden(text: string, opts: { inPlace?: boolean } = {}): string {
+  const drop = new Set(hiddenCharIndexes(text, opts));
   return drop.size === 0 ? text : Array.from(text).filter((_, i) => !drop.has(i)).join('');
 }
 
@@ -301,11 +302,20 @@ function cutText(text: string, max: number): string {
   return chars.slice(0, Math.max(0, max - Array.from(JUDGE_CONTEXT_CUT).length)).join('') + JUDGE_CONTEXT_CUT;
 }
 
-/** A context value as it is sent: each text without hidden characters and cut to
- *  {@link JUDGE_CONTEXT_MAX_CHARS}, a list's texts each so; any other value as it is. */
+/** One text as it is sent: without hidden characters, cut to {@link JUDGE_CONTEXT_MAX_CHARS}. */
+function shapeContextText(text: string): string {
+  return cutText(withoutHidden(text), JUDGE_CONTEXT_MAX_CHARS);
+}
+
+/** A context value as it is sent: a text shaped ({@link shapeContextText}); a record, or a list or
+ *  record inside a list, as its JSON text, shaped so — a text is what the cuts can shorten; a
+ *  list's texts each shaped; a number, a yes/no or null as it is. */
 function shapeContextValue(value: unknown): unknown {
-  if (typeof value === 'string') return cutText(withoutHidden(value), JUDGE_CONTEXT_MAX_CHARS);
-  if (Array.isArray(value)) return value.map((v) => typeof v === 'string' ? cutText(withoutHidden(v), JUDGE_CONTEXT_MAX_CHARS) : v);
+  if (typeof value === 'string') return shapeContextText(value);
+  if (Array.isArray(value)) {
+    return value.map((v) => typeof v === 'string' ? shapeContextText(v) : v !== null && typeof v === 'object' ? shapeContextText(canonicalJson(v)) : v);
+  }
+  if (value !== null && typeof value === 'object') return shapeContextText(canonicalJson(value));
   return value;
 }
 
@@ -330,11 +340,12 @@ export function judgeContext(
 ): { context: Record<string, unknown> } | { secretField: number } {
   const holdsSecret = (text: string): boolean => check.maskVault(text) !== text || check.scanSecret(text) !== null;
   // A text as written and, where it can hold markup, as it reads: an entity or a tag can split a
-  // credential the written bytes do not show whole.
+  // credential the written bytes do not show whole. Each also without any hidden character, those
+  // a text may carry in place included: a soft hyphen between two letters splits a key as well.
   const textHolds = (text: string): boolean => {
-    if (holdsSecret(text)) return true;
     const read = htmlTextOf(text);
-    return read !== null && holdsSecret(read);
+    return [text, ...(read === null ? [] : [read])]
+      .some((t) => holdsSecret(t) || holdsSecret(withoutHidden(t, { inPlace: false })));
   };
   for (let i = 0; i < fields.length; i++) {
     const value = Object.hasOwn(read, fields[i]!) ? read[fields[i]!] : null;
@@ -354,9 +365,13 @@ export function judgeContext(
     }
   }
   if (holdsSecret(canonicalJson(context))) {
-    // Named by the field whose own text holds it; one spread over two fields' JSON is named by the first.
-    const at = fields.findIndex((f) => holdsSecret(canonicalJson({ [f]: context[f] })));
-    return { secretField: at === -1 ? 0 : at };
+    // Named by the field whose own text holds it. One spread over two fields' JSON is named by the
+    // field it ends in: the JSON's fields are added in its own (sorted) order until it holds it.
+    const own = fields.findIndex((f) => holdsSecret(canonicalJson({ [f]: context[f] })));
+    if (own !== -1) return { secretField: own };
+    const sorted = [...fields].sort();
+    const upTo = sorted.findIndex((_, n) => holdsSecret(canonicalJson(Object.fromEntries(sorted.slice(0, n + 1).map((f) => [f, context[f]])))));
+    return { secretField: upTo === -1 ? 0 : fields.indexOf(sorted[upTo]!) };
   }
   return { context };
 }

@@ -942,6 +942,7 @@ describe('the context C the judge only reads (U-140)', () => {
 	const source = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
 	const table: Record<string, string> = {
 		'bulk.invalid.secret_in_context': 'field {field} holds a key', 'bulk.invalid.secret_in_context_column': 'column {field} holds a key',
+		'bulk.invalid.secret_in_context_field': 'entry field {field} holds a key',
 		'bulk.field.shopify.vendor': 'Vendor', 'bulk.field.shopify.tags': 'Tags', 'bulk.invalid.other': 'skip ({code})',
 	};
 	const own: BulkI18n = { t: (k) => table[k] ?? k, tf: (k, v) => (table[k] ?? k).replace(/\{(\w+)\}/g, (_, n: string) => v[n] ?? '') };
@@ -957,9 +958,11 @@ describe('the context C the judge only reads (U-140)', () => {
 		const odd = 'no‮te';
 		expect(bulkInvalidText('secret_in_context', false, true, own, { field: odd, host: null, dataStore: true }))
 			.toBe(`column ${bulkVisibleText(odd)} holds a key`);
-		// Neither a store nor the data store: by its code, as every reason there.
+		// Neither a store nor the data store: by the field's name as the list has it.
 		expect(bulkInvalidText('secret_in_context', false, true, own, { field: 'x', host: 'api.example.com', dataStore: false }))
-			.toBe('skip (secret_in_context)');
+			.toBe('entry field x holds a key');
+		expect(bulkInvalidText('secret_in_context', false, true, own, { field: odd, host: 'api.example.com', dataStore: false }))
+			.toBe(`entry field ${bulkVisibleText(odd)} holds a key`);
 	});
 
 	it('words every new text as ux decided it, in both languages', () => {

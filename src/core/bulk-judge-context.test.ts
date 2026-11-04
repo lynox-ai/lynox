@@ -223,6 +223,28 @@ describe('judgeContext: the two credential checks', () => {
     expect(judgeContext({ d: split }, ['d'], check)).toEqual({ secretField: 0 });
   });
 
+  it('finds one a hidden character splits where real text may carry one, which the sent text keeps', () => {
+    // A soft hyphen between two letters stands in place: it is not removed from what is sent.
+    const soft = 'key sk-li\u00ADve-abc';
+    expect(hiddenCharIndexes(soft)).toEqual([]);
+    expect(scan(soft)).toBeNull();
+    expect(judgeContext({ d: soft }, ['d'], check)).toEqual({ secretField: 0 });
+    expect(judgeContext({ d: 'key sk-de\u00ADad-abc' }, ['d'], check)).toHaveProperty('context');
+  });
+
+  it('finds one an entity spells a hidden character into, and one in a record nested in the value', () => {
+    expect(judgeContext({ d: '<p>key sk-&#8203;live-abc</p>' }, ['d'], check)).toEqual({ secretField: 0 });
+    expect(judgeContext({ a: 'x', meta: { k: 'sk-\u200Blive-abc' } }, ['a', 'meta'], check)).toEqual({ secretField: 1 });
+    expect(judgeContext({ a: 'x', meta: { k: 'sk-\u200Bdead-abc' } }, ['a', 'meta'], check)).toHaveProperty('context');
+  });
+
+  it('names a credential spread over two fields\' JSON by the field it ends in', () => {
+    // Neither value holds it alone; the context's JSON, in its sorted order, does from b on.
+    const vault = { scanSecret: () => null, maskVault: (t: string) => t.replace('1","b":"p', '***') };
+    expect(judgeContext({ a: 'p1', b: 'p2', c: 'z' }, ['a', 'b', 'c'], vault)).toEqual({ secretField: 1 });
+    expect(judgeContext({ a: 'p1', b: 'p2', c: 'z' }, ['c', 'b', 'a'], vault)).toEqual({ secretField: 1 });
+  });
+
   it('finds one in a value the vault knows, in the value and in the context sent', () => {
     expect(judgeContext({ a: 'x', b: 'my-pass' }, ['a', 'b'], { scanSecret: () => null, maskVault: (t) => t.replace('my-pass', '***') }))
       .toEqual({ secretField: 1 });
@@ -264,6 +286,15 @@ describe('judgeContext: what is sent', () => {
     expect(out['a']).toBe('x'.repeat(3_000));
     expect(out['b']).toBe('y'.repeat(3_000));
     expect((out['c'] as string).endsWith(JUDGE_CONTEXT_CUT)).toBe(true);
+  });
+
+  it('sends a record as its JSON text, without hidden characters, and cuts it to the bounds', () => {
+    expect(sent({ meta: { b: 'x\u200By', a: 1 } }, ['meta'])).toEqual({ meta: '{"a":1,"b":"xy"}' });
+    expect(sent({ t: ['a', { k: 'v' }, 2] }, ['t'])).toEqual({ t: ['a', '{"k":"v"}', 2] });
+    const big = sent({ a: 'x'.repeat(3_000), meta: { note: 'n'.repeat(60_000) } }, ['a', 'meta']);
+    expect(Array.from(JSON.stringify(big)).length).toBeLessThanOrEqual(JUDGE_CONTEXT_MAX_TOTAL);
+    expect(big['a']).toBe('x'.repeat(3_000));
+    expect((big['meta'] as string).endsWith(JUDGE_CONTEXT_CUT)).toBe(true);
   });
 
   it('cuts a list from its end, marked, when it is the field the whole is cut in', () => {
