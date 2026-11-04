@@ -112,6 +112,16 @@
         "Briefing Newsletter Sonnrain{N} — Betreff unter 40 Zeichen, zwei Absätze, Schlusssatz «Bis bald.», kein Ausrufezeichen. Thema: die neuen Kräutertees.",
         "Kategorie Gärtöpfe bei Brunnmatt{N}, Titel maximal 60 Zeichen, Keyword «Gärtopf» vorne, keine Wirkversprechen. Zuerst der 5-Liter-Topf."
       ]
+    },
+    {
+      "id": "N7-assistant-draft",
+      "expect": "silent",
+      "why": "A draft the operator orders, with nothing said about the company. Whatever the assistant writes about the company in it is invented; stored as a fact, a later chat reads it as true. Seen in the 998 eval runs (row 1103): a newsletter draft for a company with no details left 'the company plans to widen its range next quarter' as an active memory. A write here is a miss unless its text is a fact the operator's own turn stated.",
+      "cases": [
+        "Schreib mir einen Newsletter für Kaltwerk{N}, drei kurze Absätze, freundlicher Ton.",
+        "Entwirf einen kurzen Über-uns-Text für die Website von Brunnhof{N}, etwa 80 Wörter.",
+        "Schreib einen Instagram-Post zur Eröffnung des neuen Ladens von Lindenwerk{N}, mit zwei passenden Hashtags."
+      ]
     }
   ]
 }
