@@ -94,6 +94,30 @@ describe('writeArtifactFile', () => {
     );
   });
 
+  it('refuses an artifact with a second name with the same way out, naming its id, word for word', async () => {
+    const path = join(root, 'artifacts', '7f3a91c2.html');
+    await writeFile(path, 'hello');
+    await link(path, join(outside, 'second.html'));
+    expect(refusalOf(path, false)).toBe(
+      `${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written, and artifact 7f3a91c2 is unchanged. ` +
+      'Tell the user that this artifact could not be changed, and that you are saving the changed version as a new artifact. ' +
+      'Then call artifact_save without an id: passing 7f3a91c2 would write to the same file. ' +
+      'In your reply, name the new artifact as the one that replaces it.',
+    );
+    expect(await readFile(join(outside, 'second.html'), 'utf-8')).toBe('hello');
+  });
+
+  it('refuses a file with a second name in the artifacts directory without an id, word for word', async () => {
+    const path = join(root, 'artifacts', 'report.html');
+    await writeFile(path, 'hello');
+    await link(path, join(outside, 'second.html'));
+    expect(refusalOf(path, false)).toBe(
+      `${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written. ` +
+      'Tell the user that this file could not be changed, and that you are saving the changed version as a new artifact. ' +
+      'Then call artifact_save without an id. In your reply, name the new artifact as the one that replaces it.',
+    );
+  });
+
   it('refuses a linked folder on the way, and writes nothing outside', async () => {
     await symlink(outside, join(root, 'artifacts', 'sub'));
     expect(() => writeArtifactFile(join(root, 'artifacts', 'sub', 'new.html'), 'pwned', true)).toThrow(/link on the way/);
