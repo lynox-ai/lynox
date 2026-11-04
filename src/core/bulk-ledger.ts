@@ -618,7 +618,7 @@ export interface PreviewTarget {
    *  counted and named, not halted. Set only where it holds. */
   hostRewrote?: true | undefined;
   /** A read Shopify product's `update` in a run that is not an undo: the fields behind the page's
-   *  SEO title and description whose text gains `&`, `<` or `>` (`shopifySeoEntityFields`), which a
+   *  SEO title and description whose text gains an `&` (`shopifySeoEntityFields`), which a
    *  theme may show as an entity. A note to the owner; nothing is refused. Set only where it holds. */
   seoEntityFields?: string[] | undefined;
   /** With `secret_in_context`: the field of the rule's context C that held it, by its name, so the

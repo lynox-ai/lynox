@@ -1913,10 +1913,9 @@ describe('whether a read product lies in a list\'s filters', () => {
 });
 
 describe('shopifySeoEntityFields', () => {
-  it('names an SEO field that gains an &, < or >, counted against its before-image', () => {
+  it('names an SEO field that gains an &, counted against its before-image', () => {
     expect(shopifySeoEntityFields({ seo_title: 'Bio und Natur' }, { seo_title: 'Bio & Natur' })).toEqual(['seo_title']);
-    expect(shopifySeoEntityFields({ seo_description: 'A' }, { seo_description: 'A < B' })).toEqual(['seo_description']);
-    expect(shopifySeoEntityFields({ seo_description: 'A' }, { seo_description: 'A > B' })).toEqual(['seo_description']);
+    expect(shopifySeoEntityFields({ seo_description: 'A' }, { seo_description: 'A & B' })).toEqual(['seo_description']);
     expect(shopifySeoEntityFields({ seo_title: 'A & B' }, { seo_title: 'A & B & C' })).toEqual(['seo_title']);
     expect(shopifySeoEntityFields({ seo_title: null, seo_description: null }, { seo_title: 'A & B', seo_description: 'C & D' })).toEqual(['seo_title', 'seo_description']);
   });
@@ -1927,13 +1926,20 @@ describe('shopifySeoEntityFields', () => {
     expect(shopifySeoEntityFields({ title: 'A und B', seo_title: 'Eigen' }, { title: 'A & B' })).toEqual([]);
     // Emptying the SEO title shows the product title: its & is new on the page.
     expect(shopifySeoEntityFields({ title: 'A & B', seo_title: 'A und B' }, { seo_title: '' })).toEqual(['title']);
+    expect(shopifySeoEntityFields({ title: 'A & B', seo_title: 'A und B' }, { seo_title: null })).toEqual(['title']);
     // An SEO title set to the title the page already shows adds nothing.
     expect(shopifySeoEntityFields({ title: 'A & B', seo_title: null }, { seo_title: 'A & B' })).toEqual([]);
   });
 
-  it('does not name a product not read yet: there is nothing to compare with', () => {
+  it('does not name a product not read yet, which the same text against a read empty product would be', () => {
     expect(shopifySeoEntityFields(null, { seo_title: 'A & B' })).toEqual([]);
     expect(shopifySeoEntityFields({}, { seo_title: 'A & B' })).toEqual(['seo_title']);
+  });
+
+  it('names only an &: the note says &, so a < or > a theme may show alike is not counted', () => {
+    expect(shopifySeoEntityFields({ seo_description: 'A' }, { seo_description: 'A < B > C' })).toEqual([]);
+    // Through the title fallback too: emptying the SEO title shows a title with > on the page.
+    expect(shopifySeoEntityFields({ title: 'A > B', seo_title: 'X' }, { seo_title: '' })).toEqual([]);
   });
 
   it('does not name a field whose before-image holds as many', () => {

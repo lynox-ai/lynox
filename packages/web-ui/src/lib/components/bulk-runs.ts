@@ -443,7 +443,7 @@ export interface BulkTarget {
 	/** Written, and the store kept the description otherwise than sent, without outside markup. */
 	hostRewrote?: true | undefined;
 	/** The fields behind a Shopify product page's SEO title and description whose text gains an `&`,
-	 *  which a theme may show as `&amp;` (a new `<` or `>` is refused before). A note; nothing is refused. */
+	 *  which a theme may show as `&amp;`. A note; nothing is refused. */
 	seoEntityFields?: string[] | undefined;
 	/** Refused for `shortcode_changed`: each field the shortcode check refuses, with its whole
 	 *  planned value, for the owner to copy into the shop (1130). Set only where one holds. */
