@@ -84,7 +84,8 @@ export function formatStatus(s: BulkRunStatus): string {
       `${s.deselected > 0 ? `, taken out by the owner ${String(s.deselected)}` : ''}.`,
     `Undo class if applied: ${s.undo}.`,
   ];
-  if (nothingToApprove(s)) lines.push(NOTHING_TO_APPROVE_NOTE);
+  const nothing = nothingToApprove(s);
+  if (nothing) lines.push(NOTHING_TO_APPROVE_NOTE);
   if ((s.invalidReasons.effect_field ?? 0) > 0) {
     lines.push('effect_field: the after-state sets a field whose value sets off an effect at the provider — ' +
       'an email to a customer, a payment, or a change of someone\'s access or data. A bulk run never writes ' +
@@ -99,7 +100,8 @@ export function formatStatus(s: BulkRunStatus): string {
   if (s.costUsd > 0 || s.costCapUsd !== null) {
     lines.push(`Model spend: ${formatUsd(s.costUsd, 'down')}${s.costCapUsd !== null ? ` of a ${formatUsd(s.costCapUsd)} limit` : ', no limit set'}.`);
   }
-  if (s.writeMethod !== null) {
+  // A run with nothing to approve has no first target to apply either.
+  if (s.writeMethod !== null && !nothing) {
     lines.push(`Writes with ${s.writeMethod}.${s.probeConfirmed ? '' : ' It can be applied to one target first; more only after the user has checked that one.'}`);
   }
   if (s.list?.state === 'pending') {
@@ -434,7 +436,8 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             ? 'External dry run recorded — nothing was sent or written. Nothing is read either until the user starts it outside this chat.'
             : 'Dry run recorded — nothing was written, and no target was valid, so there is nothing to read.',
           formatStatus(out.status),
-          ...(judge ? [JUDGE_NOTE] : []),
+          // With no valid target there is nothing to judge: the judge note would promise verdicts.
+          ...(judge && !nothingToApprove(out.status) ? [JUDGE_NOTE] : []),
           ...(nothingToApprove(out.status) ? [] : ['Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
             'The before- and after-state of each target is then in the run\'s ledger for the user to review; it is not shown to you. ' +
             'Only the user can start and approve it, outside this chat.']),

@@ -501,6 +501,16 @@ describe('a previewed run in which nothing can be written', () => {
     expect(result).toContain(NOTHING_TO_APPROVE_NOTE);
     expect(result).not.toContain('Only the user can start and approve it');
     expect(result).not.toContain('Once the user has started it');
+    // Nor that it writes with a method, one target first.
+    expect(result).not.toMatch(/Writes with|applied to one target first/);
+  });
+
+  it('does not promise verdicts for a judged external plan with no valid target', async () => {
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'not a url' }]));
+    const judge = { rule: 'Shorten the title.', schema: { type: 'object', properties: { title: { type: 'string', maxLength: 80 } }, required: ['title'] } };
+    const result = await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'src.json', judge } as Parameters<typeof bulkPlanTool.handler>[0], agent());
+    expect(result).toContain(NOTHING_TO_APPROVE_NOTE);
+    expect(result).not.toContain('no model is called until the user starts the run');
   });
 
   it('waits for every verdict, for the whole list and for the preview', async () => {

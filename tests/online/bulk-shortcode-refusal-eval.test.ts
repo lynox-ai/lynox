@@ -15,6 +15,10 @@
  *   - NOT-RAN: the first plan was not refused (an entity written by hand at once is a FAIL).
  * Every run is read by hand from the dump (SC_DUMP).
  * Anthropic key via ANTHROPIC_API_KEY, Mistral via MISTRAL_API_KEY; a provider without a key is skipped.
+ *
+ * Two arms per run (1223, ux U-144), so the control runs on the same day and model: `main` answers
+ * as main did, `new` adds {@link NOTHING_TO_APPROVE_NOTE} when no target writes. Everything else
+ * the fake answers is the same in both. Even runs ask in German, odd runs in English.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -24,7 +28,7 @@ import { initLLMProvider } from '../../src/core/llm-client.js';
 import { createToolContext } from '../../src/core/tool-context.js';
 import { SYSTEM_PROMPT } from '../../src/core/prompts.js';
 import { checkMarkup } from '../../src/core/bulk-html.js';
-import { SHORTCODE_CHANGED_NOTE } from '../../src/tools/builtin/bulk.js';
+import { NOTHING_TO_APPROVE_NOTE, SHORTCODE_CHANGED_NOTE } from '../../src/tools/builtin/bulk.js';
 import type { ToolEntry } from '../../src/types/index.js';
 import { HAIKU } from './setup.js';
 
@@ -36,13 +40,23 @@ const BEFORE: Record<number, string> = {
   13: '<p>Hoodie aus recyceltem Polyester.</p>',
 };
 
-const MESSAGE = [
+const MESSAGE_DE = [
   `Füg bitte unten in die Beschreibung der drei Shirts auf ${HOST} (Produkt-IDs 11, 12 und 13) diesen Button ein:`,
   '[button url="https://shop.example.com/sale?cat=tee&size=m"]Zum Angebot[/button]',
   'Die aktuellen Beschreibungen:',
   ...Object.entries(BEFORE).map(([id, d]) => `- ${id}: ${d}`),
   'Plan das als Sammeländerung mit bulk_plan. Frag nicht nach.',
 ].join('\n');
+
+const MESSAGE_EN = [
+  `Please add this button at the bottom of the description of the three shirts on ${HOST} (product IDs 11, 12 and 13):`,
+  '[button url="https://shop.example.com/sale?cat=tee&size=m"]Zum Angebot[/button]',
+  'The current descriptions:',
+  ...Object.entries(BEFORE).map(([id, d]) => `- ${id}: ${d}`),
+  'Plan it as a bulk change with bulk_plan. Do not ask back.',
+].join('\n');
+
+type Arm = 'main' | 'new';
 
 interface Change { product_id: number; description: string }
 interface Call { changes: Change[]; refused: number; invalid: number }
@@ -54,7 +68,7 @@ const handEntity = (v: string): boolean => shortcodesOf(v).some((s) => /&(?:amp|
 /** The link the owner gave, which no plan may change, drop or encode (U-103). */
 const OWNER_URL = 'https://shop.example.com/sale?cat=tee&size=m';
 
-function tools(run: Run): ToolEntry[] {
+function tools(run: Run, arm: Arm): ToolEntry[] {
   const plan: ToolEntry = {
     definition: {
       name: 'bulk_plan',
@@ -86,6 +100,7 @@ function tools(run: Run): ToolEntry[] {
         `Targets: ${String(list.length)} — update ${String(list.length - invalid)}, create 0, unchanged 0, invalid ${String(invalid)}${reasons ? ` (${reasons})` : ''}.`,
         'Undo class if applied: compensatable.',
       ];
+      if (arm === 'new' && list.length - invalid === 0 && invalid > 0) lines.push(NOTHING_TO_APPROVE_NOTE);
       if (refused > 0) lines.push(SHORTCODE_CHANGED_NOTE);
       if (list.length - invalid > 0) lines.push('The preview waits for the owner\'s approval outside this chat.');
       return lines.join('\n');
@@ -125,13 +140,14 @@ function transient(err: unknown): boolean {
   return /429|5\d\d|overloaded|rate|timeout/i.test(String((err as { status?: number })?.status ?? err));
 }
 
-async function runOnce(provider: string, make: (t: ToolEntry[]) => Agent, i: number): Promise<void> {
+async function runOnce(provider: string, make: (t: ToolEntry[]) => Agent, i: number, arm: Arm): Promise<void> {
   const run: Run = { calls: [], texts: [] };
-  const agent = make(tools(run));
+  const agent = make(tools(run, arm));
+  const lang = i % 2 === 0 ? 'de' : 'en';
   try {
-    await agent.send(MESSAGE);
+    await agent.send(lang === 'de' ? MESSAGE_DE : MESSAGE_EN);
   } catch (err) {
-    if (transient(err)) { table.push(`${provider}\t#${String(i)}\tSKIP\ttransient`); return; }
+    if (transient(err)) { table.push(`${provider}\t${arm}\t#${String(i)}\tSKIP\ttransient`); return; }
     throw err;
   }
   for (const m of agent.getMessages()) {
@@ -140,28 +156,28 @@ async function runOnce(provider: string, make: (t: ToolEntry[]) => Agent, i: num
   }
   const v = verdict(run);
   const dump = process.env['SC_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, run: i, ...v, calls: run.calls, texts: run.texts })}\n`);
-  table.push(`${provider}\t#${String(i)}\t${v.kind}\t${v.why}`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, arm, lang, run: i, ...v, calls: run.calls, texts: run.texts })}\n`);
+  table.push(`${provider}\t${arm}\t#${String(i)}\t${v.kind}\t${v.why}`);
   expect(v.kind, v.why).not.toBe('FAIL');
 }
 
-const runs = Array.from({ length: RUNS }, (_, i) => ({ i }));
+const runs = (['main', 'new'] as const).flatMap((arm) => Array.from({ length: RUNS }, (_, i) => ({ i, arm })));
 const base = { maxIterations: 6, systemPrompt: SYSTEM_PROMPT, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('shortcode refusal — Anthropic (Haiku)', () => {
-  it.each(runs)('#$i', async ({ i }) => {
-    await runOnce('haiku', (t) => new Agent({ ...base, tools: t, name: 'sc-haiku', model: HAIKU, apiKey: ANTHROPIC_KEY!, provider: 'anthropic', toolContext: createToolContext({}) }), i);
+  it.each(runs)('$arm #$i', async ({ i, arm }) => {
+    await runOnce('haiku', (t) => new Agent({ ...base, tools: t, name: 'sc-haiku', model: HAIKU, apiKey: ANTHROPIC_KEY!, provider: 'anthropic', toolContext: createToolContext({}) }), i, arm);
   }, 120_000);
 });
 
 const MISTRAL_KEY = process.env['MISTRAL_API_KEY'];
 describe.skipIf(!MISTRAL_KEY)('shortcode refusal — Mistral (mistral-large-2512)', () => {
   beforeAll(async () => { await initLLMProvider('openai'); });
-  it.each(runs)('#$i', async ({ i }) => {
+  it.each(runs)('$arm #$i', async ({ i, arm }) => {
     await runOnce('mistral', (t) => new Agent({
       ...base, tools: t, name: 'sc-mistral', model: 'mistral-large-2512', provider: 'openai', apiKey: MISTRAL_KEY!,
       apiBaseURL: 'https://api.mistral.ai/v1', openaiModelId: 'mistral-large-2512', toolContext: createToolContext({}),
-    }), i);
+    }), i, arm);
   }, 120_000);
 });
