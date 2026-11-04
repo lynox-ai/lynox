@@ -395,6 +395,20 @@ describe('the workflow’s side', () => {
     expect(p.preview.members.map((m) => [m.name, m.ended, m.roles])).toEqual([['z@x.ch', true, ['created']], ['h@x.ch', false, ['edited', 'created']]]);
   });
 
+  it('the role of a mark without a grant id goes to the live member under that address, not to an ended one listed first', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch', grant: 'g2-h@x.ch' });
+    renewed(b, 'h@x.ch', 'g2-h@x.ch');
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    // An edit of the plan from before marks carried a grant id.
+    editor(b, 'triggers', 'p', 'h@x.ch', null);
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    if (p.kind !== 'preview') throw new Error(`no preview: ${p.kind}`);
+    expect(p.preview.members.map((m) => [m.ended, m.roles])).toEqual([[true, ['created']], [false, ['workflow-created', 'edited']]]);
+  });
+
   it('the member that stays is named, as live', () => {
     const b = box();
     workflow(b, 'w', { email: 'z@x.ch' });

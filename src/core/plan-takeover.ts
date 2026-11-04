@@ -264,7 +264,9 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
     // A mark without a grant id (written before marks carried one) names the person, not an
     // access: it adds nobody the list already has under that address, and its roles (read for the
     // id-less mark only, `rolesOn`) go to that member instead of being lost.
-    const same = p.mandateId === undefined ? members.findIndex((m) => m.name === p.email) : -1;
+    // To the live member under that address when there is one, as the web-ui's T-5 reads it.
+    const live = members.findIndex((m) => m.name === p.email && !m.ended);
+    const same = p.mandateId === undefined ? (live >= 0 ? live : members.findIndex((m) => m.name === p.email)) : -1;
     if (same >= 0) {
       const had = members[same]!;
       members[same] = { ...had, roles: [...had.roles, ...roles(p).filter((r) => !had.roles.includes(r))] };
