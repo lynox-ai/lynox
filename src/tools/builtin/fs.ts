@@ -8,7 +8,7 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { isArtifactId } from '../../core/artifact-store.js';
-import { processUmask, toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
+import { creatingUmask, processUmask, toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
 import { sidecarWriteModes } from '../../core/workspace-write-modes.js';
 import {
   FILE_TOOL_READ_CAP_BYTES, closeAnchor, isReadLimit, openAnchor, openRead, openWrite, readFdCapped, WorkspaceAccessError, type WorkspaceAnchor,
@@ -240,6 +240,7 @@ export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonl
     // In sidecar mode the shell's pool must read and write what is created here: the modes and
     // group of the layout document, not the umask (`workspace-write-modes.ts`).
     const sidecar = create ? sidecarWriteModes() : null;
+    // `processUmask`, not `creatingUmask`, as before: without /proc a new file here stays 0600.
     const umask = create && sidecar === null ? processUmask() : 0;
     ({ fd } = openWrite(target.anchor, target.rel, !create ? {}
       : sidecar !== null ? { createMode: sidecar.fileMode, dirMode: sidecar.dirMode, group: sidecar.group }
@@ -363,7 +364,11 @@ function artifactSecondNameRefusal(path: string, rel: string): string {
   return artifactRefusal(`${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written`, rel);
 }
 
-function artifactRefusal(cause: string, rel: string): string {
+/**
+ * A refusal in the artifacts directory, with the way out: a new artifact. `rel` is the file's path
+ * below that directory; a top-level `<id>.html` names the id. Also worded by artifact_save.
+ */
+export function artifactRefusal(cause: string, rel: string): string {
   const id = rel.endsWith('.html') ? rel.slice(0, -'.html'.length) : '';
   if (isArtifactId(id)) {
     return `${cause}, and artifact ${id} is unchanged. ` +
@@ -384,6 +389,16 @@ function artifactRefusal(cause: string, rel: string): string {
 function secondNameRefusal(path: string): string {
   return `${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written. ` +
     'Write the changed content to a new file under another name instead, and tell the user which file now holds it.';
+}
+
+/**
+ * The refusal for reading a workspace file with a second name. The way out goes through the user:
+ * a file they upload again is stored under a new name of its own, with one name.
+ */
+function readSecondNameRefusal(path: string): string {
+  return `${path} has more than one name (a hard link); the file tools do not read such a file, because its other name may be a file outside the workspace. ` +
+    'Nothing was read. Do not read it with bash either, for the same reason. ' +
+    'Tell the user that this file could not be read, and ask them to give you its content another way, for example by uploading it again.';
 }
 
 /**
@@ -436,15 +451,6 @@ export function writeResolvedFile(path: string, data: string, create: boolean): 
   writeBelow('/', path.slice(1), path, data, create, { link: () => resolvedLinkRefusal(path), secondName: () => secondNameRefusal(path) });
 }
 
-/**
- * The umask a write by name would apply. `processUmask` reads it from /proc and assumes 077
- * without /proc, which would make every new file private on macOS; there the process's own umask
- * is read instead (in the main thread, where the file tools run). `writeInPlace` (the workspace's
- * open directory) still takes `processUmask` as before, so without /proc its new files stay 0600.
- */
-function creatingUmask(): number {
-  return existsSync('/proc/self/status') ? processUmask() : process.umask();
-}
 
 /**
  * An open that failed for another reason than a link, said by the file's own path: the walk's
@@ -547,7 +553,7 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
           // A second name may be a file of the engine's outside the workspace, as for a write.
           if (fstatSync(fd).nlink > 1) {
             closeSync(fd);
-            throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not read such a file.`);
+            throw new Error(readSecondNameRefusal(target.shown));
           }
         } else {
           filePath = target.path;

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { linkSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ArtifactStore } from '../../core/artifact-store.js';
@@ -147,5 +147,68 @@ describe('artifact_save refuses the eviction placeholder as content', () => {
     expect(store.get(id)?.content).toBe(DOCUMENT + '\nThree options.');
     const created = await artifactSaveTool.handler({ title: 'Notes', content: 'short note' }, makeAgent(store));
     expect(created).toMatch(/^Saved artifact "Notes"/);
+  });
+});
+
+describe('artifact_save and artifact_restore at a link or a file with a second name', () => {
+  let dir: string;
+  let outside: string;
+  let store: ArtifactStore;
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-artifact-link-')));
+    outside = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-artifact-link-out-')));
+    writeFileSync(join(outside, 'target.txt'), 'kept');
+    store = new ArtifactStore(dir);
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  const wayOut = (id: string): string =>
+    `, and artifact ${id} is unchanged. ` +
+    'Tell the user that this artifact could not be changed, and that you are saving the changed version as a new artifact. ' +
+    `Then call artifact_save without an id: passing ${id} would write to the same file. ` +
+    'In your reply, name the new artifact as the one that replaces it.';
+
+  it('artifact_save with an id refuses a link at its file, word for word, and writes nothing through it', async () => {
+    const a = store.save({ title: 'Deck', content: 'v1' });
+    const file = join(dir, `${a.id}.html`);
+    rmSync(file);
+    symlinkSync(join(outside, 'target.txt'), file);
+    const message = await artifactSaveTool.handler({ id: a.id, title: 'Deck', content: 'v2' }, makeAgent(store)).then(() => '', (err: Error) => err.message);
+    expect(message).toBe(`${file}: a link on the way to the file is not followed; nothing was written${wayOut(a.id)}`);
+    expect(readFileSync(join(outside, 'target.txt'), 'utf-8')).toBe('kept');
+  });
+
+  it('artifact_save with an id refuses a file with a second name, word for word', async () => {
+    const a = store.save({ title: 'Deck', content: 'v1' });
+    const file = join(dir, `${a.id}.html`);
+    linkSync(file, join(outside, 'second.html'));
+    const message = await artifactSaveTool.handler({ id: a.id, title: 'Deck', content: 'v2' }, makeAgent(store)).then(() => '', (err: Error) => err.message);
+    expect(message).toBe(`${file} has more than one name (a hard link); artifact_save does not write such a file, so nothing was written${wayOut(a.id)}`);
+    expect(readFileSync(join(outside, 'second.html'), 'utf-8')).toBe('v1');
+  });
+
+  it('artifact_restore refuses a link at the artifact\'s file, word for word', async () => {
+    const a = store.save({ title: 'Deck', content: 'v1' });
+    store.save({ id: a.id, title: 'Deck', content: 'v2' });
+    const file = join(dir, `${a.id}.html`);
+    rmSync(file);
+    symlinkSync(join(outside, 'target.txt'), file);
+    const message = await artifactRestoreTool.handler({ id: a.id, version: 1 }, makeAgent(store)).then(() => '', (err: Error) => err.message);
+    expect(message).toBe(`${file}: a link on the way to the file is not followed; nothing was written${wayOut(a.id)}`);
+    expect(readFileSync(join(outside, 'target.txt'), 'utf-8')).toBe('kept');
+  });
+
+  it('artifact_restore refuses a file with a second name, word for word', async () => {
+    const a = store.save({ title: 'Deck', content: 'v1' });
+    store.save({ id: a.id, title: 'Deck', content: 'v2' });
+    const file = join(dir, `${a.id}.html`);
+    linkSync(file, join(outside, 'second.html'));
+    const message = await artifactRestoreTool.handler({ id: a.id, version: 1 }, makeAgent(store)).then(() => '', (err: Error) => err.message);
+    expect(message).toBe(`${file} has more than one name (a hard link); artifact_restore does not write such a file, so nothing was written${wayOut(a.id)}`);
+    expect(readFileSync(join(outside, 'second.html'), 'utf-8')).toBe('v2');
   });
 });

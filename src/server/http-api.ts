@@ -151,7 +151,7 @@ import type { WorkspaceAccess } from '../core/workspace-access.js';
 import type { StagedArchive, WorkspaceManifest } from '../core/workspace-export.js';
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
-import { ArtifactPlaceholderError } from '../core/artifact-store.js';
+import { ArtifactFileRefusedError, ArtifactPlaceholderError } from '../core/artifact-store.js';
 import { findHiddenChar } from '../core/hidden-text.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -10014,6 +10014,10 @@ export class LynoxHTTPApi {
           ...(typeof b['id'] === 'string' ? { id: b['id'] } : {}),
         });
       } catch (err) {
+        if (err instanceof ArtifactFileRefusedError) {
+          errorResponse(res, 409, 'The artifact\'s file is a link or has a second name, so it was not written. Nothing was saved; save it as a new artifact.', 'artifact_file_refused');
+          return;
+        }
         if (!(err instanceof ArtifactPlaceholderError)) throw err;
         errorResponse(res, 422, 'This is the placeholder the assistant keeps for an already saved document, not the document. Nothing was saved.', 'artifact_placeholder');
         return;

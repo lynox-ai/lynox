@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,6 +83,22 @@ describe('POST /api/artifacts with the placeholder (real engine)', () => {
     const ok = await post({ title: 'Bug report', content: quoting });
     expect(ok.status).toBe(201);
     expect(store().list().some((a) => a.title === 'Bug report')).toBe(true);
+  }, 60_000);
+
+  it('refuses an update whose file is a link with 409, and writes nothing through it', async () => {
+    const doc = store().save({ title: 'Linked', content: '<h1>Linked</h1>' });
+    const target = join(dir!, 'outside-target.txt');
+    writeFileSync(target, 'kept');
+    const file = join(dir!, 'artifacts', `${doc.id}.html`);
+    rmSync(file);
+    symlinkSync(target, file);
+    const refused = await post({ id: doc.id, title: 'Linked', content: '<h1>new</h1>' });
+    expect(refused.status).toBe(409);
+    expect(JSON.parse(refused.text)).toMatchObject({
+      code: 'artifact_file_refused',
+      error: 'The artifact\'s file is a link or has a second name, so it was not written. Nothing was saved; save it as a new artifact.',
+    });
+    expect(readFileSync(target, 'utf-8')).toBe('kept');
   }, 60_000);
 
   it('control: real content is saved', async () => {

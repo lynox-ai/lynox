@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
-import { ArtifactPlaceholderError, isArtifactId } from '../../core/artifact-store.js';
+import { ArtifactFileRefusedError, ArtifactPlaceholderError, isArtifactId } from '../../core/artifact-store.js';
+import { artifactRefusal } from './fs.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface ArtifactSaveInput {
@@ -17,6 +18,17 @@ interface ArtifactListInput {
 
 interface ArtifactDeleteInput {
   id: string;
+}
+
+/**
+ * The store's refusal of a link or a file with a second name, worded for the model: the same way
+ * out as the file tools give in the artifacts directory, a new artifact without the id.
+ */
+function fileRefusal(err: ArtifactFileRefusedError, tool: string): string {
+  const cause = err.reason === 'link'
+    ? `${err.path}: a link on the way to the file is not followed; nothing was written`
+    : `${err.path} has more than one name (a hard link); ${tool} does not write such a file, so nothing was written`;
+  return artifactRefusal(cause, err.path.slice(err.path.lastIndexOf('/') + 1));
 }
 
 export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
@@ -60,6 +72,16 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       );
     }
 
+    try {
+      return saveArtifact(input, agent, store);
+    } catch (err) {
+      if (err instanceof ArtifactFileRefusedError) throw new Error(fileRefusal(err, 'artifact_save'), { cause: err });
+      throw err;
+    }
+  },
+};
+
+function saveArtifact(input: ArtifactSaveInput, agent: IAgent, store: NonNullable<IAgent['toolContext']['artifactStore']>): string {
     return withInstanceWrite(agent, {
       site: 'artifact_save#save', kind: () => (isArtifactId(input.id) ? 'save' : 'create'), store: 'artifacts',
       target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined]],
@@ -109,8 +131,7 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       );
       return lines.join('\n');
     });
-  },
-};
+}
 
 export const artifactListTool: ToolEntry<ArtifactListInput> = {
   definition: {
@@ -228,6 +249,7 @@ export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
         main: ['restore'],
       }, (w) => w.run('restore', () => store.restore(input.id, input.version), ifNonNull));
     } catch (err) {
+      if (err instanceof ArtifactFileRefusedError) throw new Error(fileRefusal(err, 'artifact_restore'), { cause: err });
       if (!(err instanceof ArtifactPlaceholderError)) throw err;
       return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
     }
