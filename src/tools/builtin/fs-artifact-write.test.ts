@@ -100,7 +100,6 @@ describe('writeArtifactFile', () => {
     await link(path, join(outside, 'second.html'));
     expect(refusalOf(path, false)).toBe(
       `${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written, and artifact 7f3a91c2 is unchanged. ` +
-      'Do not write it under this name again, with any tool, bash included: that would change the file under its other name too. ' +
       'Tell the user that this artifact could not be changed, and that you are saving the changed version as a new artifact. ' +
       'Then call artifact_save without an id: passing 7f3a91c2 would write to the same file. ' +
       'In your reply, name the new artifact as the one that replaces it.',
@@ -114,7 +113,6 @@ describe('writeArtifactFile', () => {
     await link(path, join(outside, 'second.html'));
     expect(refusalOf(path, false)).toBe(
       `${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written. ` +
-      'Do not write it under this name again, with any tool, bash included: that would change the file under its other name too. ' +
       'Tell the user that this file could not be changed, and that you are saving the changed version as a new artifact. ' +
       'Then call artifact_save without an id. In your reply, name the new artifact as the one that replaces it.',
     );

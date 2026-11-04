@@ -360,22 +360,18 @@ function linkRefusal(path: string, rel: string): string {
 
 /** The refusal for an artifact with a second name (a hard link): the same way out as for a link. */
 function artifactSecondNameRefusal(path: string, rel: string): string {
-  return artifactRefusal(`${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written`, rel, NOT_UNDER_THIS_NAME);
+  return artifactRefusal(`${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written`, rel);
 }
 
-/** Why not to write a file with a second name some other way: a model reads the refusal as an
- *  obstacle and reaches for the shell, which writes through the second name. */
-const NOT_UNDER_THIS_NAME = 'Do not write it under this name again, with any tool, bash included: that would change the file under its other name too. ';
-
-function artifactRefusal(cause: string, rel: string, also = ''): string {
+function artifactRefusal(cause: string, rel: string): string {
   const id = rel.endsWith('.html') ? rel.slice(0, -'.html'.length) : '';
   if (isArtifactId(id)) {
-    return `${cause}, and artifact ${id} is unchanged. ${also}` +
+    return `${cause}, and artifact ${id} is unchanged. ` +
       'Tell the user that this artifact could not be changed, and that you are saving the changed version as a new artifact. ' +
       `Then call artifact_save without an id: passing ${id} would write to the same file. ` +
       'In your reply, name the new artifact as the one that replaces it.';
   }
-  return `${cause}. ${also}` +
+  return `${cause}. ` +
     'Tell the user that this file could not be changed, and that you are saving the changed version as a new artifact. ' +
     'Then call artifact_save without an id. In your reply, name the new artifact as the one that replaces it.';
 }
@@ -387,7 +383,6 @@ function artifactRefusal(cause: string, rel: string, also = ''): string {
  */
 function secondNameRefusal(path: string): string {
   return `${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written. ` +
-    NOT_UNDER_THIS_NAME +
     'Write the changed content to a new file under another name instead, and tell the user which file now holds it.';
 }
 

@@ -50,7 +50,6 @@ const linkText = (path: string): string =>
   `Write the file under another file name instead, and tell the user where it is and that ${basename(path)} could not be written because of a link.`;
 const secondNameText = (path: string): string =>
   `${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written. ` +
-  'Do not write it under this name again, with any tool, bash included: that would change the file under its other name too. ' +
   'Write the changed content to a new file under another name instead, and tell the user which file now holds it.';
 
 describe('writeResolvedFile', () => {
