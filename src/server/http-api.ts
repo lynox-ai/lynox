@@ -12946,7 +12946,7 @@ export class LynoxHTTPApi {
 
     // ── Backups ──────────────────────────────────────────────────
 
-    // Each backup's `files` (every file's path and size) is left out unless `?files=1` asks for it:
+    // Each backup's `files` (one entry per file) is left out unless `?files=1` asks for it:
     // across many large backups it is the bulk of the answer, and `file_count`/`total_bytes` carry
     // what the list shows.
     this.addStatic('user', 'GET /api/backups', async (req, res) => {
