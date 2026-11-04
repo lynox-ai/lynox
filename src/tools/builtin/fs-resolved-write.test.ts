@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, symlink, writeFile, readFile, link, readdir, stat, chmod } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { writeResolvedFile, writeFileTool, editFileTool } from './fs.js';
 import { clearTenantWorkspace, setTenantWorkspace } from '../../core/workspace.js';
@@ -44,10 +44,13 @@ const refusalOf = (run: () => void): string => {
 const linkText = (path: string): string =>
   `${path}: a link on the way to the file is not followed here; nothing was written. ` +
   'If the link was set while the file was being written, writing it once more checks the path anew. ' +
-  'If the same refusal comes back, the link leads to nothing that exists: write the file to another path, ' +
-  'or tell the user that this path cannot be written because of a link on it.';
+  'If the same refusal comes back, the link leads to nothing that exists. ' +
+  'Do not write, remove or change anything at this path, with any tool, bash included: ' +
+  'bash would follow the link and create a file wherever it points. ' +
+  `Write the file under another file name instead, and tell the user where it is and that ${basename(path)} could not be written because of a link.`;
 const secondNameText = (path: string): string =>
   `${path} has more than one name (a hard link); the file tools do not write such a file, so nothing was written. ` +
+  'Do not write it under this name again, with any tool, bash included: that would change the file under its other name too. ' +
   'Write the changed content to a new file under another name instead, and tell the user which file now holds it.';
 
 describe('writeResolvedFile', () => {
