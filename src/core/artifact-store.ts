@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { containsEvictionMarker } from './artifact-eviction.js';
 import {
-  closeAnchor, listDir, openAnchor, openRead, openWrite, readFdCapped, readFileAt, removeStaleStages, statEntry, unlinkAt, writeFileAt,
+  closeAnchor, listDir, openAnchor, openRead, openWrite, readFdCapped, readFileAt, statEntry, unlinkAt, writeFileAt,
   WorkspaceAccessError, type WorkspaceAnchor,
 } from './workspace-fd.js';
 import { creatingUmask } from './workspace-rel.js';
@@ -110,6 +110,11 @@ export class ArtifactFileRefusedError extends Error {
   }
 }
 
+/** A kernel error said by the file's path, its `code` kept for callers that branch on it. */
+function errnoError(code: string, path: string, cause: unknown): Error {
+  return Object.assign(new Error(`${code}: ${path}`, { cause }), { code });
+}
+
 /**
  * Thrown by {@link ArtifactStore.restore} when the version to restore is a link or has a second
  * name: it was not read, and nothing was restored.
@@ -144,10 +149,6 @@ export class ArtifactStore {
     mkdirSync(this.dir, { recursive: true });
     this.anchorDir = realpathSync(this.dir);
     this.anchor = this.openStoreAnchor();
-    if (this.anchor !== null) {
-      // Temp files a crash left behind while replacing the index or a version.
-      try { removeStaleStages(this.anchor, ''); } catch { /* best effort */ }
-    }
     this.indexPath = join(this.dir, 'index.json');
     this.loadIndex();
   }
@@ -161,17 +162,31 @@ export class ArtifactStore {
     }
   }
 
-  /** The held handle, opened again if its directory was deleted; null where there is none. */
+  /**
+   * The held handle, opened again if its directory was deleted (or its filesystem no longer
+   * answers for it); null where there is none. A directory renamed away is not noticed: the
+   * store keeps writing into it. Comparing the handle with what the path names now would
+   * follow a folder above the store that was swapped for a link — the move the handle is held
+   * against.
+   */
   private liveAnchor(): WorkspaceAnchor | null {
     if (this.anchor === null) return null;
-    if (fstatSync(this.anchor.fd).nlink === 0) this.reopen();
+    let gone: boolean;
+    try { gone = fstatSync(this.anchor.fd).nlink === 0; } catch { gone = true; }
+    if (gone) this.reopen(this.anchor);
     return this.anchor;
   }
 
-  private reopen(): void {
-    if (this.anchor !== null) closeAnchor(this.anchor);
+  /**
+   * Open the directory again, then let go of the old handle. If the open fails, the old handle
+   * stays held — its directory is still gone, so the next use tries again and fails the same
+   * way, never on a closed descriptor that may have been handed out again.
+   */
+  private reopen(old: WorkspaceAnchor): void {
     mkdirSync(this.anchorDir, { recursive: true });
-    this.anchor = this.openStoreAnchor();
+    const next = openAnchor(this.anchorDir);
+    this.anchor = next;
+    closeAnchor(old);
   }
 
   /**
@@ -198,7 +213,7 @@ export class ArtifactStore {
     } catch (err) {
       if (err instanceof WorkspaceAccessError || err instanceof ArtifactFileRefusedError) throw err;
       const code = (err as NodeJS.ErrnoException).code;
-      if (typeof code === 'string') throw new Error(`${code}: ${join(this.dir, rel)}`, { cause: err });
+      if (typeof code === 'string') throw errnoError(code, join(this.dir, rel), err);
       throw err;
     }
   }
@@ -266,7 +281,7 @@ export class ArtifactStore {
       writeFileSync(fd, data, 'utf-8');
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      throw typeof code === 'string' ? new Error(`${code}: ${join(this.dir, rel)}`, { cause: err }) : err;
+      throw typeof code === 'string' ? errnoError(code, join(this.dir, rel), err) : err;
     } finally {
       closeSync(fd);
     }

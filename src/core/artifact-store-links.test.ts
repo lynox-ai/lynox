@@ -264,6 +264,19 @@ describe('the held handle on the store directory', () => {
     expect(readFileSync(join(dir, 'artifacts', `${a.id}.html`), 'utf-8')).toBe('y');
   });
 
+  it('refuses, and keeps refusing, when a link stands where the deleted directory was', () => {
+    const store = new ArtifactStore(join(dir, 'artifacts'));
+    store.save({ title: 'before', content: 'x' });
+    rmSync(join(dir, 'artifacts'), { recursive: true, force: true });
+    mkdirSync(join(outside, 'planted'));
+    symlinkSync(join(outside, 'planted'), join(dir, 'artifacts'));
+    // Twice: the second attempt must meet the same refusal, not a descriptor closed by the first.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(() => store.save({ title: 'after', content: 'y' })).toThrow(/ENOTDIR|ELOOP/);
+    }
+    expect(readdirSync(join(outside, 'planted'))).toEqual([]);
+  });
+
   it('after the erasure, forgetAll writes to the directory again', () => {
     const store = new ArtifactStore(join(dir, 'artifacts'));
     store.save({ title: 'before', content: 'x' });
@@ -280,7 +293,10 @@ describe('an error from the kernel', () => {
     const store = new ArtifactStore(dir);
     const a = store.save({ title: 't', content: 'x' });
     chmodSync(join(dir, `${a.id}.html`), 0o444);
-    expect(() => store.save({ id: a.id, title: 't', content: 'y' })).toThrow(`EACCES: ${join(dir, `${a.id}.html`)}`);
+    let err: (Error & { code?: string }) | undefined;
+    try { store.save({ id: a.id, title: 't', content: 'y' }); } catch (e) { err = e as Error & { code?: string }; }
+    expect(err?.message).toBe(`EACCES: ${join(dir, `${a.id}.html`)}`);
+    expect(err?.code).toBe('EACCES');
   });
 });
 
@@ -294,6 +310,16 @@ describe('a refused update', () => {
     rmSync(join(dir, `${a.id}.html`));
     symlinkSync(join(outside, 'secret.txt'), join(dir, `${a.id}.html`));
     expect(refusalOf(() => store.save({ id: a.id, title: 't', content: 'v13' }))?.reason).toBe('link');
+    expect(readdirSync(join(dir, 'versions')).sort()).toEqual(before);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('that the snapshot could read leaves the version ring as it was too', () => {
+    const store = new ArtifactStore(dir);
+    const a = store.save({ title: 't', content: 'v1' });
+    for (let n = 2; n <= 12; n++) store.save({ id: a.id, title: 't', content: `v${n}` });
+    const before = readdirSync(join(dir, 'versions')).sort();
+    chmodSync(join(dir, `${a.id}.html`), 0o444); // readable for a snapshot, not writable
+    expect(() => store.save({ id: a.id, title: 't', content: 'v13' })).toThrow(/EACCES/);
     expect(readdirSync(join(dir, 'versions')).sort()).toEqual(before);
   });
 
@@ -318,15 +344,6 @@ describe('the index file', () => {
 });
 
 describe('a store that is made', () => {
-  it('removes temp files a crash left behind', () => {
-    writeFileSync(join(dir, '.lynox-stage-0123456789abcdef01234567'), 'half');
-    mkdirSync(join(dir, 'versions'));
-    writeFileSync(join(dir, 'versions', '.lynox-stage-89abcdef0123456789abcdef'), 'half');
-    new ArtifactStore(dir);
-    expect(readdirSync(dir).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
-    expect(readdirSync(join(dir, 'versions'))).toEqual([]);
-  });
-
   it('does not adopt a file with a second name as an artifact', () => {
     linkSync(join(outside, 'secret.txt'), join(dir, 'abcdef12.html'));
     expect(new ArtifactStore(dir).list()).toEqual([]);
