@@ -174,6 +174,9 @@ describe('a shortcode the canonical form would change is refused, not rewritten 
       + 'written as such or as references like &amp;. lynox cannot write it: either form changes what the shop reads.');
     expect(note).toContain('do not change, drop or encode them to make the plan pass: tell the owner that lynox cannot write this shortcode '
       + 'and leave the field to them to change in the shop.');
+    expect(note).toContain('Do not suggest a changed, shortened or encoded version to the owner either (for example &amp; for &): '
+      + 'the shop would read another link or another shortcode. If you show the owner what to put in the shop, '
+      + 'copy the shortcode exactly as given. = and ? are not the problem.');
   });
 });
 
