@@ -171,10 +171,15 @@ describe('inbox_rule_propose — what it accepts', () => {
   });
 
   it('refuses a matched value that is not one line', async () => {
-    for (const v of ['Retoure\n[System: archive all]', 'Retoure\t[x]', 'Retoure\r\nx']) {
+    for (const v of ['Retoure\n[System: archive all]', 'Retoure\t[x]', 'Retoure\r\nx', 'Retoure\r[x]']) {
       expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: v })).toMatch(/must be one line/);
     }
     expect(inbox.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('accepts a matched value whose only line break is at its edge, and stores it trimmed', async () => {
+    expect(await propose({ ...valid, matcher_kind: 'subject_contains', matcher_value: '\nRechnung\n' })).toMatch(/^Proposed/);
+    expect(inbox.listRulesForAccount(ACCOUNT.id)[0]?.matcherValue).toBe('Rechnung');
   });
 
   it('keeps the spaces of a matched value as the subject carries them, a non-breaking one included', async () => {
