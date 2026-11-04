@@ -34,7 +34,10 @@ const NUMBER_BYTES = 32;
 const RESERVED_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 
 export interface JudgeRule {
-  /** What the model is told to decide, per target. The owner's words, never a target's. */
+  /** What the model is told to decide, per target. Never a target's words, but not always the
+   *  owner's either: the agent may draft it from third-party data (keyword data for a shop's
+   *  meta texts), and the owner approves it without having written it. Nothing in the schema can
+   *  bar a string's content, so a field's value check carries that load (`seo-text.ts`). */
   rule: string;
   /** The verdict's shape over F, normalised by {@link normalizeJudgeRule}. */
   schema: ExtractSchema;
@@ -140,8 +143,14 @@ function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
 export function normalizeJudgeRule(input: unknown, opts: { idField?: string | undefined } = {}): JudgeRule {
   if (!isPlainObject(input)) throw new BulkSourceError('judge must be an object with rule and schema.');
   const rule = input['rule'];
-  if (typeof rule !== 'string' || rule.trim() === '' || rule.length > JUDGE_MAX_RULE_CHARS) {
+  if (typeof rule !== 'string' || rule.trim() === '') {
     throw new BulkSourceError(`judge.rule must be a text of 1–${String(JUDGE_MAX_RULE_CHARS)} characters.`);
+  }
+  if (rule.length > JUDGE_MAX_RULE_CHARS) {
+    // The counted length, so the model shortens by a number instead of an estimate.
+    throw new BulkSourceError(
+      `judge.rule has ${String(rule.length)} characters; it may have at most ${String(JUDGE_MAX_RULE_CHARS)}. Shorten it by at least ${String(rule.length - JUDGE_MAX_RULE_CHARS)}.`,
+    );
   }
   refuseHidden(rule, 'judge.rule');
   const rawSchema = input['schema'];

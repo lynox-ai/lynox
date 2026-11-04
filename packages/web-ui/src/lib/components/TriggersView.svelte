@@ -12,6 +12,7 @@
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
+	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -70,6 +71,11 @@
 	// Who reads the list (`GET /api/triggers`). Only the owner takes a plan over; the route says
 	// so too (ownerOnly), the button only follows it.
 	let viewer = $state<'owner' | 'mandate' | 'none'>('none');
+	// Confirming a plan is the owner's (`POST /api/tasks/:id/confirm`). Whose session it is comes
+	// from the list's own `viewer` or from the shared store, which this page loads itself. The button
+	// waits for a known owner, so a mandate never sees it, not even while neither has answered;
+	// without it the line says the owner confirms, which is true whoever reads it.
+	const ownerActs = $derived(viewer === 'owner' || isOwnerSession());
 	let loading = $state(true);
 	let error = $state('');
 	// Per-trigger in-flight guard so a double-click can't fire two run-now /
@@ -162,7 +168,7 @@
 	}
 	// The stamp is the owner's (the route is ownerOnly); a helper sees what waits, not a button.
 	function ownerStamps(trigger: Trigger): boolean {
-		return viewer === 'owner' && stampable(trigger);
+		return ownerActs && stampable(trigger);
 	}
 	// "Check connections": a confirmed schedule whose run can use a connection, opened on demand,
 	// so the preview is not asked for on every refresh (ux U-058, ii-c-min).
@@ -510,7 +516,7 @@
 		stopped: 'tasks.run_stopped',
 	};
 
-	$effect(() => { void loadTriggers(); /* catches and sets its error */ });
+	$effect(() => { void loadTriggers(); void loadSettingsViewer(); /* both catch their errors */ });
 
 	// `running` and `stoppable` are snapshots, and a scheduled run starts on its own: without
 	// a refresh, the Stop button of a run that began while the page was open never appears.
@@ -606,7 +612,8 @@
 								     nothing to agree to. One gate for the button (`offersConfirmation`), so it can
 								     never outlive the thing it consents to. -->
 								<div class="mt-2 space-y-1.5" data-trigger-consent>
-									<p class="text-xs text-warning">{t('triggers.awaiting_hint')}</p>
+									<!-- Only a known owner confirms here; anyone else is told who does, in place of the hint and the button. -->
+									<p class="text-xs text-warning" data-trigger-awaits>{t(ownerActs ? 'triggers.awaiting_hint' : 'triggers.confirm_owner_only_notice')}</p>
 									{#if ownerStamps(trigger)}
 										<!-- The owner's block reads the schedule from the stamp preview, so what
 										     is shown is what the stamp holds (`StampConfirm`). -->

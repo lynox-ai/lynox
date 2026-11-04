@@ -68,6 +68,8 @@ const providerRecords = (): readonly erasure.StoredConnectionRecord[] => erasure
 const stateOf = (grant: string): string | undefined => providerRecords().find((r) => r.revokedGrant === grant)?.historyState;
 interface AuditRow { actor_kind: string; actor_email: string | null; mandate_id: string | null; target: string; phase: string; correlation_id: string }
 const cancelRows = (): AuditRow[] => db.getDb().prepare("SELECT actor_kind, actor_email, mandate_id, target, phase, correlation_id FROM audit_log WHERE action = 'connection.erasure.cancel' ORDER BY id").all() as AuditRow[];
+/** The opaque id the audit rows name the profile by, never its slug. */
+const trailOf = (): string => { const t = store.trailIdOf('shop'); expect(t).toMatch(/^apf_[0-9a-f]{16}$/); return t!; };
 const notices = (now: Date): readonly erasure.ProviderNotice[] => erasure.providerNotices(db.getDb(), now);
 
 describe('who may cancel by a new consent', () => {
@@ -150,7 +152,7 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     markRevoked();
     reconnectAs(OWNER_PRINCIPAL);
     const id = providerRecords()[0]!.id;
-    expect(cancelRows()).toEqual([{ actor_kind: 'owner', actor_email: null, mandate_id: null, target: `shop ${id} consent`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
+    expect(cancelRows()).toEqual([{ actor_kind: 'owner', actor_email: null, mandate_id: null, target: `${trailOf()} ${id} consent`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
   });
 
   it('a mandate\'s consent names the mandate', () => {
@@ -159,7 +161,7 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     markRevoked();
     reconnectAs(HELPER);
     const id = providerRecords()[0]!.id;
-    expect(cancelRows()).toEqual([{ actor_kind: 'mandate', actor_email: 'helper@example.com', mandate_id: 'm-1', target: `shop ${id} consent`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
+    expect(cancelRows()).toEqual([{ actor_kind: 'mandate', actor_email: 'helper@example.com', mandate_id: 'm-1', target: `${trailOf()} ${id} consent`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
   });
 
   it('a lift names whoever saved it', () => {
@@ -171,7 +173,7 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     expect(store.save({ ...current, oauth_grant: grant }, undefined, { actor: HELPER }).ok).toBe(true);
     const id = providerRecords()[0]!.id;
     expect(providerRecords()[0]!.historyState).toBe('cancelled');
-    expect(cancelRows()).toEqual([{ actor_kind: 'mandate', actor_email: 'helper@example.com', mandate_id: 'm-1', target: `shop ${id} lift`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
+    expect(cancelRows()).toEqual([{ actor_kind: 'mandate', actor_email: 'helper@example.com', mandate_id: 'm-1', target: `${trailOf()} ${id} lift`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
   });
 
   it('a lift saved without an actor is refused: the profile stays revoked and its erasure held', () => {
@@ -210,8 +212,46 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     store.save(profile());
     markRevoked();
     const id = providerRecords()[0]!.id;
+    const trail = trailOf();
     expect(store.remove('shop', undefined, { record: 'erasure' })).toBe(true);
-    expect(cancelRows()).toEqual([{ actor_kind: 'owner', actor_email: null, mandate_id: null, target: `shop ${id} owner_delete`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
+    expect(cancelRows()).toEqual([{ actor_kind: 'owner', actor_email: null, mandate_id: null, target: `${trail} ${id} owner_delete`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
+    // Witness for the test below: here the owner's record covers what the provider's covers.
+    expect(erasure.erasureRecords(db.getDb(), 'shop').find((r) => r.cause !== 'provider_revoked')?.historyState).toBe('pending');
+  });
+
+  it('an owner\'s erasure delete whose own record covers nothing leaves the provider\'s erasure held', () => {
+    store.save(profile());
+    const refused = grantOf();
+    const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    history.insertToolCall({ runId: run, toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0, connectionId: 'shop', grantId: refused });
+    history.updateRun(run, { status: 'completed' });
+    markRevoked();
+    // An earlier removal of the same id ended this grant (an import carried it back): the owner's
+    // record then covers nothing, so it cannot stand in for the provider's.
+    db.getDb().prepare(`INSERT INTO connection_records (kind, connection_id, covered_grants_json, ended_grants_json, history_state, created_at, deadline)
+      VALUES ('closing', 'shop', '[]', ?, 'not reached', ?, ?)`).run(JSON.stringify([refused]), T0.toISOString(), T0.toISOString());
+    expect(erasure.coveredGrantSet(db.getDb(), 'shop')).toBeNull();
+    expect(store.remove('shop', undefined, { record: 'erasure' })).toBe(true);
+    expect(stateOf(refused)).toBe('pending');
+    expect(cancelRows()).toEqual([]);
+    expect(erasure.erasureRecords(db.getDb(), 'shop').filter((r) => r.cause !== 'provider_revoked' && r.kind === 'erasure').map((r) => r.historyState)).toEqual(['not reached']);
+    // The provider's erasure still runs after its hold: the history of the refused grant goes.
+    erasure.runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(T0.getTime() + erasure.PROVIDER_HOLD_MS));
+    const left = (history.getDb().prepare('SELECT COUNT(*) AS n FROM run_tool_calls WHERE grant_id = ?').get(refused) as { n: number }).n;
+    expect(left).toBe(0);
+  });
+
+  it('a cover that misses one of the provider\'s grants cancels nothing; one that holds them all cancels', () => {
+    store.save(profile());
+    const refused = grantOf();
+    markRevoked();
+    const id = providerRecords()[0]!.id;
+    db.getDb().prepare('UPDATE connection_records SET covered_grants_json = ? WHERE id = ?').run(JSON.stringify([refused, 'g-other']), id);
+    const now = new Date(T0.getTime() + 1000);
+    expect(erasure.cancelHeldProviderRecords(db.getDb(), 'shop', now, undefined, [refused])).toEqual([]);
+    expect(stateOf(refused)).toBe('pending');
+    expect(erasure.cancelHeldProviderRecords(db.getDb(), 'shop', now, undefined, [refused, 'g-other'])).toEqual([id]);
+    expect(stateOf(refused)).toBe('cancelled');
   });
 
   it('a store without an audit log does not cancel: the consent throws and the erasure stays held', () => {
@@ -256,6 +296,64 @@ describe('an owner\'s delete supersedes a held provider erasure only with an era
     markRevoked();
     store.remove('shop', undefined, { record: 'erasure' });
     expect(stateOf(a)).toBe('cancelled');
+  });
+});
+
+describe('a profile stored again under the same id begins a later epoch, whose cancels leave the earlier one held', () => {
+  /** A provider refused the first connection, which the owner then deleted with a closing record, and stored again. */
+  const earlierEpochHeld = (): string => {
+    store.save(profile());
+    const a = grantOf();
+    markRevoked();
+    expect(store.remove('shop', undefined, { record: 'closing' })).toBe(true);
+    expect(store.save(profile()).ok).toBe(true);
+    expect(grantOf()).not.toBe(a);
+    expect(stateOf(a)).toBe('pending');
+    return a;
+  };
+
+  it('the owner\'s new consent on the later connection', () => {
+    const a = earlierEpochHeld();
+    reconnectAs(OWNER_PRINCIPAL);
+    expect(stateOf(a)).toBe('pending');
+    expect(cancelRows()).toEqual([]);
+  });
+
+  it('the owner\'s erasure delete of the later connection', () => {
+    const a = earlierEpochHeld();
+    expect(store.remove('shop', undefined, { record: 'erasure' })).toBe(true);
+    expect(stateOf(a)).toBe('pending');
+    expect(cancelRows()).toEqual([]);
+  });
+
+  it('a refusal in the later epoch is still cancelled by the owner\'s consent, and the earlier one stays held (positive control)', () => {
+    const a = earlierEpochHeld();
+    const b = grantOf();
+    markRevoked();
+    reconnectAs(OWNER_PRINCIPAL);
+    expect(stateOf(b)).toBe('cancelled');
+    expect(stateOf(a)).toBe('pending');
+  });
+
+  it('a row that does not say where its epoch starts ends none: the earlier connection\'s erasure stays held', () => {
+    const a = earlierEpochHeld();
+    db.getDb().prepare("UPDATE connections SET first_grant_id = NULL WHERE id = 'shop'").run();
+    reconnectAs(OWNER_PRINCIPAL);
+    expect(stateOf(a)).toBe('pending');
+    expect(cancelRows()).toEqual([]);
+  });
+
+  it('a refusal of a grant the boot minted inside the epoch is still the connection\'s: a later backfill does not cut it off', () => {
+    store.save(profile());
+    const reissue = (store as unknown as { _reissue(id: string, reason: string): boolean })._reissue.bind(store);
+    expect(reissue('shop', 'backfill')).toBe(true);
+    const b = grantOf();
+    markRevoked();
+    expect(reissue('shop', 'backfill')).toBe(true);
+    expect(grantOf()).not.toBe(b);
+    expect(stateOf(b)).toBe('pending');
+    reconnectAs(OWNER_PRINCIPAL);
+    expect(stateOf(b)).toBe('cancelled');
   });
 });
 

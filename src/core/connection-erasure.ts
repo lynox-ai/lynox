@@ -267,13 +267,29 @@ function writeProviderRecord(engineDb: Database.Database, connectionId: string, 
 /**
  * Cancels the provider's erasures of `connectionId` that are still held at `now`: the owner
  * reconnected, the revocation was lifted on the same grant (`onlyGrant`), or the owner removed the
- * connection, whose own record then covers the epoch. It writes no record; it only ends a held one.
+ * connection with an erasure. For that last one the caller passes the grants the owner's record
+ * covers (`coveredBy`), and only an erasure whose every grant is among them ends: an owner's record
+ * that covers less, or nothing, leaves the provider's held, and it runs. It writes no record; it
+ * only ends a held one.
+ *
+ * Without `onlyGrant` only the erasures of a grant in the epoch of the connection stored now
+ * ({@link boundedEpoch}, the bounds the owner's notices use): a connection deleted with a closing
+ * record and stored again under the same id begins a later epoch, and neither its reconnect nor its
+ * erasure covers the earlier one, whose erasure still runs. A row whose epoch cannot be read (it
+ * does not say where it starts) ends none: a provider's erasure is only written while the epoch of
+ * its refused grant can be read, and a row does not lose its start, so one held then is an earlier
+ * connection's, and it runs.
  */
-export function cancelHeldProviderRecords(engineDb: Database.Database, connectionId: string, now: Date, onlyGrant?: string): number[] {
+export function cancelHeldProviderRecords(engineDb: Database.Database, connectionId: string, now: Date, onlyGrant?: string, coveredBy?: readonly string[]): number[] {
+  const epoch = onlyGrant === undefined ? boundedEpoch(engineDb, connectionId).map((e) => e.g) : [];
+  const grants = onlyGrant !== undefined ? [onlyGrant] : epoch;
   return (engineDb.prepare(`UPDATE connection_records SET history_state = 'cancelled', cancelled_at = ?
     WHERE connection_id = ? AND cause = 'provider_revoked' AND kind = 'erasure' AND history_state = 'pending' AND hold_until > ?
-    ${onlyGrant === undefined ? '' : 'AND revoked_grant IN (?)'} RETURNING id`)
-    .all(now.toISOString(), connectionId, now.toISOString(), ...(onlyGrant === undefined ? [] : [onlyGrant])) as Array<{ id: number }>).map((r) => r.id);
+    AND revoked_grant IN (SELECT value FROM json_each(?))
+    AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(covered_grants_json) AS c WHERE c.value NOT IN (SELECT value FROM json_each(?))))
+    RETURNING id`)
+    .all(now.toISOString(), connectionId, now.toISOString(), JSON.stringify(grants),
+      coveredBy === undefined ? null : 1, JSON.stringify(coveredBy ?? [])) as Array<{ id: number }>).map((r) => r.id);
 }
 
 /** The owner's "the connection did not end" on one held provider erasure. */
@@ -309,14 +325,21 @@ export function mayCancelProviderErasure(
  * The audit row of each cancelled provider erasure: who cancelled it and why. Written in the
  * cancel's transaction by its caller, so a cancel whose row cannot be written does not happen,
  * and neither does one without an audit log to write it to: that throws too. Ids and the reason
- * only.
+ * only: the profile is named by its opaque id (`connections.trail_id`), never by its slug, which
+ * the model chooses and which can name a client. The id is read here, in the cancel's transaction
+ * and before an owner's delete removes the row. A row without one is named `api`. The owner reads
+ * the slug back through the record id (`connection_records.connection_id`), also once the profile
+ * is deleted.
  */
-export function auditProviderCancels(audit: AuditLog | null, actor: RequestPrincipal, connectionId: string, recordIds: readonly number[], reason: ProviderCancelReason): void {
+export function auditProviderCancels(audit: AuditLog | null, db: Database.Database, actor: RequestPrincipal, recordIds: readonly number[], reason: ProviderCancelReason): void {
   if (recordIds.length === 0) return;
   if (audit === null) throw new Error('A provider erasure is not cancelled without an audit log to record it.');
+  const trailIdOf = db.prepare(`SELECT c.trail_id FROM connection_records r
+    LEFT JOIN connections c ON c.id = r.connection_id AND c.kind = 'api' WHERE r.id = ?`);
   for (const id of recordIds) {
+    const row = trailIdOf.get(id) as { trail_id: string | null } | undefined;
     audit.record({
-      principal: actor, action: 'connection.erasure.cancel', target: `${connectionId} ${id} ${reason}`,
+      principal: actor, action: 'connection.erasure.cancel', target: `${row?.trail_id ?? 'api'} ${id} ${reason}`,
       phase: 'done', correlationId: `connection-erasure-${id}`,
     });
   }
@@ -588,14 +611,14 @@ export const FALLBACK_CONTENT_COLUMNS: Readonly<Record<string, readonly string[]
 export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   advisor_suggestions: ['run_id', 'type', 'priority', 'context_id', 'created_at', 'dismissed_at'],
   pending_prompts: ['id', 'session_id', 'prompt_type', 'secret_name', 'secret_key_type', 'status', 'created_at', 'answered_at', 'expires_at', 'trigger_id', 'created_by', 'closed_reason', 'mandate_id', 'answered_by', 'answered_mandate_id'],
-  pipeline_runs: ['id', 'manifest_name', 'status', 'parent_run_id', 'started_at', 'completed_at', 'workflow_id', 'workflow_grant_id', 'started_via', 'origin_thread_id'],
+  pipeline_runs: ['id', 'manifest_name', 'status', 'parent_run_id', 'started_at', 'completed_at', 'workflow_id', 'workflow_grant_id', 'started_via', 'origin_thread_id', 'started_by_run_id'],
   pipeline_step_results: ['pipeline_run_id', 'step_id', 'status', 'model_tier'],
   pre_approval_events: ['set_id', 'tool_name', 'decision', 'autonomy_level', 'run_id', 'created_at'],
   pre_approval_sets: ['id', 'approved_by', 'run_id', 'created_at'],
   processes: ['id', 'name', 'source_run_id', 'promoted_to_pipeline_id', 'created_at'],
-  // v69's text columns are enumerated values and ids, never free text: kept (held
-  // to their value sets by a test). `is_error` is an INTEGER and outside this list.
-  run_tool_calls: ['id', 'run_id', 'tool_name', 'connection_id', 'connection_created_at', 'grant_id', 'tool_use_id', 'contract_state', 'contract_grant_id', 'lift_grant_id', 'lift_entry', 'filing', 'approval_id'],
+  // v69's and v71's text columns are enumerated values and ids, never free text: kept (held
+  // to their value sets by a CHECK). `is_error` and `api_cost_usd` are numbers and outside this list.
+  run_tool_calls: ['id', 'run_id', 'tool_name', 'connection_id', 'connection_created_at', 'grant_id', 'tool_use_id', 'contract_state', 'contract_grant_id', 'lift_grant_id', 'lift_entry', 'filing', 'approval_id', 'api_cost_source'],
   runs: ['id', 'session_id', 'model_tier', 'model_id', 'stop_reason', 'status', 'run_type', 'batch_parent_id', 'spawn_parent_id', 'context_id', 'created_at', 'tenant_id', 'archetype_id', 'kind', 'provider', 'composition_json', 'trigger_origin'],
   security_events: ['event_type', 'tool_name', 'decision', 'autonomy_level', 'agent_name', 'run_id', 'source', 'created_at'],
   wire_snapshots: ['run_id', 'model', 'provider', 'system_prompt_hash', 'tool_names', 'tool_choice'],

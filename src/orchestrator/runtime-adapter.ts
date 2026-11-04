@@ -1,6 +1,6 @@
-import type { RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
-import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { Agent } from '../core/agent.js';
@@ -22,6 +22,7 @@ import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.j
 import { describeTurnUntrusted } from '../core/untrusted-signals.js';
 import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
 import { ConversationGrants } from '../core/conversation-grants.js';
+import { escapeHiddenInJson } from '../core/hidden-text.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
@@ -226,6 +227,9 @@ export interface ChatOrigin {
   readonly threadId: string | undefined;
   /** Whether the chat has private mode on right now. */
   readonly skipsCapture: () => boolean;
+  /** The chat run whose turn started the workflow, recorded on the pipeline run so the chat's
+   *  footer counts the paid API calls of its steps (`RunHistory.getApiCallsOfRun`). */
+  readonly runId?: string | undefined;
 }
 
 /**
@@ -236,11 +240,12 @@ export interface ChatOrigin {
  * `memory_extraction: false`, which stands a step's capture down as it does the chat's.
  */
 export function chatOriginOf(
-  agent: Pick<IAgent, 'currentThreadId' | 'originThreadId' | 'skipMemoryExtraction'> & Partial<Pick<IAgent, 'toolContext'>>,
+  agent: Pick<IAgent, 'currentThreadId' | 'originThreadId' | 'skipMemoryExtraction'> & Partial<Pick<IAgent, 'toolContext' | 'currentRunId'>>,
 ): ChatOrigin {
   const threadId = agent.currentThreadId ?? agent.originThreadId;
   return {
     threadId,
+    runId: agent.currentRunId,
     skipsCapture: () => agent.skipMemoryExtraction === true
       || (threadId !== undefined && agent.toolContext?.threadStore?.getThread(threadId)?.skip_extraction === 1),
   };
@@ -333,6 +338,8 @@ export type StepToolRecorder = (call: {
   contract?: CallContract | undefined;
   /** How the call's filing for the owner's approval ended (`CallFiled`); absent when it filed nothing. */
   filed?: CallFiled | undefined;
+  /** The API request the call sent and its cost, from the result event (`CallApiCost`). */
+  apiCost?: CallApiCost | undefined;
   /** The connection and grant the call resolved its URL to, from the result event; absent when
    *  nothing was resolved (`CallConnection`). */
   connection?: CallConnection | undefined;
@@ -410,6 +417,7 @@ export function createStepStreamHandler(opts: {
         ...(event.grant !== undefined ? { grant: { ...event.grant } } : {}),
         ...(event.contract !== undefined ? { contract: { ...event.contract } } : {}),
         ...(event.filed !== undefined ? { filed: { ...event.filed } } : {}),
+        ...(event.apiCost !== undefined ? { apiCost: { ...event.apiCost } } : {}),
         ...(event.connection !== undefined ? { connection: { ...event.connection } } : {}),
         toolUseId: event.toolUseId,
       });
@@ -508,6 +516,10 @@ export function buildSubAgentPromptCallbacks(
       : undefined,
   };
 }
+
+/** A step's time limit when its manifest sets no `timeout_ms`. The pipeline tool's schema
+ *  names it to the model, so both read it from here. */
+export const DEFAULT_STEP_TIMEOUT_MS = 1_800_000;
 
 /**
  * A step's time limit, held while the step waits for its owner's answer (PRD 3b-2 G5 (a)). A
@@ -953,7 +965,7 @@ export async function spawnViaAgent(
     : { type: 'adaptive' };
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
-  const stepTimeout = new StepTimeout(step.timeout_ms ?? 1_800_000);
+  const stepTimeout = new StepTimeout(step.timeout_ms ?? DEFAULT_STEP_TIMEOUT_MS);
   const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
@@ -1020,8 +1032,9 @@ export async function spawnViaAgent(
     userTimezone,
     // Inherited, so anything THIS step spawns is reachable by the same abort.
     abortScope,
-    // And the run's principal, so a mandate's step runs under the mandate's lock.
-    principal,
+    // And the run's principal, so a mandate's step runs under the mandate's lock. Absent is the
+    // public API's owner, resolved here so the agent is never handed an undefined one (1173).
+    principal: principal ?? OWNER_PRINCIPAL,
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -1098,7 +1111,9 @@ export function buildReplayInstruction(
   const lines = [
     'Execute exactly this tool call and return its result. Do not add, omit, rename, or reinterpret any argument, and do not call any other tool first or instead.',
     `Tool: ${tool}`,
-    `Input (JSON): ${JSON.stringify(inputTemplate)}`,
+    // A character that renders as nothing is written as its escape: the same JSON to the tool,
+    // and no instruction the model reads but nobody sees (an imported workflow's arguments).
+    `Input (JSON): ${escapeHiddenInJson(JSON.stringify(inputTemplate))}`,
   ];
   const trimmed = description?.trim();
   if (trimmed) {
@@ -1238,7 +1253,10 @@ export async function spawnInline(
   // back (`MANDATE_PATTERN_WRITE_TOOLS`) are dropped, not refused: they are registered only beside
   // the legacy memory, so on the engines a mandate signs in to the step names a tool that is not
   // there, and the planners still offer `memory_update` for steps.
-  const lock = principal !== undefined ? toolLockFor(principal) : null;
+  // Absent is the owner only because `spawnInline` is public API; the engine's own runs always
+  // pass one (`buildRunCtx`). The lock is asked either way, so the owner's null comes from
+  // `toolLockFor`, not from a branch that skips it.
+  const lock = toolLockFor(principal ?? OWNER_PRINCIPAL);
   if (lock !== null) {
     const named = [...(step.tools ?? []), ...(step.tool !== undefined ? [step.tool] : [])];
     const withheld = [...new Set(named.filter(n => !lock.has(n) && Object.hasOwn(MANDATE_WITHHELD_TOOLS, n)))];
@@ -1340,7 +1358,7 @@ export async function spawnInline(
   const maxIter = 10;
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
-  const stepTimeout = new StepTimeout(step.timeout_ms ?? 1_800_000);
+  const stepTimeout = new StepTimeout(step.timeout_ms ?? DEFAULT_STEP_TIMEOUT_MS);
   const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
@@ -1401,8 +1419,9 @@ export async function spawnInline(
     memory: parentMemory ?? undefined,
     // Inherited, so anything THIS step spawns is reachable by the same abort.
     abortScope,
-    // And the run's principal, so a mandate's step runs under the mandate's lock.
-    principal,
+    // And the run's principal, so a mandate's step runs under the mandate's lock. Absent is the
+    // public API's owner, resolved here so the agent is never handed an undefined one (1173).
+    principal: principal ?? OWNER_PRINCIPAL,
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -1605,8 +1624,8 @@ export async function spawnPipeline(
     // pipeline's agents reachable by nothing, which is the shape the scoping is meant to
     // remove rather than relocate.
     abortScope,
-    // The nested run's steps are built for the same principal as this one.
-    principal,
+    // The nested run's steps are built for the same principal as this one (absent = the owner, 1173).
+    principal: principal ?? OWNER_PRINCIPAL,
     // …and with the same ToolContext, so they run under the engine's egress policy.
     parentToolContext,
     // …and in the same chat, so a nested step keeps that chat's private mode.

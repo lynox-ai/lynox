@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mandateNeedsOwnerStamp } from '../../../../../src/core/request-principal.js';
 import { setLocale, getLocale } from '../i18n.svelte.js';
-import { awaitsOwnerStamp, confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, listedLine, listedNote, paramsOf, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
+import { awaitsOwnerStamp, confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, listedLine, listedNote, paramsOf, readPreview, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
 
 const before = getLocale();
 afterEach(() => { setLocale(before); });
@@ -173,5 +173,28 @@ describe('the list of a confirmed plan (B3)', () => {
 		expect(listedNote({ lapsed: false, ended: true, ended_on: 'workflow', entries: [entry('waits')] }, false)).toContain('auch den Workflow unter Automation → Workflows');
 		// A paused plan offers "Take over", which covers both sides.
 		expect(listedNote({ lapsed: false, ended: true, ended_on: 'workflow', entries: [entry('waits')] }, true)).toContain('mit „Übernehmen“');
+	});
+});
+
+describe('readPreview', () => {
+	it('takes the preview as the engine sends it, with or without a workflow and connections', () => {
+		const p = preview();
+		expect(readPreview(p)).toBe(p);
+		const wf = preview({ workflow: { name: null, confirmed: false }, by: null, connections: [{ id: 'c', profile: 'CRM', provider: 'api.crm.example', account: null }] }, { effect: 'run_workflow', pipeline_id: 'wf-1' });
+		expect(readPreview(wf)).toBe(wf);
+	});
+
+	it('refuses every other shape, field by field', () => {
+		const p = preview() as unknown as Record<string, unknown>;
+		const sub = p['subject'] as Record<string, unknown>;
+		const bad: unknown[] = [
+			null, [], 'x', {},
+			{ ...p, expect: '' }, { ...p, expect: 1 }, { ...p, by: 1 },
+			{ ...p, subject: undefined }, { ...p, subject: [] }, { ...p, subject: { ...sub, id: 1 } }, { ...p, subject: { ...sub, title: null } },
+			{ ...p, subject: { ...sub, effect: 1 } }, { ...p, subject: { ...sub, wf: {} } }, { ...p, subject: { ...sub, description: undefined } },
+			{ ...p, workflow: { name: 'W' } }, { ...p, workflow: 'W' },
+			{ ...p, connections: undefined }, { ...p, connections: [{ id: 'c', profile: 'CRM', provider: 'x' }] }, { ...p, connections: [null] },
+		];
+		expect(bad.map((b) => readPreview(b))).toEqual(bad.map(() => null));
 	});
 });

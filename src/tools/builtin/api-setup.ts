@@ -23,10 +23,10 @@ import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
-import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
+import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, ExtractionStoppedError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
 import { recordSessionCost } from '../../core/session-budget.js';
@@ -41,7 +41,7 @@ import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../cor
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -170,6 +170,8 @@ const VALID_SHAPE_KINDS = new Set(['reduce', 'passthrough', 'graphql']);
 const VALID_REDUCERS = new Set(['avg', 'peak', 'avg+peak', 'count', 'first_n', 'last_n']);
 const VALID_OUTPUT_VOLUMES = new Set(['small', 'medium', 'large', 'streaming']);
 const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
+/** `cost.response_field`: names or indexes joined by dots, at most 8 of them. */
+const COST_RESPONSE_FIELD_RE = /^[A-Za-z0-9_]{1,64}(\.[A-Za-z0-9_]{1,64}){0,7}$/;
 const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 
 /** The built-in preset an oauth2 profile names, when the engine knows it. */
@@ -216,7 +218,10 @@ function presetClientIdGuidance(name: string): string {
 /** Why a profile on a provider's API host has to go through the provider, and how. Names only
  *  the engine's own provider, never a value of the profile. */
 function notThroughProvider(provider: OAuthPreset): string {
-  return `the API of ${provider.label} is connected only through this engine's built-in "${provider.id}" provider, which shows the user what lynox may do there before a write access and asks every write with what it sends. A profile with another sign-in, a pasted token included, would reach the same account past both. Use auth.type "oauth2" with auth.oauth.preset_id "${provider.id}", then api_setup action "connect".`;
+  // A provider whose host comes from a parameter (Shopify's store) names it, so the next save is not refused for it.
+  const params = presetParamsForModel(provider);
+  const withParams = params === '' ? '' : ` and auth.oauth.preset_params ${params}`;
+  return `the API of ${provider.label} is connected only through this engine's built-in "${provider.id}" provider, which shows the user what lynox may do there before a write access and asks every write with what it sends. A profile with another sign-in, a pasted token included, would reach the same account past both. Use auth.type "oauth2" with auth.oauth.preset_id "${provider.id}"${withParams}, then api_setup action "connect".`;
 }
 
 function validateProfile(profile: ApiProfile): string | null {
@@ -236,7 +241,7 @@ function validateProfile(profile: ApiProfile): string | null {
   // Checked before the auth fields: whatever they say, a profile on this host that does not
   // name the provider is the wrong one. A stored profile that fails here is refused at every
   // request as well (`http_request`), so a profile saved before this check holds nothing.
-  const provider = presetNotFollowed(profile);
+  const provider = providerNotFollowed(profile);
   if (provider) return `Invalid profile: ${notThroughProvider(provider)}`;
   if (profile.auth) {
     if (!VALID_AUTH_TYPES.has(profile.auth.type)) {
@@ -470,6 +475,10 @@ function validateProfile(profile: ApiProfile): string | null {
     }
     if (profile.cost.output_ratio !== undefined && (!Number.isFinite(profile.cost.output_ratio) || profile.cost.output_ratio <= 0)) {
       return 'Invalid cost.output_ratio: must be positive number';
+    }
+    const field: unknown = profile.cost.response_field;
+    if (field !== undefined && (typeof field !== 'string' || !COST_RESPONSE_FIELD_RE.test(field))) {
+      return 'Invalid cost.response_field: must be a dot path of names or indexes into the JSON answer, like "cost" or "tasks.0.cost"';
     }
   }
   if (profile.provenance) {
@@ -733,6 +742,7 @@ const DOCS_EXTRACT_SCHEMA: ExtractSchema = {
         model: { type: 'string', enum: ['per_call', 'per_token', 'per_unit'] as const },
         rate_usd: { type: 'number', minimum: 0, maximum: 100 },
         output_ratio: { type: 'number', minimum: 0 },
+        response_field: { type: 'string', pattern: COST_RESPONSE_FIELD_RE.source, maxLength: 520 },
       },
       required: ['model', 'rate_usd'],
     },
@@ -1808,7 +1818,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         },
         profile: {
           type: 'object',
-          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, username_key, password_key, header_name, query_param, vault_keys[], oauth {preset_id: ' + OAUTH_PRESETS.ids().join('|') + ', scope, client_id_key, client_secret_key} — a built-in provider, with vault_keys listing those two keys; then action "connect"}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
+          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, username_key, password_key, header_name, query_param, vault_keys[], oauth {preset_id: ' + OAUTH_PRESETS.ids().join('|') + ', scope, client_id_key, client_secret_key} — a built-in provider, with vault_keys listing those two keys; then action "connect"}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio, response_field}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
         },
         id: {
           type: 'string',
@@ -1841,7 +1851,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   detailedGuidance:
     'connect: pass `id` of a profile whose auth.oauth.preset_id names a built-in provider — the preset supplies the sign-in and token URLs and the scopes it allows, and the engine runs the authorization-code flow, stores the tokens and renews them while it holds a refresh token. Returns a link; SHOW it to the user and let them click it. The engine builds the link and stores what comes back — never ask the user to paste a token for a profile that can connect, and never assemble the link yourself.\n' +
     'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
-    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled. If the API documents its own header for the access token instead of `Authorization: Bearer`, set `auth.header_name` to it on the oauth2 profile: the engine then sends the raw token under that name.' +
+    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets the access token auto-attached by the engine, as `Authorization: Bearer …`; do NOT set that header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled. If the API documents its own header for the access token instead of `Authorization: Bearer`, set `auth.header_name` to it on the oauth2 profile: the engine then sends the raw token under that name. A profile of a built-in provider (auth.oauth.preset_id) is signed in with action "connect" instead. Its token is attached the way that provider takes it: under the provider\'s own header where it has one, and only to the paths of its API; so set no header for it either.' +
     ' basic + basic_format="user_pass_split": name the two vault keys in `username_key` and `password_key` (or list them in `vault_keys`, username first). The ENGINE combines and Base64-encodes them onto every http_request to this host — do NOT set an Authorization header and do NOT try to encode anything; you never hold the plaintext, only `secret:` references, so you cannot. Use `pre_encoded_b64` only when the credential genuinely arrives already Base64-encoded.' +
     ' bearer / header: name the vault key holding the token in `vault_keys` (first entry; for `header` also set `header_name`, default X-Api-Key). The ENGINE attaches it to every http_request to this host — do NOT set the header yourself and do NOT pass `secret:NAME` in one. Hand-setting it is not merely redundant: the value resolves before the egress scanner runs, so a token shaped like a known credential (a JWT, `ghp_…`, `sk-…`) gets the request blocked as exfiltration. Store the value with ask_secret, then just call http_request.',
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> => {
@@ -2026,8 +2036,12 @@ ${draftJson}
           // A stored profile on a provider's API host with another sign-in: the reason is the
           // engine's own, so it is said, and the way out is to change this profile (one host
           // holds one profile, so a second one for the provider is refused).
-          const provider = presetNotFollowed(existing);
-          if (provider) return `Error: the stored profile "${input.id}" cannot be refined: ${notThroughProvider(provider)} Change this profile with api_setup action="update"; reading through it works until then.`;
+          const provider = providerNotFollowed(existing);
+          if (provider) {
+            // A store profile reads nothing either: every request to a store needs the preset's connection.
+            const until = provider.apiOnDerivedHost === true ? 'every request through it is refused until then' : 'reading through it works until then';
+            return `Error: the stored profile "${input.id}" cannot be refined: ${notThroughProvider(provider)} Change this profile with api_setup action="update"; ${until}.`;
+          }
           return `Error: the stored profile "${input.id}" does not pass validation on its own, so it cannot be refined. Its values are not repeated here. Replace it with api_setup action="update" and a complete profile.`;
         }
         return `Validation error after refine: ${err}`;
@@ -2036,8 +2050,11 @@ ${draftJson}
       // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
       const existingId = existing.id;
       const refine = input.refine;
-      return withInstanceWrite(agent, { site: 'api_setup#refine', kind: 'change', store: 'api_profiles', target: () => [['profile', existingId]], main: ['save'] }, (w) => {
-        const mergedSave = w.run('save', () => apiStore.save(merged, apisDir), ifOk);
+      // A mandate's row names the profile by its opaque id, never by the slug the model chose. A
+      // row without one (an older binary's) gets the id made here, as for `save` below.
+      const refineTrailId = apiStore.newTrailId();
+      return withInstanceWrite(agent, { site: 'api_setup#refine', kind: 'change', store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(existingId) ?? refineTrailId]], main: ['save'] }, (w) => {
+        const mergedSave = w.run('save', () => apiStore.save(merged, apisDir, { trailId: refineTrailId }), ifOk);
         if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
 
         const changed: string[] = [];
@@ -2402,7 +2419,13 @@ ${draftJson}
       const growth = await askBindingGrowth(agent, profile);
       if ('refusal' in growth) return growth.refusal;
       const savedId = profile.id;
-      return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', savedId]], main: ['save'] }, (w) => {
+      // A mandate's row names the profile by its opaque id, never by the slug the model chose. Read
+      // from the database, not from `prior`: a row the store could not load still has its id, and
+      // the save keeps it. A new row takes the id made here, which the save is handed, so the row
+      // and the profile name the same one. Without engine.db there is no id and the row names the
+      // kind only.
+      const freshTrailId = apiStore.newTrailId();
+      return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(savedId) ?? freshTrailId]], main: ['save'] }, (w) => {
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);
           if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
@@ -2412,7 +2435,7 @@ ${draftJson}
             return `Error: this update of profile "${profile.id}" changes where its credentials go, or where the tokens it read from another profile's refresh slot go. The tokens it holds were minted for the old destinations or may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
           }
         }
-        const saved = w.run('save', () => apiStore.save(profile, apisDir), ifOk);
+        const saved = w.run('save', () => apiStore.save(profile, apisDir, { trailId: freshTrailId }), ifOk);
         // A refusal used to arrive here as `isNew`, so the tool answered "Created
         // … saved and activated immediately" for a profile that was never stored.
         // Fail-closed in effect, false-confident in report — and the only trace was
@@ -2736,7 +2759,8 @@ ${draftJson}
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
       // One block from the removal to the purge (the sweep, the releases and the vault among it): a
       // throw of `remove` that the catch below answers reads `returned`, which claims nothing.
-      return withInstanceWrite(agent, { site: 'api_setup#delete', kind: 'delete', store: 'api_profiles', target: () => [['profile', ID_PATTERN.test(id) ? id : undefined]], main: ['removal'] }, (w) => {
+      // Read while the row is still there; the slug is never named.
+      return withInstanceWrite(agent, { site: 'api_setup#delete', kind: 'delete', store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(id)]], main: ['removal'] }, (w) => {
         let removed: boolean;
         try {
           // The person was asked above. Only the owner's delete erases the run-history record of
@@ -2884,6 +2908,14 @@ ${draftJson}
         return `Error: profile "${input.id}" names "${slotNameForModel(tokenAsClient, refreshTokenKey(input.id))}" as its OAuth ${tokenAsClient === clientIdKey ? 'client id' : 'client secret'}, a vault name that holds an OAuth token, and a token is never sent as client credentials. Nothing was sent. Point the field at the vault name of this API's own client credential with api_setup update.`;
       }
       const exchangedSlot = oauth.refresh_token_key ?? refreshTokenKey(input.id);
+      // A deleted profile's refresh slot this one read: the name went with that connection. The way
+      // out is this profile's own sign-in, never a new value under the deleted profile's name.
+      if (grantType === 'refresh_token' && lapsedSlot(apiStore, exchangedSlot)) {
+        const own = builtInPresetOf(profile) !== undefined
+          ? 'remove auth.oauth.refresh_token_key with api_setup update, then connect it with api_setup connect'
+          : 'remove auth.oauth.refresh_token_key with api_setup update, so it reads its own refresh slot, and have the user store this API\'s own refresh token there';
+        return `Error: profile "${input.id}" reads its refresh token from "${slotNameForModel(exchangedSlot, refreshTokenKey(input.id))}", the refresh slot of a profile that was deleted. That connection went with the deleted profile, and this profile does not take its slot over, whatever is stored there. Nothing was sent. To sign this profile in on its own: ${own}.`;
+      }
       if (grantType === 'refresh_token' && !slotMayReach(apiStore, exchangedSlot, 'exchange', tokenUrl, profile)) {
         return `Error: profile "${input.id}" reads its refresh token from "${slotNameForModel(exchangedSlot, refreshTokenKey(input.id))}", and that token goes only to the token endpoint of the connection it belongs to, for that connection or a profile sharing it through a built-in provider — this profile is neither, or more than one profile holds the name. Nothing was sent. Another stored profile holds this vault name. Do not change or delete a profile to get past this: tell the user that another profile holds the connection behind this vault name, and let the user decide.`;
       }

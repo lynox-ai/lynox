@@ -15,7 +15,7 @@ import { compose, engineText, wrapUntrustedData, renderFence } from './data-boun
 import { SUGGESTED_API_CATALOG, type SuggestedApiCatalog } from './suggested-apis.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import type { OAuthAccount } from './oauth-account.js';
-import { ConnectionStore, type ConnectionRow } from './connection-store.js';
+import { ConnectionStore, newApiTrailId, type ConnectionRow } from './connection-store.js';
 import type { GrantLedger, GrantMintReason } from './grant-ledger.js';
 import { auditProviderCancels, cancelHeldProviderRecords, mayCancelProviderErasure, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
 import type { AuditLog } from './audit-log.js';
@@ -73,7 +73,7 @@ const BRIEFING_AUTH_TYPES: ReadonlySet<string> = new Set(['none', 'basic', 'bear
  *    the model as written, and an `&` cannot start a tag.
  * Not a string (a profile from a file is not type-checked) prints as a marker.
  */
-function oneLineInBriefing(value: unknown): string {
+export function oneLineInBriefing(value: unknown): string {
   if (typeof value !== 'string') return `[non-string: ${typeof value}]`;
   return value
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
@@ -295,6 +295,10 @@ export interface ApiProfile {
     rate_usd: number;
     /** For per_token, ratio between input and output tokens (often ~3:1). */
     output_ratio?: number | undefined;
+    /** Where the API's answer states what the request cost, in USD: a dot path into the JSON
+     *  answer (`cost`, `tasks.0.cost`). Read before `response_shape`. When the answer gives a
+     *  number there, it is the request's cost; otherwise `rate_usd` stands, as an estimate. */
+    response_field?: string | undefined;
   } | undefined;
 
   /** Provenance — audit + refresh trigger. Presence of `schema_version: 2` marks a v2 profile. */
@@ -464,6 +468,14 @@ export interface OAuthGrantRecord {
    * that as changed credentials.
    */
   fingerprint_check?: string | undefined;
+  /**
+   * Token slots of a deleted profile that this one read as its refresh slot when that profile
+   * was deleted (written by {@link ApiStore.remove}). Such a name stays the deleted grant's: it
+   * never becomes this profile's own refresh slot, so a value stored under it later goes nowhere
+   * (`slotGrant` in `profile-secret-view.ts`). A save keeps it with the rest of the record; a new
+   * consent through the connect callback writes a grant without it.
+   */
+  lapsed_slots?: string[] | undefined;
 }
 
 /** One entry of {@link OAuthGrantRecord.written}. */
@@ -505,6 +517,12 @@ export function writtenNames(profile: ApiProfile): string[] {
     if (typeof name === 'string' && name !== '') names.push(name);
   }
   return names;
+}
+
+/** The names on a profile's {@link OAuthGrantRecord.lapsed_slots}, each one that is a string. */
+export function lapsedSlots(profile: ApiProfile): string[] {
+  const lapsed: unknown = profile.oauth_grant?.lapsed_slots;
+  return Array.isArray(lapsed) ? lapsed.filter((n): n is string => typeof n === 'string' && n !== '') : [];
 }
 
 /**
@@ -639,9 +657,12 @@ export function hasTokenSlotShape(name: string): boolean {
   return /_(ACCESS|REFRESH)_TOKEN$/.test(name);
 }
 
-/** Map an `ApiProfile` onto a `kind='api'` connection row (outbound, no subject). */
-function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
-  const { id, name, ...rest } = profile;
+/** Map an `ApiProfile` onto a `kind='api'` connection row (outbound, no subject). `trailId` is the
+ *  opaque id a save hands in for a new row (`SaveOptions.trailId`), never one from the profile. */
+function profileToConnectionRow(profile: ApiProfile, trailId?: string): ConnectionRow {
+  // `trail_id` is the row's own column, never part of the profile: a profile is spread from the
+  // model's input, so a `trail_id` key in it would otherwise be stored as if it were the id.
+  const { id, name, trail_id: _trail, ...rest } = profile as ApiProfile & { trail_id?: unknown };
   return {
     id,
     kind: 'api',
@@ -660,6 +681,7 @@ function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
     // Where the connection's epoch starts (PRD source-connection R8-3): the store keeps the
     // first value a row is written with, so passing the current grant on every write is safe.
     firstGrantId: typeof profile.oauth_grant?.grant_id === 'string' ? profile.oauth_grant.grant_id : null,
+    trailId,
   };
 }
 
@@ -1214,6 +1236,11 @@ export interface SaveOptions {
    * it is the actor of the audit row of every cancel. A save without one cancels nothing.
    */
   actor?: RequestPrincipal | undefined;
+  /**
+   * The opaque id the caller already named in the instance trail (`newTrailId`), for a row that
+   * has none yet. A row that has one keeps it. Never read from the profile, which the model writes.
+   */
+  trailId?: string | undefined;
 }
 
 /** A save the store refused, with the reason it gives the caller. */
@@ -1464,6 +1491,20 @@ export class ApiStore {
   }
 
   /**
+   * The opaque id a mandate's row names the profile `id` by, read from the database (not from the
+   * profiles this store loaded: a row it could not read still has its id). Undefined without
+   * engine.db, where profiles have no id.
+   */
+  trailIdOf(id: string): string | undefined {
+    return this.connStore?.trailIdOf(id);
+  }
+
+  /** A fresh opaque id for a save to pass as `SaveOptions.trailId`; undefined without engine.db. */
+  newTrailId(): string | undefined {
+    return this.connStore === null ? undefined : newApiTrailId();
+  }
+
+  /**
    * Another kind's connection under `id`, or null. `connections.id` is one key across every
    * kind, so an upsert of an api row would turn another kind's row into an api row: its
    * config replaced, its kind rewritten, and nothing left to say what was there.
@@ -1480,11 +1521,11 @@ export class ApiStore {
    * already log a failed write. Two writes do not: the one-shot flat-file import, on purpose (see
    * there), and the static re-gate, which rewrites only rows it read as kind api.
    */
-  private _writeRow(profile: ApiProfile): void {
+  private _writeRow(profile: ApiProfile, trailId?: string): void {
     if (!this.connStore) return;
     const kind = this._otherKindAt(profile.id);
     if (kind !== null) throw new Error(`a ${kind} connection already uses the id ${JSON.stringify(profile.id)}`);
-    this.connStore.upsert(profileToConnectionRow(profile));
+    this.connStore.upsert(profileToConnectionRow(profile, trailId));
     this._recordGrantHosts(profile);
   }
 
@@ -2646,7 +2687,7 @@ export class ApiStore {
         for (const name of exchange.wrote) if (Object.hasOwn(moved, name)) moved[name] = keyedOf(f, name);
         kept = { ...kept, fingerprints: moved };
       }
-      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew);
+      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew, options?.trailId);
       // A save that clears a revocation from the grant it keeps (an exchange that worked again with
       // the same token) lifts it: a provider's erasure of that grant still held is cancelled with it,
       // whoever saves, since the same grant works again. A save that names no actor cancels nothing.
@@ -2663,7 +2704,7 @@ export class ApiStore {
             const result = persist();
             if (!result.ok) throw new SaveRefused(result.reason);
             const cancelled = cancelHeldProviderRecords(conn.recordDb(), profile.id, new Date(), liftedGrant);
-            auditProviderCancels(this.auditLog, actor, profile.id, cancelled, 'lift');
+            auditProviderCancels(this.auditLog, conn.recordDb(), actor, cancelled, 'lift');
             return result;
           });
         } catch (err: unknown) {
@@ -2686,7 +2727,7 @@ export class ApiStore {
           consentRefresh: options?.newConsent === true ? options.consentRefresh : undefined,
           adopt: mintReason === 'exchange' ? exchange?.presentedRefreshTokenFp ?? undefined : undefined,
         }));
-        const result = this._persist(minted, apisDir, isNew);
+        const result = this._persist(minted, apisDir, isNew, options?.trailId);
         // A refused save must not leave a ledger row behind for a grant nothing carries:
         // throwing rolls the mint back with it.
         if (!result.ok) throw new SaveRefused(result.reason);
@@ -2702,7 +2743,7 @@ export class ApiStore {
           const onlyGrant = actor.kind === 'owner' ? undefined : refused?.grant_id;
           if (actor.kind === 'owner' || onlyGrant !== undefined) {
             const cancelled = cancelHeldProviderRecords(this.connStore.recordDb(), profile.id, new Date(), onlyGrant);
-            auditProviderCancels(this.auditLog, actor, profile.id, cancelled, mintReason);
+            auditProviderCancels(this.auditLog, this.connStore.recordDb(), actor, cancelled, mintReason);
           }
         }
         return result;
@@ -2719,11 +2760,11 @@ export class ApiStore {
     }
   }
 
-  private _persist(profile: ApiProfile, apisDir: string | undefined, isNew: boolean): { ok: true; isNew: boolean } | { ok: false; reason: string } {
+  private _persist(profile: ApiProfile, apisDir: string | undefined, isNew: boolean, trailId: string | undefined): { ok: true; isNew: boolean } | { ok: false; reason: string } {
     const refusal = this._saveAdmit(profile, false);
     if (refusal !== null) return { ok: false, reason: refusal };
     if (this.connStore) {
-      this._writeRow(profile);
+      this._writeRow(profile, trailId);
     } else if (apisDir) {
       mkdirSync(apisDir, { recursive: true, mode: 0o700 });
       writeFileSync(join(apisDir, `${profile.id}.json`), JSON.stringify(profile, null, 2), { mode: 0o600 });
@@ -2776,6 +2817,8 @@ export class ApiStore {
    * recorded. The flat-JSON path records nothing.
    */
   remove(id: string, apisDir?: string, options?: { readonly record?: ConnectionRecordKind | undefined }): boolean {
+    // Before the profile goes, while it still names its slots. A write that throws keeps it in place.
+    this._markLapsedReaders(id, apisDir);
     const removed = this._removeStored(id, apisDir, options?.record);
     // Gone from the store, so no longer a profile any check has to see. Not before: a removal
     // that throws leaves the stored profile in place, and it stays known.
@@ -2791,14 +2834,42 @@ export class ApiStore {
     return removed;
   }
 
+  /**
+   * Marks every other stored profile that reads a token slot of profile `id` as its refresh slot
+   * with that name in {@link OAuthGrantRecord.lapsed_slots} (register 685). Without the mark, once
+   * `id` is gone, a reader that alone still names the slot would take it over as its own refresh
+   * slot and exchange whatever value is stored there next. A mark on a reader that holds the name
+   * itself (the other half of a `-`/`_` pair) changes nothing: a held name is never `lapsed`. The
+   * mark is written as the reader is stored, past admission: it changes only the engine's own
+   * record, and no reader's state may keep its owner from being deleted. A held-back reader stays
+   * held back.
+   */
+  private _markLapsedReaders(id: string, apisDir: string | undefined): void {
+    const gone = this.knownProfiles().find((p) => p.id === id);
+    if (gone === undefined) return;
+    const names = grantTokenNames(gone);
+    for (const reader of this.knownProfiles()) {
+      if (reader.id === id || reader.auth?.type !== 'oauth2') continue;
+      const slot = readersRefreshSlot(reader);
+      if (!names.has(slot) || lapsedSlots(reader).includes(slot)) continue;
+      const next: ApiProfile = { ...reader, oauth_grant: { ...reader.oauth_grant, lapsed_slots: [...lapsedSlots(reader), slot] } };
+      if (this.connStore) this._writeRow(next);
+      else if (apisDir) writeFileSync(join(apisDir, `${next.id}.json`), JSON.stringify(next, null, 2), { mode: 0o600 });
+      if (this.profiles.has(next.id)) this.profiles.set(next.id, next);
+      else this.heldBack.set(next.id, next);
+    }
+  }
+
   private _removeStored(id: string, apisDir: string | undefined, record: ConnectionRecordKind | undefined): boolean {
-    if (this.connStore) {
+    const conn = this.connStore;
+    if (conn) {
       const inMemory = this.unregister(id); // no apisDir → in-memory only, no file unlink
       // Kind-scoped so a cross-kind id collision (once mail/google/push land)
       // can never delete a neighbour's connection.
       // Only the owner starts an erasure (api_setup), so the owner is the actor of a supersede.
-      const inStore = record === undefined ? this.connStore.remove(id, 'api')
-        : this.connStore.removeApiWithRecord(id, record, new Date(), (ids) => { auditProviderCancels(this.auditLog, OWNER_PRINCIPAL, id, ids, 'owner_delete'); });
+      // The supersede's audit rows are written before the row goes, so they name its opaque id.
+      const inStore = record === undefined ? conn.remove(id, 'api')
+        : conn.removeApiWithRecord(id, record, new Date(), (ids) => { auditProviderCancels(this.auditLog, conn.recordDb(), OWNER_PRINCIPAL, ids, 'owner_delete'); });
       if (inMemory || inStore) return true;
       // A file the import could not read is deleted as a file: it holds the import open until it
       // is read or gone, and there is no row of it to remove.

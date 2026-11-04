@@ -2,6 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { keepSettingsItem } from '../utils/billing-tier.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	interface SettingsItem {
 		href: string;
@@ -19,6 +20,8 @@
 		 * For a page only the owner may read, so a helper is not shown an item that leads to a refusal.
 		 */
 		probe?: string;
+		/** Hidden from a mandate's session: the page holds only what the owner keeps (ux U-104). */
+		ownerOnly?: boolean;
 	}
 
 	interface SettingsSection {
@@ -53,9 +56,10 @@
 	let probesShown = $state<ReadonlySet<string>>(new Set());
 
 	$effect(() => {
+		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
 			.then(r => r.json())
-			.then((data: Record<string, unknown>) => { managed = !!data['managed']; })
+			.then((data: Record<string, unknown>) => { managed = !!data['managed']; noteViewer(data); })
 			.catch(() => { managed = false; });
 	});
 
@@ -102,7 +106,7 @@
 				// config — moved here from the Automation Hub. Two distinct
 				// primitives (a callable endpoint profile vs a secret), so two tiles.
 				{ href: '/app/settings/apis', titleKey: 'settings.apis', descKey: 'settings.apis_desc' },
-				{ href: '/app/settings/llm/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc' },
+				{ href: '/app/settings/llm/keys', titleKey: 'settings.keys', descKey: 'settings.keys_desc', ownerOnly: true },
 				// IA reorg (M6): ToolToggles unified from two identical tier-split
 				// mounts (workspace/tools Self-Host + privacy/tools Managed) into
 				// one all-tier entry here. The legacy routes 301 to /policy-tools.
@@ -116,7 +120,7 @@
 			labelKey: 'settings.section_workspace',
 			items: [
 				{ href: '/app/settings/workspace/backups', titleKey: 'settings.workspace.backups', descKey: 'settings.workspace.backups_desc', selfHostOnly: true },
-				{ href: '/app/settings/workspace/security', titleKey: 'settings.workspace.security', descKey: 'settings.workspace.security_desc', selfHostOnly: true },
+				{ href: '/app/settings/workspace/security', titleKey: 'settings.workspace.security', descKey: 'settings.workspace.security_desc', selfHostOnly: true, ownerOnly: true },
 				{ href: '/app/settings/workspace/limits', titleKey: 'settings.workspace.limits', descKey: 'settings.workspace.limits_desc', selfHostOnly: true },
 				{ href: '/app/settings/workspace/updates', titleKey: 'settings.workspace.updates', descKey: 'settings.workspace.updates_desc', selfHostOnly: true },
 			],
@@ -171,6 +175,7 @@
 		if (!keepSettingsItem(i, managed)) return false;
 		if (i.probe !== undefined && !probesShown.has(i.probe)) return false;
 		if (i.hideOnMobile && hideMobileOnly) return false;
+		if (i.ownerOnly && isMandateSession()) return false;
 		return true;
 	}
 

@@ -1,3 +1,4 @@
+import { findHiddenChar, hiddenCharRefusal } from '../../core/hidden-text.js';
 import { randomUUID } from 'node:crypto';
 import { pinnedModelOf } from '../../core/profile-pair.js';
 import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline, ModelTier, ThinkingHint, EffortLevel } from '../../types/index.js';
@@ -335,6 +336,10 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     },
   },
   handler: async (input: PlanTaskInput, agent: IAgent): Promise<string> => {
+    // Refused before the owner is asked: the save would refuse it after an approval anyway
+    // (`insertPlannedPipeline`), and the character does not show in what the owner approves.
+    const hidden = findHiddenChar({ summary: input.summary, phases: input.phases, steps: input.steps });
+    if (hidden) return `Error: ${hiddenCharRefusal('plan', hidden)}`;
     let phases = input.phases ?? [];
     let hasPhases = phases.length > 0;
     const hasSteps = (input.steps ?? []).length > 0;

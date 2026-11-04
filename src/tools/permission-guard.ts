@@ -7,7 +7,10 @@ import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS, isPathWithin } from '../core/workspace.js';
-import { proveBashCommand, BASH_OBSERVE_EVENT } from './bash-allowlist.js';
+import { proveBashCommand, BASH_OBSERVE_EVENT, type BashProof } from './bash-allowlist.js';
+import { shellIsolation } from '../core/shell-isolation.js';
+import { namesSidecarLabel } from '../core/workspace-root.js';
+import { getLynoxDir } from '../core/config.js';
 import { channels } from '../core/observability.js';
 import { globToRegex } from '../core/glob.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
@@ -545,12 +548,25 @@ const UNATTENDED_ASK_BASH = DANGEROUS_BASH.filter((rule) => rule.unattended === 
  */
 export const DANGEROUS_AFTER_CRITICAL_BASH = DANGEROUS_BASH.filter((rule) => rule.unattended !== 'block');
 
+/** `/root/` and `.config/`: where the data dir of an install as root or of an XDG layout lives.
+ *  They step aside only for the data dir's own `artifacts/` and `workspace/`, which hold the
+ *  agent's files. Everywhere else they stay — in the rest of the data dir too, whose secrets
+ *  (`config.json`, `vault.db`, `http-secret`) the `.lynox/` rules miss when the data dir has
+ *  another name. */
+const ROOT_HOME = /^\/root\//;
+const CONFIG_DIR = /\.config\//;
+const HOME_LOCATIONS: ReadonlySet<RegExp> = new Set([ROOT_HOME, CONFIG_DIR]);
+
 const SENSITIVE_PATHS: RegExp[] = [
-  /^\/etc\//, /^\/usr\//, /^\/sys\//, /^\/proc\//, /^\/root\//,
+  /^\/etc\//, /^\/usr\//, /^\/sys\//, /^\/proc\//, ROOT_HOME,
   /\.(env|pem|key|p12|pfx|jks)$/,
   /id_(rsa|ed25519|ecdsa|dsa)/, /authorized_keys/, /known_hosts/,
-  /credentials/i, /\.netrc$/,
-  /\.(ssh|gnupg|aws|config|docker|kube|npm)\//,
+  // A file or folder whose name has the word (`credentials.json`, `credentials (1).json`,
+  // `.git-credentials`, `/run/credentials/`) — except a text document about them, whose one
+  // extension is a docs format: `client-credentials-guide.md` is asked about no more,
+  // `credentials.json.md` and a saved `credentials.html` still are.
+  /credentials(?![^/.]*\.(?:md|mdx|markdown|rst|adoc)$)[^/]*$/i, /credentials[^/]*\//i, /\.netrc$/,
+  /\.(ssh|gnupg|aws|docker|kube|npm)\//, CONFIG_DIR,
   /\.token$/, /\.secret$/,
   LYNOX_SECRET_FILES,
   LYNOX_DB_FILES,
@@ -565,8 +581,22 @@ const SENSITIVE_PATHS: RegExp[] = [
   /\.mozilla\//,
 ];
 
+const AGENT_FILE_DIRS = ['artifacts', 'workspace'] as const;
+
+/** Whether a path is one the guard asks about before it is read or written: a rule in
+ *  `SENSITIVE_PATHS`, with `/root/` and `.config/` stepping aside in the data dir's
+ *  `artifacts/` and `workspace/` (spelled as configured or resolved). */
+function isSensitivePath(path: string): boolean {
+  const dataDir = getLynoxDir();
+  const inOwnFiles = [resolve(dataDir), resolveRealPath(dataDir)].some((dir) =>
+    AGENT_FILE_DIRS.some((sub) => isPathWithin(path, join(dir, sub))));
+  return SENSITIVE_PATHS.some((re) => !(inOwnFiles && HOME_LOCATIONS.has(re)) && re.test(path));
+}
+
 function resolveRealPath(filePath: string): string {
   const resolved = resolve(filePath);
+  // In shell sidecar mode a workspace path is judged by its spelling, not looked up by name (D3).
+  if (namesSidecarLabel(resolved)) return resolved;
   if (existsSync(resolved)) {
     return realpathSync(resolved);
   }
@@ -683,12 +713,16 @@ function observeBashProof(toolName: string, input: unknown, autonomy: AutonomyLe
   if (!channels.securityFlagged.hasSubscribers) return;
   if (!input || typeof input !== 'object' || !('command' in input)) return;
   const command = String((input as { command: unknown }).command);
-  const proof = proveBashCommand(command, {
-    cwd: getWorkspaceCwd(),
-    home: process.env['HOME'],
-    readRoots: READ_ONLY_ROOTS,
-    isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)),
-  });
+  // In shell sidecar mode the proof would resolve the command's paths here, by name, in a tree
+  // the command never runs in: not proven, and nothing is looked up (PRD shell-sidecar-activation D3).
+  const proof: BashProof = shellIsolation().kind === 'sidecar'
+    ? { proven: false, reason: 'sidecar', program: 'other' }
+    : proveBashCommand(command, {
+      cwd: getWorkspaceCwd(),
+      home: process.env['HOME'],
+      readRoots: READ_ONLY_ROOTS,
+      isSensitive: (realPath) => isSensitivePath(realPath),
+    });
   const current = !warning ? 'free' : warning.includes('[BLOCKED') ? 'blocked' : 'asks';
   channels.securityFlagged.publish({
     event_type: BASH_OBSERVE_EVENT,
@@ -1959,14 +1993,12 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   if (toolName === 'read_file' && input && typeof input === 'object' && 'path' in input) {
     const rawPath = resolve(asPath('path', String((input as { path: unknown }).path)));
     const filePath = resolveRealPath(rawPath);
-    for (const pattern of SENSITIVE_PATHS) {
-      // Check both raw (pre-symlink) and resolved path — /etc/ → /private/etc/ on macOS
-      if (pattern.test(rawPath) || pattern.test(filePath)) {
-        if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`);
-        }
-        return framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" — this path contains system or security files`;
+    // Check both raw (pre-symlink) and resolved path — /etc/ → /private/etc/ on macOS
+    if (isSensitivePath(rawPath) || isSensitivePath(filePath)) {
+      if (autonomy === 'autonomous') {
+        return hardBlock(framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`);
       }
+      return framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" — this path contains system or security files`;
     }
   }
 
@@ -1975,13 +2007,18 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   // own path to the workspace or the artifacts root (fs.ts `resolveWritablePath`), so measured
   // against the process cwd that check would judge a path the tool never writes.
   if ((toolName === 'write_file' || toolName === 'edit_file') && input && typeof input === 'object' && 'path' in input) {
-    const filePath = resolveRealPath(asPath('path', String((input as { path: unknown }).path)));
-    for (const pattern of SENSITIVE_PATHS) {
-      if (pattern.test(filePath)) {
+    const rawPath = asPath('path', String((input as { path: unknown }).path));
+    const filePath = resolveRealPath(rawPath);
+    // The file the tool writes, as its handler resolves it (`ToolEntry.writeTarget`): without a
+    // workspace a path is confined to the data dir's workspace and a link in it is followed, so the
+    // file written need not be the path as written. Both are read; null means the tool refuses it.
+    const target = entry?.writeTarget?.(rawPath) ?? null;
+    for (const judged of target !== null && target !== filePath ? [filePath, target] : [filePath]) {
+      if (isSensitivePath(judged)) {
         if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`);
+          return hardBlock(framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(judged)}" [BLOCKED — this path contains system or security files]`);
         }
-        return framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(filePath)}" — this path contains system or security files`;
+        return framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(judged)}" — this path contains system or security files`;
       }
     }
     // Overwriting an existing file with empty content destroys it (rm bypass)
@@ -2007,26 +2044,22 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     const dirPath = dirRaw ? resolveRealPath(dirRaw) : '';
 
     if (dirPath) {
-      for (const pattern of [...SENSITIVE_PATHS, LYNOX_DIR]) {
-        if (pattern.test(dirRaw) || pattern.test(dirPath)) {
-          if (autonomy === 'autonomous') {
-            return hardBlock(framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}" [BLOCKED]`);
-          }
-          return framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}"`;
+      if (isSensitivePath(dirRaw) || isSensitivePath(dirPath) || LYNOX_DIR.test(dirRaw) || LYNOX_DIR.test(dirPath)) {
+        if (autonomy === 'autonomous') {
+          return hardBlock(framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}" [BLOCKED]`);
         }
+        return framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}"`;
       }
     }
 
     if (obj.operation === 'move' && typeof obj.destination === 'string') {
       const destRaw = resolve(asPath('destination', obj.destination));
       const destPath = resolveRealPath(destRaw);
-      for (const pattern of [...SENSITIVE_PATHS, LYNOX_DIR]) {
-        if (pattern.test(destRaw) || pattern.test(destPath)) {
-          if (autonomy === 'autonomous') {
-            return hardBlock(framed`⚠ ${system(toolName)}: move into sensitive path — "${agentText(destPath)}" [BLOCKED]`);
-          }
-          return framed`⚠ ${system(toolName)}: move files into sensitive path — "${agentText(destPath)}"`;
+      if (isSensitivePath(destRaw) || isSensitivePath(destPath) || LYNOX_DIR.test(destRaw) || LYNOX_DIR.test(destPath)) {
+        if (autonomy === 'autonomous') {
+          return hardBlock(framed`⚠ ${system(toolName)}: move into sensitive path — "${agentText(destPath)}" [BLOCKED]`);
         }
+        return framed`⚠ ${system(toolName)}: move files into sensitive path — "${agentText(destPath)}"`;
       }
 
       const cwd = resolveRealPath(process.cwd());

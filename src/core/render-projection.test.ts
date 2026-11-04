@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, buildApprovalNoteContent, sanitizeNoteDetail, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT } from './render-projection.js';
+import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, buildApprovalNoteContent, sanitizeNoteDetail, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT, THINKING_ONLY_CONTINUATION_PROMPT } from './render-projection.js';
 import type { ThreadMessageRecord } from './thread-store.js';
 
 function rec(seq: number, role: string, content: unknown): ThreadMessageRecord {
@@ -421,6 +421,36 @@ describe('projectMessages — usage', () => {
     expect(projectMessages([r])[0]?.usage).not.toHaveProperty('spawnCostUsd');
   });
 
+  it('carries the run\'s API calls through a resume', () => {
+    const r: ThreadMessageRecord = {
+      ...rec(0, 'assistant', 'keywords'),
+      usage_json: JSON.stringify({
+        tokensIn: 100, tokensOut: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.01,
+        apiCalls: 4, apiCostUsd: 0.0040, apiCostEstimated: true, apiCallsUnpriced: 1,
+      }),
+    };
+    expect(projectMessages([r])[0]?.usage).toMatchObject({ apiCalls: 4, apiCostUsd: 0.0040, apiCostEstimated: true, apiCallsUnpriced: 1 });
+  });
+
+  it('never says more calls went unpriced than were sent', () => {
+    const r: ThreadMessageRecord = {
+      ...rec(0, 'assistant', 'keywords'),
+      usage_json: JSON.stringify({ tokensIn: 100, tokensOut: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.01, apiCalls: 2, apiCostUsd: 0, apiCallsUnpriced: 9 }),
+    };
+    expect(projectMessages([r])[0]?.usage?.apiCallsUnpriced).toBe(2);
+  });
+
+  it('omits the API calls for a run that sent none, and drops a count that is not a positive whole number', () => {
+    for (const apiCalls of [undefined, 0, -1, 1.5, '4']) {
+      const r: ThreadMessageRecord = {
+        ...rec(0, 'assistant', 'solo'),
+        usage_json: JSON.stringify({ tokensIn: 100, tokensOut: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.01, apiCalls, apiCostUsd: 0.36 }),
+      };
+      expect(projectMessages([r])[0]?.usage).not.toHaveProperty('apiCalls');
+      expect(projectMessages([r])[0]?.usage).not.toHaveProperty('apiCostUsd');
+    }
+  });
+
   it('drops malformed usage_json instead of throwing', () => {
     const r: ThreadMessageRecord = { ...rec(0, 'assistant', 'x'), usage_json: 'not-json' };
     const [msg] = projectMessages([r]);
@@ -677,5 +707,16 @@ describe('max_tokens continuation prompt', () => {
     ];
     const out = projectMessages(similar.map((t, i) => rec(i + 1, 'user', t)));
     expect(out.map((m) => m.content)).toEqual(similar);
+  });
+  it('the continuation after a thinking-only turn is dropped the same way (996)', () => {
+    const STORED_THINKING = 'Your previous turn spent its whole output limit on thinking and produced no answer and no tool call. That thinking is not kept, so do not start it over. Act now: call a tool, or answer with what you have.';
+    expect(THINKING_ONLY_CONTINUATION_PROMPT).toBe(STORED_THINKING);
+    const out = projectMessages([
+      rec(1, 'user', 'go'),
+      rec(2, 'assistant', [{ type: 'text', text: '[…]' }]),
+      rec(3, 'user', STORED_THINKING),
+      rec(4, 'assistant', [{ type: 'text', text: 'Answer.' }]),
+    ], { mergeTurns: false });
+    expect(out.filter((m) => m.role === 'user').map((m) => m.content)).toEqual(['go']);
   });
 });

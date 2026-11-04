@@ -5,7 +5,8 @@
  * reads it whole into the message; the Anthropic SDK carries it in `message`). In a contained
  * container that body can quote what the run read from a store, so there an error leaves as its
  * class and HTTP status only, as `judgeErrorForTracker` already reports bulk-judge failures
- * (PRD-SHOPIFY-CONTAINMENT-ERASURE E4).
+ * (PRD-SHOPIFY-CONTAINMENT-ERASURE E4). The one exception is a `FixedTextError`: its fixed text,
+ * which lynox wrote and which quotes nothing, leaves instead of the class.
  *
  * Which errors: a sink that knows its thread or bulk run asks `Containment.isContained`. A sink
  * that does not (the HTTP catch-all, the process-wide handlers) reduces every error once the
@@ -40,17 +41,31 @@ export function providerStatus(err: unknown): number | null {
 
 /**
  * Class and HTTP status of an error, and nothing it carries. A name is kept only when it is an
- * identifier, as a class name is; one built from text (spaces, punctuation) reads `Error`.
+ * identifier, as a class name is; one built from text (spaces, punctuation) reads `Error`. A
+ * `FixedTextError` reads its fixed text, which lynox wrote and which quotes nothing.
  */
 export function reducedErrorText(err: unknown): string {
   // A getter on `name`, `status` or `message` that throws would carry its own text into the
   // handler that called this; such an error reads `Error`.
   try {
+    if (err instanceof FixedTextError) return err.fixedText;
     const name = err instanceof Error ? (/^[A-Za-z_][A-Za-z0-9_]{0,39}$/.test(err.name) ? err.name : 'Error') : typeof err;
     const status = providerStatus(err);
     return `${name}${status !== null ? ` (HTTP ${String(status)})` : ''}`;
   } catch {
     return 'Error';
+  }
+}
+
+/**
+ * An error whose reduced text lynox wrote itself, word for word, with nothing from a store in it:
+ * a reduced sink sends `fixedText` instead of the class, so the reader learns why and what to do.
+ * The message, which may name a stored value, stays for a sink that is not reduced.
+ */
+export class FixedTextError extends Error {
+  constructor(message: string, readonly fixedText: string) {
+    super(message);
+    this.name = 'FixedTextError';
   }
 }
 

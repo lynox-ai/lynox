@@ -430,6 +430,27 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
     }
   }, 60_000);
 
+  it('answers a restore that left entries out with them and the backup folder they stay in', async () => {
+    const bm = engineOf().getBackupManager();
+    if (bm === null) throw new Error('fixture: no backup manager');
+    const made = await bm.createBackup();
+    const id = made.path.split('/').pop()!;
+    const spy = vi.spyOn(bm, 'restoreBackup').mockResolvedValue({ success: true, pre_restore_backup_path: '', files_restored: 3, duration_ms: 0, skipped: ['memory/old.md'] });
+    // A successful restore restarts the process; here the exit is held.
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    try {
+      const res = await call('POST', `/api/backups/${id}/restore`);
+      expect(res.status).toBe(200);
+      expect(res.body['skipped']).toEqual(['memory/old.md']);
+      expect(res.body['backup_path']).toBe(bm.getBackupPath(id));
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      exit.mockRestore();
+      spy.mockRestore();
+    }
+  }, 60_000);
+
   it('refuses while a backup runs', async () => {
     const bm = engineOf().getBackupManager();
     if (bm === null) throw new Error('fixture: no backup manager');

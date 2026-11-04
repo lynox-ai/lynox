@@ -66,13 +66,14 @@ const PINNED: Readonly<Record<string, string>> = {
   'server/http-api.ts|client_id: secrets.resolve(keys.id),': 'a preset client id, public',
   'server/http-api.ts|const priorId = secrets.resolve(keys.id);': 'a preset client id, public',
   // Names with the last characters of a value: the briefing and ask_secret's list.
-  'core/engine-init.ts|const names = visibleNames.map(n => `secret:${n} (${store!.getMasked(n)})`).join(\', \');': 'masked listing; reviewed separately',
-  "tools/builtin/ask-secret.ts|const listing = names.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');": 'masked listing; reviewed separately',
+  'core/engine-init.ts|if (holders.length === 0) free.push(`secret:${n} (${store.getMasked(n)})`);': 'masked listing; reviewed separately',
+  "tools/builtin/ask-secret.ts|const listing = free.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');": 'masked listing; reviewed separately',
   // Migration between instances: an admin route, refused to a mandate.
   'core/migration-import.ts|const value = vault.get(w.name);': 'admin migration restore',
   "server/http-api.ts|? { principal: OWNER_PRINCIPAL, actorKind: 'cp-migration' as const }": 'audit actor of a migration, no attach',
   "core/engine.ts|principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history',": 'audit actor of the connection erasure sweep, no attach',
   "core/plan-takeover.ts|principal: OWNER_PRINCIPAL, action: 'plan.takeover', phase: 'done', correlationId: newCorrelationId(),": 'audit actor of the owner\'s takeover of a paused plan, no attach',
+  "core/session-store.ts|const summarySession = engine.createSession({ model: 'fast', principal: OWNER_PRINCIPAL });": 'the thread summary\'s session, built for the owner without tools, no attach',
   'core/migration-export.ts|const allSecrets = vault.getAll();': 'admin migration export, refused to a mandate before dispatch',
   'core/secret-vault.ts|const entries = oldVault.getAll();': 'vault re-key',
   'core/secret-store.ts|const entries = this.vault.getAll();': 'the store\'s own load',
@@ -87,7 +88,7 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/api-setup.ts|const ids = apiStore.getAll().filter((p) => connectionWaits(p, ends)).map((p) => p.id);': 'profile ids, no values',
   'core/transcribe/session-context.ts|return store.getAll().map((p) => p.name).filter((n) => n.length > 0);': 'profile names, no values',
   'integrations/push/web-push-channel.ts|for (const row of this.store.getAll()) {': 'push subscriptions, not the vault',
-  'server/http-api.ts|jsonResponse(res, 200, { profiles: store.getAll().map((p) => profileForReader(p, reader)), importWaiting: store.importWaitsOn() });': 'profiles as the reader may see them: no fingerprints, no account of another person\'s connection',
+  'server/http-api.ts|jsonResponse(res, 200, { profiles: store.getAll().map((p) => ({ ...profileForReader(p, reader), reader_may_connect: mayStartConnect(reader, p) })), importWaiting: store.importWaitsOn() });': 'profiles as the reader may see them: no fingerprints, no account of another person\'s connection; plus whether this reader may start the connection, a yes or no from the same check as the connect start',
   'server/http-api.ts|secret: (name) => this.engine?.getSecretStore()?.resolve(name) ?? null,': 'webhook signature secret named by its connection row; compared, not sent',
 };
 
@@ -164,8 +165,8 @@ describe('bypasses of the member-connection view', () => {
 // place that removes it carries the check that keeps it off a member's live connection.
 const PROFILE_SAVES: Readonly<Record<string, string>> = {
   'tools/builtin/api-setup.ts|return apiStore.save(next, apisDir, { exchange, actor }).ok ? \'saved\' : \'not-saved\';': 'grant persist: spreads the stored profile, author kept',
-  'tools/builtin/api-setup.ts|const mergedSave = w.run(\'save\', () => apiStore.save(merged, apisDir), ifOk);': 'refine: applyRefine keeps the author',
-  'tools/builtin/api-setup.ts|const saved = w.run(\'save\', () => apiStore.save(profile, apisDir), ifOk);': 'create/update: author removed behind the owner-save check',
+  'tools/builtin/api-setup.ts|const mergedSave = w.run(\'save\', () => apiStore.save(merged, apisDir, { trailId: refineTrailId }), ifOk);': 'refine: applyRefine keeps the author',
+  'tools/builtin/api-setup.ts|const saved = w.run(\'save\', () => apiStore.save(profile, apisDir, { trailId: freshTrailId }), ifOk);': 'create/update: author removed behind the owner-save check',
   'tools/builtin/api-setup.ts|const saved = apiStore.save(next, apisDir);': 'adopt_connection: author removed once the connection waits',
   'server/http-api.ts|const saved = apiStore.save(': 'connect callback: spreads the stored profile, author kept',
 };

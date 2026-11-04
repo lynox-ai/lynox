@@ -21,11 +21,14 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkFoundAsPlannedNote, bulkWriteCap, canonicalJson,
+  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, sameValue,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
 import { processUmask } from './workspace-rel.js';
+import { shopifySavedForm } from './shopify-saved-form.js';
+import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
+import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
 
 export type BulkEffect = BulkWriteEffect;
@@ -54,8 +57,14 @@ export interface TargetWriter {
   /** A writer whose requests carry a stored credential (an external host): start noting the
    *  connections of what it sends from now on (`ExternalClient.track`). A local writer has none. */
   readonly track?: (() => () => AttachedConnection | null) | undefined;
-  read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
-  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage }>;
+  /** `titleNow`: the product title the same read answered, for a form the store saves in its
+   *  own way ({@link shopifySavedForm}); null where the answer holds none. Never part of the image. */
+  read(key: string, fields: readonly string[] | null): Promise<(BeforeImage & { readonly titleNow?: string | null }) | 'path_changed' | 'foreign'>;
+  /** `hostAddedMarkup`: the read-back holds markup the write never sent (PRD shopify-preset
+   *  §21.2 item 6). The target is written all the same — the value is in the store — and is
+   *  recorded with its mark; the run then halts. `hostRewrote`: the host stored the value otherwise
+   *  than sent, within what the run may write — counted on the target, not halted. */
+  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true; hostRewrote?: true }>;
 }
 
 /**
@@ -122,17 +131,27 @@ const MIN_RUN_BUDGET_MS = 60_000;
  *  than {@link bulkFailureLimit} in the pass. */
 const HALT_CONSECUTIVE = 3;
 
-function sameImage(a: BeforeImage, b: BeforeImage): boolean {
+/** Two images equal: both absent, or values equal — the run's HTML fields under `htmlEqual` ({@link sameValue}). */
+function sameImage(a: BeforeImage, b: BeforeImage, htmlFields: readonly string[] = []): boolean {
   if (a.absent || b.absent) return a.absent === b.absent;
-  return canonicalJson(a.value) === canonicalJson(b.value);
+  return sameValue(a.value, b.value, htmlFields);
 }
 
-function summarize(ledger: BulkLedger, runId: string, lead: string): string {
+/**
+ * A read holding what the store would have saved of a planned image ({@link shopifySavedForm}),
+ * with the title the read answered where the plan sets none. The read is taken as it is. A read
+ * without that title leaves the planned `seo_title` as it is: unknown is not equal.
+ */
+function sameInSavedForm(cur: BeforeImage & { readonly titleNow?: string | null }, planned: BeforeImage, htmlFields: readonly string[] = []): boolean {
+  if (cur.absent || planned.absent) return false;
+  const titleNow = cur.titleNow ?? null;
+  return sameValue(cur.value, shopifySavedForm(planned.value, titleNow), htmlFields);
+}
+
+function summarize(ledger: BulkLedger, runId: string, lead: string, say: BulkNotices = BULK_NOTICES.en): string {
   const s = ledger.getStatus(runId);
   if (!s) return lead;
-  return `${lead} Applied ${String(s.applied)}${bulkFoundAsPlannedNote(s.foundAsPlanned)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, ` +
-    `undone ${String(s.undone)} of ${String(s.total)} targets.` +
-    (s.sentUnknown > 0 ? ` Unclear ${String(s.sentUnknown)}: sent without a clear answer, not sent again.` : '');
+  return `${lead} ${say.applyCounts(s)}`;
 }
 
 export interface BulkEffectDeps {
@@ -156,6 +175,8 @@ export interface BulkEffectDeps {
    * for every other.
    */
   trailFor: (run: BulkRunForApply) => BulkRunTrail | null;
+  /** The sentences of the outcome's summary, in the instance's notice language; English without. */
+  notices?: BulkNotices | undefined;
 }
 
 /**
@@ -204,6 +225,7 @@ async function applyRunEffect(
   runId: string, effect: BulkEffect, deps: BulkEffectDeps, opened: (trail: BulkRunTrail, run: BulkRunForApply) => void,
 ): Promise<BulkEffectOutcome> {
   const { ledger } = deps;
+  const say = deps.notices ?? BULK_NOTICES.en;
   const now = deps.now ?? Date.now;
   const run = ledger.getRunForApply(runId);
   if (!run) return { status: 'refused', summary: 'No bulk run with this id.' };
@@ -218,7 +240,7 @@ async function applyRunEffect(
   }
   if (run.expiresAt === null || now() > Date.parse(run.expiresAt)) {
     ledger.halt(runId, BULK_HALT_REASONS.expired);
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.expired}.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.expired), say) };
   }
   if (run.approvalChecksum === null || ledger.computeChecksum(runId) !== run.approvalChecksum) {
     ledger.halt(runId, BULK_HALT_REASONS.checksum);
@@ -249,6 +271,10 @@ async function applyRunEffect(
   ledger.setPhase(runId, ['approved'], 'writing');
 
   const writingTotal = ledger.countWriting(runId);
+  // Compared under `htmlEqual` where a value is HTML: a store re-serialises a description.
+  const htmlFields = ledger.comparedAsHtml(runId);
+  // Compared also in the form the store saves a value in, on a Shopify product run only.
+  const savedForm = ledger.comparedInSavedForm(runId);
   const pending = ledger.listPending(runId);
   const deadline = now() + Math.max(MIN_RUN_BUDGET_MS, pending.length * BULK_TARGET_BUDGET_MS);
   let consecutive = 0;
@@ -266,7 +292,7 @@ async function applyRunEffect(
     await yieldToLoop();
     const current = ledger.getRunForApply(runId);
     // Another loop on the same ledger closed the run: nothing is left for this one.
-    if (current?.phase === 'done') return { status: 'done', summary: summarize(ledger, runId, 'Bulk run done.') };
+    if (current?.phase === 'done') return { status: 'done', summary: summarize(ledger, runId, say.applyDone, say) };
     if (!current || current.phase !== 'writing' || current.haltReason !== null) {
       return { status: 'halted', summary: summarize(ledger, runId, 'Bulk run stopped by another loop.') };
     }
@@ -291,7 +317,7 @@ async function applyRunEffect(
       // halts like any run and can be resumed (as `endStopped` does for the owner's stop).
       if (run.atomic && ledger.listAppliedDesc(runId).length > 0) return rollBack(ledger, writer, run, now, 'time');
       ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.timeBudget}.`) };
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.timeBudget), say) };
     }
     if (!ledger.claimTarget(runId, seq, now())) continue;
     const target = ledger.loadTarget(runId, seq);
@@ -306,10 +332,16 @@ async function applyRunEffect(
       // The target is released unwritten; a resume takes it again.
       ledger.releaseClaim(runId, seq);
       ledger.halt(runId, outcome.reason);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${outcome.reason}.`) };
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', outcome.reason), say) };
     }
     if (outcome.kind === 'applied') {
-      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via);
+      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true);
+      if (outcome.hostAddedMarkup === true) {
+        // Written and recorded with its mark first, so a halt that another loop's reason
+        // overwrites still leaves the target marked: the mark is the truth, not `halt_reason`.
+        ledger.halt(runId, BULK_HALT_REASONS.markupAddedByShop);
+        return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.markupAddedByShop), say) };
+      }
       consecutive = 0;
       continue;
     }
@@ -329,11 +361,11 @@ async function applyRunEffect(
     const failed = ledger.getRunForApply(runId)?.failed ?? 0;
     if (consecutive >= HALT_CONSECUTIVE) {
       ledger.halt(runId, BULK_HALT_REASONS.consecutiveFailures);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.consecutiveFailures}.`) };
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.consecutiveFailures), say) };
     }
     if (failed > bulkFailureLimit(writingTotal)) {
       ledger.halt(runId, BULK_HALT_REASONS.failureRate);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.failureRate}.`) };
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.failureRate), say) };
     }
   }
 
@@ -350,7 +382,7 @@ async function applyRunEffect(
       // The probe's cap over a wider approval (its probe stopped holding since) is not the
       // approval's bound either: something changed underneath the run.
       const planned = !cappedByProbe && (ledger.getRunForApply(runId)?.failed ?? 0) === 0;
-      return { status: 'halted', ...(planned ? { planned: true as const } : {}), summary: summarize(ledger, runId, `Bulk run halted: ${reason}.`) };
+      return { status: 'halted', ...(planned ? { planned: true as const } : {}), summary: summarize(ledger, runId, say.halted('apply', reason), say) };
     }
     // The stop that came during the loop's last write, with the rest held by another loop:
     // no pass between targets is left to read it, and `pending` would re-arm the trigger and
@@ -365,7 +397,7 @@ async function applyRunEffect(
     return { status: 'pending', summary: summarize(ledger, runId, 'Bulk run waiting for targets another loop holds.') };
   }
   ledger.finish(run);
-  return { status: 'done', summary: summarize(ledger, runId, 'Bulk run done.') };
+  return { status: 'done', summary: summarize(ledger, runId, say.applyDone, say) };
 
   function ownerStopped(): boolean {
     return deps.signal?.aborted === true && deps.ownerStopped?.() === true;
@@ -382,23 +414,31 @@ async function applyRunEffect(
       return { ...rolled, status: 'stopped' };
     }
     ledger.halt(runId, BULK_HALT_REASONS.stoppedByOwner);
-    return { status: 'stopped', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.stoppedByOwner}.`) };
+    return { status: 'stopped', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.stoppedByOwner), say) };
   }
 
   /** One claimed target: what to record for it. */
   async function writeOne(w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null):
-    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
+    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
     try {
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
-      if (cur !== 'foreign' && sameImage(cur, t.after)) {
+      if (cur !== 'foreign' && (sameImage(cur, t.after, htmlFields) || (savedForm && sameInSavedForm(cur, t.after, htmlFields)))) {
         // Found as planned: either a loop of this run wrote it and died before recording it
         // (the target is marked sent), or someone else set the value, and the run sends
         // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
         // also what an undo must expect.
-        return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
+        // Found only under the HTML comparison: the store holds the planned description in its own
+        // form — counted like a read-back stored otherwise than sent. A title or SEO title the store
+        // saved in its measured form is no description and not counted; neither is HTML, so that
+        // comparison runs without the HTML fields.
+        const rewritten = htmlFields.length > 0 && !sameImage(cur, t.after) && !(savedForm && sameInSavedForm(cur, t.after));
+        return {
+          kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null,
+          ...(rewritten ? { hostRewrote: true as const } : {}),
+        };
       }
-      if (cur === 'foreign' || !sameImage(cur, t.expected)) return { kind: 'conflict' };
+      if (cur === 'foreign' || !sameImage(cur, t.expected, htmlFields)) return { kind: 'conflict' };
       // Still as expected, but an earlier send reached it without a clear answer: that write
       // may land later or not be visible yet, and sending it again could carry the change out
       // twice. A local writer's outcome is always known.
@@ -409,7 +449,12 @@ async function applyRunEffect(
       const refused = (): void => { ledger.markRefused(runId, t.seq); };
       if (w.reportsSend !== true) sent();
       const out = await w.write(t.key, t.after, sent, refused);
-      return typeof out === 'string' ? { kind: 'applied', result: out, actual: null } : { kind: 'applied', result: out.result, actual: out.actual };
+      if (typeof out === 'string') return { kind: 'applied', result: out, actual: null };
+      return {
+        kind: 'applied', result: out.result, actual: out.actual,
+        ...(out.hostAddedMarkup === true ? { hostAddedMarkup: true as const } : {}),
+        ...(out.hostRewrote === true ? { hostRewrote: true as const } : {}),
+      };
     } catch (err: unknown) {
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };
@@ -611,8 +656,15 @@ export function anchoredWorkspaceWriter(): TargetWriter {
       // Something other than a file at the leaf (a link planted since the read) is not what the
       // run planned for — and a link's mode would be copied onto the new file.
       if (st !== null && st.type !== 'file') throw new Error('not a regular file');
-      const umask = processUmask();
-      writeFileAt(at.anchor, at.rel, after.value, {
+      const sidecar = sidecarWriteModes();
+      const umask = sidecar === null ? processUmask() : 0;
+      writeFileAt(at.anchor, at.rel, after.value, sidecar !== null ? {
+        // In sidecar mode the shell's pool keeps group read and write on what the run replaced
+        // (a pool file written under umask 022 is 0644), and a new file takes the layout's mode.
+        fileMode: st !== null ? sidecarReplaceMode(st.mode) : sidecar.fileMode,
+        dirMode: sidecar.dirMode,
+        group: sidecar.group,
+      } : {
         // The new file is the engine's: setuid and setgid are not carried over, as the kernel drops
         // them on a write to the file in place.
         fileMode: st !== null ? st.mode & ~0o6000 : 0o666 & ~umask,

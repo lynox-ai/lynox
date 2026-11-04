@@ -74,6 +74,30 @@ describe('WebPushNotificationChannel — msg.data passthrough', () => {
 	});
 });
 
+describe('WebPushNotificationChannel — tag', () => {
+	it('gives two untagged messages sent in the same millisecond tags of their own, so neither replaces the other', async () => {
+		const now = vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+		try {
+			await Promise.all([
+				channel.send({ title: 'a', body: 'a', priority: 'normal' }),
+				channel.send({ title: 'b', body: 'b', priority: 'normal' }),
+			]);
+		} finally {
+			now.mockRestore();
+		}
+		const tags = (webPush.sendNotification as ReturnType<typeof vi.fn>).mock.calls
+			.map((call) => (JSON.parse(call[1] as string) as { tag: string }).tag);
+		expect(tags).toHaveLength(2);
+		expect(new Set(tags).size).toBe(2);
+	});
+
+	it('keeps a caller\'s taskId as the tag', async () => {
+		await channel.send({ title: 'a', body: 'a', priority: 'normal', taskId: 'lynox-approval-queue' });
+		const payload = JSON.parse((webPush.sendNotification as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string) as { tag: string };
+		expect(payload.tag).toBe('lynox-approval-queue');
+	});
+});
+
 describe('WebPushNotificationChannel — outcome', () => {
 	it('reports delivered when a subscription accepted the push', async () => {
 		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('delivered');

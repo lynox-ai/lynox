@@ -8,7 +8,7 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
-	import { confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, paramsOf, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
+	import { confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, paramsOf, readPreview, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
 		id: string;
@@ -33,8 +33,9 @@
 		try {
 			const res = await fetch(`${getApiBase()}/tasks/${encodeURIComponent(id)}/stamp-preview`);
 			if (!res.ok) throw new Error();
-			const answer = (await res.json()) as StampPreview;
+			const answer = readPreview(await res.json());
 			if (mine !== request) return;
+			if (!answer) throw new Error();
 			preview = answer;
 		} catch {
 			if (mine !== request) return;

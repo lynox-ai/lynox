@@ -89,9 +89,12 @@ export function containedPrefill(messages: readonly PrefillSource[]): ContainedP
  * `GET /api/config`. A bulk run is promised only where bulk runs are on and may read a Shopify
  * store (`bulk_runs.on` and `bulk_runs.shopify`), as the engine's text for that chat does
  * (`chat-context.ts › containedOriginContext`), and in the same order: what is missing for the
- * Shopify read, then for bulk runs, support once. Bulk runs the owner's config turns off get no
- * sentence of their own: the first one says they are not enabled, and there is no place to name
- * where to turn them on. A config that could not be read gives no line:
+ * Shopify read, then for bulk runs, support once. Bulk runs the owner can turn on (`source` is
+ * `'config'`, or `allowed`: a pool tier the control plane has opened them on) get the place of the
+ * switch; the others go to support, as the engine reads it (`bulk-switch.ts › bulkRunsTurnedOnBy`).
+ * Where the engine database did not open (`db` false) the switch is locked, so no place is named.
+ * A mandate's session (`viewer`) does not see the owner's switch or configuration: its sentences
+ * say the owner turns them on. A config that could not be read gives no line:
  * the engine reads the state when the message is sent, and a line saying either way could
  * contradict its answer.
  */
@@ -104,9 +107,14 @@ export function originLineKeys(ok: boolean, data: unknown): string[] {
 	const shopify = bulk['shopify'] === true;
 	if (bulkRuns && shopify) return ['contained.origin_line'];
 	const managed = !!cfg!['managed'];
+	const mandate = bulk['viewer'] === 'mandate';
 	const keys = ['contained.origin_line_off'];
-	if (!shopify) keys.push(managed ? 'contained.way_support' : 'contained.way_flag');
-	if (!bulkRuns && bulk['source'] !== 'config' && !keys.includes('contained.way_support')) keys.push('contained.way_support');
+	if (!shopify) keys.push(managed ? 'contained.way_support' : mandate ? 'contained.way_flag_mandate' : 'contained.way_flag');
+	if (!bulkRuns) {
+		if (bulk['source'] === 'config' || bulk['allowed'] === true) {
+			if (bulk['db'] !== false) keys.push(mandate ? 'contained.way_setting_mandate' : 'contained.way_setting');
+		} else if (!keys.includes('contained.way_support')) keys.push('contained.way_support');
+	}
 	keys.push('contained.origin_line_draft');
 	return keys;
 }

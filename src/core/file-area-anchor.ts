@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 import { DIR_MODE_PRIVATE, FILE_MODE_PRIVATE } from './constants.js';
 import { chatUploadRel, persistChatUpload } from './workspace.js';
 import { toWorkspaceRel, workspaceBase, WorkspacePathRefused } from './workspace-rel.js';
+import { sidecarWriteModes } from './workspace-write-modes.js';
 import {
   listDir, openRead, statEntry, unlinkAt, writeFileAt, WorkspaceAccessError,
   type EntryInfo, type WorkspaceAnchor,
@@ -93,7 +94,9 @@ export function openAreaFile(t: AreaTarget, maxBytes: number, tooLarge: string):
     fd = openRead(t.anchor, t.rel);
   } catch (err) {
     if (err instanceof WorkspaceAccessError && err.code === 'NOT_FILE') throw new AreaRefusal(400, 'Not a file');
-    throw onTheWay(err) ?? new AreaRefusal(404, 'File not found');
+    // Any other error (no permission to read the file or a directory on the way) leaves the
+    // file where it is, so it is not answered as "not found": the route reports a failed read.
+    throw onTheWay(err) ?? err;
   }
   try {
     const st = fstatSync(fd);
@@ -133,7 +136,9 @@ export function deleteAreaFile(t: AreaTarget): void {
   try {
     st = statEntry(t.anchor, t.rel);
   } catch (err) {
-    throw onTheWay(err) ?? new AreaRefusal(404, 'File not found');
+    // Any other error (a directory on the way the server may not read) leaves the file in place,
+    // so it is not answered as "not found": the route reports it as a failed delete.
+    throw onTheWay(err) ?? err;
   }
   if (st === null) throw new AreaRefusal(404, 'File not found');
   if (st.type !== 'file' && st.type !== 'symlink') throw new AreaRefusal(400, 'Not a file');
@@ -142,8 +147,9 @@ export function deleteAreaFile(t: AreaTarget): void {
 
 /**
  * {@link persistChatUpload} with isolation: stored through the area's open directory, private as
- * before (0600 in 0700 directories) and atomically (temp file, fsync, rename). Null when it cannot
- * be written, so the caller falls back to inlining the upload, as before.
+ * before (0600 in 0700 directories) and atomically (temp file, fsync, rename). In sidecar mode the
+ * shell must read it, so it takes the sidecar's modes and group instead (`workspace-write-modes.ts`).
+ * Null when it cannot be written, so the caller falls back to inlining the upload, as before.
  */
 export function persistChatUploadInArea(fileName: string, text: string): { rel: string; abs: string } | null {
   let t: AreaTarget | null;
@@ -154,7 +160,9 @@ export function persistChatUploadInArea(fileName: string, text: string): { rel: 
   }
   if (t === null) return persistChatUpload(fileName, text);
   try {
-    writeFileAt(t.anchor, t.rel, text, { fileMode: FILE_MODE_PRIVATE, dirMode: DIR_MODE_PRIVATE });
+    // In sidecar mode `bash` must read an upload: the layout's modes and group, not private ones.
+    const sidecar = sidecarWriteModes();
+    writeFileAt(t.anchor, t.rel, text, sidecar ?? { fileMode: FILE_MODE_PRIVATE, dirMode: DIR_MODE_PRIVATE });
   } catch {
     return null;
   }

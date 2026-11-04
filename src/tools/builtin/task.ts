@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent, TaskPriority, TaskStatus, TriggerStatus, MemoryScopeRef } from '../../types/index.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
+import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidden-text.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-principal.js';
@@ -70,7 +71,10 @@ const UNSAFE_IN_LINE = /[\x00-\x1f\x7f\u0085\u2028\u2029]/g;
 const FIELD_SEPARATOR = ' · ';
 
 /** Flatten anything that could end a line or forge a field. */
-const clean = (v: string): string => v.replace(UNSAFE_IN_LINE, ' ');
+// Also without the characters that render as nothing (`hidden-text.ts`): a stored field can carry
+// text someone else wrote, and this line is read by the model.
+// Line ends first, so each still reads as a space and not as nothing.
+const clean = (v: string): string => stripHidden(v.replace(UNSAFE_IN_LINE, ' '));
 
 /** Cut at a CODEPOINT boundary. `slice` counts UTF-16 units, so a provider whose
  *  error text puts an emoji across the limit leaves a lone surrogate in the
@@ -228,11 +232,14 @@ function formatTaskLine(
   // rather than concatenated on.
   suffix = '',
 ): string {
-  const scope = t.scope_type === 'context' && !t.scope_id ? '' : ` (${t.scope_type}:${t.scope_id})`;
-  const due = t.due_date ? ` — due ${t.due_date}` : '';
-  const assign = t.assignee ? ` @${t.assignee}` : '';
+  // Title, assignee, scope and due date as stored, without the characters that render as nothing
+  // (`hidden-text.ts`): the model's write tools refuse them, but a plan saved before, or through
+  // another path, carries them.
+  const scope = t.scope_type === 'context' && !t.scope_id ? '' : ` (${t.scope_type}:${stripHidden(t.scope_id)})`;
+  const due = t.due_date ? ` — due ${stripHidden(t.due_date)}` : '';
+  const assign = t.assignee ? ` @${stripHidden(t.assignee)}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
-  return `${prio}${t.id} ${t.title}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine(t)}`;
+  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine(t)}`;
 }
 
 // Catches an LLM output failure mode where the model emits an escaped close-quote
@@ -317,6 +324,15 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
     const embeddedErr = detectEmbeddedParams('description', input.description)
       ?? detectEmbeddedParams('title', input.title);
     if (embeddedErr) return embeddedErr;
+
+    // No character that renders as nothing (`hidden-text.ts`), on every task, firing or not: a
+    // plan copied from someone else's would bring its hidden instructions along, and the owner's
+    // own plan needs no stamp. The injection scan below cannot catch it, as it folds them away.
+    const hidden = findHiddenChar({
+      title: input.title, description: input.description, tags: input.tags, params: input.params,
+      assignee: input.assignee, scope: input.scope, watch_url: input.watch_url,
+    });
+    if (hidden) return `Error: ${hiddenCharRefusal('task', hidden)}`;
 
     // `params` only reaches a workflow run. Silently dropping it would look like
     // a successful batch schedule that in fact re-targets nothing.
@@ -429,10 +445,25 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // part of confirming, so the refusal says not to create it here again.
         // Only the id is echoed: this tool's result is not scanned, and the
         // stored name is free text written by someone else. A workflow this
-        // cannot find is left to the manager and the worker, which already
-        // report a missing target.
+        // cannot find is left, for the owner, to the manager, which stores the
+        // task, and the worker, which reports the missing target at its tick.
         const { getPipeline } = await import('./pipeline.js');
         const planned = getPipeline(input.workflow_id, agent.toolContext.runHistory);
+        // A schedule on another mandate's workflow ties both mandates into one plan, so a mandate
+        // schedules only its own workflows and the owner's (`foreignWorkflowScheduleRefusal`). A
+        // workflow this cannot find has no author to check, so a mandate's schedule on it is refused:
+        // as missing when no row has the id, as unreadable when one does (its definition did not parse).
+        if (!isOwnerPrincipal(agent.principal)) {
+          const { foreignWorkflowScheduleRefusal, MISSING_WORKFLOW_SCHEDULE_REFUSAL, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL } = await import('../../core/plan-stamp.js');
+          const asked = input.workflow_id;
+          const stored = (): boolean => {
+            try { return agent.toolContext.runHistory?.getWorkflowAuthorship(asked) !== undefined; } catch { return true; }
+          };
+          const refusal = planned
+            ? foreignWorkflowScheduleRefusal(agent.principal, planned.id, agent.toolContext.runHistory)
+            : stored() ? UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL : MISSING_WORKFLOW_SCHEDULE_REFUSAL;
+          if (refusal !== null) return `Error: workflow ${planned?.id ?? input.workflow_id}: ${refusal}`;
+        }
         if (planned) {
           const unschedulable = !isSchedulableWorkflow(planned)
             ? `is '${planned.mode}' and may ask for something other than an answer from its owner; a schedule runs an 'autonomous' workflow, or one whose only question tool is ask_user. Remove its ask_secret / ask_human steps before scheduling it.`
@@ -454,7 +485,8 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         return withInstanceWrite(agent, { site: 'task_create#workflow', kind: 'create', store: 'tasks', target: () => [['type', 'workflow'], ['workflow', plannedId]], main: ['create'] }, (w) => {
           const task = w.run('create', () => managerRef.createPipelineTask({
             ...baseParams,
-            pipelineId: workflowId,
+            // The workflow checked above: a prefix the store resolves on its own may name another.
+            pipelineId: plannedId ?? workflowId,
             scheduleCron: input.schedule,
             ...(pipelineParams !== undefined ? { pipelineParams } : {}),
             // The run this task starts has no session of its own; it inherits what this one
@@ -559,6 +591,10 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
     const scopeFilter = agent.activeScopes && agent.activeScopes.length > 0
       ? agent.activeScopes
       : undefined;
+
+    // No character that renders as nothing in what this edit writes, as on create.
+    const hidden = findHiddenChar({ title: input.title, description: input.description, tags: input.tags, assignee: input.assignee });
+    if (hidden) return `Error: ${hiddenCharRefusal('task', hidden)}`;
 
     try {
       // The create path refuses a firing trigger whose title or description reads like an

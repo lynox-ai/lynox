@@ -116,6 +116,14 @@ describe('a schedule a mandate set up', () => {
 		expect(q('[data-stamp-schedule]')).not.toBeNull();
 	});
 
+	it('says the preview could not be read, and offers no confirm, when its answer has another shape', async () => {
+		previewAnswers = [{ expect: 'digest-1' }];
+		await render();
+		expect(q('[data-stamp-reload]')).not.toBeNull();
+		expect(q('[data-stamp-confirm-button]')).toBeNull();
+		expect(q('[data-stamp-instruction]')).toBeNull();
+	});
+
 	it('shows the schedule it stamps without what could forge it', async () => {
 		// A cron's fields are read with parseInt, so a bidi or TAG character inside one still runs.
 		previewAnswers = [{ ...PREVIEW, subject: { ...SUBJECT, schedule_cron: '0 3\u202E21\u202C * * *' } }];

@@ -58,7 +58,9 @@ export type ProofReason =
   | 'path-sensitive'
   | 'path-hidden'
   | 'path-special'
-  | 'path-unresolvable';
+  | 'path-unresolvable'
+  /** Shell sidecar mode: the command runs in the sidecar's tree, which the engine does not look at. */
+  | 'sidecar';
 
 export interface BashProof {
   proven: boolean;

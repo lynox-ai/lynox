@@ -31,12 +31,13 @@ vi.mock('../core/chat-context.js', async (importOriginal) => {
 });
 
 const { LynoxHTTPApi } = await import('./http-api.js');
+const { originLineKeys } = await import('../../packages/web-ui/src/lib/stores/contained-way-out.js');
 const { reloadConfig } = await import('../core/config.js');
 
 describe('the run route takes a contained-origin context (real engine)', () => {
   // Built at runtime, never a literal: this repo is public and the commit scan looks for keys.
   const SECRET = `t-${randomBytes(12).toString('hex')}`;
-  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_FEATURE_SHOPIFY_BULK_READ'];
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_FEATURE_SHOPIFY_BULK_READ', 'LYNOX_FEATURE_BULK_RUNS'];
   const saved: Record<string, string | undefined> = {};
   let api: InstanceType<typeof LynoxHTTPApi> | undefined;
   let baseUrl: string;
@@ -60,6 +61,7 @@ describe('the run route takes a contained-origin context (real engine)', () => {
     process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
     delete process.env['LYNOX_BILLING_TIER'];
     delete process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'];
+    delete process.env['LYNOX_FEATURE_BULK_RUNS'];
     reloadConfig();
     api = new LynoxHTTPApi();
     await api.init();
@@ -138,6 +140,46 @@ describe('the run route takes a contained-origin context (real engine)', () => {
     } finally {
       delete process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'];
       delete process.env['LYNOX_BILLING_TIER'];
+    }
+  });
+
+  it('on a pool tier the control plane opened, bulk runs the owner turned off are the owner\'s to turn on, on both sides', async () => {
+    const cfg = async (): Promise<Record<string, unknown>> => {
+      const res = await fetch(`${baseUrl}/api/config`, { headers: { Authorization: `Bearer ${SECRET}` } });
+      return ((await res.json()) as Record<string, unknown>)['bulk_runs'] as Record<string, unknown>;
+    };
+    // What the line above the input names as the way for bulk runs, read by the UI's own reader.
+    const uiOwnerWay = (b: Record<string, unknown>): boolean => {
+      const keys = originLineKeys(true, { managed: 'managed', bulk_runs: b });
+      expect(keys.includes('contained.way_setting')).not.toBe(keys.includes('contained.way_support'));
+      return keys.includes('contained.way_setting');
+    };
+    process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'] = 'true';
+    process.env['LYNOX_BILLING_TIER'] = 'managed';
+    process.env['LYNOX_FEATURE_BULK_RUNS'] = '1';
+    try {
+      await post('/api/config', { bulk_runs_enabled: false }, 'PUT');
+      ways.length = 0;
+      await runWith({ kind: 'contained-origin', id: 't-old' });
+      expect(ways[0]!.wayOut).toEqual({ bulkRuns: false, bulkRunsBy: 'config', shopifyBulk: true, managed: true });
+      expect(ways[0]!.text).toContain('bulk runs are turned off on this instance');
+      expect(ways[0]!.text).not.toContain('support@lynox.ai');
+      const opened = await cfg();
+      expect(opened['on']).toBe(false);
+      expect(uiOwnerWay(opened)).toBe(true);
+
+      // The control plane closes it again: now support is the way, on both sides.
+      process.env['LYNOX_FEATURE_BULK_RUNS'] = '';
+      ways.length = 0;
+      await runWith({ kind: 'contained-origin', id: 't-old' });
+      expect(ways[0]!.wayOut?.bulkRunsBy).toBe('control-plane');
+      expect(ways[0]!.text).toContain('support@lynox.ai');
+      expect(uiOwnerWay(await cfg())).toBe(false);
+    } finally {
+      delete process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'];
+      delete process.env['LYNOX_BILLING_TIER'];
+      delete process.env['LYNOX_FEATURE_BULK_RUNS'];
+      await post('/api/config', { bulk_runs_enabled: false }, 'PUT');
     }
   });
 

@@ -36,6 +36,28 @@ export interface StampPreview {
 
 const MANDATE_TAG = 'mandate:';
 
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const strOrNull = (v: unknown): boolean => v === null || typeof v === 'string';
+
+/**
+ * The stamp preview as the engine sends it, or null when the answer has another shape (an older
+ * engine, a proxy's page). The block renders every field it reads, so a missing `subject` would
+ * throw in the middle of the schedules page instead of saying the preview could not be read.
+ */
+export function readPreview(raw: unknown): StampPreview | null {
+	if (!isObj(raw) || typeof raw['expect'] !== 'string' || raw['expect'] === '' || !strOrNull(raw['by'])) return null;
+	const s = raw['subject'];
+	if (!isObj(s) || typeof s['id'] !== 'string' || typeof s['title'] !== 'string') return null;
+	for (const k of ['effect', 'source', 'description', 'schedule_cron', 'watch', 'pipeline_id', 'pipeline_params', 'model_tier', 'wf']) {
+		if (!strOrNull(s[k])) return null;
+	}
+	const w = raw['workflow'];
+	if (w !== null && !(isObj(w) && strOrNull(w['name']) && typeof w['confirmed'] === 'boolean')) return null;
+	const c = raw['connections'];
+	if (!Array.isArray(c) || !c.every((e) => isObj(e) && typeof e['id'] === 'string' && typeof e['profile'] === 'string' && typeof e['provider'] === 'string' && strOrNull(e['account']))) return null;
+	return raw as unknown as StampPreview;
+}
+
 /** The fields of a trigger row the stamp predicates read (`GET /api/triggers`). */
 export interface StampRow {
 	effect?: string | undefined;

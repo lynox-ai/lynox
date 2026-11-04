@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent, ChangesetManagerLike } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
-import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
+import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, AUDIT_UNAVAILABLE_STORED_MAIL_READ, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
 import { currentCallSignal, noteCallFiled, noteOwnStopSentence } from './call-connection.js';
@@ -112,6 +112,7 @@ import { createDocsTool } from '../integrations/google/google-docs.js';
 import { createDriveTool } from '../integrations/google/google-drive.js';
 import { createSheetsTool } from '../integrations/google/google-sheets.js';
 import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tools/index.js';
+import { createInboxReadTool } from '../integrations/mail/tools/inbox-read.js';
 import { currentCallTwins, noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 import { readRunStop, withRunStop } from './run-stop.js';
 
@@ -646,9 +647,12 @@ describe('Agent', () => {
       // exhausted and the turn still produced nothing visible. Exactly 11
       // queued: the initial turn + maxContinuations(10) continuations — over-
       // queuing would leak into the next test (clearAllMocks keeps the queue).
+      // Two empty turns in a row stop the run (ThinkingOnlyLoopError, 996), and so do three blank
+      // truncated turns in a row (continuation-loop.test.ts), so the empty turns alternate with
+      // turns that carry text, each a different one. The last one is empty.
       for (let i = 0; i < 11; i++) {
         mockProcess.mockResolvedValueOnce({
-          content: [],
+          content: i % 2 === 0 ? [] : [{ type: 'text', text: `part ${String(i)}` }],
           stop_reason: 'max_tokens',
           usage: { input_tokens: 100, output_tokens: 16_000 },
         });
@@ -7336,6 +7340,53 @@ describe('actor trail — a mandate\'s outward read', () => {
     await run(reader('http_request', handler), { url: 'https://api.example.invalid/x' }, { auditLog: owner.log });
     expect(handler).toHaveBeenCalledTimes(1);
     expect(owner.recs).toEqual([]);
+  });
+
+  // sec-core 2026-11-03: a read of stored mail is in the trail as a read of the mailbox is.
+  it('writes one read row before a mandate\'s inbox_read, naming what it read and nothing of the mail; none for the owner', async () => {
+    const MAIL_TEXT = 'Vertraulicher Inhalt der Kundenmail';
+    const reader = {
+      countByBucket: () => ({ requires_user: 1, draft_ready: 0, auto_handled: 0 }),
+      listItems: () => [],
+      getItem: () => ({
+        id: 'inb_1_abc', tenantId: 'default', accountId: 'acct-1', channel: 'email', threadKey: 't', bucket: 'requires_user',
+        confidence: 1, reasonDe: MAIL_TEXT, classifiedAt: new Date(), classifierVersion: 'v1', userAction: undefined,
+        userActionAt: undefined, draftId: undefined, snoozeUntil: undefined, snoozeCondition: undefined, unsnoozeOnReply: false,
+        fromAddress: 'kunde@example.com', fromName: undefined, subject: MAIL_TEXT, mailDate: undefined, snippet: MAIL_TEXT,
+        messageId: undefined, inReplyTo: undefined, notifyOnUnsnooze: false, notifiedAt: undefined,
+      }),
+      bodyOf: () => MAIL_TEXT,
+      threadOf: () => [],
+      sensitiveAtIngest: () => [],
+      disabledAccounts: new Set<string>(),
+    };
+    const tool = createInboxReadTool({ inboxReader: reader as never }) as unknown as ToolEntry;
+    const mandate = recorder();
+    const handler = tool.handler;
+    const spied: ToolEntry = { ...tool, handler: (async (input: never, agent: never) => {
+      expect(mandate.recs, 'the row precedes the read').toHaveLength(1);
+      return handler(input, agent);
+    }) as ToolEntry['handler'] };
+    const r = await run(spied, { action: 'item', id: 'inb_1_abc' }, { principal: MANDATE, auditLog: mandate.log });
+    expect(r.resultText).toContain('Vertraulicher');
+    expect(mandate.recs).toHaveLength(1);
+    expect(mandate.recs[0]).toMatchObject({ principal: MANDATE, action: 'inbox_read:read', target: 'item inb_1_abc', phase: 'read', runId: 'run-read-1' });
+    expect(JSON.stringify(mandate.recs[0])).not.toContain('Vertraulich');
+    const owner = recorder();
+    await run(tool, { action: 'counts' }, { auditLog: owner.log });
+    expect(owner.recs).toEqual([]);
+  });
+
+  it('does not run a mandate\'s inbox_read whose row cannot be written, and says it is the stored mail that is not read unrecorded', async () => {
+    for (const auditLog of [failing, null]) {
+      const handler = vi.fn().mockResolvedValue('ok');
+      const tool: ToolEntry = { ...makeTool('inbox_read', handler), storedMailRead: () => 'counts' };
+      const r = await run(tool, { action: 'counts' }, { principal: MANDATE, auditLog });
+      expect(handler, String(auditLog)).not.toHaveBeenCalled();
+      expect(r.isError).toBe(true);
+      expect(r.resultText).toContain(JSON.stringify(AUDIT_UNAVAILABLE_STORED_MAIL_READ).slice(1, -1));
+      expect(r.resultText).not.toContain('outside the instance');
+    }
   });
 
   it('names the approval entry on the end row of a write filed for the owner, and nothing for one not filed', async () => {

@@ -186,7 +186,7 @@ describe('the exchange pass is minted in one place, for the connect callback alo
     expect(http.match(/LYNOX_SHOPIFY_EXCHANGE/g)).toHaveLength(2); // the doc comment and the read
   });
 
-  it('the switch is read inside shopifyExchangeSwitchOn, which the exchange and the session prompt alone ask', () => {
+  it('the switch is read inside shopifyExchangeSwitchOn, which the exchange, the session prompt and the provider list alone ask', () => {
     const http = readFileSync(join(SRC, 'tools/builtin/http.ts'), 'utf-8');
     const fn = http.indexOf('export function shopifyExchangeSwitchOn(): boolean {');
     expect(fn).toBeGreaterThan(-1);
@@ -197,7 +197,9 @@ describe('the exchange pass is minted in one place, for the connect callback alo
       .filter((p) => /\bshopifyExchangeSwitchOn\(\)/.test(readFileSync(p, 'utf-8').replace('export function shopifyExchangeSwitchOn()', '')))
       .map((p) => relative(SRC, p).replace(/\\/g, '/'))
       .sort();
-    expect(callers).toEqual(['core/session.ts', 'tools/builtin/http.ts']);
+    // The provider list (`contained-providers.ts`) holds every model and speech request of an
+    // instance with the switch on to §E7's providers; it reads the switch, it does not widen it.
+    expect(callers).toEqual(['core/contained-providers.ts', 'core/session.ts', 'tools/builtin/http.ts']);
     const session = readFileSync(join(SRC, 'core/session.ts'), 'utf-8');
     expect(session.match(/shopifyPresetSuffix\(shopifyExchangeSwitchOn\(\)\)/g) ?? []).toHaveLength(2);
   });

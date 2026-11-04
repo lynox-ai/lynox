@@ -48,6 +48,17 @@ export const MAX_TOKENS_CONTINUATION_PROMPT =
   'Your previous response was truncated due to length. Please continue from where you left off.';
 
 /**
+ * The continuation after a truncated turn that held only thinking. Its thinking is not kept in
+ * the history (the agent strips thinking blocks), so "continue from where you left off" points
+ * at nothing the model can see: it starts the same reasoning over, and the next turn is cut off
+ * the same way. This one says what happened and asks for an act. Persisted and suppressed in
+ * the projection like {@link MAX_TOKENS_CONTINUATION_PROMPT}; keep today's string as a legacy
+ * match if the wording ever changes.
+ */
+export const THINKING_ONLY_CONTINUATION_PROMPT =
+  'Your previous turn spent its whole output limit on thinking and produced no answer and no tool call. That thinking is not kept, so do not start it over. Act now: call a tool, or answer with what you have.';
+
+/**
  * UI-ready projection of stored thread messages.
  *
  * The storage layer keeps raw Anthropic `BetaMessageParam` shape (role + content
@@ -90,6 +101,12 @@ export interface RenderedUsage {
    *  opt-in diagnostics panel survives a thread resume. */
   runId?: string;
   durationMs?: number;
+  /** The run's requests to APIs with a cost (see `RunUsageSummary.apiCalls`), so a reloaded
+   *  thread shows the same count and cost as the live one. */
+  apiCalls?: number;
+  apiCostUsd?: number;
+  apiCostEstimated?: boolean;
+  apiCallsUnpriced?: number;
 }
 
 /** Structured failure-note marker (B-full). The engine persists this as the
@@ -277,6 +294,16 @@ function parseUsage(raw: string | null): RenderedUsage | undefined {
     if (typeof u['spawnCostUsd'] === 'number' && u['spawnCostUsd'] > 0) {
       usage.spawnCostUsd = u['spawnCostUsd'];
     }
+    // Only with a positive whole count: the writer omits the keys for a run that sent none.
+    const calls = u['apiCalls'];
+    if (typeof calls === 'number' && Number.isInteger(calls) && calls > 0) {
+      usage.apiCalls = calls;
+      const usd = u['apiCostUsd'];
+      usage.apiCostUsd = typeof usd === 'number' && Number.isFinite(usd) && usd >= 0 ? usd : 0;
+      usage.apiCostEstimated = u['apiCostEstimated'] === true;
+      const unpriced = u['apiCallsUnpriced'];
+      usage.apiCallsUnpriced = typeof unpriced === 'number' && Number.isInteger(unpriced) && unpriced > 0 ? Math.min(unpriced, calls) : 0;
+    }
     return usage;
   } catch {
     return undefined;
@@ -388,7 +415,7 @@ export function projectMessages(
           : '';
       // The agent's own "please continue" turn: the model reads it, the user
       // never wrote it. The answer before and after it renders as one turn.
-      if (text === MAX_TOKENS_CONTINUATION_PROMPT) continue;
+      if (text === MAX_TOKENS_CONTINUATION_PROMPT || text === THINKING_ONLY_CONTINUATION_PROMPT) continue;
       out.push({
         seq: r.seq,
         role: 'user',

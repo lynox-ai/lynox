@@ -11,6 +11,8 @@
  * from every mandate turn (`MANDATE_PATTERN_WRITE_TOOLS` in mandate-tool-lock.ts).
  */
 
+import type { DurableMemoryState } from '../contract/http.js';
+
 /** Why an engine registers the legacy memory tools: durable memory is off, or on without its store. */
 export type LegacyMemoryReason = 'dk_off' | 'store_missing';
 
@@ -19,4 +21,10 @@ export function legacyMemoryReason(durableEnabled: unknown, knowledgeStore: obje
   if (durableEnabled !== true) return 'dk_off';
   if (!knowledgeStore) return 'store_missing';
   return null;
+}
+
+/** The same answer as the health body's one word (`HealthBody.engine.durable_memory`). */
+export function durableMemoryState(reason: LegacyMemoryReason | null): DurableMemoryState {
+  if (reason === null) return 'on';
+  return reason === 'dk_off' ? 'off' : 'not_loaded';
 }

@@ -243,6 +243,13 @@ describe('fetch_token in the member\'s run after a provider\'s refusal', () => {
       expect(record.historyState, reply).toBe('cancelled');
       expect(db.getDb().prepare("SELECT actor_kind AS a, actor_email AS e, mandate_id AS m FROM audit_log WHERE action = 'connection.erasure.cancel'").all())
         .toEqual([{ a: 'mandate', e: 'setup@example.org', m: 'M-1' }]);
+      // The row names the profile by its opaque id, not by the slug the model chose; the owner
+      // reads the slug back through the record id.
+      const trail = store.trailIdOf('crm-api');
+      expect(trail).toMatch(/^apf_[0-9a-f]{16}$/);
+      expect(db.getDb().prepare("SELECT target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all())
+        .toEqual([{ t: `${trail} ${record.id} lift` }]);
+      expect(db.getDb().prepare('SELECT connection_id AS c FROM connection_records WHERE id = ?').get(record.id)).toEqual({ c: 'crm-api' });
     } finally {
       restore();
       db.close();

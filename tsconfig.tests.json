@@ -10,13 +10,14 @@
   // that into the "blocked" result — the security suite then reports a clean
   // run while measuring nothing.
   //
-  // Scoped to `tests/security` deliberately. The rest of `tests/` carries 17
-  // pre-existing errors across 9 files (measured 2026-08-23); widening is a
-  // separate change and must not ride along in a security fix.
+  // It began scoped to `tests/security`; the entries below widened it one
+  // directory at a time, each with its reason. `tests/` as a whole is still not
+  // included: files outside these entries (the `tests/model-fitness-*` tests,
+  // for one) are checked by nothing.
   //
-  // `include` names only `tests/security`: tsc pulls the imported `src` files
-  // in as dependencies and checks them, so a wrong-arity call into the guard
-  // is caught without re-checking all of src a second time (2.6s vs 2.9s).
+  // `include` names directories under `tests/`, not `src`: tsc pulls the
+  // imported `src` files in as dependencies and checks them, so a wrong-arity
+  // call into the guard is caught without re-checking all of src a second time.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
@@ -24,6 +25,12 @@
     "incremental": false
   },
   "include": ["tests/security", "tests/contract-env.test.ts",
+    // The online evals. vitest leaves them out unless opted in (`scripts/vitest-online-opt-in.ts`)
+    // and, opted in, runs them without a type check. A stub of the wrong shape then fails only at
+    // run time, and where an eval swallows it, it changes what the eval measures without a symptom:
+    // a `promptSecret` stub that resolved an object made `ask_secret` return nothing instead of its
+    // cancel text (its switch has no default).
+    "tests/online",
     // The pinned-fetch bridge, which adapts fetchPinned's transport back onto a
     // `globalThis.fetch` stub for the suites whose subject moved to the
     // connector surface. It calls into the network guard, so it has exactly the

@@ -8,7 +8,12 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
-import { errorText, errorTextReduced, processErrorText } from './error-egress.js';
+import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
+import { containThreadFrom, threadIsContained } from './containment.js';
+import { isProvisionedInstance } from './wire-capture.js';
+import { noticeLanguage } from './notice-language.js';
+import { WORKER_NOTICES, type WorkerNotices } from './worker-notices.js';
+import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isFeatureEnabled } from './features.js';
@@ -23,7 +28,7 @@ import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
 import { runAsPlanOf, type StampEntry } from './plan-run-context.js';
 import { planOfTrigger, stampFromRow } from './plan-stamp.js';
-import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, claimPauseNotices, pausePlanNow, pausedAtNow, planPauseOn } from './plan-pause.js';
+import { ACCESS_ENDED_PAUSED_RESULT, ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT, claimAdvanceWarnings, claimPauseNotices, markWarningsDelivered, pausePlanNow, pausedAtNow, planPauseOn } from './plan-pause.js';
 import { filingContextFor } from './approval-filing.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -34,6 +39,7 @@ import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
 import { inquiryOptions, summarizeDelivery } from './notification-router.js';
+import { stripHidden } from './hidden-text.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
@@ -47,6 +53,7 @@ import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBud
 import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
+import { WORKFLOW_ENDED_MID_RUN } from '../orchestrator/run-source.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
@@ -76,20 +83,22 @@ const CONSENT_REMINDER_BATCH = 3;
  * {@link CONSENT_REMINDER_BATCH} at once (the first tick after an upgrade, say) become one
  * summary, so a backlog does not arrive as a burst.
  */
-export function consentReminderMessages(triggers: readonly TriggerRecord[]): NotificationMessage[] {
+export function consentReminderMessages(
+  triggers: readonly TriggerRecord[],
+  notices: WorkerNotices = WORKER_NOTICES.en,
+): NotificationMessage[] {
   if (triggers.length === 0) return [];
   if (triggers.length > CONSENT_REMINDER_BATCH) {
     return [{
-      title: `\u23F8 ${String(triggers.length)} scheduled actions are waiting for your confirmation`,
-      body: 'They came due and have not run. Review each one under Automation \u203A Triggers before you confirm it.',
+      title: notices.consentManyTitle(triggers.length),
+      body: notices.consentManyBody,
       priority: 'normal',
     }];
   }
   return triggers.map((t) => {
-    const outside = t.created_untrusted ? ' It was set up after reading content from outside.' : '';
     return {
-      title: '\u23F8 A scheduled action is waiting for your confirmation',
-      body: `It came due and has not run.${outside} Review \u201C${reminderTitle(t.title)}\u201D under Automation \u203A Triggers before you confirm it.`,
+      title: notices.consentOneTitle,
+      body: notices.consentOneBody(reminderTitle(t.title), Boolean(t.created_untrusted)),
       taskId: t.id,
       priority: 'normal' as const,
     };
@@ -167,14 +176,32 @@ const LEASE_HEARTBEAT_MS = 30_000;
 const LEASE_TTL_MS = 15 * 60_000;
 /** What a run the engine lost mid-way reads as — a RESULT; its run status is `interrupted`,
  *  the schedule's status `failed`. */
-const INTERRUPTED_RESULT =
-  'The engine stopped while this run was in progress. It is recorded as interrupted and not resumed or run again by itself, because what it had already done would happen a second time.';
 /** How long an event that did not run keeps its values. Nothing runs it again today. */
 const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
 /** What the owner is told of an event that was not run, or whose run did not complete: lynox's own sentences. */
 export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger does not accept events, so these events are not run. Look at the trigger under Automation.';
 export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves, so it was not run.';
 export const EVENT_RUN_FAILED = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual.';
+/**
+ * A run whose answered question came from a deleted contained conversation, and whose new one
+ * could not be contained (ux U-089). The way on depends on who runs the instance.
+ */
+export const RESUMED_RUN_NOT_CONTAINED = 'This run\'s chat was marked as holding data from a connected shop and was deleted before your answer came. lynox could not mark the new chat the same way, so the run did not continue and your answer was not used. Run the task again.';
+export function resumedRunNotContained(provisioned: boolean = isProvisionedInstance()): string {
+  return provisioned
+    ? `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`
+    : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`;
+}
+/**
+ * What a push from a contained run says instead of the run's own text (`errorTextReduced`): the
+ * run may have read a connected store, its result or question may carry what the store returned,
+ * and a push leaves the instance. The text stays in the chat the push opens (ux U-088). "may":
+ * a container whose state is unknown is reduced too.
+ */
+export const CONTAINED_RESULT_PUSH = WORKER_NOTICES.en.containedResult;
+export const CONTAINED_QUESTION_PUSH = WORKER_NOTICES.en.containedQuestion;
+/** The question a mail lists under the body, which already gives the reason. */
+export const CONTAINED_QUESTION_INQUIRY = WORKER_NOTICES.en.containedQuestionInquiry;
 export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
 /** Why a mandate's trigger the owner has not confirmed did not run. */
 const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
@@ -684,6 +711,16 @@ export class WorkerLoop {
     private readonly lease: { heartbeatMs: number; ttlMs: number } = { heartbeatMs: LEASE_HEARTBEAT_MS, ttlMs: LEASE_TTL_MS },
   ) {}
 
+  /** The worker's own sentences in the instance's notice language, read per notice (`notice-language.ts`). */
+  #notices(): WorkerNotices {
+    return WORKER_NOTICES[noticeLanguage(this.engine.config?.language)];
+  }
+
+  /** A bulk run's outcome sentences in the same language. */
+  #bulkNotices(): BulkNotices {
+    return BULK_NOTICES[noticeLanguage(this.engine.config?.language)];
+  }
+
   start(): void {
     if (this.timer) return; // already running
     this.timer = setInterval(() => void this.tick(), this.intervalMs);
@@ -803,11 +840,11 @@ export class WorkerLoop {
 
   /**
    * Whom the run of `id` is built for: the mandate its plan acts for (`planOf`), else whoever
-   * started it by hand; undefined is the owner. Every session, workflow run and question of the
-   * run takes it from here.
+   * started it by hand, else the owner, named as such. Every session, workflow run and question
+   * of the run takes it from here, and none of them reads an absent principal as the owner (1055).
    */
-  #runAs(id: string, starter: RequestPrincipal | undefined): RequestPrincipal | undefined {
-    return this.#runSlotOf(id)?.planOf ?? starter;
+  #runAs(id: string, starter: RequestPrincipal | undefined): RequestPrincipal {
+    return this.#runSlotOf(id)?.planOf ?? starter ?? OWNER_PRINCIPAL;
   }
 
   /**
@@ -1185,7 +1222,7 @@ export class WorkerLoop {
     const promptStore = this.engine.getPromptStore();
     const open = promptStore?.getPendingForTrigger(trigger.id);
     if (open && trigger.status === 'waiting') return { ok: false, reason: 'awaiting_answer' };
-    if (open) promptStore?.expirePendingForTrigger(trigger.id);
+    if (open) promptStore?.expirePendingForTrigger(trigger.id, 'plan_ended');
     // A run another engine process holds counts as running too. A lost run does not stop
     // a manual one: running it again is what the person asked for.
     const lease = this.takeLease(trigger.id);
@@ -1328,7 +1365,7 @@ export class WorkerLoop {
           // expiry may already have settled the question (register: hand-run question origin).
           const asked = this.engine.getPromptStore()?.getLatestForTrigger(parked.id);
           try {
-            this.engine.getPromptStore()?.expirePendingForTrigger(parked.id);
+            this.engine.getPromptStore()?.expirePendingForTrigger(parked.id, 'timed_out');
           } catch (err: unknown) {
             process.stderr.write(
               `[lynox:worker] prompt settle failed for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -1418,7 +1455,7 @@ export class WorkerLoop {
         if (this.notificationRouter.hasChannels()) {
           const claimed = taskManager.getAwaitingConsentUnreminded()
             .filter((waiting) => taskManager.markConsentReminded(waiting.id));
-          for (const message of consentReminderMessages(claimed)) {
+          for (const message of consentReminderMessages(claimed, this.#notices())) {
             void this.notificationRouter.notify(message);
           }
         }
@@ -1437,12 +1474,35 @@ export class WorkerLoop {
         if (planPauseOn() && this.notificationRouter.hasChannels()) {
           const db = this.engine.getEngineDb()?.getDb();
           if (db !== undefined) {
-            for (const message of claimPauseNotices(db)) void this.notificationRouter.notify(message);
+            for (const message of claimPauseNotices(db, undefined, noticeLanguage(this.engine.config?.language))) void this.notificationRouter.notify(message);
           }
         }
       } catch (err: unknown) {
         process.stderr.write(
           `[lynox:worker] paused-plan notice failed: ${processErrorText(err)}\n`,
+        );
+      }
+
+      // The owner's advance warning before a mandate's known end (`plan-pause.ts`), in the same
+      // order: only with a channel, claimed before it is sent. Not awaited, so a slow channel does
+      // not hold up the due plans below; the warning counts as given only once a channel accepted
+      // it, and a warning no channel accepted is not sent again. Fenced like the notice.
+      try {
+        if (planPauseOn() && this.notificationRouter.hasChannels()) {
+          const db = this.engine.getEngineDb()?.getDb();
+          if (db !== undefined) {
+            for (const { message, keys } of claimAdvanceWarnings(db, undefined, noticeLanguage(this.engine.config?.language))) {
+              void this.notificationRouter.notify(message)
+                .then((report) => { if (summarizeDelivery(report) === 'delivered') markWarningsDelivered(db, keys); })
+                .catch((err: unknown) => {
+                  process.stderr.write(`[lynox:worker] advance warning: sending it or recording it as delivered failed: ${processErrorText(err)}\n`);
+                });
+            }
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:worker] advance warning failed: ${processErrorText(err)}\n`,
         );
       }
 
@@ -1560,7 +1620,7 @@ export class WorkerLoop {
           // then stays and lapses again, and the run is reported once more, never re-run.
           releasePersistentBudget(reservation.reservedUSD);
           try {
-            this.recordAndNotify(task, INTERRUPTED_RESULT, 'interrupted');
+            this.recordAndNotify(task, this.#notices().interrupted, 'interrupted');
             this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
           } catch (err: unknown) {
             process.stderr.write(
@@ -2049,7 +2109,7 @@ export class WorkerLoop {
               // executeTask call, a bypassed read path), refuse it — record + stop,
               // NEVER mint the autonomous run.
               if (!task.confirmed_at && !handRun) {
-                this.recordAndNotify(task, 'This scheduled agent action needs your confirmation before it runs unattended — skipped.', false);
+                this.recordAndNotify(task, this.#notices().confirmationSkipped, false);
                 break;
               }
               // Source-gated executor choice — NOT a money boundary (both branches are
@@ -2233,16 +2293,18 @@ export class WorkerLoop {
           threadId: entry.session?.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
         });
         const pushedMsg = reduce && !isTimeout ? errorText(err, true) : errorMsg;
+        const notices = this.#notices();
         await this.notificationRouter.notify({
           title: `${stopped ? '\u23f9' : '\u2717'} ${task.title}`,
-          body: stopped ? `Stopped on your instruction: ${pushedMsg}` : `Task failed: ${pushedMsg}`,
+          body: stopped ? notices.stoppedWith(pushedMsg) : notices.failed(pushedMsg),
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
+          // The tasks stay English model text: no channel shows them (`WorkerNotices.chipRunAgain`).
           followUps: stopped
-            ? [{ label: 'Run again', task: task.description ?? task.title }]
+            ? [{ label: notices.chipRunAgain, task: stripHidden(task.description ?? task.title) }]
             : [
-              { label: 'Retry', task: task.description ?? task.title },
-              { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${pushedMsg}` },
+              { label: notices.chipRetry, task: stripHidden(task.description ?? task.title) },
+              { label: notices.chipExplain, task: `Explain why this failed: ${stripHidden(task.title)} — Error: ${stripHidden(pushedMsg)}` },
             ],
         });
       }
@@ -2327,6 +2389,7 @@ export class WorkerLoop {
         signal,
         ownerStopped,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
+        notices: this.#bulkNotices(),
       });
     } catch (err: unknown) {
       // What leaves here reaches the run result, the notification, the follow-up prompt and the
@@ -2386,6 +2449,7 @@ export class WorkerLoop {
         signal,
         costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
         clientFor: (r, listQuery, shopifyRead) => clientFor(r, listQuery, shopifyRead),
+        notices: this.#bulkNotices(),
       });
     } catch (err: unknown) {
       // A preview that threw would leave its run `planned` and unhalted with no trigger
@@ -2470,11 +2534,13 @@ export class WorkerLoop {
       outcome = await openRunGroup(randomUUID(), () => runBulkJudge(runId, {
         ledger,
         signal,
+        notices: this.#bulkNotices(),
         readTargets: host === null ? undefined : () => runBulkPreview(runId, {
           ledger,
           signal,
           costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
           clientFor: (r, listQuery, shopifyRead) => clientFor(r, listQuery, shopifyRead),
+          notices: this.#bulkNotices(),
         }),
         resolveModel: (tier) => resolveJudgeModel(this.engine.getUserConfig(), tier, this.engine.client, getActiveProvider()),
         gate: (tier) => fireBeforeRunGate(this.engine, tier),
@@ -2609,7 +2675,7 @@ export class WorkerLoop {
    */
   private async executeReminder(task: TriggerRecord): Promise<void> {
     await this.notificationRouter.notify({
-      title: 'Erinnerung',
+      title: this.#notices().reminderTitle,
       body: task.title,
       taskId: task.id,
       priority: 'normal',
@@ -2697,10 +2763,33 @@ export class WorkerLoop {
       // difference and the daily cap would be the thing that breaks. Null means nobody
       // reserved (a manual run), and then the constant is the only bound there is.
       costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD },
-      ...(runAs ? { principal: runAs } : {}),
+      principal: runAs,
       // The tier the user chose for this trigger, held to the ceiling by the session.
       ...(triggerTier ? { model: triggerTier } : {}),
     });
+    // The new thread takes the question and its answer as input, and the question may quote what
+    // a connected store returned: when the deleted conversation was contained, the new thread is
+    // contained before the run starts (`containThreadFrom`), or the run does not start.
+    if (answered !== undefined && continueIn === undefined) {
+      const { containment } = this.engine.getToolContext();
+      if (threadIsContained(containment, answered.session_id)) {
+        try {
+          containThreadFrom({ containment, threadStore: this.engine.getThreadStore() }, answered.session_id, session.sessionId);
+        } catch (err: unknown) {
+          // The cause, for the instance log the refusal points to; neither the question nor the thread.
+          process.stderr.write(`[lynox:worker] task ${task.id}: the new thread of a run resumed from a deleted contained one could not be contained: ${processErrorText(err)}\n`);
+          // The answer is released unread, as the refusal says: kept, every later pickup of this
+          // trigger would meet the same refusal until the question expires.
+          try {
+            this.engine.getPromptStore()?.releaseTrigger(answered.id);
+          } catch (releaseErr: unknown) {
+            process.stderr.write(`[lynox:worker] task ${task.id}: the refused run's answer could not be released: ${processErrorText(releaseErr)}\n`);
+          }
+          const refusal = resumedRunNotContained();
+          throw new FixedTextError(refusal, refusal);
+        }
+      }
+    }
     // Cost control: cap agent loop iterations for background tasks
     // Background model: the user's choice (`background_model`, already bounded at
     // config load) beats the operator's `worker_profile`, which routes background
@@ -2796,7 +2885,7 @@ export class WorkerLoop {
       let promptId: string;
       try {
         promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: false }, session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
-          principal: runAs ?? OWNER_PRINCIPAL,
+          principal: runAs,
           handRun: active?.handRun === true,
         });
       } catch (err: unknown) {
@@ -2860,13 +2949,19 @@ export class WorkerLoop {
       // the box carries the field names the question lists, never the values.
       const offBoxText = flattenPrompt(offBoxPrompt(rawQuestion));
       const offBoxQuestion = secretStore ? secretStore.maskAll(offBoxText) : offBoxText;
+      // A contained run's question leaves as a fixed sentence and without its options: it may
+      // quote what a connected store returned, which no vault mask knows (`error-egress.ts`).
+      const questionReduced = errorTextReduced(this.engine.getToolContext().containment, {
+        threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
+      });
       // Whether the question reached anyone goes onto the trigger and, through the engine as a
       // workflow question's does, to the hooks: on a managed instance a push that reached nobody
       // then mails the owner a fixed text that names neither the question nor the task.
       const recordDelivery = this.engine.escalationReporter(this.#recordEscalation(task.id));
+      const notices = this.#notices();
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
-        body: offBoxQuestion,
+        body: questionReduced ? notices.containedQuestion : offBoxQuestion,
         taskId: task.id,
         priority: 'high',
         // Deep-link to the asking thread so a tap opens the conversation where
@@ -2874,7 +2969,9 @@ export class WorkerLoop {
         // `promptId` rides along so a client can settle this exact row.
         data: { threadId: session.sessionId, promptId },
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
-        inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
+        inquiry: questionReduced
+          ? { question: notices.containedQuestionInquiry }
+          : { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
       }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
         process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });
@@ -2937,7 +3034,7 @@ export class WorkerLoop {
         // cannot leave its run parked. That option is not available here,
         // because here the abort is what ended the wait in the first place.)
         try {
-          promptStore.expirePrompt(promptId);
+          promptStore.expirePrompt(promptId, 'run_stopped');
         } catch (err: unknown) {
           // Silent would hide the cases that are NOT a shutdown: `stop()` is a
           // public method and can run with the DB wide open, where a failure
@@ -3037,9 +3134,15 @@ export class WorkerLoop {
       }
     };
 
-    const base = task.description && task.description.trim() !== task.title.trim()
-      ? `Task: ${task.title}\n\n${task.description}`
-      : `Task: ${task.title}`;
+    // Without the characters that render as nothing (`hidden-text.ts`): the model's write tools
+    // refuse them, but a plan confirmed before, or saved through another path, carries them, and a hidden clause in its
+    // text would reach the model as part of the task. Stripped, not refused, so a plan that holds
+    // a stray one from a paste keeps running on what its owner can see.
+    const title = stripHidden(task.title);
+    const description = task.description ? stripHidden(task.description) : task.description;
+    const base = description && description.trim() !== title.trim()
+      ? `Task: ${title}\n\n${description}`
+      : `Task: ${title}`;
     // §0 A10: the answer goes into the INPUT, named alongside the question it
     // answers. Without this the re-armed run asks the same thing again and parks
     // again — a loop on the wait's own period, which is a worse outcome than the
@@ -3105,7 +3208,7 @@ export class WorkerLoop {
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
     this.#stopIfStarterEnded(active, starter, task.id);
-    const result = await session.run(prompt, { triggerOrigin: task.source, ...(runAs ? { principal: runAs } : {}) });
+    const result = await session.run(prompt, { triggerOrigin: task.source, principal: runAs });
 
     // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
     // knowing it ever happened: `costGuard` makes the agent stop and RETURN its text — it
@@ -3134,17 +3237,20 @@ export class WorkerLoop {
     // the text the owner reads. The partial-double case is not hypothetical; it is why
     // this repo states the same rule at `session.ts`'s helper-cost read.
     const stop = session.getLastRunStop?.() ?? null;
-    const cut = stop === null || stop.pendingToolCount <= 0 ? null
-      : stop.cause === 'budget_cap' ? `cost ceiling of $${(capUSD ?? WORKER_MAX_COST_USD).toFixed(2)}`
-        : stop.cause === 'iteration_cap' ? `turn limit of ${String(WORKER_MAX_ITERATIONS)}`
+    const notices = this.#notices();
+    // The push leads with the stop's first sentence; the recorded result adds the way out, which
+    // in the push would take the room of the result (web push cuts at 240).
+    const capStop = stop === null || stop.pendingToolCount <= 0 ? null
+      : stop.cause === 'budget_cap' ? notices.budgetCut('cost', `$${(capUSD ?? WORKER_MAX_COST_USD).toFixed(2)}`)
+        : stop.cause === 'iteration_cap' ? notices.budgetCut('turns', String(WORKER_MAX_ITERATIONS))
           : null;
-    const budgetCut = cut === null ? null : `Stopped at this run's ${cut} with work still pending`;
+    const budgetCut = capStop === null ? null : `${capStop} ${notices.budgetCutWayOut}`;
     // Composed BEFORE the truncation, so the reason survives a long result rather than
     // being the thing that gets cut.
-    const reported = budgetCut === null ? result : `${budgetCut}.\n\n${result}`;
-    const truncatedResult = reported.length > MAX_TASK_RESULT_CHARS
-      ? reported.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
-      : reported;
+    const truncate = (text: string): string => text.length > MAX_TASK_RESULT_CHARS
+      ? text.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
+      : text;
+    const truncatedResult = truncate(budgetCut === null ? result : `${budgetCut}\n\n${result}`);
 
     // Who ended the run, when an unanswered question is how it ended (see below).
     const endedByOwner = questionWentUnanswered && active?.stopRequested === true;
@@ -3179,6 +3285,17 @@ export class WorkerLoop {
     const memberNotes = currentMemberNotes();
     const memberTold = withMemberNotes(truncatedResult, endedByOwner || budgetCut !== null ? 'other' : 'success', memberNotes);
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
+      // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
+      // its error does (above); the recorded run keeps the full text. Only the run's text is
+      // replaced: the ceiling's reason and the member-connection lines are lynox's own and say
+      // why the title is ✗ or ⏸, so they go out as before.
+      const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
+        threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
+      });
+      const pushed = resultReduced
+        ? withMemberNotes(capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`, 'other', memberNotes).result
+        : capStop === null ? memberTold.result
+          : withMemberNotes(truncate(`${capStop}\n\n${result}`), 'other', memberNotes).result;
       await this.notificationRouter.notify({
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
@@ -3193,7 +3310,7 @@ export class WorkerLoop {
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
         title: `${endedByOwner ? '\u23f9' : (budgetCut !== null ? '\u2717' : memberTold.status === 'halted' ? RUN_END_LOOK.halted.mark : '\u2713')} ${task.title}`,
-        body: endedByOwner ? `Stopped on your instruction.\n\n${memberTold.result}` : memberTold.result,
+        body: endedByOwner ? `${notices.stopped}\n\n${pushed}` : pushed,
         taskId: task.id,
         priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
@@ -3201,8 +3318,8 @@ export class WorkerLoop {
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
         data: { threadId: session.sessionId },
         followUps: [
-          { label: 'Details', task: `Show me more details about: ${task.title}` },
-          { label: 'Run again', task: task.description ?? task.title },
+          { label: notices.chipDetails, task: `Show me more details about: ${stripHidden(task.title)}` },
+          { label: notices.chipRunAgain, task: stripHidden(task.description ?? task.title) },
         ],
       });
     }
@@ -3237,7 +3354,7 @@ export class WorkerLoop {
       // effect=run_workflow, so a null target lands here rather than at
       // executeStandard. Same benign skip as a workflow deleted mid-flight (below):
       // record it and stop — NEVER run the trigger title as an autonomous task.
-      this.recordAndNotify(task, 'Pipeline target workflow no longer exists (skipped)', false);
+      this.recordAndNotify(task, this.#notices().workflowGone(undefined), false);
       return;
     }
 
@@ -3249,7 +3366,7 @@ export class WorkerLoop {
     // executor tick. Record a skip (so the task list reflects reality) and
     // return without surfacing to Bugsink — there's nothing to fix in code.
     if (!planned) {
-      this.recordAndNotify(task, `Pipeline ${task.pipeline_id} no longer exists (skipped)`, false);
+      this.recordAndNotify(task, this.#notices().workflowGone(task.pipeline_id), false);
       return;
     }
 
@@ -3377,7 +3494,7 @@ export class WorkerLoop {
       // Whom the run is for — the mandate its plan acts for, or who started it by hand: the
       // workflow's steps get only the tools that principal's lock allows (PRD §3.13 E4 — the
       // build site is here, not a session).
-      ...(runAs ? { principal: runAs } : {}),
+      principal: runAs,
       // A mapped value reaches only a step's task text, where it is fenced as untrusted; asked
       // by the runner of the workflow exactly as it read it, so no edit falls in between.
       ...(event !== undefined ? { checkWorkflow: (p: PlannedPipeline) => {
@@ -3411,6 +3528,27 @@ export class WorkerLoop {
       return;
     }
 
+    // The runner ended the run before a step because a mandate its workflow depends on ended
+    // since it started (1100, `WORKFLOW_ENDED_MID_RUN`): the same end the sweep gives the run
+    // (`stopEndedStarters`) when it comes first, so it is recorded as that stop, and with the pause
+    // on the plan pauses. Keyed on the run's own error and on the plan having ended, so a step
+    // whose error happens to read the same is still a failure.
+    const endedEntry = this.activeTasks.get(task.id);
+    // A liveness read that throws is no end found: the run is recorded as a failure and retried,
+    // and the plan is not paused for it. The runner stopped the run on its own read (a throw there
+    // counts as ended, `stopForEndedAuthor`), so no further step ran; its error, which the end
+    // event carries and, for a run without a webhook event, the escalation, still says that an
+    // access ended.
+    const planEnded = (entry: ActiveTask): boolean => { try { return this.#planHasEnded(entry); } catch { return false; } };
+    if (result.ok && result.error === WORKFLOW_ENDED_MID_RUN && endedEntry !== undefined && planEnded(endedEntry)) {
+      endedEntry.accessEnded = true;
+      const stopped = this.#runSlotOf(task.id);
+      if (!planPauseOn()) endEvent(stopped, { state: 'failed', reason: ACCESS_ENDED_RESULT, runId: result.runId });
+      this.#recordRun(this.engine.getTaskManager(), task.id,
+        `${ACCESS_ENDED_RESULT} (run ${result.runId ?? 'unknown'}).`, 'stopped');
+      return;
+    }
+
     // The owner deleted the conversation the run's question was asked in, so the question was
     // withdrawn and the run ended without its answer. Recorded like a stop — no retry, no
     // escalation, a recurring schedule stays healthy — because the owner acted; but in words of
@@ -3427,7 +3565,10 @@ export class WorkerLoop {
       // Surface conversion / validation / not-found / not-template errors as
       // typed throws so the existing executeTask catch routes them through
       // Bugsink + recordTaskRun like any other task failure.
-      throw new Error(result.error ?? `Pipeline ${task.pipeline_id} execution failed`);
+      // A refusal that names stored text carries its fixed wording too: a push from a contained
+      // instance then says why the run did not start, not only that it failed.
+      const message = result.error ?? `Pipeline ${task.pipeline_id} execution failed`;
+      throw result.fixedError !== undefined ? new FixedTextError(message, result.fixedError) : new Error(message);
     }
 
     // What the owner must read even when every step completed: a write the run was
@@ -3443,7 +3584,7 @@ export class WorkerLoop {
     if (success) {
       // Still a success: the run completed. Marking it failed would retry the whole run
       // (repeating its other effects) and flip the trigger's status, on every instance.
-      this.recordAndNotify(task, `Pipeline completed (run ${result.runId ?? 'unknown'})${grantReport}`, true);
+      this.recordAndNotify(task, `${this.#notices().workflowCompleted(result.runId)}${grantReport}`, true);
       return;
     }
 
@@ -3463,18 +3604,17 @@ export class WorkerLoop {
     // The run + workflow ids ride in the seeded body so the agent, when the user
     // replies, can diagnose the run (diagnose_workflow_run), edit the workflow
     // (update_workflow_steps) and re-run it (run_workflow) — Slice C2's fix flow.
-    const ref = result.runId
-      ? `(run ${result.runId}${task.pipeline_id ? ` · workflow ${task.pipeline_id}` : ''})`
-      : (task.pipeline_id ? `(workflow ${task.pipeline_id})` : '');
+    const notices = this.#notices();
+    const ref = notices.workflowRef(result.runId, task.pipeline_id ?? undefined);
     this.engine.escalateToUser({
       key: task.id,
       title: `✗ ${task.title}`,
       body:
-        `Your scheduled workflow "${task.title}" didn't complete (status: ${result.status ?? 'unknown'}).\n\n` +
-        (result.error ? `Error: ${result.error}\n\n` : '') +
-        (stepDetail ? `Failed steps:\n${stepDetail}\n\n` : '') +
-        (grantLines.length > 0 ? `Writes:\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
-        `Reply here and I'll help you fix it — I have this run loaded${ref ? ` ${ref}` : ''}.`,
+        `${notices.workflowIncomplete(task.title, result.status)}\n\n` +
+        (result.error ? `${notices.errorLabel} ${result.error}\n\n` : '') +
+        (stepDetail ? `${notices.failedStepsLabel}\n${stepDetail}\n\n` : '') +
+        (grantLines.length > 0 ? `${notices.writesLabel}\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
+        notices.workflowReply(ref),
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
       onReported: this.#recordEscalation(task.id),
     });
@@ -3490,7 +3630,7 @@ export class WorkerLoop {
    * nested `run_workflow` pass on `promptUser` only, which a scheduled step does not have.
    */
   #workflowQuestions(
-    task: TriggerRecord, runAs: RequestPrincipal | undefined, active: ActiveTask | undefined,
+    task: TriggerRecord, runAs: RequestPrincipal, active: ActiveTask | undefined,
     ownerStop: AbortSignal, scope: AbortScope,
   ): { runId: string; channel: WorkflowQuestions } {
     const runId = randomUUID();
@@ -3499,7 +3639,7 @@ export class WorkerLoop {
       runId,
       scheduleId: task.id,
       title: task.title,
-      principal: runAs ?? OWNER_PRINCIPAL,
+      principal: runAs,
       handRun: active?.handRun === true,
       promptStore: () => this.engine.getPromptStore(),
       threadStore: () => this.engine.getThreadStore(),
@@ -3711,7 +3851,7 @@ export class WorkerLoop {
       autonomy: 'autonomous',
       // A run without tools, but built for whom it runs all the same: the lock must not
       // depend on which turns happen to carry tools today.
-      ...(runAs ? { principal: runAs } : {}),
+      principal: runAs,
       // A watch is a single summarize-what-changed turn — a fast-tier job.
       // Without this it inherited the engine's default tier (often
       // 'balanced'/Sonnet), paying a premium model for change-detection. A
@@ -3755,9 +3895,11 @@ export class WorkerLoop {
     const contentForPrompt = currentSignal.length > WATCH_CONTENT_CHARS
       ? currentSignal.slice(0, WATCH_CONTENT_CHARS) + ' […truncated]'
       : currentSignal;
+    // The URL as stored, without the characters that render as nothing (`hidden-text.ts`): the
+    // model's write tool refuses them, but a watch saved before, or through another path, carries them.
     const analysisPrompt = isFirstRun
-      ? `You are monitoring ${config.url} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
-      : `You are monitoring ${config.url} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
+      ? `You are monitoring ${stripHidden(config.url)} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
+      : `You are monitoring ${stripHidden(config.url)} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result ? stripHidden(task.last_run_result.slice(0, 2000)) : 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
 
     // noTools: this turn embeds up to 8 KB of the WATCHED PAGE — content the
     // user did not author and an attacker may control (a monitored forum, a
@@ -3768,7 +3910,7 @@ export class WorkerLoop {
     // _detectDanger). Removing the capability beats gating it. Same mechanism the
     // compaction summarizer uses for the same "pure summarize" shape.
     this.#stopIfStarterEnded(stopEntry, starter, task.id);
-    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', ...(runAs ? { principal: runAs } : {}) });
+    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', principal: runAs });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : analysis;

@@ -1,25 +1,29 @@
 import { describe, it, expect } from 'vitest';
 import { defaultTreeAdapter, serialize, type DefaultTreeAdapterTypes } from 'parse5';
-import { BLOCK_ELEMENTS, canonicalHtml, normalizeHtml, parseHtmlFragment, walkHtml, type HtmlNodeRef } from './html-tree.js';
+import { BLOCK_ELEMENTS, CONTENT_CARRYING_ELEMENTS, canonicalHtml, normalizeHtml, parseHtmlFragment, walkHtml, type HtmlNodeRef } from './html-tree.js';
+import { checkMarkup, markupOf as markupOfA2 } from './bulk-html.js';
 
 /**
  * The fuzz of Shopify PRD §21.3 over `html-tree.ts`. It mutates seeds, it does not draw markup at
  * random, and every run must also find a difference against each known-wrong version of what it
  * tests (the controls): a run that cannot tell a wrong version from the right one proves nothing.
  *
- * What runs here before A2 lands:
+ * What runs here:
  * - the generator, and a test that the canonical mutation-XSS case is reachable from the seeds;
  * - the reference markup over `walkHtml`, with controls (a)–(c) and (g)–(j) as known-wrong
  *   extractions of the same shape;
- * - property 2 against a stand-in check built on the reference. Both of its assertions hold by
- *   construction until A2's `checkMarkup` replaces the stand-in; what carries information now is
- *   that the generator reaches accepted values, and the control: a check without `not_canonical`
- *   accepts a value whose `canonicalHtml` is not idempotent;
+ * - property 1: A2's `markupOf` (bulk-html.ts) against the same walk, with the known-wrong
+ *   extractions as controls that the comparison must tell apart from A2;
+ * - property 2 against A2's `checkMarkup`: an accepted value holds nothing outside the allowlist
+ *   and the before-image (the oracle written here, apart from A2), is canonical-idempotent and
+ *   ends in plain markup. Controls: a check without `not_canonical`, (d) a check that holds by
+ *   name, (e) a check whose URL rule takes any target, and a check that lets a value end open.
+ *   Two limits: the lists of counted and of URL attributes are A2's lists, so a gap in them passes
+ *   both; and "ends in plain markup" is weaker than A2's end rule (an `a`, `form` or `table` left
+ *   open passes here), which bulk-html.test.ts pins by example only;
  * - property 3 over `normalizeHtml`, on the seeds and on generated values: tree-preserving
  *   mutations give the same string, one-change mutations a different one, with control (f) and the
  *   `pre` control, each counted only when found by the mutation it is about.
- * After A2: property 1 (`markupOf` against the reference walk) and controls (d) and (e) against
- * `checkMarkup`.
  */
 
 // ── The generator ────────────────────────────────────────────────────────────
@@ -59,7 +63,7 @@ if (SEED_ENV !== undefined && !(/^\d+$/.test(SEED_ENV) && Number(SEED_ENV) < 2 *
 }
 const SEED = SEED_ENV === undefined ? 0x5eed2b : Number(SEED_ENV);
 
-const RAW = ['noscript', 'textarea', 'title', 'style', 'xmp', 'noembed', 'plaintext'] as const;
+const RAW = ['noscript', 'textarea', 'title', 'style', 'xmp', 'noembed', 'noframes', 'plaintext'] as const;
 
 // The seeds: the M6 inputs and what Shopify gave back (run m6-2026-10-26T15-10-53-615Z), and the
 // categories of the M6b corpus (§21.2 item 8). The S5 markup joins once A2 has measured it.
@@ -95,6 +99,10 @@ const SEEDS: readonly string[] = [
   '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>',
   '<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>',
   '<form id=a><div></form><form id=b><input></form>',
+  // A foreign script with elements below it: where its text sits is part of its body.
+  '<svg><script>a=1;/*b()*/<g></g><g></g></script></svg>',
+  // Every attribute through which a value links somewhere.
+  '<p><a href="/products/x" ping="https://shop.example/p">a</a></p><video poster="https://shop.example/v.png"></video><object data="https://shop.example/o"></object><blockquote cite="https://shop.example/q">q</blockquote><table background="https://shop.example/t.png"><tr><td>t</td></tr></table><form action="https://shop.example/f"><button formaction="https://shop.example/g">b</button></form><iframe srcdoc="<p>s</p>"></iframe><img srcset="https://shop.example/i.png 1x">',
 ];
 
 /** A mutation: pure in its input and the choices it draws. Each names the §21.3 class it covers. */
@@ -174,6 +182,21 @@ const MUTATIONS: Readonly<Record<string, Mutation>> = {
       default: return `<svg><![CDATA[${s}]]></svg>`;
     }
   },
+  carrierText(rng, s) {
+    // Text moves between a foreign carrier and an element below it: out of `<g>…</g>` to before
+    // it, or the tail of the text before a `<g></g>` into it.
+    const inside = matches(/<g>([^<]+)<\/g>/, s);
+    if (inside.length > 0 && rng() < 0.5) {
+      const x = pick(rng, inside);
+      return s.slice(0, x.index) + x[1]! + '<g></g>' + s.slice(x.index + x[0].length);
+    }
+    const empty = matches(/([^<>]+)<g><\/g>/, s);
+    if (empty.length === 0) return s;
+    const x = pick(rng, empty);
+    const text = x[1]!;
+    const cut = Math.floor(rng() * text.length);
+    return s.slice(0, x.index) + text.slice(0, cut) + `<g>${text.slice(cut)}</g>` + s.slice(x.index + x[0].length);
+  },
   rawTextPayload(rng, s) {
     // An attribute value that closes a raw-text parent: the shape of the noscript case.
     const el = pick(rng, RAW);
@@ -186,12 +209,15 @@ const MUTATIONS: Readonly<Record<string, Mutation>> = {
 };
 const MUTATION_NAMES = Object.keys(MUTATIONS);
 
-function generate(rng: Rng): string {
-  let s = pick(rng, SEEDS);
+/** A generated value and the seed it grew from. */
+function generateFrom(rng: Rng): [string, string] {
+  const seed = pick(rng, SEEDS);
+  let s = seed;
   const n = 1 + Math.floor(rng() * 4);
   for (let i = 0; i < n; i++) s = MUTATIONS[pick(rng, MUTATION_NAMES)]!(rng, s);
-  return s;
+  return [seed, s];
 }
+const generate = (rng: Rng): string => generateFrom(rng)[1];
 
 /** A replay of fixed draws, for the reachability test: each call returns the next value. */
 const draws = (...xs: number[]): Rng => () => xs.shift() ?? 0;
@@ -228,6 +254,8 @@ interface Wrong {
   setNotMultiset?: true; // (h)
   contentHtmlOnly?: true; // (i)
   noTemplateFlag?: true; // (j)
+  noLayout?: true; // (k) a carrier's text without where it sits
+  textBelow?: true; // a carrier keyed by all the text below it, not its direct text
 }
 
 const HTML_NS = 'http://www.w3.org/1999/xhtml';
@@ -254,6 +282,13 @@ function markupOf(nodes: readonly HtmlNodeRef[], wrong: Wrong = {}): Markup {
     if (wrong.skipForeign && n.namespace !== HTML_NS) { skipBelow = n.depth; continue; }
     const attrs = n.attrs.map((a) => [a.namespace ?? '', a.name, a.value]).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1));
     let content = wrong.ignoreContent ? null : n.content;
+    if (wrong.textBelow && content !== null) {
+      content = '';
+      for (let j = nodes.indexOf(n) + 1; j < nodes.length && nodes[j]!.depth > n.depth; j++) {
+        const c = nodes[j]!;
+        if (c.kind === 'text') content += c.value;
+      }
+    }
     if (wrong.contentHtmlOnly && n.namespace !== HTML_NS) content = null;
     if (!wrong.triplesOnly) {
       const k = JSON.stringify([n.namespace, n.name, attrs, content, flag]);
@@ -297,6 +332,116 @@ describe(`the extraction controls (seed ${SEED}, ${CASES} cases)`, () => {
   });
 });
 
+// ── Property 1: A2's extraction against the reference walk ───────────────────
+
+const SHORT_NS: Readonly<Record<string, string>> = {
+  [HTML_NS]: 'html', 'http://www.w3.org/2000/svg': 'svg', 'http://www.w3.org/1998/Math/MathML': 'mathml',
+};
+
+/**
+ * A2's shape of a tree's markup, built from the reference walk. Three choices are A2's:
+ * - it carries text for every name the walk carries for HTML, in every namespace;
+ * - the text is all the text below the element, not its direct text: below a foreign `script`
+ *   there may be elements. That alone is not finer than the walk's direct text (text can move
+ *   between the carrier and an element below it and keep the sum), hence the third:
+ * - where an element stands below a carrier, the layout of everything below it, each node with its
+ *   depth, is part of the occurrence.
+ * Every other rule is the walk's: template contents included and flagged, foreign content kept,
+ * comments as occurrences, an element triple for every element and one triple per attribute.
+ */
+function a2Shape(nodes: readonly HtmlNodeRef[], wrong: Wrong = {}): { occurrences: string[]; triples: string[] } {
+  const occurrences: string[] = [];
+  const triples: string[] = [];
+  let skipBelow = Infinity;
+  nodes.forEach((n, i) => {
+    if (n.depth <= skipBelow) skipBelow = Infinity;
+    if (n.depth > skipBelow) return;
+    if (wrong.skipTemplate && n.inTemplate) return;
+    const flag = wrong.noTemplateFlag ? false : n.inTemplate;
+    if (n.kind === 'text') return;
+    if (n.kind === 'comment') { occurrences.push(JSON.stringify(['comment', '', '', [], n.data, null, flag])); return; }
+    if (wrong.skipForeign && n.namespace !== HTML_NS) { skipBelow = n.depth; return; }
+    const ns = SHORT_NS[n.namespace] ?? 'other';
+    const attrs = n.attrs.map((a) => [a.prefix ? `${a.prefix}:${a.name}` : a.name, a.value] as const)
+      .sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
+    const carries = n.name === 'script' || n.name === 'style' || CONTENT_CARRYING_ELEMENTS.has(n.name);
+    let text: string | null = null;
+    if (carries && !wrong.ignoreContent && !(wrong.contentHtmlOnly && n.namespace !== HTML_NS)) {
+      text = '';
+      for (let j = i + 1; j < nodes.length && nodes[j]!.depth > n.depth; j++) {
+        const c = nodes[j]!;
+        if (c.kind === 'text') text += c.value;
+      }
+    }
+    let layout: string | null = null;
+    if (text !== null && !wrong.noLayout) {
+      const below: (readonly [number, string, string] | readonly [number, string])[] = [];
+      let elementBelow = false;
+      for (let j = i + 1; j < nodes.length && nodes[j]!.depth > n.depth; j++) {
+        const c = nodes[j]!;
+        const d = c.depth - n.depth;
+        if (c.kind === 'text') below.push([d, '#text', c.value]);
+        else if (c.kind === 'comment') below.push([d, '#comment', c.data]);
+        else { elementBelow = true; below.push([d, c.name]); }
+      }
+      if (elementBelow) layout = JSON.stringify(below);
+    }
+    occurrences.push(JSON.stringify(['element', ns, n.name, attrs, text, layout, flag]));
+    triples.push(JSON.stringify([ns, n.name, null, null, flag]));
+    for (const [an, av] of attrs) triples.push(JSON.stringify([ns, n.name, an, av, flag]));
+  });
+  const asSet = (xs: string[]): string[] => (wrong.setNotMultiset ? [...new Set(xs)] : xs);
+  return { occurrences: asSet(occurrences).sort(), triples: asSet(triples).sort() };
+}
+
+function a2Markup(v: string): { occurrences: string[]; triples: string[] } {
+  const m = markupOfA2(parseHtmlFragment(v));
+  return {
+    occurrences: m.occurrences.map((o) => JSON.stringify([o.kind, o.namespace, o.name, o.attributes, o.text, o.layout, o.inTemplate])).sort(),
+    triples: m.triples.map((t) => JSON.stringify([t.namespace, t.element, t.attribute, t.value, t.inTemplate])).sort(),
+  };
+}
+
+const PROPERTY_1_CONTROLS: readonly (readonly [string, Wrong])[] = [
+  ['(a) template contents skipped', { skipTemplate: true }],
+  ['(b) foreign content skipped', { skipForeign: true }],
+  ['(g) raw-text content ignored', { ignoreContent: true }],
+  ['(h) a set, not a multiset', { setNotMultiset: true }],
+  ['(i) script and style content for HTML only', { contentHtmlOnly: true }],
+  ['(j) occurrences without the template flag', { noTemplateFlag: true }],
+  ['(k) a carrier\'s text without where it sits', { noLayout: true }],
+];
+
+describe(`property 1: A2's markupOf against the reference walk (seed ${SEED}, the seeds and ${CASES} cases)`, () => {
+  it('gives the walk\'s markup on every seed and generated value, and tells every known-wrong extraction apart', () => {
+    const rng = sfc32(SEED ^ 0x1);
+    const found = new Set<string>();
+    for (const v of [...SEEDS, ...Array.from({ length: CASES }, () => generate(rng))]) {
+      const nodes = walkHtml(parseHtmlFragment(v));
+      const got = a2Markup(v);
+      expect(got, v).toEqual(a2Shape(nodes));
+      for (const [name, wrong] of PROPERTY_1_CONTROLS) {
+        if (!found.has(name) && JSON.stringify(a2Shape(nodes, wrong)) !== JSON.stringify(got)) found.add(name);
+      }
+    }
+    expect(PROPERTY_1_CONTROLS.map(([name]) => [name, found.has(name)])).toEqual(PROPERTY_1_CONTROLS.map(([name]) => [name, true]));
+  });
+
+  it('where the walk carries content, A2 carries text, and the layout where elements stand below', () => {
+    // A foreign element named like an HTML raw-text one, and a foreign script with an element below.
+    const v = '<svg><noscript>a</noscript><script>b<g>c</g></script></svg><p><textarea>d</textarea></p>';
+    const nodes = walkHtml(parseHtmlFragment(v));
+    const a2 = markupOfA2(parseHtmlFragment(v)).occurrences.filter((o) => o.kind === 'element');
+    const els = nodes.filter((n) => n.kind === 'element');
+    expect(a2.length).toBe(els.length);
+    els.forEach((n, i) => { if (n.kind === 'element' && n.content !== null) expect(a2[i]!.text, n.name).not.toBeNull(); });
+    expect(a2.find((o) => o.namespace === 'svg' && o.name === 'noscript')?.text).toBe('a');
+    expect(a2.find((o) => o.namespace === 'svg' && o.name === 'script')?.text).toBe('bc');
+    expect(a2.find((o) => o.namespace === 'svg' && o.name === 'script')?.layout).toBe(JSON.stringify([[1, '#text', 'b'], [1, 'g'], [2, '#text', 'c']]));
+    expect(a2.find((o) => o.namespace === 'svg' && o.name === 'noscript')?.layout).toBeNull();
+  });
+});
+
 // ── Property 2: what an accepted value may hold ──────────────────────────────
 
 const STORE_HOST = 'shop.myshopify.com';
@@ -319,64 +464,100 @@ const ALLOW_BARE: ReadonlySet<string> = new Set(['p', 'br', 'strong', 'em', 'ul'
  * is the same host.
  */
 const HOST_LABELS = /^[a-z0-9-]+(\.[a-z0-9-]+)*$/;
-function urlHost(value: string): string | null {
+interface Target { readonly kind: 'web' | 'mail'; readonly host: string }
+function urlTarget(value: string): Target | null {
   if (/[\u0000-\u001f\ufffd\\]/.test(value)) return null;
   let u: URL;
   try { u = new URL(value, `https://${STORE_HOST}/`); } catch { return null; }
-  if (u.protocol === 'https:' || u.protocol === 'http:') return u.hostname.toLowerCase().replace(/\.$/, '');
+  if (u.protocol === 'https:' || u.protocol === 'http:') return { kind: 'web', host: u.hostname.toLowerCase().replace(/\.$/, '') };
   if (u.protocol !== 'mailto:' || /[?,#]/.test(value)) return null;
   let address: string;
   try { address = decodeURIComponent(u.pathname); } catch { return null; }
   const at = address.split('@');
   if (at.length !== 2 || !/^[A-Za-z0-9._+-]+$/.test(at[0]!)) return null;
-  return at[1]!.toLowerCase().replace(/\.$/, '');
+  return { kind: 'mail', host: at[1]!.toLowerCase().replace(/\.$/, '') };
 }
-function urlAllowed(value: string, hosts: readonly string[]): boolean {
-  const x = urlHost(value);
-  return x !== null && HOST_LABELS.test(x) && hosts.some((h) => x === h || x.endsWith(`.${h}`));
+/** Hosts by kind: a held web link lends its host to web links, a held address its domain to
+ *  addresses. Linking to a host is not writing to it. */
+interface Hosts { readonly web: readonly string[]; readonly mail: readonly string[] }
+function urlAllowed(value: string, hosts: Hosts | readonly string[]): boolean {
+  const t = urlTarget(value);
+  if (t === null || !HOST_LABELS.test(t.host)) return false;
+  const list = Array.isArray(hosts) ? hosts : (hosts as Hosts)[t.kind];
+  return list.some((h) => t.host === h || t.host.endsWith(`.${h}`));
 }
 
-/** The hosts a field's before-image already links to, from every URL attribute of the reference walk. */
-function linkHosts(nodes: readonly HtmlNodeRef[]): string[] {
-  const out: string[] = [];
+/** The attributes through which a before-image links somewhere (with the prefix: `xlink:href`). */
+const URL_ATTRS: ReadonlySet<string> = new Set(['href', 'xlink:href', 'src', 'poster', 'data', 'action', 'formaction', 'cite', 'background', 'ping']);
+const attrName = (a: { prefix?: string; name: string }): string => (a.prefix ? `${a.prefix}:${a.name}` : a.name);
+
+/** The hosts a field's before-image already links to, by kind, from every URL attribute of the walk. */
+function linkHosts(nodes: readonly HtmlNodeRef[]): Hosts {
+  const web: string[] = [];
+  const mail: string[] = [];
   for (const n of nodes) {
     if (n.kind !== 'element') continue;
     for (const a of n.attrs) {
-      if (!['href', 'src', 'srcset', 'action', 'formaction', 'cite', 'poster', 'data', 'background'].includes(a.name)) continue;
-      // Only a web link names a host a later link may reuse; a `mailto:` or `javascript:` names none.
-      let u: URL;
-      try { u = new URL(a.value, `https://${STORE_HOST}/`); } catch { continue; }
-      if (u.protocol === 'https:' || u.protocol === 'http:') out.push(u.hostname.toLowerCase().replace(/\.$/, ''));
+      if (!URL_ATTRS.has(attrName(a))) continue;
+      const t = urlTarget(a.value);
+      if (t !== null) (t.kind === 'web' ? web : mail).push(t.host);
     }
   }
-  return out;
+  return { web, mail };
+}
+
+/**
+ * Attributes that count per element: they run code, style the page, load something, or name an
+ * element the page's scripts look up. Held once, such an attribute is not copied onto a second
+ * element; any other attribute (a `class`) only needs to be held at all.
+ */
+const counted = (name: string): boolean =>
+  /^on/i.test(name) || ['style', 'srcdoc', 'srcset', 'id', 'name'].includes(name) || URL_ATTRS.has(name);
+
+/** Known-wrong checks, for the controls of property 2. */
+interface WrongCheck {
+  holdByName?: true; // (d) an element is held when one of its name is
+  anyUrl?: true; // (e) every link target passes
+  everyAttributeOnce?: true; // a held `onclick` may be copied onto every element
+  textBelowOnly?: true; // a carrier is keyed by all the text below it, wherever that text sits
 }
 
 /**
  * Everything the after-state's trees hold beyond the allowlist and the before-image (§21.3
- * property 2). Each tree of the after-state is compared with the before-image's tree of the same
- * kind: the bytes with the bytes, the canonical form with the canonical form (D-7).
+ * property 2), each tree against the before-image's tree of the same kind: the bytes with the
+ * bytes, the canonical form with the canonical form (D-7). The allowlist is the HTML elements in
+ * `ALLOW_BARE`, wherever they stand and whatever they carry; what they carry is the triples' rule:
+ * an attribute is held (counted ones per element), or it is an `a`'s `href` whose target is the
+ * store, a start domain or a host the before-image links to with the same kind of link.
  */
-function violations(before: string | null, after: string): string[] {
+function violations(before: string | null, after: string, wrong: WrongCheck = {}): string[] {
   const out: string[] = [];
   for (const kind of [(v: string) => v, canonicalHtml]) {
     const aNodes = walkHtml(parseHtmlFragment(kind(after)));
     const bNodes = before === null ? [] : walkHtml(parseHtmlFragment(kind(before)));
-    const A = markupOf(aNodes), B = markupOf(bNodes);
-    const hosts = [STORE_HOST, ...START_DOMAINS, ...linkHosts(bNodes)];
+    const extraction: Wrong = wrong.textBelowOnly ? { textBelow: true } : {};
+    const A = markupOf(aNodes, extraction), B = markupOf(bNodes, extraction);
+    const held = linkHosts(bNodes);
+    const hosts: Hosts = { web: [STORE_HOST, ...START_DOMAINS, ...held.web], mail: [STORE_HOST, ...START_DOMAINS, ...held.mail] };
+    const byName = (k: string): string => { const [ns, name, , , t] = JSON.parse(k) as [string, string, unknown, unknown, boolean]; return JSON.stringify([ns, name, t]); };
+    const bOcc = new Map<string, number>();
+    for (const [k, n] of B.occurrences) { const kk = wrong.holdByName ? byName(k) : k; bOcc.set(kk, (bOcc.get(kk) ?? 0) + n); }
     for (const [k, n] of A.occurrences) {
-      if (n <= (B.occurrences.get(k) ?? 0)) continue;
-      const [ns, name, attrs, content, inTemplate] = JSON.parse(k) as [string, string, [string, string, string][], string | null, boolean];
-      const allowed = ns === HTML_NS && ALLOW_BARE.has(name) && content === null && !inTemplate
-        && attrs.every(([ans, an]) => ans === '' && name === 'a' && an === 'href');
-      if (!allowed) out.push(`occurrence ${k}`);
+      const parsed = JSON.parse(k) as [string, string, unknown, unknown, boolean];
+      if (parsed[0] === HTML_NS && ALLOW_BARE.has(parsed[1])) continue;
+      const kk = wrong.holdByName ? byName(k) : k;
+      if (wrong.holdByName ? (bOcc.get(kk) ?? 0) > 0 : n <= (bOcc.get(kk) ?? 0)) continue;
+      out.push(`occurrence ${k}`);
     }
     for (const [t, n] of A.triples) {
-      if (n <= (B.triples.get(t) ?? 0)) continue;
-      const [ns, name, ans, an, value, inTemplate] = JSON.parse(t) as [string, string, string | null, string | null, string | null, boolean];
-      if (ns !== HTML_NS || !ALLOW_BARE.has(name) || inTemplate) { out.push(`triple ${t}`); continue; }
+      const [ns, name, ans, an, value] = JSON.parse(t) as [string, string, string | null, string | null, string | null, boolean];
       if (an === null) continue;
-      if (!(name === 'a' && an === 'href' && ans === '' && urlAllowed(value!, hosts))) out.push(`triple ${t}`);
+      const have = B.triples.get(t) ?? 0;
+      const full = ans === 'http://www.w3.org/1999/xlink' ? `xlink:${an}` : an;
+      if (have > 0 && (wrong.everyAttributeOnce || !counted(full) || n <= have)) continue;
+      const link = ns === HTML_NS && name === 'a' && an === 'href' && ans === '';
+      if (link && (wrong.anyUrl || urlAllowed(value!, hosts))) continue;
+      out.push(`triple ${t}`);
     }
   }
   return out;
@@ -384,45 +565,135 @@ function violations(before: string | null, after: string): string[] {
 
 const idempotent = (v: string): boolean => { const c = canonicalHtml(v); return canonicalHtml(c) === c; };
 
-/** The stand-in for A2's `checkMarkup` until A2 lands: accept exactly what the reference allows. */
+/**
+ * Whether a value ends so that what the page puts after it stays the page's: the value followed by
+ * a mark parses to the value's own markup plus the mark, as an element of its own. A tag, an
+ * attribute, a comment or raw text left open swallows the mark, or turns it into something else.
+ * What the value leaves open around the mark is not compared here: the page closes it.
+ */
+const MARK = '<em data-page-mark="1">m</em>';
+function endsPlain(v: string): boolean {
+  const own = markupOf(walkHtml(parseHtmlFragment(v)));
+  const marked = markupOf(walkHtml(parseHtmlFragment(v + MARK)));
+  const markOnly = markupOf(walkHtml(parseHtmlFragment(MARK)));
+  const plus = (m: ReadonlyMap<string, number>, x: ReadonlyMap<string, number>): string => {
+    const r = new Map(m);
+    for (const [k, n] of x) r.set(k, (r.get(k) ?? 0) + n);
+    return JSON.stringify([...r].sort());
+  };
+  return plus(own.occurrences, markOnly.occurrences) === JSON.stringify([...marked.occurrences].sort())
+    && plus(own.triples, markOnly.triples) === JSON.stringify([...marked.triples].sort());
+}
+
 type Check = (before: string | null, after: string) => boolean;
-const standIn: Check = (before, after) => violations(before, after).length === 0 && idempotent(after);
-const withoutNotCanonical: Check = (before, after) => violations(before, after).length === 0;
+const a2: Check = (before, after) => checkMarkup({ before, after, storeHost: STORE_HOST, startDomains: START_DOMAINS }).ok;
+const wrongCheck = (w: WrongCheck, opts: { canonical?: false; end?: false } = {}): Check => (before, after) =>
+  violations(before, after, w).length === 0 && (opts.canonical === false || idempotent(after)) && (opts.end === false || endsPlain(after));
+
+/** Each control: a known-wrong check, and what property 2 must find against it. */
+const PROPERTY_2_CONTROLS: readonly (readonly [string, Check, (before: string | null, after: string) => boolean])[] = [
+  ['a check without not_canonical', wrongCheck({}, { canonical: false }), (_b, a) => !idempotent(a)],
+  ['a check that lets a value end open', wrongCheck({}, { end: false }), (_b, a) => !endsPlain(a)],
+  ['(d) a check that holds by element name', wrongCheck({ holdByName: true }), (b, a) => violations(b, a).length > 0],
+  ['(e) a check whose URL rule takes any target', wrongCheck({ anyUrl: true }), (b, a) => violations(b, a).length > 0],
+  ['a check that holds a counted attribute once for every element', wrongCheck({ everyAttributeOnce: true }), (b, a) => violations(b, a).length > 0],
+  ['a check that keys a carrier by all the text below it', wrongCheck({ textBelowOnly: true }), (b, a) => violations(b, a).length > 0],
+];
 
 const PAIRS = 3000;
+
+/** A link the generator may add: allowed, held, or out. */
+const HREFS = ['/products/x', 'https://shop.example/a', 'https://partner.example/b', 'https://evil.example/c', 'mailto:info@shop.example', 'mailto:x@partner.example', 'java\tscript:alert(1)', '//evil.example/x'];
+
+/** The seed whose carrier holds elements, for the pairs that edit it in place. */
+const CARRIER_SEED = '<svg><script>a=1;/*b()*/<g></g><g></g></script></svg>';
 
 function pairs(rng: Rng): [string | null, string][] {
   const out: [string | null, string][] = [];
   for (let i = 0; i < PAIRS; i++) {
-    const after = generate(rng);
+    // One pair in twenty edits the carrier seed by moving its text, so that every run, whatever
+    // its seed, holds such edits; the rest grow out of any seed.
+    if (rng() < 0.05) {
+      out.push([CARRIER_SEED, MUTATIONS['carrierText']!(rng, CARRIER_SEED)]);
+      continue;
+    }
+    const [seed, generated] = generateFrom(rng);
+    let after = generated;
     const r = rng();
-    // A third the same value (nothing added, only `not_canonical` can refuse), a third a seed,
-    // a third nothing before.
-    out.push([r < 1 / 3 ? after : r < 2 / 3 ? pick(rng, SEEDS) : null, after]);
+    // A quarter each: the same value (nothing added, only `not_canonical` can refuse), the seed
+    // it grew from (an edit of what is there), another seed, nothing before. One in four
+    // after-states gets a link, and one in four a copy of its before-image's first element.
+    const before = r < 1 / 4 ? after : r < 2 / 4 ? seed : r < 3 / 4 ? pick(rng, SEEDS) : null;
+    const extra = rng();
+    if (extra < 0.25) after = `${after}<p><a href="${pick(rng, HREFS)}">l</a></p>`;
+    else if (extra < 0.5 && before !== null) after = `${before}${before.match(/<[a-z][^>]*>[^<]*<\/[a-z]+>/i)?.[0] ?? ''}`;
+    out.push([before, after]);
   }
   return out;
 }
 
-describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, () => {
-  it('an accepted value holds nothing outside the allowlist and the before-image, and is canonical-idempotent', () => {
+describe(`property 2 against checkMarkup (seed ${SEED}, ${PAIRS} pairs)`, () => {
+  it('an accepted value holds nothing outside the allowlist and the before-image, is canonical-idempotent and ends plain', () => {
     const all = pairs(sfc32(SEED ^ 0x2));
     let accepted = 0;
-    let controlFound: string | null = null;
+    let acceptedChanged = 0;
+    let refused = 0;
+    const found = new Map<string, string>();
     for (const [before, after] of all) {
-      if (standIn(before, after)) {
+      if (a2(before, after)) {
         accepted++;
-        expect(violations(before, after), after).toEqual([]);
+        if (before !== after) acceptedChanged++;
+        expect(violations(before, after), `${before} → ${after}`).toEqual([]);
         expect(idempotent(after), after).toBe(true);
+        expect(endsPlain(after), after).toBe(true);
+      } else refused++;
+      for (const [name, check, wrongWhere] of PROPERTY_2_CONTROLS) {
+        if (!found.has(name) && check(before, after) && wrongWhere(before, after)) found.set(name, after);
       }
-      if (controlFound === null && withoutNotCanonical(before, after) && !idempotent(after)) controlFound = after;
     }
-    // Enough of both kinds to mean something, and the check without `not_canonical` accepted a
-    // value whose canonical form is not idempotent.
-    expect(accepted).toBeGreaterThan(PAIRS / 10);
-    expect(controlFound, 'control: a check without not_canonical').not.toBeNull();
+    // Enough of both kinds to mean something, counting as accepted only values whose bytes differ
+    // from their before-image (for the same bytes the property holds by construction; a value
+    // that differs only in case or quoting still counts), and every known-wrong check accepted a
+    // value the property refuses. The bound guards against a run that accepts next to nothing new,
+    // not a tuned figure: seed 6 gave exactly 300 of 3000, so a tenth was no margin.
+    expect(acceptedChanged).toBeGreaterThan(PAIRS / 20);
+    expect(refused).toBeGreaterThan(PAIRS / 10);
+    expect(PROPERTY_2_CONTROLS.map(([name]) => [name, found.has(name)])).toEqual(PROPERTY_2_CONTROLS.map(([name]) => [name, true]));
   });
 
-  it('the URL rule refuses what §21.7 names, and passes the store and a start domain', () => {
+  it('the controls\' named values: each wrong check takes it, checkMarkup and the property do not', () => {
+    const named: readonly (readonly [string, string | null, string])[] = [
+      ['a check that lets a value end open', '', '<img src=x onerror=alert(1) '],
+      ['(d) a check that holds by element name', '<script>ok()</script>', '<script>ok()</script><script>evil()</script>'],
+      ['(e) a check whose URL rule takes any target', '', '<p><a href="java\tscript:alert(1)">x</a></p>'],
+      ['(e) a check whose URL rule takes any target', '', '<p><a href="//evil.example/x">x</a></p>'],
+      ['a check that holds a counted attribute once for every element', '<p onclick="a()">x</p>', '<p onclick="a()">x</p><p onclick="a()">y</p>'],
+      ['a check that keys a carrier by all the text below it', CARRIER_SEED, '<svg><script>a=1;<g>/*</g>b()<g>*/</g></script></svg>'],
+    ];
+    for (const [name, before, after] of named) {
+      const [, check, wrongWhere] = PROPERTY_2_CONTROLS.find(([n]) => n === name)!;
+      expect([name, check(before, after), wrongWhere(before, after), a2(before, after)], after).toEqual([name, true, true, false]);
+    }
+  });
+
+  it('takes what A2 holds that a strict rule would refuse: an allowed element\'s held class, an address domain lent to addresses, an allowed element in a held template', () => {
+    // The class is held at all, so a second paragraph may carry it.
+    const p = ['<p class="x">a</p>', '<p class="x">a</p><p class="x">b</p>'] as const;
+    // A held address lends its domain to another address, not to a web link.
+    const m = ['<p><a href="mailto:info@partner.example">m</a></p>', '<p><a href="mailto:info@partner.example">m</a><a href="mailto:sales@partner.example">s</a></p>'] as const;
+    const mw = '<p><a href="mailto:info@partner.example">m</a><a href="https://partner.example/x">w</a></p>';
+    // An allowed element stands wherever it stands: inside a held template it adds nothing live.
+    const t = ['<template></template>', '<template><p>a</p></template>'] as const;
+    for (const [before, after] of [p, m, t]) {
+      expect(a2(before, after), after).toBe(true);
+      expect(violations(before, after), after).toEqual([]);
+    }
+    expect(a2(m[0], mw)).toBe(false);
+    expect(violations(m[0], mw)).not.toEqual([]);
+  });
+
+  it('the URL rule refuses what §21.7 names, and passes the store and a start domain, here and in checkMarkup', () => {
+    const link = (href: string): string => `<p><a href="${href.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}">x</a></p>`;
     const hosts = [STORE_HOST, ...START_DOMAINS, 'example.ch'];
     for (const bad of ['javascript:alert(1)', 'java\tscript:x', '//evil.example/x', '/\\evil.example', 'https://evil.example/\u0000', 'https://evilexample.ch/', 'mailto:a@evil.example',
       'mailto:x@evil.example,y@shop.example', 'mailto:x@evil.example%2Cy@shop.example', 'mailto:y@shop.example?cc=x@evil.example', 'mailto:y@shop.example?BCC=x@evil.example', 'mailto:info@shop.example?subject=x', 'mailto:a@shop.example,b@example.ch',
@@ -435,22 +706,38 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
       'mailto:a@evil.example%20b.shop.example', 'mailto:a@evil.example%09.shop.example', 'mailto:a@evil.example%7F.shop.example',
       'mailto:%3Ca@evil.example%3E.shop.example', 'mailto:a@evil.example(x.shop.example', 'mailto:x@evil.example%0d%0acc:a@shop.example', 'mailto:a@shop.example@evil.example', 'https://evil.example./x', 'mailto:']) {
       expect(urlAllowed(bad, hosts), bad).toBe(false);
+      expect(a2(null, link(bad)), bad).toBe(false);
     }
     for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example', 'mailto:Info+news@SHOP.example', 'mailto:info@xn--mnchen-3ya.shop.example', 'mailto:%61@shop.example', 'mailto:a%40shop.example', 'https://shop.example./x']) {
       expect(urlAllowed(ok, hosts), ok).toBe(true);
+      // `example.ch` is a start domain of this list only, not of the check's.
+      expect(a2(null, link(ok)), ok).toBe(!ok.includes('example.ch'));
     }
   });
 
-  it('a before-image link without a web host lends no host to the after-state', () => {
-    // A `mailto:` or `javascript:` link has no host to lend; an `ftp:` or `ws:` one has, and must not.
-    for (const held of ['mailto:info@shop.example', 'javascript:void(0)', 'ftp://evil.example/f', 'ws://evil.example/s']) {
+  it('a before-image link lends its host only to links of its kind', () => {
+    // A `javascript:` link has no host to lend; an `ftp:` or `ws:` one has, and must not; an
+    // address lends to addresses only.
+    for (const held of ['mailto:info@evil.example', 'javascript:void(0)', 'ftp://evil.example/f', 'ws://evil.example/s']) {
       const before = `<p><a href="${held}">m</a></p>`;
       for (const href of ['https://evil.example./steal', 'https://evil.example../steal', 'https://evil.example/steal']) {
         expect(violations(before, `${before}<a href="${href}">x</a>`), `${held} ${href}`).not.toEqual([]);
+        expect(a2(before, `${before}<a href="${href}">x</a>`), `${held} ${href}`).toBe(false);
       }
     }
-    // A held web link does lend its host.
+    // A held web link does lend its host, through any URL attribute.
     expect(violations('<p><a href="https://partner.example/">p</a></p>', '<p><a href="https://partner.example/">p</a><a href="https://partner.example/x">q</a></p>')).toEqual([]);
+    expect(violations('<svg><a xlink:href="https://partner.example/"></a></svg>', '<svg><a xlink:href="https://partner.example/"></a></svg><p><a href="https://partner.example/x">q</a></p>')).toEqual([]);
+    expect(a2('<svg><a xlink:href="https://partner.example/"></a></svg>', '<svg><a xlink:href="https://partner.example/"></a></svg><p><a href="https://partner.example/x">q</a></p>')).toBe(true);
+  });
+
+  it('a foreign carrier whose text moves between it and an element below it carries another body', () => {
+    const before = '<svg><script>a=1;/*b()*/<g></g><g></g></script></svg>';
+    const moved = '<svg><script>a=1;<g>/*</g>b()<g>*/</g></script></svg>';
+    expect(violations(before, moved)).not.toEqual([]);
+    expect(a2(before, moved)).toBe(false);
+    // Control: the same carrier, held as it is, passes.
+    expect(a2(before, before)).toBe(true);
   });
 });
 

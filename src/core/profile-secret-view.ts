@@ -17,14 +17,15 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, oneLineInBriefing, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, lapsedSlots, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
-import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
+import { currentPlanOf, currentPlanOwnerStarted, currentPlanStamp } from './plan-run-context.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
 import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
+import { collapseToSingleLine } from './sanitize.js';
 import type { SecretReleases } from './secret-releases.js';
 import type { VaultNameBindings } from './vault-name-bindings.js';
 import { DERIVED_NAME_SHAPE, shapedForLog, VAULT_NAME_SHAPE } from './profile-value-shape.js';
@@ -138,10 +139,13 @@ export type SlotRole = 'request' | 'exchange' | 'client' | 'other';
  * - `owned` — `owner` holds it; `members` are the owner and, only for the owner's own refresh
  *   slot, the profiles that read that slot and share the grant through a built-in provider
  *   ({@link sharedGrant}).
+ * - `lapsed` — no profile holds it, and a profile that still names it read it from a profile
+ *   since deleted (`OAuthGrantRecord.lapsed_slots`): it stays that grant's and goes nowhere.
  */
 type SlotGrant =
   | { readonly kind: 'free' }
   | { readonly kind: 'contested' }
+  | { readonly kind: 'lapsed' }
   | { readonly kind: 'owned'; readonly owner: ApiProfile; readonly members: readonly ApiProfile[]; readonly preset: OAuthPreset | undefined };
 
 /**
@@ -186,12 +190,15 @@ function sharedGrant(a: ApiProfile, b: ApiProfile): OAuthPreset | undefined {
  * way, is the configurer's own refresh slot: it goes only to that profile's own exchange, and to
  * nothing else. Named by another profile as well (a state admission does not let two registered
  * profiles reach), it stays free, so a configured name never takes another profile's credential.
+ * A name no grant holds that a profile still naming it read from a deleted profile is `lapsed`,
+ * whoever else names it: the name does not pass from the deleted owner to a reader (register 685).
  */
 function slotGrant(profiles: readonly ApiProfile[], name: string): SlotGrant {
   const holders = profiles.filter((p) => grantTokenNames(p).has(name));
   const [owner] = holders;
   if (owner === undefined) {
     const namers = profiles.filter((p) => slotNames(p).includes(name));
+    if (namers.some((p) => lapsedSlots(p).includes(name))) return { kind: 'lapsed' };
     const [only] = namers;
     if (namers.length !== 1 || only!.auth?.type !== 'oauth2' || readersRefreshSlot(only!) !== name) return { kind: 'free' };
     return { kind: 'owned', owner: only!, members: [only!], preset: undefined };
@@ -442,6 +449,19 @@ export function clientlessSlot(
   }
 }
 
+/**
+ * Whether `name` is a deleted profile's token slot that a profile still naming it read as its
+ * refresh slot ({@link SlotGrant} `lapsed`), for the refusal that names the way out. Anything that
+ * throws answers false, and the refusal falls back to the general text.
+ */
+export function lapsedSlot(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string): boolean {
+  try {
+    return slotGrant(apiStore.knownProfiles(), name).kind === 'lapsed';
+  } catch {
+    return false;
+  }
+}
+
 /** Whether `name` is a refresh slot of `p`: the one its id derives, or the one it configures. */
 function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
   return p.auth?.type === 'oauth2' && (refreshTokenKey(p.id) === name || p.auth.oauth?.refresh_token_key === name);
@@ -482,7 +502,7 @@ export function slotMayReach(
     const profiles = apiStore.knownProfiles();
     const grant = slotGrant(profiles, name);
     if (grant.kind === 'free') return true;
-    if (grant.kind === 'contested' || target === undefined) return false;
+    if (grant.kind === 'contested' || grant.kind === 'lapsed' || target === undefined) return false;
     const { owner, members } = grant;
     const refresh = members.some((m) => isRefreshSlotOf(m, name));
     if (role === 'request') {
@@ -534,6 +554,85 @@ export function slotMayReach(
   } catch {
     return false;
   }
+}
+
+/**
+ * The stored profiles that hold `name` as one of their token slots ({@link tokenSlotNames}: the
+ * derived pair, the names an exchange wrote, and the refresh slot an oauth2 profile reads, which
+ * it may configure), when a `secret:` reference to it is refused ({@link slotMayReach} with
+ * `other`). Such a name is a connection's token: it is used through that profile, never offered
+ * as `secret:NAME`. A name refused only because a stored entry the boot could not read may hold
+ * it is NOT one — no profile is known to hold it — and answers an empty list, as does anything
+ * that throws, which leaves the name where it was.
+ *
+ * `tokenSlotNames`, not `grantTokenNames`: a configured refresh slot is in the first set only,
+ * and the refusal covers it.
+ */
+export function connectionTokenHolders(
+  apiStore: Pick<ApiStore, 'knownProfiles' | 'get' | 'unreadableHolds'>,
+  name: string,
+): ApiProfile[] {
+  try {
+    if (slotMayReach(apiStore, name, 'other', undefined)) return [];
+    return apiStore.knownProfiles().filter((p) => tokenSlotNames(p).has(name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * What forges a quote rather than filling it: bidi overrides and isolates
+ * (a span that reads forwards on screen and backwards in the store, so the
+ * quote is no longer a quote) and the zero-width formatters (a box that looks
+ * empty but is not). `collapseToSingleLine` covers neither — it handles C0/C1
+ * and the exotic separators. LRM/RLM are left alone; see the note on the
+ * client half in `chat-framing.ts`.
+ */
+export const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
+
+/**
+ * Who holds a connection's token, for a text the model reads: the profile's name when exactly one
+ * stored profile holds it, else nothing. Cleaned as the API block of the same briefing cleans it
+ * (`oneLineInBriefing`: no format or default-ignorable characters, `<` escaped), and bounded,
+ * because a stored name is not shaped by the engine. Cut before the escape, so the bound counts
+ * the name and never ends inside an `&lt;`. `String()` because a name read from a stored
+ * file may be a number. Callers quote it with `JSON.stringify`, so a `"` in it cannot end the quote.
+ */
+const HOLDER_MAX_CHARS = 64;
+export function connectionTokenHolderName(holders: readonly { name: unknown }[]): string | null {
+  if (holders.length !== 1) return null;
+  const raw = [...collapseToSingleLine(String(holders[0]!.name).replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, ''))];
+  const cut = raw.length > HOLDER_MAX_CHARS ? `${raw.slice(0, HOLDER_MAX_CHARS - 1).join('')}…` : raw.join('');
+  return oneLineInBriefing(cut);
+}
+
+/**
+ * The connection tokens in the vault, COUNTED per profile, never named: `2 for profile "shop-api"`,
+ * and `1 held by more than one profile` for those no single profile holds. A name is what a model
+ * writes after `secret:`; listed by name, models copied it from this very line into requests
+ * (measured with tests/online/ask-secret-token-slot-eval.test.ts). Counted, the line still says the
+ * profile has its access, so the model does not ask the owner for it again. Counted per profile
+ * id, not per shown name: two profiles may share a name, and the shown name is cleaned and cut.
+ * The text claims no more than every token does: a refresh slot is never attached to a request,
+ * only used for the profile's own token exchange. Undefined when there is none.
+ */
+export function describeConnectionTokens(holdersOfEach: readonly (readonly { id?: unknown; name: unknown }[])[]): string | undefined {
+  if (holdersOfEach.length === 0) return undefined;
+  const perProfile = new Map<string, { who: string; n: number }>();
+  let shared = 0;
+  for (const holders of holdersOfEach) {
+    const who = connectionTokenHolderName(holders);
+    if (who === null) { shared++; continue; }
+    const key = `${typeof holders[0]!.id}:${String(holders[0]!.id ?? '')}:${typeof holders[0]!.name}:${String(holders[0]!.name)}`;
+    const seen = perProfile.get(key);
+    if (seen) seen.n++;
+    else perProfile.set(key, { who, n: 1 });
+  }
+  const parts = [...perProfile.values()].map(({ who, n }) => `${String(n)} for profile ${JSON.stringify(who)}`);
+  if (shared > 0) parts.push(`${String(shared)} held by more than one profile`);
+  return 'Connection tokens in the vault, held by an API profile: the engine uses them for that profile\'s '
+    + 'requests itself. They are not referenced with secret: and not collected again: '
+    + `${parts.join(', ')}.`;
 }
 
 /**
@@ -1012,9 +1111,9 @@ export function memberConnectionReader(
   return (consented || profile.created_by === tag) && ends !== null && ends.isLive(reader.mandateId);
 }
 
-/** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` exists only there, never in the store. */
+/** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` and `connected_by_reader` exist only there, never in the store. */
 export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
-  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined }) | undefined;
+  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined; connected_by_reader: boolean }) | undefined;
 };
 
 /**
@@ -1027,19 +1126,29 @@ export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
  * login ({@link memberConnectionReader}, `read`: same tag and same grant, both known); the
  * control plane's bearer none. A grant whose account was left out says so (`account_withheld`),
  * so the page does not read it as an account the engine never recorded.
+ *
+ * Every grant also says whether this reader gave the consent (`connected_by_reader`): the page
+ * cannot tell who reads it, and a tag alone does not say whether it is the reader's. The owner's
+ * is the owner tag or none (a grant from before the tag was recorded); a mandate's, the same
+ * test that shows it the account.
  */
 export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ProfileForReader {
   const shown = withoutFingerprints(profile);
   const grant = shown.oauth_grant;
-  if (grant?.account === undefined) return shown;
+  if (grant === undefined) {
+    const { oauth_grant: _none, ...rest } = shown;
+    return rest;
+  }
+  let yours: boolean;
   switch (reader.kind) {
-    case 'owner': return shown;
-    case 'mandate': if (memberConnectionReader(profile, reader, 'read', null)) return shown; break;
-    case 'cp-admin': break;
+    case 'owner': yours = grant.connected_by === undefined || grant.connected_by === 'owner'; break;
+    case 'mandate': yours = memberConnectionReader(profile, reader, 'read', null); break;
+    case 'cp-admin': yours = false; break;
     default: return unhandledPrincipal(reader);
   }
+  if (grant.account === undefined || reader.kind === 'owner' || yours) return { ...shown, oauth_grant: { ...grant, connected_by_reader: yours } };
   const { account: _account, ...rest } = grant;
-  return { ...shown, oauth_grant: { ...rest, account_withheld: true } };
+  return { ...shown, oauth_grant: { ...rest, connected_by_reader: yours, account_withheld: true } };
 }
 
 /**
@@ -1056,6 +1165,41 @@ function heldFromReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string,
   }
   return false;
 }
+
+/**
+ * How a plan run's refusal of a member's connection ends: that it is final for the run, and who
+ * may change it. Without the first, a model looked the profile up and tried the connection again;
+ * with only "Tell the owner", it sometimes told the member instead.
+ */
+function planRefusalFinal(person: string): string {
+  return `${RUN_REFUSAL_FINAL} Nobody in this run can change it, neither you nor ${person}: only the owner of this lynox instance decides which connections a plan may use. ${OWNER_ALLOWS_AT} ${RUN_REFUSAL_CLOSE}`;
+}
+
+/**
+ * The same end without who decides, for a refusal the owner cannot lift by stamping the plan:
+ * another member's connection, or one whose own member's access does not carry the request.
+ */
+function planRefusalFinalForRun(): string {
+  return `${RUN_REFUSAL_FINAL} ${RUN_REFUSAL_CLOSE}`;
+}
+
+/**
+ * For the member's own connection that their access does not cover: final for the run, but it
+ * promises neither the same words nor a refused token exchange. A token exchange asks in write
+ * mode, which a later access of the same person passes; the refresh slot's own check may stop it
+ * in other words, or let it through while that earlier access is still live. A request through
+ * it stays refused either way: its grant names the earlier access, and only connecting again
+ * changes that, which a plan cannot. What it does not cover: a login that extends an ended
+ * access pauses the plan and stops its run right after it commits (`endEndedMandateRuns`, which
+ * reaches `stopEndedStarters`), but a request already under way then still completes, and a run
+ * in a phase that reads no stop goes on until its next turn or the next sweep.
+ */
+function ownRefusalFinalForRun(): string {
+  return `This is final for this run: another request through it is refused as well, so do not try the connection again. ${RUN_REFUSAL_CLOSE}`;
+}
+
+const RUN_REFUSAL_FINAL = 'This is final for this run: another request through it or a token exchange gets the same answer, so do not try the connection again.';
+const RUN_REFUSAL_CLOSE = 'Say so in your reply, and do not ask for permission.';
 
 /**
  * What a request through `profile` says when it would carry a token of a connection someone
@@ -1082,9 +1226,21 @@ export function memberConnectionRefusal(
   // a plan's run acting for anyone else reaches it no more than any other reader.
   if (inPlan !== 'no-plan') {
     const ownPlan = own && memberConnectionReader(profile, reader, mode, ends);
-    if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${OWNER_DECIDES}`;
-    if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${OWNER_DECIDES}`;
-    return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session.`;
+    // The owner started this run of the person's workflow (1100): no schedule stands behind it, so
+    // there is no confirmation that could list the connection, and nobody needs telling.
+    // Its own end, with the ways on (ux U-122); the shared sentences stay as they are.
+    if (ownPlan && inPlan === 'unlisted' && currentPlanOwnerStarted()) {
+      return `${lead}. This run of a workflow ${person} set up or changed was not started by a schedule of ${person}'s, so it does not use connections ${person} made with their own login. `
+        + `${RUN_REFUSAL_FINAL} In your reply, say so. The person reading your reply is the owner of this instance, not ${person}. `
+        + `Tell them to connect ${provider} themselves under Settings → APIs and then ask lynox in a chat to do this step with that connection. `
+        + `Do not suggest running this workflow again, and do not ask ${person} to do anything. Do not ask for permission to try again.`;
+    }
+    if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${planRefusalFinal(person)}`;
+    if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;
+    // Not "only in their own session" for the member's own: their access does not carry this
+    // request, there or here.
+    if (own) return `${lead}, and ${person}'s access does not cover this plan, so the connection is not used in this plan's run. ${ownRefusalFinalForRun()}`;
+    return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session. ${planRefusalFinalForRun()}`;
   }
   // The same person under a later access: the connection was made under the earlier one.
   if (own) return `This connection (${provider}, profile ${shown}) was set up under an earlier access of ${person}'s, so it is not used now. Connect it again with api_setup action "connect".`;
@@ -1140,11 +1296,11 @@ function planMayUse(profile: ApiProfile): boolean {
 }
 
 /**
- * The end of a plan's refusal of a connection it may not use: who decides, and where the owner
- * does it (641 4b ii-c-min, ux U-058). The model reads it and passes it on, so it names the
- * place in both languages the owner's screen may be in: what it says is what the owner finds.
+ * Where the owner lifts a plan's refusal of a connection it may not use (641 4b ii-c-min, ux U-058).
+ * The model reads it and passes it on, so it names the place in both languages the owner's screen
+ * may be in: what it says is what the owner finds.
  */
-export const OWNER_DECIDES = 'Tell the owner: only the owner decides which connections a plan may use, and they can allow it under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
+const OWNER_ALLOWS_AT = 'The owner can allow it under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
 
 export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
   const presetId = profile.auth?.oauth?.preset_id;
