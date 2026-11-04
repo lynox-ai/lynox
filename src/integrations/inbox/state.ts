@@ -551,8 +551,8 @@ export class InboxStateDb {
 
   /**
    * Open a `replied` item again (a new message came into its thread). Only a `replied` item: an
-   * archived one keeps the user's choice. A snooze on it ends, as `unsnooze_on_reply` ends one:
-   * otherwise the reopened item would notify and stay hidden. The item takes the new message's date and
+   * archived one keeps the user's choice, and so does a snooze: whether a reply wakes it is the
+   * user's `unsnooze_on_reply`, which the hook applies before this. The item takes the new message's date and
    * moves to the top of its list: lists sort by `classified_at`, and the row shows `mail_date`, so
    * a reopened item with the first mail's dates would sit far down with an old date. Neither
    * column is read as "when the classifier ran" anywhere else. Returns whether the row changed.
@@ -560,8 +560,7 @@ export class InboxStateDb {
   reopenReplied(id: string, tenantId: string, mailDate: Date, at: Date = new Date()): boolean {
     const result = this.db
       .prepare<[number, number, string, string], unknown>(
-        `UPDATE inbox_items SET user_action = NULL, user_action_at = NULL, mail_date = ?, classified_at = ?,
-                snooze_until = NULL, snooze_condition = NULL, notify_on_unsnooze = 0
+        `UPDATE inbox_items SET user_action = NULL, user_action_at = NULL, mail_date = ?, classified_at = ?
           WHERE id = ? AND tenant_id = ? AND user_action = 'replied'`,
       )
       .run(mailDate.getTime(), at.getTime(), id, tenantId) as { changes: number };

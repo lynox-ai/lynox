@@ -198,7 +198,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     });
     if (reopened && opts.notifier && existing.bucket === 'requires_user') {
       const item = opts.state.getItem(existing.id, existing.tenantId);
-      if (item) void opts.notifier.notifyNewItem(item);
+      // A snoozed item is not in the list until it wakes; a push now would lead nowhere.
+      const snoozed = item?.snoozeUntil !== undefined && item.snoozeUntil.getTime() > Date.now();
+      if (item && !snoozed) void opts.notifier.notifyNewItem(item);
     }
   };
 

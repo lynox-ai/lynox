@@ -217,13 +217,41 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(inbox.getItem(id)!.userAction).toBe('replied');
   });
 
-  it('a snoozed replied item wakes up, so the item it notifies about is in the list', async () => {
+  it('a snoozed replied item keeps the snooze the user chose and sends no push while hidden', async () => {
     const id = seedReplied();
-    inbox.setSnooze(id, new Date(Date.now() + 86_400_000), null, false);
+    const until = new Date(Date.now() + 86_400_000);
+    inbox.setSnooze(id, until, null, /* unsnoozeOnReply */ false, /* notifyOnUnsnooze */ true);
+    await hook()(ACCOUNT.id, envelope());
+    const after = inbox.getItem(id)!;
+    expect(after.userAction).toBeUndefined();
+    expect(after.snoozeUntil?.getTime()).toBe(until.getTime());
+    expect(after.notifyOnUnsnooze).toBe(true);
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
+  it('a snooze that wakes on a reply wakes, and then the push goes out', async () => {
+    const id = seedReplied();
+    inbox.setSnooze(id, new Date(Date.now() + 86_400_000), null, /* unsnoozeOnReply */ true);
     await hook()(ACCOUNT.id, envelope());
     expect(inbox.getItem(id)!.snoozeUntil).toBeUndefined();
-    expect(inbox.countItemsByBucket().requires_user).toBe(1);
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
     expect(notifyNewItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('own-address check ignores case on both sides', async () => {
+    const id = seedReplied();
+    const h = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+      accounts: { resolve: () => ({ address: 'Me@Acme.Example', displayName: 'Me' }) },
+    });
+    await h(ACCOUNT.id, envelope({ from: [{ address: 'me@acme.example' }], messageId: '<own2@x>' }));
+    expect(inbox.getItem(id)!.userAction).toBe('replied');
+  });
+
+  it('a message dated exactly at the reply does not open the item', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope({ date: new Date('2026-11-03T09:00:00Z') }));
+    expect(inbox.getItem(id)!.userAction).toBe('replied');
   });
 
   it('the reconcile prefers the item of the account the reply leaves from', async () => {
