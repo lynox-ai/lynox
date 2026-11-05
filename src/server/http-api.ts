@@ -82,7 +82,7 @@ import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onb
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
-import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
+import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
@@ -135,7 +135,8 @@ import { WorkflowStore, type WorkflowAuthorship } from '../core/workflow-store.j
 import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
-import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
+import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './webhook-receiver.js';
+import { requestLogUrl } from './request-log-url.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
@@ -1327,6 +1328,39 @@ export const BULK_PROBE_REQUIRED =
 /** A workflow's authorship, or undefined when the read throws: no badge, and a run the runner refuses as unreadable. */
 function authorshipOrNone(read: () => WorkflowAuthorship | undefined): WorkflowAuthorship | undefined {
   try { return read(); } catch { return undefined; }
+}
+
+/** The code beside `MANDATE_KEY_INPUT_REFUSAL`, read by the web UI. */
+export const MANDATE_KEY_INPUT_CODE = 'mandate_key_input';
+
+/**
+ * Whether text a mandate's helper typed somewhere other than the chat reads as carrying a key — a
+ * conversation's title, a task's fields, a compaction's focus — and was refused for it (422, the
+ * fixed sentence). Every string in `value` is read, nested ones and object keys included; a value
+ * nested deeper than four levels is refused unread. The owner is not checked.
+ */
+function refusedMandateKeyIn(principal: RequestPrincipal, res: ServerResponse, value: unknown): boolean {
+  if (isOwnerPrincipal(principal)) return false;
+  const texts: string[] = [];
+  let tooDeep = false;
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v === 'string') { texts.push(v); return; }
+    if (v === null || typeof v !== 'object') return;
+    if (depth >= 4) { tooDeep = true; return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, depth + 1); return; }
+    for (const [k, x] of Object.entries(v)) { texts.push(k); walk(x, depth + 1); }
+  };
+  walk(value, 0);
+  if (!tooDeep && !texts.some((t) => mandateCredentialInput(t) !== null)) return false;
+  errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+  return true;
+}
+
+/** A mandate's typed answer refused for reading as a key (`MandateKeyInputError`): 422, fixed sentence. */
+function keyInputRefused(res: ServerResponse, err: unknown): boolean {
+  if (!(err instanceof MandateKeyInputError)) return false;
+  errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+  return true;
 }
 
 function errorResponse(
@@ -3536,8 +3570,9 @@ export class LynoxHTTPApi {
         // error goes out as class and status (`error-egress.ts`).
         process.stderr.write(`HTTP API error: ${processErrorText(err)}\n`);
       }
-      // A webhook route token selects a trigger and is never logged.
-      const url = redactWebhookPath(req.url ?? '/');
+      // A webhook route token selects a trigger and is never logged, and no query value is
+      // (`request-log-url.ts`): the line keeps the path and the parameter names.
+      const url = requestLogUrl(req.url ?? '/');
       const status = res.statusCode;
       const ms = Date.now() - start;
       process.stderr.write(`${method} ${url} ${status} ${ms}ms\n`);
@@ -4483,6 +4518,19 @@ export class LynoxHTTPApi {
       // A mandate runs only in a conversation it started (§3.13 E1, N2). Read on the thread
       // row, not on the session object: the session's principal is whoever ran last.
       if (this._refuseUnlessOwns(req, res, 'run this conversation', () => [this._threadRow(sessionId)])) return;
+      // A mandate's helper takes no key in this chat: a message that reads as carrying one is
+      // refused here, before the thread, the run history, the title, a log or the model see any of
+      // it, and before a busy or full queue (409, 429) or a takeover could answer instead — those
+      // keep the message in the helper's browser as failed and resendable. Not masked as for the
+      // owner below: what a mask leaves (a key's last characters) would still reach the owner's
+      // thread. The refusal is a fixed sentence and names no part of the text.
+      {
+        const typed = (body as Record<string, unknown> | null)?.['task'];
+        if (typeof typed === 'string' && !isOwnerPrincipal(this._principalOf(req)) && mandateCredentialInput(typed) !== null) {
+          errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
+          return;
+        }
+      }
       // Which erasure this request started under; see `erasureGeneration`.
       const erasureGenAtEntry = this.erasureGeneration;
       const erasedSinceEntry = (): boolean => this.erasureGeneration !== erasureGenAtEntry;
@@ -5711,7 +5759,9 @@ export class LynoxHTTPApi {
         // Pending, yet not answered: its time ran out before the sweep marked it. Nothing between
         // the read above and this write yields, so another answer cannot settle it in between
         // today; should that change, this still names only this question.
-        if (!ps.answerUser(promptId, answer, by)) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
+        let answered: boolean;
+        try { answered = ps.answerUser(promptId, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
+        if (!answered) { errorResponse(res, 410, CLOSED_PROMPT_MESSAGE.timed_out, 'timed_out'); return; }
         jsonResponse(res, 200, { ok: true });
         return;
       }
@@ -5720,7 +5770,9 @@ export class LynoxHTTPApi {
       const pending = ps.getPending(params['id']!);
       if (pending && pending.prompt_type === 'ask_user' && !pending.questions_json) {
         if (!this._answerRecorded(_req, res, by, pending.id)) return;
-        if (ps.answerUser(pending.id, answer, by)) { jsonResponse(res, 200, { ok: true }); return; }
+        let answered: boolean;
+        try { answered = ps.answerUser(pending.id, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
+        if (answered) { jsonResponse(res, 200, { ok: true }); return; }
       }
 
       errorResponse(res, 404, 'No pending prompt');
@@ -5761,7 +5813,9 @@ export class LynoxHTTPApi {
 
       const by = this._principalOf(_req);
       if (!this._answerRecorded(_req, res, by, promptId)) return;
-      if (ps.answerUserTabs(promptId, answers, by)) { jsonResponse(res, 200, { ok: true }); return; }
+      let answered: boolean;
+      try { answered = ps.answerUserTabs(promptId, answers, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
+      if (answered) { jsonResponse(res, 200, { ok: true }); return; }
       errorResponse(res, 404, 'No pending prompt');
     }, OWN));
 
@@ -5786,7 +5840,7 @@ export class LynoxHTTPApi {
       if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
       if (existing.status !== 'pending') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
 
-      ps.setPartialAnswers(promptId, partial as (string | null)[]);
+      try { ps.setPartialAnswers(promptId, partial as (string | null)[], this._principalOf(_req)); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
       jsonResponse(res, 200, { ok: true });
     }, OWN));
 
@@ -5997,6 +6051,7 @@ export class LynoxHTTPApi {
       }
       const b = body as Record<string, unknown> | null;
       const focus = typeof b?.['focus'] === 'string' ? b['focus'] : undefined;
+      if (refusedMandateKeyIn(this._principalOf(_req), res, focus)) return;
       const result = await session.compact(focus);
       // The occupancy pair travels on the manual path too: this route is a
       // blocking request with no SSE, so without it the UI would have to show
@@ -6088,6 +6143,7 @@ export class LynoxHTTPApi {
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       if (this._refuseUnlessOwns(_req, res, 'change this conversation', () => [thread])) return;
       const b = body as Record<string, unknown> | null;
+      if (refusedMandateKeyIn(this._principalOf(_req), res, b?.['title'])) return;
       const skipExtraction = typeof b?.['skip_extraction'] === 'boolean' ? b['skip_extraction'] : undefined;
       // A chat that read data through a store connection stays out of memory for its life
       // (`core/containment.ts`): private mode cannot be switched off there. Read from the
@@ -7040,8 +7096,10 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { names });
     }, ownerOnly('list the secrets'));
 
-    // Category-level booleans — available to all authenticated users
-    this.addStatic('user', 'GET /api/secrets/status', async (_req, res) => {
+    // Category-level booleans — available to all authenticated users. `count` is the owner's
+    // only: it is the size of the owner's vault, and a mandate stores nothing there.
+    this.addStatic('user', 'GET /api/secrets/status', async (req, res) => {
+      const ownerAsks = isOwnerPrincipal(this._principalOf(req));
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const names = new Set(store.listNames());
@@ -7116,7 +7174,7 @@ export class LynoxHTTPApi {
           google: engine.getGoogleClientSource() !== null,
           bugsink: names.has('LYNOX_BUGSINK_DSN'),
         },
-        count: names.size,
+        ...(ownerAsks ? { count: names.size } : {}),
         searxng_url: searxngUrl ?? null,
       });
     }, READS);
@@ -8821,6 +8879,8 @@ export class LynoxHTTPApi {
       const pipelineId = typeof b['pipelineId'] === 'string' && b['pipelineId'].length > 0 ? b['pipelineId'] : undefined;
       const hidden = hiddenInTaskText(b);
       if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
+      // The fields a person types; not the ids, which a random-looking id would fail.
+      if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
 
       // Slice B2: schedule a saved workflow on cron — the promote-to-cron consent
       // action. Validates the workflow is autonomous, binds + constrains the
@@ -8957,6 +9017,8 @@ export class LynoxHTTPApi {
       // Before the mark below: a refused edit is no mandate's edit.
       const hidden = hiddenInTaskText(b);
       if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
+      // The fields a person types; not the ids, which a random-looking id would fail.
+      if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
       // Checked here rather than left to `update`, which throws: a thrown error answers
       // 500, and a refused request must not mark the trigger as a mandate's edit either.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {
@@ -9436,10 +9498,13 @@ export class LynoxHTTPApi {
       if (!loop) return null;
       return loop.resumesAt(bulkPreviewTriggerId(runId)) ?? loop.resumesAt(`bulk-${runId}`);
     };
-    /** The target a probe wrote and the fields it changed; null unless the run waits on its probe. */
-    const bulkProbeOf = (status: import('../core/bulk-ledger.js').BulkRunStatus, ledger: import('../core/bulk-ledger.js').BulkLedger): { key: string; fields: string[] } | null => {
+    /** The target a probe wrote and the fields it changed, and whether it was found so after a
+     *  send without a clear answer (`found`) rather than written; null unless the run waits on
+     *  its probe. */
+    const bulkProbeOf = (status: import('../core/bulk-ledger.js').BulkRunStatus, ledger: import('../core/bulk-ledger.js').BulkLedger): { key: string; fields: string[]; found: boolean } | null => {
       // Offered only where confirm-probe can succeed: a target found already holding its
-      // value was not written, and a run still writing has not stopped at its probe.
+      // value and never sent to by this run is no probe, and a run still writing has not
+      // stopped at its probe.
       if (status.probeConfirmed) return null;
       const key = ledger.probeKey(status.id);
       const written = key === null ? undefined : ledger.listAppliedDesc(status.id).find((t) => t.key === key);
@@ -9449,7 +9514,7 @@ export class LynoxHTTPApi {
       const before = fieldsOf(written.expected);
       const after = fieldsOf(written.after);
       const fields = Object.keys(after).filter((f) => !(f in before) || canonicalJson(after[f]) !== canonicalJson(before[f]));
-      return { key: written.key, fields };
+      return { key: written.key, fields, found: ledger.probeFound(status.id) };
     };
     /** Why an external run could not reach its host now, or null (a local run, or one it can). */
     const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
@@ -12407,7 +12472,9 @@ export class LynoxHTTPApi {
       return null;
     };
 
-    // user scope: same mailbox-management surface as POST /api/mail/accounts.
+    // user scope. Free, unlike POST /api/mail/accounts beside it: it stores nothing, like
+    // POST /api/secrets/validate-key and POST /api/mail/autodiscover, and it spends nothing of the
+    // owner's: the login it tests is the one in the request. The rate limit above bounds the probe.
     this.addStatic('user', 'POST /api/mail/accounts/test', async (req, res, _params, body) => {
       const rateErr = mailTestRateCheck(req);
       if (rateErr) { errorResponse(res, 429, rateErr); return; }
@@ -12805,8 +12872,8 @@ export class LynoxHTTPApi {
       sendInbox(res, handleDeleteRule(deps!, params['id']!));
     }, ownerOnly('change inbox rules')));
 
-    // A rule the agent proposed applies only once the owner confirms it here (PRD inbox-user-rules
-    // E7). Owner-only: a mandate can neither propose (the tool is withheld) nor confirm.
+    // A rule the agent proposed applies only once the owner confirms it here.
+    // Owner-only: a mandate can neither propose (the tool is withheld) nor confirm.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/rules/:id/confirm', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
@@ -12962,10 +13029,15 @@ export class LynoxHTTPApi {
 
     // ── Backups ──────────────────────────────────────────────────
 
-    this.addStatic('user', 'GET /api/backups', async (_req, res) => {
+    // Each backup's `files` (one entry per file) is left out unless `?files=1` asks for it:
+    // across many large backups it is the bulk of the answer, and `file_count`/`total_bytes` carry
+    // what the list shows.
+    this.addStatic('user', 'GET /api/backups', async (req, res) => {
       const bm = engine.getBackupManager();
       if (!bm) { jsonResponse(res, 200, { backups: [] }); return; }
-      const backups = bm.listBackups();
+      const withFiles = new URL(req.url ?? '', 'http://localhost').searchParams.get('files') === '1';
+      const listed = bm.listBackups();
+      const backups = withFiles ? listed : listed.map(({ files: _files, ...entry }) => entry);
       jsonResponse(res, 200, { backups });
     }, READS);
 
@@ -13795,7 +13867,8 @@ export class LynoxHTTPApi {
           wsAccess = workspaceAccessIfPresent();
           wsWalk = wsAccess === null ? null : await this._workspaceWalk(wsAccess, dataDir);
         } catch (err) {
-          process.stderr.write(`⚠ /api/data: workspace root unavailable: ${err instanceof Error ? err.message : String(err)}\n`);
+          // The walk's errno messages name the workspace entry, and those names are chosen by the agent or the user.
+          process.stderr.write(`⚠ /api/data: workspace root unavailable: ${processErrorText(err)}\n`);
           jsonResponse(res, 500, { deleted: false, failed: ['workspace'], error: 'Erasure incomplete — the workspace could not be reached, so nothing was erased' });
           return;
         }
@@ -14443,7 +14516,8 @@ export class LynoxHTTPApi {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === 'ENOENT') { errorResponse(res, 404, 'Directory not found'); return; }
         if (code === 'ENOTDIR') { errorResponse(res, 400, 'Not a directory'); return; }
-        console.error(`[lynox] GET /api/files failed: ${code ?? (err instanceof Error ? err.message : String(err))}`);
+        // The code alone where there is one; a WorkspaceRootError has none and names the workspace path.
+        console.error(`[lynox] GET /api/files failed: ${code ?? processErrorText(err)}`);
         errorResponse(res, 500, 'Could not read the directory');
       }
     }, free('creates the workspace directory when it is missing, and only reads otherwise'));

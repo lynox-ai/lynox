@@ -292,6 +292,10 @@ describe('where the stored Shopify list form is read', () => {
     'tools/builtin/bulk.ts | return form === SHOPIFY_LIST_FORM || form === SHOPIFY_MEDIA_',
     // A judge on the planner's form: only the product form takes one.
     'tools/builtin/bulk.ts | if (judgeInput !== undefined && form !== \'shopify\') throw ne',
+    // The image form on the planner's input: refused where the store connection may not write
+    // files, and named after a refused product plan only where it may.
+    'tools/builtin/bulk.ts | if (form === \'shopify_media\' && isShopifyStoreHostName(host)',
+    'tools/builtin/bulk.ts | const images = form !== \'shopify\' ? \'\' : mediaWritableFor(in',
     'tools/builtin/bulk.ts | import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listRea',
     // parseShopifyMediaListSource: the planner's image form and the form it is stored under.
     'core/bulk-list.ts | if (form === SHOPIFY_MEDIA_LIST_FORM) return parseShopifyMed',

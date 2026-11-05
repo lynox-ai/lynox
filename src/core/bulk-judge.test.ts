@@ -7,6 +7,7 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_JUDGED_RETENTION_MS, BULK_MAX_PREVIEWED_RUNS } from './bulk-ledger.js';
+import { BULK_NOTICES } from './bulk-notices.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
@@ -957,5 +958,17 @@ describe('what a verdict\'s text may not add (PRD shopify-preset §20.2 item 5)'
     // The twin: text without new markup passes, and markup the field already held is no addition.
     expect(verdictTextRefusal({ name: 'Mug, blue' }, { name: 'Mug' }, formless)).toBeNull();
     expect(verdictTextRefusal({ description: '<p>Old</p> and more' }, { description: '<p>Old</p>' }, formless)).toBeNull();
+  });
+});
+
+// ux Rest-P B11, B13: a refusal told to a German owner, lead and counts in German.
+describe('a judging refusal told to a German owner', () => {
+  it('names a run that does not exist, and one not ready and halted, in German', async () => {
+    const h = harness(() => ({ data: change({ title: 'x' }), costUsd: 0.01 }), { notices: BULK_NOTICES.de });
+    expect((await runBulkJudge('no-such-run', h.deps)).summary).toBe('Diesen Massenlauf mit Beurteilung gibt es nicht.');
+    // Planned and halted until its start: not ready, and halted.
+    const id = await plan(['A']);
+    expect((await runBulkJudge(id, h.deps)).summary).toMatch(/^Massenlauf nicht bereit zum Beurteilen und angehalten; nichts beurteilt\. Beurteilt 0, /);
+    expect(h.calls).toHaveLength(0);
   });
 });

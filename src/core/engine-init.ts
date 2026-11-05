@@ -492,6 +492,32 @@ export function renderSecretsBriefing(
   return compose([renderFence('secrets', lines.join('\n'))]);
 }
 
+const SECRETS_CLOSER = '\n</secrets>';
+const SECRETS_CUT_NOTE = '\n[...truncated]';
+
+/**
+ * Bound a rendered `<secrets>` listing to `max` characters without losing its closing tag. The
+ * wire capture blanks names and masks only between `<secrets>` and `</secrets>`
+ * (`redactWireUserMessage`), so a plain slice that cut the closer off left every name in the
+ * capture. The cut falls on an entry boundary, so no name is left half written: between two
+ * `secret:` references on the line of free names, else at a line break, which drops the cut line
+ * whole. The line of connection tokens is never cut inside, since a profile name it quotes may hold
+ * `, `. One entry longer than the whole bound leaves the frame empty.
+ */
+export function capSecretsListing(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const body = text.endsWith(SECRETS_CLOSER) ? text.slice(0, -SECRETS_CLOSER.length) : text;
+  const open = body.indexOf('>') + 1;
+  const budget = max - SECRETS_CLOSER.length - SECRETS_CUT_NOTE.length;
+  const head = body.slice(0, Math.max(open, budget));
+  const lineStart = Math.max(head.lastIndexOf('\n'), open - 1);
+  const line = head.slice(lineStart + 1);
+  const entry = line.startsWith('secret:') ? line.lastIndexOf(', secret:') : -1;
+  const cut = entry >= 0 ? lineStart + 1 + entry : lineStart;
+  const kept = body.slice(0, Math.max(cut, open));
+  return `${kept}${SECRETS_CUT_NOTE}${SECRETS_CLOSER}`;
+}
+
 export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   const parts: Part[] = [];
   let secretsBriefing: string | undefined;
@@ -1018,7 +1044,9 @@ export function setupMemoryStoreSubscription(
             process.stderr.write(`[lynox:trail] derived knowledge write refused: its row could not be written (${namespaceLabel(data.namespace)})\n`);
             return;
           }
-          process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${getErrorMessage(err)}\n`);
+          // The store runs entity extraction over the memory; a malformed stored alias list fails its JSON.parse with a
+          // SyntaxError that quotes entity names taken from run memory.
+          process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${processErrorText(err)}\n`);
         }
       })();
 

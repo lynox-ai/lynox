@@ -434,7 +434,7 @@ describe('InboxStateDb — rules', () => {
   });
 });
 
-describe('InboxStateDb — rules the agent proposes (PRD inbox-user-rules E7)', () => {
+describe('InboxStateDb — rules the agent proposes and the owner confirms', () => {
   const proposal = (over: Partial<Parameters<InboxStateDb['proposeRule']>[0]> = {}) => ({
     accountId: TEST_ACCOUNT.id, matcherKind: 'from' as const, matcherValue: 'kunde@example.com', name: 'Kunde', ...over,
   });

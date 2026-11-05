@@ -11,29 +11,79 @@ import type { MandateEnds } from '../core/mandate-ends.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal, planAuthorshipOfWorkflow, planMandate, mandateIdOf, planMembers, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
 import type { WorkflowAuthorship } from '../core/workflow-store.js';
 
+/** A saved workflow. `authors` is resolved by the caller, which already holds the workflow:
+ *  the mandates it depends on (none for the owner's), or `'unreadable'` when its authorship could
+ *  not be read. `ends` is the engine's store of mandate ends; without it no mandate can be told
+ *  live. */
+export interface SavedRunSource {
+  readonly kind: 'saved';
+  readonly workflowId: string;
+  readonly authors: readonly RequestPrincipal[] | 'unreadable';
+  readonly ends: Pick<MandateEnds, 'isLive'> | null;
+}
+
 export type RunSource =
-  /** A saved workflow. `authors` is resolved by the caller, which already holds the workflow:
-   *  the mandates it depends on (none for the owner's), or `'unreadable'` when its authorship could
-   *  not be read. `ends` is the engine's store of mandate ends; without it no mandate can be told
-   *  live. */
-  | {
-      readonly kind: 'saved';
-      readonly workflowId: string;
-      readonly authors: readonly RequestPrincipal[] | 'unreadable';
-      readonly ends: Pick<MandateEnds, 'isLive'> | null;
-    }
+  | SavedRunSource
   /** Steps the calling agent wrote for this run, which no saved workflow shaped. They run under the
    *  caller's own principal and lock. */
   | { readonly kind: 'adhoc' }
   /** A `runtime: 'pipeline'` step's sub-run. Its steps are part of the manifest that holds the
-   *  step, whose own source was checked when that run started. Accepted only below the top level. */
-  | { readonly kind: 'nested' };
+   *  step, whose own source was checked when that run started. Accepted only below the top level.
+   *  `within` is the saved workflow whose run holds this one, at any depth (absent for an ad-hoc
+   *  run): the sub-run reads its makers' access before each of its own steps, as the outer run
+   *  does before each of its steps (1184). */
+  | { readonly kind: 'nested'; readonly within?: SavedRunSource | undefined };
+
+/** The saved workflow a run belongs to: its own source, or for a sub-run the one that holds it. */
+export function heldSource(source: RunSource | undefined): SavedRunSource | undefined {
+  if (source === undefined) return undefined;
+  if (source.kind === 'saved') return source;
+  if (source.kind === 'nested') return source.within;
+  return undefined;
+}
 
 export const WORKFLOW_ENDED_REFUSAL = 'This workflow was set up or changed by someone whose access has ended, so it does not run.';
-// Texts reviewed with ux (U-122).
-export const WORKFLOW_ENDED_MID_RUN = 'The access of someone who set up or changed this workflow ended while it ran, so it stopped before its next step. '
+// Texts reviewed with ux (U-122; the stored error U-145).
+/** Why a run stopped when a maker's access ended mid-run; both texts below begin with it. */
+const ENDED_MID_RUN_CAUSE = 'The access of someone who set up or changed this workflow ended while it ran, so it stopped before its next step.';
+/** The run's stored error for that end: what the library shows the owner, and what the worker keys
+ *  on. It speaks to the person, not to the model (1184); the model's text is `WORKFLOW_ENDED_MID_RUN`. */
+export const WORKFLOW_ENDED_MID_RUN_ERROR = `${ENDED_MID_RUN_CAUSE} `
+  + 'Starting it again will not work. To finish the remaining steps, ask lynox in a chat to do them or to write a new workflow for them.';
+/** What the model is told, as the result's `endedBecause`, when a run ended for that cause. */
+export const WORKFLOW_ENDED_MID_RUN = `${ENDED_MID_RUN_CAUSE} `
   + 'The steps listed in this result ran; the others did not. Starting this workflow again is refused for the same reason, so do not start it again. '
   + 'If the remaining steps are still needed, tell the user they can describe them in chat and ask lynox to do them or to write a new workflow for them.';
+/** Why a run stopped when the read of its makers' access threw before a step: it stops
+ *  (fail-closed), but no end was found, so none is said (1184, U-145). */
+const END_CHECK_FAILED_CAUSE = 'Could not check whether the access of everyone who set up or changed this workflow is still active, so it stopped before its next step. '
+  + "No one's access is known to have ended.";
+/** The run's stored error for that stop, to the person. A new start runs the finished steps again:
+ *  only a chat's run can be retried from its results, and only while the engine keeps them. */
+export const WORKFLOW_END_CHECK_FAILED_ERROR = `${END_CHECK_FAILED_CAUSE} `
+  + 'You can start it again, but the steps that already ran will run again, so first check that this does no harm.';
+/** What the model is told, as the result's `endedBecause`, for that stop. */
+export const WORKFLOW_END_CHECK_FAILED = `${END_CHECK_FAILED_CAUSE} `
+  + "The steps listed in this result ran; the others did not. Do not say that anyone's access ended or name another cause. "
+  + 'Tell the user they can start it again, and that the steps that already ran would then run again. Do not start it yourself unless they ask.';
+/**
+ * A sub-run stopped because a maker's access ended, or because that read threw: thrown from the
+ * `runtime: 'pipeline'` step so the run that holds it takes `runError` as its own cause, word for
+ * word, instead of reading the access again (a second read can disagree with the first) or
+ * recording the step's failure (1184).
+ */
+export class NestedRunEndedError extends Error {
+  constructor(readonly runError: string, message: string) {
+    super(message);
+    this.name = 'NestedRunEndedError';
+  }
+}
+
+/** Whether a run's error is one of the two that stop a run before a step for its makers' access. */
+export function isAuthorStop(error: string | undefined): error is string {
+  return error === WORKFLOW_ENDED_MID_RUN_ERROR || error === WORKFLOW_END_CHECK_FAILED_ERROR;
+}
+
 export const WORKFLOW_UNREADABLE_REFUSAL = 'Could not read who set up this workflow, so it did not run.';
 export const NESTED_AT_TOP_REFUSAL = 'A nested run was started on its own, outside the run it belongs to, so it did not run.';
 

@@ -128,7 +128,7 @@ describe('InboxRulesLoader — ordering and isolation', () => {
   });
 });
 
-describe('InboxRulesLoader — only confirmed rules apply (PRD inbox-user-rules E7)', () => {
+describe('InboxRulesLoader — only confirmed rules apply, a proposal waits for the owner', () => {
   it('a rule the agent proposed matches nothing until the owner confirms it', () => {
     const p = inbox.proposeRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'waits@x', name: 'W' }, 10);
     const id = p.ok ? p.id : '';

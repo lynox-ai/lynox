@@ -58,9 +58,9 @@ import { PROVIDER_NOT_ON_LIST_REFUSAL, providerListApplies } from '../../core/co
 import { FixedTextError } from '../../core/error-egress.js';
 
 /**
- * Waiting rule proposals per account (PRD inbox-user-rules E7), as `MAX_PENDING_PER_TRIGGER` caps
- * the approval queue (`core/approval-filing.ts`): a run that reads hostile mail cannot fill the
- * owner's rule view.
+ * Waiting rule proposals per account (a proposal applies only once the owner confirms it), as
+ * `MAX_PENDING_PER_TRIGGER` caps the approval queue (`core/approval-filing.ts`): a run that reads
+ * hostile mail cannot fill the owner's rule view.
  */
 export const MAX_PENDING_RULE_PROPOSALS = 10;
 

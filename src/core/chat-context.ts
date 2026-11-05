@@ -714,6 +714,22 @@ export const APPROVAL_DRAFT_UNAVAILABLE =
   'The draft from the approval queue that this chat was opened on cannot be loaded here. ' +
   'Tell the user it is not available. Do not write the email from memory or look for it elsewhere; ask the user what they want to send.';
 
+/** How the block of a draft that DID load opens, one per way it loads ({@link approvalLoadable}). */
+const APPROVAL_DRAFT_MOVED_OPENER = '[Loaded draft moved from the approval queue — entry: ';
+const APPROVAL_DRAFT_NOT_SENT_OPENER = '[Loaded draft of an approved email that was not sent — entry: ';
+
+/**
+ * Whether a composed first message carries the loaded draft of an approval entry: a whole
+ * loaded-context block that opens as one of the two loaded-draft blocks. A draft that did not
+ * load ({@link APPROVAL_DRAFT_UNAVAILABLE}) does not count, and neither does a user who only
+ * types the opening line: without the closing sentinel there is no block. Read by the thread
+ * title (`approval-chat-title.ts`), which must not take the draft's subject.
+ */
+export function opensLoadedApprovalDraft(text: string): boolean {
+  return LOADED_CONTEXT_AT_START.test(text)
+    && (text.startsWith(APPROVAL_DRAFT_MOVED_OPENER) || text.startsWith(APPROVAL_DRAFT_NOT_SENT_OPENER));
+}
+
 /** Recipients as one line, at most {@link MAX_RECIPIENTS} of them, and how many were left out:
  *  that count is the engine's statement, so it goes into the framing, not beside the addresses. */
 function addressLine(list: ReadonlyArray<StoredAddress>): { line: string; left: number } {
@@ -877,8 +893,8 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   // The reason is a code from a fixed list, never the stored result's text: a provider's error
   // message is someone else's words.
   const head = loadable.as === 'moved'
-    ? `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`
-    : `[Loaded draft of an approved email that was not sent — entry: ${entry.id} · ${filing.kind} · reason: ${loadable.reason} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
+    ? `${APPROVAL_DRAFT_MOVED_OPENER}${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`
+    : `${APPROVAL_DRAFT_NOT_SENT_OPENER}${entry.id} · ${filing.kind} · reason: ${loadable.reason} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
   const fields = wrapChannelMessage({
     source: `approval:${entry.id}`,
     injection,
