@@ -34,6 +34,7 @@ import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 import { containedTextKeys, readContainedUnknown, type ContainedUnknown } from './contained-text.js';
+import { stripNowMarker } from '../utils/now-marker.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
 // `import { UsageInfo } from './chat.svelte.js'` callers keep working.
@@ -707,6 +708,7 @@ if (typeof window !== 'undefined') {
 						let lastRole: string | undefined;
 						let activeRun: boolean | undefined;
 						let scheduledQuestion = false;
+						let lastUserText: string | undefined;
 						if (!probeSid) return;
 						try {
 							const ar = await fetch(`${getApiBase()}/runs/active`);
@@ -720,20 +722,23 @@ if (typeof window !== 'undefined') {
 							const enc = encodeURIComponent(probeSid);
 							const r = await fetch(`${getApiBase()}/threads/${enc}/messages`);
 							if (r.ok) {
-								const md = await r.json() as { messages?: Array<{ role?: string }> };
+								const md = await r.json() as { messages?: Array<{ role?: string; content?: unknown }> };
 								// Parsed shape, not just status — see the same guard on the
 								// drop path: a captive portal answers 200 with HTML.
 								if (Array.isArray(md.messages)) {
 									reached = true;
 									lastRole = md.messages.at(-1)?.role;
+									const lastUser = md.messages.filter((m) => m.role === 'user').at(-1)?.content;
+									if (typeof lastUser === 'string') lastUserText = stripNowMarker(lastUser);
 								}
 							}
 						} catch { /* still blind — shouldRefireOfflineTurn declines */ }
 						if (sessionId !== probeSid) return; // thread switched mid-probe
-						// A scheduled run's question waits here (U-155). The transcript ends on it and reads
-						// as "answered", which cleared the failed message and lost it. It stays failed and
+						// A scheduled run's question waits here (U-155). A transcript ending on it reads as
+						// "answered", which cleared the failed message and lost it. Unless the transcript's
+						// last own message is this one (it arrived: then as before), it stays failed and
 						// marked offline, is not sent past the question, and the card comes back.
-						if (scheduledQuestion) {
+						if (scheduledQuestion && lastUserText !== lastFailed.content) {
 							sayQuestionWaiting(await checkPendingPrompt());
 							return;
 						}
@@ -760,8 +765,9 @@ if (typeof window !== 'undefined') {
 				return;
 			}
 			// Asked first too: a message held at a scheduled run's question stays failed, and the
-			// reconnect must not send it past the question the tap stopped at (U-155).
-			void askBeforeResend().then((resend) => { if (resend) refireFailedTurn(lastFailed); });
+			// reconnect must not send it past the question the tap stopped at (U-155). When the
+			// server cannot be asked yet, it is sent again as before.
+			void askBeforeResend({ unreachableSends: true }).then((resend) => { if (resend) refireFailedTurn(lastFailed); });
 		}
 	});
 	// Flush pending persist on tab close to prevent data loss
@@ -1310,7 +1316,7 @@ let _resendProbeInFlight = false;
  * attached. A scheduled run's question waiting there holds it back too: the user is told and
  * the question's card is brought back. Resolves whether to send; never rejects.
  */
-async function askBeforeResend(): Promise<boolean> {
+async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promise<boolean> {
 	if (_resendProbeInFlight || isStreaming) return false;
 	const sid = sessionId;
 	// No session yet: the failed turn never reached one, so nothing can be running.
@@ -1325,6 +1331,10 @@ async function askBeforeResend(): Promise<boolean> {
 		live = selectReattachTarget(body, sid);
 		scheduledQuestion = scheduledQuestionWaits(body, sid);
 	} catch {
+		// The reconnect's automatic re-send went ahead before it asked first, and still does when
+		// the question cannot be asked, silently: right after `online` the network often is not
+		// back yet, and the re-send waits for it.
+		if (opts.unreachableSends === true) return sessionId === sid;
 		// Not "nothing is running": the question could not be asked, so nothing is sent.
 		if (sessionId === sid) addToast(t('chat.error_connection'), 'error', 6000);
 		return false;
@@ -1340,8 +1350,16 @@ async function askBeforeResend(): Promise<boolean> {
 		return false;
 	}
 	if (live === null) return true;
-	// A run that waits for the user's answer is not working: the way on is to answer it.
-	addToast(t(live.status === 'awaiting_input' ? 'chat.question_waiting' : 'chat.still_running'), 'info', 6000);
+	// A run that waits for the user's answer is not working: the way on is to answer it. The
+	// sentence follows the card, as for a scheduled run's question; with none known, the one
+	// that names no card.
+	if (live.status === 'awaiting_input') {
+		const card = await checkPendingPrompt();
+		if (sessionId !== sid) return false;
+		addToast(t(questionWaitingKey(card) ?? 'chat.question_waiting_plain'), 'info', 6000);
+	} else {
+		addToast(t('chat.still_running'), 'info', 6000);
+	}
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its
@@ -1352,18 +1370,20 @@ async function askBeforeResend(): Promise<boolean> {
 
 /**
  * Says that a scheduled run's question holds a message back, by the card that came back (U-155).
- * A decision card (approval, deep consent) has no X to cancel it, so its sentence names none. With
- * no question or decision card back, nothing is said: a sentence about one could be false.
+ * A decision card (approval, deep consent) has no X to cancel it, so its sentence names none, nor
+ * does another kind of card (several questions, a secret, a mail connection). With no card back,
+ * nothing is said: a sentence about one could be false.
  */
 function sayQuestionWaiting(card: PendingCard): void {
 	const key = questionWaitingKey(card);
 	if (key !== null) addToast(t(key), 'info', 6000);
 }
 
-/** The sentence for `card`, or null when it is no question or decision card. */
+/** The sentence for `card`, or null when no card came back. */
 export function questionWaitingKey(card: PendingCard): string | null {
 	if (card === 'decision') return 'chat.question_waiting_decision';
 	if (card === 'question') return 'chat.question_waiting';
+	if (card === 'other') return 'chat.question_waiting_plain';
 	return null;
 }
 
@@ -3755,10 +3775,12 @@ export async function retryInterruptedRun(): Promise<void> {
 		if (m && m.role === 'user' && m.content) { lastUserText = m.content; break; }
 	}
 	// Asked before the dismiss: a waiting question (or a live run, or no answer from the server)
-	// keeps the banner and its Retry, and nothing is sent. It also returns false when the chat
-	// changed meanwhile, so the retry never goes into another chat.
+	// keeps the banner and its Retry, and nothing is sent. The chat is checked after each await,
+	// so the retry never goes into a chat opened meanwhile.
+	const sid = sessionId;
 	if (lastUserText && !await askBeforeResend()) return;
 	await dismissInterruptedRun();
+	if (sessionId !== sid) return;
 	if (lastUserText) await sendMessage(lastUserText);
 }
 
