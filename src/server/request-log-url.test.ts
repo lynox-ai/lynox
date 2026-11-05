@@ -32,6 +32,9 @@ describe('requestLogUrl', () => {
     const key = `sk-ant-api03-${'A1b2C3d4'.repeat(6)}`;
     expect(requestLogUrl(`/api/memory/${key}`)).not.toContain(key);
     expect(requestLogUrl('/api/threads/abc-123')).toBe('/api/threads/abc-123');
+    const opaque = 'Ab3dEfGh'.repeat(6);
+    expect(requestLogUrl(`/api/memory/${opaque}`)).not.toContain(opaque);
+    expect(requestLogUrl('/c/jane%ef%bc%a0customer.ch')).toBe('/c/<address>');
   });
 
   it('replaces everything after an encoded question mark in the path', () => {
