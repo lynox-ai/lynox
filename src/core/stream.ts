@@ -15,12 +15,11 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import type { ImitationHit, ToolCallImitationDetector } from './tool-call-imitation.js';
 
-/** What a reply cut off mid-stream has used so far: the usage the provider reported
- *  (`message_start`, any `message_delta`), and how many text and thinking characters
- *  were streamed, to estimate the output from. */
-export interface PartialUsage {
+/** A reply cut off mid-stream, as far as it came: the usage the provider reported
+ *  (`message_start`, any `message_delta`) and the content blocks streamed so far. */
+export interface PartialReply {
   readonly usage: BetaUsage | undefined;
-  readonly streamedChars: number;
+  readonly content: readonly BetaContentBlock[];
 }
 
 /**
@@ -31,7 +30,7 @@ export interface PartialUsage {
  */
 export interface ImitationGuard {
   readonly detector: ToolCallImitationDetector;
-  readonly stop: (hit: ImitationHit, partial: PartialUsage) => Error;
+  readonly stop: (hit: ImitationHit, partial: PartialReply) => Error;
 }
 
 export class StreamProcessor {
@@ -43,7 +42,6 @@ export class StreamProcessor {
 
   /** Usage seen so far in the current stream; the `message_delta` merge updates it in place. */
   private _usage: BetaUsage | undefined;
-  private _streamedChars = 0;
 
   async process(stream: AsyncIterable<BetaRawMessageStreamEvent>): Promise<{
     content: BetaContentBlock[];
@@ -135,11 +133,10 @@ export class StreamProcessor {
         const textDelta = delta as BetaTextDelta;
         const textBlock = block as BetaTextBlock;
         (textBlock as { text: string }).text += textDelta.text;
-        this._streamedChars += textDelta.text.length;
         // Checked before the delta is shown: the delta that completes a stopping
         // copy is not rendered.
         const hit = this.guard?.detector.push(textDelta.text) ?? null;
-        if (hit !== null && this.guard) throw this.guard.stop(hit, { usage: this._usage, streamedChars: this._streamedChars });
+        if (hit !== null && this.guard) throw this.guard.stop(hit, { usage: this._usage, content });
         await this.onEvent({ type: 'text', text: textDelta.text, agent: this.agentName });
         break;
       }
@@ -148,7 +145,6 @@ export class StreamProcessor {
         const thinkingDelta = delta as BetaThinkingDelta;
         const thinkingBlock = block as BetaThinkingBlock;
         (thinkingBlock as { thinking: string }).thinking += thinkingDelta.thinking;
-        this._streamedChars += thinkingDelta.thinking.length;
         await this.onEvent({ type: 'thinking', thinking: thinkingDelta.thinking, agent: this.agentName });
         break;
       }

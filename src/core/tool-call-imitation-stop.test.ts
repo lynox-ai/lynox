@@ -61,6 +61,8 @@ import { reloadConfig } from './config.js';
 import { SessionStore } from './session-store.js';
 import { readRunStop, runStopText, applyRunStops } from './run-stop.js';
 import { TOOL_CALL_IMITATION_REPEATS } from './tool-call-imitation.js';
+import { abortedCallCost, abortedCallCounts } from './aborted-call.js';
+import { calculateCost } from './pricing.js';
 import type { Session } from './session.js';
 import type { ToolEntry } from '../types/index.js';
 import type { LynoxConfig } from '../types/config.js';
@@ -176,8 +178,18 @@ function deltaCompletingCopy(n: number, step: number): number {
 describe('a reply that writes the same tool call out as text', { timeout: 60_000 }, () => {
   it('is stopped while it streams: question and completed pairs stay, the text goes, the call ends upstream, no retry', async () => {
     const engine = await boot();
+    const debited = new Map<string, number[]>();
+    engine.registerHooks({ onAfterRun: (runId: string, costUsd: number) => { debited.set(runId, [...(debited.get(runId) ?? []), costUsd]); } });
     const session = engine.createSession();
     handler.mockResolvedValue('200 OK, order list');
+    // Per call: the run's signal, and whether the call's own signal was live when it started.
+    const runSignals: AbortSignal[] = [];
+    const liveAtStart: boolean[] = [];
+    onCall.fn = () => {
+      const run = (session.getAgent() as unknown as { abortController: AbortController | null }).abortController;
+      if (run) runSignals.push(run.signal);
+      liveAtStart.push(calls.at(-1)!.signal?.aborted === false);
+    };
     toolUseReply('tu_list', { url: 'https://shop.example.com/api/orders', method: 'GET' });
     const step = 9;
     const looping = textReply(COPY.repeat(5), step);
@@ -196,11 +208,20 @@ describe('a reply that writes the same tool call out as text', { timeout: 60_000
     // The request itself was ended through the call's own signal, before the stream was left.
     expect(looping.abortedAtReturn).toBe(true);
 
-    // What the stopped call used is recorded with the run: both calls' input tokens, and the
-    // first call's output plus an estimate for the text streamed before the stop.
+    // The stop leaves the run's own signal alone.
+    expect(runSignals).toHaveLength(2);
+    expect(runSignals[1]!.aborted).toBe(false);
+
+    // The stopped call is booked as an aborted call: its estimate goes to the run's cost line,
+    // and none of it to the tenant debit, which gets the finished call's exact cost only.
     const run = engine.getRunHistory()!.getRunsBySession(session.sessionId)[0]!;
-    expect(run.tokens_in).toBe(200);
-    expect(run.tokens_out).toBeGreaterThan(20);
+    const finishedCost = calculateCost(run.model_id, { input_tokens: 100, output_tokens: 20 });
+    expect(run.tokens_in).toBe(100);
+    expect(run.tokens_out).toBe(20);
+    expect(run.cost_usd).toBeGreaterThan(finishedCost);
+    const debit = debited.get(run.id) ?? [];
+    expect(debit).toHaveLength(1);
+    expect(debit[0]).toBeCloseTo(finishedCost, 12);
 
     const live = session.getAgent()!.getMessages();
     // The question and the completed pair; nothing of the stopped reply.
@@ -227,7 +248,9 @@ describe('a reply that writes the same tool call out as text', { timeout: 60_000
     expect(outgoingTexts(applyRunStops(live)).at(-1)).toBe(runStopText({ code: 'tool_call_imitation' }));
     expect(runStopText({ code: 'tool_call_imitation' })).toContain('wrote a tool call out as text');
     expect(runStopText({ code: 'tool_call_imitation' })).toContain('Nothing of it was run');
-    // A finished call's controller is released after it, so nothing of it can run on.
+    // The next call starts with a live signal, and its controller is released after it, so
+    // nothing of it can run on.
+    expect(liveAtStart.at(-1)).toBe(true);
     expect(calls.at(-1)!.signal?.aborted).toBe(true);
   });
 
@@ -302,22 +325,45 @@ describe('the per-call controller on a long run', () => {
 });
 
 describe('what a stopped call used', () => {
-  it('goes to the cost guard and to a turn_end event, input as reported and output estimated from the text', async () => {
-    const events: Array<{ type: string; stop_reason?: string; usage?: { input_tokens: number; output_tokens: number } }> = [];
+  type Booked = { costGuard: { capOnlyUSD: number } };
+  const site = 'agent.tool_call_imitation';
+
+  it('is booked as an aborted call: the bound to the caps, the estimate to the cost line, no turn usage', async () => {
+    const events: Array<{ type: string }> = [];
+    const counters = { costUSD: 0, spawnCount: 0, spawnCostUSD: 0 } as unknown as import('../types/agent.js').SessionCounters;
     const agent = new Agent({
-      name: 'test', model: 'claude-sonnet-4-6', tools: [sendTool], costGuard: { maxBudgetUSD: 100 },
-      onStream: (e) => { events.push(e as (typeof events)[number]); },
+      name: 'test', model: 'claude-sonnet-4-6', tools: [sendTool], costGuard: { maxBudgetUSD: 100 }, sessionCounters: counters,
+      onStream: (e) => { events.push(e as { type: string }); },
     });
+    const before = abortedCallCounts().notBilled[site] ?? 0;
+    const uncountedBefore = abortedCallCounts().uncounted[site] ?? 0;
     textReply(COPY.repeat(5), 9);
-    const err = await agent.send('place the order').catch((e: unknown) => e);
+    const err = await agent.send('place the order').catch((e: unknown) => e) as ToolCallImitationError;
     expect(err).toBeInstanceOf(ToolCallImitationError);
-    const snap = agent.getCostSnapshot()!;
-    expect(snap.inputTokens).toBe(100);
-    expect(snap.outputTokens).toBeGreaterThan(0);
-    const end = events.filter((e) => e.type === 'turn_end');
-    expect(end).toHaveLength(1);
-    expect(end[0]!.stop_reason).toBe('tool_call_imitation');
-    expect(end[0]!.usage).toMatchObject({ input_tokens: 100, output_tokens: snap.outputTokens });
-    expect((err as ToolCallImitationError).usage?.output_tokens).toBe(snap.outputTokens);
+    const capOnly = (agent as unknown as Booked).costGuard.capOnlyUSD;
+    const estimate = agent.getHelperCostUsd();
+    expect(estimate).toBeGreaterThan(0);
+    expect(capOnly).toBeGreaterThan(estimate);
+    expect(counters.costUSD).toBeCloseTo(capOnly, 12);
+    // Not as a finished call's usage: no turn_end, and the guard counted no tokens.
+    expect(events.filter((e) => e.type === 'turn_end')).toHaveLength(0);
+    expect(agent.getCostSnapshot()!.inputTokens).toBe(0);
+    // Reported per site; the provider counted this prompt (message_start carried 100).
+    expect(abortedCallCounts().notBilled[site]).toBe(before + 1);
+    expect(abortedCallCounts().uncounted[site] ?? 0).toBe(uncountedBefore);
+  });
+
+  it('estimates the prompt from the request when the wire reports no input count', async () => {
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [sendTool], costGuard: { maxBudgetUSD: 100 } });
+    const uncountedBefore = abortedCallCounts().uncounted[site] ?? 0;
+    const s = textReply(COPY.repeat(5), 9);
+    // The openai-compatible adapter's message_start carries no input count.
+    (s.events[0] as { message: { usage: { input_tokens: number } } }).message.usage.input_tokens = 0;
+    const err = await agent.send('place the order').catch((e: unknown) => e) as ToolCallImitationError;
+    expect(err).toBeInstanceOf(ToolCallImitationError);
+    expect(abortedCallCounts().uncounted[site]).toBe(uncountedBefore + 1);
+    // More than the output alone: the request's size priced as input.
+    const outputOnly = abortedCallCost({ model: 'claude-sonnet-4-6', maxTokens: (agent as unknown as { maxTokens: number }).maxTokens, request: '', partial: err.partial }).estimateUsd;
+    expect(agent.getHelperCostUsd()).toBeGreaterThan(outputOnly);
   });
 });

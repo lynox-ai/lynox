@@ -31,7 +31,7 @@ import { headlessRefusalNote } from './write-notes.js';
 import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile, DEFAULT_MAX_TOOL_RESULT_CHARS, MISTRAL_EU_HOST, MISTRAL_GLOBAL_HOST } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
-import { StreamProcessor, type PartialUsage } from './stream.js';
+import { StreamProcessor, type PartialReply } from './stream.js';
 import { ToolCallImitationDetector, imitationToolsFrom } from './tool-call-imitation.js';
 import { CostGuard } from './cost-guard.js';
 import { classifyProviderFailure, type RunFailure } from './provider-failure.js';
@@ -409,13 +409,13 @@ export class ThinkingOnlyLoopError extends ContinuationLoopError {
 export class ToolCallImitationError extends RunAbortedError {
   /** The tool the repeated text names or whose input it carries, when known; for logs. */
   readonly toolName: string | undefined;
-  /** What the stopped call used up to the stop. The provider bills it, so it is recorded. */
-  readonly usage: BetaUsage | undefined;
-  constructor(toolName?: string | undefined, usage?: BetaUsage | undefined) {
+  /** The stopped reply as far as it came; the provider bills it, so the call is booked from it. */
+  readonly partial: PartialReply | undefined;
+  constructor(toolName?: string | undefined, partial?: PartialReply | undefined) {
     super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
     this.name = 'ToolCallImitationError';
     this.toolName = toolName;
-    this.usage = usage;
+    this.partial = partial;
   }
 }
 
@@ -2568,6 +2568,9 @@ export class Agent implements IAgent {
    * one, on roughly every turn that needs the recovery. Accumulated here rather than folded
    * into `usage`, because these tokens are priced on the FAST model and adding them to a run's
    * own token counts would misprice them at the run's `pricePerM`.
+   *
+   * It also carries the estimate of aborted calls (`_bookAbortedHelper`, `_bookStoppedCall`),
+   * which are never debited.
    */
   private _helperCostUsd = 0;
 
@@ -3756,7 +3759,7 @@ export class Agent implements IAgent {
             detector: new ToolCallImitationDetector(imitationTools),
             stop: (hit, partial) => {
               callController.abort();
-              return new ToolCallImitationError(hit.toolName, this._stoppedCallUsage(partial));
+              return new ToolCallImitationError(hit.toolName, partial);
             },
           }
           : undefined);
@@ -3773,9 +3776,9 @@ export class Agent implements IAgent {
       } catch (err: unknown) {
         if (signal?.aborted) throw err;
         // The reply was stopped on purpose; the same request would write the same text again.
-        // What it used is booked like a finished call's usage before the run ends.
+        // What it used is booked as an aborted call before the run ends.
         if (err instanceof ToolCallImitationError) {
-          await this._recordStoppedCallUsage(err.usage);
+          this._bookStoppedCall(err.partial, { system: systemBlocks, messages: outboundMessages, tools: toolsDef });
           throw err;
         }
         if (attempt < Agent.MAX_RETRIES && isRetryable(err)) {
@@ -3810,35 +3813,22 @@ export class Agent implements IAgent {
     throw new Error('Exhausted retries');
   }
 
-  /** The usage of a call cut off mid-stream: what the provider reported so far, with the
-   *  output at least the estimate from the streamed characters. */
-  private _stoppedCallUsage(partial: PartialUsage): BetaUsage {
-    const u = partial.usage;
-    // A provider may report a small running count at the start; the streamed text is the
-    // better floor until its final count arrives.
-    const estimatedOut = Math.ceil(partial.streamedChars / this._charsPerToken);
-    return {
-      cache_creation: u?.cache_creation ?? null,
-      cache_creation_input_tokens: u?.cache_creation_input_tokens ?? null,
-      cache_read_input_tokens: u?.cache_read_input_tokens ?? null,
-      inference_geo: u?.inference_geo ?? null,
-      input_tokens: u?.input_tokens ?? 0,
-      iterations: u?.iterations ?? null,
-      output_tokens: Math.max(u?.output_tokens ?? 0, estimatedOut),
-      server_tool_use: u?.server_tool_use ?? null,
-      service_tier: u?.service_tier ?? null,
-      speed: u?.speed ?? null,
-    };
-  }
-
-  /** Books a stopped call's usage where a finished call's goes: the `turn_end` event the
-   *  session sums into the run's tokens and cost, and the cost guard. */
-  private async _recordStoppedCallUsage(usage: BetaUsage | undefined): Promise<void> {
-    if (usage === undefined) return;
-    if (this.onStream) {
-      await this.onStream({ type: 'turn_end', stop_reason: 'tool_call_imitation', usage, agent: this.name });
+  /**
+   * Book a call the guard stopped mid-stream, as an aborted call (aborted-call.ts): the run
+   * ceiling and the session cap get the upper bound, the run's cost line gets the estimate,
+   * and the tenant debit gets nothing. The prompt is the provider's count when it sent one,
+   * else the request's size.
+   */
+  private _bookStoppedCall(partial: PartialReply | undefined, request: unknown): void {
+    try {
+      const cost = abortedCallCost({ model: this.model, maxTokens: this.maxTokens, request, partial });
+      this.costGuard?.recordCapOnlyCost(cost.upperBoundUsd);
+      recordSessionCost(this.sessionCounters, cost.upperBoundUsd);
+      this._helperCostUsd += cost.estimateUsd;
+      reportAbortedCall('agent.tool_call_imitation', this.model, cost);
+    } catch {
+      // Booking must not replace the stop it books.
     }
-    this.costGuard?.recordTurn(usage);
   }
 
   private _buildSystemPrompt(): Array<BetaTextBlockParam & { cache_control?: BetaCacheControlEphemeral }> {

@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import {
   MAX_COPY_GAP,
   MAX_UNIT_CHARS,
-  PLACEHOLDER_VALUES,
   TOOL_CALL_IMITATION_REPEATS,
   ToolCallImitationDetector,
   imitationToolsFrom,
@@ -58,7 +57,7 @@ describe('ToolCallImitationDetector', () => {
       expect(hit!.count).toBe(3);
     });
 
-    it('lets a reply show a call as an example', () => {
+    it('reads a reply that shows a call as an example to the end', () => {
       expect(feed(times(2, () => unit)).hit).toBeNull();
     });
 
@@ -90,7 +89,7 @@ describe('ToolCallImitationDetector', () => {
     expect(feed(`${a}\n${b}\n${c}\n`).hit).toBeNull();
   });
 
-  it('lets the user\'s requested list of example requests through', () => {
+  it('reads a requested list of example requests to the end', () => {
     const text = times(6, (i) => `Example ${String(i + 1)}:\n{"url": "https://api.example.com/items/${String(i)}", "method": "GET"}`);
     expect(feed(text).hit).toBeNull();
     expect(feed(text, 1).hit).toBeNull();
@@ -132,27 +131,24 @@ describe('ToolCallImitationDetector', () => {
     expect(feed(text, 5).hit).not.toBeNull();
   });
 
-  it('reads a long ordinary answer without stopping it, in time that grows linearly with its length', () => {
+  it('reads a long ordinary answer without stopping it, with work that grows linearly with its length', () => {
     const para = 'The quarterly report shows revenue of 1.2M, up 4% on the year (see table 3). '
       + 'Costs {fixed and variable} were flat; the http_request budget line is unchanged. '
       + 'Example config: {"region": "eu", "tier": "pro"}. Next steps follow below.\n';
     const code = 'function f(a) { if (a) { return { x: a, y: [1, 2, 3] }; } return null; }\n';
     const answer = (n: number): string => { let t = ''; while (t.length < n) t += para + code; return t; };
-    const best = (text: string): number => {
-      let min = Infinity;
-      for (let r = 0; r < 3; r++) {
-        const started = performance.now();
-        expect(feed(text, 4).hit).toBeNull();
-        min = Math.min(min, performance.now() - started);
-      }
-      return min;
+    const work = (text: string): number => {
+      const d = new ToolCallImitationDetector(TOOLS);
+      expect(feed(text, 4, d).hit).toBeNull();
+      return d.charsExamined();
     };
-    best(answer(50_000)); // warm-up
-    const small = best(answer(100_000));
-    const large = best(answer(400_000));
-    // Four times the text: about four times the time. Re-reading the whole reply on every
-    // delta made it about sixteen.
-    expect(large / small).toBeLessThan(6);
+    const small = work(answer(100_000));
+    const large = work(answer(400_000));
+    expect(small).toBeGreaterThan(100_000);
+    // Four times the text, about four times the characters examined. Re-reading the whole
+    // reply on every delta made it about sixteen.
+    expect(large / small).toBeGreaterThan(3.5);
+    expect(large / small).toBeLessThan(4.5);
   });
 });
 
@@ -160,6 +156,7 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
   const SCHEMAS = imitationToolsFrom([
     { name: 'contacts_save', input_schema: { properties: { company: {}, email: {}, name: {}, notes: {}, phone: {}, tags: {}, type: {} } } },
     { name: 'read_file', input_schema: { properties: { path: {} } } },
+    { name: 'write_file', input_schema: { properties: { path: {}, content: {} } } },
     { name: 'bash', input_schema: { properties: { command: {}, timeout_ms: {} } } },
     { name: 'save_workflow', input_schema: { properties: { description: {}, name: {}, workflow_id: {} } } },
     { name: 'task_create', input_schema: { properties: { assignee: {}, description: {}, due_date: {}, priority: {}, title: {}, tags: {} } } },
@@ -167,11 +164,22 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
   ]);
   const run = (text: string, step = 5): ImitationHit | null => feed(text, step, new ToolCallImitationDetector(SCHEMAS)).hit;
 
-  it('treats the listed slot values as placeholders', () => {
-    expect([...PLACEHOLDER_VALUES]).toEqual(['', '...', '…', 'tbd', 'xxx', 'string', 'example', 'todo']);
+  describe.each([[''], ['...'], ['…'], ['TBD'], [' xxx '], ['String'], ['example'], ['todo'], ['<url>'], [null]])('a schema whose fields all hold %j', (slot) => {
+    it('is read to the end', () => {
+      const row = JSON.stringify({ url: slot, method: slot });
+      expect(run([row, row, row].join('\n') + '\n')).toBeNull();
+    });
   });
 
-  it('lets an import template with empty fields through', () => {
+  it('a request with concrete values in the same shape is a call', () => {
+    const row = JSON.stringify({ url: 'https://x.test/a', method: 'GET' });
+    expect(run([row, row, row].join('\n') + '\n')?.toolName).toBe('http_request');
+    // One concrete field is enough.
+    const mixed = JSON.stringify({ url: 'https://x.test/a', method: '' });
+    expect(run([mixed, mixed, mixed].join('\n') + '\n')?.toolName).toBe('http_request');
+  });
+
+  it('reads an import template to the end', () => {
     const row = '  {"name": "", "email": "", "phone": ""}';
     expect(run(`Use this import template:\n\`\`\`json\n[\n${[row, row, row].join(',\n')}\n]\n\`\`\`\n`)).toBeNull();
     const nulls = '{"name": null, "email": null, "phone": null}';
@@ -183,7 +191,7 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     expect(run(`[\n${[filled, filled, filled].join(',\n')}\n]\n`)?.toolName).toBe('contacts_save');
   });
 
-  it('lets a format description with placeholder values through', () => {
+  it('reads a format description to the end', () => {
     const row = '{"name": "...", "description": "..."}';
     expect(run(`Format:\n[${[row, row, row].join(', ')}]`)).toBeNull();
     expect(run(['{"name": "<name>", "description": "<text>"}', '{"name": "<name>", "description": "<text>"}', '{"name": "<name>", "description": "<text>"}'].join('\n'))).toBeNull();
@@ -191,7 +199,7 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     expect(run(`[${[filled, filled, filled].join(', ')}]`)?.toolName).toBe('save_workflow');
   });
 
-  it('lets records that share a nested object through', () => {
+  it('reads a list of records that share a nested object to the end', () => {
     const text = '[{"title":"A","x":{"priority":"high","description":"Fix login"}},{"title":"B","x":{"priority":"high","description":"Fix login"}},{"title":"C","x":{"priority":"high","description":"Fix login"}}]';
     expect(run(text)).toBeNull();
     // The nested object on its own, three times in a row, stops.
@@ -199,8 +207,8 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     expect(run([own, own, own].join('\n') + '\n')?.toolName).toBe('task_create');
   });
 
-  it('lets code that defines and uses a function of a tool\'s name through', () => {
-    const filler = '# ' + 'read the configuration and validate every field before use. '.repeat(6) + '\n';
+  it('reads code that defines and uses a function of a tool\'s name to the end', () => {
+    const filler = '# ' + 'read the configuration and validate every field before use. '.repeat(36) + '\n';
     expect(filler.length).toBeGreaterThan(MAX_COPY_GAP);
     const code = `def read_file(path):\n    with open(path) as f:\n        return f.read()\n${filler}data = read_file(path)\n${filler}print(len(read_file(path)))\n`;
     expect(run(code)).toBeNull();
@@ -212,7 +220,7 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     expect(run('bash("ls")\nbash("ls")\nbash("ls")\n', 1)?.toolName).toBe('bash');
   });
 
-  it('lets code that defines a function of a tool\'s name and calls it nearby through', () => {
+  it('reads code that defines a function of a tool\'s name and calls it nearby to the end', () => {
     const python = 'def read_file(path):\n    with open(path) as f:\n        return f.read()\n\nif os.path.exists(path):\n    data = read_file(path)\nelse:\n    log(path)\nprint(len(read_file(path)))\n';
     expect(run(python)).toBeNull();
     expect(run(python, 1)).toBeNull();
@@ -223,9 +231,44 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     expect(run('x = 1\nbash("ls");\nbash("ls");\nbash("ls");\n')?.toolName).toBe('bash');
   });
 
-  it('lets code that calls a method of a tool\'s name on another object through', () => {
+  it('reads code that calls a method of that name on another object to the end', () => {
     expect(run('client.read_file(path)\nclient.read_file(path)\nclient.read_file(path)\n')).toBeNull();
     expect(run('fs . read_file(path)\nfs . read_file(path)\nfs . read_file(path)\n', 1)).toBeNull();
+  });
+
+  describe.each([
+    ['default_api.', 'print(default_api.read_file(path="a.txt"))', 'read_file'],
+    ['to=functions.', 'to=functions.bash {"command":"ls"}', 'bash'],
+    ['functions.', 'functions.read_file(path="a.txt")', 'read_file'],
+    ['tools.', 'tools.http_request(url="https://a.ch", method="GET")', 'http_request'],
+    ['tool.', 'tool.bash(command="ls")', 'bash'],
+  ])('a call through the tool namespace %s', (_ns, unit, tool) => {
+    it('stops on the third copy', () => {
+      expect(run([unit, unit, unit].join('\n') + '\n')?.toolName).toBe(tool);
+      expect(run([unit, unit, unit].join('\n') + '\n', 1)?.toolName).toBe(tool);
+    });
+  });
+
+  describe.each([
+    ['a call wrapped in a list', '{"calls":[{"path":"a.txt","content":"hi"}]}', 'write_file'],
+    ['a named call in a tool_calls list', '{"tool_calls":[{"name":"bash","arguments":{"command":"ls"}}]}', 'bash'],
+    ['a function call in a tool_calls list', '{"tool_calls":[{"type":"function","function":{"name":"bash","arguments":"{}"}}]}', 'bash'],
+  ])('%s', (_label, unit, tool) => {
+    it('stops ten copies, one per line and on one line', () => {
+      expect(run(Array.from({ length: 10 }, () => unit).join('\n'))?.toolName).toBe(tool);
+      expect(run(unit.repeat(10), 1)?.toolName).toBe(tool);
+    });
+  });
+
+  it('stops a call that comes back after a long made-up result each time', () => {
+    const copy = `<tool_call>{"name":"read_file","arguments":{"path":"a.txt"}}</tool_call>\n<tool_response>\n${'lorem ipsum '.repeat(35)}\n</tool_response>`;
+    expect(run(Array.from({ length: 6 }, () => copy).join('\n'))?.toolName).toBe('read_file');
+  });
+
+  it('stops two long calls that alternate', () => {
+    const a = `<tool_call>{"name":"write_file","arguments":{"path":"a","content":"${'x'.repeat(500)}"}}</tool_call>`;
+    const b = `<tool_call>{"name":"write_file","arguments":{"path":"b","content":"${'x'.repeat(500)}"}}</tool_call>`;
+    expect(run(Array.from({ length: 5 }, () => `${a}\n${b}`).join('\n'))?.toolName).toBe('write_file');
   });
 
   it('counts copies that follow each other closely as one run', () => {
@@ -233,7 +276,6 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     const call = 'bash("ls")';
     expect(run(`${call}\n${call}\n${gap}${call}\n${call}\n`)).toBeNull();
     expect(run(`${call}\n${call}\n${gap}${call}\n${call}\n${call}\n`)?.count).toBe(3);
-    // A gap of exactly the limit still continues the run.
     expect(run(`${call}${'~'.repeat(MAX_COPY_GAP)}${call}${'~'.repeat(MAX_COPY_GAP)}${call}\n`)?.count).toBe(3);
   });
 
@@ -259,7 +301,7 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     });
   });
 
-  it('reads data objects with a name field as data', () => {
+  it('reads data objects that have a name field to the end', () => {
     expect(run('{"name": "Anna", "arguments": {"x": 1}} '.repeat(10))).toBeNull();
     expect(run('{"name": "bash", "arguments": {"x": 1}} '.repeat(3))?.toolName).toBe('bash');
   });

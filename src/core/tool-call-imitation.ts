@@ -29,7 +29,7 @@ export const MAX_UNIT_CHARS = 2000;
 
 /** Most characters between the end of one copy and the start of the next for both to count
  *  as one run of copies. */
-export const MAX_COPY_GAP = 300;
+export const MAX_COPY_GAP = MAX_UNIT_CHARS;
 
 /** String values that hold a slot rather than a value (compared trimmed, case-insensitive);
  *  `<…>` in angle brackets counts too. */
@@ -50,8 +50,14 @@ const LOOK_BACK = 32;
 
 /** A definition keyword right before a name on its line (`def read_file(path):`). */
 const DEFINITION_BEFORE = /(?:^|[^A-Za-z0-9_$])(?:async\s+)?(?:def|function|fn|func|fun|sub|proc)\s+$/;
-/** A member access right before a name (`client.read_file(path)`). */
-const MEMBER_BEFORE = /\.\s*$/;
+/** A member access right before a name (`client.read_file(path)`), with its receiver. */
+const MEMBER_BEFORE = /([A-Za-z0-9_$]*)\s*\.\s*$/;
+/** Receivers that hold the tools themselves in the call formats models write
+ *  (`functions.bash`, `default_api.read_file`): a call through them is a tool call. */
+export const TOOL_NAMESPACES: ReadonlySet<string> = new Set(['functions', 'default_api', 'tools', 'tool']);
+
+/** How many levels into a JSON object's values (objects and arrays) a call is looked for. */
+const JSON_DEPTH = 2;
 
 export interface ImitationTool {
   readonly name: string;
@@ -115,12 +121,19 @@ export class ToolCallImitationDetector {
   /** Per signature: copies in the current run, and where (in the whole reply) the last one ended. */
   private readonly runs = new Map<string, { count: number; end: number }>();
   private toolUseSeen = false;
+  /** Characters read: the stretch each scan starts from, and each bracket group walked. */
+  private examined = 0;
 
   constructor(tools: readonly ImitationTool[]) {
     this.tools = new Map(tools.map((t) => [t.name, t]));
     const names = tools.map((t) => escapeRe(t.name)).sort((a, b) => b.length - a.length);
     const nameStart = names.length > 0 ? String.raw`|(?<![A-Za-z0-9_-])(?:${names.join('|')})\s*(?:\[ARGS\])?[({]` : '';
     this.start = new RegExp(`${MARKUP_START}${nameStart}|\\{`, 'g');
+  }
+
+  /** How many characters the detector has read so far: what its cost grows with. */
+  charsExamined(): number {
+    return this.examined;
   }
 
   /** A real tool call has started in this reply. */
@@ -140,6 +153,7 @@ export class ToolCallImitationDetector {
       this.pos -= cut;
     }
     this.buf += text;
+    this.examined += this.buf.length - this.pos;
     const re = this.start;
     re.lastIndex = this.pos;
     let m: RegExpExecArray | null;
@@ -212,7 +226,9 @@ export class ToolCallImitationDetector {
     // code, not a call of the tool.
     const lineStart = this.buf.lastIndexOf('\n', at - 1) + 1;
     const before = this.buf.slice(Math.max(lineStart, at - LOOK_BACK), at);
-    if (DEFINITION_BEFORE.test(before) || MEMBER_BEFORE.test(before)) return { kind: 'none' };
+    if (DEFINITION_BEFORE.test(before)) return { kind: 'none' };
+    const member = MEMBER_BEFORE.exec(before);
+    if (member !== null && !TOOL_NAMESPACES.has(member[1]!)) return { kind: 'none' };
     const end = this.balanced(open);
     if (end === 'pending') return { kind: 'pending' };
     if (end === null) return { kind: 'none' };
@@ -230,10 +246,30 @@ export class ToolCallImitationDetector {
     try { parsed = JSON.parse(this.buf.slice(at, end)); } catch { return { kind: 'none' }; }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { kind: 'none' };
     this.jsonSpanEnd = this.base + end;
-    const named = this.namedTool(parsed as Record<string, unknown>);
-    if (named !== undefined) return { kind: 'unit', end, toolName: named };
-    if (Object.values(parsed).every(isPlaceholder)) return { kind: 'none' };
-    const keys = Object.keys(parsed);
+    // The object itself, or a call it wraps (`{"tool_calls": [{…}]}`): then the whole object
+    // is the unit.
+    const tool = this.objectTool(parsed as Record<string, unknown>) ?? this.wrappedTool(parsed, JSON_DEPTH);
+    return tool !== undefined ? { kind: 'unit', end, toolName: tool } : { kind: 'none' };
+  }
+
+  /** A call inside `value`'s objects and arrays, at most `depth` levels down. */
+  private wrappedTool(value: unknown, depth: number): string | undefined {
+    if (depth === 0 || typeof value !== 'object' || value === null) return undefined;
+    for (const v of Object.values(value)) {
+      if (typeof v !== 'object' || v === null) continue;
+      const found = (Array.isArray(v) ? undefined : this.objectTool(v as Record<string, unknown>)) ?? this.wrappedTool(v, depth - 1);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+
+  /** The tool an object calls: one it names, or the one whose input keys it carries (at
+   *  least two, with a concrete value). */
+  private objectTool(o: Record<string, unknown>): string | undefined {
+    const named = this.namedTool(o);
+    if (named !== undefined) return named;
+    if (Object.values(o).every(isPlaceholder)) return undefined;
+    const keys = Object.keys(o);
     // The tool sharing the most keys; on a tie the one with fewer properties fits closer.
     let best: ImitationTool | undefined;
     let bestShared = 0;
@@ -245,7 +281,7 @@ export class ToolCallImitationDetector {
         bestShared = shared;
       }
     }
-    return best !== undefined && bestShared >= 2 ? { kind: 'unit', end, toolName: best.name } : { kind: 'none' };
+    return best !== undefined && bestShared >= 2 ? best.name : undefined;
   }
 
   /** The sent tool an object names in `name`, `tool`, `function` or `function.name`. */
@@ -278,6 +314,7 @@ export class ToolCallImitationDetector {
     const stop = Math.min(this.buf.length, limit);
     let depth = 0;
     let inStr = false;
+    this.examined += stop - open;
     for (let i = open; i < stop; i++) {
       const c = this.buf.charCodeAt(i);
       if (inStr) {
