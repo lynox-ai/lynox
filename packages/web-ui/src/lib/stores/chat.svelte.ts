@@ -734,7 +734,8 @@ if (typeof window !== 'undefined') {
 						// "answered", which cleared the failed message and lost it. It stays failed and marked
 						// offline, is not sent past the question, and the card comes back. Whether it arrived
 						// meanwhile is not decided here: text equality cannot tell it from an earlier message
-						// with the same words, so a tap after the question is answered asks the server again.
+						// with the same words. Once the question is answered, the user decides by tapping;
+						// if it had arrived after all, that tap sends it a second time.
 						if (scheduledQuestion) {
 							sayQuestionWaiting(await checkPendingPrompt());
 							return;
@@ -1348,7 +1349,8 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 	}
 	if (live === null) return true;
 	// A run that waits for the user's answer is not working: the way on is to answer it. Its card
-	// comes with the attached stream, so the sentence names none (and no X): it is true for any.
+	// comes with the attached stream, so the sentence names no card and no X; for an approval it
+	// says "question", as main did, rather than fetch the card and race a second probe.
 	if (live.status === 'awaiting_input') addToast(t('chat.question_waiting_plain'), 'info', QUESTION_TOAST_MS);
 	else addToast(t('chat.still_running'), 'info', 6000);
 	// The last run's checkpoint says nothing about this run's stream.
@@ -1370,7 +1372,7 @@ function sayQuestionWaiting(card: PendingCard): void {
 	if (key !== null) addToast(t(key), 'info', QUESTION_TOAST_MS);
 }
 
-/** These sentences run to ~190 characters; 6 s was too short to read them (ux U-155). */
+/** The longest of these sentences runs to about 200 characters; 6 s was too short to read it (ux U-155). */
 const QUESTION_TOAST_MS = 10_000;
 
 /** The sentence for `card`, or null when no card came back. */

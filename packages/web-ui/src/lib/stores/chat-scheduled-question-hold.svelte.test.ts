@@ -111,7 +111,7 @@ describe('the tap on a failed message', () => {
 		expect(failedOne('again').map((m) => m.failed)).toEqual([true]);
 		expect(store.getPendingPermission()?.question).toBe('Which list, A or B?');
 		expect(toastKeys()).toEqual(['chat.question_waiting']);
-		// ~190 characters: it stays long enough to read (ux U-155: at least 8 s).
+		// About 200 characters: it stays long enough to read (ux U-155: at least 8 s).
 		expect(toasts[0]!.ms).toBeGreaterThanOrEqual(8000);
 	});
 
@@ -136,6 +136,25 @@ describe('the tap on a failed message', () => {
 	it('with the chat’s own run waiting on a decision: the sentence that names no card, so no X', async () => {
 		await questionWaits(DECISION);
 		active = { runs: [{ runId: 'own', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0 }] };
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		await store.retryFailedTurn(store.getMessages().at(-1)!, 'again');
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(toastKeys()).toEqual(['chat.question_waiting_plain']);
+		expect(toasts[0]!.ms).toBeGreaterThanOrEqual(8000);
+	});
+
+	it('with a secret card waiting: the sentence that names no X', async () => {
+		await questionWaits({ pending: true, promptType: 'ask_secret', promptId: 'p5', secretName: 'API_KEY', question: 'Your key?' });
+		store.getMessages().push({ role: 'user', content: 'again', failed: true });
+		await store.retryFailedTurn(store.getMessages().at(-1)!, 'again');
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(toastKeys()).toEqual(['chat.question_waiting_plain']);
+	});
+
+	it('with a mail-connection card waiting: the sentence that names no X', async () => {
+		await questionWaits({ pending: true, promptType: 'connect_mail', promptId: 'p6', mailConnect: { id: 'm1', displayName: 'Mail', address: 'a@b.test', preset: 'custom', type: 'personal' } });
 		store.getMessages().push({ role: 'user', content: 'again', failed: true });
 		await store.retryFailedTurn(store.getMessages().at(-1)!, 'again');
 		await settle();
@@ -212,6 +231,23 @@ describe('the reconnect after a turn failed offline', () => {
 		expect(failedOne('offline turn').map((m) => [m.failed, m.failedOffline])).toEqual([[true, true]]);
 		expect(store.getPendingPermission()?.question).toBe('⚠ mail_send needs your OK');
 		expect(toastKeys()).toEqual(['chat.question_waiting_decision']);
+		expect(toasts[0]!.ms).toBeGreaterThanOrEqual(8000);
+	});
+
+	it('with a question waiting and the same words already in the transcript: still held', async () => {
+		await questionWaits(DECISION);
+		// An earlier message with the same words arrived; this one may not have. Equal text does not
+		// say which, so the message stays failed rather than being cleared as answered.
+		threadMessages = { messages: [
+			{ role: 'user', content: '[Now: 2026-11-05T15:00:00.000Z]\n\nja' },
+			{ role: 'assistant', content: '⚠ mail_send needs your OK' },
+		], activeRun: null };
+		store.getMessages().push({ role: 'user', content: 'ja', failed: true, failedOffline: true });
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(failedOne('ja').map((m) => [m.failed, m.failedOffline])).toEqual([[true, true]]);
 	});
 
 	it('with nothing waiting and the same transcript: cleared as answered, as before', async () => {
