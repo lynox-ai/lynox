@@ -587,7 +587,25 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     expect(check('[embed]http:evil.example/a b[/embed]')).toEqual(foreign);
     expect(check('[embed]http:/evil.example/a[/embed]')).toEqual(foreign);
     // Twin: words in a pair are a label, not a link, even with a colon or a URL among them.
-    for (const after of ['[b]Hinweis:[/b]', '[b]Hinweis: neu[/b]', '[b]<em>Neu:</em>[/b]', '[box]Mehr unter javascript:alert(1) hier[/box]', '[box]Infos auf www.hersteller.example[/box]', '[caption]Foto:Max[/caption]', '[b]Zeit:12h[/b]', '[b]1.5kg[/b]', '[b]ca.30cm[/b]']) {
+    for (const after of ['[b]Hinweis:[/b]', '[b]Hinweis: neu[/b]', '[b]<em>Neu:</em>[/b]', '[box]Mehr unter javascript:alert(1) hier[/box]', '[box]Infos auf www.hersteller.example[/box]', '[b]1.5kg[/b]', '[b]ca.30cm[/b]']) {
+      expect(check(after), after).toEqual({ ok: true });
+    }
+  });
+
+  it('refuses every scheme but a web or mail one as written, in a pair or an attribute, a space after it or not', () => {
+    // A page follows these printed as written; none is a web link.
+    for (const after of [
+      '[link]ms-msdt:/id[/link]', '[link]file://evil.example/x[/link]', '[link]file:///etc/passwd[/link]',
+      '[link]blob:https://evil.example/x[/link]', '[link]filesystem:https://evil.example/x[/link]',
+      '[link]search-ms:query=x[/link]', '[link]intent://evil.example#Intent;scheme=https;end[/link]',
+      '[x url="ms-msdt:/id PCWDiagnostic /skip force"]', '[x url="file:///C:/Program Files/x.exe"]',
+      // A colon with a letter after it reads as a scheme, a label's too: the owner writes it by hand.
+      '[caption]Foto:Max[/caption]', '[b]Zeit:12h[/b]', '[x a="a:b"]',
+      // A scheme that runs something is read in a label's form too.
+      '[x url="ms-settings: x"]', '[b]search-ms: x[/b]', '[x url="MS-Msdt: /id"]',
+    ]) expect(check(after), after).toMatchObject({ ok: false, reason: 'url_scheme' });
+    // Twin: a label, a colon and then a space or nothing, is no link as written.
+    for (const after of ['[b]Hinweis: neu[/b]', '[b]Hinweis:[/b]', '[x title="Kontakt: Anfrage"]', '[x title="Neu:"]']) {
       expect(check(after), after).toEqual({ ok: true });
     }
   });
@@ -677,7 +695,7 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     expect(check('[video src="https://evil.example/a.mp4"]', '<p><a href="https://evil.example/">x</a></p>')).toEqual({ ok: true });
     expect(check('[video src="https://evil.example/a.mp4"]', '<p>https://evil.example/x</p>')).toEqual({ ok: true });
     // Nor does a name in a pair or an attribute that does not name its host as a link does.
-    for (const held of ['<p>Hersteller: [b]evil.example[/b]</p>', '<p>[x title="evil.example"]</p>']) {
+    for (const held of ['<p>Hersteller: [b]evil.example[/b]</p>', '<p>[x title="evil.example"]</p>', '<p>[b]https://evil.example/ ist Partner[/b]</p>']) {
       expect(check(`${held}[embed]https://evil.example/x[/embed]`, held), held).toEqual(foreign);
     }
   });
@@ -711,14 +729,14 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
   });
 
   it('reads values of many attributes, quotes and colons in linear time', () => {
-    for (const value of [`[x ${'"a'.repeat(100_000)}]`, `[x ${'a='.repeat(100_000)}]`, `[x ${"a='".repeat(60_000)}]`, `[e]${'a:'.repeat(100_000)}[/e]`, `[e]${' //'.repeat(60_000)}[/e]`, `${'\n'.repeat(100_000)}x`, `${' \n'.repeat(60_000)}x`, `[e]${'%'.repeat(30_000)}${'0a'.repeat(30_000)}[/e]`, `[x a="${'%'.repeat(30_000)}${'0a'.repeat(30_000)}"]`]) {
+    for (const value of [`[x ${'"a'.repeat(100_000)}]`, `[x ${'a='.repeat(100_000)}]`, `[x ${"a='".repeat(60_000)}]`, `[e]${'a:'.repeat(100_000)}[/e]`, `[e]${' //'.repeat(60_000)}[/e]`, `${'\n'.repeat(100_000)}x`, `${' \n'.repeat(60_000)}x`, `${'\r'.repeat(100_000)}x`, `${' \r'.repeat(60_000)}x`, `[e]${'%'.repeat(30_000)}${'0a'.repeat(30_000)}[/e]`, `[x a="${'%'.repeat(30_000)}${'0a'.repeat(30_000)}"]`]) {
       const start = performance.now();
       check(value);
       expect(performance.now() - start, `${value.slice(0, 12)}… of ${value.length}`).toBeLessThan(3000);
     }
     // A value the tree check refuses never reaches the links; a before-image is read for them all the
     // same, so the shapes that would refuse go there.
-    for (const before of ['<p '.repeat(80_000), '<p a'.repeat(60_000)]) {
+    for (const before of ['<p '.repeat(80_000), '<p a'.repeat(60_000), `${'\r'.repeat(100_000)}x`]) {
       const start = performance.now();
       check('<p>x</p>', before);
       expect(performance.now() - start, `before ${before.slice(0, 12)}… of ${before.length}`).toBeLessThan(3000);

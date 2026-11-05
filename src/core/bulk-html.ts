@@ -847,9 +847,9 @@ const BEFORE_CLOSER = /\]([^[\]]*)\[\//g;
  *  oEmbed discovery for any site, so an unknown host can still put a frame on the page. A URL
  *  among words is not embedded and, as text, not checked (as in HTML). Its patterns run without
  *  `/u`, where `\s` is ASCII only: a no-break or an ideographic space inside a URL does not end it,
- *  so here only the six ASCII spaces do. The space before a URL on its line is read up to a line
- *  break only, so a run of empty lines is read once, not once per line. */
-const OWN_LINE_URL = /^[ \t\v\f\r]*(https?:\/\/[^ \t\n\v\f\r<>"]+)[ \t\v\f\r]*$/gim;
+ *  so here only the six ASCII spaces do. The space before a URL on its line holds no line break
+ *  (`\n`, nor `\r`, at which a JavaScript line starts too), so a run of empty lines is read once. */
+const OWN_LINE_URL = /^[ \t\v\f]*(https?:\/\/[^ \t\n\v\f\r<>"]+)[ \t\v\f\r]*$/gim;
 const OWN_PARAGRAPH_URL = /<p(?: [^<>]*)?>[ \t\n\v\f\r]*(https?:\/\/[^ \t\n\v\f\r<>"]+)[ \t\n\v\f\r]*<\/p>/gi;
 
 /** A shortcode's text in a link's place: its tags dropped and trimmed. */
@@ -867,15 +867,15 @@ function enclosedTextsOf(value: string, depth: number, out: string[]): void {
 }
 
 /** A value of a shortcode or of the page that the shop may print as a link: an attribute's value,
- *  or a text (what a pair encloses, a URL `autoembed` reads). */
-type LinkCandidate = { value: string; kind: 'attribute' | 'text' };
+ *  or a text (what a pair encloses, a URL `autoembed` reads). Both are read the same way. */
+type LinkCandidate = { value: string };
 
 /** The values a shortcode or a page may turn into a link: every attribute value of an opening
  *  shortcode tag, the text each pair encloses and the text before each closing tag, and each URL
  *  `autoembed` embeds. */
 function linkCandidatesOf(value: string): LinkCandidate[] {
   const out: LinkCandidate[] = [];
-  const add = (v: string, kind: LinkCandidate['kind']): void => { if (v !== '') out.push({ value: v, kind }); };
+  const add = (v: string): void => { if (v !== '') out.push({ value: v }); };
   for (const tag of shortcodeTagsOf(value)) {
     // WordPress reads a no-break and a zero-width space as a space, the name included: in
     // `[video\u200bsrc="…"]` the name is `video` and `src` an attribute.
@@ -884,15 +884,15 @@ function linkCandidatesOf(value: string): LinkCandidate[] {
     const rest = spaced.slice(1 + nameRunAt(spaced, 0, spaced.length - 1), -1).replace(/\/\s*$/, '');
     for (const m of rest.matchAll(SHORTCODE_ATTRIBUTE)) {
       const v = m[2] ?? m[4] ?? m[6] ?? m[7] ?? m[8] ?? m[9];
-      if (v !== undefined && v.trim() !== '') add(v, 'attribute');
+      if (v !== undefined && v.trim() !== '') add(v);
     }
   }
   const texts: string[] = [];
   enclosedTextsOf(value, ENCLOSED_DEPTH, texts);
   for (const m of value.matchAll(BEFORE_CLOSER)) texts.push(enclosedText(m[1]!));
-  for (const t of texts) add(t, 'text');
-  for (const m of value.matchAll(OWN_LINE_URL)) add(m[1]!, 'text');
-  for (const m of value.matchAll(OWN_PARAGRAPH_URL)) add(m[1]!, 'text');
+  for (const t of texts) add(t);
+  for (const m of value.matchAll(OWN_LINE_URL)) add(m[1]!);
+  for (const m of value.matchAll(OWN_PARAGRAPH_URL)) add(m[1]!);
   return out;
 }
 
@@ -906,8 +906,13 @@ function schemeOf(value: string): string | null {
   return m === null ? null : m[1]!.toLowerCase();
 }
 
-/** Schemes that run something when a page follows them, refused wherever a value is read as a link. */
-const RUNNING_SCHEMES = new Set(['javascript', 'vbscript', 'data']);
+/** Schemes that run something when a page follows them, refused wherever a value is read as a link,
+ *  a label's form included (`ms-settings: x`): these, Windows's `search-ms`, and every `ms-` one. */
+const RUNNING_SCHEMES = new Set(['javascript', 'vbscript', 'data', 'search-ms']);
+
+function runsSomething(scheme: string): boolean {
+  return RUNNING_SCHEMES.has(scheme) || scheme.startsWith('ms-');
+}
 
 /** `_deep_replace(['%0d', '%0a', '%0D', '%0A'], …)` in one pass: each removal can join what is left
  *  into another (`%0%0aa`), so a kept character is taken back as soon as it ends one. */
@@ -973,17 +978,16 @@ function readsAsHost(prefixed: string): boolean {
  * A value read as a link the way it reaches a browser.
  *
  * As `esc_url` prints it, for a shortcode that escapes it: with `http://` in front where that
- * names a host; with a scheme of `wp_allowed_protocols` (any other makes `esc_url` print nothing,
- * so `Foto:Max` or `Hinweis: neu` is no link); or relative.
+ * names a host; with a scheme of `wp_allowed_protocols` (any other makes `esc_url` print nothing);
+ * or relative.
  *
- * As written, for a shortcode that prints it as it is: an attribute's value without a space, and a
- * text without a space that has no scheme or a web one — `Zeit:12h` in a pair is a label, but
- * `https://evil.example\@shop.example`, which a page reads with `/` for the backslash, is read. A
- * value with a running scheme (`javascript:`) is read as written wherever it stands, a space after
- * the colon included. A scheme alone (`Hinweis:`) is no link.
+ * As written, for a shortcode that prints it as it is, with any scheme: a page follows an unknown
+ * one too, so only a web or a mail link passes, and `a:b` or `Zeit:12h` is refused. A label — a
+ * word with a colon and then a space or nothing (`Hinweis: neu`, `Kontakt: Anfrage`, `Neu:`) — is
+ * no link as written, unless its scheme runs something (`javascript: alert(1)`).
  */
 function printedForms(candidate: LinkCandidate): string[] {
-  const { value, kind } = candidate;
+  const { value } = candidate;
   const out: string[] = [];
   const escaped = escUrl(value);
   const escapedScheme = schemeOf(escaped.url);
@@ -993,16 +997,19 @@ function printedForms(candidate: LinkCandidate): string[] {
   // The URL parser drops tab and newline and trims C0 and space at both ends.
   const parsed = value.replace(/[\t\n\r]/g, '').replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '');
   const scheme = schemeOf(parsed);
-  if (scheme !== null && RUNNING_SCHEMES.has(scheme)) {
+  if (scheme !== null && runsSomething(scheme)) {
     out.push(parsed);
-  } else if (!/\s/.test(parsed) && !/^[A-Za-z][A-Za-z0-9+.-]*:$/.test(parsed)) {
-    if (kind === 'attribute' || scheme === null || scheme === 'http' || scheme === 'https') out.push(value);
+  } else if (!/^[A-Za-z][A-Za-z0-9+.-]*:(?:\s|$)/.test(parsed)) {
+    // Every scheme but a label's is read, an unknown one too: a page follows `ms-msdt:` or
+    // `file:` printed as written, so anything but a web or mail link is refused.
+    out.push(value);
   }
   return out;
 }
 
-/** A value that names its host itself (`https://…`, `//…`): what a before-image holds so is a link
- *  it already makes, and lends its domain; a bare `evil.example` in a pair may be only a word. */
+/** A value that names its host itself (`https://…`, `//…`) and holds no space: what a before-image
+ *  holds so is a link it already makes, and lends its domain; a bare `evil.example` in a pair, or
+ *  `https://evil.example/ ist Partner`, may be only words. */
 const ABSOLUTE_LINK = /^[\u0000-\u0020]*(?:https?:)?[/\\]{2}/i;
 
 /** A value as a browser reads it once the shop prints it into an attribute, with its character
@@ -1011,7 +1018,7 @@ function linkForms(candidate: LinkCandidate): string[] {
   const forms = printedForms(candidate);
   if (candidate.value.includes('&')) {
     const decoded = textBelow(parseHtmlFragment(candidate.value.replace(/</g, '&lt;')));
-    forms.push(...printedForms({ value: decoded, kind: candidate.kind }));
+    forms.push(...printedForms({ value: decoded }));
   }
   return [...new Set(forms)];
 }
@@ -1028,7 +1035,7 @@ function checkShortcodeLinks(input: MarkupCheckInput): MarkupCheckResult {
   const held = counts(beforeCandidates.map((c) => c.value));
   const linked = linkedDomains(markupOf(parseHtmlFragment(before)).triples, input.storeHost);
   for (const c of beforeCandidates) {
-    if (!ABSOLUTE_LINK.test(c.value)) continue;
+    if (!ABSOLUTE_LINK.test(c.value) || /\s/.test(c.value.trim())) continue;
     for (const form of linkForms(c)) {
       const target = linkTarget(form, input.storeHost);
       if (target.ok) linked.add(`${target.kind}:${target.domain}`);
