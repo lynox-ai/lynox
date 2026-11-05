@@ -170,6 +170,11 @@ describe('release.yml — the release image is attested', () => {
       expect(unreadable.status, d).not.toBe(0);
       expect(unreadable.outputs['digest'], d).toBeUndefined();
     }
+    // Built images that list nothing, and a version tag on an empty list: equal, and still refused.
+    const empty = runIndex(healthy({ [`@${AMD}`]: list(AMD, []), [`@${ARM}`]: list(ARM, []), ':2.19.0': list(D('a'), []) }));
+    expect(empty.status).toBe(1);
+    expect(empty.stdout).toContain('::error::2.19.0 does not point at the images this run built');
+    expect(empty.outputs['digest']).toBeUndefined();
     for (const built of [[AMD], [AMD, ARM, D('9')], []]) {
       const r = runIndex(healthy(), built);
       expect(r.status, built.join()).toBe(1);
