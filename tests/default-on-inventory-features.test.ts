@@ -97,6 +97,7 @@ describe('default-on-inventory reads the feature flags\' defaults', () => {
     ['a write to the table after its declaration', block("  'on-flag': false,\n", "CORE_FEATURE_DEFAULTS['on-flag'] = true;\n"), NAMED],
     ['a write to the table in place of the read', `const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {\n  'on-flag': false,\n};\nCORE_FEATURE_DEFAULTS['on-flag'] = true;\n`, NAMED],
     ['a write on the read line itself', block("  'on-flag': false,\n").replace(READ_LINE, `${READ_LINE} CORE_FEATURE_DEFAULTS['on-flag'] = true;`), NAMED],
+    ['a read that changes the default itself', block("  'on-flag': false,\n").replace(READ_LINE, '  return CORE_FEATURE_DEFAULTS[flag as FeatureFlag] ?? true;'), NAMED],
     ['an entry on the opening line', `const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = { 'on-flag': true,\n  'off-flag': false,\n};\n${READ}`, NAMED],
   ];
   for (const [what, features, diagnosis] of unreadable) {
