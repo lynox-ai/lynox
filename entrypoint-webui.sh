@@ -186,7 +186,10 @@ done
 # rewrites inside it return EACCES. Surface the diagnosis so the operator
 # knows the one-liner fix instead of debugging "refine doesn't work".
 CURRENT_UID=$(id -u)
-CURRENT_USER=$(id -un)
+# The container may run as any host uid (the installer sets `user:` to the host user's), and most
+# have no name in the image. `id -un` then fails, and under `set -e` a failed command substitution
+# in an assignment ends the script: the container restarted in a loop before the engine started.
+CURRENT_USER=$(id -un 2>/dev/null) || CURRENT_USER="(no name)"
 if [ -d "$HOME/.lynox" ]; then
   # Limit to the first few mismatched paths so the log stays readable; the
   # operator only needs to know *that* there are wrong-owned files, not the
