@@ -618,6 +618,7 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
       ['[video src="evil\u3002example/a.mp4"]', 'evil.example'],
       ['[video src="203.0.113.7"]', '203.0.113.7'],
       ['[video src="3405803783/a.mp4"]', '203.0.113.7'],
+      ['[video src="203.0.28935/a.mp4"]', '203.0.113.7'],
       ['[button url="3405803783"]', '203.0.113.7'],
       ['[embed]0xcb007107[/embed]', '203.0.113.7'],
       ['[video src="evil.exa%0D%0ample/a.mp4"]', 'evil.example'],
@@ -628,6 +629,7 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     ] as const) expect(check(after), after).toEqual({ ok: false, reason: 'new_link_domain', detail });
     // Printed as written, a backslash is a `/` to the page: the host is the name before it.
     expect(check(`[video src="https://evil.example\\@${HOST}/a.mp4"]`)).toMatchObject({ ok: false, reason: 'url_control_char' });
+    expect(check(`[embed]https://evil.example\\@${HOST}/x[/embed]`)).toMatchObject({ ok: false, reason: 'url_control_char' });
     // A file name is a domain to `esc_url` as well.
     expect(check('[video src="a.mp4"]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'a.mp4' });
     // Twin: a value that names no host stays a word or a path on the store: a relative path, a
@@ -709,10 +711,17 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
   });
 
   it('reads values of many attributes, quotes and colons in linear time', () => {
-    for (const value of [`[x ${'"a'.repeat(100_000)}]`, `[x ${'a='.repeat(100_000)}]`, `[x ${"a='".repeat(60_000)}]`, `[e]${'a:'.repeat(100_000)}[/e]`, `[e]${' //'.repeat(60_000)}[/e]`, `${'\n'.repeat(100_000)}x`, `${' \n'.repeat(60_000)}x`, `[e]${'%'.repeat(30_000)}${'0a'.repeat(30_000)}[/e]`, `[x a="${'%'.repeat(30_000)}${'0a'.repeat(30_000)}"]`, '<p '.repeat(40_000)]) {
+    for (const value of [`[x ${'"a'.repeat(100_000)}]`, `[x ${'a='.repeat(100_000)}]`, `[x ${"a='".repeat(60_000)}]`, `[e]${'a:'.repeat(100_000)}[/e]`, `[e]${' //'.repeat(60_000)}[/e]`, `${'\n'.repeat(100_000)}x`, `${' \n'.repeat(60_000)}x`, `[e]${'%'.repeat(30_000)}${'0a'.repeat(30_000)}[/e]`, `[x a="${'%'.repeat(30_000)}${'0a'.repeat(30_000)}"]`]) {
       const start = performance.now();
       check(value);
       expect(performance.now() - start, `${value.slice(0, 12)}… of ${value.length}`).toBeLessThan(3000);
+    }
+    // A value the tree check refuses never reaches the links; a before-image is read for them all the
+    // same, so the shapes that would refuse go there.
+    for (const before of ['<p '.repeat(80_000), '<p a'.repeat(60_000)]) {
+      const start = performance.now();
+      check('<p>x</p>', before);
+      expect(performance.now() - start, `before ${before.slice(0, 12)}… of ${before.length}`).toBeLessThan(3000);
     }
   });
 });
