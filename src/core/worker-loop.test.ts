@@ -514,6 +514,39 @@ describe('WorkerLoop', () => {
     expect(later).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
   });
 
+  it('executeWatch hands the next change the summary of the last one, not what a check without a change recorded', async () => {
+    vi.useRealTimers();
+    const analysisSession = { run: vi.fn().mockResolvedValue('Price is 12.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn(), startEscalation: vi.fn(() => true), recordEscalationOutcome: vi.fn(() => true) } as unknown as TaskManager;
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      createSession: vi.fn(() => analysisSession),
+      escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+    // A change: its summary is kept with the hash it belongs to.
+    mockFetchPinned.mockResolvedValueOnce(new Response('PRICE 12', { status: 200 }));
+    await fire(makeTask({ id: 't-sum', source: 'watch', effect: 'run_agent', last_run_result: 'Price is 10.', watch_config: JSON.stringify({ url: 'https://x.test/', interval_minutes: 60, last_hash: 'an-earlier-hash' }) }));
+    const kept = vi.mocked(taskManager.updateWatchConfig).mock.calls[0]![1] as { last_hash: string; last_summary: string };
+    expect(kept.last_summary).toBe('Price is 12.');
+    // A check that finds the same page records only that, and leaves the kept summary alone.
+    mockFetchPinned.mockResolvedValueOnce(new Response('PRICE 12', { status: 200 }));
+    await fire(makeTask({ id: 't-sum', source: 'watch', effect: 'run_agent', last_run_result: 'Price is 12.', watch_config: JSON.stringify(kept) }));
+    expect(taskManager.recordTaskRun).toHaveBeenLastCalledWith('t-sum', 'No changes detected', 'success');
+    expect(taskManager.updateWatchConfig).toHaveBeenCalledTimes(1);
+    expect(analysisSession.run).toHaveBeenCalledTimes(1);
+    // The next change compares against the last summary, although the run's result now says nothing changed.
+    mockFetchPinned.mockResolvedValueOnce(new Response('PRICE 15', { status: 200 }));
+    await fire(makeTask({ id: 't-sum', source: 'watch', effect: 'run_agent', last_run_result: 'No changes detected', watch_config: JSON.stringify(kept) }));
+    const later = String(vi.mocked(analysisSession.run).mock.calls[1]![0]);
+    expect(later).toContain('Previous summary was: Price is 12.\n');
+    expect(later).not.toContain('No changes detected');
+  });
+
   it('executeWatch records on the trigger whether its finding reached anyone', async () => {
     vi.useRealTimers();
     const analysisSession = { run: vi.fn().mockResolvedValue('Price changed.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;

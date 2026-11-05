@@ -306,6 +306,8 @@ const DEFER_RELOG_MS = 10 * 60_000;
 // the window would buffer the whole body into memory and OOM the worker. 10 MB
 // is far above any real HTML page; the signal extractor caps further at 256 KB.
 const WATCH_MAX_BODY_BYTES = 10 * 1024 * 1024;
+/** How much of a watch's last summary is kept with its baseline and handed to the next change. */
+const WATCH_SUMMARY_CHARS = 2000;
 
 /**
  * Reduce a fetched HTML page to a stable visible-content signal for change
@@ -3771,7 +3773,7 @@ export class WorkerLoop {
     // buys is a second reader being safe, not a defect closed today. The `attachSession`
     // CALL below is covered (deleting it fails the watch test).
     const stopEntry = this.activeTasks.get(task.id);
-    let config: { url?: string; interval_minutes?: number; selector?: string; last_hash?: string };
+    let config: { url?: string; interval_minutes?: number; selector?: string; last_hash?: string; last_summary?: string };
     try {
       config = task.watch_config ? JSON.parse(task.watch_config) as typeof config : {};
     } catch {
@@ -3894,9 +3896,14 @@ export class WorkerLoop {
       : currentSignal;
     // The URL as stored, without the characters that render as nothing (`hidden-text.ts`): the
     // model's write tool refuses them, but a watch saved before, or through another path, carries them.
+    // The summary of the last change, kept with the hash it belongs to. The run's result is
+    // not it: a check that found nothing records "No changes detected" there, and a failed
+    // fetch its error, and either would stand in for the summary at the next change. A watch
+    // saved before the summary was kept has none yet and reads the result once more.
+    const previousSummary = config.last_summary ?? task.last_run_result;
     const analysisPrompt = isFirstRun
       ? `You are monitoring ${stripHidden(config.url)} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
-      : `You are monitoring ${stripHidden(config.url)} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result ? stripHidden(task.last_run_result.slice(0, 2000)) : 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
+      : `You are monitoring ${stripHidden(config.url)} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${previousSummary ? stripHidden(previousSummary.slice(0, WATCH_SUMMARY_CHARS)) : 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
 
     // noTools: this turn embeds up to 8 KB of the WATCHED PAGE — content the
     // user did not author and an attacker may control (a monitored forum, a
@@ -3914,6 +3921,7 @@ export class WorkerLoop {
 
     // Update config with new hash and record result
     config.last_hash = currentHash;
+    config.last_summary = truncatedAnalysis.slice(0, WATCH_SUMMARY_CHARS);
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
       this.#recordRun(taskManager, task.id, truncatedAnalysis, 'success');
