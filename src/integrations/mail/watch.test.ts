@@ -455,6 +455,23 @@ describe('MailWatcher — a deferred batch is held for the next poll', () => {
     expect(handler, 'removed account handed over its held mail').toHaveBeenCalledTimes(1);
   });
 
+  it('a poll still in its handler when the account is removed holds nothing for a later account', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    handler.mockImplementationOnce(async () => { await gate; throw new InboundMailDeferred('test'); });
+    const first = new FakeProvider('acct-a');
+    await watcher.attach(first, { applyPrefilter: false });
+    const inFlight = first.emit({ type: 'new', envelopes: [envelope(1, { messageId: '<d-1@x>' })] });
+    await watcher.detach('acct-a');
+    release();
+    await inFlight;
+
+    const second = new FakeProvider('acct-a');
+    await watcher.attach(second, { applyPrefilter: false });
+    await second.emit({ type: 'ok' });
+    expect(handler, 'the removed account\'s deferral reached the new one').toHaveBeenCalledTimes(1);
+  });
+
   it('a second deferral adds to what is held instead of replacing it', async () => {
     // Gmail polls can overlap; the second one's deferral must not drop the first one's mails.
     // Deferred after a turn of the event loop, so both polls are in their handler at once.

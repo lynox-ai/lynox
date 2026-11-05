@@ -54,6 +54,8 @@ export interface MailWatcherAttachOptions {
 interface Attachment {
   provider: MailProvider;
   handle: MailWatchHandle;
+  /** Ends this attachment's claim on the held mails: a poll still in its handler holds nothing. */
+  retire: () => void;
 }
 
 export class MailWatcher {
@@ -142,6 +144,9 @@ export class MailWatcher {
     const folder = options.folder;
     const intervalMs = options.intervalMs;
     const maxPerTick = options.maxPerTick;
+    // A poll can still be in its handler when the account is detached; its deferral must not
+    // bring back a held list that detach cleared (it would reach a later account of the same id).
+    let live = true;
 
     const handle = await provider.watch(
       {
@@ -215,12 +220,12 @@ export class MailWatcher {
         } catch (err: unknown) {
           // Swallowed — survivors stay unseen. A deferral also holds them for the next poll, as
           // the provider will not list them again (see `deferred`).
-          if (err instanceof InboundMailDeferred) this.hold(accountId, survivors);
+          if (err instanceof InboundMailDeferred && live) this.hold(accountId, survivors);
         }
       },
     );
 
-    this.attachments.set(accountId, { provider, handle });
+    this.attachments.set(accountId, { provider, handle, retire: () => { live = false; } });
 
     return async () => {
       await this.detach(accountId);
@@ -246,6 +251,7 @@ export class MailWatcher {
     if (!attached) return;
     this.attachments.delete(accountId);
     this.lastErrors.delete(accountId);
+    attached.retire();
     this.deferred.delete(accountId);
     await attached.handle.stop();
   }
@@ -255,6 +261,7 @@ export class MailWatcher {
     this.stopFollowupCheck();
     const all = [...this.attachments.values()];
     this.attachments.clear();
+    for (const a of all) a.retire();
     this.deferred.clear();
     await Promise.allSettled(all.map(a => a.handle.stop()));
   }
