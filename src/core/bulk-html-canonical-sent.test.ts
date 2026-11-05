@@ -352,6 +352,15 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
       expect([inPath.error, inPath.linkDomain]).toEqual(['new_link_domain', undefined]);
     });
 
+    it('reads no spelling outside ASCII, though it folds to the domain', async () => {
+      // U+212A KELVIN SIGN lower-cases to `k`, and `new URL` maps it so: the domain is `akia…`,
+      // which neither the spelling nor the domain shows to an upper-case scanner.
+      const kelvin = `A\u212AIA${'IOSFODNN7EXAMPLE'}.evil.example`;
+      expect(new URL(`https://${kelvin}/`).hostname).toBe('akiaiosfodnn7example.evil.example');
+      const shown = shownOf(await judge(linked(`https://${kelvin}/`), { scanSecret: aws }));
+      expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
     it('names the domain of a link with user info and a port, as the check read it (twin)', async () => {
       expect(shownOf(await judge(linked('https://user@Evil.Example.:8080/x'), { scanSecret: aws })).linkDomain).toBe('evil.example');
     });

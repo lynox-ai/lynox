@@ -530,8 +530,9 @@ export interface VerdictTextRefusal {
   reason: BulkInvalidReason;
   linkDomain?: string | undefined;
   /** The host as the refused link's own value spells it, in its own case, where that spelling is
-   *  the domain up to case and a final dot. Undefined where the link spells it percent-encoded, as
-   *  an entity or in Unicode: `new URL` decoded it, and what it decoded to was never seen as written. */
+   *  the domain up to ASCII case and a final dot. The value is the attribute as parsed, an entity
+   *  already decoded. Undefined where the link spells it percent-encoded or outside ASCII: `new URL`
+   *  decoded or mapped it, and what it became was never seen as written. */
   linkDomainWritten?: string | undefined;
 }
 
@@ -553,7 +554,10 @@ export function shownLinkDomain(refusal: VerdictTextRefusal, holdsSecret: (text:
  *  spelling, else undefined. Only the link's own value counts — the same host written elsewhere in
  *  the field says nothing about how this link spells it. */
 function writtenDomain(hostWritten: string | undefined, domain: string): string | undefined {
-  return hostWritten !== undefined && hostWritten.toLowerCase().replace(/\.$/, '') === domain ? hostWritten : undefined;
+  // Printable ASCII only: `toLowerCase` folds one other character to ASCII (U+212A KELVIN SIGN to
+  // `k`, which `new URL` maps the same way), and a spelling with it would pass a scan for `AKIA…`.
+  if (hostWritten === undefined || !/^[\x21-\x7e]+$/.test(hostWritten)) return undefined;
+  return hostWritten.toLowerCase().replace(/\.$/, '') === domain ? hostWritten : undefined;
 }
 
 /** {@link verdictTextRefusal} with the domain of a refused link. */
