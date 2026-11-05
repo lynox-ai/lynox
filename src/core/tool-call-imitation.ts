@@ -45,6 +45,14 @@ function isPlaceholder(v: unknown): boolean {
 /** How far back a start token that may still be arriving is looked for (`<function=…>` is the longest). */
 const START_TAIL = 256;
 
+/** Characters kept before the unsettled text, to read what precedes a tool's name. */
+const LOOK_BACK = 32;
+
+/** A definition keyword right before a name on its line (`def read_file(path):`). */
+const DEFINITION_BEFORE = /(?:^|[^A-Za-z0-9_$])(?:async\s+)?(?:def|function|fn|func|fun|sub|proc)\s+$/;
+/** A member access right before a name (`client.read_file(path)`). */
+const MEMBER_BEFORE = /\.\s*$/;
+
 export interface ImitationTool {
   readonly name: string;
   /** Top-level property names of the tool's input schema. */
@@ -123,10 +131,10 @@ export class ToolCallImitationDetector {
   /** Feed the next text delta. Returns the hit when the reply has to stop, else null. */
   push(text: string): ImitationHit | null {
     if (text.length === 0) return null;
-    // Only the unsettled text is kept (plus one character for the name look-behind): a
-    // growing string would be copied whole on every scan.
-    if (this.pos > 1) {
-      const cut = this.pos - 1;
+    // Only the unsettled text is kept, plus LOOK_BACK characters for what precedes a name:
+    // a growing string would be copied whole on every scan.
+    if (this.pos > LOOK_BACK) {
+      const cut = this.pos - LOOK_BACK;
       this.buf = this.buf.slice(cut);
       this.base += cut;
       this.pos -= cut;
@@ -200,6 +208,11 @@ export class ToolCallImitationDetector {
     // A tool's name followed by `(` or `{`.
     const open = at + matched.length - 1;
     const name = matched.slice(0, matched.length - 1).replace(/\[ARGS\]$/, '').trimEnd();
+    // A definition of a function with the tool's name, or a method of another object, is
+    // code, not a call of the tool.
+    const lineStart = this.buf.lastIndexOf('\n', at - 1) + 1;
+    const before = this.buf.slice(Math.max(lineStart, at - LOOK_BACK), at);
+    if (DEFINITION_BEFORE.test(before) || MEMBER_BEFORE.test(before)) return { kind: 'none' };
     const end = this.balanced(open);
     if (end === 'pending') return { kind: 'pending' };
     if (end === null) return { kind: 'none' };

@@ -212,13 +212,29 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     expect(run('bash("ls")\nbash("ls")\nbash("ls")\n', 1)?.toolName).toBe('bash');
   });
 
+  it('lets code that defines a function of a tool\'s name and calls it nearby through', () => {
+    const python = 'def read_file(path):\n    with open(path) as f:\n        return f.read()\n\nif os.path.exists(path):\n    data = read_file(path)\nelse:\n    log(path)\nprint(len(read_file(path)))\n';
+    expect(run(python)).toBeNull();
+    expect(run(python, 1)).toBeNull();
+    const js = 'function bash(cmd) { return exec(cmd); }\nbash("ls");\nbash("ls");\n';
+    expect(run(js)).toBeNull();
+    // The same calls without the definition, back to back, stop.
+    expect(run('read_file(path)\nread_file(path)\nread_file(path)\n')?.toolName).toBe('read_file');
+    expect(run('x = 1\nbash("ls");\nbash("ls");\nbash("ls");\n')?.toolName).toBe('bash');
+  });
+
+  it('lets code that calls a method of a tool\'s name on another object through', () => {
+    expect(run('client.read_file(path)\nclient.read_file(path)\nclient.read_file(path)\n')).toBeNull();
+    expect(run('fs . read_file(path)\nfs . read_file(path)\nfs . read_file(path)\n', 1)).toBeNull();
+  });
+
   it('counts copies that follow each other closely as one run', () => {
-    const gap = '.'.repeat(MAX_COPY_GAP + 1);
+    const gap = '~'.repeat(MAX_COPY_GAP + 1);
     const call = 'bash("ls")';
     expect(run(`${call}\n${call}\n${gap}${call}\n${call}\n`)).toBeNull();
     expect(run(`${call}\n${call}\n${gap}${call}\n${call}\n${call}\n`)?.count).toBe(3);
     // A gap of exactly the limit still continues the run.
-    expect(run(`${call}${'.'.repeat(MAX_COPY_GAP)}${call}${'.'.repeat(MAX_COPY_GAP)}${call}\n`)?.count).toBe(3);
+    expect(run(`${call}${'~'.repeat(MAX_COPY_GAP)}${call}${'~'.repeat(MAX_COPY_GAP)}${call}\n`)?.count).toBe(3);
   });
 
   describe.each([
