@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead,
 } from './bulk-runs.js';
@@ -14,6 +14,8 @@ import { MERGE_REFUSAL_CODES } from '../../../../../src/core/subject-merge-runne
 const TABLE: Record<string, string> = {
 	'bulk.label': '{n} Ziele · {target}',
 	'bulk.label_undo': 'Rücknahme · {n} Ziele · {target}',
+	'bulk.label_one': '1 Ziel · {target}',
+	'bulk.label_undo_one': 'Rücknahme · 1 Ziel · {target}',
 	'bulk.system.data_store': 'Datenspeicher',
 };
 const i18n: BulkI18n = {
@@ -27,6 +29,9 @@ describe('bulk run helpers', () => {
 	it('names a run by its size and where it writes, an undo as such', () => {
 		expect(bulkLabel({ kind: 'apply', total: 220, targetSystem: 'http:shop.example.invalid' }, i18n)).toBe('220 Ziele · shop.example.invalid');
 		expect(bulkLabel({ kind: 'undo', total: 14, targetSystem: 'data_store' }, i18n)).toBe('Rücknahme · 14 Ziele · Datenspeicher');
+		// One target is named in the singular.
+		expect(bulkLabel({ kind: 'apply', total: 1, targetSystem: 'http:shop.example.invalid' }, i18n)).toBe('1 Ziel · shop.example.invalid');
+		expect(bulkLabel({ kind: 'undo', total: 1, targetSystem: 'data_store' }, i18n)).toBe('Rücknahme · 1 Ziel · Datenspeicher');
 	});
 
 	it('shows the host of an external run and the raw name of a system it has no word for', () => {
@@ -567,6 +572,19 @@ describe('going on from a run that halted', () => {
 		// A halt the page cannot write on from, and a changed run, stay as they were.
 		expect(bulkResumeKind(w('superseded', unclear))).toBeNull();
 		expect(bulkResumeKind(w('checksum', unclear))).toBe('none');
+	});
+
+	it('says a conflict looked different than expected at the last read, one or several, and nothing at none', () => {
+		// True after an unclear send, for an undo, after a later resume and for a local run alike.
+		expect(bulkConflictsText({ conflicts: 1 }, DE)).toBe('Ein Ziel stand beim letzten Nachsehen anders da als erwartet; lynox hat es so gelassen.');
+		expect(bulkConflictsText({ conflicts: 3 }, DE)).toBe('3 Ziele standen beim letzten Nachsehen anders da als erwartet; lynox hat sie so gelassen.');
+		expect(bulkConflictsText({ conflicts: 1 }, EN)).toBe('One target looked different than expected when lynox last checked it; lynox left it as it was.');
+		expect(bulkConflictsText({ conflicts: 3 }, EN)).toBe('3 targets looked different than expected when lynox last checked them; lynox left them as they were.');
+		expect(bulkConflictsText({ conflicts: 0 }, DE)).toBeNull();
+		// The run title names one target in the singular, read from the real table.
+		expect(bulkLabel({ kind: 'apply', total: 1, targetSystem: 'http:shop.example.invalid' }, DE)).toBe('1 Ziel · shop.example.invalid');
+		expect(bulkLabel({ kind: 'undo', total: 1, targetSystem: 'http:shop.example.invalid' }, EN)).toBe('Undo · 1 target · shop.example.invalid');
+		expect(bulkLabel({ kind: 'apply', total: 2, targetSystem: 'http:shop.example.invalid' }, EN)).toBe('2 targets · shop.example.invalid');
 	});
 
 	it('offers nothing where every target left had changed at the provider after its unclear send', () => {

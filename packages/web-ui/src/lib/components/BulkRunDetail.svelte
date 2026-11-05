@@ -13,7 +13,7 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
+		BULK_STEPS, bulkMandateI18n, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -342,6 +342,7 @@
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
 	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
+	const conflictsText = $derived(run ? bulkConflictsText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
 	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');
 	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, view) : { text: null, nothing: false });
@@ -411,8 +412,8 @@
 				{/if}
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.list_note')}</p>
 			{/if}
-			{#if run.conflicts > 0}
-				<p class="text-sm text-text-muted">{tf('bulk.conflicts', { n: String(run.conflicts) })}</p>
+			{#if conflictsText}
+				<p class="text-sm text-text-muted">{conflictsText}</p>
 			{/if}
 			{#if (run.hostRewrote ?? 0) > 0}
 				<p class="text-sm text-text-muted" data-testid="bulk-host-rewrote-count">{run.hostRewrote === 1 ? t('bulk.run.host_rewrote_one') : tf('bulk.run.host_rewrote', { n: String(run.hostRewrote) })}</p>

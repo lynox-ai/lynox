@@ -540,7 +540,18 @@ export function bulkSystemName(targetSystem: string, i18n: BulkI18n): string {
 
 /** A run has no title: it is named by its size and where it writes. */
 export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): string {
-	return i18n.tf(run.kind === 'undo' ? 'bulk.label_undo' : 'bulk.label', { n: String(run.total), target: bulkSystemName(run.targetSystem, i18n) });
+	const one = run.total === 1 ? '_one' : '';
+	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n: String(run.total), target: bulkSystemName(run.targetSystem, i18n) });
+}
+
+/** The line about targets that held another value than expected when lynox last read them, or
+ *  null when there are none. Worded for every case: after a send without a clear answer lynox did
+ *  send to them (so not "not written"), an undo expects what its source wrote (so not "since the
+ *  preview"), a later resume reads them again (so of the last read only), and a local run has no
+ *  provider to name. */
+export function bulkConflictsText(run: Pick<BulkRun, 'conflicts'>, i18n: BulkI18n): string | null {
+	if (run.conflicts <= 0) return null;
+	return run.conflicts === 1 ? i18n.t('bulk.conflicts_one') : i18n.tf('bulk.conflicts', { n: String(run.conflicts) });
 }
 
 /** Targets the run writes — the most an approval can let it write. */
