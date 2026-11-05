@@ -676,7 +676,7 @@
 <div class="p-6 max-w-4xl mx-auto">
 	<h1 class="text-xl font-light tracking-tight mb-4">{t('workflow_library.title')}</h1>
 
-	{#if error}
+	{#if error && !scheduleModalWf}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
 	{/if}
 	{#if notice}
@@ -1016,6 +1016,10 @@
 				</div>
 			{/if}
 
+			<!-- In the dialog: on the page behind it, a refusal is covered by the dialog that stays open. -->
+			{#if error}
+				<p data-schedule-error class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mt-4">{error}</p>
+			{/if}
 			<div class="flex items-center justify-end gap-2 mt-5">
 				<button
 					onclick={cancelScheduleModal}
