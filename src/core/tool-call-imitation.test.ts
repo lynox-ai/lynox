@@ -228,13 +228,18 @@ describe('ToolCallImitationDetector on templates, code and provider call formats
     ['call object that names the tool', '{"name": "bash", "arguments": {"command": "ls -la"}} ', 'bash'],
     ['function object that names the tool', '{"type": "function", "function": {"name": "bash", "arguments": "{\\"command\\": \\"ls\\"}"}} ', 'bash'],
     ['tool field that names the tool', '{"tool": "read_file", "input": {"path": "a.txt"}} ', 'read_file'],
+    ['Llama call tags on one line', '<|python_tag|>web.run(query="opening hours")', undefined],
   ])('%s', (_label, unit, tool) => {
     it('stops 150 copies on one line', () => {
-      expect(run(unit.repeat(150), 4)?.toolName).toBe(tool);
+      const hit = run(unit.repeat(150), 4);
+      expect(hit).not.toBeNull();
+      expect(hit!.toolName).toBe(tool);
     });
 
     it('stops them when they arrive one character at a time', () => {
-      expect(run(unit.repeat(150), 1)?.toolName).toBe(tool);
+      const hit = run(unit.repeat(150), 1);
+      expect(hit).not.toBeNull();
+      expect(hit!.toolName).toBe(tool);
     });
   });
 

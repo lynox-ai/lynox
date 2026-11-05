@@ -104,9 +104,6 @@ export class ToolCallImitationDetector {
   private pos = 0;
   /** End, in the whole reply, of the last JSON object read; an object starting before it is nested. */
   private jsonSpanEnd = 0;
-  /** Starts below this were already resolved; the tail kept for a partly arrived start token
-   *  is scanned again, but what was resolved there is not resolved twice. */
-  private resolvedUpTo = 0;
   /** Per signature: copies in the current run, and where (in the whole reply) the last one ended. */
   private readonly runs = new Map<string, { count: number; end: number }>();
   private toolUseSeen = false;
@@ -133,7 +130,6 @@ export class ToolCallImitationDetector {
       this.buf = this.buf.slice(cut);
       this.base += cut;
       this.pos -= cut;
-      this.resolvedUpTo = Math.max(0, this.resolvedUpTo - cut);
     }
     this.buf += text;
     const re = this.start;
@@ -141,16 +137,11 @@ export class ToolCallImitationDetector {
     let m: RegExpExecArray | null;
     while ((m = re.exec(this.buf)) !== null) {
       const at = m.index;
-      if (at < this.resolvedUpTo) {
-        re.lastIndex = at + 1;
-        continue;
-      }
       const r = this.resolve(at, m[0]);
       if (r.kind === 'pending') {
         this.pos = at;
         return null;
       }
-      this.resolvedUpTo = at + 1;
       if (r.kind === 'none') {
         re.lastIndex = at + 1;
         continue;
