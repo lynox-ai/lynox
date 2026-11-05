@@ -399,6 +399,18 @@ describe('the undo of a description (§21.2 items 2 and 7)', () => {
     expect(byKey(refused, `${LIST}/1`)).toMatchObject({ change: 'invalid', error: 'before_has_shop_markup' });
   });
 
+  it('reads no mark in a field the read-back holds but the write never sent', async () => {
+    const { id } = await markedRun();
+    const db = engineDb.getDb();
+    const row = db.prepare('SELECT seq, after_actual FROM bulk_targets WHERE run_id = ? AND shop_added_markup = 1').get(id) as { seq: number; after_actual: string };
+    const actual = JSON.parse(engineDb.dec(row.after_actual)) as { value: Record<string, unknown> };
+    // The store's own short description, read back beside the description the write sent.
+    db.prepare('UPDATE bulk_targets SET after_actual = ? WHERE run_id = ? AND seq = ?')
+      .run(engineDb.enc(JSON.stringify({ ...actual, value: { ...actual.value, short_description: '<p>kurz</p>' } })), id, row.seq);
+    const next = approvedRun({ description: '<p>Neuer</p>' }, [{ description: '<p>Meins</p>', short_description: '<p>kurz</p>' }, { description: '<p>Alt 2</p>' }]);
+    expect(byKey(next, `${LIST}/1`).change).toBe('update');
+  });
+
   it('counts a marked row whose sent value does not parse as the marked value', async () => {
     const { id } = await markedRun();
     engineDb.getDb().prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND shop_added_markup = 1').run(engineDb.enc('{broken'), id);
