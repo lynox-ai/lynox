@@ -561,10 +561,10 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   const call = deps.call ?? callForStructuredJson;
   const newToken = deps.newToken ?? randomUUID;
   const run = ledger.getJudgeRun(runId);
-  if (!run) return { status: 'refused', summary: 'No judged bulk run with this id.' };
-  if (run.kind !== 'apply' || run.listPending) return { status: 'refused', summary: 'The bulk run has nothing to judge yet.' };
+  if (!run) return { status: 'refused', summary: say.noJudgedRun };
+  if (run.kind !== 'apply' || run.listPending) return { status: 'refused', summary: say.nothingToJudge };
   if (run.phase !== 'planned' || run.haltReason !== null) {
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run is ${run.phase}${run.haltReason !== null ? ' and halted' : ''} — nothing judged.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.notReadyToJudge(run.phase, run.haltReason !== null), say) };
   }
 
   // An external run reads its targets first, with the preview's read and under its budget.
