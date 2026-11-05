@@ -3,6 +3,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider, getActiveProvider } from './llm-client.js';
 import type { RunFailure } from './provider-failure.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
+import { pinTlsFloor } from './tls-floor.js';
 import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds, poolSuppliesLLMKeys } from './llm/provider-keys.js';
 import { resolveInboxMistralKey } from '../integrations/inbox/mistral-key.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
@@ -1010,6 +1011,8 @@ export class Engine {
 
   async init(): Promise<this> {
     this._startedAt = Date.now();
+    // Before anything opens a connection: no launch flag may lower the TLS floor (tls-floor.ts).
+    pinTlsFloor();
     await this._initBootstrap();
     await this._initPersistence();
     await this._initContextAndIdentity();
