@@ -337,6 +337,25 @@ describe('a judged run refused for shortcode_changed shows the judge\'s value to
       expect([shown.error, shown.linkDomain]).toEqual(['new_link_domain', undefined]);
     });
 
+    it('reads the spelling from the link itself, never from the same host written elsewhere', async () => {
+      // The link spells the key percent-encoded, which no scanner sees as one; a lower-case copy of
+      // the host, in the text or in the link's own path, is not how the link spells it. Built at run time.
+      const encoded = `AKIA${'%49OSFODNN7EXAMPLE'}.evil.example`;
+      const decoy = 'akiaiosfodnn7example.evil.example';
+      const inText = shownOf(await judge({ ...before, short_description: `<p>siehe ${decoy} <a href="https://${encoded}/">x</a></p>` }, { scanSecret: aws }));
+      expect([inText.error, inText.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('reads no spelling from the link\'s own path', async () => {
+      const encoded = `AKIA${'%49OSFODNN7EXAMPLE'}.evil.example`;
+      const inPath = shownOf(await judge(linked(`https://${encoded}/akiaiosfodnn7example.evil.example`), { scanSecret: aws }));
+      expect([inPath.error, inPath.linkDomain]).toEqual(['new_link_domain', undefined]);
+    });
+
+    it('names the domain of a link with user info and a port, as the check read it (twin)', async () => {
+      expect(shownOf(await judge(linked('https://user@Evil.Example.:8080/x'), { scanSecret: aws })).linkDomain).toBe('evil.example');
+    });
+
     it('keeps no domain whose spelling holds a vault value that lower case would hide', async () => {
       const vault = (t: string): string => t.replaceAll('MyToken42', '***');
       expect(vault('mytoken42.evil.example')).toBe('mytoken42.evil.example');

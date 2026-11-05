@@ -295,7 +295,13 @@ export interface MarkupCheckInput {
   startDomains: readonly string[];
 }
 
-export type MarkupCheckResult = { ok: true } | { ok: false; reason: MarkupRefusal; detail: string };
+export type MarkupCheckResult = { ok: true } | {
+  ok: false; reason: MarkupRefusal; detail: string;
+  /** With `new_link_domain`: the host as the attribute value spells it, before `new URL` folds its
+   *  case, decodes its escapes and maps it to Punycode; undefined where the value does not spell it
+   *  in a form read here (`hostAsWritten`). */
+  hostWritten?: string | undefined;
+};
 
 const DETAIL_MAX = 200;
 
@@ -801,7 +807,21 @@ function checkLink(value: string, input: MarkupCheckInput, linked: Set<string>):
   // Not through `refused`: its cut at DETAIL_MAX would shorten a host (up to 253 characters) without
   // a sign, and the owner's page names this domain (1010). It is the host as `new URL` reads it,
   // ASCII and lower case, an internationalised one in Punycode, so the page never shows a lookalike.
-  return { ok: false, reason: 'new_link_domain', detail: target.domain };
+  return { ok: false, reason: 'new_link_domain', detail: target.domain, hostWritten: hostAsWritten(value) };
+}
+
+/** The host a link's value spells: after `scheme://` or `//`, without user info and port, or the
+ *  domain of a `mailto:` address. Undefined for any other form (`https:host`, a backslash), which
+ *  `new URL` may still read; the caller then names no domain. */
+function hostAsWritten(value: string): string | undefined {
+  const mail = /^\s*mailto:[^@]*@(.*)$/i.exec(value);
+  if (mail) return mail[1]!.trim();
+  const web = /^\s*(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/([^/?#\\\s]*)/.exec(value);
+  if (!web) return undefined;
+  const authority = web[1]!;
+  const host = authority.slice(authority.lastIndexOf('@') + 1);
+  if (host.startsWith('[')) return host.slice(0, host.indexOf(']') + 1);
+  return host.replace(/:\d*$/, '');
 }
 
 // --- Plain-text fields.

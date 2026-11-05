@@ -529,30 +529,31 @@ export function verdictTextRefusal(
 export interface VerdictTextRefusal {
   reason: BulkInvalidReason;
   linkDomain?: string | undefined;
-  /** Every place the field's value spells that domain, in its own case. Empty where it spells it
-   *  only percent-encoded or in Unicode: `new URL` decoded it, and what it decoded to was never
-   *  scanned as written. */
-  linkDomainWritten?: string[] | undefined;
+  /** The host as the refused link's own value spells it, in its own case, where that spelling is
+   *  the domain up to case and a final dot. Undefined where the link spells it percent-encoded, as
+   *  an entity or in Unicode: `new URL` decoded it, and what it decoded to was never seen as written. */
+  linkDomainWritten?: string | undefined;
 }
 
 /**
  * The domain of a refused link as the owner may be shown it (1010), or undefined. The check reads
  * the host as `new URL` does: lower case, percent-escapes decoded, Unicode in Punycode. A credential
  * spelled in a host can lose its shape that way (`AKIA…` in upper case) or gain it (`sk%2Dant…`),
- * so the domain is shown only where the value spells it as it is, and only if no spelling of it
- * and not the domain itself holds a vault value or a credential's shape.
+ * so the domain is shown only where the link's own value spells it as it is, and only if neither
+ * that spelling nor the domain itself holds a vault value or a credential's shape.
  */
 export function shownLinkDomain(refusal: VerdictTextRefusal, holdsSecret: (text: string) => boolean): string | undefined {
   const domain = refusal.linkDomain;
-  const written = refusal.linkDomainWritten ?? [];
-  if (domain === undefined || written.length === 0) return undefined;
-  return [domain, ...written].some(holdsSecret) ? undefined : domain;
+  const written = refusal.linkDomainWritten;
+  if (domain === undefined || written === undefined) return undefined;
+  return holdsSecret(domain) || holdsSecret(written) ? undefined : domain;
 }
 
-/** Each place `text` spells `domain`, ignoring case, as written. */
-function spellingsOf(text: string, domain: string): string[] {
-  const escaped = domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return [...text.matchAll(new RegExp(escaped, 'gi'))].map((m) => m[0]);
+/** The host a refused link spells, where it is its domain up to case and a final dot: that
+ *  spelling, else undefined. Only the link's own value counts — the same host written elsewhere in
+ *  the field says nothing about how this link spells it. */
+function writtenDomain(hostWritten: string | undefined, domain: string): string | undefined {
+  return hostWritten !== undefined && hostWritten.toLowerCase().replace(/\.$/, '') === domain ? hostWritten : undefined;
 }
 
 /** {@link verdictTextRefusal} with the domain of a refused link. */
@@ -578,7 +579,7 @@ export function verdictTextRefusalOf(
       if (!checked.ok && checked.reason === 'shortcode_changed') shortcode = { reason: checked.reason };
       else if (!checked.ok) {
         return checked.reason === 'new_link_domain'
-          ? { reason: checked.reason, linkDomain: checked.detail, linkDomainWritten: spellingsOf(value, checked.detail) }
+          ? { reason: checked.reason, linkDomain: checked.detail, linkDomainWritten: writtenDomain(checked.hostWritten, checked.detail) }
           : { reason: checked.reason };
       }
       continue;

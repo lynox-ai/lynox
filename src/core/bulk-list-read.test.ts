@@ -535,9 +535,10 @@ describe('a planned description on a list run (PRD shopify-preset §20.2 item 5,
     expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', 'evil.example'], ['new_link_domain', 'evil.example']]);
   });
 
-  it('keeps no domain a plan spells percent-encoded, which decodes to a credential\'s shape (1010)', async () => {
-    // The run's plan-time scan reads the text, where `%2D` breaks the shape; the link check
-    // decodes the host to `sk-ant-api03-…`, which the scanner names.
+  it('keeps no domain a plan spells only percent-encoded (1010)', async () => {
+    // The run's plan-time scan reads the text, where `%2D` breaks a credential's shape; the link
+    // check decodes the host to `sk-ant-api03-…`. A host the link does not spell as it is gets no
+    // domain at all, before any scanner is asked (the scanner itself: the upper-case test below).
     const href = 'https://sk%2Dant%2Dapi03%2Dabcdefghijklmnopqrstuvwxyz0123456789ABCD.evil.example/';
     const id = await previewed({ description: `<p>New <a href="${href}">deal</a></p>` });
     expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', undefined], ['new_link_domain', undefined]]);
