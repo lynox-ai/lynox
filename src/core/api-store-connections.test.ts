@@ -252,16 +252,18 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
 
   it('loadFromConnections names a row whose config is not JSON without quoting the config', () => {
     const { cs, engine } = makeCs();
-    // The parser's message quotes the text around the fault, and that text is the stored config.
+    // An unquoted value: V8's message then quotes the text around the fault (`..."ase_url":
+    // quoted-con"...`), and that text is the stored config. Other faults quote nothing, so the
+    // seed must be one that does, or the negative assert below proves nothing.
     engine.getDb().prepare(
-      "INSERT INTO connections (id, kind, name, config_json) VALUES ('broken','api','Broken','{\"base_url\":\"https://quoted-config.example\" x')",
+      "INSERT INTO connections (id, kind, name, config_json) VALUES ('broken','api','Broken','{\"base_url\": quoted-config}')",
     ).run();
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
       expect(new ApiStore().loadFromConnections(cs)).toBe(0);
       const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
       expect(logged).toContain('[lynox:api-store] Failed to load connection "broken": not valid JSON\n');
-      expect(logged).not.toContain('quoted-config');
+      expect(logged).not.toContain('quoted-con');
     } finally {
       stderr.mockRestore();
     }

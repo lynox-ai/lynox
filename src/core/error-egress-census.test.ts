@@ -170,7 +170,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'tier-raise mirror failed', count: 1, why: 'stub supersede and upsert: SQLite' },
   ],
   'core/memory-graph-store.ts': [
-    { marker: 'gc reap failed', count: 1, why: 'the subject reap after the stub GC: deletes and merge closure by id in one SQLite transaction' },
+    { marker: 'gc reap failed', count: 1, why: 'the subject reap after the stub GC: deletes and merge closure by id in one SQLite transaction; the cross-store probes catch their own errors and report them reduced' },
   ],
   'core/crm.ts': [
     { marker: 'CRM contact mirror failed', count: 1, why: 'subject-graph mirror writes: SQLite, or lynox errors naming ids and kinds only' },
@@ -225,7 +225,7 @@ const FROZEN: Record<string, number> = {
   'core/config.ts': 1,
   'core/crm.ts': 2,
   'core/engine-init.ts': 1,
-  'core/engine.ts': 33,
+  'core/engine.ts': 32,
   'core/knowledge-layer.ts': 8,
   'core/knowledge-store.ts': 2,
   'core/llm-wire-rules.ts': 1,
