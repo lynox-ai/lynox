@@ -706,10 +706,15 @@ if (typeof window !== 'undefined') {
 						let reached = false;
 						let lastRole: string | undefined;
 						let activeRun: boolean | undefined;
+						let scheduledQuestion = false;
 						if (!probeSid) return;
 						try {
 							const ar = await fetch(`${getApiBase()}/runs/active`);
-							if (ar.ok) activeRun = selectReattachTarget(await ar.json(), probeSid) !== null;
+							if (ar.ok) {
+								const body: unknown = await ar.json();
+								activeRun = selectReattachTarget(body, probeSid) !== null;
+								scheduledQuestion = scheduledQuestionWaits(body, probeSid);
+							}
 						} catch { /* leave undefined — treated as blind, not as "no run" */ }
 						try {
 							const enc = encodeURIComponent(probeSid);
@@ -725,6 +730,16 @@ if (typeof window !== 'undefined') {
 							}
 						} catch { /* still blind — shouldRefireOfflineTurn declines */ }
 						if (sessionId !== probeSid) return; // thread switched mid-probe
+						// A scheduled run's question waits here. A transcript ending on it reads as
+						// "answered", which cleared the failed message and lost it. It stays failed and marked
+						// offline, is not sent past the question, and the card comes back. Whether it arrived
+						// meanwhile is not decided here: text equality cannot tell it from an earlier message
+						// with the same words. Once the question is answered, the user decides by tapping;
+						// if it had arrived after all, that tap sends it a second time.
+						if (scheduledQuestion) {
+							sayQuestionWaiting(await checkPendingPrompt());
+							return;
+						}
 						if (!shouldRefireOfflineTurn({ reached, lastRole, activeRun })) {
 							// Answered, still running, or still unverifiable. Either way this
 							// turn does not get sent again by itself; the failed bubble keeps
@@ -747,7 +762,10 @@ if (typeof window !== 'undefined') {
 				})();
 				return;
 			}
-			refireFailedTurn(lastFailed);
+			// Asked first too: a message held at a scheduled run's question stays failed, and the
+			// reconnect must not send it past the question the tap stopped at. When the
+			// server cannot be asked yet, it is sent again as before.
+			void askBeforeResend({ unreachableSends: true }).then((resend) => { if (resend) refireFailedTurn(lastFailed); });
 		}
 	});
 	// Flush pending persist on tab close to prevent data loss
@@ -1296,7 +1314,7 @@ let _resendProbeInFlight = false;
  * attached. A scheduled run's question waiting there holds it back too: the user is told and
  * the question's card is brought back. Resolves whether to send; never rejects.
  */
-async function askBeforeResend(): Promise<boolean> {
+async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promise<boolean> {
 	if (_resendProbeInFlight || isStreaming) return false;
 	const sid = sessionId;
 	// No session yet: the failed turn never reached one, so nothing can be running.
@@ -1311,6 +1329,10 @@ async function askBeforeResend(): Promise<boolean> {
 		live = selectReattachTarget(body, sid);
 		scheduledQuestion = scheduledQuestionWaits(body, sid);
 	} catch {
+		// The reconnect's automatic re-send went ahead before it asked first, and still does when
+		// the question cannot be asked, silently: right after `online` the network often is not
+		// back yet, and the re-send waits for it.
+		if (opts.unreachableSends === true) return sessionId === sid;
 		// Not "nothing is running": the question could not be asked, so nothing is sent.
 		if (sessionId === sid) addToast(t('chat.error_connection'), 'error', 6000);
 		return false;
@@ -1322,19 +1344,43 @@ async function askBeforeResend(): Promise<boolean> {
 	if (live === null && scheduledQuestion) {
 		// A scheduled run's question has no stream to attach: the way on is to answer it, so
 		// its card is brought back rather than a turn sent past it.
-		addToast(t('chat.question_waiting'), 'info', 6000);
-		void checkPendingPrompt();
+		sayQuestionWaiting(await checkPendingPrompt());
 		return false;
 	}
 	if (live === null) return true;
-	// A run that waits for the user's answer is not working: the way on is to answer it.
-	addToast(t(live.status === 'awaiting_input' ? 'chat.question_waiting' : 'chat.still_running'), 'info', 6000);
+	// A run that waits for the user's answer is not working: the way on is to answer it. Its card
+	// comes with the attached stream, so the sentence names no card and no X; for an approval it
+	// says "question", as main did, rather than fetch the card and race a second probe.
+	if (live.status === 'awaiting_input') addToast(t('chat.question_waiting_plain'), 'info', QUESTION_TOAST_MS);
+	else addToast(t('chat.still_running'), 'info', 6000);
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its
 	// own failures (an unreachable stream leaves the thread as it is).
 	void reattachToActiveRun(sid, -1);
 	return false;
+}
+
+/**
+ * Says that a scheduled run's question holds a message back, by the card that came back.
+ * A decision card (approval, deep consent) has no X to cancel it, so its sentence names none, nor
+ * does another kind of card that came back (several questions, a secret, a mail connection). With
+ * no card restored, nothing is said: a sentence about one could be false.
+ */
+function sayQuestionWaiting(card: PendingCard): void {
+	const key = questionWaitingKey(card);
+	if (key !== null) addToast(t(key), 'info', QUESTION_TOAST_MS);
+}
+
+/** The longest of these sentences runs to about 200 characters; 6 s was too short to read it. */
+const QUESTION_TOAST_MS = 10_000;
+
+/** The sentence for `card`, or null when no card came back. */
+export function questionWaitingKey(card: PendingCard): string | null {
+	if (card === 'decision') return 'chat.question_waiting_decision';
+	if (card === 'question') return 'chat.question_waiting';
+	if (card === 'other') return 'chat.question_waiting_plain';
+	return null;
 }
 
 /** The tap on a failed message: asks first, then sends `text` again. Never rejects. */
@@ -2914,16 +2960,28 @@ export function getMailConnectGeneration() {
 }
 
 /**
- * Check the server for a pending prompt that survived a disconnect/refresh.
- * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it.
+ * The card `checkPendingPrompt` brought back: a question (its card has the X that cancels it), a
+ * decision (an approval or a deep-consent card, which have no X), another kind of prompt, or none.
  */
-export async function checkPendingPrompt(): Promise<void> {
-	if (!sessionId) return;
+export type PendingCard = 'question' | 'decision' | 'other' | null;
+
+/**
+ * Check the server for a pending prompt that survived a disconnect/refresh.
+ * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it, and says which card.
+ */
+export async function checkPendingPrompt(): Promise<PendingCard> {
+	const sid = sessionId;
+	if (!sid) return null;
+	let card: PendingCard = null;
 	try {
+		// `sessionId` is `sid` here (no await between); the polled-routes list names this spelling.
 		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/pending-prompt`);
-		if (!res.ok) return;
+		if (!res.ok) return null;
 		const data = (await res.json()) as Record<string, unknown>;
-		if (!data['pending']) return;
+		// The chat may have changed while the request ran: the card belongs to the chat it was
+		// asked for, and set now it would show in another one.
+		if (sessionId !== sid) return null;
+		if (!data['pending']) return null;
 
 		const promptType = data['promptType'] as string;
 		const kind = data['kind'] as string | undefined;
@@ -2951,6 +3009,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				receivedAt: createdAt,
 				origin,
 			};
+			card = 'other';
 		} else if (promptType === 'ask_user') {
 			pendingPermission = {
 				question: String(data['question'] ?? ''),
@@ -2964,6 +3023,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				multiSelect: data['multiSelect'] === true,
 				origin,
 			};
+			card = isConsentCard(pendingPermission.options) ? 'decision' : 'question';
 		} else if (promptType === 'ask_secret') {
 			pendingSecretPrompt = {
 				name: String(data['secretName'] ?? ''),
@@ -2973,6 +3033,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				origin,
 			};
 			secretPromptGeneration++;
+			card = 'other';
 		} else if (promptType === 'connect_mail' && data['mailConnect']) {
 			const mc = data['mailConnect'] as Record<string, unknown>;
 			pendingMailConnect = {
@@ -2989,10 +3050,12 @@ export async function checkPendingPrompt(): Promise<void> {
 				origin,
 			};
 			mailConnectGeneration++;
+			card = 'other';
 		}
 	} catch {
 		// Non-critical — prompt check failed, user can still interact normally
 	}
+	return card;
 }
 
 /** Stop the current run. Resolves false when the stop request could not be sent (it may still
@@ -3709,7 +3772,13 @@ export async function retryInterruptedRun(): Promise<void> {
 		const m = messages[i];
 		if (m && m.role === 'user' && m.content) { lastUserText = m.content; break; }
 	}
+	// Asked before the dismiss: a waiting question (or a live run, or no answer from the server)
+	// keeps the banner and its Retry, and nothing is sent. The chat is checked after each await,
+	// so the retry never goes into a chat opened meanwhile.
+	const sid = sessionId;
+	if (lastUserText && !await askBeforeResend()) return;
 	await dismissInterruptedRun();
+	if (sessionId !== sid) return;
 	if (lastUserText) await sendMessage(lastUserText);
 }
 
