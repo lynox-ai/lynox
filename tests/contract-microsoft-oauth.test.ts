@@ -85,8 +85,8 @@ describe('the Microsoft return parameters', () => {
 });
 
 describe('the work address on the Microsoft start', () => {
-  it('is work_address', () => {
-    expect(MICROSOFT_OAUTH_START_ADDRESS_PARAM).toBe('work_address');
+  it('is microsoft_work_address', () => {
+    expect(MICROSOFT_OAUTH_START_ADDRESS_PARAM).toBe('microsoft_work_address');
   });
 
   it('shares no name with the return parameters or the start\'s own', () => {
@@ -106,7 +106,10 @@ describe('the admin-consent status', () => {
 // The twin check in `migrated.ts` sees a re-declared NAME. A param name drifts by a
 // re-typed STRING instead (the Google card reads `'google_oauth'` by hand), so the
 // literal is swept for here: outside the contract, code imports the constant.
-const PARAM_LITERAL = /['"](?:microsoft_oauth(?:_error)?|work_address)['"]|[?&](?:microsoft_oauth(?:_error)?|work_address)=/;
+const PARAM_NAMES = String.raw`microsoft_oauth(?:_error)?|microsoft_work_address`;
+// Quoted, as a template literal passed to a call, in a query string, or as an object key.
+// A name in backticks inside a comment is a doc mention and stays allowed.
+const PARAM_LITERAL = new RegExp(String.raw`['"](?:${PARAM_NAMES})['"]|\(\s*\`(?:${PARAM_NAMES})\`|[?&](?:${PARAM_NAMES})=|\b(?:${PARAM_NAMES})\s*:`);
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -123,13 +126,16 @@ describe('the Microsoft parameters are imported, never typed', () => {
       'params.get("microsoft_oauth_error")',
       'c.redirect(`${url}?microsoft_oauth=${nonce}`)',
       'c.redirect(`${url}?x=1&microsoft_oauth_error=${code}`)',
-      "c.req.query('work_address')",
-      '`${cp}/oauth/microsoft/start?instance_id=${id}&work_address=${encodeURIComponent(a)}`',
+      "c.req.query('microsoft_work_address')",
+      'c.req.query(`microsoft_work_address`)',
+      '`${cp}/oauth/microsoft/start?instance_id=${id}&microsoft_work_address=${encodeURIComponent(a)}`',
+      'new URLSearchParams({ instance_id: id, microsoft_work_address: a })',
     ]) expect(PARAM_LITERAL.test(line), line).toBe(true);
     for (const line of [
       '// the card reads `microsoft_oauth` through the constant',
       'params.get(MICROSOFT_OAUTH_CLAIM_PARAM)',
-      '// the start carries the user\'s work_address next to the token',
+      '// the start carries the user\'s address next to the token',
+      "params.get('work_address')",
       "params.get('google_oauth')",
     ]) expect(PARAM_LITERAL.test(line), line).toBe(false);
   });

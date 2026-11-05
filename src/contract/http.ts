@@ -951,25 +951,37 @@ export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
  * `login_hint` from it; the engine only passes the address on (PRD-M365 §3.5).
  *
  * Next to the start token, not inside it. Signing it would protect nothing: the address
- * comes from no authenticated source, and the token already binds the start to its
- * instance. Three conditions carry that placement, and the control plane's start route
- * owes all three:
+ * comes from no authenticated source, and the engine that mints the token would sign
+ * whatever address it was given. What a start is safe on is the token, which binds it to
+ * the instance whose owner asked for it, and the sign-in at Microsoft, which decides whose
+ * mailbox is connected. The address names neither. The control plane's start route owes
+ * the following:
  *
- *  1. **A hint only.** The connected identity and the `tid` come from the token exchange
+ *  1. **A hint only.** The connected identity and its `tid` come from the token exchange
  *     alone (id_token, Graph `/me`). Nothing read from this parameter is stored, and it
- *     decides nothing beyond `login_hint` and the tenant discovery. A plan that would store
- *     it reopens the question of signing it.
- *  2. **Personal data in a URL.** The address lands in browser history and in whatever
- *     records the request URL. The control plane does not log it, never echoes it in an
- *     error text or a redirect, and keeps it out of what its error tracking reports about
- *     the request.
- *  3. **A swapped address connects nothing.** In a genuine start link it leads to another
- *     tenant's sign-in, and the `tid` comparison after the exchange ends the flow with
- *     `wrong_tenant`. A test at that comparison kills the mutant that drops it.
+ *     decides nothing beyond `login_hint` and the tenant discovery. The `tid` the route
+ *     resolves from the address only checks that the sign-in went to the tenant the hint
+ *     named (`wrong_tenant`); it proves nothing about the address, because a different
+ *     address names a different tenant to compare with. A test signs in as someone other
+ *     than the address names and finds only the signed-in identity stored. A plan that
+ *     would store the address reopens the question of signing it.
+ *  2. **Checked before it is used.** At most 254 characters, exactly one `@`, a domain of
+ *     letters, digits and hyphens with at least one dot. `common`, `organizations` and
+ *     `consumers` are refused, or the start would fall back to a multi-tenant authority.
+ *     The authority and the `tid` the route keeps come only from the discovered directory
+ *     id, never from the raw domain, and `login_hint` is set as one encoded query value.
+ *  3. **Token first.** The start token is verified before the tenant discovery runs, and
+ *     the discovery is limited in rate and cached, so that one start link cannot drive
+ *     outbound lookups or serve as an oracle for which domains have a tenant.
+ *  4. **Personal data in a URL.** The address is in a URL only on this last hop, from the
+ *     browser to the control plane; it reaches the engine in a request body. It still lands
+ *     in browser history and in whatever records the request URL. The control plane does
+ *     not log it, never echoes it in an error text or a redirect, and keeps it out of what
+ *     its error tracking reports about the request.
  *
  * Imported, never typed, for the reason {@link MICROSOFT_OAUTH_CLAIM_PARAM} gives.
  */
-export const MICROSOFT_OAUTH_START_ADDRESS_PARAM = 'work_address';
+export const MICROSOFT_OAUTH_START_ADDRESS_PARAM = 'microsoft_work_address';
 
 // === Admin consent status — GET /internal/oauth/microsoft/adminconsent/status (engine → CP) ===
 
