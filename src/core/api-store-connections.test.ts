@@ -250,6 +250,23 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
     expect(r.get('broken')).toBeUndefined();
   });
 
+  it('loadFromConnections names a row whose config is not JSON without quoting the config', () => {
+    const { cs, engine } = makeCs();
+    // The parser's message quotes the text around the fault, and that text is the stored config.
+    engine.getDb().prepare(
+      "INSERT INTO connections (id, kind, name, config_json) VALUES ('broken','api','Broken','{\"base_url\":\"https://quoted-config.example\" x')",
+    ).run();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      expect(new ApiStore().loadFromConnections(cs)).toBe(0);
+      const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
+      expect(logged).toContain('[lynox:api-store] Failed to load connection "broken": not valid JSON\n');
+      expect(logged).not.toContain('quoted-config');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   // A file the import cannot take as a profile holds the whole import: it runs once, and a file
   // it passed over would be gone for good. The owner is told which file and what to do
   // (`importWaitsOn`); the import runs once the file is repaired or deleted.

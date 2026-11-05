@@ -169,6 +169,9 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'confidence mirror (', count: 1, why: 'a confidence UPDATE by id' },
     { marker: 'tier-raise mirror failed', count: 1, why: 'stub supersede and upsert: SQLite' },
   ],
+  'core/memory-graph-store.ts': [
+    { marker: 'gc reap failed', count: 1, why: 'the subject reap after the stub GC: deletes and merge closure by id in one SQLite transaction' },
+  ],
   'core/crm.ts': [
     { marker: 'CRM contact mirror failed', count: 1, why: 'subject-graph mirror writes: SQLite, or lynox errors naming ids and kinds only' },
   ],
@@ -218,16 +221,15 @@ it('names a judgement whose sink moved away or multiplied', () => {
 
 /** Raw sinks per file as of this change. A rise fails (a new sink); a drop asks to lower it here. */
 const FROZEN: Record<string, number> = {
-  'core/api-store.ts': 8,
+  'core/api-store.ts': 6,
   'core/config.ts': 1,
   'core/crm.ts': 2,
   'core/engine-init.ts': 1,
-  'core/engine.ts': 34,
+  'core/engine.ts': 33,
   'core/knowledge-layer.ts': 8,
   'core/knowledge-store.ts': 2,
   'core/llm-wire-rules.ts': 1,
   'core/managed-hook.ts': 1,
-  'core/mandate-ends.ts': 1,
   'core/memory-graph-store.ts': 1,
   'core/mistral-health-check.ts': 1,
   'core/onboarding-promotion.ts': 2,
