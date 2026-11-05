@@ -26,10 +26,10 @@
 # `false → true` there ships the feature on every instance that sets nothing, the same
 # rollout as a `?? true`. Until this read existed, such a flip passed this guard green.
 # It reads the table literal, not what `isFeatureEnabled` returns: a special case in the
-# resolver is not read. The table's name may occur exactly twice in the file, in its
-# declaration and in the one read, which must be the line below word for word; any other
-# occurrence (an assignment, `Object.assign`, an alias, even on the read's own line) stops
-# the run, because the literal would no longer be the whole default.
+# resolver is not read. The table's name may stand on exactly two lines of the file, its
+# declaration and the one read, which must be the line below word for word; any other
+# mention (an assignment, `Object.assign`, an alias, also on the read's own line) stops the
+# run, because the literal would no longer be the whole default.
 # Flags registered at runtime (`registerFeature`) are not in the table and not read here.
 # Then diffs that set against `scripts/default-on-inventory.txt`. A new default-ON
 # flag that is not in the file fails. Adding the line is the deliberate act — it
@@ -88,12 +88,12 @@ done
 # default-ON". Block comments are refused rather than parsed: parsing them is where a
 # `true` hides.
 FEATURE_READ='  return CORE_FEATURE_DEFAULTS[flag as FeatureFlag] ?? _dynamicDefaults.get(flag) ?? false;'
-# `|| true` inside the group: with no match, grep's exit 1 would end the run silently
-# under `pipefail`, without saying why.
-feature_mentions="$( { grep -o 'CORE_FEATURE_DEFAULTS' "$FEATURES" || true; } | wc -l | tr -d ' ')"
+# Lines that name the table. A second name on the read's line fails the word-for-word
+# match below; `|| true` keeps a count of 0 from ending the run silently under `set -e`.
+feature_mentions="$(grep -c 'CORE_FEATURE_DEFAULTS' "$FEATURES" || true)"
 if [ "$feature_mentions" -ne 2 ] || ! grep -qE '^const CORE_FEATURE_DEFAULTS[^=]*= \{[[:space:]]*$' "$FEATURES" \
    || ! grep -qxF "$FEATURE_READ" "$FEATURES"; then
-  echo "default-on-inventory: CORE_FEATURE_DEFAULTS is named ${feature_mentions} times in $FEATURES, expected its declaration (ending in '{') and the one read in isFeatureEnabled, word for word: '${FEATURE_READ}' — a write elsewhere would change a default the table does not show; refusing to report a clean run" >&2
+  echo "default-on-inventory: CORE_FEATURE_DEFAULTS is named on ${feature_mentions} lines of $FEATURES, expected its declaration (ending in '{') and the one read in isFeatureEnabled, word for word: '${FEATURE_READ}' — a write elsewhere would change a default the table does not show; refusing to report a clean run" >&2
   exit 1
 fi
 # The check above made the opening line end at `{`, so no entry can sit on it, outside the

@@ -82,7 +82,7 @@ describe('default-on-inventory reads the feature flags\' defaults', () => {
   // Fail-closed: each of these would otherwise read as "nothing default-ON". Each names its
   // diagnosis: a missing table and an unreadable one are different repairs.
   const UNREADABLE = /read \d+ of \d+ lines of CORE_FEATURE_DEFAULTS .* refusing to report a clean run/;
-  const NAMED = /CORE_FEATURE_DEFAULTS is named \d+ times .* refusing to report a clean run/;
+  const NAMED = /CORE_FEATURE_DEFAULTS is named on \d+ lines of .* refusing to report a clean run/;
   const unreadable: Array<[string, string, RegExp]> = [
     ['a value that is a constant', block("  'on-flag': ON_BY_DEFAULT,\n"), UNREADABLE],
     ['a value on the next line', block("  'on-flag':\n    true,\n"), UNREADABLE],
