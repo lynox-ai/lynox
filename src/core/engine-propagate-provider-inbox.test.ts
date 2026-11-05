@@ -108,6 +108,7 @@ vi.mock('../integrations/inbox/bootstrap.js', () => ({
 
 import { Engine, RESTORE_INBOX_BOUND_MS, SHUTDOWN_INBOX_CLASSIFY_MS, SHUTDOWN_INBOX_CUTOFF_MS } from './engine.js';
 import type { LynoxConfig, LynoxUserConfig } from '../types/index.js';
+import { InboundMailDeferred } from '../integrations/mail/inbound-deferred.js';
 
 interface MockRuntime {
   __sentinel: string;
@@ -466,6 +467,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       _inboxRebootstrapInflight: Promise<void> | null;
       _inboxClassifierSuspended: boolean;
       _mailContext: typeof fakeMailContext | null;
+      _inboundMailHook: (runtime: MockRuntime) => NonNullable<typeof fakeMailContext.hooks.onInboundMail>;
     };
     engineHandle._inboxRuntime = usRuntime;
     engineHandle._mailStateDb = mockMailStateDb;
@@ -483,7 +485,15 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     usRuntime.shutdown.mockReturnValueOnce(shutdownDeferred);
 
     const euRuntime = makeRuntime('eu-runtime');
-    mockBootstrapInbox.mockReturnValueOnce(euRuntime);
+    // The bootstrap runs after the old runtime is drained and before the new hook is wired: the
+    // hook in place then must defer too, not be missing (a missing hook counts the mail handled).
+    let hookDuringBootstrap: Promise<unknown> | null = null;
+    mockBootstrapInbox.mockImplementationOnce(() => {
+      hookDuringBootstrap = fakeMailContext.hooks.onInboundMail
+        ? fakeMailContext.hooks.onInboundMail('acct-1', { messageId: 'm-gap' } as unknown as import('../integrations/mail/context.js').MailEnvelope).then(() => 'returned', (err: unknown) => err)
+        : Promise.resolve('no hook');
+      return euRuntime;
+    });
 
     // Trigger the cross-region switch — fire-and-forget; do NOT await
     // the inflight yet, because we want to probe the drain window.
@@ -518,11 +528,10 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       bodyText: '',
       receivedAt: new Date().toISOString(),
     } as unknown as import('../integrations/mail/context.js').MailEnvelope;
-    fakeMailContext.hooks.onInboundMail = async (accountId, envelope) => {
-      if (engineHandle._inboxClassifierSuspended) return;
-      return usRuntime.hook(accountId, envelope);
-    };
-    await fakeMailContext.hooks.onInboundMail('acct-1', mockMail);
+    fakeMailContext.hooks.onInboundMail = engineHandle._inboundMailHook(usRuntime);
+    // The mail is deferred, not dropped: a hook that returned would count as handled, and the
+    // watcher would mark the mail seen without it ever being classified.
+    await expect(fakeMailContext.hooks.onInboundMail('acct-1', mockMail)).rejects.toBeInstanceOf(InboundMailDeferred);
     // OLD US runtime must NOT have been invoked — privacy guarantee.
     expect(usRuntime.hook).not.toHaveBeenCalled();
 
@@ -534,6 +543,7 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     }
     expect(engineHandle._inboxClassifierSuspended).toBe(false);
     expect(engineHandle._inboxRuntime).toBe(euRuntime);
+    expect(await hookDuringBootstrap, 'hook between drain and rewire').toBeInstanceOf(InboundMailDeferred);
 
     // Post-rebootstrap: the MailContext.hook is the suspension-aware
     // wrapper around the NEW (EU) runtime. Invoke it — the EU runtime
@@ -552,7 +562,8 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
    * is drained the short way, so the rebootstrap settles instead of holding the restore for as
    * long as classifying the backlog takes.
    */
-  async function engineMidRebootstrap(shortDrain: 'releases' | 'hangs'): Promise<{ engine: Engine; usRuntime: MockRuntime; releaseDrain: () => void }> {
+  type InboundHook = (accountId: string, envelope: import('../integrations/mail/context.js').MailEnvelope) => Promise<void>;
+  async function engineMidRebootstrap(shortDrain: 'releases' | 'hangs', mailContext?: { hooks: { onInboundMail?: InboundHook } }): Promise<{ engine: Engine; usRuntime: MockRuntime; releaseDrain: () => void }> {
     process.env['MISTRAL_API_KEY'] = 'sk-mistral-test';
     const engine = new Engine({ model: 'balanced' });
     const usRuntime = makeRuntime('us-runtime');
@@ -561,10 +572,12 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       _mailStateDb: unknown;
       _inboxLlmRegion: 'us' | 'eu' | null;
       _inboxRebootstrapInflight: Promise<void> | null;
+      _mailContext: unknown;
     };
     engineHandle._inboxRuntime = usRuntime;
     engineHandle._mailStateDb = { __sentinel: 'mail-db' };
     engineHandle._inboxLlmRegion = 'us';
+    if (mailContext) engineHandle._mailContext = mailContext;
 
     // The old runtime's plain drain holds (a backlog being classified); drained the short way it
     // releases the held drain too, as the queue does, unless its running jobs hang.
@@ -633,6 +646,69 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     } finally {
       vi.useRealTimers();
       releaseDrain();
+    }
+  });
+  it('a restore that gives up on a rebootstrap defers the mail the finished rebootstrap would take', async () => {
+    // The restore's bound passes while the old runtime still drains; the rebootstrap goes on and
+    // wires the new runtime before the process exits. A mail it took then would be lost with the
+    // exit, so it stays unseen for the process after the restore.
+    const mailContext: { hooks: { onInboundMail?: InboundHook } } = { hooks: {} };
+    const { engine, releaseDrain } = await engineMidRebootstrap('hangs', mailContext);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const restore = engine.shutdown({ inboxBacklog: 'dead-letter' }).catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(RESTORE_INBOX_BOUND_MS);
+      expect(await restore, 'fixture: the restore gave up at the bound').toBeInstanceOf(Error);
+    } finally {
+      vi.useRealTimers();
+      releaseDrain();
+    }
+    const inflight = (engine as unknown as { _inboxRebootstrapInflight: Promise<void> | null })._inboxRebootstrapInflight;
+    if (inflight) await inflight;
+    const euRuntime = mockBootstrapInbox.mock.results[0]?.value as MockRuntime;
+    expect(mailContext.hooks.onInboundMail, 'fixture: the rebootstrap wired its hook').toBeDefined();
+    const mail = { messageId: 'm-after-restore' } as unknown as import('../integrations/mail/context.js').MailEnvelope;
+    await expect(mailContext.hooks.onInboundMail!('acct-1', mail)).rejects.toBeInstanceOf(InboundMailDeferred);
+    expect(euRuntime.hook).not.toHaveBeenCalled();
+  });
+
+  it('a shutdown that ends no restore leaves the intake open (control)', async () => {
+    // Only the restore closes the intake; a signal shutdown keeps handing mail on until it stops.
+    const { engine, releaseDrain } = await engineMidRebootstrap('releases');
+    try {
+      await engine.shutdown({ inboxBacklog: 'bounded' });
+    } finally {
+      releaseDrain();
+    }
+    expect((engine as unknown as { _inboxIntakeClosed: boolean })._inboxIntakeClosed).toBe(false);
+  });
+
+  it('a rebootstrap whose bootstrap fails leaves no hook behind, as a cold boot whose inbox failed', async () => {
+    // The deferring stand-in must not outlive a failed bootstrap: it would hold every mail back
+    // until the next restart.
+    const mailContext: { hooks: { onInboundMail?: InboundHook } } = { hooks: {} };
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => { /* expected */ });
+    try {
+      process.env['MISTRAL_API_KEY'] = 'sk-mistral-test';
+      const engine = new Engine({ model: 'balanced' });
+      const engineHandle = engine as unknown as {
+        _inboxRuntime: MockRuntime | null; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
+        _inboxRebootstrapInflight: Promise<void> | null; _mailContext: unknown;
+      };
+      engineHandle._inboxRuntime = makeRuntime('us-runtime');
+      engineHandle._mailStateDb = { __sentinel: 'mail-db' };
+      engineHandle._inboxLlmRegion = 'us';
+      engineHandle._mailContext = mailContext;
+      mockBootstrapInbox.mockImplementationOnce(() => { throw new Error('bootstrap failed'); });
+      mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.eu.mistral.ai/v1', openai_model_id: 'mistral-large-2512' } satisfies LynoxUserConfig);
+      mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
+      await engine.reloadCredentials();
+      if (engineHandle._inboxRebootstrapInflight) await engineHandle._inboxRebootstrapInflight;
+      expect(errSpy, 'fixture: the bootstrap failed').toHaveBeenCalled();
+      expect(engineHandle._inboxRuntime).toBeNull();
+      expect(mailContext.hooks.onInboundMail).toBeUndefined();
+    } finally {
+      errSpy.mockRestore();
     }
   });
 });
