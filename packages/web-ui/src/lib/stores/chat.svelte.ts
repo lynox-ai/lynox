@@ -1349,7 +1349,8 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 	if (live === null) return true;
 	// A run that waits for the user's answer is not working: the way on is to answer it. Its card
 	// comes with the attached stream, so the sentence names none (and no X): it is true for any.
-	addToast(t(live.status === 'awaiting_input' ? 'chat.question_waiting_plain' : 'chat.still_running'), 'info', 6000);
+	if (live.status === 'awaiting_input') addToast(t('chat.question_waiting_plain'), 'info', QUESTION_TOAST_MS);
+	else addToast(t('chat.still_running'), 'info', 6000);
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its
@@ -1366,8 +1367,11 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
  */
 function sayQuestionWaiting(card: PendingCard): void {
 	const key = questionWaitingKey(card);
-	if (key !== null) addToast(t(key), 'info', 6000);
+	if (key !== null) addToast(t(key), 'info', QUESTION_TOAST_MS);
 }
+
+/** These sentences run to ~190 characters; 6 s was too short to read them (ux U-155). */
+const QUESTION_TOAST_MS = 10_000;
 
 /** The sentence for `card`, or null when no card came back. */
 export function questionWaitingKey(card: PendingCard): string | null {

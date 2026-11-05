@@ -10,9 +10,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 type Store = typeof import('./chat.svelte.js');
 type I18n = typeof import('../i18n.svelte.js');
 
-const toasts: Array<{ message: string; type: string }> = [];
+const toasts: Array<{ message: string; type: string; ms?: number | null }> = [];
 vi.mock('./toast.svelte.js', () => ({
-	addToast: (message: string, type: string) => { toasts.push({ message, type }); return 1; },
+	addToast: (message: string, type: string, ms?: number | null) => { toasts.push({ message, type, ms }); return 1; },
 }));
 
 const json = (body: unknown, status = 200): Response =>
@@ -111,6 +111,8 @@ describe('the tap on a failed message', () => {
 		expect(failedOne('again').map((m) => m.failed)).toEqual([true]);
 		expect(store.getPendingPermission()?.question).toBe('Which list, A or B?');
 		expect(toastKeys()).toEqual(['chat.question_waiting']);
+		// ~190 characters: it stays long enough to read (ux U-155: at least 8 s).
+		expect(toasts[0]!.ms).toBeGreaterThanOrEqual(8000);
 	});
 
 	it('with a decision waiting: the decision sentence, which names no X', async () => {
