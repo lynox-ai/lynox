@@ -39,10 +39,12 @@ import { HAIKU } from './setup.js';
 const RUNS = Number(process.env['FORM_RUNS'] ?? 3);
 const STORE = 'acme-demo.myshopify.com';
 
+// The fields a store's product list carries (Admin REST), so a model that reads before it plans
+// finds the description and the vendor (s4) where a real store has them.
 const PRODUCTS = JSON.stringify({
   products: [
-    { id: 1, title: 'Bergtee', images: [{ id: 11, alt: '' }] },
-    { id: 2, title: 'Honig', images: [{ id: 21, alt: 'Honig' }] },
+    { id: 1, title: 'Bergtee', body_html: '<p>Kräutertee aus dem Engadin, von Hand gepflückt.</p>', vendor: 'Hof Sur', product_type: 'Tee', tags: 'bio, tee', images: [{ id: 11, alt: '' }] },
+    { id: 2, title: 'Honig', body_html: '<p>Blütenhonig vom eigenen Hof, kalt geschleudert.</p>', vendor: 'Hof Sur', product_type: 'Honig', tags: 'bio', images: [{ id: 21, alt: 'Honig' }] },
   ],
 });
 
@@ -81,6 +83,17 @@ const CASES: Case[] = [
     right: (input) => {
       const judge = typeof input['judge'] === 'object' && input['judge'] !== null ? input['judge'] as Record<string, unknown> : {};
       return listOf(input)['form'] === 'shopify' && keysOf(judge['schema']).includes('seo_title');
+    },
+  },
+  {
+    // The context C (PRD shopify-preset §20.2 item 7): fields the judge reads and never writes.
+    label: '(s4) SEO texts per product, decided from its description, which stays as it is',
+    message: `Schreib für jedes Produkt in meinem Shop ${STORE} einen neuen SEO-Titel und eine SEO-Beschreibung. Nimm dafür die Produktbeschreibung und den Hersteller als Grundlage, aber ändere die Beschreibung selbst nicht. Plan das als Massenlauf, ich gebe ihn dann frei.`,
+    right: (input) => {
+      const judge = typeof input['judge'] === 'object' && input['judge'] !== null ? input['judge'] as Record<string, unknown> : {};
+      const context = Array.isArray(judge['context']) ? judge['context'] as unknown[] : [];
+      return listOf(input)['form'] === 'shopify' && keysOf(judge['schema']).includes('seo_title')
+        && !keysOf(judge['schema']).includes('descriptionHtml') && context.includes('descriptionHtml');
     },
   },
 ];
@@ -129,8 +142,9 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
     { ...(bulkStatusTool as ToolEntry), handler: async () => 'No bulk runs recorded.' } as ToolEntry,
     { ...(askUserTool as ToolEntry), handler: async () => 'Mach einfach, so wie beschrieben.' } as ToolEntry,
   ]);
+  let reply = '';
   try {
-    await agent.send(c.message);
+    reply = String(await agent.send(c.message));
   } catch (err) {
     if (transient(err)) { table.push(`${provider}\t${c.label}\t#${String(i)}\tSKIP\ttransient`); return; }
     throw err;
@@ -148,7 +162,7 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
   else if (!c.right(recorded.input)) why = `recorded, but not the asked form and field: ${JSON.stringify(recorded.input['source_list'])}`;
   else { ok = true; why = handled === 1 ? 'right on the first handled call' : `right on handled call ${String(handled)}`; }
   const dump = process.env['FORM_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok, handled, first: ok && handled === 1, plans })}\n`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok, handled, first: ok && handled === 1, plans, reply: reply.slice(0, 4000) })}\n`);
   table.push(`${provider}\t${c.label}\t#${String(i)}\t${ok ? 'PASS' : 'FAIL'}\t${why}`);
   expect(ok, why).toBe(true);
 }
@@ -156,7 +170,7 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
 // FORM_CASES=s1 (or s1,s3) runs only those cases.
 const ONLY = process.env['FORM_CASES']?.split(',').map((x) => `(${x.trim()})`);
 const runs = CASES.filter((c) => !ONLY || ONLY.some((o) => c.label.startsWith(o))).flatMap((c) => Array.from({ length: RUNS }, (_, i) => ({ c, i, label: `${c.label} #${String(i)}` })));
-const base = { maxIterations: 8, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => ({ status: 'canceled' as const }) };
+const base = { maxIterations: 8, systemPrompt: SYSTEM, promptUser: async () => 'ok', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('bulk_plan Shopify form — Anthropic (Haiku)', () => {

@@ -187,8 +187,8 @@ describe('the gate', () => {
 
   it('a paused plan stays paused once a login extended the grant: nothing runs', async () => {
     const p = boot();
-    p.ends.onExtendAfterEnd((mandateId, before, now) => {
-      pauseEndedPlans({ db: p.db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS: now });
+    p.ends.onExtendAfterEnd((mandateId, before, now, email) => {
+      pauseEndedPlans({ db: p.db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, onlyMandateEmail: email, nowS: now });
     });
     plan(p);
     login(p, 'h@x.ch', nowS() - H, nowS() - 2 * H);
@@ -428,8 +428,8 @@ describe('a run stopped part-way', () => {
 describe('every way of starting a paused plan', () => {
   it('starts nothing, before and after a login extends the grant', async () => {
     const p = boot();
-    p.ends.onExtendAfterEnd((mandateId, before, now) => {
-      pauseEndedPlans({ db: p.db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS: now });
+    p.ends.onExtendAfterEnd((mandateId, before, now, email) => {
+      pauseEndedPlans({ db: p.db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, onlyMandateEmail: email, nowS: now });
     });
     plan(p, 'cron');
     plan(p, 'once', 'h@x.ch', { once: true });

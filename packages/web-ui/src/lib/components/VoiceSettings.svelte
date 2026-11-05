@@ -111,10 +111,23 @@
 
 	// A mandate's session (ux U-104): what each picker shows, as text, with the option's visible
 	// name. A section without a choice shows no picker to the owner, and no row here.
+	// The server sends one English name per provider; Mistral's is shown in the UI language.
+	function providerName(p: { id: string; name: string }): string {
+		return p.id === 'mistral' ? t('voice.provider_mistral') : p.name;
+	}
+	// A locked picker (managed instance) shows the provider in use, which the server names by the
+	// engine's id ('mistral-voxtral', 'mistral-voxtral-tts'), not by the picker's 'mistral'.
+	// Mistral's gets the same visible name as in the picker (ux U-134); any other id shows as sent.
+	function lockedName(id: string | null): string {
+		if (id === 'mistral-voxtral' || id === 'mistral-voxtral-tts') return t('voice.provider_mistral');
+		return id ?? '—';
+	}
 	function providerRow(label: string, side: VoiceInfo['stt'], chosen: string | undefined): { label: string; value: string } {
-		const options = side.providers.map((p) => ({ value: p.id, label: p.name }));
+		const options = side.providers.map((p) => ({ value: p.id, label: providerName(p) }));
 		// Pinned by the environment or locked on a managed instance: the picker shows the provider in use.
 		const value = side.env_override || side.locked ? side.provider : (chosen ?? 'auto');
+		// Locked: the row names the provider as the owner's locked picker does.
+		if (side.locked && !side.env_override && value) return { label, value: lockedName(value) };
 		return { label, value: optionLabel(value, options) };
 	}
 	const mandateRows = $derived.by(() => {
@@ -164,14 +177,14 @@
 			{:else if info.stt.locked}
 				{#if !info.speech_service_off}<p class="text-xs text-text-muted">{t('voice.managed_locked')}</p>{/if}
 				<select disabled class="w-full px-2 py-1 border border-border rounded bg-bg opacity-60">
-					<option>{info.stt.provider ?? '—'}</option>
+					<option>{lockedName(info.stt.provider)}</option>
 				</select>
 			{:else}
 				<select disabled={!loaded} value={config.transcription_provider ?? 'auto'}
 					onchange={(e) => { config.transcription_provider = e.currentTarget.value as Config['transcription_provider']; }}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 					{#each info.stt.providers as p (p.id)}
-						<option value={p.id} disabled={!p.available}>{p.name}{p.available ? '' : ' — ' + t('voice.unavailable')}</option>
+						<option value={p.id} disabled={!p.available}>{providerName(p)}{p.available ? '' : ' — ' + t('voice.unavailable')}</option>
 					{/each}
 				</select>
 			{/if}
@@ -195,14 +208,14 @@
 			{:else if info.tts.locked}
 				{#if !info.speech_service_off}<p class="text-xs text-text-muted">{t('voice.managed_locked')}</p>{/if}
 				<select disabled class="w-full px-2 py-1 border border-border rounded bg-bg opacity-60">
-					<option>{info.tts.provider ?? '—'}</option>
+					<option>{lockedName(info.tts.provider)}</option>
 				</select>
 			{:else}
 				<select disabled={!loaded} value={config.tts_provider ?? 'auto'}
 					onchange={(e) => { config.tts_provider = e.currentTarget.value as Config['tts_provider']; }}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 					{#each info.tts.providers as p (p.id)}
-						<option value={p.id} disabled={!p.available}>{p.name}{p.available ? '' : ' — ' + t('voice.unavailable')}</option>
+						<option value={p.id} disabled={!p.available}>{providerName(p)}{p.available ? '' : ' — ' + t('voice.unavailable')}</option>
 					{/each}
 				</select>
 			{/if}

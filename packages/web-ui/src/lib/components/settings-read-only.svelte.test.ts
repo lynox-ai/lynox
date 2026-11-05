@@ -251,7 +251,7 @@ describe('ToolToggles', () => {
 
 describe('VoiceSettings', () => {
 	const load = () => import('./VoiceSettings.svelte');
-	const mistral = { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)', available: true };
+	const mistral = { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: true };
 	const routes = (viewer: Viewer) => ({
 		'/voice/info': {
 			speech_service_off: false,
@@ -268,7 +268,8 @@ describe('VoiceSettings', () => {
 		expect(target.querySelector('[data-testid="read-only-rows"]')).not.toBeNull();
 		expectMandateView(t('voice.save'));
 		expect(rows()).toEqual([
-			line(t('voice.stt_heading'), 'Mistral Voxtral (Paris, EU)'),
+			// The server names Mistral in English; the page shows it in the UI language (de here).
+			line(t('voice.stt_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
 			line(t('voice.tts_heading'), 'Auto'),
 			line(t('voice.tts_voice'), 'paul (de)'),
 		]);
@@ -278,6 +279,34 @@ describe('VoiceSettings', () => {
 		await render(load, routes('owner'));
 		expectOwnerView();
 		expect(buttonTexts()).toContain(t('voice.save'));
+	});
+
+	// ux U-134: on a managed instance both pickers are locked and the server names the provider in
+	// use by the engine's id. The mandate's rows name it as the owner's locked picker does.
+	it('shows a mandate the locked providers of a managed instance by their visible names, not the engine ids', async () => {
+		const r = routes('mandate');
+		r['/voice/info'].stt = { ...r['/voice/info'].stt, locked: true, provider: 'mistral-voxtral' } as typeof r['/voice/info']['stt'];
+		r['/voice/info'].tts = { ...r['/voice/info'].tts, locked: true, provider: 'mistral-voxtral-tts' } as typeof r['/voice/info']['tts'];
+		await render(load, r);
+		expectMandateView(t('voice.save'));
+		expect(rows()).toEqual([
+			line(t('voice.stt_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
+			line(t('voice.tts_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
+			line(t('voice.tts_voice'), 'paul (de)'),
+		]);
+	});
+
+	// The owner's page checks a pin by the environment before the lock, and shows that provider as
+	// sent; a locked side without a provider has nothing to name.
+	it('keeps an environment pin as sent and a locked side without a provider as not set', async () => {
+		const r = routes('mandate');
+		r['/voice/info'].stt = { ...r['/voice/info'].stt, locked: true, env_override: 'mistral-voxtral', provider: 'mistral-voxtral' } as unknown as typeof r['/voice/info']['stt'];
+		r['/voice/info'].tts = { ...r['/voice/info'].tts, locked: true, provider: null } as unknown as typeof r['/voice/info']['tts'];
+		await render(load, r);
+		expect(rows().slice(0, 2)).toEqual([
+			line(t('voice.stt_heading'), 'mistral-voxtral'),
+			line(t('voice.tts_heading'), t('settings.value_not_set')),
+		]);
 	});
 });
 

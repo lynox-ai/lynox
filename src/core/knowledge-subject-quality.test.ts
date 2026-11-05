@@ -64,7 +64,7 @@ describe('knowledge subject quality', () => {
      * whole TOPICS list green — a mutant nothing killed. These are the residues.
      */
     const RULE_WITNESSES: ReadonlyArray<readonly [string, string]> = [
-      ['possessive owner', "Client's Aurelva"],   // title-cased tail: only rule 1 sees it
+      ['possessive owner', "Client's Morvanta"],   // title-cased tail: only rule 1 sees it
       ['bare generic', 'Company'],                // one token: only rule 2 sees it
       ['sentence case', 'Compliance and regulatory risks'],
       ['generic noun', 'tools'],                  // isCleanupTarget's own domain
@@ -90,7 +90,7 @@ describe('knowledge subject quality', () => {
       'MURRANTO Ventures', 'Mistral Small 4', 'Stripe API', 'Hetzner',
       // A real name that CARRIES a possessive — the rule keys on the owner, not the
       // apostrophe, and would be worthless if it caught these.
-      "Aurelva Women's Health", "Levi's",
+      "Morvanta Women's Health", "Levi's",
       // A connective is not sentence case.
       'Bank of America',
       // ── SHAPES harvested from a live graph; the NAMES here are invented ──────────
@@ -308,8 +308,10 @@ describe('knowledge subject quality', () => {
     // prevent is a DISAGREEMENT between its two outputs — and a disagreement is only
     // visible when both are read from the same case.
     const CASES: ReadonlyArray<readonly [boolean, AttributionOverride | null, FactSource, CaptureRouting, boolean]> = [
-      [false, null,        'external',    'turn_trusted',       false],
-      [false, 'wrapped',   'external',    'turn_trusted',       false],
+      [false, null,        'external',    'turn_trusted_assistant', true],
+      [false, 'wrapped',   'external',    'turn_trusted_assistant', true],
+      [false, null,        'user_stated', 'turn_trusted',       false],
+      [false, 'injection', 'user_stated', 'turn_trusted',       false],
       [true,  'wrapped',   'user_stated', 'excerpt_external',   true],
       [true,  'injection', 'user_stated', 'injection_suspected', true],
       [true,  null,        'external',    'fact_external',      true],
@@ -324,7 +326,7 @@ describe('knowledge subject quality', () => {
     it('every routing value that gates is untrusted, and only those', () => {
       // The invariant the old side-by-side expressions could break: a label saying the fact
       // was released while the gate held it, or the reverse. Stated once, over the table.
-      const GATED = new Set<CaptureRouting>(['excerpt_external', 'injection_suspected', 'fact_external']);
+      const GATED = new Set<CaptureRouting>(['turn_trusted_assistant', 'excerpt_external', 'injection_suspected', 'fact_external']);
       for (const [turn, override, source] of CASES) {
         const r = routeCapturedFact(turn, override, source);
         expect(r.untrusted, `${r.routing} disagrees with its own gate`).toBe(GATED.has(r.routing));

@@ -107,7 +107,8 @@ describe('bootstrapInbox — wiring', () => {
     expect(before?.bucket).toBe('draft_ready');
     expect(before?.userAction).toBeUndefined();
     runtime.state.updateUserAction(id, 'replied');
-    expect(runtime.inboxLabelOf('acct-1', 't-l')).toEqual({ bucket: 'draft_ready', userAction: 'replied' });
+    expect(before?.reason).toBe('r');
+    expect(runtime.inboxLabelOf('acct-1', 't-l')).toEqual({ bucket: 'draft_ready', userAction: 'replied', reason: 'r' });
     expect(runtime.inboxLabelOf('acct-2', 't-l')).toBeNull();
     expect(runtime.inboxLabelOf('acct-1', 't-unknown')).toBeNull();
   });
@@ -296,7 +297,7 @@ describe('bootstrapInbox — wiring', () => {
       us.budget.recordUsage(1_000_000, 1_000_000);
       eu.budget.recordUsage(1_000_000, 1_000_000);
       expect(us.budget.snapshot().spentUSD).toBeCloseTo(6.0, 6); // Haiku $1 + $5
-      expect(eu.budget.snapshot().spentUSD).toBeCloseTo(0.75, 6); // Mistral Small 4 $0.15 + $0.60
+      expect(eu.budget.snapshot().spentUSD).toBeCloseTo(0.825, 6); // Mistral Small 4 EU $0.165 + $0.66
     } finally {
       await us.shutdown();
       await eu.shutdown();

@@ -53,6 +53,7 @@ import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBud
 import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
+import { WORKFLOW_ENDED_MID_RUN_ERROR } from '../orchestrator/run-source.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
@@ -3525,6 +3526,26 @@ export class WorkerLoop {
       else if (!planPauseOn()) endEvent(stopped, { state: 'failed', reason: ACCESS_ENDED_RESULT, runId: result.runId });
       this.#recordRun(this.engine.getTaskManager(), task.id,
         `Workflow stopped on your instruction (run ${result.runId ?? 'unknown'}).`, 'stopped');
+      return;
+    }
+
+    // The runner ended the run before a step because a mandate its workflow depends on ended
+    // since it started (1100, `WORKFLOW_ENDED_MID_RUN_ERROR`): the same end the sweep gives the run
+    // (`stopEndedStarters`) when it comes first, so it is recorded as that stop, and with the pause
+    // on the plan pauses. Keyed on the run's own error and on the plan having ended, so a step
+    // whose error happens to read the same is still a failure.
+    const endedEntry = this.activeTasks.get(task.id);
+    // A liveness read that throws is no end found: the run is recorded as a failure and retried,
+    // and the plan is not paused for it. A throw in the runner's own read stops the run too
+    // (`stopForEndedAuthor`), with `WORKFLOW_END_CHECK_FAILED_ERROR`, which says the check failed and
+    // not that an access ended (1184), so it never reaches this branch.
+    const planEnded = (entry: ActiveTask): boolean => { try { return this.#planHasEnded(entry); } catch { return false; } };
+    if (result.ok && result.error === WORKFLOW_ENDED_MID_RUN_ERROR && endedEntry !== undefined && planEnded(endedEntry)) {
+      endedEntry.accessEnded = true;
+      const stopped = this.#runSlotOf(task.id);
+      if (!planPauseOn()) endEvent(stopped, { state: 'failed', reason: ACCESS_ENDED_RESULT, runId: result.runId });
+      this.#recordRun(this.engine.getTaskManager(), task.id,
+        `${ACCESS_ENDED_RESULT} (run ${result.runId ?? 'unknown'}).`, 'stopped');
       return;
     }
 

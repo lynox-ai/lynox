@@ -24,8 +24,9 @@ import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
-import { sourceRefusal, type RunSource } from './run-source.js';
+import { NestedRunEndedError, WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR, heldSource, isAuthorStop, sourceRefusal, type RunSource } from './run-source.js';
 import { childFilingContext } from '../core/approval-filing.js';
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -235,6 +236,14 @@ export interface RunManifestOptions {
 }
 
 /**
+ * The options a run carries once it has started: the public default of `principal` (absent = the
+ * owner) is resolved once, where the run is entered (`runManifest`), so no step inside it can read
+ * an absent one and fall back somewhere else (register 1173). Every step spawner is handed this
+ * principal, and the census (`principal-sites.test.ts`) checks by type that it is never undefined.
+ */
+export type StartedRunOptions = RunManifestOptions & { principal: import('../core/request-principal.js').RequestPrincipal };
+
+/**
  * Inputs to {@link buildRunCtx}. `autonomy` is a **required key** (value may be
  * `undefined`) so every call site must consciously decide the run's permission
  * posture — the headless saved-workflow path passes `'autonomous'`, in-session
@@ -313,7 +322,7 @@ export interface RunCtxInput {
  * `runGuardedSavedWorkflow`, so adding a wrapper here would double-bill
  * (prd-review A3).
  */
-export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
+export function buildRunCtx(input: RunCtxInput): StartedRunOptions {
   return {
     source: input.source,
     autonomy: input.autonomy,
@@ -533,15 +542,18 @@ export function runManifest(
     return Promise.reject(err instanceof Error ? err : new Error(String(err)));
   }
   if (refused !== undefined) return Promise.reject(new Error(refused));
-  if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, options);
-  const runId = options.runId ?? randomUUID();
-  return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...options, runId }));
+  // The public API's default, resolved once for the whole run (see `StartedRunOptions`). The
+  // step spawners resolve their own the same way (`spawnInline` and `spawnPipeline` are public API).
+  const started: StartedRunOptions = { ...options, principal: options.principal ?? OWNER_PRINCIPAL };
+  if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, started);
+  const runId = started.runId ?? randomUUID();
+  return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...started, runId }));
 }
 
 async function runManifestInGroup(
   manifest: Manifest,
   config: LynoxUserConfig,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
 ): Promise<RunState> {
   const depth = options.depth ?? 0;
   if (depth > MAX_PIPELINE_DEPTH) {
@@ -736,10 +748,10 @@ async function runManifestInGroup(
   // Effective options carry the (possibly-augmented) parentPrompt so
   // executeStep / spawners pick up the per-run budget without mutating the
   // caller's options.
-  const withPrompt: RunManifestOptions = parentPrompt === options.parentPrompt
+  const withPrompt: StartedRunOptions = parentPrompt === options.parentPrompt
     ? options
     : { ...options, parentPrompt };
-  const effectiveOptions: RunManifestOptions = dropGrant
+  const effectiveOptions: StartedRunOptions = dropGrant
     ? { ...withPrompt, capabilityContract: undefined, isAcceptedParam: undefined }
     : withPrompt;
 
@@ -827,6 +839,33 @@ export async function retryManifest(
   });
 }
 
+/**
+ * Before each step (1100), read where the owner's stop is: a saved workflow whose maker's access
+ * has ended since the run started ends here, before its next step, as `sourceRefusal` refuses it
+ * at the start. A worker's plan run is also stopped by its sweep (`stopEndedStarters`); this is the
+ * same end for a run nothing else watches — the library's Run, a chat's `run_workflow` — and the
+ * worker records it as that sweep's stop. A sub-run (`runtime: 'pipeline'`) reads the saved
+ * workflow that holds it, so its own steps stop too, not only the outer ones (1184). A check that
+ * throws ends the run too, with an error of its own that does not say an access ended. A run that
+ * already ended on a cause of its own keeps it, as with the stop. True when the run must halt.
+ */
+export function stopForEndedAuthor(options: RunManifestOptions, state: RunState): boolean {
+  const saved = heldSource(options.source);
+  if (saved === undefined) return false;
+  let error: string | undefined;
+  try {
+    error = sourceRefusal(saved, options.depth ?? 0) !== undefined ? WORKFLOW_ENDED_MID_RUN_ERROR : undefined;
+  } catch {
+    error = WORKFLOW_END_CHECK_FAILED_ERROR;
+  }
+  if (error === undefined) return false;
+  if (state.status !== 'running') return true;
+  state.status = 'failed';
+  state.error = error;
+  state.completedAt = new Date().toISOString();
+  return true;
+}
+
 // --- Sequential execution (v1.0 behavior, zero behavior change) ---
 
 async function runSequential(
@@ -834,7 +873,7 @@ async function runSequential(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
@@ -901,7 +940,7 @@ async function runParallel(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
@@ -1046,7 +1085,7 @@ async function executeStep(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<StepResult> {
@@ -1064,6 +1103,7 @@ async function executeStep(
   // pool hands out after the stop (the scope can only abort agents that already exist).
   if (stoppedByOwner(options, state)) return 'halt';
   if (questionUnanswered(options, state)) return 'halt';
+  if (stopForEndedAuthor(options, state)) return 'halt';
 
   const stepStart = new Date().toISOString();
   // A2: the step's `pipeline_step` run id (declared before the try so the catch
@@ -1163,7 +1203,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset, options.source);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -1298,6 +1338,24 @@ async function executeStep(
     // aborted) or ends the run anyway: a stopped run does not carry on to the next step.
     if (stoppedByOwner(options, state)) return 'halt';
     if (questionUnanswered(options, state)) return 'halt';
+    // …and so does a sub-run that stopped for its makers' access: the run that holds it ends with
+    // that cause as the sub-run read it, whatever `on_failure` says. Only that error: a step that
+    // failed on its own keeps its outcome, and the next step's check reads the access again.
+    if (err instanceof NestedRunEndedError) {
+      if (state.status === 'running') {
+        state.status = 'failed';
+        state.error = err.runError;
+        state.completedAt = new Date().toISOString();
+      }
+      return 'halt';
+    }
+    // A sibling in the same phase already ended the run for its makers' access: the two branches
+    // below that would write the run's own cause leave it. This step's failure or rejection may
+    // follow from the same end, and only that cause tells the worker to stop the plan and the model
+    // not to start it again (1184, review r2). Under `continue` and `notify` nothing overwrites it,
+    // so the step's failure is still recorded and notified there (review r3).
+    const overwritesCause = err instanceof GateRejectedError || err instanceof GateExpiredError || manifest.on_failure === 'stop';
+    if (overwritesCause && state.status !== 'running' && isAuthorStop(state.error)) return 'halt';
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
       state.status = 'rejected';

@@ -23,7 +23,7 @@ const before = getLocale();
 /** What GET /api/voice/info answers: with the switch on, Mistral is unavailable and `auto` only
  *  where it resolves to something (whisper.cpp for dictation, nothing for speech output). */
 function voiceInfo(speechServiceOff: boolean, sttAvailable: boolean): unknown {
-	const mistral = { id: 'mistral', name: 'Mistral Voxtral (Paris, EU)', available: !speechServiceOff };
+	const mistral = { id: 'mistral', name: 'Mistral Voxtral (EU endpoint)', available: !speechServiceOff };
 	return {
 		speech_service_off: speechServiceOff,
 		stt: {
@@ -114,5 +114,35 @@ describe('voice settings on an instance connected to a Shopify store', () => {
 		info.stt['locked'] = true;
 		const text = await render(info);
 		expect(text).toContain(t('voice.managed_locked'));
+	});
+});
+
+// ux U-134: a locked picker on a managed instance names Mistral the way the open picker does,
+// not by the engine's id.
+describe('locked voice pickers on a managed instance', () => {
+	function managed(sttProvider: string | null, ttsProvider: string | null): unknown {
+		const info = voiceInfo(false, true) as { stt: Record<string, unknown>; tts: Record<string, unknown> };
+		info.stt['locked'] = true;
+		info.stt['provider'] = sttProvider;
+		info.tts['locked'] = true;
+		info.tts['provider'] = ttsProvider;
+		return info;
+	}
+	const shown = (): string[] => [...target.querySelectorAll('select')].map((s) => s.textContent?.trim() ?? '');
+
+	it('show "Mistral Voxtral (EU-Endpunkt)" for dictation and reading aloud, not the engine id', async () => {
+		await render(managed('mistral-voxtral', 'mistral-voxtral-tts'));
+		expect(shown()).toEqual(['Mistral Voxtral (EU-Endpunkt)', 'Mistral Voxtral (EU-Endpunkt)']);
+	});
+
+	it('in English show "Mistral Voxtral (EU endpoint)"', async () => {
+		setLocale('en');
+		await render(managed('mistral-voxtral', 'mistral-voxtral-tts'));
+		expect(shown()).toEqual(['Mistral Voxtral (EU endpoint)', 'Mistral Voxtral (EU endpoint)']);
+	});
+
+	it('show any other provider as the server names it, and a dash for none', async () => {
+		await render(managed('whisper-cpp', null));
+		expect(shown()).toEqual(['whisper-cpp', '—']);
 	});
 });

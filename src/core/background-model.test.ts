@@ -104,7 +104,9 @@ describe('loadConfig — background_model', () => {
   it('an admitted choice is kept', async () => {
     writeUserConfig(JSON.stringify({ background_model: MINISTRAL }));
     const { loadConfig } = await import('./config.js');
-    expect(loadConfig().background_model).toEqual(MINISTRAL);
+    // Read on Mistral's EU endpoint; the file keeps what was written.
+    expect(loadConfig().background_model).toEqual({ ...MINISTRAL, api_base_url: 'https://api.eu.mistral.ai/v1' });
+    expect(readFileSync(userConfigPath, 'utf8')).toBe(JSON.stringify({ background_model: MINISTRAL }));
   });
 
   it('a refused choice is dropped in memory only, and the operator default stays', async () => {

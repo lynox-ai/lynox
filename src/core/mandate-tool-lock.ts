@@ -50,7 +50,7 @@ export const MANDATE_TOOL_SURFACE: ReadonlySet<string> = new Set([
   'artifact_save', 'artifact_list', 'artifact_delete', 'artifact_history', 'artifact_restore',
   'media_process',
   // integrations the owner connected
-  'mail_read', 'mail_search', 'mail_triage', 'mail_send', 'mail_reply', 'mail_connect',
+  'mail_read', 'mail_search', 'mail_triage', 'mail_send', 'mail_reply', 'inbox_read',
   'google_calendar', 'google_docs', 'google_drive', 'google_sheets', 'calendar_read',
 ]);
 
@@ -69,6 +69,17 @@ export const MANDATE_OUTWARD_READERS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The tools on `MANDATE_TOOL_SURFACE` that read mail the instance stores (the inbox store, a
+ * copy of mail from outside). Each declares `storedMailRead`, and a mandate's call leaves a
+ * `read` row before it runs, as a read of the mailbox does: mail is in the trail on every way
+ * it is read (sec-core 2026-11-03). A separate class, not `MANDATE_OUTWARD_READERS`: the read
+ * stays inside the instance. A test over a booted registry holds the list to the declarations.
+ */
+export const MANDATE_STORED_MAIL_READERS: ReadonlySet<string> = new Set([
+  'inbox_read',
+]);
+
+/**
  * The engine's own tools a mandate's turn does not get, each with the reason. Together with
  * `MANDATE_TOOL_SURFACE` this is the closed classification a booted registry is checked
  * against: a new engine tool that is in neither fails that test until someone places it.
@@ -80,6 +91,10 @@ export const MANDATE_WITHHELD_TOOLS: Readonly<Record<string, string>> = Object.f
   edit_file: 'edits any absolute path outside a workspace',
   batch_files: 'reads and writes files like read_file and write_file',
   memory_focus: 'sets the knowledge focus for every session of the instance',
+  // The form it opens asks the person at the screen for the mailbox password and sends it to
+  // the account route, which only the owner may write. For a mandate the password would leave
+  // their hands for an account that is never created, and there is no step to send them to.
+  mail_connect: 'opens a form for a mailbox password, and only the owner adds a mail account',
 });
 
 /**
@@ -142,7 +157,7 @@ export const MANDATE_INSIDE_WRITERS: ReadonlySet<string> = new Set([
  */
 export const MANDATE_INSIDE_NON_WRITERS: Readonly<Record<string, string>> = Object.freeze({
   ask_user: 'asks a question; the prompt row is the question, not an entry',
-  ask_secret: 'asks for a secret; the vault write behind it is the owner\'s route, refused for a mandate',
+  ask_secret: 'refuses a mandate before any dialog; only the owner stores a secret',
   suggest_follow_ups: 'shows suggestions, writes nothing',
   recall_tool_result: 'reads a stored tool result',
   http_request: 'writes outside the instance, recorded by the outward trail; a due renewal runs api_setup fetch_token, which records its own pair',
@@ -166,9 +181,9 @@ export const MANDATE_INSIDE_NON_WRITERS: Readonly<Record<string, string>> = Obje
   mail_read: 'reads mail, recorded as a read',
   mail_search: 'reads mail, recorded as a read',
   mail_triage: 'reads mail, recorded as a read',
+  inbox_read: 'reads the inbox store inside the instance, recorded as a read',
   mail_send: 'writes outside, recorded by the outward trail',
   mail_reply: 'writes outside, recorded by the outward trail',
-  mail_connect: 'asks for a connection; the account write is the owner\'s route, refused for a mandate',
   google_calendar: 'reads and writes outside, recorded by the outward trail',
   google_docs: 'reads and writes outside, recorded by the outward trail',
   google_drive: 'reads and writes outside, recorded by the outward trail',

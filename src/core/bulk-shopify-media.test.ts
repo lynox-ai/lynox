@@ -164,6 +164,8 @@ describe('a Shopify media list source', () => {
     const s = parse({ form: 'shopify_media', after: { alt: 'Mug' } });
     expect(s).toEqual({ form: 'shopify_media', path: '', filters: {}, idField: 'id', method: null, after: { alt: 'Mug' } });
     expect(isOfferedListSource(s)).toBe(true);
+    // Its read takes no filters: a stored one with filters would read every image past them.
+    expect(isOfferedListSource({ ...s, filters: { vendor: 'Acme' } })).toBe(false);
     expect(parse({ form: 'shopify_media', after: { alt: null } }).after).toEqual({ alt: '' });
     expect(maxListPages('shopify_media')).toBe(Math.ceil(BULK_MAX_TARGETS / SHOPIFY_MEDIA_LIST_PAGE_SIZE) + 1);
     expect(listReadContract(HOST, s)).toMatchObject({ httpMethods: ['GET'], hostPatterns: [HOST], pathPatterns: [] });
@@ -187,9 +189,9 @@ describe('the grants for a media run', () => {
 
   it('mints the media list page, an image\'s read and its write, each under its own body only', async () => {
     const list = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, form: 'shopify_media_list' });
-    const products = withShopifyRead(base, HOST, { phase: 'list', afterId: 0 });
+    const products = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: {} });
     expect(await client(list).graphqlRead(ENDPOINT, { form: 'shopify_media_list', afterId: 0 })).not.toEqual({ kind: 'not_granted' });
-    expect(await client(list).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 0 })).toEqual({ kind: 'not_granted' });
+    expect(await client(list).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 0, filters: {} })).toEqual({ kind: 'not_granted' });
     expect(await client(products).graphqlRead(ENDPOINT, { form: 'shopify_media_list', afterId: 0 })).toEqual({ kind: 'not_granted' });
     const read = withShopifyRead(base, HOST, { phase: 'read', targets: [image(1)] });
     expect(await client(read).graphqlRead(ENDPOINT, { form: 'shopify_media_read', gid: image(2) })).toEqual({ kind: 'not_granted' });
@@ -404,6 +406,8 @@ describe('applying a media run', () => {
       { form: 'shopify_media_alt', gid: image(11), after: { alt: 'New alt' } },
       { form: 'shopify_media_alt', gid: image(12), after: { alt: 'New alt' } },
     ] });
+    // An image's alt is not compared in the form a store saves a product in: nothing of it is measured.
+    expect(ledger.comparedInSavedForm(id)).toBe(false);
   });
 
   it('writes its probe, one image, and goes wide only after this run\'s probe is confirmed', async () => {
@@ -411,7 +415,7 @@ describe('applying a media run', () => {
     const id = await previewed();
     const checksum = ledger.computeChecksum(id)!;
     expect(ledger.approve(id, { checksum })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
-    expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_media_alt', cause: 'own_missing' }], step: null } });
     expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
     s.requests.length = 0;
     await apply(id);
@@ -420,7 +424,7 @@ describe('applying a media run', () => {
     expect(mediaOf(image(11))!.alt).toBe('New alt');
     expect(mediaOf(image(12))!.alt).toBeNull();
 
-    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 4 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 4 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_media_alt', cause: 'own_missing' }], step: 'confirm' } });
     expect(ledger.confirmProbe(id)).toEqual({ ok: true });
     expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 4 })).toMatchObject({ ok: true });
     await apply(id);
@@ -434,11 +438,38 @@ describe('applying a media run', () => {
     ledger.approve(first, { checksum: ledger.computeChecksum(first)!, unmeasuredConfirmed: true, maxTargets: 1 });
     await apply(first);
     expect(ledger.confirmProbe(first)).toEqual({ ok: true });
-    expect(engineDb.getDb().prepare('SELECT host, method, kind FROM bulk_host_probes').all()).toEqual([{ host: HOST, method: 'POST', kind: 'unmeasured:shopify_media_alt' }]);
+    expect(engineDb.getDb().prepare('SELECT host, method, kind FROM bulk_host_probes').all()).toEqual([{ host: HOST, method: 'POST', kind: `unmeasured:${first}:shopify_media_alt` }]);
     mediaOf(image(11))!.alt = 'A1';
     engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(first);
     const second = await previewed();
-    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_media_alt', cause: 'other_run' }], step: null } });
+    // The second run's own probe gets a row of its own; the first run keeps its probe.
+    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+    await apply(second);
+    expect(ledger.confirmProbe(second)).toEqual({ ok: true });
+    expect([ledger.getStatus(first)!.probeConfirmed, ledger.getStatus(second)!.probeConfirmed]).toEqual([true, true]);
+    const rows = engineDb.getDb().prepare('SELECT kind, run_id FROM bulk_host_probes').all() as { kind: string; run_id: string }[];
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(expect.arrayContaining([
+      { kind: `unmeasured:${first}:shopify_media_alt`, run_id: first },
+      { kind: `unmeasured:${second}:shopify_media_alt`, run_id: second },
+    ]));
+  });
+
+  // A probe confirmed before the kind carried its run: `unmeasured:<form>`, read with its `run_id`.
+  it('reads an image probe filed before rows carried their run as that run\'s own only', async () => {
+    fill(2);
+    const first = await previewed();
+    ledger.approve(first, { checksum: ledger.computeChecksum(first)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    await apply(first);
+    engineDb.getDb().prepare('INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, NULL, ?)')
+      .run(HOST, 'POST', 'unmeasured:shopify_media_alt', first, new Date().toISOString());
+    expect(ledger.getStatus(first)!.probeConfirmed).toBe(true);
+    expect(ledger.probeKey(first)).toBeNull();
+    mediaOf(image(11))!.alt = 'A1';
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(first);
+    const second = await previewed();
+    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: 'shopify_media_alt', cause: 'other_run' }], step: null } });
   });
 
   it('records an image the store refuses as not ready as refused, and the alt as it was', async () => {

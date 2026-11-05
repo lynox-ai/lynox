@@ -343,8 +343,8 @@ describe('the sweep, one plan at a time', () => {
 
 describe('the login that extends an ended grant', () => {
   function listen(b: Box): void {
-    b.ends.onExtendAfterEnd((mandateId, before, nowS) => {
-      pauseEndedPlans({ db: b.db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS });
+    b.ends.onExtendAfterEnd((mandateId, before, nowS, email) => {
+      pauseEndedPlans({ db: b.db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, onlyMandateEmail: email, nowS });
     });
   }
 
@@ -409,7 +409,7 @@ describe('the login that extends an ended grant', () => {
     vi.useRealTimers();
   });
 
-  it('a plan whose workflow cannot be read does not refuse the login: the login goes through, a plan of the mandate’s own schedule pauses, one it has only through the workflow does not, and stderr names both', () => {
+  it('a plan whose workflow cannot be read does not refuse the login: the login goes through, and every such plan pauses for the mandate of the login, also one it has only through the workflow, and stays paused once the read works again', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(NOW * 1000);
     const b = box();
@@ -428,10 +428,23 @@ describe('the login that extends an ended grant', () => {
     expect(b.ends.endOf('g-h@x.ch')).toBe(NOW + H);
     expect(col(b, 'own').paused_at).toBe(NOW);
     expect(col(b, 'own-on-wf').paused_at).toBe(NOW);
-    expect(col(b, 'via-wf').paused_at).toBeNull();
-    expect(lines.filter((l) => l.includes("who set up its workflow could not be read, paused on the schedule's own marks only")).map((l) => l.slice(0, 22)))
+    // Fail-closed: the gate refusing it held only while the read failed; now the read works again.
+    expect(col(b, 'via-wf').paused_at).toBe(NOW);
+    expect(JSON.parse(String(col(b, 'via-wf').paused_for)).map((e: { mandateId: string; email: string; roles: string[] }) => [e.mandateId, e.email, e.roles])).toEqual([['g-h@x.ch', 'h@x.ch', []]]);
+    expect(lines.filter((l) => l.includes('who set up its workflow could not be read, paused for the mandate of this login')).map((l) => l.slice(0, 22)))
       .toEqual(['[lynox] plan via-wf: w', '[lynox] plan own-on-wf']);
     vi.useRealTimers();
+  });
+
+  it('a login that names no address cannot pause such a plan, so it is refused rather than let through', () => {
+    const b = box();
+    workflow(b, 'wf', { email: 'h@x.ch', grant: 'g-h@x.ch' });
+    plan(b, 'via-wf', { effect: 'run_workflow', workflow: 'wf' });
+    b.db.exec('ALTER TABLE workflows RENAME COLUMN mandate_edited_at TO gone');
+    const before = { ends_at: NOW - H, revoked_at: null };
+    expect(() => pauseEndedPlans({ db: b.db, endOf: (id) => (id === 'g-h@x.ch' ? before : undefined), onlyMandate: 'g-h@x.ch', nowS: NOW }))
+      .toThrow('the login names no address to pause it for');
+    expect(col(b, 'via-wf').paused_at).toBeNull();
   });
 
   it('a failure of the transaction itself fails the login, records nothing, and the next login after the cause is gone succeeds', () => {
@@ -976,7 +989,7 @@ describe('the advance warning\'s claiming transaction', () => {
 describe('the migration', () => {
   it('v57 adds the four pause columns, NULL on every existing row', () => {
     const b = box();
-    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(65);
+    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(67);
     const cols = (b.db.prepare('PRAGMA table_info(triggers)').all() as Array<{ name: string; dflt_value: unknown }>)
       .filter((c) => c.name.startsWith('pause'));
     // `paused_db_at` is v60's (the takeover's clock), not v57's.

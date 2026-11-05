@@ -15,7 +15,8 @@
  * Shopify run's after-state may name.
  */
 import { isPlainObject, type ExternalClient, type ExternalRead, type TargetIo } from './bulk-external.js';
-import type { BulkInvalidReason, ListPageItem } from './bulk-ledger.js';
+import type { BulkInvalidReason, BulkRunStatus, ListPageItem } from './bulk-ledger.js';
+import type { BulkNotices } from './bulk-notices.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, mediaImageGidNumber, productGidNumber, type ShopifyWriteForm } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
 
@@ -27,6 +28,35 @@ export function shopifyBulkReadEnabled(): boolean {
 
 /** The fields of a product's flat before-image, and so of a Shopify run's after-state. */
 export const SHOPIFY_PRODUCT_FIELDS = ['title', 'descriptionHtml', 'seo_title', 'seo_description'] as const;
+
+/**
+ * The fields behind a product page's SEO title and SEO description whose text, once the after-state
+ * is written, holds an `&` more often than it does now. A theme may escape `page_title` and
+ * `page_description` twice, and then the browser tab and a search result show `&amp;` (measured on
+ * one theme, not on every one). lynox cannot tell which theme does, so the preview names the target
+ * and refuses nothing: "A & B" is a legitimate text. Only `&` is counted, because the owner's note
+ * names only `&`; a `<` or `>` a theme shows the same way is not marked.
+ *
+ * The page's title is the SEO title, or the product's title where the SEO title is empty (measured
+ * on a store), so it is that text which is compared, and the field it comes from which is named. The
+ * description's own fallback is not followed: a run does not write `descriptionHtml` yet.
+ * A product not read yet holds no before-image to compare with, and is not named.
+ */
+export function shopifySeoEntityFields(prior: unknown, after: unknown): string[] {
+  if (!isPlainObject(after) || !isPlainObject(prior)) return [];
+  const next: Record<string, unknown> = { ...prior, ...after };
+  const text = (image: Record<string, unknown>, field: string): string => {
+    const value = image[field];
+    return typeof value === 'string' ? value : '';
+  };
+  const titleField = (image: Record<string, unknown>): string => (text(image, 'seo_title') !== '' ? 'seo_title' : 'title');
+  const ampersands = (value: string): number => value.split('&').length - 1;
+  const shown: [string, string, string][] = [
+    [titleField(next), text(next, titleField(next)), text(prior, titleField(prior))],
+    ['seo_description', text(next, 'seo_description'), text(prior, 'seo_description')],
+  ];
+  return shown.filter(([, now, was]) => ampersands(now) > ampersands(was)).map(([field]) => field);
+}
 
 /** The field of an image's before-image, and so of a media run's after-state. */
 export const SHOPIFY_MEDIA_FIELDS = ['alt'] as const;
@@ -114,6 +144,84 @@ export function shopifyBeforeImage(data: unknown, gid: string): { value: Record<
     if (Object.hasOwn(seo, 'description')) value['seo_description'] = seo['description'];
   }
   return { value };
+}
+
+/** A text with only `A`–`Z` made lower case: no locale and no Unicode case mapping takes part. */
+function asciiLower(text: string): string {
+  return text.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+/**
+ * Whether a product, as the preview's `shopify_product_read` answered it, lies in the list's
+ * filters (PRD shopify-preset §22.4, `not_in_filter`): each filter's field of the RAW answer
+ * equals its value up to ASCII letter case. Shopify's search folds diacritics, so a search for
+ * `Gemuse` lists `Gemüse` too; this check does not, and fails closed — `GEMÜSE` is not in a
+ * `Gemüse` group, and an answer without the field, or with another key, is in none. A list
+ * without filters holds every product it lists.
+ */
+export function shopifyInFilter(data: unknown, filters: Readonly<Record<string, string>>): boolean {
+  const product = isPlainObject(data) && isPlainObject(data['product']) ? data['product'] : {};
+  const field: Readonly<Record<string, string>> = { product_type: 'productType', vendor: 'vendor' };
+  return Object.entries(filters).every(([key, value]) => {
+    const name = Object.hasOwn(field, key) ? field[key]! : null;
+    const held = name === null ? undefined : product[name];
+    return typeof held === 'string' && asciiLower(held) === asciiLower(value);
+  });
+}
+
+/** Which filters a Shopify list has, for the sentences below; null for a list without filters. */
+function filterKind(filters: Readonly<Record<string, string>>): 'product_type' | 'vendor' | 'both' | null {
+  const type = filters['product_type'] !== undefined;
+  const vendor = filters['vendor'] !== undefined;
+  if (!type && !vendor) return null;
+  // With both, each value may match products while the pair matches none: no value is to blame.
+  return type && vendor ? 'both' : type ? 'product_type' : 'vendor';
+}
+
+/**
+ * What a filtered Shopify list that matched no product tells the model and the owner, by the
+ * filters it has ({@link BulkNotices.listNoMatch}); null for a list without filters. The value is
+ * not repeated: no summary of this code echoes the planner's input, and the model has it in its
+ * own plan.
+ */
+export function shopifyNoMatchSentence(filters: Readonly<Record<string, string>>, say: BulkNotices): string | null {
+  const kind = filterKind(filters);
+  return kind === null ? null : say.listNoMatch(kind);
+}
+
+/**
+ * What a filtered list says when its search listed products and every one fell out as
+ * `not_in_filter` (PRD shopify-preset §22.2 item 7, §22.4): products were found, none spelled as
+ * the filter ({@link BulkNotices.listNoneLeft}), so neither the model nor the owner reads it as
+ * "the store has no such products". Null otherwise: a target left out for another reason (a read
+ * that failed) may have matched, and the run does not say that none did.
+ */
+export function shopifyNoneLeftSentence(
+  filters: Readonly<Record<string, string>>, status: Pick<BulkRunStatus, 'total' | 'invalidReasons'> | null, say: BulkNotices,
+): string | null {
+  if (status === null || status.invalidReasons.not_in_filter !== status.total) return null;
+  const kind = filterKind(filters);
+  return kind === null ? null : say.listNoneLeft(kind);
+}
+
+/**
+ * The context C of a product from the same `shopify_product_read` answer as its before-image
+ * (PRD shopify-preset §20.2 item 7): each of `fields` flat, as {@link SHOPIFY_CONTEXT_FIELDS} names
+ * them (`seo.title` → `seo_title`), `null` where the answer holds none, and `tags` only as a list
+ * of texts. Read only, for the judge: never part of the before-image, so never compared or written.
+ * Call it only on an answer {@link shopifyBeforeImage} took as the target.
+ */
+export function shopifyContextOf(data: unknown, fields: readonly string[]): Record<string, unknown> {
+  const product = isPlainObject(data) && isPlainObject(data['product']) ? data['product'] : {};
+  const seo = isPlainObject(product['seo']) ? product['seo'] : {};
+  const text = (v: unknown): string | null => typeof v === 'string' ? v : null;
+  const flat: Record<string, unknown> = {
+    title: text(product['title']), descriptionHtml: text(product['descriptionHtml']),
+    seo_title: text(seo['title']), seo_description: text(seo['description']),
+    productType: text(product['productType']), vendor: text(product['vendor']),
+    tags: Array.isArray(product['tags']) && product['tags'].every((t) => typeof t === 'string') ? product['tags'] : null,
+  };
+  return Object.fromEntries(fields.map((f) => [f, Object.hasOwn(flat, f) ? flat[f] : null]));
 }
 
 /**

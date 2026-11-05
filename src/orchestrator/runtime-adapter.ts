@@ -1,4 +1,5 @@
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
+import { NestedRunEndedError, heldSource, isAuthorStop, type RunSource } from './run-source.js';
 import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
@@ -1032,8 +1033,9 @@ export async function spawnViaAgent(
     userTimezone,
     // Inherited, so anything THIS step spawns is reachable by the same abort.
     abortScope,
-    // And the run's principal, so a mandate's step runs under the mandate's lock.
-    principal,
+    // And the run's principal, so a mandate's step runs under the mandate's lock. Absent is the
+    // public API's owner, resolved here so the agent is never handed an undefined one (1173).
+    principal: principal ?? OWNER_PRINCIPAL,
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -1418,8 +1420,9 @@ export async function spawnInline(
     memory: parentMemory ?? undefined,
     // Inherited, so anything THIS step spawns is reachable by the same abort.
     abortScope,
-    // And the run's principal, so a mandate's step runs under the mandate's lock.
-    principal,
+    // And the run's principal, so a mandate's step runs under the mandate's lock. Absent is the
+    // public API's owner, resolved here so the agent is never handed an undefined one (1173).
+    principal: principal ?? OWNER_PRINCIPAL,
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -1548,6 +1551,9 @@ export async function spawnPipeline(
   chatOrigin?: ChatOrigin | undefined,
   /** The review of the chat run that started the workflow, as its writer view; absent = none. */
   parentChangeset?: ChangesetWriter | undefined,
+  /** The source of the run that holds this step. Last, for the reason given above; absent = a run
+   *  of no saved workflow. */
+  parentSource?: RunSource | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -1607,8 +1613,9 @@ export async function spawnPipeline(
 
   const startTime = Date.now();
   const state = await runManifest(subManifest, config, {
-    // Part of the run that holds this step, whose source was checked when it started.
-    source: { kind: 'nested' },
+    // Part of the run that holds this step, whose source was checked when it started; its steps
+    // read the access of that run's saved workflow before each one, as the outer steps do (1184).
+    source: { kind: 'nested', within: heldSource(parentSource) },
     parentTools: pool,
     depth: depth + 1,
     parentPrompt,
@@ -1622,8 +1629,8 @@ export async function spawnPipeline(
     // pipeline's agents reachable by nothing, which is the shape the scoping is meant to
     // remove rather than relocate.
     abortScope,
-    // The nested run's steps are built for the same principal as this one.
-    principal,
+    // The nested run's steps are built for the same principal as this one (absent = the owner, 1173).
+    principal: principal ?? OWNER_PRINCIPAL,
     // …and with the same ToolContext, so they run under the engine's egress policy.
     parentToolContext,
     // …and in the same chat, so a nested step keeps that chat's private mode.
@@ -1670,6 +1677,10 @@ export async function spawnPipeline(
   // nested run keeps a failed step out of `state.outputs`). A rejected nested run stays
   // rejected, since readers of the outer run's status tell the two apart.
   if (state.status === 'rejected') throw new GateRejectedError(step.id, state.error);
+  // A sub-run stopped for its makers' access: the outer run ends with the same cause (1184).
+  if (state.status === 'failed' && isAuthorStop(state.error)) {
+    throw new NestedRunEndedError(state.error, `Nested pipeline "${step.id}" failed: ${state.error}`);
+  }
   if (state.status !== 'completed') {
     throw new Error(`Nested pipeline "${step.id}" ${state.status}: ${state.error ?? 'no reason recorded'}`);
   }

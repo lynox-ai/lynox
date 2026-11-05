@@ -64,7 +64,7 @@ function childOwnCostUSD(snap: CostSnapshot | null | undefined): number {
  * child's model is not restricted to the tier defaults, and because an earlier version of
  * this comment counted a set it had not measured. Over all **40** ids in
  * `MODEL_CAPABILITIES` (counted 2026-10-13) a cold first turn runs from **$0.00224576**
- * (`ministral-3b-2512`) to
+ * (`ministral-3b-2512`; $0.002470336 since Mistral is priced at its EU endpoint rate, × 1.1) to
  * **$0.88** (`claude-fable-5`: 20k prefix at $20/Mtok plus 9 600 output tokens at
  * $50/Mtok); over the three tier defaults it is $0.052288 / $0.192 / $0.44, a spread of
  * 8.41x. So the flat $0.05 this replaces was nearly exact for the fast tier and **17.60x
@@ -73,7 +73,8 @@ function childOwnCostUSD(snap: CostSnapshot | null | undefined): number {
  * up there it is no floor at all.
  *
  * ⚠ The other direction is larger, not a side note: at the cheap end the flat figure was
- * **55.66x too HIGH** (11.13x on `ministral-14b-2512`, the mid-cheap case), so batches on
+ * **22.26x too HIGH** at Mistral's list price (11.13x on `ministral-14b-2512`, the mid-cheap
+ * case; 20.24x and 10.12x at its EU endpoint rate, list × 1.1), so batches on
  * a cheap model were refused although every share could have paid for dozens of turns.
  * This change admits those.
  *
@@ -1693,7 +1694,8 @@ async function executeThinker(
     }
   }
 
-  const agentConfig: AgentConfig = {
+  // `principal` required here (1173): the census reads by type whom this agent runs for.
+  const agentConfig: AgentConfig & { principal: import('../../core/request-principal.js').RequestPrincipal } = {
     name: spec.name,
     model,
     // A profile pins endpoint and model as one pair (`AgentConfig.modelPinnedByProfile`),

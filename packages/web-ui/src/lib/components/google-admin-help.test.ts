@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { GOOGLE_BROKER_SCOPES } from '../contract/http.js';
 
 /**
  * A company account whose Google Workspace admin restricts third-party apps cannot connect through
@@ -114,17 +115,29 @@ describe('the docs section the link leads to', () => {
 	});
 
 	it('names exactly the scopes lynox\'s client asks for', () => {
-		// The broker's list lives in the hosting repo (`DEFAULT_SCOPES`); this is the far side of it.
+		// The contract list is the one the control plane's broker is to send (bound on its side separately).
 		const row = /^\| Scopes \| (.+) \|$/m.exec(section());
 		expect(row).not.toBeNull();
 		const scopes = [...row![1]!.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
-		expect(scopes).toEqual([
-			'openid',
-			'https://www.googleapis.com/auth/userinfo.email',
-			'https://www.googleapis.com/auth/calendar.events',
-			'https://www.googleapis.com/auth/calendar.freebusy',
-			'https://www.googleapis.com/auth/drive.file',
-		]);
+		expect(scopes).toEqual([...GOOGLE_BROKER_SCOPES]);
+	});
+
+	it('explains every data scope on the list, and its Gmail sentence still holds', () => {
+		// When the list changes, the paragraph under it changes in the same PR (legal, row 370).
+		const s = section();
+		const start = s.indexOf('`calendar.events` and');
+		const end = s.indexOf('**Where to configure it**');
+		expect(start, 'the paragraph under the table is gone').toBeGreaterThan(-1);
+		expect(end, 'the heading after the paragraph is gone').toBeGreaterThan(start);
+		const paragraph = s.slice(start, end);
+		const identity = new Set(['openid', 'https://www.googleapis.com/auth/userinfo.email']);
+		const named = GOOGLE_BROKER_SCOPES.filter((x) => !identity.has(x)).map((x) => x.replace('https://www.googleapis.com/auth/', ''));
+		// Both directions: every data scope is explained, and nothing it explains has left the list.
+		const mentioned = new Set([...paragraph.matchAll(/`([^`]+)`/g)].map((m) => m[1]!));
+		expect([...mentioned].sort()).toEqual([...named].sort());
+		expect(paragraph).toContain('lynox does not ask for Gmail with this client.');
+		const list: readonly string[] = GOOGLE_BROKER_SCOPES;
+		expect(list.filter((x) => x.includes('/auth/gmail') || x === 'https://mail.google.com/')).toEqual([]);
 	});
 
 	it('says what drive.file reaches as Google defines it', () => {
@@ -135,5 +148,91 @@ describe('the docs section the link leads to', () => {
 		const s = section();
 		expect(s).toContain('**Security** → **Access and data control** → **API controls**');
 		expect(s).toContain('**Manage App Access** → **Configure new app**');
+	});
+});
+
+describe('the other places on the page that say what the Standard set holds', () => {
+	// Row 370: besides the admin table, the page says in prose what the standard consent asks
+	// for. Each statement is tied to the contract list, so a scope change in EITHER direction
+	// fails here until the page says the new truth.
+	const short = (x: string): string => x.replace('https://www.googleapis.com/auth/', '');
+	const identity = new Set(['openid', 'userinfo.email']);
+	const inSet = new Set(GOOGLE_BROKER_SCOPES.map(short).filter((x) => !identity.has(x)));
+
+	// Every scope the prose has a phrase for, sent or not. A phrase must appear in both passages
+	// exactly while its scope is on the list — so dropping a scope forces its phrase out.
+	const PHRASES: Record<string, string> = {
+		'calendar.events': 'calendar events',
+		'calendar.freebusy': 'free/busy',
+		'drive.file': 'drive files lynox',
+	};
+	const NOT_IN_THE_SET = ['gmail', 'sheets', 'docs', 'document', 'spreadsheet', 'full drive', 'contacts', 'tasks'];
+
+	const between = (from: string, to: string, fence?: string): string => {
+		const start = DOCS.indexOf(from);
+		expect(start, `the passage opening with ${from} is gone`).toBeGreaterThan(-1);
+		const end = DOCS.indexOf(to, start + from.length);
+		expect(end, `the end of the passage opening with ${from} is gone`).toBeGreaterThan(start);
+		if (fence !== undefined) {
+			const close = DOCS.indexOf(fence, start + from.length);
+			expect(close, 'the end anchor moved out of its block').toBeGreaterThan(end);
+		}
+		return DOCS.slice(start, end).toLowerCase();
+	};
+	// The managed tip, up to the sentence that names what the set does NOT include.
+	const tip = (): string => between(':::tip[On lynox.cloud you can skip all of it]', 'If you need more than that', '\n:::');
+	const standardRow = (): string => between('| **Standard** (default) |', '\n');
+
+	it('has a phrase for every data scope on the list, and the phrases cannot stand in for each other', () => {
+		for (const scope of inSet) expect(Object.keys(PHRASES), `no phrase for ${scope}`).toContain(scope);
+		const phrases = Object.values(PHRASES);
+		for (const a of phrases) for (const b of phrases) if (a !== b) expect(b.includes(a), `${a} is inside ${b}`).toBe(false);
+	});
+
+	it.each([['the managed tip', tip], ['the Standard row of the access-level table', standardRow]] as const)(
+		'%s names exactly the scopes on the list, and nothing outside the set',
+		(_name, passage) => {
+			const text = passage();
+			for (const [scope, phrase] of Object.entries(PHRASES)) {
+				expect(text.includes(phrase), `${phrase} (${scope}) ${inSet.has(scope) ? 'missing' : 'still named, but off the list'}`).toBe(inSet.has(scope));
+			}
+			for (const word of NOT_IN_THE_SET) expect(text, `names ${word}`).not.toContain(word);
+		},
+	);
+
+	it('the per-service sections claim membership only for scopes on the list', () => {
+		// `Standard grants \`x\`` and `\`x\` is part of Standard` are claims about the list.
+		const claimed = [
+			...[...DOCS.matchAll(/Standard grants `([^`]+)`/g)].map((m) => m[1]!),
+			...[...DOCS.matchAll(/`([^`]+)` is part of Standard/g)].map((m) => m[1]!),
+		];
+		expect(claimed.length, 'the membership claims are gone').toBeGreaterThan(0);
+		for (const scope of claimed) expect(inSet, `${scope} is claimed for Standard`).toContain(scope);
+		// The Calendar heading says the whole service is in; it is while events are.
+		expect(DOCS.includes('### Google Calendar — in the Standard set')).toBe(inSet.has('calendar.events'));
+		// The services the page says Standard leaves out are out.
+		const list: readonly string[] = GOOGLE_BROKER_SCOPES;
+		const out: Array<[string, RegExp]> = [
+			['Gmail is **not** part of the Standard set.', /\/auth\/gmail|mail\.google\.com/],
+			['Standard grants no Sheets access.', /\/auth\/spreadsheets/],
+			['Standard grants no Docs access at all, reading included.', /\/auth\/documents/],
+		];
+		for (const [sentence, scope] of out) {
+			expect(DOCS, `the sentence "${sentence}" is gone`).toContain(sentence);
+			expect(list.filter((x) => scope.test(x)), sentence).toEqual([]);
+		}
+	});
+
+	it('the list of what Standard leaves out implies no Sheets or Docs access either', () => {
+		// It once said "no access to spreadsheets or documents you did not create through lynox",
+		// which reads as access to the ones lynox created; Standard has no Sheets or Docs scope.
+		const start = DOCS.indexOf('**What Standard does not include');
+		expect(start, 'the paragraph is gone').toBeGreaterThan(-1);
+		const paragraph = DOCS.slice(start, DOCS.indexOf('\n\n', start)).toLowerCase().replace(/\s+/g, ' ');
+		for (const word of ['spreadsheet', 'document', 'sheets', 'docs']) {
+			expect(paragraph.slice(0, paragraph.indexOf('asking lynox')), `names ${word}`).not.toContain(word);
+		}
+		expect(paragraph).toContain('no gmail access of any kind');
+		expect(paragraph).toContain('no access to drive files lynox did not create');
 	});
 });

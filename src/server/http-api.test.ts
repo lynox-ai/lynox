@@ -1895,11 +1895,27 @@ describe('LynoxHTTPApi', () => {
         author = 'mandate:jan@example.invalid';
         const foreign = await post();
         expect(foreign.status).toBe(403);
-        expect(((await foreign.json()) as { error: string }).error).toMatch(/^Not scheduled: this workflow holds steps another person with delegated access/);
+        const foreignBody = (await foreign.json()) as { error: string; code?: string };
+        expect(foreignBody.error).toMatch(/^Not scheduled: this workflow holds steps another person with delegated access/);
+        // The code lets the page word the refusal in its reader's language (UX-058, ux U-119).
+        expect(foreignBody.code).toBe('foreign_workflow');
         author = undefined;
-        expect((await post()).status).toBe(403);
+        const unread = await post();
+        expect(unread.status).toBe(403);
+        const unreadBody = (await unread.json()) as { error: string; code?: string };
+        expect(unreadBody.code).toBe('unreadable_workflow');
+        expect(unreadBody.error).toMatch(/^Not scheduled: lynox could not read who set up this workflow/);
         author = 'throws';
-        expect((await post()).status).toBe(403);
+        const thrown = await post();
+        expect(thrown.status).toBe(403);
+        const thrownBody = (await thrown.json()) as { error: string; code?: string };
+        expect(thrownBody.code).toBe('unreadable_workflow');
+        expect(thrownBody.error).toMatch(/^Not scheduled: lynox could not read who set up this workflow/);
+        // A workflow that is gone (the lookup finds none) is a 404 with its own code, before any refusal.
+        mockGetPipeline.mockReturnValueOnce(undefined);
+        const missing = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-gone', scheduleCron: '0 9 1 * *' }) });
+        expect(missing.status).toBe(404);
+        expect(((await missing.json()) as { code?: string }).code).toBe('missing_workflow');
         expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
         author = 'mandate:eva@example.invalid';
         expect((await post()).status).toBe(201);
@@ -5819,15 +5835,15 @@ describe('LynoxHTTPApi', () => {
     // The approved wording, copied byte for byte. A difference here is a text that was not
     // approved; change it only with a new approval.
     const APPROVED = [
-      'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an bexio schickt, und er geschieht erst nach deinem Ja. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
-      'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
+      'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an bexio schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in bexio, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
+      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
       'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
     ];
     // The page around it, approved 2026-10-21 under the same rule.
     const APPROVED_FRAME = {
       title: 'Schreibrechte für bexio bestätigen',
       scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Das Recht ist damit breiter als das, was lynox damit tut.',
+      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
       button: 'Zustimmen und weiter zu bexio',
       afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
     };
@@ -11826,6 +11842,21 @@ describe('LynoxHTTPApi', () => {
 
       // The link domains the owner allows a judged list run's verdicts to add (PRD
       // shopify-preset §20.2 item 5, S20-4): taken at the start that begins the judge only.
+      it('shows the owner the context the judge reads beside the record, as the hash binds it (PRD shopify-preset §20.2 item 7)', async () => {
+        const withContext = normalizeJudgeRule({ rule: 'Write a short title.', schema: { title: { type: 'string', maxLength: 40 } }, context: ['brand', 'note'] });
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old', brand: 'Acme', note: 'n' } }, after: judgeTemplate(withContext) }],
+          judge: withContext,
+        }).id;
+        const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+        expect(shown['judgeRule']).toEqual({ rule: withContext.rule, schema: withContext.schema, tier: 'fast', context: ['brand', 'note'] });
+        expect(shown['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
+        // Twin: a rule without one shows no context key at all.
+        const plain = await (await jsonFetch(`/api/bulk/runs/${judgedRun()}`)).json() as { judgeRule: Record<string, unknown> };
+        expect(Object.hasOwn(plain.judgeRule, 'context')).toBe(false);
+      });
+
       it('takes the start list at the judge start, refuses it at the list read and on a resume', async () => {
         const host = 'shop.example.com';
         const LIST_RULE = normalizeJudgeRule({ rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } }, { idField: 'id' });
@@ -12126,6 +12157,26 @@ describe('LynoxHTTPApi', () => {
       expect(asUndo).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', writeFormNote: null, writeFormConfirmation: null });
     });
 
+    it('says when the probe was found as planned after a send without a clear answer, not written', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2' } });
+      bulkLedger.finishPreview(id);
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      // Sent without a clear answer, then read back holding the planned value.
+      bulkLedger.markSent(id, 0);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'already');
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      const probe = ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown }).probe;
+      expect(probe).toEqual({ key: keys[0], fields: ['price'], found: true });
+    });
+
     it('names the one target a probe wrote and the fields it changed, until the probe is confirmed', async () => {
       const host = 'shop.example.com';
       const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
@@ -12147,7 +12198,33 @@ describe('LynoxHTTPApi', () => {
       expect(await probeOf()).toBeNull();
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
       // The written target, and only the fields the write changed — not the ones sent unchanged.
-      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'] });
+      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'], found: false });
+      // Writing on wider before the confirmation is refused with the engine's reason: what the kind
+      // of entry lacks, and that the one written target is the probe to confirm.
+      const block = { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'confirm' };
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shop', name: 'Shop', base_url: `https://${host}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-09-30T00:00:00.000Z' },
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((k: string) => (k === 'SHOP_TOKEN' ? 'not-a-real-token-only-a-fixture' : null));
+      try {
+        const wider = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), maxTargets: 2 }) });
+        expect(wider.status).toBe(409);
+        expect(await wider.json()).toMatchObject({ code: 'probe_required', probe: block });
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+      const blockOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probeBlock: unknown }).probeBlock;
+      // Only a run halted for want of a probe carries the reason on its page; this one halted at its maximum.
+      expect(await blockOf()).toBeNull();
+      bulkLedger.halt(id, BULK_HALT_REASONS.probeRequired);
+      expect(await blockOf()).toEqual(block);
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(200);
       expect(await probeOf()).toBeNull();
     });
@@ -12224,8 +12301,9 @@ describe('LynoxHTTPApi', () => {
       try {
         const widened = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets: 2 }) });
         expect(widened.status).toBe(409);
+        const refusal = (await widened.json()) as { error: string };
         // The sentence is prompt surface (the model reads refusals): pinned word for word.
-        expect(((await widened.json()) as { error: string }).error).toBe(
+        expect(refusal.error).toBe(
           'This run writes one target first. Approve it with maxTargets 1, check that target at the provider, confirm the '
           + 'probe, then resume with more. One probe covers one kind of entry changed in one way, so a run that changes '
           + 'several kinds of entry needs a confirmed probe for each. A run with an unchecked change needs a probe of its own, '
@@ -12233,6 +12311,19 @@ describe('LynoxHTTPApi', () => {
           + 'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes '
           + 'in a run of their own.',
         );
+        // With it, the engine's reason: no confirmed probe for the kind, and nothing written yet.
+        expect(refusal).toMatchObject({ code: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'write_one' } });
+        // Approving such a run for more than one target is refused with the same reason, before
+        // anything is written: there is no step of this run to name yet.
+        const other = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '3' } })), contract: mintBulkContract(host, keys) });
+        if (!other.ok) throw new Error('not planned');
+        const otherId = other.status.id;
+        bulkLedger.resumePreview(otherId);
+        for (const seq of [0, 1]) bulkLedger.recordRead(otherId, seq, { before: { price: '2' } });
+        bulkLedger.finishPreview(otherId);
+        const wide = await jsonFetch(`/api/bulk/runs/${otherId}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(otherId), maxTargets: 2, unmeasuredConfirmed: true }) });
+        expect(wide.status).toBe(409);
+        expect(await wide.json()).toMatchObject({ code: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: null } });
       } finally {
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
@@ -12577,6 +12668,33 @@ describe('LynoxHTTPApi', () => {
         expect(phases).toEqual(['attempt', 'failed']);
       });
 
+      // 1100: a run that a refused member connection kept from the provider is no success in the log.
+      it('ends the run record as failed when a member connection was refused, though every step completed', async () => {
+        mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
+        const { MEMBER_CONNECTION_PREFIX } = await import('../core/member-connection-notes.js');
+        const { currentPlanOwnerStarted } = await import('../core/plan-run-context.js');
+        let ownerStarted: boolean | undefined;
+        const record = vi.fn();
+        const origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record });
+        const phasesOf = (): string[] => record.mock.calls.map((c) => c[0] as { action: string; phase: string }).filter((r) => r.action === 'workflow:run').map((r) => r.phase);
+        try {
+          mockRunSavedWorkflow.mockImplementationOnce(async () => {
+            ownerStarted = currentPlanOwnerStarted();
+            return { ok: true, runId: 'run-1', status: 'completed', writeNotes: [`${MEMBER_CONNECTION_PREFIX} eva@kanzlei.example set up this connection`] };
+          });
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          expect(phasesOf()).toEqual(['attempt', 'failed']);
+          // The refusal it got names the owner as the one who started it, not a schedule.
+          expect(ownerStarted).toBe(true);
+          // CONTROL: another note under a completed run leaves it a success.
+          record.mockClear();
+          mockRunSavedWorkflow.mockResolvedValueOnce({ ok: true, runId: 'run-2', status: 'completed', writeNotes: ['A write may have landed before a refused redirect.'] });
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          expect(phasesOf()).toEqual(['attempt', 'done']);
+        } finally { engineRef()['getAuditLog'] = origLog; }
+      });
+
       it('does not run the mandate\'s workflow when its start cannot be recorded', async () => {
         mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
         const origLog = engineRef()['getAuditLog'];
@@ -12608,10 +12726,43 @@ describe('LynoxHTTPApi', () => {
         live = false;
         const res = await jsonFetch('/api/workflows/library');
         const body = await res.json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
-        expect(body.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true });
+        // No engine.db here, so no paused plan whose takeover covers it: none counted.
+        expect(body.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 });
         expect(body.workflows.find((w) => w.id === 'wf-o')).not.toHaveProperty('runs_as');
         mockHistoryGetWorkflowAuthorship.mockReset();
         mockHistoryGetPlannedPipelines.mockReturnValue([]);
+      });
+
+      it('reads the paused plans once per list and only when a listed workflow has ended, and a failed read counts none instead of failing the list', async () => {
+        repayRateWindow();
+        mockHistoryGetPlannedPipelines.mockReturnValue([
+          { id: 'wf-m', manifest_name: 'M', manifest_json: JSON.stringify({ template: true, name: 'M', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-21T00:00:00Z' },
+          { id: 'wf-m2', manifest_name: 'M2', manifest_json: JSON.stringify({ template: true, name: 'M2', steps: [{ id: 's1', task: 't' }] }), step_count: 1, started_at: '2026-05-20T00:00:00Z' },
+        ]);
+        mockHistoryGetWorkflowAuthorship.mockImplementation((id: string) => (id === 'wf-m' || id === 'wf-m2' ? mandateMade : undefined));
+        const origDb = engineRef()['getEngineDb'];
+        const getDb = vi.fn((): never => { throw new Error('engine.db closed'); });
+        engineRef()['getEngineDb'] = () => ({ getDb });
+        type Lib = { workflows: Array<{ id: string; runs_as?: unknown }> };
+        try {
+          live = true;
+          const whileLive = await jsonFetch('/api/workflows/library');
+          expect(((await whileLive.json()) as Lib).workflows.map((w) => w.runs_as)).toEqual([0, 1].map(() => ({ person: 'eva@kanzlei.example', ended: false })));
+          // Nothing listed has ended: the paused plans are not read at all.
+          expect(getDb).not.toHaveBeenCalled();
+          live = false;
+          const ended = await jsonFetch('/api/workflows/library');
+          expect(ended.status).toBe(200);
+          const endedRows = ((await ended.json()) as Lib).workflows;
+          expect(endedRows.map((w) => w.runs_as)).toEqual([0, 1].map(() => ({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 })));
+          // Twin: the read was tried, so the 0 above is the fallback, not a skipped read — and
+          // tried once for both ended workflows, not once per row.
+          expect(getDb).toHaveBeenCalledTimes(1);
+        } finally {
+          engineRef()['getEngineDb'] = origDb;
+          mockHistoryGetWorkflowAuthorship.mockReset();
+          mockHistoryGetPlannedPipelines.mockReturnValue([]);
+        }
       });
 
       it('lists no one\'s email to a mandate reading the library', async () => {
@@ -12623,8 +12774,22 @@ describe('LynoxHTTPApi', () => {
         const cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
         try {
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'ida@kanzlei.example', mandateId: MID }));
-          const asMandate = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+          const asMandate = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown; schedule_refusal?: unknown }> };
           expect(asMandate.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('runs_as');
+          // What it does learn: this one is not its to schedule (UX-058), and not whose it is.
+          expect(asMandate.workflows.find((w) => w.id === 'wf-m')?.schedule_refusal).toBe('foreign');
+          expect(JSON.stringify(asMandate)).not.toContain('eva@kanzlei.example');
+          // Its own workflow and the owner's carry no refusal; one whose author cannot be read does.
+          mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: 'mandate:ida@kanzlei.example', createdMandateId: MID, mandateEditor: null, mandateEditorId: null });
+          const own = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; schedule_refusal?: unknown }> };
+          expect(own.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('schedule_refusal');
+          mockHistoryGetWorkflowAuthorship.mockReturnValue({ ...mandateMade, createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null });
+          const owners = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; schedule_refusal?: unknown }> };
+          expect(owners.workflows.find((w) => w.id === 'wf-m')).not.toHaveProperty('schedule_refusal');
+          mockHistoryGetWorkflowAuthorship.mockReturnValue(undefined);
+          const unread = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; schedule_refusal?: unknown }> };
+          expect(unread.workflows.find((w) => w.id === 'wf-m')?.schedule_refusal).toBe('unreadable');
+          mockHistoryGetWorkflowAuthorship.mockReturnValue(mandateMade);
           // Twin on the same machinery: the owner gets it.
           api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
           const asOwner = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
@@ -13566,6 +13731,29 @@ describe('LynoxHTTPApi', () => {
       expect(body.configured.api_key).toBe(true);
       expect(body.configured.search).toBe(false);
       expect(body.count).toBe(1);
+    });
+
+    it('GET /api/secrets/status gives a mandate the booleans but not the size of the owner\'s vault', async () => {
+      repayRateWindow();
+      mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY', 'STRIPE_KEY', 'SHOPIFY_TOKEN']);
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-vault' : null));
+      type Resolver = Parameters<typeof api.setPrincipalResolverForTesting>[0];
+      const saved = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown> & { configured: Record<string, boolean> };
+        expect(body.configured.api_key).toBe(true);
+        expect(body.configured.search).toBe(false);
+        expect('count' in body).toBe(false);
+        expect(JSON.stringify(body)).not.toMatch(/"count"/);
+      } finally {
+        api.setPrincipalResolverForTesting(saved);
+      }
+      // The owner, on the same vault, still gets it.
+      const owner = await (await jsonFetch('/api/secrets/status')).json() as { count?: number };
+      expect(owner.count).toBe(3);
     });
 
     // Regression: HN-launch installer bug (2026-05-23). When the npx wizard
@@ -14669,6 +14857,48 @@ describe('LynoxHTTPApi', () => {
           expect(res.status).toBe(403);
           const body = await res.json() as { error: string };
           expect(body.error).toContain('tier_set');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config names a refused endpoint without its credentials, query or fragment, and keeps a curated one as entered', async () => {
+        // This file shares one per-IP rate window; these requests are paid back.
+        repayRateWindow();
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const refusal = async (update: Record<string, unknown>): Promise<string> => {
+            const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(update) });
+            expect(res.status).toBe(403);
+            return (await res.json() as { error: string }).error;
+          };
+          // The endpoint check, the Mistral pairing check and a tier slot (any string, no scheme;
+          // here with an apostrophe and an `@` in the password, so the host starts after the last `@`).
+          const top = await refusal({ api_base_url: 'https://u:SECRET@h.example/v1?key=SECRET#SECRET' });
+          expect(top).toContain("cannot set api_base_url to 'https://h.example/v1'");
+          const paired = await refusal({ provider: 'openai', api_base_url: 'https://u:SECRET@h.example/v1?key=SECRET' });
+          expect(paired).toContain("api_base_url; got 'https://h.example/v1'");
+          const slot = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: "u:SE'CRET@SECRET@h.example/v1?key=SECRET" } } });
+          expect(slot).toContain("api_base_url 'h.example/v1' is not a curated");
+          // A `?` inside the password must not shield it, and a full-width `@` counts as one.
+          const shielded = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'u:SECRET?x@h.example/v1' } } });
+          expect(shielded).toContain("api_base_url 'h.example/v1' is not a curated");
+          const lookalike = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'u:SECRET\uFF20h.example/v1' } } });
+          expect(lookalike).toContain("api_base_url 'h.example/v1' is not a curated");
+          const encoded = await refusal({ tier_set: { fast: { provider: 'anthropic', model_id: 'claude-x', api_base_url: 'u:SECRET%40h.example/v1' } } });
+          expect(encoded).toContain("api_base_url 'h.example/v1' is not a curated");
+          for (const error of [top, paired, slot, shielded, lookalike, encoded]) expect(error).not.toContain('SECRET');
+          // An `@` in the query of a parseable URL is not a credential: the host stays.
+          expect(await refusal({ api_base_url: 'https://h.example/v1?next=a@b.example' })).toContain("cannot set api_base_url to 'https://h.example/v1'");
+          // The other way: a curated endpoint is saved as it was entered.
+          const MISTRAL = 'https://api.eu.mistral.ai/v1';
+          const saved = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ provider: 'openai', api_base_url: MISTRAL, openai_model_id: 'mistral-medium-2604' }) });
+          expect(saved.status).toBe(200);
+          const { saveUserConfig } = await import('../core/config.js');
+          const written = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1)?.[0];
+          expect(written?.['api_base_url']).toBe(MISTRAL);
         } finally {
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -16635,6 +16865,55 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(403);
     });
 
+    it('without isolation too, says a file it may not read as a failure, not as "File not found"', async () => {
+      repayRateWindow();
+      expect(process.getuid?.(), 'this test needs a non-root user').not.toBe(0);
+      writeFileSync(join(base, 'safe', 'sealed.txt'), 's');
+      const seen: unknown[] = [];
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let lines: string[] = [];
+      try {
+        chmodSync(join(base, 'safe', 'sealed.txt'), 0o000);
+        for (const route of ['download', 'read']) {
+          const res = await jsonFetch(`/api/files/${route}?path=safe/sealed.txt`);
+          seen.push([route, res.status, await res.json()]);
+          seen.push([route, (await jsonFetch(`/api/files/${route}?path=safe/gone.txt`)).status]);
+        }
+      } finally {
+        chmodSync(join(base, 'safe', 'sealed.txt'), 0o600);
+        rmSync(join(base, 'safe', 'sealed.txt'), { force: true });
+        lines = logged.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('/api/files/'));
+        logged.mockRestore();
+      }
+      const failed = { error: 'Could not read the file' };
+      expect(seen).toEqual([['download', 500, failed], ['download', 404], ['read', 500, failed], ['read', 404]]);
+      // The reason behind the 500 is in the server's log, as for the folder listing.
+      expect(lines).toEqual(['[lynox] GET /api/files/download failed: EACCES', '[lynox] GET /api/files/read failed: EACCES']);
+    });
+
+    it('without isolation, closes the opened file when the header cannot be sent and for an empty file', async () => {
+      repayRateWindow();
+      const held = (name: string): number =>
+        readdirSync('/proc/self/fd').filter((n) => { try { return readlinkSync(`/proc/self/fd/${n}`).endsWith(name); } catch { return false; } }).length;
+      writeFileSync(join(base, 'safe', 'once.txt'), 'x');
+      writeFileSync(join(base, 'safe', 'empty.txt'), '');
+      const writeHead = vi.spyOn(ServerResponse.prototype, 'writeHead');
+      try {
+        for (let i = 0; i < 10; i++) {
+          // The header write is what fails, as Node does for a header value it refuses.
+          writeHead.mockImplementationOnce(() => { throw new TypeError('Invalid character in header content'); });
+          // The answer of the route itself, so the failed header write was the route's own.
+          const res = await jsonFetch('/api/files/download?path=safe/once.txt');
+          expect([res.status, await res.json()]).toEqual([500, { error: 'Could not read the file' }]);
+        }
+      } finally {
+        writeHead.mockRestore();
+      }
+      for (let i = 0; i < 10; i++) expect((await jsonFetch('/api/files/download?path=safe/empty.txt')).status).toBe(200);
+      // A FileHandle left open stays open until the garbage collector finds it.
+      expect([held('once.txt'), held('empty.txt')]).toEqual([0, 0]);
+    });
+
     it('answers every path behind an escaping symlink with 403, so files and directories out there look alike', async () => {
       mkdirSync(join(externalDir, 'sub'), { recursive: true });
       // Missing leaf, a file used as a directory, a directory, and a missing nested path: all
@@ -16845,7 +17124,57 @@ describe('LynoxHTTPApi', () => {
       expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('outside');
     });
 
-    const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
+    it('says a delete the file system refused as a failure, not as "File not found", and keeps the file', async () => {
+      repayRateWindow();
+      // root ignores directory permissions, so the refusal this test needs cannot happen there
+      expect(process.getuid?.(), 'this test needs a non-root user').not.toBe(0);
+      mkdirSync(join(ws, 'locked'));
+      writeFileSync(join(ws, 'locked', 'keep.txt'), 'k');
+      try {
+        // 0o500: the file can be looked at but not removed; 0o000: not even looked at.
+        for (const mode of [0o500, 0o000]) {
+          chmodSync(join(ws, 'locked'), mode);
+          const res = await jsonFetch('/api/files?path=locked/keep.txt', { method: 'DELETE' });
+          expect([mode.toString(8), res.status, await res.json()]).toEqual([mode.toString(8), 500, { error: 'Could not delete the file' }]);
+        }
+        chmodSync(join(ws, 'locked'), 0o700);
+        expect(readFileSync(join(ws, 'locked', 'keep.txt'), 'utf8')).toBe('k');
+      } finally {
+        chmodSync(join(ws, 'locked'), 0o700);
+      }
+    });
+
+    it('says a read the file system refused as a failure, not as "File not found", for the download and the preview', async () => {
+      repayRateWindow();
+      // root ignores file and directory permissions, so the refusal this test needs cannot happen there
+      expect(process.getuid?.(), 'this test needs a non-root user').not.toBe(0);
+      mkdirSync(join(ws, 'shut'));
+      writeFileSync(join(ws, 'shut', 'in.txt'), 'i');
+      writeFileSync(join(ws, 'sealed.txt'), 's');
+      const seen: unknown[] = [];
+      try {
+        chmodSync(join(ws, 'shut'), 0o000);
+        chmodSync(join(ws, 'sealed.txt'), 0o000);
+        for (const route of ['download', 'read']) {
+          for (const p of ['sealed.txt', 'shut/in.txt']) {
+            const res = await jsonFetch(`/api/files/${route}?path=${q(p)}`);
+            seen.push([route, p, res.status, await res.json()]);
+          }
+          // A file that is really missing stays "not found".
+          seen.push([route, 'gone.txt', await status(`/api/files/${route}?path=gone.txt`)]);
+        }
+      } finally {
+        chmodSync(join(ws, 'shut'), 0o700);
+        chmodSync(join(ws, 'sealed.txt'), 0o600);
+      }
+      const failed = { error: 'Could not read the file' };
+      expect(seen).toEqual([
+        ['download', 'sealed.txt', 500, failed], ['download', 'shut/in.txt', 500, failed], ['download', 'gone.txt', 404],
+        ['read', 'sealed.txt', 500, failed], ['read', 'shut/in.txt', 500, failed], ['read', 'gone.txt', 404],
+      ]);
+    });
+
+    const openFds =(): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
 
     it('downloads a file whose name is outside Latin-1, under that name', async () => {
       repayRateWindow();
@@ -16864,7 +17193,7 @@ describe('LynoxHTTPApi', () => {
       try {
         for (let i = 0; i < 10; i++) {
           writeHead.mockImplementationOnce(() => { throw new TypeError('Invalid character in header content'); });
-          expect(await status('/api/files/download?path=once.txt')).toBe(404);
+          expect(await status('/api/files/download?path=once.txt')).toBe(500);
         }
       } finally {
         writeHead.mockRestore();

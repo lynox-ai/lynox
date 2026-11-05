@@ -106,6 +106,8 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'readLoginPrincipal', contractFile: 'http.ts', twinPattern: valueTwin('readLoginPrincipal') },
   { name: 'OAuthClaimRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimRequest') },
   { name: 'OAuthClaimResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimResponse') },
+  { name: 'OAuthClaimPreviewRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimPreviewRequest') },
+  { name: 'OAuthClaimPreviewResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimPreviewResponse') },
   // Born in the contract rather than migrated into it (W5, PRD Stage 1 §3.4).
   // Listed anyway, and the reason is the sweep rather than the history: without a
   // row, a local re-declaration of one of these anywhere in `src/` or the web-ui
@@ -125,6 +127,18 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   // name, and one under `tests/`, which is outside its roots — which is why this
   // repo's minter test imports the constant rather than restating it.
   { name: 'BROKER_START_GOLDEN', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_GOLDEN') },
+  // Row 1224: the provider-bound v2 start token, next to v1 until the fleet mints v2.
+  { name: 'BROKER_START_VERSION_V2', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_VERSION_V2') },
+  { name: 'BROKER_START_PROVIDERS', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_PROVIDERS') },
+  { name: 'BrokerStartProvider', contractFile: 'broker-start.ts', twinPattern: typeTwin('BrokerStartProvider') },
+  { name: 'isBrokerStartProvider', contractFile: 'broker-start.ts', twinPattern: valueTwin('isBrokerStartProvider') },
+  { name: 'brokerStartPayloadV2', contractFile: 'broker-start.ts', twinPattern: valueTwin('brokerStartPayloadV2') },
+  { name: 'parseBrokerStartTokenV2', contractFile: 'broker-start.ts', twinPattern: valueTwin('parseBrokerStartTokenV2') },
+  { name: 'formatBrokerStartTokenV2', contractFile: 'broker-start.ts', twinPattern: valueTwin('formatBrokerStartTokenV2') },
+  { name: 'BROKER_START_GOLDEN_V2', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_GOLDEN_V2') },
+  { name: 'BrokerStartVersion', contractFile: 'broker-start.ts', twinPattern: typeTwin('BrokerStartVersion') },
+  { name: 'parseAnyBrokerStartToken', contractFile: 'broker-start.ts', twinPattern: valueTwin('parseAnyBrokerStartToken') },
+  { name: 'brokerStartAcceptsVersion', contractFile: 'broker-start.ts', twinPattern: valueTwin('brokerStartAcceptsVersion') },
   // Engine → CP report shapes of the usage routes. Born in the contract; a local copy on
   // either side is how the two would drift apart.
   { name: 'ProviderIncidentRequest', contractFile: 'http.ts', twinPattern: typeTwin('ProviderIncidentRequest') },
@@ -147,6 +161,8 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'MICROSOFT_OAUTH_ERROR_PARAM', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_ERROR_PARAM') },
   { name: 'AdminConsentStatusRequest', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusRequest') },
   { name: 'AdminConsentStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusResponse') },
+  // Born in the contract: the scopes lynox's Google client asks for.
+  { name: 'GOOGLE_BROKER_SCOPES', contractFile: 'http.ts', twinPattern: valueTwin('GOOGLE_BROKER_SCOPES') },
   // K-W3 — the guarded-capable boot marker. The literal existed twice by hand
   // across the repo boundary; a local re-declaration is that failure returning.
   { name: 'GUARDED_CAPABLE_MARKER', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_MARKER') },

@@ -425,7 +425,7 @@ export function isGraphqlEndpoint(url: string): boolean {
   // WPGraphQL answers on any path that carries the query key `graphql` (`/?graphql`,
   // `/index.php?graphql`), with or without a value; PHP reads `graphql[]` and ` graphql` (leading
   // spaces dropped) as the same key.
-  if (urlQueryStrings(url).some((search) => [...new URLSearchParams(search).keys()].some((key) => key.trimStart().toLowerCase().replace(/\[.*$/, '') === 'graphql'))) return true;
+  if (urlQueryStrings(url).some((search) => queryReadings(search).some((params) => [...params.keys()].some((key) => queryKeyName(key) === 'graphql')))) return true;
   const { path, ambiguous } = normalizeWritePath(parsed.pathname);
   // A path whose routing is not known here (a double encoding, an escape that does not decode,
   // a character a router may strip) is read every way a server may decode it, and any reading
@@ -561,15 +561,44 @@ export function graphqlWrite(headers: Readonly<Record<string, string>>, body: un
 /**
  * Whether a request that is not a write carries a GraphQL write in its URL: any `query`
  * parameter that names `mutation` or `subscription`. Some servers run a document sent this way;
- * the question could not show it, so such a request is refused rather than asked.
+ * the question could not show it, so such a request is refused rather than asked. Each query
+ * string is read every way a server may (`queryReadings`), and each key as a server may name it
+ * (`queryKeyName`).
  */
 export function graphqlUrlWrites(url: string): boolean {
   try {
     new URL(url);
-    return urlQueryStrings(url).some((search) => new URLSearchParams(search).getAll('query').some((query) => GRAPHQL_WRITE_OPERATION.test(query)));
+    return urlQueryStrings(url).some((search) => queryReadings(search).some((params) => [...params].some(([key, value]) => queryKeyName(key) === 'query' && GRAPHQL_WRITE_OPERATION.test(value))));
   } catch {
     return true;
   }
+}
+
+/**
+ * A query key as the servers that may receive it name it: PHP ends a key at a NUL, drops leading
+ * spaces and reads `name[...]` as `name` (a newline inside the brackets included), ASP.NET compares
+ * keys without case. So ` query`, `QUERY`, `query[]` and `query%00x` are all `query`.
+ */
+function queryKeyName(key: string): string {
+  return key.split('\0')[0]!.trimStart().toLowerCase().replace(/\[[\s\S]*$/, '');
+}
+
+/**
+ * A query string as the servers that may receive it parse it: split on `&` alone, and on `;` as
+ * well (Rack before 3, Python's `parse_qs` before 3.9.2, Java servlet containers on request);
+ * each with `%uXXXX` decoded, as IIS/System.Web does, and without. A reading that cannot decode a
+ * `%u` escape (a lone surrogate) keeps it as U+FFFD, which names nothing.
+ */
+export function queryReadings(search: string): URLSearchParams[] {
+  const separated = [search, search.replace(/;/g, '&')];
+  const decoded = separated.map((text) => text.replace(/%u([0-9a-f]{4})/gi, (_, hex: string) => {
+    try {
+      return encodeURIComponent(String.fromCharCode(parseInt(hex, 16)));
+    } catch {
+      return '%EF%BF%BD';
+    }
+  }));
+  return [...new Set([...separated, ...decoded])].map((text) => new URLSearchParams(text));
 }
 
 /**

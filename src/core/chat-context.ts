@@ -7,6 +7,7 @@ import { stripUntrustedSeparators } from './sanitize.js';
 import { approvalQueueEnabled, approvalResultSawDedup, type ApprovalEntry, type StoredAddress } from './approval-store.js';
 import { APPROVAL_REWRITABLE_OUTCOMES, approvalOutcome, plainAddresses, type ApprovalOutcome, type ApprovalScope } from './approval-view.js';
 import { stripHidden, stripHiddenInName } from './hidden-text.js';
+import { detectSensitiveContent } from '../integrations/inbox/sensitive-content.js';
 
 const REWRITABLE: ReadonlySet<ApprovalOutcome> = new Set(APPROVAL_REWRITABLE_OUTCOMES);
 
@@ -148,6 +149,59 @@ export interface ChatInboxReader {
   /** Resolve the IMAP uid+folder for a stored message-id, or null if unknown
    *  (old/moved mail) — the caller then instructs a mail_search fallback. */
   getUidByMessageId(accountId: string, messageId: string): { uid: number; folder: string } | null;
+  /** The thread's stored messages, newest first (`InboxStateDb.listThreadMessages`). */
+  listThreadMessages(
+    accountId: string,
+    threadKey: string,
+    opts: { tenantId?: string | undefined; limit?: number | undefined },
+  ): ReadonlyArray<ChatThreadMessage>;
+  /** The item's audit, oldest first (`InboxStateDb.listAuditForItem`). */
+  listAuditForItem(itemId: string, tenantId?: string): ReadonlyArray<{ action: string; payloadJson: string }>;
+}
+
+/** What "Reply in chat" reads of a stored thread message. */
+export interface ChatThreadMessage {
+  messageId: string;
+  fromAddress: string;
+  fromName?: string | undefined;
+  subject: string;
+  bodyMd?: string | undefined;
+  snippet?: string | undefined;
+  mailDate?: Date | undefined;
+  direction: string;
+  /** true = automatic reply, false = checked and not one, undefined = not checked. */
+  autoReply?: boolean | undefined;
+}
+
+/**
+ * The message "Reply in chat" answers when it is not the item's own mail: the newest inbound
+ * message of the thread that is not older than the item's own mail and is known not to be an
+ * automatic reply — checked and not one, or the message that reopened the item (its audit names
+ * it; reopening already ruled out a known automatic reply). An out-of-office note is stored in
+ * the thread too, and answering it would answer "I am away until …". Any other message never
+ * checked (stored before the check existed) is not taken, so such an item answers its first
+ * mail, as before.
+ */
+export function followUpToAnswer(reader: ChatInboxReader, item: InboxItem): ChatThreadMessage | null {
+  const messages = reader.listThreadMessages(item.accountId, item.threadKey, { tenantId: item.tenantId, limit: 50 });
+  const own = item.messageId !== undefined ? messages.find((m) => m.messageId === item.messageId) : undefined;
+  const since = own?.mailDate?.getTime();
+  const reopenedBy = new Set<string>();
+  for (const a of reader.listAuditForItem(item.id, item.tenantId)) {
+    if (a.action !== 'reopened_on_reply') continue;
+    try {
+      const id = (JSON.parse(a.payloadJson) as { message_id?: unknown }).message_id;
+      if (typeof id === 'string') reopenedBy.add(id);
+    } catch {
+      // An unreadable payload names no message.
+    }
+  }
+  return messages.find((m) =>
+    m.messageId !== item.messageId
+    && m.direction === 'inbound'
+    && (m.autoReply === false || (m.autoReply === undefined && reopenedBy.has(m.messageId)))
+    && !(since !== undefined && m.mailDate !== undefined && m.mailDate.getTime() < since),
+  ) ?? null;
 }
 
 /**
@@ -382,33 +436,50 @@ export function resolveChatContext(
     //     is.
     // And the baseline is not "the old scan": before this, the scan did not run
     // on this path at all, so it is 19 of 21 where it was 0 of 21.
-    const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
-    const from = item.fromName
-      ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
+    // A follow-up in the thread (a customer writing again) is what the user answers now, so its
+    // sender, subject, text and Message-ID take the place of the first mail's.
+    const followUp = followUpToAnswer(inboxState, item);
+    const mail = followUp ?? item;
+    const fromAddr = oneLine(mail.fromAddress, MAX_NAME_CHARS);
+    const from = mail.fromName
+      ? `${oneLine(mail.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
       : fromAddr;
     // The cached body can be an EMPTY string (body-refresh persists '' for an
     // all-markup/redacted mail), so `??` would leave a blank Message line — fall
     // back to the snippet on empty, not just on null/undefined.
-    const cachedBody = inboxState.getItemBody(ref.id)?.bodyMd;
-    const bodyMd = cachedBody && cachedBody.length > 0 ? cachedBody : (item.snippet ?? '');
+    const cachedBody = followUp ? followUp.bodyMd : inboxState.getItemBody(ref.id)?.bodyMd;
+    const bodyMd = cachedBody && cachedBody.length > 0 ? cachedBody : (mail.snippet ?? '');
+    // A follow-up was not judged by the intake check the item's own mail passed, so it is checked
+    // here, as `inbox_read` checks a thread message: a hit withholds its text and the sender's
+    // name, said outside the block. Its locator stays, so the reply still answers it.
+    const withheld = followUp
+      ? detectSensitiveContent({ subject: '', body: [followUp.subject, followUp.fromName ?? '', bodyMd].join('\n') }).categories
+      : [];
+    const hidden = withheld.length > 0;
+    // A follow-up's row holds no text when the inbox kept none (a mail held as sensitive on
+    // `skip`), and only an excerpt otherwise: neither is the whole message, and the framing says
+    // which, so the model does not take an excerpt for the mail or an absence for an empty one.
+    const followUpText = followUp && !hidden
+      ? (bodyMd.length === 0 ? ' — the inbox stored no text of it' : cachedBody && cachedBody.length > 0 ? '' : ' — Message is an excerpt')
+      : '';
     // The IMAP uid is account-SPECIFIC, so the reply MUST go from this item's
     // account — name it so mail_reply resolves the uid against the right mailbox.
     const acct = oneLine(item.accountId, MAX_NAME_CHARS);
     // Resolve the IMAP uid mail_reply needs (data in processed_mail_messages).
     // Absent for old/moved mail → fall back to a mail_search instruction.
-    const uidRow = item.messageId
-      ? inboxState.getUidByMessageId(item.accountId, item.messageId)
+    const uidRow = mail.messageId
+      ? inboxState.getUidByMessageId(item.accountId, mail.messageId)
       : null;
     // Rendered ONCE and reused, so the prose below and the field cannot disagree:
     // gating the sentence on the raw `item.messageId` while the field renders the
     // `oneLine`d value lets a whitespace-only header point the model at a line
     // that was skipped as empty.
-    const msgId = item.messageId ? oneLine(item.messageId, MAX_NAME_CHARS) : '';
+    const msgId = mail.messageId ? oneLine(mail.messageId, MAX_NAME_CHARS) : '';
     const replyLine = uidRow
       ? `To reply, call mail_reply with uid: ${uidRow.uid}, account: "${acct}"` +
         `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}. `
       : `To reply, first locate this message with mail_search ` +
-        `(by the sender, the subject${msgId ? `, or the Message-ID shown above` : ''}) ` +
+        `(by the sender${hidden ? '' : ', the subject'}${msgId ? `, or the Message-ID shown above` : ''}) ` +
         `on account "${acct}", then mail_reply with its uid and account: "${acct}". `;
     // What stays OUTSIDE the boundary is engine-generated operational metadata —
     // the item id, the account, the IMAP uid/folder — the same split mail_read makes.
@@ -429,16 +500,23 @@ export function resolveChatContext(
     // Keys are the field LABELS lowercased, so the note and the block name the same
     // things: "no subject, message" points at `Subject:` and `Message:`, not at
     // internal variable names the model never sees.
-    const absent = missingFieldNote({ from: from, subject: oneLine(item.subject, MAX_NAME_CHARS), message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS) });
+    const subject = hidden ? '' : oneLine(mail.subject, MAX_NAME_CHARS);
+    const message = hidden ? '' : oneLine(bodyMd, MAX_MAIL_BODY_CHARS);
+    const absent = hidden
+      ? ` — sender name, subject and message withheld: sensitive content (${[...new Set(withheld)].join(', ')})`
+      : followUp && bodyMd.length === 0
+        ? missingFieldNote({ from: from, subject })
+        : missingFieldNote({ from: from, subject, message });
+    const which = followUp ? ' — the newest message of its thread, a follow-up to the mail the inbox took in' : '';
     return (
-      `[Loaded mail for reply — item: ${item.id}${absent}]\n` +
+      `[Loaded mail for reply — item: ${item.id}${which}${followUpText}${absent}]\n` +
       `${wrapChannelMessage({
         source: `mail:${acct}:inbox:${item.id}`,
         fields: {
-          From: from,
-          Subject: oneLine(item.subject, MAX_NAME_CHARS),
+          From: hidden ? fromAddr : from,
+          Subject: subject,
           ...(uidRow || !msgId ? {} : { 'Message-ID': msgId }),
-          Message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS),
+          Message: message,
         },
       })}\n\n` +
       replyLine +
@@ -636,6 +714,22 @@ export const APPROVAL_DRAFT_UNAVAILABLE =
   'The draft from the approval queue that this chat was opened on cannot be loaded here. ' +
   'Tell the user it is not available. Do not write the email from memory or look for it elsewhere; ask the user what they want to send.';
 
+/** How the block of a draft that DID load opens, one per way it loads ({@link approvalLoadable}). */
+const APPROVAL_DRAFT_MOVED_OPENER = '[Loaded draft moved from the approval queue — entry: ';
+const APPROVAL_DRAFT_NOT_SENT_OPENER = '[Loaded draft of an approved email that was not sent — entry: ';
+
+/**
+ * Whether a composed first message carries the loaded draft of an approval entry: a whole
+ * loaded-context block that opens as one of the two loaded-draft blocks. A draft that did not
+ * load ({@link APPROVAL_DRAFT_UNAVAILABLE}) does not count, and neither does a user who only
+ * types the opening line: without the closing sentinel there is no block. Read by the thread
+ * title (`approval-chat-title.ts`), which must not take the draft's subject.
+ */
+export function opensLoadedApprovalDraft(text: string): boolean {
+  return LOADED_CONTEXT_AT_START.test(text)
+    && (text.startsWith(APPROVAL_DRAFT_MOVED_OPENER) || text.startsWith(APPROVAL_DRAFT_NOT_SENT_OPENER));
+}
+
 /** Recipients as one line, at most {@link MAX_RECIPIENTS} of them, and how many were left out:
  *  that count is the engine's statement, so it goes into the framing, not beside the addresses. */
 function addressLine(list: ReadonlyArray<StoredAddress>): { line: string; left: number } {
@@ -799,8 +893,8 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   // The reason is a code from a fixed list, never the stored result's text: a provider's error
   // message is someone else's words.
   const head = loadable.as === 'moved'
-    ? `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`
-    : `[Loaded draft of an approved email that was not sent — entry: ${entry.id} · ${filing.kind} · reason: ${loadable.reason} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
+    ? `${APPROVAL_DRAFT_MOVED_OPENER}${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`
+    : `${APPROVAL_DRAFT_NOT_SENT_OPENER}${entry.id} · ${filing.kind} · reason: ${loadable.reason} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
   const fields = wrapChannelMessage({
     source: `approval:${entry.id}`,
     injection,

@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
-import { ArtifactPlaceholderError, isArtifactId } from '../../core/artifact-store.js';
+import { ArtifactFileRefusedError, ArtifactPlaceholderError, ArtifactVersionRefusedError, isArtifactId } from '../../core/artifact-store.js';
+import { artifactRefusal } from './fs.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface ArtifactSaveInput {
@@ -17,6 +18,32 @@ interface ArtifactListInput {
 
 interface ArtifactDeleteInput {
   id: string;
+}
+
+/**
+ * The store's refusal of a link or a file with a second name at an artifact's file, worded for
+ * artifact_save: the same way out as the file tools give in the artifacts directory, a new
+ * artifact without the id (ux U-138 a).
+ */
+function saveRefusal(err: ArtifactFileRefusedError): string {
+  const cause = err.reason === 'link'
+    ? `${err.path}: a link on the way to the file is not followed; nothing was written`
+    : `${err.path} has more than one name (a hard link); artifact_save does not write such a file, so nothing was written`;
+  return artifactRefusal(cause, err.path.slice(err.path.lastIndexOf('/') + 1));
+}
+
+/**
+ * The same refusal met by artifact_restore. The content to keep is the version, which the model
+ * does not hold: it reads it at its path and saves it as a new artifact (ux U-138 b).
+ */
+function restoreRefusal(err: ArtifactFileRefusedError, id: string, version: number, versionPath: string): string {
+  const cause = err.reason === 'link'
+    ? `${err.path}: a link on the way to the file is not followed`
+    : `${err.path} has more than one name (a hard link); artifact_restore does not write such a file, so`;
+  return `${cause}${err.reason === 'link' ? ';' : ''} nothing was restored, and artifact ${id} is unchanged. ` +
+    `Tell the user that artifact ${id} could not be restored to v${version}, and that you are keeping v${version} as a new artifact instead. ` +
+    `Read v${version} with read_file at ${versionPath}, then call artifact_save without an id, with that content: passing ${id} would write to the same file. ` +
+    `In your reply, name the new artifact as the one that holds v${version}.`;
 }
 
 export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
@@ -60,6 +87,16 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       );
     }
 
+    try {
+      return saveArtifact(input, agent, store);
+    } catch (err) {
+      if (err instanceof ArtifactFileRefusedError) throw new Error(saveRefusal(err), { cause: err });
+      throw err;
+    }
+  },
+};
+
+function saveArtifact(input: ArtifactSaveInput, agent: IAgent, store: NonNullable<IAgent['toolContext']['artifactStore']>): string {
     return withInstanceWrite(agent, {
       site: 'artifact_save#save', kind: () => (isArtifactId(input.id) ? 'save' : 'create'), store: 'artifacts',
       target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined]],
@@ -75,12 +112,16 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       // Only an id the store chose: one passed in is the model's.
       if (!input.id && !artifact.overwrite) w.created('save', artifact.id);
 
-      const action = input.id ? 'Updated' : 'Saved';
+      // Said by what the store did, not by what was asked: an id the index did not hold makes a
+      // new artifact, and the model must not report it as an update (ux U-138). The first line
+      // ends in "(id: …, vN)." and starts as isSuccessfulSaveResult expects: the chat reads the
+      // id from that line end, and the eviction its start.
       const path = store.pathFor(artifact.id);
-      const lines = [
-        `${action} artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).`,
-        `File: ${path}`,
-      ];
+      const lines = artifact.overwrite
+        ? [`Updated artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).`]
+        : [`Created a new artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).`];
+      if (!artifact.overwrite && input.id) lines.push(`No artifact with id ${input.id} existed, so this is a new one.`);
+      lines.push(`File: ${path}`);
 
       // Make an overwrite VISIBLE (it replaced existing content) and recoverable,
       // instead of silently clobbering a good version (2026-06-04).
@@ -109,8 +150,7 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       );
       return lines.join('\n');
     });
-  },
-};
+}
 
 export const artifactListTool: ToolEntry<ArtifactListInput> = {
   definition: {
@@ -228,6 +268,12 @@ export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
         main: ['restore'],
       }, (w) => w.run('restore', () => store.restore(input.id, input.version), ifNonNull));
     } catch (err) {
+      if (err instanceof ArtifactFileRefusedError) {
+        throw new Error(restoreRefusal(err, input.id, input.version, store.versionPathFor(input.id, input.version)), { cause: err });
+      }
+      if (err instanceof ArtifactVersionRefusedError) {
+        return `v${String(input.version)} of artifact ${input.id} is a link or has more than one name, so it was not read; nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
+      }
       if (!(err instanceof ArtifactPlaceholderError)) throw err;
       return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
     }

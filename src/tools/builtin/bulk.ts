@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { BULK_HALT_REASONS, BulkPreviewCapError, bulkFoundAsPlannedNote, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
 import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
-import { isShopifyListForm, listReadContract, parseListSource } from '../../core/bulk-list.js';
+import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { shopifyBulkReadEnabled } from '../../core/bulk-shopify.js';
 import { detectSecretInContent } from './http.js';
 import {
@@ -9,8 +9,8 @@ import {
   bulkFileKey, parseSourceText, planDataStore, planWorkspace, readBulkKey, rowsToSource,
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
-import { judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
-import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
+import { contextFieldsOfListForm, judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_FILTER_VALUE_RULE, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 
 /**
@@ -50,7 +50,30 @@ function formatUsd(usd: number, round: 'down' | 'nearest' = 'nearest'): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
-function formatStatus(s: BulkRunStatus): string {
+/** What the model reads when a target is left out for `shortcode_changed` (1130, U-103): the way
+ *  out, not only the diagnosis. The way out is the preview, which shows the owner the whole
+ *  planned text to copy (`refusedValues`); the model points there and writes no text of its own,
+ *  since three wordings that asked it to copy or leave the link failed in a real-model eval. */
+export const SHORTCODE_CHANGED_NOTE = 'shortcode_changed: the new text has a [shortcode] containing &, < or > that lynox cannot write. ' +
+  'The preview shows the owner the whole new text exactly as planned, to copy into the shop themselves. Tell the owner that. ' +
+  'Do not put the text, the shortcode or a changed form of it in your reply, and do not offer another way out. ' +
+  'Only where you wrote these characters yourself, plan the value again without them.';
+
+/** The model's line for a previewed run in which no target writes and at least one is invalid
+ *  (ux, 1130 eval run 4): without it the model told the owner that approving would write. */
+export const NOTHING_TO_APPROVE_NOTE = 'Nothing in this run can be written, so there is nothing to approve.';
+
+/** Whether a run is previewed and nothing in it can be written: no update, create or delete the
+ *  owner kept, at least one invalid target, none taken out by the owner (they could put one back),
+ *  and every verdict in. Approving such a run is refused (`nothing_to_apply`). */
+export function nothingToApprove(s: BulkRunStatus): boolean {
+  return s.phase === 'previewed' && s.list?.state !== 'pending'
+    && s.changes.update + s.changes.create + s.changes.delete === 0
+    && s.changes.invalid > 0 && s.deselected === 0
+    && (s.judge === null || s.judge.unjudged === 0);
+}
+
+export function formatStatus(s: BulkRunStatus): string {
   const invalid = Object.entries(s.invalidReasons).map(([r, n]) => `${r} ${String(n)}`).join(', ');
   const lines = [
     `Bulk ${s.kind === 'undo' ? `undo run ${s.id} of run ${s.sourceRunId ?? '(deleted)'}` : `run ${s.id}`} ` +
@@ -61,11 +84,14 @@ function formatStatus(s: BulkRunStatus): string {
       `${s.deselected > 0 ? `, taken out by the owner ${String(s.deselected)}` : ''}.`,
     `Undo class if applied: ${s.undo}.`,
   ];
+  const nothing = nothingToApprove(s);
+  if (nothing) lines.push(NOTHING_TO_APPROVE_NOTE);
   if ((s.invalidReasons.effect_field ?? 0) > 0) {
     lines.push('effect_field: the after-state sets a field whose value sets off an effect at the provider — ' +
       'an email to a customer, a payment, or a change of someone\'s access or data. A bulk run never writes ' +
       'such a field: leave it out, or make that change in the provider\'s own interface.');
   }
+  if ((s.invalidReasons.shortcode_changed ?? 0) > 0) lines.push(SHORTCODE_CHANGED_NOTE);
   if (s.judge !== null) {
     lines.push(`A model decides each target's new values with the run's rule: ` +
       `${String(judgedTargets(s))} judged, ${String(s.judge.unjudged)} target(s) without a verdict yet. The verdicts are only in the run's ledger, for the user to review.`);
@@ -74,7 +100,8 @@ function formatStatus(s: BulkRunStatus): string {
   if (s.costUsd > 0 || s.costCapUsd !== null) {
     lines.push(`Model spend: ${formatUsd(s.costUsd, 'down')}${s.costCapUsd !== null ? ` of a ${formatUsd(s.costCapUsd)} limit` : ', no limit set'}.`);
   }
-  if (s.writeMethod !== null) {
+  // A run with nothing to approve has no first target to apply either.
+  if (s.writeMethod !== null && !nothing) {
     lines.push(`Writes with ${s.writeMethod}.${s.probeConfirmed ? '' : ' It can be applied to one target first; more only after the user has checked that one.'}`);
   }
   if (s.list?.state === 'pending') {
@@ -140,11 +167,17 @@ function refusePlannerStartDomains(input: BulkPlanInput): void {
   }
 }
 
+/** The Shopify forms a planner may name. The stored `shopify_filtered` is not one: parseListSource
+ *  refuses it, and it has no rules of its own to say. */
+function isPlannerShopifyForm(form: unknown): form is typeof SHOPIFY_LIST_FORM | typeof SHOPIFY_MEDIA_LIST_FORM {
+  return form === SHOPIFY_LIST_FORM || form === SHOPIFY_MEDIA_LIST_FORM;
+}
+
 /** What a Shopify form takes, said with every refusal of a plan in that form: its checks stop at
  *  the first fault, and the schema does not describe the form, so a model would learn the rules
  *  one refusal at a time. */
 const SHOPIFY_FORM_RULES: Record<string, string> = {
-  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com): no path, filters, id_field or write_method; source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.`,
+  shopify: `Form shopify plans the products of target_host (<store>.myshopify.com), all of them or those of one product type and/or vendor: no path, id_field or write_method; source_list.filters may name product_type, vendor or both, each the value as the store shows it (letter case of A-Z aside, nothing else), which may hold ${SHOPIFY_FILTER_VALUE_RULE} (a value that does not fit is refused, never changed); source_list.after sets only ${SHOPIFY_WRITABLE_FIELDS.join(', ')}, each as text or null; a judge (then without after) sets only the same fields, each of type "string". For the images of the products, use form shopify_media.`,
   shopify_media: `Form shopify_media plans the images of the products of target_host (<store>.myshopify.com): no path, filters, id_field, write_method or judge; source_list.after sets only ${SHOPIFY_MEDIA_WRITABLE_FIELDS.join(', ')}, as text of at most ${String(SHOPIFY_ALT_MAX_CHARS)} characters or null. For product fields, use form shopify.`,
 };
 
@@ -157,7 +190,7 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
   } catch (err) {
     const list = input.source_list;
     const form = typeof list === 'object' && list !== null ? (list as Record<string, unknown>)['form'] : undefined;
-    if (!(err instanceof BulkSourceError) || !isShopifyListForm(form) || err.message === SHOPIFY_READ_OFF) throw err;
+    if (!(err instanceof BulkSourceError) || !isPlannerShopifyForm(form) || err.message === SHOPIFY_READ_OFF) throw err;
     throw new BulkSourceError(`${err.message} ${SHOPIFY_FORM_RULES[String(form)]!}`);
   }
 }
@@ -172,7 +205,7 @@ function shopifyHostHint(input: BulkPlanInput): string {
   const host = canonicalHost(input.target_host);
   if (host === null || !isShopifyStoreHostName(host)) return '';
   const list = input.source_list;
-  if (typeof list === 'object' && list !== null && isShopifyListForm((list as Record<string, unknown>)['form'])) return '';
+  if (typeof list === 'object' && list !== null && isPlannerShopifyForm((list as Record<string, unknown>)['form'])) return '';
   return ' target_host is a Shopify store: to change its products across the store, plan with source_list and form shopify (product fields) or shopify_media (image alt texts).';
 }
 
@@ -187,8 +220,9 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
   if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
   if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
   let listInput = input.source_list;
-  if (typeof listInput === 'object' && listInput !== null && isShopifyListForm((listInput as Record<string, unknown>)['form'])) {
-    const form = String((listInput as Record<string, unknown>)['form']);
+  const listForm = typeof listInput === 'object' && listInput !== null ? (listInput as Record<string, unknown>)['form'] : undefined;
+  if (isPlannerShopifyForm(listForm)) {
+    const form = listForm;
     // Checked when the run is planned and again on every tick of it (`bulk-preview.ts`).
     if (!shopifyBulkReadEnabled()) throw new BulkSourceError(SHOPIFY_READ_OFF);
     // A judge plans its fields F like an after-state: the Shopify parse below bounds them to the
@@ -202,11 +236,11 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
     const raw = typeof listInput === 'object' && listInput !== null ? listInput as Record<string, unknown> : {};
     if (raw['after'] !== undefined) throw new BulkSourceError('With judge, source_list takes no "after": the model decides each target\'s values.');
     const idField = typeof raw['id_field'] === 'string' ? raw['id_field'] : 'id';
-    judge = normalizeJudgeRule(judgeInput, { idField });
+    judge = normalizeJudgeRule(judgeInput, { idField, contextFields: contextFieldsOfListForm(raw['form']) });
     // A store takes its product fields as text: a verdict of another type would be judged and paid
     // for, then refused by the write document for the whole run. A field the store cannot be
     // written is left to the Shopify parse below, which names the fields that can.
-    if (isShopifyListForm(raw['form'])) {
+    if (isPlannerShopifyForm(raw['form'])) {
       const rule = judge;
       const notText = judgeFields(rule).find((f) => SHOPIFY_WRITABLE_FIELDS.includes(f) && rule.schema.properties[f]!.type !== 'string');
       if (notText !== undefined) throw new BulkSourceError(`judge.schema.${notText} must be type "string" for form shopify: the store takes its product fields as text.`);
@@ -284,7 +318,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           properties: {
             form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com); shopify_media: the images of its products.' },
             path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products. Not for the Shopify forms.' },
-            filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status); values are 1–64 letters, digits, - or _.' },
+            filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status; values are 1–64 letters, digits, - or _). shopify: product_type, vendor or both, each the value as the store shows it (letter case of A-Z aside, nothing else). Not for shopify_media.' },
             id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },
             after: { type: 'object', description: 'The fields to set on every listed element (text, number, true/false or null); not the id field. Not with judge.' },
           },
@@ -299,6 +333,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             rule: { type: 'string', description: 'What to decide for each target, in plain words (up to 4000 characters).' },
             schema: { type: 'object', description: 'The fields the model sets, field name → {type: "string", maxLength} or {type: "string", enum: [...]} or {type: "number"|"integer"} or {type: "boolean"}. No pattern, no lists or nested objects; at most 20 fields.' },
             tier: { type: 'string', enum: ['fast', 'balanced', 'deep'], description: 'Which tier places the call (its provider, its limit). The model that judges is set per provider, not by the tier. Default fast.' },
+            context: { type: 'array', items: { type: 'string' }, description: 'Optional: other fields of each target the model reads to decide, but never sets — not a field of schema, not the id field; at most 20. The user sees them before starting the run, and they go to the model too.' },
           },
           required: ['rule', 'schema'],
         },
@@ -367,6 +402,10 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
               throw new BulkSourceError(`judge.schema gives ${f} the type ${fieldType}, which its ${col.type} column does not take.`);
             }
           }
+          // A context column is read from the row as it is, never written: it only has to exist.
+          for (const f of judge.context ?? []) {
+            if (!colDefs.has(f)) throw new BulkSourceError(`judge.context names ${f}, which is not a column of the target collection.`);
+          }
           const template = judgeTemplate(judge);
           // A verdict replaces F on an existing row; a row that is not there has nothing to judge.
           targets = planDataStore(source, store, input.target_collection).map((t): PlannedTarget =>
@@ -397,10 +436,11 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             ? 'External dry run recorded — nothing was sent or written. Nothing is read either until the user starts it outside this chat.'
             : 'Dry run recorded — nothing was written, and no target was valid, so there is nothing to read.',
           formatStatus(out.status),
-          ...(judge ? [JUDGE_NOTE] : []),
-          'Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
+          // With no valid target there is nothing to judge: the judge note would promise verdicts.
+          ...(judge && !nothingToApprove(out.status) ? [JUDGE_NOTE] : []),
+          ...(nothingToApprove(out.status) ? [] : ['Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
             'The before- and after-state of each target is then in the run\'s ledger for the user to review; it is not shown to you. ' +
-            'Only the user can start and approve it, outside this chat.',
+            'Only the user can start and approve it, outside this chat.']),
         ].join('\n');
       } else {
         throw new BulkSourceError('target_system must be "workspace", "data_store" or "http".');
@@ -416,8 +456,10 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         'Dry run recorded — nothing was written to any target.',
         formatStatus(status),
         ...(judge ? [JUDGE_NOTE] : []),
-        'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. ' +
-          'Only the user can approve and apply it, outside this chat; bulk_status shows how far it got.',
+        nothingToApprove(status)
+          ? 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you.'
+          : 'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. ' +
+            'Only the user can approve and apply it, outside this chat; bulk_status shows how far it got.',
       ].join('\n');
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return `Error: ${err.message}${shopifyHostHint(input)}`;

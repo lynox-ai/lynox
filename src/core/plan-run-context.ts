@@ -14,7 +14,7 @@ import { principalTag, type RequestPrincipal } from './request-principal.js';
  * Its own store rather than a field of the worker's task context, so a reader in `core/` does
  * not have to import the worker loop.
  */
-const planRunStorage = new AsyncLocalStorage<{ readonly planOf: RequestPrincipal; readonly stamp: readonly StampEntry[] | null; readonly planRun: string | undefined }>();
+const planRunStorage = new AsyncLocalStorage<{ readonly planOf: RequestPrincipal; readonly stamp: readonly StampEntry[] | null; readonly planRun: string | undefined; readonly ownerStarted: boolean }>();
 
 /**
  * One connection the owner's stamp of a plan lists: the profile, the grant it was connected
@@ -32,9 +32,17 @@ export interface StampEntry {
  * of this run's schedule lists, already checked against the stamp it was written with; null when
  * it lists none or no longer holds. `planRun`: the key of the run's own rows in the instance log
  * (the correlation id of its `plan:run` rows), which every row written within the run carries.
+ * `ownerStarted`: the owner started this run of a mandate's workflow (the library's Run, the
+ * owner's chat or session, 1055/1100), so no schedule of the mandate's stands behind it and no
+ * stamp can list a connection; read only for the words of a refusal (`memberConnectionRefusal`).
  */
-export function runAsPlanOf<T>(planOf: RequestPrincipal, fn: () => T, stamp: readonly StampEntry[] | null = null, planRun?: string): T {
-  return planRunStorage.run({ planOf, stamp, planRun }, fn);
+export function runAsPlanOf<T>(planOf: RequestPrincipal, fn: () => T, stamp: readonly StampEntry[] | null = null, planRun?: string, ownerStarted = false): T {
+  return planRunStorage.run({ planOf, stamp, planRun, ownerStarted }, fn);
+}
+
+/** Whether the plan run this code runs in is one the owner started (see {@link runAsPlanOf}); false outside one. */
+export function currentPlanOwnerStarted(): boolean {
+  return planRunStorage.getStore()?.ownerStarted === true;
 }
 
 /**
