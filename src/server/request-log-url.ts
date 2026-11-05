@@ -4,7 +4,13 @@
 // value. A value can carry something a reader of the container log should not hold, and a list
 // of parameters to redact misses the next one without a sound, so all values go. Should a value
 // ever be needed in the log, it is let through here by name, with the reason.
+//
+// The path goes through the audit log's own reading of it (`requestPathTarget`): a segment that
+// holds an address is replaced whole and a known secret shape is masked, because some routes
+// name a contact by address in the path. Everything after an encoded `?` in the path is
+// replaced, and an absolute-form target loses its scheme and authority.
 
+import { requestPathTarget } from '../core/audit-log.js';
 import { redactWebhookPath } from './webhook-receiver.js';
 
 const REDACTED = '<redacted>';
@@ -18,9 +24,9 @@ const PARAM_NAME = /^[A-Za-z_][A-Za-z0-9_.\-[\]]{0,63}$/;
  * is a value on its own and is replaced whole.
  */
 export function requestLogUrl(rawUrl: string): string {
-  const withoutFragment = rawUrl.split('#', 1)[0] ?? '';
+  const withoutFragment = (rawUrl.split('#', 1)[0] ?? '').replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?]*/, '');
   const q = withoutFragment.indexOf('?');
-  const path = redactWebhookPath(q === -1 ? withoutFragment : withoutFragment.slice(0, q));
+  const path = logPath(q === -1 ? withoutFragment : withoutFragment.slice(0, q));
   if (q === -1) return path;
   const entries = withoutFragment.slice(q + 1).split('&').filter((entry) => entry !== '');
   const kept = entries.map((entry) => {
@@ -30,4 +36,14 @@ export function requestLogUrl(rawUrl: string): string {
     return `${PARAM_NAME.test(name) ? name : REDACTED}=${REDACTED}`;
   });
   return kept.length === 0 ? path : `${path}?${kept.join('&')}`;
+}
+
+/** The path part of the log line: route token out, an encoded `?` and all after it replaced,
+ *  addresses and secret shapes as the audit log treats them. */
+function logPath(rawPath: string): string {
+  const withoutToken = redactWebhookPath(rawPath);
+  const encodedQuery = withoutToken.search(/%3F/i);
+  const path = encodedQuery === -1 ? withoutToken : withoutToken.slice(0, encodedQuery);
+  const target = requestPathTarget(path);
+  return encodedQuery === -1 ? target : `${target}%3F${REDACTED}`;
 }
