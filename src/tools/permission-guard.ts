@@ -1,5 +1,5 @@
 import { realpathSync, existsSync } from 'node:fs';
-import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, isReadMethod } from '../core/outbound-write.js';
+import { bodyMayWriteGraphql, effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, isReadMethod } from '../core/outbound-write.js';
 import { isShopifyAdminHost } from '../core/shopify-host.js';
 import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyMediaListBody, shopifyTargetReadBody, shopifyWriteRequest, type ShopifyListFilters, type ShopifyWrite } from '../core/shopify-graphql.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
@@ -782,6 +782,12 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // token can run are the same POST to the same path, and nothing here reads the document. Read
   // from the URL alone, so it holds for the callers that never pass a body.
   if (!isReadMethod(method) && isGraphqlEndpoint(obj.url)) return false;
+  // Nor a write to a GraphQL API whose URL does not say so (`api.monday.com/v2`): there the body
+  // decides whether a POST reads or runs any mutation the token can, so a grant that never read
+  // it would cover both. Read from the body the request sends.
+  const sent = input as { body?: unknown; headers?: unknown };
+  const sentHeaders = typeof sent.headers === 'object' && sent.headers !== null ? sent.headers as Record<string, string> : undefined;
+  if (!isReadMethod(method) && bodyMayWriteGraphql(sent.body, sentHeaders)) return false;
 
   let parsed: URL;
   try {

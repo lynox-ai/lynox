@@ -412,7 +412,9 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // The records decide the body, and a top-level `_method` field in it is read by some
     // servers as the request's method: the contract is checked against what such a server does.
     const gated = effectiveWriteMethod(method, { 'content-type': 'application/json' }, url, payload);
-    const asked = graphql !== undefined
+    // The body goes to the contract too: on an API whose URL does not say it speaks GraphQL, the
+    // body decides whether a write runs a mutation (`bodyMayWriteGraphql`).
+    const asked = payload !== undefined
       ? { url, method: gated, headers: { 'content-type': 'application/json' }, body: payload }
       : { url, method: gated };
     if (gated === null || !contractGrants('http_request', asked, deps.contract)) return { kind: 'not_granted' };

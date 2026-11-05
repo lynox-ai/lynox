@@ -6297,6 +6297,77 @@ describe('httpRequestTool', () => {
       expect(result).not.toContain('re-save it');
     });
 
+    describe('a GraphQL write on a host whose profile carries its credential in the query', () => {
+      const GQL = 'https://graphql.contentful.example/content/v1/spaces/s';
+      const doc = (query: string): string => JSON.stringify({ query });
+      const writer = (store: unknown) => {
+        const prompt = vi.fn(async () => 'Allow');
+        const agent = {
+          principal: OWNER_PRINCIPAL,
+          toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
+          secretStore: { resolve: () => null, maskSecrets: (t: string) => t, containsSecret: () => false, containsSecretAsHost: () => false },
+          sessionCounters: testCounters,
+          promptUser: prompt,
+          approvalBatch: () => ({}),
+          governingContract: () => ({ contract: undefined, withheld: 'none' }),
+        } as never;
+        return { agent, prompt };
+      };
+
+      it('asks a write that carries exactly the declared parameter, and sends it on Allow', async () => {
+        const store = await storeFor('graphql.contentful.example', { type: 'query', query_param: 'access_token', vault_keys: ['CF_TOKEN'] });
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+        vi.stubGlobal('fetch', fetchMock);
+        const { agent, prompt } = writer(store);
+        const out = await visible({ url: `${GQL}?access_token=t0k3n`, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: doc('mutation { a }') }, agent);
+        expect(out).not.toContain('Blocked');
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(String((fetchMock.mock.calls[0] as unknown[])[0])).toContain('access_token=t0k3n');
+      });
+
+      it('takes `key` as the parameter of a profile that names none', async () => {
+        const store = await storeFor('graphql.contentful.example', { type: 'query', vault_keys: ['CF_TOKEN'] });
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+        vi.stubGlobal('fetch', fetchMock);
+        const { agent, prompt } = writer(store);
+        expect(await visible({ url: `${GQL}?key=t`, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: doc('{ a }') }, agent)).not.toContain('Blocked');
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        ['another parameter', '?api_key=t'],
+        ['the declared parameter and another', '?access_token=t&query=x'],
+        ['the declared parameter and another after ;', '?access_token=t;query=mutation%7Bb%7D'],
+        ['the declared parameter in another case', '?ACCESS_TOKEN=t'],
+        ['the declared parameter beside a ? decoded in the path', '%3Fquery=mutation%7Bb%7D?access_token=t'],
+      ])('CONTROL: refuses %s, as before', async (_k, search) => {
+        const store = await storeFor('graphql.contentful.example', { type: 'query', query_param: 'access_token', vault_keys: ['CF_TOKEN'] });
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+        vi.stubGlobal('fetch', fetchMock);
+        const { agent, prompt } = writer(store);
+        const out = await visible({ url: `${GQL}${search}`, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: doc('{ a }') }, agent);
+        expect(out).toContain('is a GraphQL write with a query string');
+        expect(prompt).not.toHaveBeenCalled();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('CONTROL: refuses a profile that declares a parameter a GraphQL server reads a document from, and a host whose profile sends a header', async () => {
+        for (const auth of [{ type: 'query', query_param: 'query', vault_keys: ['CF_TOKEN'] }, { type: 'bearer', vault_keys: ['CF_TOKEN'] }]) {
+          const store = await storeFor('graphql.contentful.example', auth);
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+          vi.stubGlobal('fetch', fetchMock);
+          const { agent } = writer(store);
+          // The bearer profile sends `key`, the name a query profile that names none would take.
+          const param = auth.query_param ?? 'key';
+          const out = await visible({ url: `${GQL}?${param}=t`, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: doc('{ a }') }, agent);
+          expect(out, auth.type).toContain('is a GraphQL write with a query string');
+          expect(fetchMock).not.toHaveBeenCalled();
+        }
+      });
+    });
+
     it('a query-auth profile host may carry its key in the URL', async () => {
       const store = await storeFor('maps.example.com', { type: 'query', query_param: 'key', vault_keys: ['MAPS_KEY'] });
       mockDnsPublic();
@@ -7511,6 +7582,35 @@ describe('write approvals for the write the question showed (270)', () => {
   beforeEach(() => {
     mockDnsPublic();
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ok()));
+  });
+
+  describe('a GraphQL API whose URL does not say so (api.monday.com/v2)', () => {
+    const V2 = 'https://api.board.example/v2';
+    const JSON_CT = { 'Content-Type': 'application/json' };
+    const READ = JSON.stringify({ query: '{ boards { id } }' });
+    const MUTATION = JSON.stringify({ query: 'mutation { delete_board (board_id: 1) { id } }' });
+
+    it('a contract with POST on the path sends a read unattended and no mutation', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const contract = { version: 1, grantedTools: ['http_request'], httpMethods: ['POST'], hostPatterns: ['api.board.example'], pathPatterns: ['/v2'], paramConstraints: {} };
+      const agent = { governingContract: () => ({ contract, withheld: 'none' }), toolContext: testCtx, sessionCounters: testCounters, principal: OWNER_PRINCIPAL, approvalBatch: () => ({}) } as never;
+      expect(await visible({ url: V2, method: 'POST', headers: JSON_CT, body: READ }, agent)).not.toContain('Blocked');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(await visible({ url: V2, method: 'POST', headers: JSON_CT, body: MUTATION }, agent)).toContain('requires user consent but no interactive prompt is available');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('an approved read covers no mutation to the same path; CONTROL: it covers the same read again', async () => {
+      const { agent, prompt } = agent270();
+      await visible({ url: V2, method: 'POST', headers: JSON_CT, body: READ }, agent);
+      expect(prompt).toHaveBeenCalledTimes(1);
+      await visible({ url: V2, method: 'POST', headers: JSON_CT, body: MUTATION }, agent);
+      expect(prompt).toHaveBeenCalledTimes(2);
+      expect(question(prompt, 1)).toContain('delete_board');
+      await visible({ url: V2, method: 'POST', headers: JSON_CT, body: READ }, agent);
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('(3) in its batch, an approval holds for the same write again', async () => {

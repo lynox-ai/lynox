@@ -575,11 +575,85 @@ export function graphqlUrlWrites(url: string): boolean {
 }
 
 /**
+ * A GraphQL operation that writes, read as its grammar has it: `mutation` or `subscription`, an
+ * optional name, and then `(`, `{` or `@`, with blanks, commas, a byte-order mark and `#` comments
+ * between them. Narrower than `GRAPHQL_WRITE_OPERATION`, so a REST body with the word in it
+ * (`{"subscription":"premium"}`) is no hit; a miss of this one fails open, so it is used only where
+ * the endpoint is not known to speak GraphQL. Comments are read in place, not stripped first: a
+ * `#` inside a string (`query{a(s:"#")} mutation{b}`) would otherwise hide the mutation. Each
+ * repetition has one way to match, so the time is linear in the text after the word.
+ */
+const GRAPHQL_WRITE_FORM = /\b(?:mutation|subscription)\b(?:[\s,\uFEFF]|#[^\n\r]*[\n\r])*(?:[_A-Za-z]\w*(?:[\s,\uFEFF]|#[^\n\r]*[\n\r])*)?[({@]/i;
+
+/** Keys a persisted query names its stored document by; the server runs that document, which the request does not show. */
+const PERSISTED_QUERY_KEYS = new Set(['documentid', 'doc_id', 'queryid', 'persistedquery']);
+
+/**
+ * Whether a request body may carry a GraphQL write to an API whose URL does not say it speaks
+ * GraphQL (`api.monday.com/v2`, `/api`, `/query`), read as such a server reads it:
+ *  - a JSON body: the value of a `query` key at any depth (a batch included) that holds an
+ *    operation that writes, a key that names a persisted query, or a key named twice in one object
+ *    (`jsonRepeatsAKey`: a server may keep the first). A `query` that is an object (a search API's)
+ *    is no GraphQL document;
+ *  - any other body: the same keys read as form pairs (`queryKeyName`), and the body as a whole as
+ *    a document (`application/graphql`);
+ *  - a multipart body with an `operations` part, the GraphQL upload form, whose escapes no reading
+ *    here undoes.
+ * Other fields of a JSON body are not read: a description that says „Mutation (…)" is no request a
+ * server runs. A body that is not a string, or that throws while it is read, counts as one.
+ *
+ * For grants, not for questions: a question shows the body; a grant lets it go unseen.
+ */
+export function bodyMayWriteGraphql(body: unknown, headers: Readonly<Record<string, string>> | undefined): boolean {
+  if (body === undefined || body === '') return false;
+  if (typeof body !== 'string') return true;
+  try {
+    const contentType = Object.entries(headers ?? {}).filter(([name]) => name.trim().toLowerCase() === 'content-type').map(([, value]) => value).join(',');
+    if (/multipart/i.test(contentType) && /\boperations\b/i.test(body)) return true;
+    let parsed: unknown;
+    let json = true;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      json = false;
+    }
+    if (json) {
+      if (jsonRepeatsAKey(body)) return true;
+      // A loop, not a recursion: a deeply nested body costs no stack.
+      const pending: unknown[] = [parsed];
+      while (pending.length > 0) {
+        const node = pending.pop();
+        if (Array.isArray(node)) pending.push(...node);
+        else if (typeof node === 'object' && node !== null) {
+          for (const [key, value] of Object.entries(node)) {
+            const name = key.trim().toLowerCase();
+            if (PERSISTED_QUERY_KEYS.has(name)) return true;
+            if (name === 'query' && typeof value === 'string' && GRAPHQL_WRITE_FORM.test(value)) return true;
+            pending.push(value);
+          }
+        }
+      }
+      return false;
+    }
+    for (const params of queryReadings(body)) {
+      for (const [key, value] of params) {
+        const name = queryKeyName(key);
+        if (PERSISTED_QUERY_KEYS.has(name)) return true;
+        if (name === 'query' && GRAPHQL_WRITE_FORM.test(value)) return true;
+      }
+    }
+    return GRAPHQL_WRITE_FORM.test(body);
+  } catch {
+    return true;
+  }
+}
+
+/**
  * A query key as the servers that may receive it name it: PHP ends a key at a NUL, drops leading
  * spaces and reads `name[...]` as `name` (a newline inside the brackets included), ASP.NET compares
  * keys without case. So ` query`, `QUERY`, `query[]` and `query%00x` are all `query`.
  */
-function queryKeyName(key: string): string {
+export function queryKeyName(key: string): string {
   return key.split('\0')[0]!.trimStart().toLowerCase().replace(/\[[\s\S]*$/, '');
 }
 
