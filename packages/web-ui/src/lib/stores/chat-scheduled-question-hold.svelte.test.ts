@@ -1,7 +1,7 @@
 // Runs in the browser-compile project (vitest.config.ts): Svelte state behaves as in the browser.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// A scheduled run's question waits in this chat (U-155): every way of sending an existing message
+// A scheduled run's question waits in this chat: every way of sending an existing message
 // again stops there — the tap on a failed message, the reconnect, the Retry banner — brings the
 // question's card back and says so. The sentence depends on the card: a decision card (approval,
 // deep consent) has no X to cancel it, so its sentence names none; with no such card back, nothing
@@ -111,7 +111,7 @@ describe('the tap on a failed message', () => {
 		expect(failedOne('again').map((m) => m.failed)).toEqual([true]);
 		expect(store.getPendingPermission()?.question).toBe('Which list, A or B?');
 		expect(toastKeys()).toEqual(['chat.question_waiting']);
-		// About 200 characters: it stays long enough to read (ux U-155: at least 8 s).
+		// About 200 characters: it stays long enough to read (at least 8 s).
 		expect(toasts[0]!.ms).toBeGreaterThanOrEqual(8000);
 	});
 
@@ -349,7 +349,7 @@ describe('the card of a waiting prompt', () => {
 	});
 });
 
-describe('the sentences, word for word (ux U-155)', () => {
+describe('the sentences, word for word (reviewed wording)', () => {
 	const TEXT: Record<string, { de: string; en: string }> = {
 		'chat.question_waiting': {
 			de: 'In diesem Chat wartet eine Frage auf deine Antwort. Beantworte sie zuerst oder brich sie mit dem X auf der Karte ab; dann geht der Lauf ohne Antwort weiter. Deine Nachricht wurde nicht noch einmal gesendet.',

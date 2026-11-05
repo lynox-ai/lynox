@@ -730,7 +730,7 @@ if (typeof window !== 'undefined') {
 							}
 						} catch { /* still blind — shouldRefireOfflineTurn declines */ }
 						if (sessionId !== probeSid) return; // thread switched mid-probe
-						// A scheduled run's question waits here (U-155). A transcript ending on it reads as
+						// A scheduled run's question waits here. A transcript ending on it reads as
 						// "answered", which cleared the failed message and lost it. It stays failed and marked
 						// offline, is not sent past the question, and the card comes back. Whether it arrived
 						// meanwhile is not decided here: text equality cannot tell it from an earlier message
@@ -763,7 +763,7 @@ if (typeof window !== 'undefined') {
 				return;
 			}
 			// Asked first too: a message held at a scheduled run's question stays failed, and the
-			// reconnect must not send it past the question the tap stopped at (U-155). When the
+			// reconnect must not send it past the question the tap stopped at. When the
 			// server cannot be asked yet, it is sent again as before.
 			void askBeforeResend({ unreachableSends: true }).then((resend) => { if (resend) refireFailedTurn(lastFailed); });
 		}
@@ -1362,7 +1362,7 @@ async function askBeforeResend(opts: { unreachableSends?: boolean } = {}): Promi
 }
 
 /**
- * Says that a scheduled run's question holds a message back, by the card that came back (U-155).
+ * Says that a scheduled run's question holds a message back, by the card that came back.
  * A decision card (approval, deep consent) has no X to cancel it, so its sentence names none, nor
  * does another kind of card that came back (several questions, a secret, a mail connection). With
  * no card restored, nothing is said: a sentence about one could be false.
@@ -1372,7 +1372,7 @@ function sayQuestionWaiting(card: PendingCard): void {
 	if (key !== null) addToast(t(key), 'info', QUESTION_TOAST_MS);
 }
 
-/** The longest of these sentences runs to about 200 characters; 6 s was too short to read it (ux U-155). */
+/** The longest of these sentences runs to about 200 characters; 6 s was too short to read it. */
 const QUESTION_TOAST_MS = 10_000;
 
 /** The sentence for `card`, or null when no card came back. */
