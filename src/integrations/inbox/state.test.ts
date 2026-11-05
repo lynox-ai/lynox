@@ -434,7 +434,7 @@ describe('InboxStateDb — rules', () => {
   });
 });
 
-describe('InboxStateDb — rules the agent proposes (PRD inbox-user-rules E7)', () => {
+describe('InboxStateDb — rules the agent proposes and the owner confirms', () => {
   const proposal = (over: Partial<Parameters<InboxStateDb['proposeRule']>[0]> = {}) => ({
     accountId: TEST_ACCOUNT.id, matcherKind: 'from' as const, matcherValue: 'kunde@example.com', name: 'Kunde', ...over,
   });
@@ -529,7 +529,7 @@ describe('InboxStateDb — rules the agent proposes (PRD inbox-user-rules E7)', 
   });
 });
 
-describe('InboxStateDb — description rules are capped per account (PRD inbox-user-rules E11)', () => {
+describe('InboxStateDb — description rules are capped per account', () => {
   const desc = (i: number, accountId = TEST_ACCOUNT.id) => ({ accountId, matcherKind: 'matches_description' as const, matcherValue: `Beschreibung ${String(i)}`, name: `D${String(i)}` });
 
   it('refuses the proposal past MAX_DESCRIPTION_RULES, counting confirmed and waiting rules alike', () => {

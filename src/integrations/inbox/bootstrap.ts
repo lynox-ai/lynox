@@ -58,9 +58,9 @@ import { PROVIDER_NOT_ON_LIST_REFUSAL, providerListApplies } from '../../core/co
 import { FixedTextError } from '../../core/error-egress.js';
 
 /**
- * Waiting rule proposals per account (PRD inbox-user-rules E7), as `MAX_PENDING_PER_TRIGGER` caps
- * the approval queue (`core/approval-filing.ts`): a run that reads hostile mail cannot fill the
- * owner's rule view.
+ * Waiting rule proposals per account (a proposal applies only once the owner confirms it), as
+ * `MAX_PENDING_PER_TRIGGER` caps the approval queue (`core/approval-filing.ts`): a run that reads
+ * hostile mail cannot fill the owner's rule view.
  */
 export const MAX_PENDING_RULE_PROPOSALS = 10;
 
@@ -276,7 +276,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       }
     }
   };
-  // The description-rule check (PRD inbox-user-rules E3): its own cheap model — ministral-8b in
+  // The description-rule check: its own cheap model — ministral-8b in
   // the EU, Haiku in the US — priced at that model's rates, against the same daily cap, debited
   // and recorded like the classifier, as its own run.
   const ruleModelId = region === 'eu' ? MISTRAL_MODEL_MAP.fast : getModelId('fast');

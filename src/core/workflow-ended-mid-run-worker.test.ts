@@ -10,13 +10,13 @@ import { PromptStore } from './prompt-store.js';
 import { MandateEnds } from './mandate-ends.js';
 import { AuditLog } from './audit-log.js';
 import { setPlanPauseForTests } from './plan-pause.js';
-import { WORKFLOW_ENDED_MID_RUN } from '../orchestrator/run-source.js';
+import { WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR } from '../orchestrator/run-source.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 
 /**
  * 1100: the runner ends a saved workflow's run before its next step once a mandate the workflow
- * depends on has ended (`WORKFLOW_ENDED_MID_RUN`). When that comes before the worker's sweep, the
+ * depends on has ended (`WORKFLOW_ENDED_MID_RUN_ERROR`). When that comes before the worker's sweep, the
  * worker records it as the sweep's stop: `stopped`, not a failure, and with the pause on the plan
  * pauses and keeps its schedule. A real TaskManager, RunHistory, engine.db, MandateEnds and
  * AuditLog; the runner is a double that ends the grant while it runs.
@@ -108,7 +108,7 @@ describe('a workflow run the runner ended because an access ended mid-run (1100)
     runner.run = () => {
       ran++;
       p.ends.revoke(GRANT);
-      return Promise.resolve({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN, runId: 'r1' });
+      return Promise.resolve({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN_ERROR, runId: 'r1' });
     };
     await tick(p);
     expect(ran, 'the run reached the runner').toBe(1);
@@ -126,7 +126,7 @@ describe('a workflow run the runner ended because an access ended mid-run (1100)
     runner.run = () => {
       ran++;
       vi.spyOn(p.ends, 'isLive').mockImplementation(() => { throw new Error('engine.db busy'); });
-      return Promise.resolve({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN, runId: 'r1' });
+      return Promise.resolve({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN_ERROR, runId: 'r1' });
     };
     await tick(p);
     expect(ran, 'the run reached the runner').toBe(1);
@@ -136,10 +136,22 @@ describe('a workflow run the runner ended because an access ended mid-run (1100)
     expect(r.paused_at).toBeNull();
   });
 
+  it("the runner's own check threw: a failure whose record does not say an access ended (1184)", async () => {
+    const p = boot();
+    runner.run = () => {
+      p.ends.revoke(GRANT);
+      return Promise.resolve({ ok: true, status: 'failed', error: WORKFLOW_END_CHECK_FAILED_ERROR, runId: 'r1' });
+    };
+    await tick(p);
+    const r = row(p);
+    expect(r.last_run_status).toBe('failed');
+    expect(r.last_run_result ?? '').not.toMatch(/access of someone who set up or changed this (plan|workflow) ended/);
+  });
+
   it('control: the same error while every member is live is a failure, not that stop', async () => {
     const p = boot();
     let ran = 0;
-    runner.run = () => { ran++; return Promise.resolve({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN, runId: 'r1' }); };
+    runner.run = () => { ran++; return Promise.resolve({ ok: true, status: 'failed', error: WORKFLOW_ENDED_MID_RUN_ERROR, runId: 'r1' }); };
     await tick(p);
     expect(ran, 'the run reached the runner').toBe(1);
     const r = row(p);

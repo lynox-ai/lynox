@@ -97,7 +97,7 @@ describe('rule check — the prompt', () => {
   });
 });
 
-describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
+describe('rule check in the runner, between the budget check and the classifier', () => {
   it('files a mail a requires_user description rule names, without the classifier', async () => {
     const ruleId = descriptionRule('Mahnungen und Zahlungserinnerungen', 'requires_user', 'Mahnungen');
     const ruleLlm = vi.fn(async () => '{"rule_id": "R1"}');
@@ -113,7 +113,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
     expect(audit(item.id)).toEqual({ action: 'rule_applied', actor: 'rule_engine', payload: expect.objectContaining({ rule_id: ruleId, rule_name: 'Mahnungen', matcher_kind: 'matches_description', stage: 'description', bucket: 'requires_user' }) });
   });
 
-  describe('an auto_handled hit needs the classifier to agree (decision 801-3b A)', () => {
+  describe('an auto_handled hit files only mail the classifier also sees as handled', () => {
     it('files the mail as handled under the rule when the classifier also sees it as handled', async () => {
       const ruleId = descriptionRule('Mahnungen und Zahlungserinnerungen', 'auto_handled', 'Mahnungen', 'mark_read');
       const ruleLlm = vi.fn(async () => '{"rule_id": "R1"}');
@@ -307,7 +307,7 @@ describe('rule check in the runner (PRD inbox-user-rules E3)', () => {
     expect(inbox.listItems()[0]!.matchedRuleId).toBeUndefined();
   });
 
-  it('does not file a sensitive mail as handled: requires_user, the rule named as withheld (F1)', async () => {
+  it('does not file a sensitive mail as handled: requires_user, the rule named as withheld', async () => {
     const ruleId = descriptionRule('Mahnungen', 'auto_handled', 'Mahnungen', 'archive');
     const ruleLlm = vi.fn(async () => '{"rule_id": "R1"}');
     const llm = classifierSays('auto_handled');

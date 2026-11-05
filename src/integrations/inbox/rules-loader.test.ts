@@ -128,7 +128,7 @@ describe('InboxRulesLoader — ordering and isolation', () => {
   });
 });
 
-describe('InboxRulesLoader — only confirmed rules apply (PRD inbox-user-rules E7)', () => {
+describe('InboxRulesLoader — only confirmed rules apply, a proposal waits for the owner', () => {
   it('a rule the agent proposed matches nothing until the owner confirms it', () => {
     const p = inbox.proposeRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'waits@x', name: 'W' }, 10);
     const id = p.ok ? p.id : '';
@@ -200,7 +200,7 @@ describe('InboxRulesLoader — cache', () => {
   });
 });
 
-describe('InboxRulesLoader — description rules (PRD inbox-user-rules E3)', () => {
+describe('InboxRulesLoader — description rules, read for the model check in the runner', () => {
   it('match() never applies a description rule, even when its text is in the sender or subject', () => {
     inbox.insertRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: 'Strategie', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
     inbox.insertRule({ accountId: 'acct-1', matcherKind: 'matches_description', matcherValue: 'mustermann@example.com', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });

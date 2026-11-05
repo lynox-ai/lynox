@@ -1,6 +1,6 @@
 // === The description-rule check: one model call that names at most one rule a mail fits ===
 //
-// PRD inbox-user-rules E3/E11. The runner calls this after the budget check and before the
+// The runner calls this after the budget check and before the
 // classifier, with the account's confirmed `matches_description` rules. The rules go to the model
 // as labels R1..Rn (never their ids), each with its name and description, inside one untrusted-data
 // block; the mail goes in a second block, as the classifier sends it (masked in `mask` mode). A rule
@@ -12,7 +12,7 @@
 // wrapped like the mail. An `auto_handled` hit still needs the classifier's agreement (runner).
 //
 // The prompt is the one measured before the build (505 fixtures, positive control by permuted
-// descriptions; engine 801 Teil 3 M1). Labels drawn at random per call were measured too and
+// descriptions). Labels drawn at random per call were measured too and
 // named a rule for more mails no rule fits (none-FP ministral-8b 18/164 vs 11/164, Haiku 9 vs 5),
 // so the labels stay R1..Rn.
 
@@ -22,7 +22,7 @@ import type { ClassifierPromptInput } from './classifier/prompt.js';
 import type { LLMCaller } from './classifier/index.js';
 import { sanitizeBody, sanitizeHeader } from './classifier/sanitize.js';
 
-/** Caps on what a rule puts into the call (E11). */
+/** Caps on what a rule puts into the call: every rule of an account is in each of its calls. */
 export const RULE_NAME_PROMPT_MAX = 120;
 export const RULE_DESCRIPTION_PROMPT_MAX = 500;
 

@@ -1,6 +1,6 @@
 // === inbox_rule_propose — the agent proposes an inbox rule; the owner confirms it ===
 //
-// PRD inbox-user-rules E7. A proposal is a rule that waits: it applies to no mail until the owner
+// A proposal is a rule that waits: it applies to no mail until the owner
 // confirms it (`POST /api/inbox/rules/:id/confirm`, owner-only), and only confirmed rules are read
 // by the loader. The tool chooses no bucket: a proposal can only send mail to `requires_user`, so a
 // proposal that hostile mail talked the agent into can at most make the owner look at more mail.

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
 import { WORKER_NOTICES } from './worker-notices.js';
+import { PLAN_ENDED_RESULT } from './plan-pause.js';
 import { onBoxBlock, pv } from './prompt-value.js';
 import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -540,7 +541,7 @@ describe('WorkerLoop', () => {
   });
 
   describe('the escalation record', () => {
-    async function watchEscalation(taskManager: TaskManager, pinNow?: number): Promise<{ engine: Engine; stderr: string[] }> {
+    async function watchEscalation(taskManager: TaskManager, pinNow?: number, language?: string): Promise<{ engine: Engine; stderr: string[] }> {
       vi.useRealTimers();
       // After useRealTimers, which replaces `Date` and would drop an earlier spy on it.
       const now = pinNow === undefined ? undefined : vi.spyOn(Date, 'now').mockReturnValue(pinNow);
@@ -554,6 +555,7 @@ describe('WorkerLoop', () => {
         escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
         getEngineDb: () => null,
         getMandateEnds: () => null,
+        config: { language },
       } as unknown as Engine;
       const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
       const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -566,6 +568,16 @@ describe('WorkerLoop', () => {
       now?.mockRestore();
       return { engine, stderr };
     }
+
+    it('pushes a German owner\'s watch change in German and keeps the thread\'s seed English (ux Rest-P E15)', async () => {
+      const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn(), startEscalation: vi.fn(() => true), recordEscalationOutcome: vi.fn(() => true) } as unknown as TaskManager;
+      const { engine } = await watchEscalation(taskManager, undefined, 'de');
+      const opts = vi.mocked(engine.escalateToUser).mock.calls[0]![0] as { body: string; pushBody?: string };
+      const analysis = opts.body.slice('https://x.test changed.\n\n'.length);
+      expect(opts.body).toBe(`https://x.test changed.\n\n${analysis}`);
+      expect(opts.pushBody).toBe(`https://x.test hat sich geändert.\n\n${analysis}`);
+      expect(analysis.length).toBeGreaterThan(0);
+    });
 
     it('escalates even when the start cannot be written, and says so', async () => {
       const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn(), startEscalation: vi.fn(() => { throw new Error('SQLITE_BUSY'); }), recordEscalationOutcome: vi.fn(() => true) } as unknown as TaskManager;
@@ -849,6 +861,21 @@ describe('WorkerLoop', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(engine.createSession).not.toHaveBeenCalled();
       expect(tm.recordTaskRun).toHaveBeenCalledWith('po-1', PLAN_RUN_UNRECORDED_RESULT, 'failed');
+    });
+
+    it('tells a German owner of a plan whose start cannot be written, and of a start by hand of another\'s plan, in German (ux Rest-P E7, E8)', async () => {
+      const unrecorded = setup(stamped(), { record: () => { throw new Error('SQLITE_FULL'); } });
+      Object.assign(unrecorded.engine, { config: { language: 'de' } });
+      await unrecorded.loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(unrecorded.tm.recordTaskRun).toHaveBeenCalledWith('po-1', WORKER_NOTICES.de.planRunUnrecorded, 'failed');
+      const ARNO = { kind: 'mandate' as const, email: 'arno@kanzlei.example', mandateId: 'TEST-GRANT-ARNO' };
+      const task = stamped();
+      const other = setup(task);
+      Object.assign(other.engine, { config: { language: 'de' } });
+      await (other.loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> })
+        .executeTask(task, null, other.loop.claimHandRunMinter()('po-1', ARNO));
+      expect(other.tm.recordTaskRun).toHaveBeenCalledWith('po-1', WORKER_NOTICES.de.planOfAnother, 'failed', { noRetry: true });
     });
 
     it('records an unwritable start as a member\'s start by hand without touching the schedule, and the schedule\'s own as before', async () => {
@@ -1443,11 +1470,30 @@ describe('WorkerLoop', () => {
           await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
           await vi.advanceTimersByTimeAsync(0);
           expect(session.run).not.toHaveBeenCalled();
-          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, resumedRunNotContained(true), 'failed');
+          // A provisioned instance with no language set speaks German (`notice-language.ts`; ux Rest-P W14).
+          expect(resumedRunNotContained(true)).not.toBe(WORKER_NOTICES.de.resumedRunNotContained(true));
+          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, 'Der Chat dieses Laufs wurde vor deiner Antwort gelöscht; lynox konnte den neuen nicht gleich schützen. Deine Antwort blieb ungenutzt. Starte die Aufgabe neu. Wiederholt es sich, schreib an support@lynox.ai.', 'failed');
           expect(stderr.mock.calls.map((c) => String(c[0])).some((l) => l.includes('no containment store'))).toBe(true);
         } finally {
           stderr.mockRestore();
           vi.unstubAllEnvs();
+        }
+      });
+
+      it('tells a self-hosted German owner the instance log, in German, in the failure\'s frame (ux Rest-P W14)', async () => {
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        try {
+          const { engine, session, task, tm } = resumeFromContained(1, { flagHolds: false });
+          Object.assign(engine as unknown as Record<string, unknown>, { config: { language: 'de' } });
+          const router = makeNotificationRouter();
+          await new WorkerLoop(engine, router, 60_000).tick();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(session.run).not.toHaveBeenCalled();
+          const de = 'Der Chat dieses Laufs wurde vor deiner Antwort gelöscht; lynox konnte den neuen nicht gleich schützen. Deine Antwort blieb ungenutzt. Starte die Aufgabe neu. Wiederholt es sich, nennt das Instanz-Protokoll den Grund.';
+          expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, de, 'failed');
+          expect(vi.mocked(router.notify).mock.calls.map((c) => c[0].body)).toEqual([`Aufgabe fehlgeschlagen: ${de}`]);
+        } finally {
+          stderr.mockRestore();
         }
       });
 
@@ -5797,5 +5843,64 @@ describe('a plan a mandate shaped runs only while its mandates are live', () => 
     await (loop as unknown as Exec).executeTask(task, null);
     expect(executor).not.toHaveBeenCalled();
     expect(recorded(engine)[0]?.[2]).toBe('stopped');
+  });
+  // ux Rest-P: what the worker pushes is said in the owner's language; what it compares stays stored as it is.
+  async function germanLoopFor(task: TriggerRecord, isLive: (id: string) => boolean, workflow?: unknown): Promise<{ loop: WorkerLoop; engine: Engine; bodies: () => string[] }> {
+    const { engine } = await loopFor(task, isLive, workflow);
+    const router = makeNotificationRouter();
+    Object.assign(engine as unknown as Record<string, unknown>, { config: { language: 'de' }, getBulkLedger: () => null });
+    const bodies = (): string[] => vi.mocked(router.notify).mock.calls.map((c) => c[0].body);
+    return { loop: new WorkerLoop(engine, router, 60_000), engine, bodies };
+  }
+
+  it('records a plan whose mandate ended as the stored sentence, and tells a German owner in German', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-plan', effect: 'notify', created_by: EVA_TAG, ...STAMPED });
+    const { loop, engine, bodies } = await germanLoopFor(task, () => false);
+    vi.spyOn(loop as unknown as Spyable, 'executeReminder').mockResolvedValue(undefined);
+    await (loop as unknown as Exec).executeTask(task, null);
+    // Stored in English: the takeover and the next due time compare it (`plan-takeover.ts`).
+    expect(recorded(engine)).toEqual([['p-plan', PLAN_ENDED_RESULT, 'stopped']]);
+    expect(bodies()).toEqual(['Diesen Zeitplan oder seinen Workflow hat jemand eingerichtet oder geändert, dessen Zugang beendet ist; darum läuft er nicht.']);
+  });
+
+  it('tells a German owner of a workflow whose authorship cannot be read in German', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-unread', effect: 'run_workflow', pipeline_id: WF_TEMPLATE.id, created_by: 'owner', ...STAMPED });
+    const { loop, engine, bodies } = await germanLoopFor(task, () => true, 'throws');
+    await (loop as unknown as Exec).executeTask(task, null);
+    const de = 'Wer den Workflow dieses Zeitplans eingerichtet hat, liess sich nicht lesen; darum lief er nicht.';
+    expect(recorded(engine)).toEqual([['p-unread', de, 'failed']]);
+    expect(bodies()).toEqual([de]);
+  });
+
+  it('tells a German owner of a mandate\'s schedule not confirmed yet in German, with where to confirm it', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-unstamped', effect: 'run_workflow', pipeline_id: WF_TEMPLATE.id, confirmed_at: undefined, created_by: EVA_TAG });
+    const { loop, engine, bodies } = await germanLoopFor(task, () => true);
+    await (loop as unknown as Exec).executeTask(task, null);
+    const de = 'Diesen Zeitplan hat jemand eingerichtet oder geändert, dem du Zugang gegeben hast. Er läuft erst nach deiner Bestätigung unter Automation → Trigger; übersprungen.';
+    expect(recorded(engine)).toEqual([['p-unstamped', de, 'failed']]);
+    expect(bodies()).toEqual([de]);
+  });
+
+  it('tells a German owner of an effect the engine does not know in German, quoting it', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-bogus', effect: 'bogus' as unknown as TriggerEffect, created_by: 'owner', ...STAMPED });
+    const { loop, engine, bodies } = await germanLoopFor(task, () => true);
+    await (loop as unknown as Exec).executeTask(task, null);
+    const de = 'Unbekannte Wirkung „bogus“ im Auslöser; übersprungen.';
+    expect(recorded(engine)).toEqual([['p-bogus', de, 'failed']]);
+    expect(bodies()).toEqual([de]);
+  });
+
+  it.each(['bulk_apply', 'bulk_preview', 'bulk_judge'] as const)('tells a German owner of a %s on an instance without bulk runs in German', async (effect) => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-bulk', effect, created_by: 'owner', ...STAMPED });
+    const { loop, engine, bodies } = await germanLoopFor(task, () => true);
+    await (loop as unknown as Exec).executeTask(task, null);
+    const de = 'Massenläufe sind auf dieser Instanz nicht verfügbar; übersprungen.';
+    expect(recorded(engine)).toEqual([['p-bulk', de, 'failed']]);
+    expect(bodies()).toEqual([de]);
   });
 });

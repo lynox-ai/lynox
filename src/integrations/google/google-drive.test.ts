@@ -307,4 +307,43 @@ describe('google_drive tool', () => {
       expect(tool.definition.input_schema.required).toEqual(['action']);
     });
   });
+  describe('move', () => {
+    // Register row 828: the read before the move can come back without `parents`. A PATCH with
+    // only `addParents` is then not a move, so the tool must stop before it.
+    it.each([
+      ['no parents field', {}],
+      ['an empty list', { parents: [] }],
+      ['only empty ids', { parents: [''] }],
+      ['non-string ids', { parents: [null, 123] }],
+      ['parents that is not a list', { parents: 'src' }],
+    ])('sends no PATCH and says why when the read returns %s', async (_label, meta) => {
+      const auth = createMockAuth();
+      const tool = createDriveTool(() => auth);
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => meta });
+
+      const result = await tool.handler({ action: 'move', file_id: 'f1', target_folder_id: 'dst' }, createMockAgent('Yes'));
+
+      expect(result).toMatch(/did not say which folder this file is in now/);
+      expect(result).toMatch(/Nothing was changed/);
+      expect(result).toMatch(/tell the user to move it in Drive itself/);
+      const patches = mockFetch.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === 'PATCH');
+      expect(patches).toHaveLength(0);
+    });
+
+    it('moves a file whose read names its folder, removing that folder', async () => {
+      const auth = createMockAuth();
+      const tool = createDriveTool(() => auth);
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ parents: ['src'] }) });
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'f1', name: 'Plan.pdf', parents: ['dst'] }) });
+
+      const result = await tool.handler({ action: 'move', file_id: 'f1', target_folder_id: 'dst' }, createMockAgent('Yes'));
+
+      expect(result).toBe('File "Plan.pdf" moved to folder dst.');
+      const patch = mockFetch.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === 'PATCH');
+      expect(patch).toBeDefined();
+      const url = new URL(String(patch![0]));
+      expect(url.searchParams.get('addParents')).toBe('dst');
+      expect(url.searchParams.get('removeParents')).toBe('src');
+    });
+  });
 });

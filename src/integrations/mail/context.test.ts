@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailContext, type AddAccountInput } from './context.js';
 import { MailStateDb } from './state.js';
-import { MailError, type MailAccountConfig } from './provider.js';
+import { MailError, type MailAccountConfig, type MailEnvelope, type MailProvider, type MailWatchEvent, type MailWatchHandle, type MailWatchHandler } from './provider.js';
+import { InboundMailDeferred } from './inbound-deferred.js';
 import type { MailCredentialBackend } from './auth/app-password.js';
 import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
 
@@ -1269,5 +1270,65 @@ describe('MailContext — a Microsoft 365 row registers no provider yet', () => 
     const src = readFileSync(new URL('./context.ts', import.meta.url), 'utf8');
     expect(src).not.toMatch(/oauth-graph|OAuthGraphProvider/);
     expect(src, 'positive control: the Gmail provider IS imported the same way').toMatch(/from '\.\/providers\/oauth-gmail\.js'/);
+  });
+});
+
+// ── Inbound hook deferral (InboundMailDeferred) ───────────────────────────
+
+describe('MailContext — a deferring inbound hook keeps the mail unseen', () => {
+  class EmittingProvider {
+    readonly accountId = 'acct-defer';
+    emit: (event: MailWatchEvent) => Promise<void> = async () => { /* not attached */ };
+    async list(): Promise<ReadonlyArray<MailEnvelope>> { return []; }
+    async fetch(): Promise<never> { throw new Error('not used'); }
+    async search(): Promise<ReadonlyArray<MailEnvelope>> { return []; }
+    async send(): Promise<never> { throw new Error('not used'); }
+    async close(): Promise<void> { /* no-op */ }
+    async watch(_opts: unknown, handler: MailWatchHandler): Promise<MailWatchHandle> {
+      this.emit = async (event) => { await handler(event); };
+      return { stop: async () => { this.emit = async () => { /* stopped */ }; } };
+    }
+  }
+  const mail = (uid: number): MailEnvelope => ({
+    uid, messageId: `<d-${String(uid)}@x>`, folder: 'INBOX', threadKey: `<d-${String(uid)}@x>`,
+    inReplyTo: undefined, from: [{ address: 'sender@example.com' }], to: [{ address: 'me@x.com' }],
+    cc: [], replyTo: [], subject: `d-${String(uid)}`, date: new Date(), flags: [], snippet: '',
+    hasAttachments: false, attachmentCount: 0, sizeBytes: 0, isAutoReply: false,
+  });
+
+  it('a deferred mail stays unseen and is handed over again on the next tick', async () => {
+    const onInbound = vi.fn<(accountId: string, env: MailEnvelope) => Promise<void>>()
+      .mockRejectedValueOnce(new InboundMailDeferred('test'))
+      .mockResolvedValue(undefined);
+    const userHandler = vi.fn(async () => { /* user handler */ });
+    const ctx2 = new MailContext(stateDb, backend, userHandler, { onInboundMail: onInbound });
+    const provider = new EmittingProvider();
+    try {
+      await ctx2.watcher.attach(provider as unknown as MailProvider, { applyPrefilter: false });
+      await provider.emit({ type: 'new', envelopes: [mail(1)] });
+      expect(stateDb.countForAccount('acct-defer'), 'deferred mail marked seen').toBe(0);
+      expect(userHandler).not.toHaveBeenCalled();
+
+      await provider.emit({ type: 'new', envelopes: [mail(1)] });
+      expect(onInbound).toHaveBeenCalledTimes(2);
+      expect(userHandler).toHaveBeenCalledTimes(1);
+      expect(stateDb.countForAccount('acct-defer')).toBe(1);
+    } finally {
+      await ctx2.close();
+    }
+  });
+
+  it('any other hook error is still swallowed: the mail counts as handled (control)', async () => {
+    const onInbound = vi.fn(async () => { throw new Error('classifier crashed'); });
+    const ctx2 = new MailContext(stateDb, backend, undefined, { onInboundMail: onInbound });
+    const provider = new EmittingProvider();
+    try {
+      await ctx2.watcher.attach(provider as unknown as MailProvider, { applyPrefilter: false });
+      await provider.emit({ type: 'new', envelopes: [mail(2)] });
+      expect(onInbound).toHaveBeenCalledTimes(1);
+      expect(stateDb.countForAccount('acct-defer')).toBe(1);
+    } finally {
+      await ctx2.close();
+    }
   });
 });

@@ -197,7 +197,7 @@ Never ask the user to give you, paste or type the client ID or secret, and do no
 Then ask for the store's myshopify.com subdomain if you do not have it. For Shopify this section sets the order of the first reply, ahead of the general research rules.
 
 The steps behind it:
-1. Create the profile: \`api_setup\` with auth.type "oauth2", auth.oauth.preset_id "shopify", auth.oauth.preset_params.shop set to that subdomain, and auth.oauth.scope listing the read scopes the user needs, separated by spaces (e.g. "read_products read_orders").
+1. Create the profile: \`api_setup\` with auth.type "oauth2", auth.oauth.preset_id "shopify", auth.oauth.preset_params.shop set to that subdomain, and auth.oauth.scope listing the scopes the user needs, separated by spaces: the read scopes (e.g. "read_products read_orders"), plus "write_products" only when lynox is to change products in a bulk run. The scope also lets a single http_request change products, each write asked for before it is sent. No other write scope is available.
 2. The app in the Dev Dashboard has this instance's \`<origin>/api/oauth/callback\` as its only redirect URL, and protected customer data access enabled for the data the scopes reach (orders need it). Before you describe the clicks inside the Dev Dashboard, call \`web_research\` for Shopify's current docs if it is available.
 3. Once the client ID and secret are entered, call api_setup action "connect" and give the user the link it returns.
 

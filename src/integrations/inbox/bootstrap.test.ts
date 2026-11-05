@@ -305,7 +305,7 @@ describe('bootstrapInbox — wiring', () => {
     fetchSpy.mockRestore();
   });
 
-  describe('description rules (PRD inbox-user-rules E3)', () => {
+  describe('description rules, checked by their own model per region', () => {
     afterEach(() => { vi.unstubAllEnvs(); });
     const mistralReply = (content: string, tokens = 1_000_000) => ({
       ok: true, status: 200, statusText: '',

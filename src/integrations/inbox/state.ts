@@ -229,7 +229,7 @@ export interface ListItemsOptions {
    */
   snoozedOnly?: boolean | undefined;
   /**
-   * Only the items one rule filed (`matched_rule_id`, PRD inbox-user-rules E4: the rule's name is
+   * Only the items one rule filed (`matched_rule_id`; the rule's name is
    * the topic). Combines with `bucket` and `q`; ignored with `snoozedOnly`.
    */
   ruleId?: string | undefined;

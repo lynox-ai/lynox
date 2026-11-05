@@ -23,6 +23,7 @@ import type { GoogleAuth } from '../google/google-auth.js';
 import { SCOPES } from '../google/scopes.js';
 import type { MailCredentialBackend } from './auth/app-password.js';
 import { MailCredentialStore, vaultKeyForAccount } from './auth/app-password.js';
+import { InboundMailDeferred } from './inbound-deferred.js';
 import { ImapSmtpProvider } from './providers/imap-smtp.js';
 import { OAuthGmailProvider } from './providers/oauth-gmail.js';
 import {
@@ -150,7 +151,10 @@ export interface OutboundContext {
 }
 
 export interface MailHooks {
-  /** Fires for every fresh (post-dedup, post-prefilter) inbound envelope. */
+  /**
+   * Fires for every fresh (post-dedup, post-prefilter) inbound envelope. A hook that cannot
+   * take the mail now throws `InboundMailDeferred`; the batch then stays unseen.
+   */
   onInboundMail?: (accountId: string, envelope: MailEnvelope) => Promise<void>;
 
   /** Fires after a successful mail_send or mail_reply. */
@@ -393,9 +397,15 @@ export class MailContext {
           }
         }
 
-        // Fire inbound hook
+        // Fire inbound hook. Its errors are swallowed, except a deferral: that one ends the
+        // batch here, so the watcher leaves it unseen for the next tick (inbound-deferred.ts).
         if (this.hooks.onInboundMail) {
-          try { await this.hooks.onInboundMail(accountId, env); } catch { /* swallow */ }
+          try {
+            await this.hooks.onInboundMail(accountId, env);
+          } catch (err: unknown) {
+            if (err instanceof InboundMailDeferred) throw err;
+            /* swallow */
+          }
         }
       }
 

@@ -16,8 +16,18 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
-import { OWNER_PRINCIPAL, isMandateTag, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
-import { maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { MandateKeyInputError, mandateCredentialInput, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
+
+/**
+ * A mandate's helper takes no key in this chat:
+ * an answer of theirs that reads as carrying one (`mandateCredentialInput`) is refused before any
+ * row stores it. The owner's answers are masked as before.
+ */
+function refuseMandateKey(by: RequestPrincipal, texts: ReadonlyArray<string | null>): void {
+  if (isOwnerPrincipal(by)) return;
+  if (texts.some((t) => t !== null && mandateCredentialInput(t) !== null)) throw new MandateKeyInputError();
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -579,8 +589,12 @@ export class PromptStore {
    * the row stores it and before the asking tool hands it to the model.
    *
    * `by` is the principal that answered, recorded beside the answer. Required on every way an
-   * answer is stored, so a new route cannot settle a question without saying who did. */
+   * answer is stored, so a new route cannot settle a question without saying who did.
+   *
+   * An answer from anyone but the owner that reads as carrying a key is not stored at all
+   * (`refuseMandateKey`): it throws `MandateKeyInputError`, and the question stays open. */
   answerUser(promptId: string, answer: string, by: RequestPrincipal): boolean {
+    refuseMandateKey(by, [answer]);
     const result = this._getAnswerStmt().run(withoutTypedCredentials(answer), principalTag(by), mandateIdOf(by) ?? null, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
@@ -590,6 +604,7 @@ export class PromptStore {
   /** Answer a multi-question (tabs) ask_user. Answers are stored as a JSON
    * string[] in the answer column. Ordering must match questions ordering. */
   answerUserTabs(promptId: string, answers: string[], by: RequestPrincipal): boolean {
+    refuseMandateKey(by, answers);
     // Shared UPDATE path: stores JSON-encoded array in the same `answer`
     // column single-question uses. Handler disambiguates by presence of
     // questions_json on the row.
@@ -605,8 +620,10 @@ export class PromptStore {
   /** Optional: persist partial answers so a reconnect mid-batch can restore
    * progress. Doesn't settle the prompt — the handler keeps awaiting. Masked
    * like a final answer, without the note: the partial goes back to the form,
-   * not to the model. */
-  setPartialAnswers(promptId: string, partial: (string | null)[]): boolean {
+   * not to the model. `by` as at `answerUser`: a mandate's partial that reads as carrying a key
+   * is not stored. */
+  setPartialAnswers(promptId: string, partial: (string | null)[], by: RequestPrincipal): boolean {
+    refuseMandateKey(by, partial);
     const masked = partial.map((a) => (a === null ? null : maskCredentialInput(a).text));
     const result = this._getSetPartialStmt().run(JSON.stringify(masked), promptId);
     return result.changes > 0;

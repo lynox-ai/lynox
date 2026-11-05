@@ -19,6 +19,24 @@ import type { BulkInvalidReason, BulkRunStatus, ListPageItem } from './bulk-ledg
 import type { BulkNotices } from './bulk-notices.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, mediaImageGidNumber, productGidNumber, type ShopifyWriteForm } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
+import { presetStoreHost } from './oauth-presets.js';
+import type { ApiProfile } from './api-store.js';
+
+/** The Shopify scopes either of which `fileUpdate`, the bulk image form's write, needs (PRD
+ *  shopify-preset §16.6). The Shopify preset asks for neither (`oauth-presets.ts`). */
+export const SHOPIFY_MEDIA_WRITE_SCOPES: readonly string[] = Object.freeze(['write_files', 'write_themes']);
+
+/**
+ * Whether the store connection for `host` may run the bulk image form (`fileUpdate`): the engine's own Shopify
+ * connection to that store (`presetStoreHost`, the same profile the write attaches) whose grant,
+ * as Shopify answered it, holds `write_files` or `write_themes`. Without a recorded grant nothing
+ * is known beyond the ask, and the preset never asks for either, so that counts as no.
+ */
+export function shopifyMediaWritable(profile: Pick<ApiProfile, 'base_url' | 'auth' | 'oauth_grant'> | undefined, host: string): boolean {
+  // Only the Shopify preset derives its API host from the store (`apiOnDerivedHost`), so a match is that preset.
+  if (profile === undefined || presetStoreHost(profile) !== host) return false;
+  return (profile.oauth_grant?.granted_scope ?? []).some((s) => SHOPIFY_MEDIA_WRITE_SCOPES.includes(s));
+}
 
 /** Whether this instance reads Shopify stores in bulk runs. Asked when a run is planned and on
  *  every tick of one, so turning it off stops a run that is already under way. */
@@ -28,6 +46,35 @@ export function shopifyBulkReadEnabled(): boolean {
 
 /** The fields of a product's flat before-image, and so of a Shopify run's after-state. */
 export const SHOPIFY_PRODUCT_FIELDS = ['title', 'descriptionHtml', 'seo_title', 'seo_description'] as const;
+
+/**
+ * The fields behind a product page's SEO title and SEO description whose text, once the after-state
+ * is written, holds an `&` more often than it does now. A theme may escape `page_title` and
+ * `page_description` twice, and then the browser tab and a search result show `&amp;` (measured on
+ * one theme, not on every one). lynox cannot tell which theme does, so the preview names the target
+ * and refuses nothing: "A & B" is a legitimate text. Only `&` is counted, because the owner's note
+ * names only `&`; a `<` or `>` a theme shows the same way is not marked.
+ *
+ * The page's title is the SEO title, or the product's title where the SEO title is empty (measured
+ * on a store), so it is that text which is compared, and the field it comes from which is named. The
+ * description's own fallback is not followed: a run does not write `descriptionHtml` yet.
+ * A product not read yet holds no before-image to compare with, and is not named.
+ */
+export function shopifySeoEntityFields(prior: unknown, after: unknown): string[] {
+  if (!isPlainObject(after) || !isPlainObject(prior)) return [];
+  const next: Record<string, unknown> = { ...prior, ...after };
+  const text = (image: Record<string, unknown>, field: string): string => {
+    const value = image[field];
+    return typeof value === 'string' ? value : '';
+  };
+  const titleField = (image: Record<string, unknown>): string => (text(image, 'seo_title') !== '' ? 'seo_title' : 'title');
+  const ampersands = (value: string): number => value.split('&').length - 1;
+  const shown: [string, string, string][] = [
+    [titleField(next), text(next, titleField(next)), text(prior, titleField(prior))],
+    ['seo_description', text(next, 'seo_description'), text(prior, 'seo_description')],
+  ];
+  return shown.filter(([, now, was]) => ampersands(now) > ampersands(was)).map(([field]) => field);
+}
 
 /** The field of an image's before-image, and so of a media run's after-state. */
 export const SHOPIFY_MEDIA_FIELDS = ['alt'] as const;

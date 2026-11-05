@@ -81,7 +81,7 @@ export class InboxRulesLoader {
   }
 
   /** The confirmed description rules of an account, in the order they were confirmed: what the
-   *  runner's model call checks (PRD inbox-user-rules E3). `match` never takes one. */
+   *  runner's model call checks. `match` never takes one. */
   descriptionRules(accountId: string, tenantId?: string | undefined): ReadonlyArray<InboxRule> {
     return this._rulesFor(accountId, tenantId)
       .map((c) => c.rule)

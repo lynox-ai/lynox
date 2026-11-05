@@ -235,7 +235,7 @@ describe('inbox_read — what the inbox found at intake counts (B1)', () => {
   // the rule too and its audit records what it found.
   it('withholds a mail a rule filed, when the check finds it sensitive beyond the stored 200 characters', async () => {
     mail.upsertAccount(ACCOUNT as never);
-    // `requires_user`: an auto_handled rule no longer files a mail the check finds sensitive (F1).
+    // `requires_user`: an auto_handled rule no longer files a mail the check finds sensitive.
     runtime.state.insertRule({ accountId: 'acct-1', matcherKind: 'from', matcherValue: 'noreply@app.example.com', bucket: 'requires_user', action: 'show', source: 'on_demand' });
     runtime.rules.invalidateAll();
     const outcome = await runtime.hook('acct-1', {

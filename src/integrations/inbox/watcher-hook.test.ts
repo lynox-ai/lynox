@@ -265,7 +265,7 @@ describe('createInboxClassifierHook — rule short-circuit', () => {
   });
 });
 
-describe('createInboxClassifierHook — description rules wait for the runner (PRD inbox-user-rules E3)', () => {
+describe('createInboxClassifierHook — description rules wait for the model check in the runner', () => {
   it('a fixed rule files the mail before any description rule is asked, even one created earlier', async () => {
     inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'auto_handled', action: 'mark_read', source: 'on_demand', createdAt: new Date(1_000) });
     const fixed = inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com', bucket: 'requires_user', action: 'show', source: 'on_demand', createdAt: new Date(2_000) });
@@ -331,7 +331,7 @@ describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
     expect(inbox.listItems()[0]?.classifierVersion).toBe('sensitive-prefilter');
   });
 
-  // PRD inbox-user-rules F1: a rule that files a sensitive mail as handled does not apply, the
+  // A rule that files a sensitive mail as handled does not apply, the
   // owner's own included; the mail goes to "requires you" without a model, in every mode.
   for (const mode of ['skip', 'mask', 'allow'] as const) {
     it(`an auto_handled rule does not silence a sensitive mail (mode ${mode})`, async () => {

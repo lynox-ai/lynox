@@ -1050,7 +1050,7 @@ describe('rules endpoints — the value of a fixed rule, on create', () => {
   });
 });
 
-describe('rules endpoints — description rules (PRD inbox-user-rules E3/E11)', () => {
+describe('rules endpoints — description rules', () => {
   afterEach(() => { vi.unstubAllEnvs(); });
   const base = { accountId: ACCOUNT.id, matcherKind: 'matches_description' as const, bucket: 'requires_user' as const, action: 'show' as const, source: 'on_demand' as const };
 
