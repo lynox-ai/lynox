@@ -183,6 +183,14 @@ describe('approving a preview', () => {
 		});
 	}
 
+	it('shows a refused backslash as one backslash in the sentence the owner reads (U-148)', async () => {
+		targets = targets.map((x) => (x.seq === 3 ? { ...x, error: 'url_control_char' } : x));
+		await render();
+		const text = target.textContent ?? '';
+		expect(text).toMatch(/[Bb]ackslash \\[ ,]/);
+		expect(text).not.toContain('ackslash \\\\');
+	});
+
 	it('approves a run of one target whole, takes the product out against the checksum it showed, and then keeps only why nothing is left', async () => {
 		await render();
 		// One target to write: no probe first, the approval covers the whole run.

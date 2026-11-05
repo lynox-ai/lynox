@@ -583,8 +583,11 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     expect(check('[embed]evil.example/a b[/embed]')).toEqual(foreign);
     expect(check('[embed]https://evil.example/a b[/embed]')).toEqual(foreign);
     expect(check('[embed]evil.example/[x][/embed]')).toEqual(foreign);
+    // A web scheme without `//` keeps its link: on an https page, `http:evil.example` is that host.
+    expect(check('[embed]http:evil.example/a b[/embed]')).toEqual(foreign);
+    expect(check('[embed]http:/evil.example/a[/embed]')).toEqual(foreign);
     // Twin: words in a pair are a label, not a link, even with a colon or a URL among them.
-    for (const after of ['[b]Hinweis:[/b]', '[b]Hinweis: neu[/b]', '[b]<em>Neu:</em>[/b]', '[box]Mehr unter javascript:alert(1) hier[/box]', '[box]Infos auf www.hersteller.example[/box]']) {
+    for (const after of ['[b]Hinweis:[/b]', '[b]Hinweis: neu[/b]', '[b]<em>Neu:</em>[/b]', '[box]Mehr unter javascript:alert(1) hier[/box]', '[box]Infos auf www.hersteller.example[/box]', '[caption]Foto:Max[/caption]', '[b]Zeit:12h[/b]', '[b]1.5kg[/b]', '[b]ca.30cm[/b]']) {
       expect(check(after), after).toEqual({ ok: true });
     }
   });
@@ -615,7 +618,11 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
       ['[video src="evil\u3002example/a.mp4"]', 'evil.example'],
       ['[video src="203.0.113.7"]', '203.0.113.7'],
       ['[video src="3405803783/a.mp4"]', '203.0.113.7'],
+      ['[button url="3405803783"]', '203.0.113.7'],
+      ['[embed]0xcb007107[/embed]', '203.0.113.7'],
       ['[video src="evil.exa%0D%0ample/a.mp4"]', 'evil.example'],
+      // Removed until none is left: taking one out can join the rest into another.
+      ['[video src="evil.exa%0%0aample/a.mp4"]', 'evil.example'],
       // esc_url trims the start, so leading spaces do not turn the host into a path.
       ['[video src="  evil.example/a.mp4"]', 'evil.example'],
     ] as const) expect(check(after), after).toEqual({ ok: false, reason: 'new_link_domain', detail });
@@ -625,7 +632,7 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     expect(check('[video src="a.mp4"]')).toMatchObject({ ok: false, reason: 'new_link_domain', detail: 'a.mp4' });
     // Twin: a value that names no host stays a word or a path on the store: a relative path, a
     // word, a number, a fraction, a one-label name, a space in the host, an abbreviation.
-    for (const after of ['[video src="/media/a.mp4"]', '[button size=large]Go[/button]', '[x version=3.5]', '[x file=index.php?a=b.example]', '[x ratio=16/9]', '[x w=1.5]', '[x label="ja/nein"]', '[x src="media/a.mp4"]', '[button link="evil .example"]', '[x title="Gr.M"]', '[x title="Hinweis:"]', '[video src="/cdn.example/a.mp4"]']) {
+    for (const after of ['[video src="/media/a.mp4"]', '[button size=large]Go[/button]', '[x version=3.5]', '[x file=index.php?a=b.example]', '[x ratio=16/9]', '[x w=1.5]', '[x label="ja/nein"]', '[x src="media/a.mp4"]', '[button link="evil .example"]', '[x title="Gr.M"]', '[x title="Hinweis:"]', '[video src="/cdn.example/a.mp4"]', '[contact-form-7 id="12" title="Kontakt: Anfrage"]', '[button text="Jetzt: 20% Rabatt"]', '[x id=12345678]']) {
       expect(check(after), after).toEqual({ ok: true });
     }
   });
@@ -648,6 +655,11 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     expect(check('<p>https://evil.example/x</p>')).toEqual(foreign);
     expect(check('<p> https://evil.example/x </p>')).toEqual(foreign);
     expect(check('Neu\nhttps://evil.example/x\nmehr')).toEqual(foreign);
+    // WordPress's pattern reads `\s` as ASCII: a wider space inside the URL does not end it.
+    for (const space of ['\u3000', '\u2003', '\u202f']) {
+      expect(check(`<p>https://evil.example/a${space}b</p>`), space).toMatchObject({ ok: false, reason: 'new_link_domain' });
+      expect(check(`<p>x</p>\nhttps://evil.example/a${space}b\n<p>y</p>`), space).toMatchObject({ ok: false, reason: 'new_link_domain' });
+    }
     // Twin: a URL among words is not embedded, nor one WordPress's pattern does not read (an
     // encoded scheme); the store's own address and a URL the before-image holds pass.
     for (const after of ['<p>Mehr auf www.evil.example</p>', '<p>Mehr auf https://evil.example/x</p>', '<p>&#104;ttps://evil.example/x</p>', `<p>https://${HOST}/sale</p>`]) {
@@ -662,6 +674,10 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
     // Twin: a link or an embed of the before-image does lend its domain.
     expect(check('[video src="https://evil.example/a.mp4"]', '<p><a href="https://evil.example/">x</a></p>')).toEqual({ ok: true });
     expect(check('[video src="https://evil.example/a.mp4"]', '<p>https://evil.example/x</p>')).toEqual({ ok: true });
+    // Nor does a name in a pair or an attribute that does not name its host as a link does.
+    for (const held of ['<p>Hersteller: [b]evil.example[/b]</p>', '<p>[x title="evil.example"]</p>']) {
+      expect(check(`${held}[embed]https://evil.example/x[/embed]`, held), held).toEqual(foreign);
+    }
   });
 
   it('asks before shortcode_changed, so a value offered to copy carries no foreign link', () => {
@@ -693,7 +709,7 @@ describe('a link inside a shortcode is held to the run\'s domains (1222)', () =>
   });
 
   it('reads values of many attributes, quotes and colons in linear time', () => {
-    for (const value of [`[x ${'"a'.repeat(100_000)}]`, `[x ${'a='.repeat(100_000)}]`, `[x ${"a='".repeat(60_000)}]`, `[e]${'a:'.repeat(100_000)}[/e]`, `[e]${' //'.repeat(60_000)}[/e]`]) {
+    for (const value of [`[x ${'"a'.repeat(100_000)}]`, `[x ${'a='.repeat(100_000)}]`, `[x ${"a='".repeat(60_000)}]`, `[e]${'a:'.repeat(100_000)}[/e]`, `[e]${' //'.repeat(60_000)}[/e]`, `${'\n'.repeat(100_000)}x`, `${' \n'.repeat(60_000)}x`, `[e]${'%'.repeat(30_000)}${'0a'.repeat(30_000)}[/e]`, `[x a="${'%'.repeat(30_000)}${'0a'.repeat(30_000)}"]`, '<p '.repeat(40_000)]) {
       const start = performance.now();
       check(value);
       expect(performance.now() - start, `${value.slice(0, 12)}… of ${value.length}`).toBeLessThan(3000);
