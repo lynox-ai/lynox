@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkInvalidText, bulkSkippedHead,
 } from './bulk-runs.js';
@@ -14,6 +14,8 @@ import { MERGE_REFUSAL_CODES } from '../../../../../src/core/subject-merge-runne
 const TABLE: Record<string, string> = {
 	'bulk.label': '{n} Ziele · {target}',
 	'bulk.label_undo': 'Rücknahme · {n} Ziele · {target}',
+	'bulk.label_one': '1 Ziel · {target}',
+	'bulk.label_undo_one': 'Rücknahme · 1 Ziel · {target}',
 	'bulk.system.data_store': 'Datenspeicher',
 };
 const i18n: BulkI18n = {
@@ -27,6 +29,9 @@ describe('bulk run helpers', () => {
 	it('names a run by its size and where it writes, an undo as such', () => {
 		expect(bulkLabel({ kind: 'apply', total: 220, targetSystem: 'http:shop.example.invalid' }, i18n)).toBe('220 Ziele · shop.example.invalid');
 		expect(bulkLabel({ kind: 'undo', total: 14, targetSystem: 'data_store' }, i18n)).toBe('Rücknahme · 14 Ziele · Datenspeicher');
+		// One target is named in the singular.
+		expect(bulkLabel({ kind: 'apply', total: 1, targetSystem: 'http:shop.example.invalid' }, i18n)).toBe('1 Ziel · shop.example.invalid');
+		expect(bulkLabel({ kind: 'undo', total: 1, targetSystem: 'data_store' }, i18n)).toBe('Rücknahme · 1 Ziel · Datenspeicher');
 	});
 
 	it('shows the host of an external run and the raw name of a system it has no word for', () => {
@@ -569,6 +574,19 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('checksum', unclear))).toBe('none');
 	});
 
+	it('says a conflict looked different than expected at the last read, one or several, and nothing at none', () => {
+		// True after an unclear send, for an undo, after a later resume and for a local run alike.
+		expect(bulkConflictsText({ conflicts: 1 }, DE)).toBe('Ein Ziel stand beim letzten Nachsehen anders da als erwartet; lynox hat es so gelassen.');
+		expect(bulkConflictsText({ conflicts: 3 }, DE)).toBe('3 Ziele standen beim letzten Nachsehen anders da als erwartet; lynox hat sie so gelassen.');
+		expect(bulkConflictsText({ conflicts: 1 }, EN)).toBe('One target looked different than expected when lynox last checked it; lynox left it as it was.');
+		expect(bulkConflictsText({ conflicts: 3 }, EN)).toBe('3 targets looked different than expected when lynox last checked them; lynox left them as they were.');
+		expect(bulkConflictsText({ conflicts: 0 }, DE)).toBeNull();
+		// The run title names one target in the singular, read from the real table.
+		expect(bulkLabel({ kind: 'apply', total: 1, targetSystem: 'http:shop.example.invalid' }, DE)).toBe('1 Ziel · shop.example.invalid');
+		expect(bulkLabel({ kind: 'undo', total: 1, targetSystem: 'http:shop.example.invalid' }, EN)).toBe('Undo · 1 target · shop.example.invalid');
+		expect(bulkLabel({ kind: 'apply', total: 2, targetSystem: 'http:shop.example.invalid' }, EN)).toBe('2 targets · shop.example.invalid');
+	});
+
 	it('offers nothing where every target left had changed at the provider after its unclear send', () => {
 		// The check found a third value: a conflict, never sent again, and no longer unclear.
 		const changed = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 0, conflicts: 1, resumeOpen: 1, resumeTries: 1, resumeSends: 0 };
@@ -1057,6 +1075,22 @@ describe('the context C the judge only reads (U-140)', () => {
 			"'bulk.invalid.secret_in_context_field': { de: 'Das Feld {field} dieses Eintrags enthält etwas, das wie ein Passwort oder Schlüssel aussieht. lynox beurteilt den Eintrag deshalb nicht und schickt nichts davon an das KI-Modell. Entfern es dort, wo du diesen Eintrag pflegst, oder bitte lynox im Chat, den Lauf ohne {field} bei den gelesenen Feldern neu zu planen.', en: 'The field {field} of this entry contains something that looks like a password or key. lynox does not judge this entry and sends nothing of it to the AI model. Remove it where you keep this entry, or ask lynox in the chat to plan the run again without {field} among the fields it reads.' }",
 			// U-142: the way out holds in both directions, whichever spelling is the typo.
 			"'bulk.invalid.not_in_filter': { de: 'Die Shopify-Suche hat dieses Produkt mitgeliefert, aber sein Produkttyp oder Anbieter ist anders geschrieben als im Filter (etwa ü statt u). lynox ändert es nicht. Gehört es in die Gruppe, schreib den Wert in Shopify bei allen Produkten der Gruppe gleich und bitte lynox dann im Chat, den Lauf mit genau dieser Schreibweise neu zu planen.', en: 'Shopify\\'s search returned this product, but its product type or vendor is spelled differently from the filter (for example ü instead of u). lynox does not change it. If it belongs to the group, spell the value the same way on every product of the group in Shopify, then ask lynox in the chat to plan the run again with exactly that spelling.' }",
+			// U-146: the mark and its line name only &, which is all the engine counts.
+			"'bulk.target.seo_entity': { de: '& neu in Titel oder SEO-Text', en: 'New & in title or SEO text' }",
+			"'bulk.preview.seo_entity': { de: 'Bei {n} Produkten kommt ein & neu in den Titel, den Browser-Tab und Suchergebnisse zeigen, oder in die Beschreibung im Suchergebnis. Manche Shop-Themes zeigen es dort als &amp;. Willst du das vermeiden, bitte lynox im Chat, den Lauf mit „und“ statt & neu zu planen, oder wähl bei diesen Produkten vor dem Freigeben „Nicht schreiben“. Sonst prüf nach dem Schreiben im Browser-Tab einer Produktseite, ob das & richtig erscheint.', en: 'In {n} products, an & is added to the title that the browser tab and search results show, or to the description in search results. Some store themes show it there as &amp;. To avoid this, ask lynox in a chat to plan the run again with \"and\" instead of &, or choose \"Don\\'t write\" on these products before you approve. Otherwise, after the write, check in the browser tab of a product page that the & shows correctly.' }",
+			"'bulk.preview.seo_entity_one': { de: 'Bei einem Produkt kommt ein & neu in den Titel, den Browser-Tab und Suchergebnisse zeigen, oder in die Beschreibung im Suchergebnis. Manche Shop-Themes zeigen es dort als &amp;. Willst du das vermeiden, bitte lynox im Chat, den Lauf mit „und“ statt & neu zu planen, oder wähl bei diesem Produkt vor dem Freigeben „Nicht schreiben“. Sonst prüf nach dem Schreiben im Browser-Tab seiner Produktseite, ob das & richtig erscheint.', en: 'In one product, an & is added to the title that the browser tab and search results show, or to the description in search results. Some store themes show it there as &amp;. To avoid this, ask lynox in a chat to plan the run again with \"and\" instead of &, or choose \"Don\\'t write\" on this product before you approve. Otherwise, after the write, check in the browser tab of its product page that the & shows correctly.' }",
 		]) expect(source).toContain(line);
+	});
+});
+
+describe('bulkSeoEntityCount', () => {
+	it('counts the targets the owner still writes whose SEO text gains an &', () => {
+		expect(bulkSeoEntityCount([
+			{ seoEntityFields: ['seo_title'], deselected: false },
+			{ seoEntityFields: ['seo_title', 'seo_description'], deselected: false },
+			{ seoEntityFields: ['seo_description'], deselected: true },
+			{ seoEntityFields: [], deselected: false },
+			{ deselected: false },
+		])).toBe(2);
 	});
 });

@@ -3567,7 +3567,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // again, whatever reached the conversation in between.
     // Three kinds of write are never remembered and ask every time: a DELETE, a path
     // the outbound-effect table names (`core/outbound-write.ts`), and any write in a mandate's
-    // session — there the person who set the mandate up gives each approval, and the approval
+    // session — there the helper the mandate was given to answers each question (or the owner;
+    // `_refuseUnlessOwnsPrompt` in http-api.ts), with the owner's scopes, and the approval
     // is what protects the account against an injected instruction (PRD
     // customer-granted-operator-access 4.11). A grant covers neither a table path nor a write
     // to a connected account, for the owner and a mandate alike (`contractGrantsWrite` below).

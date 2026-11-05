@@ -46,6 +46,7 @@ import { detectSecretInContent } from '../tools/builtin/http.js';
 import { bulkStatusTool } from '../tools/builtin/bulk.js';
 import type { IAgent } from '../types/index.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
+import { shopifySeoEntityFields } from './bulk-shopify.js';
 
 /**
  * Build plan B, the write half (§1.4, §2.3–§2.4, §4 F5/F7): an approved external run is
@@ -1524,6 +1525,23 @@ describe('the write verb and the one-target probe', () => {
     }
   });
 
+  it('does not mark an SEO text with an & on a host that is not a Shopify store', async () => {
+    const s = shop();
+    s.items.get('/products/0')!['seo_title'] = 'A und B';
+    const restore = serve(s);
+    try {
+      const runId = await previewedRun([{ target: url(0), after: { seo_title: 'A & B' } }]);
+      const t = ledger.getPreview(runId)[0]!;
+      expect(t.error).toBeNull();
+      // The same before and after would be marked on a store: only the host leaves it unmarked.
+      expect(t.change).toBe('update');
+      expect(shopifySeoEntityFields(t.before?.absent === false ? t.before.value : null, t.after)).toEqual(['seo_title']);
+      expect(t).not.toHaveProperty('seoEntityFields');
+    } finally {
+      restore();
+    }
+  });
+
   it('a field the provider requires is sent unchanged, named as such, and a foreign change to it makes the undo a conflict', async () => {
     const s = shop();
     const restore = serve(s);
@@ -1686,8 +1704,40 @@ describe('an unmeasured write form', () => {
       // is on record for them, and still the second run writes one target first.
       const second = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
       expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
-        .get(HOST, 'PATCH', 'unmeasured:/products/')).toEqual({ run_id: first });
+        .get(HOST, 'PATCH', `unmeasured:${first}:/products/`)).toEqual({ run_id: first });
       expect(ledger.getStatus(second)!.probeConfirmed).toBe(false);
+      expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, maxTargets: 2, unmeasuredConfirmed: true }))
+        .toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'other_run' }], step: null } });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a probe found as planned after a send without a clear answer is filed for its own run only', async () => {
+    const s = shop();
+    s.special.set('PATCH /products/1', { status: 303 });
+    const restore = serve(s);
+    try {
+      const c = client();
+      const first = await previewedRun([1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      const firstSum = ledger.computeChecksum(first)!;
+      expect(ledger.approve(first, { checksum: firstSum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      await runBulkEffect(first, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.getStatus(first)).toMatchObject({ applied: 0, sentUnknown: 1 });
+      s.special.delete('PATCH /products/1');
+      s.items.get('/products/1')!['price'] = '15';
+      expect(ledger.resume(first, { checksum: firstSum }).ok).toBe(true);
+      await runBulkEffect(first, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.probeKey(first)).toBe(url(1));
+      expect(ledger.probeFound(first)).toBe(true);
+      expect(ledger.confirmProbe(first)).toEqual({ ok: true });
+      expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
+        .get(HOST, 'PATCH', `unmeasured:${first}:/products/`)).toEqual({ run_id: first });
+      // Confirmed once, nothing is left to confirm.
+      expect(ledger.probeKey(first)).toBeNull();
+      expect(ledger.getStatus(first)!.probeConfirmed).toBe(true);
+
+      const second = await previewedRun([0, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
       expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, maxTargets: 2, unmeasuredConfirmed: true }))
         .toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'other_run' }], step: null } });
     } finally {
@@ -1814,7 +1864,7 @@ describe('an unmeasured write form', () => {
     }
   });
 
-  it('offers to confirm again a run whose unchecked probe another run\'s confirmation took over', async () => {
+  it('keeps a run\'s unchecked probe when a later run on the same host confirms one of the same kind', async () => {
     const s = shop();
     const restore = serve(s);
     try {
@@ -1831,10 +1881,43 @@ describe('an unmeasured write form', () => {
       expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
       expect(ledger.probeBlockFor(y)).toEqual({ missing: [{ kind: '/products/', cause: 'other_run' }], step: 'confirm' });
       expect(ledger.probeKey(y)).toBe(url(2));
-      // Y's confirmation takes the row, and X is the one to confirm again.
+      // Y's confirmation files a row of its own: both runs hold, and neither is offered it again.
       expect(ledger.confirmProbe(y)).toEqual({ ok: true });
-      expect(ledger.probeBlockFor(x)).toEqual({ missing: [{ kind: '/products/', cause: 'other_run' }], step: 'confirm' });
-      expect(ledger.probeKey(x)).toBe(url(0));
+      expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
+      expect([ledger.probeKey(y), ledger.probeBlockFor(y)]).toEqual([null, null]);
+      expect(ledger.resume(x, { checksum: ledger.computeChecksum(x)!, maxTargets: 2 }).ok).toBe(true);
+      const rows = engineDb.getDb().prepare('SELECT kind, run_id FROM bulk_host_probes WHERE host = ? AND method = ?').all(HOST, 'PATCH') as { kind: string; run_id: string }[];
+      expect(rows).toHaveLength(2);
+      expect(rows).toEqual(expect.arrayContaining([{ kind: `unmeasured:${x}:/products/`, run_id: x }, { kind: `unmeasured:${y}:/products/`, run_id: y }]));
+    } finally {
+      restore();
+    }
+  });
+
+  // A row confirmed before the kind carried its run: `unmeasured:<kind>`, read with its `run_id`.
+  it('reads an unchecked probe filed before rows carried their run as the run\'s own, and as another run\'s for the rest', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const halted = async (ids: number[]): Promise<string> => {
+        const id = await previewedRun(ids.map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+        await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        return id;
+      };
+      const x = await halted([0, 1]);
+      const y = await halted([2, 3]);
+      engineDb.getDb().prepare('INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, NULL, ?)')
+        .run(HOST, 'PATCH', 'unmeasured:/products/', x, new Date().toISOString());
+      expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
+      expect(ledger.resume(x, { checksum: ledger.computeChecksum(x)!, maxTargets: 2 }).ok).toBe(true);
+      expect(ledger.probeBlockFor(y)).toEqual({ missing: [{ kind: '/products/', cause: 'other_run' }], step: 'confirm' });
+      // Y confirms its own; the row from before stays X's.
+      expect(ledger.confirmProbe(y)).toEqual({ ok: true });
+      expect(ledger.probeBlockFor(y)).toBeNull();
+      expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
+        .get(HOST, 'PATCH', 'unmeasured:/products/')).toEqual({ run_id: x });
     } finally {
       restore();
     }
