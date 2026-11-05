@@ -706,10 +706,15 @@ if (typeof window !== 'undefined') {
 						let reached = false;
 						let lastRole: string | undefined;
 						let activeRun: boolean | undefined;
+						let scheduledQuestion = false;
 						if (!probeSid) return;
 						try {
 							const ar = await fetch(`${getApiBase()}/runs/active`);
-							if (ar.ok) activeRun = selectReattachTarget(await ar.json(), probeSid) !== null;
+							if (ar.ok) {
+								const body: unknown = await ar.json();
+								activeRun = selectReattachTarget(body, probeSid) !== null;
+								scheduledQuestion = scheduledQuestionWaits(body, probeSid);
+							}
 						} catch { /* leave undefined — treated as blind, not as "no run" */ }
 						try {
 							const enc = encodeURIComponent(probeSid);
@@ -725,6 +730,13 @@ if (typeof window !== 'undefined') {
 							}
 						} catch { /* still blind — shouldRefireOfflineTurn declines */ }
 						if (sessionId !== probeSid) return; // thread switched mid-probe
+						// A scheduled run's question waits here (U-155). The transcript ends on it and reads
+						// as "answered", which cleared the failed message and lost it. It stays failed and
+						// marked offline, is not sent past the question, and the card comes back.
+						if (scheduledQuestion) {
+							sayQuestionWaiting(await checkPendingPrompt());
+							return;
+						}
 						if (!shouldRefireOfflineTurn({ reached, lastRole, activeRun })) {
 							// Answered, still running, or still unverifiable. Either way this
 							// turn does not get sent again by itself; the failed bubble keeps
@@ -747,7 +759,9 @@ if (typeof window !== 'undefined') {
 				})();
 				return;
 			}
-			refireFailedTurn(lastFailed);
+			// Asked first too: a message held at a scheduled run's question stays failed, and the
+			// reconnect must not send it past the question the tap stopped at (U-155).
+			void askBeforeResend().then((resend) => { if (resend) refireFailedTurn(lastFailed); });
 		}
 	});
 	// Flush pending persist on tab close to prevent data loss
@@ -1322,8 +1336,7 @@ async function askBeforeResend(): Promise<boolean> {
 	if (live === null && scheduledQuestion) {
 		// A scheduled run's question has no stream to attach: the way on is to answer it, so
 		// its card is brought back rather than a turn sent past it.
-		addToast(t('chat.question_waiting'), 'info', 6000);
-		void checkPendingPrompt();
+		sayQuestionWaiting(await checkPendingPrompt());
 		return false;
 	}
 	if (live === null) return true;
@@ -1335,6 +1348,23 @@ async function askBeforeResend(): Promise<boolean> {
 	// own failures (an unreachable stream leaves the thread as it is).
 	void reattachToActiveRun(sid, -1);
 	return false;
+}
+
+/**
+ * Says that a scheduled run's question holds a message back, by the card that came back (U-155).
+ * A decision card (approval, deep consent) has no X to cancel it, so its sentence names none. With
+ * no question or decision card back, nothing is said: a sentence about one could be false.
+ */
+function sayQuestionWaiting(card: PendingCard): void {
+	const key = questionWaitingKey(card);
+	if (key !== null) addToast(t(key), 'info', 6000);
+}
+
+/** The sentence for `card`, or null when it is no question or decision card. */
+export function questionWaitingKey(card: PendingCard): string | null {
+	if (card === 'decision') return 'chat.question_waiting_decision';
+	if (card === 'question') return 'chat.question_waiting';
+	return null;
 }
 
 /** The tap on a failed message: asks first, then sends `text` again. Never rejects. */
@@ -2914,16 +2944,28 @@ export function getMailConnectGeneration() {
 }
 
 /**
- * Check the server for a pending prompt that survived a disconnect/refresh.
- * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it.
+ * The card `checkPendingPrompt` brought back: a question (its card has the X that cancels it), a
+ * decision (an approval or a deep-consent card, which have no X), another kind of prompt, or none.
  */
-export async function checkPendingPrompt(): Promise<void> {
-	if (!sessionId) return;
+export type PendingCard = 'question' | 'decision' | 'other' | null;
+
+/**
+ * Check the server for a pending prompt that survived a disconnect/refresh.
+ * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it, and says which card.
+ */
+export async function checkPendingPrompt(): Promise<PendingCard> {
+	const sid = sessionId;
+	if (!sid) return null;
+	let card: PendingCard = null;
 	try {
+		// `sessionId` is `sid` here (no await between); the polled-routes list names this spelling.
 		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/pending-prompt`);
-		if (!res.ok) return;
+		if (!res.ok) return null;
 		const data = (await res.json()) as Record<string, unknown>;
-		if (!data['pending']) return;
+		// The chat may have changed while the request ran: the card belongs to the chat it was
+		// asked for, and set now it would show in another one.
+		if (sessionId !== sid) return null;
+		if (!data['pending']) return null;
 
 		const promptType = data['promptType'] as string;
 		const kind = data['kind'] as string | undefined;
@@ -2964,6 +3006,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				multiSelect: data['multiSelect'] === true,
 				origin,
 			};
+			card = isConsentCard(pendingPermission.options) ? 'decision' : 'question';
 		} else if (promptType === 'ask_secret') {
 			pendingSecretPrompt = {
 				name: String(data['secretName'] ?? ''),
@@ -2990,9 +3033,11 @@ export async function checkPendingPrompt(): Promise<void> {
 			};
 			mailConnectGeneration++;
 		}
+		if (card === null) card = 'other';
 	} catch {
 		// Non-critical — prompt check failed, user can still interact normally
 	}
+	return card;
 }
 
 /** Stop the current run. Resolves false when the stop request could not be sent (it may still
@@ -3709,6 +3754,10 @@ export async function retryInterruptedRun(): Promise<void> {
 		const m = messages[i];
 		if (m && m.role === 'user' && m.content) { lastUserText = m.content; break; }
 	}
+	// Asked before the dismiss: a waiting question (or a live run, or no answer from the server)
+	// keeps the banner and its Retry, and nothing is sent. It also returns false when the chat
+	// changed meanwhile, so the retry never goes into another chat.
+	if (lastUserText && !await askBeforeResend()) return;
 	await dismissInterruptedRun();
 	if (lastUserText) await sendMessage(lastUserText);
 }
